@@ -409,13 +409,7 @@ impl RichTextEditor {
   // Raw key handler: routes printable characters to `insert_text`. Non-
   // printable keys (arrows, Backspace, etc.) carry `key_char = None` and are
   // ignored here — they are routed via the action system above instead.
-  fn on_key_down_event(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
-    let Some(key_char) = event.keystroke.key_char.as_ref() else {
-      return;
-    };
-    if key_char.is_empty() {
-      return;
-    }
+  fn on_key_down_event(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     // If the user is holding a modifier that turns the key into a shortcut
     // (Ctrl/Cmd), don't insert the character. Shift and Alt remain available
     // for things like capital letters and option-letter accented chars.
@@ -423,7 +417,29 @@ impl RichTextEditor {
     if m.control || m.platform {
       return;
     }
-    self.insert_text(key_char, cx);
+    #[cfg(target_os = "windows")]
+    let key_char = event
+      .keystroke
+      .key_char
+      .as_deref()
+      .or_else(|| (event.keystroke.key == "space" && !m.alt && !m.function).then_some(" "));
+
+    #[cfg(not(target_os = "windows"))]
+    let key_char = event.keystroke.key_char.as_deref();
+
+    let Some(key_char) = key_char else {
+      return;
+    };
+    if key_char.is_empty() {
+      return;
+    }
+    #[cfg(target_os = "windows")]
+    let key_char = if window.capslock().on { windows_apply_capslock(key_char) } else { key_char.to_string() };
+
+    #[cfg(not(target_os = "windows"))]
+    let key_char = key_char.to_string();
+
+    self.insert_text(&key_char, cx);
   }
 
   // -------- Movement primitives ----------------------------------------
@@ -819,6 +835,26 @@ impl Render for RichTextEditor {
         editor: cx.entity(),
         layout: WordElementLayout::default(),
       })
+  }
+}
+
+#[cfg(target_os = "windows")]
+fn windows_apply_capslock(text: &str) -> String {
+  // GPUI 0.2.2's Windows key_char generation does not include Caps Lock in
+  // the ToUnicode keyboard state. For normal letter input, Caps Lock inverts
+  // the Shift-produced case; non-letter keys should pass through unchanged.
+  let mut chars = text.chars();
+  let Some(ch) = chars.next() else {
+    return String::new();
+  };
+  if chars.next().is_none() && ch.is_ascii_alphabetic() {
+    if ch.is_ascii_lowercase() {
+      ch.to_ascii_uppercase().to_string()
+    } else {
+      ch.to_ascii_lowercase().to_string()
+    }
+  } else {
+    text.to_string()
   }
 }
 
