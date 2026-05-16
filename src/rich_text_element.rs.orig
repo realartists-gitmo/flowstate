@@ -1,0 +1,1743 @@
+use std::{cell::RefCell, ops::Range, rc::Rc};
+
+use gpui::{
+  App, AvailableSpace, Background, Bounds, Context, CursorStyle, Element, ElementId, Entity, FocusHandle, Focusable, FontStyle, FontWeight,
+  GlobalElementId, Hsla, InspectorElementId, IntoElement, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Point,
+  Render, ShapedLine, SharedString, Size, Style, TextRun as GpuiTextRun, Window, black, div, fill, font, hsla, point, prelude::*, px, rgb, size,
+};
+
+#[derive(Clone, Debug)]
+pub struct Document {
+  pub paragraphs: Vec<Paragraph>,
+  pub theme: DocumentTheme,
+}
+
+#[derive(Clone, Debug)]
+pub struct Paragraph {
+  pub style: ParagraphStyle,
+  pub runs: Vec<TextRun>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ParagraphStyle {
+  Pocket,
+  Hat,
+  Block,
+  Tag,
+  Analytic,
+  Normal,
+  Undertag,
+}
+
+#[derive(Clone, Debug)]
+pub struct TextRun {
+  pub text: String,
+  pub styles: RunStyles,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RunStyles {
+  pub cite: bool,
+  pub direct_underline: bool,
+  pub emphasis: bool,
+  pub style_underline: bool,
+  pub highlight: Option<HighlightStyle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HighlightStyle {
+  Spoken,
+  Insert,
+  Alternative,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RunStyle {
+  Plain,
+  Cite,
+  Underline,
+  Emphasis,
+  HighlightSpoken,
+  HighlightInsert,
+  HighlightAlternative,
+}
+
+impl From<RunStyle> for RunStyles {
+  fn from(style: RunStyle) -> Self {
+    let mut styles = RunStyles::default();
+    styles.apply(style);
+    styles
+  }
+}
+
+impl RunStyles {
+  pub fn apply(&mut self, style: RunStyle) {
+    match style {
+      RunStyle::Plain => {},
+      RunStyle::Cite => self.cite = true,
+      RunStyle::Underline => self.style_underline = true,
+      RunStyle::Emphasis => self.emphasis = true,
+      RunStyle::HighlightSpoken => self.highlight = Some(HighlightStyle::Spoken),
+      RunStyle::HighlightInsert => self.highlight = Some(HighlightStyle::Insert),
+      RunStyle::HighlightAlternative => self.highlight = Some(HighlightStyle::Alternative),
+    }
+  }
+
+  pub fn with(mut self, style: RunStyle) -> Self {
+    self.apply(style);
+    self
+  }
+
+  pub fn with_direct_underline(mut self) -> Self {
+    self.direct_underline = true;
+    self
+  }
+}
+
+#[derive(Clone, Debug)]
+pub struct DocumentTheme {
+  pub default_font_family: SharedString,
+  pub default_text_color: Hsla,
+  pub pageless_inset_x: Pixels,
+  pub pageless_inset_top: Pixels,
+  pub pageless_inset_bottom: Pixels,
+  pub body_font_size: Pixels,
+  pub cite_font_size: Pixels,
+  pub pocket_font_size: Pixels,
+  pub hat_font_size: Pixels,
+  pub block_font_size: Pixels,
+  pub tag_font_size: Pixels,
+  pub undertag_font_size: Pixels,
+  pub line_spacing: f32,
+  pub line_gap_fraction: f32,
+  pub paragraph_after: Pixels,
+  pub pocket_before: Pixels,
+  pub hat_before: Pixels,
+  pub block_before: Pixels,
+  pub tag_before: Pixels,
+  pub pocket_border_width: Pixels,
+  pub pocket_border_space_x: Pixels,
+  pub pocket_border_space_y: Pixels,
+  pub emphasis_border_width: Pixels,
+  pub emphasis_border_paint_width: Pixels,
+  pub box_padding_left: Pixels,
+  pub box_padding_right: Pixels,
+  pub box_padding_top: Pixels,
+  pub box_padding_bottom: Pixels,
+  pub highlight_pad_x: Pixels,
+  pub highlight_top_extra_fraction: f32,
+  pub highlight_bottom_extra_fraction: f32,
+  pub underline_fallback_top_from_baseline: Pixels,
+  pub underline_rule_thickness: Pixels,
+  pub snap_underline_rules_to_pixels: bool,
+  pub double_underline_top_from_baseline: Pixels,
+  pub double_underline_gap: Pixels,
+  pub highlight_spoken: Hsla,
+  pub highlight_insert: Hsla,
+  pub highlight_alternative: Hsla,
+  pub analytic_color: Hsla,
+  pub undertag_color: Hsla,
+}
+
+impl Default for DocumentTheme {
+  fn default() -> Self {
+    Self {
+      default_font_family: "Carlito".into(),
+      default_text_color: black(),
+      // Word page margins are 1in = 96px at 96dpi. Pageless mode should
+      // not use full page margins, but a proportional inset keeps content
+      // from sitting on the viewport edge.
+      pageless_inset_x: px(24.0),
+      pageless_inset_top: px(16.0),
+      pageless_inset_bottom: px(24.0),
+      body_font_size: pt(11.0),
+      cite_font_size: pt(13.0),
+      pocket_font_size: pt(26.0),
+      hat_font_size: pt(22.0),
+      block_font_size: pt(16.0),
+      tag_font_size: pt(13.0),
+      undertag_font_size: pt(12.0),
+      line_spacing: 259.0 / 240.0,
+      // GPUI exposes shaped ascent/descent but not Word/DirectWrite's
+      // full line gap here. Add a Calibri-like internal leading term so
+      // Word's 1.08 multiple is applied to a Word-like line box.
+      line_gap_fraction: 0.18,
+      paragraph_after: pt(8.0),
+      pocket_before: pt(12.0),
+      hat_before: pt(2.0),
+      block_before: pt(2.0),
+      tag_before: pt(2.0),
+      pocket_border_width: border_eighth_points(24.0),
+      pocket_border_space_x: pt(4.0),
+      pocket_border_space_y: pt(1.0),
+      emphasis_border_width: border_eighth_points(8.0),
+      // DOCX stores this border as 1pt, but Word's display renderer
+      // paints inline text borders as a screen hairline. Feed the snapper
+      // a sub-pixel logical width so it resolves to one device pixel
+      // instead of rounding up to a heavier two-pixel rule on scaled
+      // displays.
+      emphasis_border_paint_width: px(0.5),
+      // Word run borders report zero DOCX spacing in our fixture, but
+      // measured paint geometry shows a stable hidden inset around ink.
+      // Keep this box-only; highlights continue using the highlight band.
+      box_padding_left: pt(0.96),
+      box_padding_right: pt(1.01),
+      box_padding_top: pt(1.47),
+      box_padding_bottom: pt(1.09),
+      // These paint values come from layout-engine-handoff, whose PDF
+      // measurements are in points. Keep the values in Word/PDF points,
+      // then convert to GPUI logical px with pt().
+      highlight_pad_x: pt(0.0),
+      // Word highlights are paint rectangles, not ink boxes. The third
+      // measurement pass has censored body-size rows because the analyzer
+      // clipped at 12pt, but uncensored larger-size rows converge around
+      // a 0.20-0.24em top expansion. Use that general rule so highlights
+      // do not climb too far above the line.
+      highlight_top_extra_fraction: 0.22,
+      highlight_bottom_extra_fraction: 0.092,
+      underline_fallback_top_from_baseline: pt(1.246),
+      // GPUI paints to the screen in logical pixels. A PDF 0.25pt
+      // hairline becomes subpixel-thin at 96dpi, so use a Word-like
+      // one-pixel screen rule while keeping metric-based y placement.
+      underline_rule_thickness: px(1.0),
+      snap_underline_rules_to_pixels: true,
+      double_underline_top_from_baseline: pt(17.79 - 16.5),
+      double_underline_gap: pt(1.20),
+      highlight_spoken: rgb(0x00ff00).into(),
+      highlight_insert: rgb(0xd9d9d9).into(),
+      highlight_alternative: rgb(0x00ffff).into(),
+      analytic_color: rgb(0x1f3864).into(),
+      undertag_color: rgb(0x385623).into(),
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
+pub struct DocumentOffset {
+  pub paragraph: usize,
+  pub byte: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct EditorSelection {
+  pub anchor: DocumentOffset,
+  pub head: DocumentOffset,
+}
+
+impl EditorSelection {
+  fn caret() -> Self {
+    let zero = DocumentOffset::default();
+    Self { anchor: zero, head: zero }
+  }
+
+  fn normalized(&self) -> Range<DocumentOffset> {
+    self.anchor.min(self.head)..self.anchor.max(self.head)
+  }
+
+  fn is_caret(&self) -> bool {
+    self.anchor == self.head
+  }
+}
+
+pub struct RichTextEditor {
+  focus_handle: FocusHandle,
+  document: Document,
+  selection: EditorSelection,
+  selecting: bool,
+  last_layout: Option<LayoutState>,
+}
+
+impl RichTextEditor {
+  pub fn new(document: Document, cx: &mut Context<Self>) -> Self {
+    Self {
+      focus_handle: cx.focus_handle(),
+      document,
+      selection: EditorSelection::caret(),
+      selecting: false,
+      last_layout: None,
+    }
+  }
+
+  #[allow(dead_code)]
+  pub fn document(&self) -> &Document {
+    &self.document
+  }
+
+  #[allow(dead_code)]
+  pub fn apply_run_style_to_selection(&mut self, style: RunStyle, cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      return;
+    }
+    let range = self.selection.normalized();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+      let end = if paragraph_ix == range.end.paragraph {
+        range.end.byte
+      } else {
+        paragraph_text_len(&self.document.paragraphs[paragraph_ix])
+      };
+      apply_style_to_paragraph_range(&mut self.document.paragraphs[paragraph_ix], start..end, style);
+    }
+    cx.notify();
+  }
+
+  #[allow(dead_code)]
+  pub fn set_paragraph_style_for_selection(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
+    let range = self.selection.normalized();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      if let Some(paragraph) = self.document.paragraphs.get_mut(paragraph_ix) {
+        paragraph.style = style;
+      }
+    }
+    cx.notify();
+  }
+
+  fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    window.focus(&self.focus_handle);
+    self.selecting = true;
+    let offset = self
+      .last_layout
+      .as_ref()
+      .map(|layout| layout.hit_test(event.position))
+      .unwrap_or_default();
+    self.selection = if event.modifiers.shift {
+      EditorSelection {
+        anchor: self.selection.anchor,
+        head: offset,
+      }
+    } else {
+      EditorSelection {
+        anchor: offset,
+        head: offset,
+      }
+    };
+    cx.notify();
+  }
+
+  fn on_mouse_move(&mut self, event: &MouseMoveEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    if !self.selecting {
+      return;
+    }
+    if let Some(layout) = &self.last_layout {
+      self.selection.head = layout.hit_test(event.position);
+      cx.notify();
+    }
+  }
+
+  fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
+    self.selecting = false;
+  }
+}
+
+impl Focusable for RichTextEditor {
+  fn focus_handle(&self, _: &App) -> FocusHandle {
+    self.focus_handle.clone()
+  }
+}
+
+impl Render for RichTextEditor {
+  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    div()
+      .size_full()
+      .track_focus(&self.focus_handle(cx))
+      .cursor(CursorStyle::IBeam)
+      .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+      .on_mouse_move(cx.listener(Self::on_mouse_move))
+      .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+      .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+      .child(WordDocumentElement {
+        editor: cx.entity(),
+        layout: WordElementLayout::default(),
+      })
+  }
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub struct RichTextDocumentElement {
+  document: Document,
+  layout: WordElementLayout,
+}
+
+impl RichTextDocumentElement {
+  #[allow(dead_code)]
+  pub fn new(document: Document) -> Self {
+    Self {
+      document,
+      layout: WordElementLayout::default(),
+    }
+  }
+}
+
+impl IntoElement for RichTextDocumentElement {
+  type Element = Self;
+
+  fn into_element(self) -> Self::Element {
+    self
+  }
+}
+
+#[derive(Clone)]
+struct WordDocumentElement {
+  editor: Entity<RichTextEditor>,
+  layout: WordElementLayout,
+}
+
+impl IntoElement for WordDocumentElement {
+  type Element = Self;
+
+  fn into_element(self) -> Self::Element {
+    self
+  }
+}
+
+#[derive(Clone, Default)]
+struct WordElementLayout(Rc<RefCell<Option<LayoutState>>>);
+
+#[derive(Clone)]
+struct LayoutState {
+  paragraphs: Vec<LaidOutParagraph>,
+  bounds: Option<Bounds<Pixels>>,
+  size: Size<Pixels>,
+  snap_underline_rules_to_pixels: bool,
+}
+
+impl LayoutState {
+  fn hit_test(&self, position: Point<Pixels>) -> DocumentOffset {
+    let position = match self.bounds {
+      Some(bounds) => position - bounds.origin,
+      None => position,
+    };
+    for paragraph in &self.paragraphs {
+      if position.y < paragraph.top {
+        return DocumentOffset {
+          paragraph: paragraph.index,
+          byte: 0,
+        };
+      }
+      if position.y <= paragraph.bottom {
+        return paragraph.hit_test(position);
+      }
+    }
+    let Some(last) = self.paragraphs.last() else {
+      return DocumentOffset::default();
+    };
+    DocumentOffset {
+      paragraph: last.index,
+      byte: last.len,
+    }
+  }
+}
+
+#[derive(Clone)]
+struct LaidOutParagraph {
+  index: usize,
+  len: usize,
+  top: Pixels,
+  bottom: Pixels,
+  lines: Vec<LaidOutLine>,
+  borders: Vec<RunRect>,
+}
+
+impl LaidOutParagraph {
+  fn hit_test(&self, position: Point<Pixels>) -> DocumentOffset {
+    for line in &self.lines {
+      if position.y <= line.origin.y + line.line_height {
+        return DocumentOffset {
+          paragraph: self.index,
+          byte: line.hit_test_x(position.x - line.origin.x),
+        };
+      }
+    }
+    DocumentOffset {
+      paragraph: self.index,
+      byte: self.len,
+    }
+  }
+}
+
+#[derive(Clone)]
+struct LaidOutLine {
+  origin: Point<Pixels>,
+  line_height: Pixels,
+  ascent: Pixels,
+  descent: Pixels,
+  width: Pixels,
+  start_byte: usize,
+  end_byte: usize,
+  segments: Vec<LaidOutSegment>,
+  rects: Vec<RunRect>,
+  underlines: Vec<Decoration>,
+}
+
+impl LaidOutLine {
+  fn baseline_y(&self) -> Pixels {
+    ((self.line_height - self.ascent - self.descent) / 2.0) + self.ascent
+  }
+
+  fn hit_test_x(&self, x: Pixels) -> usize {
+    for segment in &self.segments {
+      if x <= segment.x + segment.width {
+        let local_x = (x - segment.x).max(px(0.0));
+        return segment.start_byte + segment.shaped.closest_index_for_x(local_x);
+      }
+    }
+    self.end_byte
+  }
+}
+
+#[derive(Clone)]
+struct LaidOutSegment {
+  shaped: ShapedLine,
+  format: EffectiveRunFormat,
+  x: Pixels,
+  width: Pixels,
+  ascent: Pixels,
+  descent: Pixels,
+  font_size: Pixels,
+  start_byte: usize,
+}
+
+#[derive(Clone)]
+struct RunRect {
+  bounds: Bounds<Pixels>,
+  color: Hsla,
+  snap: RuleSnap,
+}
+
+#[derive(Clone, Copy)]
+enum RuleSnap {
+  None,
+  Horizontal,
+  Vertical,
+}
+
+#[derive(Clone)]
+struct Decoration {
+  bounds: Bounds<Pixels>,
+  color: Hsla,
+}
+
+impl Element for RichTextDocumentElement {
+  type RequestLayoutState = ();
+  type PrepaintState = ();
+
+  fn id(&self) -> Option<ElementId> {
+    None
+  }
+
+  fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    None
+  }
+
+  fn request_layout(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    window: &mut Window,
+    _cx: &mut App,
+  ) -> (LayoutId, Self::RequestLayoutState) {
+    request_word_layout(self.document.clone(), self.layout.clone(), window)
+  }
+
+  fn prepaint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+    if let Some(layout) = self.layout.0.borrow_mut().as_mut() {
+      layout.bounds = Some(bounds);
+    }
+  }
+
+  fn paint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _prepaint: &mut Self::PrepaintState,
+    window: &mut Window,
+    cx: &mut App,
+  ) {
+    if let Some(layout) = self.layout.0.borrow().as_ref().cloned() {
+      paint_layout(&layout, None, window, cx);
+    }
+  }
+}
+
+impl Element for WordDocumentElement {
+  type RequestLayoutState = ();
+  type PrepaintState = ();
+
+  fn id(&self) -> Option<ElementId> {
+    None
+  }
+
+  fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    None
+  }
+
+  fn request_layout(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> (LayoutId, Self::RequestLayoutState) {
+    request_word_layout(self.editor.read(cx).document.clone(), self.layout.clone(), window)
+  }
+
+  fn prepaint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+    if let Some(layout) = self.layout.0.borrow_mut().as_mut() {
+      layout.bounds = Some(bounds);
+    }
+  }
+
+  fn paint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _prepaint: &mut Self::PrepaintState,
+    window: &mut Window,
+    cx: &mut App,
+  ) {
+    let selection = self.editor.read(cx).selection.clone();
+    if let Some(layout) = self.layout.0.borrow().as_ref().cloned() {
+      paint_layout(&layout, Some(&selection), window, cx);
+      self.editor.update(cx, |editor, _| {
+        editor.last_layout = Some(layout);
+      });
+    }
+  }
+}
+
+fn request_word_layout(document: Document, layout_cell: WordElementLayout, window: &mut Window) -> (LayoutId, ()) {
+  let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, cx| {
+    let width = known
+      .width
+      .or(match available.width {
+        AvailableSpace::Definite(width) => Some(width),
+        _ => Some(px(900.0)),
+      })
+      .unwrap_or(px(900.0));
+    let layout = build_layout(&document, width, window, cx);
+    let size = layout.size;
+    layout_cell.0.borrow_mut().replace(layout);
+    size
+  });
+  (layout_id, ())
+}
+
+#[derive(Clone)]
+struct EffectiveParagraphFormat {
+  font_size: Pixels,
+  font_family: SharedString,
+  bold: bool,
+  italic: bool,
+  color: Hsla,
+  align: ParagraphAlign,
+  spacing_before: Pixels,
+  spacing_after: Pixels,
+  line_spacing: f32,
+  border: Option<ParagraphBorder>,
+  underline: UnderlineKind,
+}
+
+#[derive(Clone, Copy)]
+struct ParagraphBorder {
+  width: Pixels,
+  space_x: Pixels,
+  space_y: Pixels,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ParagraphAlign {
+  Left,
+  Center,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum UnderlineKind {
+  None,
+  Single,
+  Double,
+}
+
+#[derive(Clone)]
+struct EffectiveRunFormat {
+  font_size: Pixels,
+  font_family: SharedString,
+  bold: bool,
+  italic: bool,
+  color: Hsla,
+  underline: UnderlineKind,
+  highlight: Option<Hsla>,
+  border_width: Pixels,
+}
+
+fn paragraph_format(document: &Document, style: ParagraphStyle) -> EffectiveParagraphFormat {
+  let theme = &document.theme;
+  let normal = EffectiveParagraphFormat {
+    font_size: theme.body_font_size,
+    font_family: theme.default_font_family.clone(),
+    bold: false,
+    italic: false,
+    color: theme.default_text_color,
+    align: ParagraphAlign::Left,
+    spacing_before: px(0.0),
+    spacing_after: theme.paragraph_after,
+    line_spacing: theme.line_spacing,
+    border: None,
+    underline: UnderlineKind::None,
+  };
+
+  match style {
+    ParagraphStyle::Normal => normal,
+    ParagraphStyle::Pocket => EffectiveParagraphFormat {
+      font_size: theme.pocket_font_size,
+      bold: true,
+      align: ParagraphAlign::Center,
+      spacing_before: theme.pocket_before,
+      spacing_after: px(0.0),
+      border: Some(ParagraphBorder {
+        width: theme.pocket_border_width,
+        space_x: theme.pocket_border_space_x,
+        space_y: theme.pocket_border_space_y,
+      }),
+      ..normal
+    },
+    ParagraphStyle::Hat => EffectiveParagraphFormat {
+      font_size: theme.hat_font_size,
+      bold: true,
+      align: ParagraphAlign::Center,
+      spacing_before: theme.hat_before,
+      spacing_after: px(0.0),
+      underline: UnderlineKind::Double,
+      ..normal
+    },
+    ParagraphStyle::Block => EffectiveParagraphFormat {
+      font_size: theme.block_font_size,
+      bold: true,
+      align: ParagraphAlign::Center,
+      spacing_before: theme.block_before,
+      spacing_after: px(0.0),
+      underline: UnderlineKind::Single,
+      ..normal
+    },
+    ParagraphStyle::Tag => EffectiveParagraphFormat {
+      font_size: theme.tag_font_size,
+      bold: true,
+      spacing_before: theme.tag_before,
+      spacing_after: px(0.0),
+      ..normal
+    },
+    ParagraphStyle::Analytic => EffectiveParagraphFormat {
+      font_size: theme.tag_font_size,
+      bold: true,
+      color: theme.analytic_color,
+      spacing_before: theme.tag_before,
+      spacing_after: px(0.0),
+      ..normal
+    },
+    ParagraphStyle::Undertag => EffectiveParagraphFormat {
+      font_size: theme.undertag_font_size,
+      font_family: theme.default_font_family.clone(),
+      italic: true,
+      color: theme.undertag_color,
+      spacing_after: px(0.0),
+      ..normal
+    },
+  }
+}
+
+fn run_format(document: &Document, paragraph: EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
+  let theme = &document.theme;
+  let mut format = EffectiveRunFormat {
+    font_size: paragraph.font_size,
+    font_family: paragraph.font_family,
+    bold: paragraph.bold,
+    italic: paragraph.italic,
+    color: paragraph.color,
+    underline: paragraph.underline,
+    highlight: styles.highlight.map(|highlight| match highlight {
+      HighlightStyle::Spoken => theme.highlight_spoken,
+      HighlightStyle::Insert => theme.highlight_insert,
+      HighlightStyle::Alternative => theme.highlight_alternative,
+    }),
+    border_width: px(0.0),
+  };
+
+  if styles.style_underline {
+    format.font_size = theme.body_font_size;
+    format.bold = false;
+    format.underline = UnderlineKind::Single;
+  }
+  if styles.direct_underline {
+    format.underline = UnderlineKind::Single;
+  }
+  if styles.cite {
+    format.font_size = theme.cite_font_size;
+    format.bold = true;
+    format.underline = UnderlineKind::None;
+  }
+  if styles.emphasis {
+    format.font_family = theme.default_font_family.clone();
+    format.font_size = theme.cite_font_size;
+    format.bold = true;
+    format.italic = false;
+    format.underline = UnderlineKind::Single;
+    format.border_width = theme.emphasis_border_width;
+  }
+
+  format
+}
+
+fn build_layout(document: &Document, width: Pixels, window: &mut Window, cx: &mut App) -> LayoutState {
+  let pageless_left = document.theme.pageless_inset_x;
+  let pageless_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let mut y = document.theme.pageless_inset_top;
+  let mut paragraphs = Vec::new();
+  let mut max_width = width;
+
+  for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
+    let p_format = paragraph_format(document, paragraph.style);
+    y += p_format.spacing_before;
+
+    let border = p_format.border;
+    let border_inset = border.map_or(px(0.0), |border| border.width + border.space_x);
+    let content_left = pageless_left + border_inset;
+    let content_top = border.map_or(px(0.0), |border| border.width + border.space_y);
+    let content_width = (pageless_width - border_inset * 2.0).max(px(1.0));
+    let paragraph_text = paragraph_text(paragraph);
+    let lines = wrap_lines(document, paragraph, p_format.clone(), &paragraph_text, content_width, window, cx);
+
+    let mut laid_out_lines = Vec::new();
+    let mut line_y = y + content_top;
+    for mut line in lines {
+      line.origin.x = content_left
+        + match p_format.align {
+          ParagraphAlign::Left => px(0.0),
+          ParagraphAlign::Center => (content_width - line.width).max(px(0.0)) / 2.0,
+        };
+      line.origin.y = line_y;
+      line_y += line.line_height;
+      max_width = max_width.max(line.origin.x + line.width);
+      laid_out_lines.push(line);
+    }
+
+    let bottom = line_y + content_top;
+    let mut borders = Vec::new();
+    if let Some(border) = border {
+      push_box_rules(
+        &mut borders,
+        Bounds::new(point(pageless_left, y), size(pageless_width, bottom - y)),
+        border.width,
+        document.theme.default_text_color,
+      );
+    }
+
+    paragraphs.push(LaidOutParagraph {
+      index: paragraph_ix,
+      len: paragraph_text.len(),
+      top: y,
+      bottom,
+      lines: laid_out_lines,
+      borders,
+    });
+    y = bottom + p_format.spacing_after;
+  }
+
+  LayoutState {
+    paragraphs,
+    bounds: None,
+    size: size(max_width, y + document.theme.pageless_inset_bottom),
+    snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
+  }
+}
+
+fn wrap_lines(
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  text: &str,
+  max_width: Pixels,
+  window: &mut Window,
+  cx: &mut App,
+) -> Vec<LaidOutLine> {
+  if text.is_empty() {
+    return vec![shape_line(document, paragraph, p_format, text, 0..0, window, cx)];
+  }
+
+  let mut lines = Vec::new();
+  let mut start = 0;
+  let mut best_break = None;
+
+  for (byte_ix, ch) in text.char_indices() {
+    let end = byte_ix + ch.len_utf8();
+    if ch.is_whitespace() || matches!(ch, '-' | '/' | ',' | ';' | ':') {
+      best_break = Some(end);
+    }
+    let candidate = shape_line(document, paragraph, p_format.clone(), &text[start..end], start..end, window, cx);
+    if candidate.width > max_width && end > start {
+      let break_at = best_break
+        .filter(|break_at| *break_at > start)
+        .unwrap_or(byte_ix);
+      let line_end = if break_at == start { end } else { break_at };
+      lines.push(shape_line(
+        document,
+        paragraph,
+        p_format.clone(),
+        text[start..line_end].trim_end(),
+        start..line_end,
+        window,
+        cx,
+      ));
+      start = line_end;
+      while start < text.len()
+        && text[start..]
+          .chars()
+          .next()
+          .is_some_and(char::is_whitespace)
+      {
+        start += text[start..].chars().next().unwrap().len_utf8();
+      }
+      best_break = None;
+    }
+  }
+
+  if start < text.len() {
+    lines.push(shape_line(document, paragraph, p_format, &text[start..], start..text.len(), window, cx));
+  }
+
+  lines
+}
+
+fn shape_line(
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  line_text: &str,
+  source_range: Range<usize>,
+  window: &mut Window,
+  cx: &mut App,
+) -> LaidOutLine {
+  let fragments = fragments_for_range(paragraph, &source_range, line_text.len());
+  let mut x = px(0.0);
+  let mut segments = Vec::new();
+  let mut ascent = px(0.0);
+  let mut descent = px(0.0);
+
+  for fragment in fragments {
+    let text = &line_text[fragment.line_range.clone()];
+    if text.is_empty() {
+      continue;
+    }
+    let format = run_format(document, p_format.clone(), fragment.styles);
+    let shaped = shape_fragment(window, text, format.clone());
+    let width = shaped.width;
+    let box_margin_left = if format.border_width > px(0.0) {
+      document.theme.box_padding_left
+    } else {
+      px(0.0)
+    };
+    let box_margin_right = if format.border_width > px(0.0) {
+      document.theme.box_padding_right
+    } else {
+      px(0.0)
+    };
+    let segment_ascent = shaped.ascent;
+    let segment_descent = shaped.descent;
+    ascent = ascent.max(segment_ascent);
+    descent = descent.max(segment_descent);
+    x += box_margin_left;
+    segments.push(LaidOutSegment {
+      shaped,
+      x,
+      width,
+      format: format.clone(),
+      ascent: segment_ascent,
+      descent: segment_descent,
+      font_size: format.font_size,
+      start_byte: fragment.source_start,
+    });
+    x += width + box_margin_right;
+  }
+
+  if segments.is_empty() {
+    let format = run_format(document, p_format.clone(), RunStyles::default());
+    let shaped = shape_fragment(window, "", format.clone());
+    ascent = shaped.ascent;
+    descent = shaped.descent;
+    segments.push(LaidOutSegment {
+      shaped,
+      format: format.clone(),
+      x: px(0.0),
+      width: px(0.0),
+      ascent,
+      descent,
+      font_size: format.font_size,
+      start_byte: source_range.start,
+    });
+  } else {
+    ascent = segments
+      .iter()
+      .map(|segment| segment.ascent)
+      .fold(px(0.0), Pixels::max);
+    descent = segments
+      .iter()
+      .map(|segment| segment.descent)
+      .fold(px(0.0), Pixels::max);
+  }
+
+  let max_font_size = segments
+    .iter()
+    .map(|segment| segment.font_size)
+    .fold(p_format.font_size, Pixels::max);
+  let line_gap = max_font_size * document.theme.line_gap_fraction;
+  let line_height = (ascent + descent + line_gap) * p_format.line_spacing;
+  let mut line = LaidOutLine {
+    origin: point(px(0.0), px(0.0)),
+    line_height,
+    ascent,
+    descent,
+    width: x,
+    start_byte: source_range.start,
+    end_byte: source_range.end,
+    segments,
+    rects: Vec::new(),
+    underlines: Vec::new(),
+  };
+  line.rects = rects_for_line(document, &line);
+  line.underlines = underlines_for_line(document, &line, cx);
+  line
+}
+
+fn shape_fragment(window: &mut Window, text: &str, format: EffectiveRunFormat) -> ShapedLine {
+  let mut run_font = font(format.font_family);
+  run_font.weight = if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
+  run_font.style = if format.italic { FontStyle::Italic } else { FontStyle::Normal };
+  let run = GpuiTextRun {
+    len: text.len(),
+    font: run_font,
+    color: format.color,
+    background_color: None,
+    underline: None,
+    strikethrough: None,
+  };
+  window
+    .text_system()
+    .shape_line(SharedString::new(text.to_string()), format.font_size, &[run], None)
+}
+
+#[derive(Clone)]
+struct VisualFragment {
+  styles: RunStyles,
+  line_range: Range<usize>,
+  source_start: usize,
+}
+
+fn fragments_for_range(paragraph: &Paragraph, range: &Range<usize>, rendered_len: usize) -> Vec<VisualFragment> {
+  let mut byte_offset = 0;
+  let mut line_offset = 0;
+  let mut remaining = rendered_len;
+  let mut fragments = Vec::new();
+  for run in &paragraph.runs {
+    let run_start = byte_offset;
+    let run_end = byte_offset + run.text.len();
+    byte_offset = run_end;
+    let start = run_start.max(range.start);
+    let end = run_end.min(range.end);
+    if start >= end || remaining == 0 {
+      continue;
+    }
+    let len = (end - start).min(remaining);
+    fragments.push(VisualFragment {
+      styles: run.styles,
+      line_range: line_offset..line_offset + len,
+      source_start: start,
+    });
+    remaining -= len;
+    line_offset += len;
+  }
+  fragments
+}
+
+fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<RunRect> {
+  let mut backgrounds = Vec::new();
+  let mut borders = Vec::new();
+  let text_top = line.baseline_y() - line.ascent;
+  let text_bottom = line.baseline_y() + line.descent;
+  let max_font_size = line
+    .segments
+    .iter()
+    .map(|segment| segment.font_size)
+    .fold(px(0.0), Pixels::max);
+  let bottom_pad = max_font_size * document.theme.highlight_bottom_extra_fraction;
+  // Highlights share the same theoretical top as Word's inline run border:
+  // even when no border is painted, the highlight should look like it fills
+  // the box that would be drawn for the run.
+  let paint_top = text_top - document.theme.box_padding_top;
+  let paint_height = (text_bottom + bottom_pad - paint_top).max(px(1.0));
+
+  for segment in &line.segments {
+    let highlight_pad_left = if segment.format.border_width > px(0.0) {
+      document.theme.box_padding_left
+    } else {
+      document.theme.highlight_pad_x
+    };
+    let highlight_pad_right = if segment.format.border_width > px(0.0) {
+      document.theme.box_padding_right
+    } else {
+      document.theme.highlight_pad_x
+    };
+    let paint_box = Bounds::new(
+      point(segment.x - highlight_pad_left, paint_top),
+      size((segment.width + highlight_pad_left + highlight_pad_right).max(px(1.0)), paint_height),
+    );
+
+    if let Some(background) = segment.format.highlight {
+      backgrounds.push(RunRect {
+        bounds: paint_box,
+        color: background,
+        snap: RuleSnap::None,
+      });
+    }
+    if segment.format.border_width > px(0.0) {
+      let box_bounds = Bounds::new(
+        point(segment.x - document.theme.box_padding_left, text_top - document.theme.box_padding_top),
+        size(
+          (segment.width + document.theme.box_padding_left + document.theme.box_padding_right).max(px(1.0)),
+          (text_bottom - text_top + document.theme.box_padding_top + document.theme.box_padding_bottom).max(px(1.0)),
+        ),
+      );
+      push_box_rules(
+        &mut borders,
+        box_bounds,
+        document.theme.emphasis_border_paint_width,
+        document.theme.default_text_color,
+      );
+    }
+  }
+  // Word paints fills before border rules. Keeping all run borders after all
+  // run highlights prevents a following highlighted run from hiding the right
+  // edge of the previous boxed run.
+  backgrounds.extend(borders);
+  backgrounds
+}
+
+fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, thickness: Pixels, color: Hsla) {
+  rects.push(RunRect {
+    bounds: Bounds::new(bounds.origin, size(bounds.size.width, thickness)),
+    color,
+    snap: RuleSnap::Horizontal,
+  });
+  rects.push(RunRect {
+    bounds: Bounds::new(
+      point(bounds.origin.x, bounds.origin.y + bounds.size.height - thickness),
+      size(bounds.size.width, thickness),
+    ),
+    color,
+    snap: RuleSnap::Horizontal,
+  });
+  rects.push(RunRect {
+    bounds: Bounds::new(bounds.origin, size(thickness, bounds.size.height)),
+    color,
+    snap: RuleSnap::Vertical,
+  });
+  rects.push(RunRect {
+    bounds: Bounds::new(
+      point(bounds.origin.x + bounds.size.width - thickness, bounds.origin.y),
+      size(thickness, bounds.size.height),
+    ),
+    color,
+    snap: RuleSnap::Vertical,
+  });
+}
+
+fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
+  let mut underlines = Vec::new();
+  let baseline = line.baseline_y();
+  for segment in &line.segments {
+    match segment.format.underline {
+      UnderlineKind::None => {},
+      UnderlineKind::Single => {
+        let (offset, thickness) = single_underline_metrics_for_segment(segment, document, cx);
+        underlines.push(Decoration {
+          bounds: Bounds::new(point(segment.x, baseline + offset), size(segment.width.max(px(1.0)), thickness)),
+          color: document.theme.default_text_color,
+        });
+      },
+      UnderlineKind::Double => {
+        let (offset, thickness) = double_underline_metrics_for_segment(document);
+        let y = baseline + offset;
+        underlines.push(Decoration {
+          bounds: Bounds::new(point(segment.x, y), size(segment.width.max(px(1.0)), thickness)),
+          color: document.theme.default_text_color,
+        });
+        underlines.push(Decoration {
+          bounds: Bounds::new(
+            point(segment.x, y + thickness + document.theme.double_underline_gap),
+            size(segment.width.max(px(1.0)), thickness),
+          ),
+          color: document.theme.default_text_color,
+        });
+      },
+    }
+  }
+  underlines
+}
+
+fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &Document, cx: &mut App) -> (Pixels, Pixels) {
+  // GPUI exposes glyph bounds in font coordinates. For Calibri, the
+  // underscore bbox is below the baseline. The origin is the lower
+  // edge of the glyph box on this metric path; Word positions an
+  // underline at the top of the underscore glyph, so subtract the
+  // glyph height from the baseline-to-origin distance.
+  //
+  // On Linux, GPUI's `typographic_bounds` is a stub returning
+  // `origin = (0, 0)` with the advance box as the size (see gpui's
+  // platform/linux/text_system.rs). That makes the formula collapse to 0
+  // and paint the underline at the baseline, cutting through descenders.
+  // So on Linux we skip the glyph-derived path entirely and use the
+  // theme's Word-derived fallback constant.
+  #[cfg(target_os = "linux")]
+  let offset = {
+    let _ = (segment, cx); // silence unused warnings on linux
+    document.theme.underline_fallback_top_from_baseline
+  };
+  #[cfg(not(target_os = "linux"))]
+  let offset = regular_underscore_bounds(segment, cx)
+    .map(|bounds| (bounds.origin.y.abs() - bounds.size.height).max(px(0.0)))
+    .unwrap_or(document.theme.underline_fallback_top_from_baseline);
+  (offset, document.theme.underline_rule_thickness)
+}
+
+fn double_underline_metrics_for_segment(document: &Document) -> (Pixels, Pixels) {
+  (document.theme.double_underline_top_from_baseline, document.theme.underline_rule_thickness)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn regular_underscore_bounds(segment: &LaidOutSegment, cx: &mut App) -> Option<Bounds<Pixels>> {
+  let mut underline_font = font(segment.format.font_family.clone());
+  // Word's underline metric follows the regular face's underscore metrics;
+  // bold text remains bold, but the underline itself does not get bolded.
+  underline_font.weight = FontWeight::NORMAL;
+  underline_font.style = if segment.format.italic { FontStyle::Italic } else { FontStyle::Normal };
+  let font_id = cx.text_system().resolve_font(&underline_font);
+  cx.text_system()
+    .typographic_bounds(font_id, segment.font_size, '_')
+    .ok()
+}
+
+fn paint_layout(layout: &LayoutState, selection: Option<&EditorSelection>, window: &mut Window, cx: &mut App) {
+  let Some(bounds) = layout.bounds else {
+    return;
+  };
+  for paragraph in &layout.paragraphs {
+    for border in &paragraph.borders {
+      let border_bounds = snap_rule_bounds(border.bounds.shift(bounds.origin), border.snap, window);
+      window.paint_quad(fill(border_bounds, Background::from(border.color)));
+    }
+  }
+  if let Some(selection) = selection {
+    paint_selection(layout, selection, bounds.origin, window);
+  }
+  for paragraph in &layout.paragraphs {
+    for line in &paragraph.lines {
+      for rect in &line.rects {
+        let rect_bounds = snap_rule_bounds(rect.bounds.shift(bounds.origin + line.origin), rect.snap, window);
+        window.paint_quad(fill(rect_bounds, Background::from(rect.color)));
+      }
+    }
+  }
+  for paragraph in &layout.paragraphs {
+    for line in &paragraph.lines {
+      paint_line_text(line, bounds.origin + line.origin, window, cx);
+    }
+  }
+  for paragraph in &layout.paragraphs {
+    for line in &paragraph.lines {
+      for underline in &line.underlines {
+        let mut underline_bounds = underline.bounds.shift(bounds.origin + line.origin);
+        if layout.snap_underline_rules_to_pixels {
+          underline_bounds = snap_horizontal_rule_to_device_pixels(underline_bounds, window);
+        }
+        window.paint_quad(fill(underline_bounds, Background::from(underline.color)));
+      }
+    }
+<<<<<<< HEAD
+  }
+  if let Some(selection) = selection
+    && selection.is_caret()
+    && let Some(caret) = caret_bounds(layout, selection.head, bounds.origin)
+  {
+    window.paint_quad(fill(caret, black()));
+  }
+=======
+    if let Some(selection) = selection {
+        paint_selection(layout, selection, bounds.origin, window);
+    }
+    for paragraph in &layout.paragraphs {
+        for line in &paragraph.lines {
+            for rect in &line.rects {
+                let rect_bounds = snap_rule_bounds(
+                    rect.bounds.shift(bounds.origin + line.origin),
+                    rect.snap,
+                    window,
+                );
+                window.paint_quad(fill(rect_bounds, Background::from(rect.color)));
+            }
+        }
+    }
+    for paragraph in &layout.paragraphs {
+        for line in &paragraph.lines {
+            for underline in &line.underlines {
+                let mut underline_bounds = underline.bounds.shift(bounds.origin + line.origin);
+                if layout.snap_underline_rules_to_pixels {
+                    underline_bounds =
+                        snap_horizontal_rule_to_device_pixels(underline_bounds, window);
+                }
+                window.paint_quad(fill(underline_bounds, Background::from(underline.color)));
+            }
+        }
+    }
+    for paragraph in &layout.paragraphs {
+        for line in &paragraph.lines {
+            paint_line_text(line, bounds.origin + line.origin, window, cx);
+        }
+    }
+    if let Some(selection) = selection
+        && selection.is_caret()
+        && let Some(caret) = caret_bounds(layout, selection.head, bounds.origin)
+    {
+        window.paint_quad(fill(caret, black()));
+    }
+>>>>>>> b247d9bba29497529f9b54005f2a11f89ed62b84
+}
+
+fn snap_horizontal_rule_to_device_pixels(mut bounds: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+  let scale = window.scale_factor();
+  bounds.origin.y = snap_pixel_to_device_grid(bounds.origin.y, scale);
+  bounds.size.height = snap_rule_thickness_to_device_grid(bounds.size.height, scale);
+  bounds
+}
+
+fn snap_rule_bounds(bounds: Bounds<Pixels>, snap: RuleSnap, window: &Window) -> Bounds<Pixels> {
+  match snap {
+    RuleSnap::None => bounds,
+    RuleSnap::Horizontal => snap_horizontal_rule_to_device_pixels(bounds, window),
+    RuleSnap::Vertical => snap_vertical_rule_to_device_pixels(bounds, window),
+  }
+}
+
+fn snap_vertical_rule_to_device_pixels(mut bounds: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
+  let scale = window.scale_factor();
+  bounds.origin.x = snap_pixel_to_device_grid(bounds.origin.x, scale);
+  bounds.size.width = snap_rule_thickness_to_device_grid(bounds.size.width, scale);
+  bounds
+}
+
+fn snap_pixel_to_device_grid(value: Pixels, scale: f32) -> Pixels {
+  let value: f32 = value.into();
+  px((value * scale).round() / scale)
+}
+
+fn snap_rule_thickness_to_device_grid(value: Pixels, scale: f32) -> Pixels {
+  let value: f32 = value.into();
+  px(((value * scale).round().max(1.0)) / scale)
+}
+
+fn paint_selection(layout: &LayoutState, selection: &EditorSelection, origin: Point<Pixels>, window: &mut Window) {
+  if selection.is_caret() {
+    return;
+  }
+  let range = selection.normalized();
+  for paragraph in &layout.paragraphs {
+    if paragraph.index < range.start.paragraph || paragraph.index > range.end.paragraph {
+      continue;
+    }
+    let start = if paragraph.index == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph.index == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph.len
+    };
+    for line in &paragraph.lines {
+      let line_start = start.max(line.start_byte);
+      let line_end = end.min(line.end_byte);
+      if line_start >= line_end {
+        continue;
+      }
+      let x1 = x_for_byte(line, line_start);
+      let x2 = x_for_byte(line, line_end);
+      window.paint_quad(fill(
+        Bounds::new(origin + line.origin + point(x1, px(0.0)), size((x2 - x1).max(px(1.0)), line.line_height)),
+        hsla(220.0 / 360.0, 0.75, 0.65, 0.35),
+      ));
+    }
+  }
+}
+
+fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, origin: Point<Pixels>) -> Option<Bounds<Pixels>> {
+  let paragraph = layout
+    .paragraphs
+    .iter()
+    .find(|p| p.index == offset.paragraph)?;
+  let line = paragraph
+    .lines
+    .iter()
+    .find(|line| offset.byte >= line.start_byte && offset.byte <= line.end_byte)
+    .or_else(|| paragraph.lines.last())?;
+  let x = x_for_byte(line, offset.byte);
+  Some(Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height)))
+}
+
+fn x_for_byte(line: &LaidOutLine, byte: usize) -> Pixels {
+  for segment in &line.segments {
+    let segment_end = segment.start_byte + segment.shaped.len();
+    if byte <= segment_end {
+      return segment.x
+        + segment
+          .shaped
+          .x_for_index(byte.saturating_sub(segment.start_byte));
+    }
+  }
+  line.width
+}
+
+fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, window: &mut Window, cx: &mut App) {
+  let text_system = cx.text_system().clone();
+  let baseline = line.baseline_y();
+  for segment in &line.segments {
+    let segment_origin = origin + point(segment.x, baseline);
+    for run in &segment.shaped.runs {
+      let glyph_bounds = text_system
+        .bounding_box(run.font_id, segment.font_size)
+        .size;
+      for glyph in &run.glyphs {
+        let glyph_origin = segment_origin + point(glyph.position.x, px(0.0));
+        if !Bounds::new(glyph_origin, glyph_bounds).intersects(&window.content_mask().bounds) {
+          continue;
+        }
+        let result = if glyph.is_emoji {
+          window.paint_emoji(glyph_origin, run.font_id, glyph.id, segment.font_size)
+        } else {
+          window.paint_glyph(glyph_origin, run.font_id, glyph.id, segment.font_size, segment.format.color)
+        };
+        if let Err(error) = result {
+          eprintln!("failed to paint glyph: {error}");
+        }
+      }
+    }
+  }
+}
+
+fn apply_style_to_paragraph_range(paragraph: &mut Paragraph, range: Range<usize>, style: RunStyle) {
+  if range.start >= range.end {
+    return;
+  }
+  let mut output = Vec::new();
+  let mut offset = 0;
+  for run in paragraph.runs.drain(..) {
+    let run_start = offset;
+    let run_end = offset + run.text.len();
+    offset = run_end;
+    if run_end <= range.start || run_start >= range.end {
+      output.push(run);
+      continue;
+    }
+    let local_start = range.start.saturating_sub(run_start).min(run.text.len());
+    let local_end = (range.end.saturating_sub(run_start)).min(run.text.len());
+    if local_start > 0 {
+      output.push(TextRun {
+        text: run.text[..local_start].to_string(),
+        styles: run.styles,
+      });
+    }
+    let mut styles = run.styles;
+    styles.apply(style);
+    output.push(TextRun {
+      text: run.text[local_start..local_end].to_string(),
+      styles,
+    });
+    if local_end < run.text.len() {
+      output.push(TextRun {
+        text: run.text[local_end..].to_string(),
+        styles: run.styles,
+      });
+    }
+  }
+  paragraph.runs = merge_adjacent_runs(output);
+}
+
+fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
+  let mut merged: Vec<TextRun> = Vec::new();
+  for run in runs {
+    if run.text.is_empty() {
+      continue;
+    }
+    if let Some(last) = merged.last_mut()
+      && last.styles == run.styles
+    {
+      last.text.push_str(&run.text);
+      continue;
+    }
+    merged.push(run);
+  }
+  merged
+}
+
+fn paragraph_text(paragraph: &Paragraph) -> String {
+  paragraph.runs.iter().map(|run| run.text.as_str()).collect()
+}
+
+fn paragraph_text_len(paragraph: &Paragraph) -> usize {
+  paragraph.runs.iter().map(|run| run.text.len()).sum()
+}
+
+fn pt(value: f32) -> Pixels {
+  px(value * 96.0 / 72.0)
+}
+
+fn border_eighth_points(value: f32) -> Pixels {
+  pt(value / 8.0)
+}
+
+trait ShiftBounds {
+  fn shift(self, by: Point<Pixels>) -> Self;
+}
+
+impl ShiftBounds for Bounds<Pixels> {
+  fn shift(self, by: Point<Pixels>) -> Self {
+    Bounds::new(self.origin + by, self.size)
+  }
+}
+
+pub fn demo_document() -> Document {
+  Document {
+    theme: DocumentTheme::default(),
+    paragraphs: vec![
+      Paragraph {
+        style: ParagraphStyle::Pocket,
+        runs: vec![plain("This is a Pocket. It’s the highest-level heading in the document.")],
+      },
+      Paragraph {
+        style: ParagraphStyle::Hat,
+        runs: vec![plain("This is a Hat. It’s the second-highest level heading.")],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain(
+          "Visual parity matters because former Word users expect familiar line spacing, heading hierarchy, highlighting, and underline behavior.",
+        )],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          plain("This paragraph mixes "),
+          run("highlighted spoken text", RunStyles::default().with(RunStyle::HighlightSpoken)),
+          plain(", "),
+          run("underlined words", RunStyles::default().with(RunStyle::Underline)),
+          plain(", and "),
+          run("emphasis", RunStyles::default().with(RunStyle::Emphasis)),
+          plain(" while preserving the document as paragraph styles plus named run styles."),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          run(
+            "This text is both underlined and highlighted, because it is all spoken. ",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(
+            "This text is both emphasized and highlighted, also all spoken.",
+            RunStyles::default()
+              .with(RunStyle::Emphasis)
+              .with(RunStyle::HighlightSpoken),
+          ),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          run(
+            "This text is highlighted in the insert style. Can also be ",
+            RunStyles::default().with(RunStyle::HighlightInsert),
+          ),
+          run(
+            "underlined",
+            RunStyles::default()
+              .with(RunStyle::HighlightInsert)
+              .with(RunStyle::Underline),
+          ),
+          run(" and ", RunStyles::default().with(RunStyle::HighlightInsert)),
+          run(
+            "emphasized.",
+            RunStyles::default()
+              .with(RunStyle::HighlightInsert)
+              .with(RunStyle::Emphasis),
+          ),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          run(
+            "Sometimes a team’s opponent will highlight in the same color as them, but you want to ‘rehighlight’ their card and read new portions. You need a different color to perform this operation. Here is a common one. Can also be ",
+            RunStyles::default().with(RunStyle::HighlightAlternative),
+          ),
+          run(
+            "underlined",
+            RunStyles::default()
+              .with(RunStyle::HighlightAlternative)
+              .with(RunStyle::Underline),
+          ),
+          run(" and ", RunStyles::default().with(RunStyle::HighlightAlternative)),
+          run(
+            "emphasized.",
+            RunStyles::default()
+              .with(RunStyle::HighlightAlternative)
+              .with(RunStyle::Emphasis),
+          ),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Block,
+        runs: vec![plain("This is a Block. It’s the third-highest level heading.")],
+      },
+      Paragraph {
+        style: ParagraphStyle::Tag,
+        runs: vec![
+          plain("This is a tag. It’s the fourth-highest level heading, tied with analytic."),
+          plain(" Tags can also be "),
+          run("underlined", RunStyles::default().with_direct_underline()),
+          plain("."),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Undertag,
+        runs: vec![
+          plain(
+            "This is an undertag. It usually goes below a tag and adds context that will be deleted when sent to opponents, and is usually never read. It can also be ",
+          ),
+          run("underlined", RunStyles::default().with_direct_underline()),
+          plain("."),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          run("Codex 26", RunStyles::default().with(RunStyle::Cite)),
+          plain(" is a wonderful coder! (This is a citation"),
+          plain(
+            ". It usually begins with the special cite text to denote the read portion, then transitions into more detailed normal text to denote the unread portion. The unread text can be ",
+          ),
+          run("underlined", RunStyles::default().with_direct_underline()),
+          plain(", though it is uncommon, and in theory the cite text can be underlined too.)"),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          run("Usually ", RunStyles::default().with(RunStyle::Underline)),
+          run(
+            "under a tag",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(" and a cite line, ", RunStyles::default().with(RunStyle::Underline)),
+          run(
+            "there’s",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(" going to be the ", RunStyles::default().with(RunStyle::Underline)),
+          run(
+            "content of the evidence.",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("It might continue for multiple paragraphs like this.")],
+      },
+      Paragraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![
+          plain("But then "),
+          run(
+            "it’ll end with the ",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(
+            "next tag",
+            RunStyles::default()
+              .with(RunStyle::Emphasis)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(
+            " or ",
+            RunStyles::default()
+              .with(RunStyle::Underline)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          run(
+            "analytic",
+            RunStyles::default()
+              .with(RunStyle::Emphasis)
+              .with(RunStyle::HighlightSpoken),
+          ),
+          plain(", or sometimes the next other header if the evidence was the end of a section."),
+        ],
+      },
+      Paragraph {
+        style: ParagraphStyle::Analytic,
+        runs: vec![
+          plain("This is an analytic"),
+          plain(", a fourth-highest level heading, tied with tag."),
+          plain(" "),
+          plain("It’"),
+          plain("s meant to be independent of evidence and deleted on the version of the document you send to your opponents. It can be "),
+          run("underlined", RunStyles::default().with_direct_underline()),
+          plain("."),
+        ],
+      },
+    ],
+  }
+}
+
+fn plain(text: &str) -> TextRun {
+  run(text, RunStyles::default())
+}
+
+fn run(text: &str, styles: RunStyles) -> TextRun {
+  TextRun {
+    text: text.to_string(),
+    styles,
+  }
+}
