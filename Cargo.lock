@@ -1255,6 +1255,7 @@ dependencies = [
  "gpui-component-assets",
  "ropey 1.6.1",
  "serde",
+ "unicode-segmentation",
  "uuid",
 ]
 
