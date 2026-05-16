@@ -1,0 +1,28 @@
+# Rust formatter configuration following Google C++ style guide principles
+# Stable version - works with stable Rust toolchain
+
+# Indentation
+tab_spaces = 2
+hard_tabs = false
+
+# Line length
+max_width = 145
+
+# Line breaks
+newline_style = "Unix"
+
+# Chain formatting
+chain_width = 60
+
+# Match formatting
+match_block_trailing_comma = true
+match_arm_leading_pipes = "Never"
+
+# Use field init shorthand
+use_field_init_shorthand = true
+
+# Edition
+edition = "2024"
+
+# Miscellaneous
+use_try_shorthand = true
