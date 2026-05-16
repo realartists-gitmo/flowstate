@@ -5,8 +5,8 @@ use gpui::{
 };
 
 use crate::rich_text_element::{
-  Backspace, Delete, InsertNewline, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MoveRight, MoveUp, RichTextEditor, SelectAll, SelectDown,
-  SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, demo_document,
+  Backspace, Delete, InsertNewline, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MoveRight, MoveUp, RichTextEditor, Save, SelectAll,
+  SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectRight, SelectUp, demo_document, load_or_create_document, write_db8,
 };
 
 struct DemoApp {
@@ -23,6 +23,11 @@ impl Render for DemoApp {
 }
 
 fn main() {
+  if std::env::args().any(|arg| arg == "--write-demo-db8") {
+    write_db8("data/demo.db8", &demo_document()).expect("failed to write data/demo.db8");
+    return;
+  }
+
   Application::new().run(|cx: &mut App| {
     gpui_component::init(cx);
 
@@ -46,6 +51,8 @@ fn main() {
       // Select-All works regardless of OS.
       KeyBinding::new("cmd-a", SelectAll, ctx),
       KeyBinding::new("ctrl-a", SelectAll, ctx),
+      KeyBinding::new("cmd-s", Save, ctx),
+      KeyBinding::new("ctrl-s", Save, ctx),
       KeyBinding::new("backspace", Backspace, ctx),
       KeyBinding::new("delete", Delete, ctx),
       KeyBinding::new("enter", InsertNewline, ctx),
@@ -58,7 +65,9 @@ fn main() {
         ..Default::default()
       },
       |_, cx| {
-        let editor = cx.new(|cx| RichTextEditor::new(demo_document(), cx));
+        let document_path = std::path::PathBuf::from("data/demo.db8");
+        let document = load_or_create_document(&document_path).expect("failed to open data/demo.db8");
+        let editor = cx.new(|cx| RichTextEditor::new_with_path(document, Some(document_path), cx));
         cx.new(|_| DemoApp { editor })
       },
     )

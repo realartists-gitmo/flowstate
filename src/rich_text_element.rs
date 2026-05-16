@@ -1,9 +1,11 @@
 use std::{
   cell::RefCell,
   collections::hash_map::DefaultHasher,
-  fmt,
+  fs,
   hash::{Hash, Hasher},
+  io::{self, Cursor, Read},
   ops::Range,
+  path::{Path, PathBuf},
   rc::Rc,
   time::Duration,
 };
@@ -37,6 +39,7 @@ actions!(
     SelectLineStart,
     SelectLineEnd,
     SelectAll,
+    Save,
     Backspace,
     Delete,
     InsertNewline,
@@ -58,6 +61,7 @@ enum VDir {
 
 #[derive(Clone, Debug)]
 pub struct Document {
+  pub text: Rope,
   pub paragraphs: Vec<Paragraph>,
   pub theme: DocumentTheme,
 }
@@ -65,6 +69,7 @@ pub struct Document {
 #[derive(Clone, Debug)]
 pub struct Paragraph {
   pub style: ParagraphStyle,
+  pub byte_range: Range<usize>,
   pub runs: Vec<TextRun>,
 }
 
@@ -79,110 +84,22 @@ pub enum ParagraphStyle {
   Undertag,
 }
 
-#[derive(Clone)]
-pub struct RunText {
-  // Crop is a UTF-8 B-tree rope. Keeping it behind this small wrapper lets the
-  // editor continue talking in byte offsets while avoiding large `String`
-  // memmoves when editing long same-style runs.
-  rope: Rope,
-}
-
-impl RunText {
-  pub fn len(&self) -> usize {
-    self.rope.byte_len()
-  }
-
-  pub fn is_empty(&self) -> bool {
-    self.rope.is_empty()
-  }
-
-  fn push_str(&mut self, text: &str) {
-    if !text.is_empty() {
-      self.rope.insert(self.len(), text);
-    }
-  }
-
-  fn push_run_text(&mut self, text: &RunText) {
-    for chunk in text.rope.chunks() {
-      self.push_str(chunk);
-    }
-  }
-
-  fn insert_str(&mut self, byte: usize, text: &str) {
-    if !text.is_empty() {
-      self.rope.insert(byte, text);
-    }
-  }
-
-  fn delete(&mut self, range: Range<usize>) {
-    if range.start < range.end {
-      self.rope.delete(range);
-    }
-  }
-
-  fn split_off(&mut self, byte: usize) -> Self {
-    let right = self.slice(byte..self.len());
-    self.rope.delete(byte..self.len());
-    right
-  }
-
-  fn slice(&self, range: Range<usize>) -> Self {
-    Self {
-      rope: Rope::from(self.rope.byte_slice(range)),
-    }
-  }
-
-  fn push_to_string(&self, output: &mut String) {
-    for chunk in self.rope.chunks() {
-      output.push_str(chunk);
-    }
-  }
-
-  fn byte_at(&self, byte: usize) -> Option<u8> {
-    (byte < self.len()).then(|| self.rope.byte(byte))
-  }
-}
-
-impl fmt::Debug for RunText {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    fmt::Debug::fmt(&self.rope, f)
-  }
-}
-
-impl fmt::Display for RunText {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    for chunk in self.rope.chunks() {
-      f.write_str(chunk)?;
-    }
-    Ok(())
-  }
-}
-
-impl From<&str> for RunText {
-  fn from(text: &str) -> Self {
-    Self { rope: Rope::from(text) }
-  }
-}
-
-impl From<String> for RunText {
-  fn from(text: String) -> Self {
-    Self { rope: Rope::from(text) }
-  }
-}
-
-impl Hash for RunText {
-  fn hash<H: Hasher>(&self, state: &mut H) {
-    state.write_usize(self.len());
-    for chunk in self.rope.chunks() {
-      state.write(chunk.as_bytes());
-    }
-  }
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TextRun {
+  pub len: usize,
+  pub styles: RunStyles,
 }
 
 #[derive(Clone, Debug)]
-pub struct TextRun {
-  pub text: RunText,
-  pub styles: RunStyles,
+struct InputRun {
+  text: String,
+  styles: RunStyles,
+}
+
+#[derive(Clone, Debug)]
+struct InputParagraph {
+  style: ParagraphStyle,
+  runs: Vec<InputRun>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
@@ -368,6 +285,95 @@ pub struct DocumentOffset {
   pub byte: usize,
 }
 
+const DB8_MAGIC: &[u8; 4] = b"DB8\0";
+const DB8_VERSION: u32 = 1;
+
+pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
+  let path = path.as_ref();
+  match read_db8(path) {
+    Ok(document) => Ok(document),
+    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+      let document = demo_document();
+      write_db8(path, &document)?;
+      Ok(document)
+    },
+    Err(error) => Err(error),
+  }
+}
+
+pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
+  let bytes = fs::read(path)?;
+  let mut cursor = Cursor::new(bytes.as_slice());
+  let mut magic = [0; 4];
+  cursor.read_exact(&mut magic)?;
+  if &magic != DB8_MAGIC {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid DB8 magic"));
+  }
+  let version = read_u32(&mut cursor)?;
+  if version != DB8_VERSION {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported DB8 version"));
+  }
+
+  let text_len = read_u64(&mut cursor)? as usize;
+  let mut text_bytes = vec![0; text_len];
+  cursor.read_exact(&mut text_bytes)?;
+  let text = String::from_utf8(text_bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text is not UTF-8"))?;
+
+  let paragraph_count = read_u64(&mut cursor)? as usize;
+  let mut paragraphs = Vec::with_capacity(paragraph_count);
+  for _ in 0..paragraph_count {
+    let style = decode_paragraph_style(read_u8(&mut cursor)?)?;
+    let start = read_u64(&mut cursor)? as usize;
+    let end = read_u64(&mut cursor)? as usize;
+    let run_count = read_u64(&mut cursor)? as usize;
+    let mut runs = Vec::with_capacity(run_count);
+    for _ in 0..run_count {
+      let len = read_u64(&mut cursor)? as usize;
+      let styles = decode_run_styles(read_u8(&mut cursor)?)?;
+      runs.push(TextRun { len, styles });
+    }
+    paragraphs.push(Paragraph {
+      style,
+      byte_range: start..end,
+      runs: merge_adjacent_runs(runs),
+    });
+  }
+
+  let document = Document {
+    text: Rope::from(text),
+    paragraphs,
+    theme: DocumentTheme::default(),
+  };
+  validate_document(&document)?;
+  Ok(document)
+}
+
+pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
+  let path = path.as_ref();
+  if let Some(parent) = path.parent() {
+    fs::create_dir_all(parent)?;
+  }
+  validate_document(document)?;
+  let mut bytes = Vec::new();
+  bytes.extend_from_slice(DB8_MAGIC);
+  bytes.extend_from_slice(&DB8_VERSION.to_le_bytes());
+  let text = document_text_slice(document, 0..document.text.byte_len());
+  write_u64(&mut bytes, text.len() as u64);
+  bytes.extend_from_slice(text.as_bytes());
+  write_u64(&mut bytes, document.paragraphs.len() as u64);
+  for paragraph in &document.paragraphs {
+    bytes.push(encode_paragraph_style(paragraph.style));
+    write_u64(&mut bytes, paragraph.byte_range.start as u64);
+    write_u64(&mut bytes, paragraph.byte_range.end as u64);
+    write_u64(&mut bytes, paragraph.runs.len() as u64);
+    for run in &paragraph.runs {
+      write_u64(&mut bytes, run.len as u64);
+      bytes.push(encode_run_styles(run.styles));
+    }
+  }
+  fs::write(path, bytes)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditorSelection {
   pub anchor: DocumentOffset,
@@ -392,6 +398,7 @@ impl EditorSelection {
 pub struct RichTextEditor {
   focus_handle: FocusHandle,
   scroll_handle: ScrollHandle,
+  document_path: Option<PathBuf>,
   document: Document,
   selection: EditorSelection,
   selecting: bool,
@@ -407,10 +414,11 @@ pub struct RichTextEditor {
 }
 
 impl RichTextEditor {
-  pub fn new(document: Document, cx: &mut Context<Self>) -> Self {
+  pub fn new_with_path(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
     Self {
       focus_handle: cx.focus_handle(),
       scroll_handle: ScrollHandle::new(),
+      document_path,
       document,
       selection: EditorSelection::caret(),
       selecting: false,
@@ -439,7 +447,7 @@ impl RichTextEditor {
       } else {
         paragraph_text_len(&self.document.paragraphs[paragraph_ix])
       };
-      apply_style_to_paragraph_range(&mut self.document.paragraphs[paragraph_ix], start..end, style);
+      apply_style_to_paragraph_range(&mut self.document, paragraph_ix, start..end, style);
     }
     cx.notify();
   }
@@ -517,6 +525,14 @@ impl RichTextEditor {
     self.goal_x = None;
     self.scroll_head_into_view();
     cx.notify();
+  }
+  fn on_save(&mut self, _: &Save, _: &mut Window, _: &mut Context<Self>) {
+    let Some(path) = &self.document_path else {
+      return;
+    };
+    if let Err(error) = write_db8(path, &self.document) {
+      eprintln!("failed to save {}: {error}", path.display());
+    }
   }
   fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
     self.backspace(cx);
@@ -617,7 +633,7 @@ impl RichTextEditor {
     }
     DocumentOffset {
       paragraph: off.paragraph,
-      byte: prev_grapheme_boundary_in_paragraph(&self.document.paragraphs[off.paragraph], off.byte),
+      byte: prev_grapheme_boundary_in_paragraph(&self.document, off.paragraph, off.byte),
     }
   }
 
@@ -634,7 +650,7 @@ impl RichTextEditor {
     }
     DocumentOffset {
       paragraph: off.paragraph,
-      byte: next_grapheme_boundary_in_paragraph(&self.document.paragraphs[off.paragraph], off.byte),
+      byte: next_grapheme_boundary_in_paragraph(&self.document, off.paragraph, off.byte),
     }
   }
 
@@ -736,8 +752,7 @@ impl RichTextEditor {
         .map(|r| r.styles)
         .unwrap_or_default()
     };
-    let paragraph = &mut self.document.paragraphs[caret.paragraph];
-    insert_text_at(paragraph, caret.byte, text, styles);
+    insert_text_at(&mut self.document, caret.paragraph, caret.byte, text, styles);
     let new = DocumentOffset {
       paragraph: caret.paragraph,
       byte: caret.byte + text.len(),
@@ -755,24 +770,13 @@ impl RichTextEditor {
     }
     let range = self.selection.normalized();
     if range.start.paragraph == range.end.paragraph {
-      delete_range_in_paragraph(&mut self.document.paragraphs[range.start.paragraph], range.start.byte..range.end.byte);
+      delete_range_in_paragraph(&mut self.document, range.start.paragraph, range.start.byte..range.end.byte);
     } else {
       // Cross-paragraph selection: delete the tail of the start paragraph,
       // the head of the end paragraph, then merge the end paragraph's
       // remaining runs onto the end of the start paragraph. Intermediate
       // paragraphs are dropped wholesale.
-      let start_para_len = paragraph_text_len(&self.document.paragraphs[range.start.paragraph]);
-      delete_range_in_paragraph(&mut self.document.paragraphs[range.start.paragraph], range.start.byte..start_para_len);
-      delete_range_in_paragraph(&mut self.document.paragraphs[range.end.paragraph], 0..range.end.byte);
-      let end_runs = std::mem::take(&mut self.document.paragraphs[range.end.paragraph].runs);
-      let start_para = &mut self.document.paragraphs[range.start.paragraph];
-      start_para.runs.extend(end_runs);
-      let merged = merge_adjacent_runs(std::mem::take(&mut start_para.runs));
-      start_para.runs = merged;
-      self
-        .document
-        .paragraphs
-        .drain(range.start.paragraph + 1..=range.end.paragraph);
+      delete_cross_paragraph_range(&mut self.document, range.clone());
     }
     self.selection = EditorSelection {
       anchor: range.start,
@@ -798,19 +802,21 @@ impl RichTextEditor {
       }
       let prev_ix = caret.paragraph - 1;
       let prev_len = paragraph_text_len(&self.document.paragraphs[prev_ix]);
-      let cur_runs = std::mem::take(&mut self.document.paragraphs[caret.paragraph].runs);
-      self.document.paragraphs[prev_ix].runs.extend(cur_runs);
-      let merged = merge_adjacent_runs(std::mem::take(&mut self.document.paragraphs[prev_ix].runs));
-      self.document.paragraphs[prev_ix].runs = merged;
-      self.document.paragraphs.remove(caret.paragraph);
+      delete_cross_paragraph_range(
+        &mut self.document,
+        DocumentOffset {
+          paragraph: prev_ix,
+          byte: prev_len,
+        }..caret,
+      );
       let new = DocumentOffset {
         paragraph: prev_ix,
         byte: prev_len,
       };
       self.selection = EditorSelection { anchor: new, head: new };
     } else {
-      let prev = prev_grapheme_boundary_in_paragraph(&self.document.paragraphs[caret.paragraph], caret.byte);
-      delete_range_in_paragraph(&mut self.document.paragraphs[caret.paragraph], prev..caret.byte);
+      let prev = prev_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
+      delete_range_in_paragraph(&mut self.document, caret.paragraph, prev..caret.byte);
       let new = DocumentOffset {
         paragraph: caret.paragraph,
         byte: prev,
@@ -837,17 +843,16 @@ impl RichTextEditor {
       if caret.paragraph + 1 >= self.document.paragraphs.len() {
         return;
       }
-      let next_ix = caret.paragraph + 1;
-      let next_runs = std::mem::take(&mut self.document.paragraphs[next_ix].runs);
-      self.document.paragraphs[caret.paragraph]
-        .runs
-        .extend(next_runs);
-      let merged = merge_adjacent_runs(std::mem::take(&mut self.document.paragraphs[caret.paragraph].runs));
-      self.document.paragraphs[caret.paragraph].runs = merged;
-      self.document.paragraphs.remove(next_ix);
+      delete_cross_paragraph_range(
+        &mut self.document,
+        caret..DocumentOffset {
+          paragraph: caret.paragraph + 1,
+          byte: 0,
+        },
+      );
     } else {
-      let next = next_grapheme_boundary_in_paragraph(&self.document.paragraphs[caret.paragraph], caret.byte);
-      delete_range_in_paragraph(&mut self.document.paragraphs[caret.paragraph], caret.byte..next);
+      let next = next_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
+      delete_range_in_paragraph(&mut self.document, caret.paragraph, caret.byte..next);
     }
     self.goal_x = None;
     self.scroll_head_into_view();
@@ -859,43 +864,9 @@ impl RichTextEditor {
       self.delete_selection_internal();
     }
     let caret = self.selection.head;
-    let split = caret.byte;
-    let para_ix = caret.paragraph;
-    // Walk runs of the current paragraph and partition them around the
-    // split byte. Runs that straddle the split are cut in two.
-    let mut offset = 0;
-    let mut left = Vec::new();
-    let mut right = Vec::new();
-    let para = &mut self.document.paragraphs[para_ix];
-    let para_style = para.style;
-    for run in para.runs.drain(..) {
-      let run_start = offset;
-      let run_end = offset + run.text.len();
-      offset = run_end;
-      if run_end <= split {
-        left.push(run);
-      } else if run_start >= split {
-        right.push(run);
-      } else {
-        let local = split - run_start;
-        let mut l = run.text;
-        let r = l.split_off(local);
-        if !l.is_empty() {
-          left.push(TextRun { text: l, styles: run.styles });
-        }
-        if !r.is_empty() {
-          right.push(TextRun { text: r, styles: run.styles });
-        }
-      }
-    }
-    para.runs = merge_adjacent_runs(left);
-    let new_para = Paragraph {
-      style: para_style,
-      runs: merge_adjacent_runs(right),
-    };
-    self.document.paragraphs.insert(para_ix + 1, new_para);
+    split_paragraph_at(&mut self.document, caret.paragraph, caret.byte);
     let new = DocumentOffset {
-      paragraph: para_ix + 1,
+      paragraph: caret.paragraph + 1,
       byte: 0,
     };
     self.selection = EditorSelection { anchor: new, head: new };
@@ -1052,6 +1023,7 @@ impl Render for RichTextEditor {
       .on_action(cx.listener(Self::on_select_line_start))
       .on_action(cx.listener(Self::on_select_line_end))
       .on_action(cx.listener(Self::on_select_all))
+      .on_action(cx.listener(Self::on_save))
       .on_action(cx.listener(Self::on_backspace))
       .on_action(cx.listener(Self::on_delete))
       .on_action(cx.listener(Self::on_insert_newline))
@@ -1199,11 +1171,12 @@ struct ParagraphCacheKey {
   fingerprint: u64,
 }
 
-fn paragraph_cache_key(paragraph: &Paragraph) -> ParagraphCacheKey {
+fn paragraph_cache_key(document: &Document, paragraph: &Paragraph) -> ParagraphCacheKey {
   let mut hasher = DefaultHasher::new();
   paragraph.style.hash(&mut hasher);
+  paragraph_text(document, paragraph).hash(&mut hasher);
   for run in &paragraph.runs {
-    run.text.hash(&mut hasher);
+    run.len.hash(&mut hasher);
     run.styles.hash(&mut hasher);
   }
   ParagraphCacheKey {
@@ -1628,7 +1601,7 @@ fn build_layout(document: &Document, width: Pixels, previous_layout: Option<&Lay
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let p_format = paragraph_format(document, paragraph.style);
     y += p_format.spacing_before;
-    let cache_key = paragraph_cache_key(paragraph);
+    let cache_key = paragraph_cache_key(document, paragraph);
 
     if let Some(cached) = previous_layout
       .and_then(|layout| layout.paragraphs.get(paragraph_ix))
@@ -1649,7 +1622,7 @@ fn build_layout(document: &Document, width: Pixels, previous_layout: Option<&Lay
     let content_left = pageless_left + border_inset;
     let content_top = border.map_or(px(0.0), |border| border.width + border.space_y);
     let content_width = (pageless_width - border_inset * 2.0).max(px(1.0));
-    let paragraph_text = paragraph_text(paragraph);
+    let paragraph_text = paragraph_text(document, paragraph);
     let lines = wrap_lines(document, paragraph, p_format.clone(), &paragraph_text, content_width, window, cx);
 
     let mut laid_out_lines = Vec::with_capacity(lines.len());
@@ -1994,7 +1967,7 @@ fn fragments_for_range(paragraph: &Paragraph, range: &Range<usize>, rendered_len
   let mut fragments = Vec::with_capacity(paragraph.runs.len());
   for run in &paragraph.runs {
     let run_start = byte_offset;
-    let run_end = byte_offset + run.text.len();
+    let run_end = byte_offset + run.len;
     byte_offset = run_end;
     let start = run_start.max(range.start);
     let end = run_end.min(range.end);
@@ -2442,37 +2415,40 @@ fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, content_mask: Boun
   }
 }
 
-fn apply_style_to_paragraph_range(paragraph: &mut Paragraph, range: Range<usize>, style: RunStyle) {
+fn apply_style_to_paragraph_range(document: &mut Document, paragraph_ix: usize, range: Range<usize>, style: RunStyle) {
   if range.start >= range.end {
     return;
   }
+  let Some(paragraph) = document.paragraphs.get_mut(paragraph_ix) else {
+    return;
+  };
   let mut output = Vec::with_capacity(paragraph.runs.len() + 2);
   let mut offset = 0;
   for run in paragraph.runs.drain(..) {
     let run_start = offset;
-    let run_end = offset + run.text.len();
+    let run_end = offset + run.len;
     offset = run_end;
     if run_end <= range.start || run_start >= range.end {
       output.push(run);
       continue;
     }
-    let local_start = range.start.saturating_sub(run_start).min(run.text.len());
-    let local_end = (range.end.saturating_sub(run_start)).min(run.text.len());
+    let local_start = range.start.saturating_sub(run_start).min(run.len);
+    let local_end = (range.end.saturating_sub(run_start)).min(run.len);
     if local_start > 0 {
       output.push(TextRun {
-        text: run.text.slice(0..local_start),
+        len: local_start,
         styles: run.styles,
       });
     }
     let mut styles = run.styles;
     styles.apply(style);
     output.push(TextRun {
-      text: run.text.slice(local_start..local_end),
+      len: local_end - local_start,
       styles,
     });
-    if local_end < run.text.len() {
+    if local_end < run.len {
       output.push(TextRun {
-        text: run.text.slice(local_end..run.text.len()),
+        len: run.len - local_end,
         styles: run.styles,
       });
     }
@@ -2483,13 +2459,13 @@ fn apply_style_to_paragraph_range(paragraph: &mut Paragraph, range: Range<usize>
 fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
   let mut merged: Vec<TextRun> = Vec::with_capacity(runs.len());
   for run in runs {
-    if run.text.is_empty() {
+    if run.len == 0 {
       continue;
     }
     if let Some(last) = merged.last_mut()
       && last.styles == run.styles
     {
-      last.text.push_run_text(&run.text);
+      last.len += run.len;
       continue;
     }
     merged.push(run);
@@ -2497,16 +2473,12 @@ fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
   merged
 }
 
-fn paragraph_text(paragraph: &Paragraph) -> String {
-  let mut text = String::with_capacity(paragraph_text_len(paragraph));
-  for run in &paragraph.runs {
-    run.text.push_to_string(&mut text);
-  }
-  text
+fn paragraph_text(document: &Document, paragraph: &Paragraph) -> String {
+  document_text_slice(document, paragraph.byte_range.clone())
 }
 
 fn paragraph_text_len(paragraph: &Paragraph) -> usize {
-  paragraph.runs.iter().map(|run| run.text.len()).sum()
+  paragraph.byte_range.end - paragraph.byte_range.start
 }
 
 fn pt(value: f32) -> Pixels {
@@ -2529,6 +2501,119 @@ impl ShiftBounds for Bounds<Pixels> {
 
 // -------- Edit / movement helper free functions ------------------------
 
+fn document_text_slice(document: &Document, range: Range<usize>) -> String {
+  let mut text = String::with_capacity(range.end - range.start);
+  for chunk in document.text.byte_slice(range).chunks() {
+    text.push_str(chunk);
+  }
+  text
+}
+
+fn shift_paragraphs_after(document: &mut Document, paragraph_ix: usize, delta: isize) {
+  if delta == 0 {
+    return;
+  }
+  for paragraph in document.paragraphs.iter_mut().skip(paragraph_ix + 1) {
+    paragraph.byte_range = shift_range(paragraph.byte_range.clone(), delta);
+  }
+}
+
+fn shift_range(range: Range<usize>, delta: isize) -> Range<usize> {
+  if delta >= 0 {
+    let delta = delta as usize;
+    range.start + delta..range.end + delta
+  } else {
+    let delta = (-delta) as usize;
+    range.start - delta..range.end - delta
+  }
+}
+
+fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRun>) {
+  let mut left = Vec::new();
+  let mut right = Vec::new();
+  let mut offset = 0;
+  for run in runs {
+    let run_start = offset;
+    let run_end = offset + run.len;
+    offset = run_end;
+    if run_end <= byte {
+      left.push(run.clone());
+    } else if run_start >= byte {
+      right.push(run.clone());
+    } else {
+      let left_len = byte - run_start;
+      let right_len = run_end - byte;
+      if left_len > 0 {
+        left.push(TextRun {
+          len: left_len,
+          styles: run.styles,
+        });
+      }
+      if right_len > 0 {
+        right.push(TextRun {
+          len: right_len,
+          styles: run.styles,
+        });
+      }
+    }
+  }
+  (merge_adjacent_runs(left), merge_adjacent_runs(right))
+}
+
+fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: usize) {
+  let paragraph = document.paragraphs[paragraph_ix].clone();
+  let global = paragraph.byte_range.start + byte;
+  document.text.insert(global, "\n");
+  let (left_runs, right_runs) = split_runs_at(&paragraph.runs, byte);
+  let old_end = paragraph.byte_range.end;
+  document.paragraphs[paragraph_ix].byte_range = paragraph.byte_range.start..global;
+  document.paragraphs[paragraph_ix].runs = left_runs;
+  document.paragraphs.insert(
+    paragraph_ix + 1,
+    Paragraph {
+      style: paragraph.style,
+      byte_range: global + 1..old_end + 1,
+      runs: right_runs,
+    },
+  );
+  for paragraph in document.paragraphs.iter_mut().skip(paragraph_ix + 2) {
+    paragraph.byte_range = shift_range(paragraph.byte_range.clone(), 1);
+  }
+}
+
+fn delete_cross_paragraph_range(document: &mut Document, range: Range<DocumentOffset>) {
+  if range.start.paragraph >= range.end.paragraph {
+    delete_range_in_paragraph(document, range.start.paragraph, range.start.byte..range.end.byte);
+    return;
+  }
+
+  let start_ix = range.start.paragraph;
+  let end_ix = range.end.paragraph;
+  let start_para = document.paragraphs[start_ix].clone();
+  let end_para = document.paragraphs[end_ix].clone();
+  let start_global = start_para.byte_range.start + range.start.byte;
+  let end_global = end_para.byte_range.start + range.end.byte;
+  let delete_len = end_global - start_global;
+
+  let (left_runs, _) = split_runs_at(&start_para.runs, range.start.byte);
+  let (_, right_runs) = split_runs_at(&end_para.runs, range.end.byte);
+  document.text.delete(start_global..end_global);
+
+  let mut merged_runs = left_runs;
+  merged_runs.extend(right_runs);
+  document.paragraphs[start_ix].runs = merge_adjacent_runs(merged_runs);
+  document.paragraphs[start_ix].byte_range =
+    start_para.byte_range.start..start_para.byte_range.start + paragraph_runs_len(&document.paragraphs[start_ix]);
+  document.paragraphs.drain(start_ix + 1..=end_ix);
+  for paragraph in document.paragraphs.iter_mut().skip(start_ix + 1) {
+    paragraph.byte_range = shift_range(paragraph.byte_range.clone(), -(delete_len as isize));
+  }
+}
+
+fn paragraph_runs_len(paragraph: &Paragraph) -> usize {
+  paragraph.runs.iter().map(|run| run.len).sum()
+}
+
 // Returns `(run_index, local_byte)` for the given absolute byte offset within
 // the paragraph. Biases to the LEFT run at run boundaries — i.e. when `byte`
 // equals the end of run i and the start of run i+1, we return run i. This is
@@ -2536,7 +2621,7 @@ impl ShiftBounds for Bounds<Pixels> {
 fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
   let mut offset = 0;
   for (ix, run) in paragraph.runs.iter().enumerate() {
-    let run_end = offset + run.text.len();
+    let run_end = offset + run.len;
     if byte <= run_end {
       return (ix, byte - offset);
     }
@@ -2547,66 +2632,73 @@ fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
     (0, 0)
   } else {
     let last = paragraph.runs.len() - 1;
-    (last, paragraph.runs[last].text.len())
+    (last, paragraph.runs[last].len)
   }
 }
 
 // Inserts `text` (with `styles`) into `paragraph` at `byte`. Splits the run
 // straddling the byte if needed and re-merges adjacent runs with identical
 // styles afterwards.
-fn insert_text_at(paragraph: &mut Paragraph, byte: usize, text: &str, styles: RunStyles) {
+fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {
   if text.is_empty() {
     return;
   }
+  let insert_len = text.len();
+  let paragraph_start = document.paragraphs[paragraph_ix].byte_range.start;
+  document.text.insert(paragraph_start + byte, text);
+  shift_paragraphs_after(document, paragraph_ix, insert_len as isize);
+  let paragraph = &mut document.paragraphs[paragraph_ix];
+  paragraph.byte_range.end += insert_len;
   if paragraph.runs.is_empty() {
-    paragraph.runs.push(TextRun { text: text.into(), styles });
+    paragraph.runs.push(TextRun { len: insert_len, styles });
     return;
   }
 
   let mut offset = 0;
   for i in 0..paragraph.runs.len() {
     let run_start = offset;
-    let run_len = paragraph.runs[i].text.len();
+    let run_len = paragraph.runs[i].len;
     let run_end = run_start + run_len;
     if byte <= run_end {
       let local = byte - run_start;
 
       if paragraph.runs[i].styles == styles {
-        paragraph.runs[i].text.insert_str(local, text);
+        paragraph.runs[i].len += insert_len;
         return;
       }
 
       if local == 0 {
         if i > 0 && paragraph.runs[i - 1].styles == styles {
-          paragraph.runs[i - 1].text.push_str(text);
+          paragraph.runs[i - 1].len += insert_len;
         } else {
           paragraph
             .runs
-            .insert(i, TextRun { text: text.into(), styles });
+            .insert(i, TextRun { len: insert_len, styles });
         }
         return;
       }
 
       if local == run_len {
         if i + 1 < paragraph.runs.len() && paragraph.runs[i + 1].styles == styles {
-          paragraph.runs[i + 1].text.insert_str(0, text);
+          paragraph.runs[i + 1].len += insert_len;
         } else {
           paragraph
             .runs
-            .insert(i + 1, TextRun { text: text.into(), styles });
+            .insert(i + 1, TextRun { len: insert_len, styles });
         }
         return;
       }
 
       let run_styles = paragraph.runs[i].styles;
-      let right = paragraph.runs[i].text.split_off(local);
+      let right_len = run_len - local;
+      paragraph.runs[i].len = local;
       paragraph
         .runs
-        .insert(i + 1, TextRun { text: text.into(), styles });
+        .insert(i + 1, TextRun { len: insert_len, styles });
       paragraph.runs.insert(
         i + 2,
         TextRun {
-          text: right,
+          len: right_len,
           styles: run_styles,
         },
       );
@@ -2617,9 +2709,9 @@ fn insert_text_at(paragraph: &mut Paragraph, byte: usize, text: &str, styles: Ru
 
   if let Some(last) = paragraph.runs.last_mut() {
     if last.styles == styles {
-      last.text.push_str(text);
+      last.len += insert_len;
     } else {
-      paragraph.runs.push(TextRun { text: text.into(), styles });
+      paragraph.runs.push(TextRun { len: insert_len, styles });
     }
   }
 }
@@ -2627,26 +2719,37 @@ fn insert_text_at(paragraph: &mut Paragraph, byte: usize, text: &str, styles: Ru
 // Removes the half-open byte range `[range.start, range.end)` from
 // `paragraph`. Runs are split or dropped as needed; remaining runs are re-
 // merged so adjacent same-style fragments coalesce.
-fn delete_range_in_paragraph(paragraph: &mut Paragraph, range: Range<usize>) {
+fn delete_range_in_paragraph(document: &mut Document, paragraph_ix: usize, range: Range<usize>) {
   if range.start >= range.end {
     return;
   }
+  let delete_len = range.end - range.start;
+  let paragraph_start = document.paragraphs[paragraph_ix].byte_range.start;
+  document
+    .text
+    .delete(paragraph_start + range.start..paragraph_start + range.end);
+  shift_paragraphs_after(document, paragraph_ix, -(delete_len as isize));
+  let paragraph = &mut document.paragraphs[paragraph_ix];
+  paragraph.byte_range.end -= delete_len;
   let mut offset = 0;
   let mut new_runs: Vec<TextRun> = Vec::with_capacity(paragraph.runs.len());
   for run in paragraph.runs.drain(..) {
     let run_start = offset;
-    let run_end = offset + run.text.len();
+    let run_end = offset + run.len;
     offset = run_end;
     if run_end <= range.start || run_start >= range.end {
       new_runs.push(run);
       continue;
     }
-    let local_start = range.start.saturating_sub(run_start).min(run.text.len());
-    let local_end = range.end.saturating_sub(run_start).min(run.text.len());
-    let mut run = run;
-    run.text.delete(local_start..local_end);
-    if !run.text.is_empty() {
-      new_runs.push(run);
+    let local_start = range.start.saturating_sub(run_start).min(run.len);
+    let local_end = range.end.saturating_sub(run_start).min(run.len);
+    let removed = local_end - local_start;
+    let remaining = run.len - removed;
+    if remaining > 0 {
+      new_runs.push(TextRun {
+        len: remaining,
+        styles: run.styles,
+      });
     }
   }
   paragraph.runs = merge_adjacent_runs(new_runs);
@@ -2729,42 +2832,36 @@ fn find_line_below(layout: &LayoutState, p_ix: usize, line_ix: usize) -> Option<
 
 // Grapheme-cluster-aware step backwards. Handles combining marks and
 // compound emoji correctly, so one keystroke deletes one visible character.
-fn prev_grapheme_boundary_in_paragraph(paragraph: &Paragraph, byte: usize) -> usize {
+fn prev_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
   if byte == 0 {
     return 0;
   }
   // Fast path for the common ASCII case. ASCII bytes are always single-byte
   // grapheme clusters, so we can avoid allocating the paragraph text while
   // someone is holding an arrow/delete key down through ordinary prose.
-  if paragraph_byte_at(paragraph, byte - 1).is_some_and(|byte| byte.is_ascii()) {
+  if paragraph_byte_at(document, paragraph_ix, byte - 1).is_some_and(|byte| byte.is_ascii()) {
     return byte - 1;
   }
-  let text = paragraph_text(paragraph);
+  let text = paragraph_text(document, &document.paragraphs[paragraph_ix]);
   prev_grapheme_boundary(&text, byte)
 }
 
-fn next_grapheme_boundary_in_paragraph(paragraph: &Paragraph, byte: usize) -> usize {
+fn next_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
+  let paragraph = &document.paragraphs[paragraph_ix];
   let len = paragraph_text_len(paragraph);
   if byte >= len {
     return len;
   }
-  if paragraph_byte_at(paragraph, byte).is_some_and(|byte| byte.is_ascii()) {
+  if paragraph_byte_at(document, paragraph_ix, byte).is_some_and(|byte| byte.is_ascii()) {
     return byte + 1;
   }
-  let text = paragraph_text(paragraph);
+  let text = paragraph_text(document, paragraph);
   next_grapheme_boundary(&text, byte)
 }
 
-fn paragraph_byte_at(paragraph: &Paragraph, byte: usize) -> Option<u8> {
-  let mut offset = 0;
-  for run in &paragraph.runs {
-    let run_end = offset + run.text.len();
-    if byte < run_end {
-      return run.text.byte_at(byte - offset);
-    }
-    offset = run_end;
-  }
-  None
+fn paragraph_byte_at(document: &Document, paragraph_ix: usize, byte: usize) -> Option<u8> {
+  let paragraph = document.paragraphs.get(paragraph_ix)?;
+  (byte < paragraph_text_len(paragraph)).then(|| document.text.byte(paragraph.byte_range.start + byte))
 }
 
 fn prev_grapheme_boundary(s: &str, byte: usize) -> usize {
@@ -2777,207 +2874,364 @@ fn next_grapheme_boundary(s: &str, byte: usize) -> usize {
   cursor.next_boundary(s, 0).ok().flatten().unwrap_or(s.len())
 }
 
-pub fn demo_document() -> Document {
-  let mut document = Document {
-    theme: DocumentTheme::default(),
-    paragraphs: vec![
-      Paragraph {
-        style: ParagraphStyle::Pocket,
-        runs: vec![plain("This is a Pocket. It’s the highest-level heading in the document.")],
-      },
-      Paragraph {
-        style: ParagraphStyle::Hat,
-        runs: vec![plain("This is a Hat. It’s the second-highest level heading.")],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![plain(
-          "Visual parity matters because former Word users expect familiar line spacing, heading hierarchy, highlighting, and underline behavior.",
-        )],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          plain("This paragraph mixes "),
-          run("highlighted spoken text", RunStyles::default().with(RunStyle::HighlightSpoken)),
-          plain(", "),
-          run("underlined words", RunStyles::default().with(RunStyle::Underline)),
-          plain(", and "),
-          run("emphasis", RunStyles::default().with(RunStyle::Emphasis)),
-          plain(" while preserving the document as paragraph styles plus named run styles."),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          run(
-            "This text is both underlined and highlighted, because it is all spoken. ",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(
-            "This text is both emphasized and highlighted, also all spoken.",
-            RunStyles::default()
-              .with(RunStyle::Emphasis)
-              .with(RunStyle::HighlightSpoken),
-          ),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          run(
-            "This text is highlighted in the insert style. Can also be ",
-            RunStyles::default().with(RunStyle::HighlightInsert),
-          ),
-          run(
-            "underlined",
-            RunStyles::default()
-              .with(RunStyle::HighlightInsert)
-              .with(RunStyle::Underline),
-          ),
-          run(" and ", RunStyles::default().with(RunStyle::HighlightInsert)),
-          run(
-            "emphasized.",
-            RunStyles::default()
-              .with(RunStyle::HighlightInsert)
-              .with(RunStyle::Emphasis),
-          ),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          run(
-            "Sometimes a team’s opponent will highlight in the same color as them, but you want to ‘rehighlight’ their card and read new portions. You need a different color to perform this operation. Here is a common one. Can also be ",
-            RunStyles::default().with(RunStyle::HighlightAlternative),
-          ),
-          run(
-            "underlined",
-            RunStyles::default()
-              .with(RunStyle::HighlightAlternative)
-              .with(RunStyle::Underline),
-          ),
-          run(" and ", RunStyles::default().with(RunStyle::HighlightAlternative)),
-          run(
-            "emphasized.",
-            RunStyles::default()
-              .with(RunStyle::HighlightAlternative)
-              .with(RunStyle::Emphasis),
-          ),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Block,
-        runs: vec![plain("This is a Block. It’s the third-highest level heading.")],
-      },
-      Paragraph {
-        style: ParagraphStyle::Tag,
-        runs: vec![
-          plain("This is a tag. It’s the fourth-highest level heading, tied with analytic."),
-          plain(" Tags can also be "),
-          run("underlined", RunStyles::default().with_direct_underline()),
-          plain("."),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Undertag,
-        runs: vec![
-          plain(
-            "This is an undertag. It usually goes below a tag and adds context that will be deleted when sent to opponents, and is usually never read. It can also be ",
-          ),
-          run("underlined", RunStyles::default().with_direct_underline()),
-          plain("."),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          run("Codex 26", RunStyles::default().with(RunStyle::Cite)),
-          plain(" is a wonderful coder! (This is a citation"),
-          plain(
-            ". It usually begins with the special cite text to denote the read portion, then transitions into more detailed normal text to denote the unread portion. The unread text can be ",
-          ),
-          run("underlined", RunStyles::default().with_direct_underline()),
-          plain(", though it is uncommon, and in theory the cite text can be underlined too.)"),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          run("Usually ", RunStyles::default().with(RunStyle::Underline)),
-          run(
-            "under a tag",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(" and a cite line, ", RunStyles::default().with(RunStyle::Underline)),
-          run(
-            "there’s",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(" going to be the ", RunStyles::default().with(RunStyle::Underline)),
-          run(
-            "content of the evidence.",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![plain("It might continue for multiple paragraphs like this.")],
-      },
-      Paragraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![
-          plain("But then "),
-          run(
-            "it’ll end with the ",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(
-            "next tag",
-            RunStyles::default()
-              .with(RunStyle::Emphasis)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(
-            " or ",
-            RunStyles::default()
-              .with(RunStyle::Underline)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          run(
-            "analytic",
-            RunStyles::default()
-              .with(RunStyle::Emphasis)
-              .with(RunStyle::HighlightSpoken),
-          ),
-          plain(", or sometimes the next other header if the evidence was the end of a section."),
-        ],
-      },
-      Paragraph {
-        style: ParagraphStyle::Analytic,
-        runs: vec![
-          plain("This is an analytic"),
-          plain(", a fourth-highest level heading, tied with tag."),
-          plain(" "),
-          plain("It’"),
-          plain("s meant to be independent of evidence and deleted on the version of the document you send to your opponents. It can be "),
-          run("underlined", RunStyles::default().with_direct_underline()),
-          plain("."),
-        ],
-      },
-    ],
+fn validate_document(document: &Document) -> io::Result<()> {
+  let text_len = document.text.byte_len();
+  if document.paragraphs.is_empty() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 document has no paragraphs"));
+  }
+  for (ix, paragraph) in document.paragraphs.iter().enumerate() {
+    if paragraph.byte_range.start > paragraph.byte_range.end || paragraph.byte_range.end > text_len {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "paragraph range is outside document text"));
+    }
+    if ix == 0 && paragraph.byte_range.start != 0 {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "first paragraph does not start at byte 0"));
+    }
+    if paragraph_runs_len(paragraph) != paragraph_text_len(paragraph) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "paragraph run lengths do not match paragraph text",
+      ));
+    }
+    if ix > 0 {
+      let previous = &document.paragraphs[ix - 1];
+      if previous.byte_range.end + 1 != paragraph.byte_range.start || document.text.byte(previous.byte_range.end) != b'\n' {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "paragraph ranges are not newline separated"));
+      }
+    }
+  }
+  if document
+    .paragraphs
+    .last()
+    .is_some_and(|paragraph| paragraph.byte_range.end != text_len)
+  {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "last paragraph does not end at text length"));
+  }
+  Ok(())
+}
+
+fn read_u8(cursor: &mut Cursor<&[u8]>) -> io::Result<u8> {
+  let mut bytes = [0; 1];
+  cursor.read_exact(&mut bytes)?;
+  Ok(bytes[0])
+}
+
+fn read_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
+  let mut bytes = [0; 4];
+  cursor.read_exact(&mut bytes)?;
+  Ok(u32::from_le_bytes(bytes))
+}
+
+fn read_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
+  let mut bytes = [0; 8];
+  cursor.read_exact(&mut bytes)?;
+  Ok(u64::from_le_bytes(bytes))
+}
+
+fn write_u64(bytes: &mut Vec<u8>, value: u64) {
+  bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+fn encode_paragraph_style(style: ParagraphStyle) -> u8 {
+  match style {
+    ParagraphStyle::Pocket => 0,
+    ParagraphStyle::Hat => 1,
+    ParagraphStyle::Block => 2,
+    ParagraphStyle::Tag => 3,
+    ParagraphStyle::Analytic => 4,
+    ParagraphStyle::Normal => 5,
+    ParagraphStyle::Undertag => 6,
+  }
+}
+
+fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
+  match value {
+    0 => Ok(ParagraphStyle::Pocket),
+    1 => Ok(ParagraphStyle::Hat),
+    2 => Ok(ParagraphStyle::Block),
+    3 => Ok(ParagraphStyle::Tag),
+    4 => Ok(ParagraphStyle::Analytic),
+    5 => Ok(ParagraphStyle::Normal),
+    6 => Ok(ParagraphStyle::Undertag),
+    _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid paragraph style")),
+  }
+}
+
+fn encode_run_styles(styles: RunStyles) -> u8 {
+  let mut bits = 0;
+  if styles.cite {
+    bits |= 1 << 0;
+  }
+  if styles.direct_underline {
+    bits |= 1 << 1;
+  }
+  if styles.emphasis {
+    bits |= 1 << 2;
+  }
+  if styles.style_underline {
+    bits |= 1 << 3;
+  }
+  bits
+    | match styles.highlight {
+      None => 0,
+      Some(HighlightStyle::Spoken) => 1 << 4,
+      Some(HighlightStyle::Insert) => 2 << 4,
+      Some(HighlightStyle::Alternative) => 3 << 4,
+    }
+}
+
+fn decode_run_styles(bits: u8) -> io::Result<RunStyles> {
+  let highlight = match (bits >> 4) & 0b11 {
+    0 => None,
+    1 => Some(HighlightStyle::Spoken),
+    2 => Some(HighlightStyle::Insert),
+    3 => Some(HighlightStyle::Alternative),
+    _ => unreachable!(),
   };
+  if bits & 0b1100_0000 != 0 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid run style bits"));
+  }
+  Ok(RunStyles {
+    cite: bits & (1 << 0) != 0,
+    direct_underline: bits & (1 << 1) != 0,
+    emphasis: bits & (1 << 2) != 0,
+    style_underline: bits & (1 << 3) != 0,
+    highlight,
+  })
+}
+
+fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) -> Document {
+  let mut text = String::new();
+  let mut stored_paragraphs = Vec::with_capacity(paragraphs.len());
+  for (ix, paragraph) in paragraphs.into_iter().enumerate() {
+    if ix > 0 {
+      text.push('\n');
+    }
+    let start = text.len();
+    let mut runs = Vec::with_capacity(paragraph.runs.len());
+    for run in paragraph.runs {
+      let len = run.text.len();
+      text.push_str(&run.text);
+      runs.push(TextRun { len, styles: run.styles });
+    }
+    let end = text.len();
+    stored_paragraphs.push(Paragraph {
+      style: paragraph.style,
+      byte_range: start..end,
+      runs: merge_adjacent_runs(runs),
+    });
+  }
+  if stored_paragraphs.is_empty() {
+    stored_paragraphs.push(Paragraph {
+      style: ParagraphStyle::Normal,
+      byte_range: 0..0,
+      runs: Vec::new(),
+    });
+  }
+  Document {
+    text: Rope::from(text),
+    paragraphs: stored_paragraphs,
+    theme,
+  }
+}
+
+pub fn demo_document() -> Document {
+  let mut paragraphs = vec![
+    InputParagraph {
+      style: ParagraphStyle::Pocket,
+      runs: vec![plain("This is a Pocket. It’s the highest-level heading in the document.")],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Hat,
+      runs: vec![plain("This is a Hat. It’s the second-highest level heading.")],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain(
+        "Visual parity matters because former Word users expect familiar line spacing, heading hierarchy, highlighting, and underline behavior.",
+      )],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        plain("This paragraph mixes "),
+        run("highlighted spoken text", RunStyles::default().with(RunStyle::HighlightSpoken)),
+        plain(", "),
+        run("underlined words", RunStyles::default().with(RunStyle::Underline)),
+        plain(", and "),
+        run("emphasis", RunStyles::default().with(RunStyle::Emphasis)),
+        plain(" while preserving the document as paragraph styles plus named run styles."),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run(
+          "This text is both underlined and highlighted, because it is all spoken. ",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(
+          "This text is both emphasized and highlighted, also all spoken.",
+          RunStyles::default()
+            .with(RunStyle::Emphasis)
+            .with(RunStyle::HighlightSpoken),
+        ),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run(
+          "This text is highlighted in the insert style. Can also be ",
+          RunStyles::default().with(RunStyle::HighlightInsert),
+        ),
+        run(
+          "underlined",
+          RunStyles::default()
+            .with(RunStyle::HighlightInsert)
+            .with(RunStyle::Underline),
+        ),
+        run(" and ", RunStyles::default().with(RunStyle::HighlightInsert)),
+        run(
+          "emphasized.",
+          RunStyles::default()
+            .with(RunStyle::HighlightInsert)
+            .with(RunStyle::Emphasis),
+        ),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run(
+          "Sometimes a team’s opponent will highlight in the same color as them, but you want to ‘rehighlight’ their card and read new portions. You need a different color to perform this operation. Here is a common one. Can also be ",
+          RunStyles::default().with(RunStyle::HighlightAlternative),
+        ),
+        run(
+          "underlined",
+          RunStyles::default()
+            .with(RunStyle::HighlightAlternative)
+            .with(RunStyle::Underline),
+        ),
+        run(" and ", RunStyles::default().with(RunStyle::HighlightAlternative)),
+        run(
+          "emphasized.",
+          RunStyles::default()
+            .with(RunStyle::HighlightAlternative)
+            .with(RunStyle::Emphasis),
+        ),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Block,
+      runs: vec![plain("This is a Block. It’s the third-highest level heading.")],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Tag,
+      runs: vec![
+        plain("This is a tag. It’s the fourth-highest level heading, tied with analytic."),
+        plain(" Tags can also be "),
+        run("underlined", RunStyles::default().with_direct_underline()),
+        plain("."),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Undertag,
+      runs: vec![
+        plain(
+          "This is an undertag. It usually goes below a tag and adds context that will be deleted when sent to opponents, and is usually never read. It can also be ",
+        ),
+        run("underlined", RunStyles::default().with_direct_underline()),
+        plain("."),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run("Codex 26", RunStyles::default().with(RunStyle::Cite)),
+        plain(" is a wonderful coder! (This is a citation"),
+        plain(
+          ". It usually begins with the special cite text to denote the read portion, then transitions into more detailed normal text to denote the unread portion. The unread text can be ",
+        ),
+        run("underlined", RunStyles::default().with_direct_underline()),
+        plain(", though it is uncommon, and in theory the cite text can be underlined too.)"),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run("Usually ", RunStyles::default().with(RunStyle::Underline)),
+        run(
+          "under a tag",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(" and a cite line, ", RunStyles::default().with(RunStyle::Underline)),
+        run(
+          "there’s",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(" going to be the ", RunStyles::default().with(RunStyle::Underline)),
+        run(
+          "content of the evidence.",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("It might continue for multiple paragraphs like this.")],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        plain("But then "),
+        run(
+          "it’ll end with the ",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(
+          "next tag",
+          RunStyles::default()
+            .with(RunStyle::Emphasis)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(
+          " or ",
+          RunStyles::default()
+            .with(RunStyle::Underline)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        run(
+          "analytic",
+          RunStyles::default()
+            .with(RunStyle::Emphasis)
+            .with(RunStyle::HighlightSpoken),
+        ),
+        plain(", or sometimes the next other header if the evidence was the end of a section."),
+      ],
+    },
+    InputParagraph {
+      style: ParagraphStyle::Analytic,
+      runs: vec![
+        plain("This is an analytic"),
+        plain(", a fourth-highest level heading, tied with tag."),
+        plain(" "),
+        plain("It’"),
+        plain("s meant to be independent of evidence and deleted on the version of the document you send to your opponents. It can be "),
+        run("underlined", RunStyles::default().with_direct_underline()),
+        plain("."),
+      ],
+    },
+  ];
 
   for ix in 1..=48 {
     let style = match ix % 9 {
@@ -2998,7 +3252,7 @@ pub fn demo_document() -> Document {
     let alternative = RunStyles::default().with(RunStyle::HighlightAlternative);
     let emphasis = RunStyles::default().with(RunStyle::Emphasis);
 
-    document.paragraphs.push(Paragraph {
+    paragraphs.push(InputParagraph {
       style,
       runs: vec![
         plain(&format!("Scrollable test paragraph {ix}. ")),
@@ -3012,16 +3266,18 @@ pub fn demo_document() -> Document {
       ],
     });
   }
-
-  document
+  document_from_input(DocumentTheme::default(), paragraphs)
 }
 
-fn plain(text: &str) -> TextRun {
+fn plain(text: &str) -> InputRun {
   run(text, RunStyles::default())
 }
 
-fn run(text: &str, styles: RunStyles) -> TextRun {
-  TextRun { text: text.into(), styles }
+fn run(text: &str, styles: RunStyles) -> InputRun {
+  InputRun {
+    text: text.to_string(),
+    styles,
+  }
 }
 
 #[cfg(test)]
@@ -3029,42 +3285,63 @@ mod tests {
   use super::*;
 
   #[test]
-  fn run_text_edits_keep_utf8_byte_offsets() {
-    let mut text = RunText::from("abé🚀cd");
-    text.insert_str("abé".len(), "Z");
-    assert_eq!(text.to_string(), "abéZ🚀cd");
+  fn paragraph_edit_helpers_preserve_text_and_styles() {
+    let emphasized = RunStyles::default().with(RunStyle::Emphasis);
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![run("hello", RunStyles::default())],
+      }],
+    );
 
-    let right = text.split_off("abéZ".len());
-    assert_eq!(text.to_string(), "abéZ");
-    assert_eq!(right.to_string(), "🚀cd");
+    insert_text_at(&mut document, 0, "he".len(), "y", RunStyles::default());
+    assert_eq!(paragraph_text(&document, &document.paragraphs[0]), "heyllo");
+    assert_eq!(document.paragraphs[0].runs.len(), 1);
 
-    text.push_run_text(&right);
-    assert_eq!(text.to_string(), "abéZ🚀cd");
+    apply_style_to_paragraph_range(&mut document, 0, "hey".len().."heyll".len(), RunStyle::Emphasis);
+    assert_eq!(paragraph_text(&document, &document.paragraphs[0]), "heyllo");
+    assert_eq!(document.paragraphs[0].runs.len(), 3);
+    assert_eq!(document.paragraphs[0].runs[1].styles, emphasized);
 
-    text.delete("abé".len().."abéZ🚀".len());
-    assert_eq!(text.to_string(), "abécd");
+    delete_range_in_paragraph(&mut document, 0, "he".len().."heyll".len());
+    assert_eq!(paragraph_text(&document, &document.paragraphs[0]), "heo");
+    assert_eq!(document.paragraphs[0].runs.len(), 1);
+    assert_eq!(document.paragraphs[0].runs[0].styles, RunStyles::default());
   }
 
   #[test]
-  fn paragraph_edit_helpers_preserve_text_and_styles() {
-    let emphasized = RunStyles::default().with(RunStyle::Emphasis);
-    let mut paragraph = Paragraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![run("hello", RunStyles::default())],
-    };
+  fn document_rope_edits_keep_utf8_byte_offsets() {
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![run("abé🚀cd", RunStyles::default())],
+      }],
+    );
+    insert_text_at(&mut document, 0, "abé".len(), "Z", RunStyles::default());
+    assert_eq!(paragraph_text(&document, &document.paragraphs[0]), "abéZ🚀cd");
 
-    insert_text_at(&mut paragraph, "he".len(), "y", RunStyles::default());
-    assert_eq!(paragraph_text(&paragraph), "heyllo");
-    assert_eq!(paragraph.runs.len(), 1);
+    let delete_start = "abé".len();
+    let delete_end = "abéZ🚀".len();
+    delete_range_in_paragraph(&mut document, 0, delete_start..delete_end);
+    assert_eq!(paragraph_text(&document, &document.paragraphs[0]), "abécd");
+  }
 
-    apply_style_to_paragraph_range(&mut paragraph, "hey".len().."heyll".len(), RunStyle::Emphasis);
-    assert_eq!(paragraph_text(&paragraph), "heyllo");
-    assert_eq!(paragraph.runs.len(), 3);
-    assert_eq!(paragraph.runs[1].styles, emphasized);
+  #[test]
+  fn db8_round_trip_preserves_text_structure_and_styles() {
+    let document = demo_document();
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("debateprocessor-test-{}.db8", std::process::id()));
+    write_db8(&path, &document).unwrap();
+    let loaded = read_db8(&path).unwrap();
+    let _ = std::fs::remove_file(path);
 
-    delete_range_in_paragraph(&mut paragraph, "he".len().."heyll".len());
-    assert_eq!(paragraph_text(&paragraph), "heo");
-    assert_eq!(paragraph.runs.len(), 1);
-    assert_eq!(paragraph.runs[0].styles, RunStyles::default());
+    assert_eq!(
+      document_text_slice(&document, 0..document.text.byte_len()),
+      document_text_slice(&loaded, 0..loaded.text.byte_len())
+    );
+    assert_eq!(document.paragraphs.len(), loaded.paragraphs.len());
+    assert_eq!(document.paragraphs[0].runs, loaded.paragraphs[0].runs);
   }
 }
