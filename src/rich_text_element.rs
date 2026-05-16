@@ -1976,33 +1976,54 @@ fn insert_text_at(paragraph: &mut Paragraph, byte: usize, text: &str, styles: Ru
     paragraph.runs.push(TextRun { text: text.to_string(), styles });
     return;
   }
+
   let mut offset = 0;
-  let mut new_runs: Vec<TextRun> = Vec::new();
-  let mut inserted = false;
-  for run in paragraph.runs.drain(..) {
+  for i in 0..paragraph.runs.len() {
     let run_start = offset;
-    let run_end = offset + run.text.len();
-    offset = run_end;
-    if !inserted && byte <= run_end {
+    let run_len = paragraph.runs[i].text.len();
+    let run_end = run_start + run_len;
+    if byte <= run_end {
       let local = byte - run_start;
-      let left = run.text[..local].to_string();
-      let right = run.text[local..].to_string();
-      if !left.is_empty() {
-        new_runs.push(TextRun { text: left, styles: run.styles });
+
+      if paragraph.runs[i].styles == styles {
+        paragraph.runs[i].text.insert_str(local, text);
+        return;
       }
-      new_runs.push(TextRun { text: text.to_string(), styles });
-      if !right.is_empty() {
-        new_runs.push(TextRun { text: right, styles: run.styles });
+
+      if local == 0 {
+        if i > 0 && paragraph.runs[i - 1].styles == styles {
+          paragraph.runs[i - 1].text.push_str(text);
+        } else {
+          paragraph.runs.insert(i, TextRun { text: text.to_string(), styles });
+        }
+        return;
       }
-      inserted = true;
+
+      if local == run_len {
+        if i + 1 < paragraph.runs.len() && paragraph.runs[i + 1].styles == styles {
+          paragraph.runs[i + 1].text.insert_str(0, text);
+        } else {
+          paragraph.runs.insert(i + 1, TextRun { text: text.to_string(), styles });
+        }
+        return;
+      }
+
+      let run_styles = paragraph.runs[i].styles;
+      let right = paragraph.runs[i].text.split_off(local);
+      paragraph.runs.insert(i + 1, TextRun { text: text.to_string(), styles });
+      paragraph.runs.insert(i + 2, TextRun { text: right, styles: run_styles });
+      return;
+    }
+    offset = run_end;
+  }
+
+  if let Some(last) = paragraph.runs.last_mut() {
+    if last.styles == styles {
+      last.text.push_str(text);
     } else {
-      new_runs.push(run);
+      paragraph.runs.push(TextRun { text: text.to_string(), styles });
     }
   }
-  if !inserted {
-    new_runs.push(TextRun { text: text.to_string(), styles });
-  }
-  paragraph.runs = merge_adjacent_runs(new_runs);
 }
 
 // Removes the half-open byte range `[range.start, range.end)` from
