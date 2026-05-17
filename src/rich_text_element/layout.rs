@@ -306,26 +306,41 @@ pub(super) fn run_format(document: &Document, paragraph: EffectiveParagraphForma
     border_width: px(0.0),
   };
 
-  if styles.style_underline {
+  match styles.semantic {
+    RunSemanticStyle::Plain => {},
+    RunSemanticStyle::Underline => {
     format.font_size = theme.body_font_size;
     format.bold = false;
     format.underline = UnderlineKind::Single;
-  }
+    },
+    RunSemanticStyle::Cite => {
+      format.font_size = theme.cite_font_size;
+      format.bold = true;
+      format.underline = UnderlineKind::None;
+    },
+    RunSemanticStyle::Emphasis => {
+      format.font_family = theme.default_font_family.clone();
+      format.font_size = theme.cite_font_size;
+      format.bold = true;
+      format.italic = false;
+      format.underline = UnderlineKind::Single;
+      format.border_width = theme.emphasis_border_width;
+    },
+    RunSemanticStyle::Condensed => {
+      format.font_size = theme.condensed_font_size;
+      format.bold = false;
+      format.italic = false;
+      format.underline = UnderlineKind::None;
+    },
+    RunSemanticStyle::Ultracondensed => {
+      format.font_size = theme.ultracondensed_font_size;
+      format.bold = false;
+      format.italic = false;
+      format.underline = UnderlineKind::None;
+    },
+  };
   if styles.direct_underline {
     format.underline = UnderlineKind::Single;
-  }
-  if styles.cite {
-    format.font_size = theme.cite_font_size;
-    format.bold = true;
-    format.underline = UnderlineKind::None;
-  }
-  if styles.emphasis {
-    format.font_family = theme.default_font_family.clone();
-    format.font_size = theme.cite_font_size;
-    format.bold = true;
-    format.italic = false;
-    format.underline = UnderlineKind::Single;
-    format.border_width = theme.emphasis_border_width;
   }
 
   format

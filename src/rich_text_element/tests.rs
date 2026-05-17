@@ -172,7 +172,7 @@ fn run_style_full_selection_toggle_policy() {
       paragraph: 0,
       byte: "all".len(),
     },
-    |styles| styles.emphasis,
+    |styles| styles.semantic == RunSemanticStyle::Emphasis,
   ));
   assert!(!selection_all_run_styles(
     &document,
@@ -180,8 +180,65 @@ fn run_style_full_selection_toggle_policy() {
       paragraph: 0,
       byte: "all plain".len(),
     },
-    |styles| styles.emphasis,
+    |styles| styles.semantic == RunSemanticStyle::Emphasis,
   ));
+}
+
+#[test]
+fn semantic_run_styles_are_mutually_exclusive() {
+  let mut styles = RunStyles::default().with(RunStyle::Emphasis);
+  styles.apply(RunStyle::Condensed);
+  assert_eq!(styles.semantic, RunSemanticStyle::Condensed);
+  styles.apply(RunStyle::Ultracondensed);
+  assert_eq!(styles.semantic, RunSemanticStyle::Ultracondensed);
+}
+
+#[test]
+fn db8_round_trip_preserves_condensed_semantic_styles() {
+  let path = std::env::temp_dir().join(format!("debateprocessor-semantic-{}.db8", uuid::Uuid::new_v4()));
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        run("condensed", RunStyles::default().with(RunStyle::Condensed)),
+        run(" ultra", RunStyles::default().with(RunStyle::Ultracondensed).with(RunStyle::HighlightSpoken)),
+      ],
+    }],
+  );
+  write_db8(&path, &document).unwrap();
+  let loaded = read_db8(&path).unwrap();
+  let _ = std::fs::remove_file(path);
+
+  assert_eq!(loaded.paragraphs[0].runs[0].styles.semantic, RunSemanticStyle::Condensed);
+  assert_eq!(loaded.paragraphs[0].runs[1].styles.semantic, RunSemanticStyle::Ultracondensed);
+  assert_eq!(loaded.paragraphs[0].runs[1].styles.highlight, Some(HighlightStyle::Spoken));
+}
+
+#[test]
+fn db8_save_can_replace_existing_file() {
+  let path = std::env::temp_dir().join(format!("debateprocessor-replace-{}.db8", uuid::Uuid::new_v4()));
+  let first = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("first")],
+    }],
+  );
+  let second = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("second")],
+    }],
+  );
+
+  write_db8(&path, &first).unwrap();
+  write_db8(&path, &second).unwrap();
+  let loaded = read_db8(&path).unwrap();
+  let _ = std::fs::remove_file(path);
+
+  assert_eq!(paragraph_text(&loaded, 0), "second");
 }
 
 #[test]
@@ -208,7 +265,7 @@ fn history_operation_round_trip_for_text_and_paragraph_split() {
   assert_eq!(document.paragraphs.len(), 2);
   assert_eq!(paragraph_text(&document, 0), "alpha");
   assert_eq!(paragraph_text(&document, 1), "NEW  beta");
-  assert!(document.paragraphs[1].runs[0].styles.emphasis);
+  assert_eq!(document.paragraphs[1].runs[0].styles.semantic, RunSemanticStyle::Emphasis);
 }
 
 #[test]
@@ -261,17 +318,17 @@ fn move_rich_text_operation_undo_redo_restores_source_and_drop() {
 
   assert_eq!(paragraph_text(&document, 0), "abc  def");
   assert_eq!(paragraph_text(&document, 1), "tarMOVEget");
-  assert!(document.paragraphs[1].runs.iter().any(|run| run.styles.emphasis));
+  assert!(document.paragraphs[1].runs.iter().any(|run| run.styles.semantic == RunSemanticStyle::Emphasis));
 
   operation.undo(&mut document);
   assert_eq!(paragraph_text(&document, 0), "abc MOVE def");
   assert_eq!(paragraph_text(&document, 1), "target");
-  assert!(document.paragraphs[0].runs.iter().any(|run| run.styles.emphasis));
+  assert!(document.paragraphs[0].runs.iter().any(|run| run.styles.semantic == RunSemanticStyle::Emphasis));
 
   operation.redo(&mut document);
   assert_eq!(paragraph_text(&document, 0), "abc  def");
   assert_eq!(paragraph_text(&document, 1), "tarMOVEget");
-  assert!(document.paragraphs[1].runs.iter().any(|run| run.styles.emphasis));
+  assert!(document.paragraphs[1].runs.iter().any(|run| run.styles.semantic == RunSemanticStyle::Emphasis));
 }
 
 #[test]
@@ -340,13 +397,13 @@ fn cross_paragraph_style_mutation_keeps_runs_and_unselected_text_intact() {
   mutate_runs_in_range(
     &mut document,
     DocumentOffset { paragraph: 0, byte: 1 }..DocumentOffset { paragraph: 1, byte: 2 },
-    |styles| styles.cite = true,
+    |styles| styles.semantic = RunSemanticStyle::Cite,
   );
 
   assert_eq!(paragraph_text(&document, 0), "abc");
   assert_eq!(paragraph_text(&document, 1), "def");
-  assert!(!document.paragraphs[0].runs[0].styles.cite);
-  assert!(document.paragraphs[0].runs[1].styles.cite);
-  assert!(document.paragraphs[1].runs[0].styles.cite);
-  assert!(!document.paragraphs[1].runs[1].styles.cite);
+  assert_ne!(document.paragraphs[0].runs[0].styles.semantic, RunSemanticStyle::Cite);
+  assert_eq!(document.paragraphs[0].runs[1].styles.semantic, RunSemanticStyle::Cite);
+  assert_eq!(document.paragraphs[1].runs[0].styles.semantic, RunSemanticStyle::Cite);
+  assert_ne!(document.paragraphs[1].runs[1].styles.semantic, RunSemanticStyle::Cite);
 }

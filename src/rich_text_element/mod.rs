@@ -12,7 +12,7 @@ mod persistence;
 mod word_boundary;
 
 pub use demo::demo_document;
-pub use document::{Document, DocumentOffset, DocumentTheme, HighlightStyle, Paragraph, ParagraphStyle, RunStyle, RunStyles, TextRun};
+pub use document::{Document, DocumentOffset, DocumentTheme, HighlightStyle, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyle, RunStyles, TextRun};
 pub use element::RichTextDocumentElement;
 pub use editor::*;
 // `read_db8` is part of the public persistence API even though only tests

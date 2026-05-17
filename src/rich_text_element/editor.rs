@@ -253,9 +253,8 @@ pub(super) fn adjust_drop_after_source_delete(drop: DocumentOffset, source: Rang
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RichTextEditorStyleState {
   pub paragraph_style: SelectionState<ParagraphStyle>,
-  pub cite: SelectionState<bool>,
+  pub semantic: SelectionState<RunSemanticStyle>,
   pub underline: SelectionState<bool>,
-  pub emphasis: SelectionState<bool>,
   pub highlight: SelectionState<Option<HighlightStyle>>,
 }
 
@@ -496,9 +495,8 @@ impl RichTextEditor {
 
     RichTextEditorStyleState {
       paragraph_style,
-      cite: selection_state_from_values(run_styles.iter().map(|styles| styles.cite)),
-      underline: selection_state_from_values(run_styles.iter().map(|styles| styles.direct_underline || styles.style_underline)),
-      emphasis: selection_state_from_values(run_styles.iter().map(|styles| styles.emphasis)),
+      semantic: selection_state_from_values(run_styles.iter().map(|styles| styles.semantic)),
+      underline: selection_state_from_values(run_styles.iter().map(|styles| styles.direct_underline || styles.semantic == RunSemanticStyle::Underline)),
       highlight: selection_state_from_values(run_styles.iter().map(|styles| styles.highlight)),
     }
   }
@@ -786,11 +784,11 @@ impl RichTextEditor {
   }
 
   pub fn toggle_emphasis(&mut self, cx: &mut Context<Self>) {
-    self.toggle_run_style_flag(|styles| styles.emphasis, |styles, value| styles.emphasis = value, cx);
+    self.toggle_semantic_style(RunSemanticStyle::Emphasis, cx);
   }
 
   pub fn toggle_cite(&mut self, cx: &mut Context<Self>) {
-    self.toggle_run_style_flag(|styles| styles.cite, |styles, value| styles.cite = value, cx);
+    self.toggle_semantic_style(RunSemanticStyle::Cite, cx);
   }
 
   pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
@@ -1605,12 +1603,11 @@ impl RichTextEditor {
       if direct {
         styles.direct_underline = !styles.direct_underline;
       } else {
-        let new_value = !styles.style_underline;
-        styles.style_underline = new_value;
-        if new_value {
+        if styles.semantic == RunSemanticStyle::Underline {
+          styles.semantic = RunSemanticStyle::Plain;
+        } else {
+          styles.semantic = RunSemanticStyle::Underline;
           styles.direct_underline = false;
-          styles.cite = false;
-          styles.emphasis = false;
         }
       }
       self.pending_styles = Some(styles);
@@ -1628,11 +1625,11 @@ impl RichTextEditor {
           styles.direct_underline = !all_selected;
         } else {
           let new_value = !all_selected;
-          styles.style_underline = new_value;
           if new_value {
+            styles.semantic = RunSemanticStyle::Underline;
             styles.direct_underline = false;
-            styles.cite = false;
-            styles.emphasis = false;
+          } else {
+            styles.semantic = RunSemanticStyle::Plain;
           }
         }
       });
@@ -1640,11 +1637,14 @@ impl RichTextEditor {
     });
   }
 
-  fn toggle_run_style_flag(&mut self, get: impl Fn(RunStyles) -> bool, set: impl Fn(&mut RunStyles, bool), cx: &mut Context<Self>) {
+  fn toggle_semantic_style(&mut self, semantic: RunSemanticStyle, cx: &mut Context<Self>) {
     if self.selection.is_caret() {
       let mut styles = self.styles_at_caret();
-      let new_value = !get(styles);
-      set(&mut styles, new_value);
+      styles.semantic = if styles.semantic == semantic {
+        RunSemanticStyle::Plain
+      } else {
+        semantic
+      };
       self.pending_styles = Some(styles);
       self.reset_caret_blink(cx);
       cx.notify();
@@ -1652,9 +1652,11 @@ impl RichTextEditor {
     }
 
     let range = self.selection.normalized();
-    let all_selected = selection_all_run_styles(&self.document, range.clone(), get);
+    let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.semantic == semantic);
     self.apply_document_edit(cx, |editor, cx| {
-      mutate_runs_in_range(&mut editor.document, range, |styles| set(styles, !all_selected));
+      mutate_runs_in_range(&mut editor.document, range, |styles| {
+        styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
+      });
       editor.after_text_mutation(cx);
     });
   }

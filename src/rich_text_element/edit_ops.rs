@@ -576,7 +576,7 @@ pub(super) fn selection_all_underline_kind(document: &Document, range: Range<Doc
     if direct {
       styles.direct_underline
     } else {
-      styles.style_underline
+      styles.semantic == RunSemanticStyle::Underline
     }
   })
 }

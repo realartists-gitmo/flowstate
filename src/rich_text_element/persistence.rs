@@ -17,7 +17,7 @@ use super::*;
 // UTF-8 text blob, then per-paragraph run metadata. Keeping the format
 // length-prefixed makes the reader resilient against trailing junk.
 const DB8_MAGIC: &[u8; 4] = b"DB8\0";
-const DB8_VERSION: u32 = 1;
+const DB8_VERSION: u32 = 2;
 
 pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
   let path = path.as_ref();
@@ -45,7 +45,7 @@ pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid DB8 magic"));
   }
   let version = read_u32(&mut cursor)?;
-  if version != DB8_VERSION {
+  if !matches!(version, 1 | DB8_VERSION) {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported DB8 version"));
   }
 
@@ -82,7 +82,7 @@ pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
         let raw = read_u64(&mut cursor)?;
         usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 run length overflows usize"))?
       };
-      let styles = decode_run_styles(read_u8(&mut cursor)?)?;
+      let styles = decode_run_styles(read_u8(&mut cursor)?, version)?;
       runs.push(TextRun { len, styles });
     }
     paragraphs.push(Paragraph {
@@ -156,7 +156,21 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   let mut temp = NamedTempFile::new_in(parent)?;
   temp.write_all(bytes)?;
   temp.as_file_mut().sync_all()?;
-  temp.persist(path).map(|_| ()).map_err(|error| error.error)
+  let temp_path = temp.into_temp_path();
+  #[cfg(target_os = "windows")]
+  {
+    // Windows does not allow the POSIX-style atomic replace that tempfile's
+    // `persist` relies on for existing files. Remove the old target first,
+    // then rename the fully written temp file into place. This is slightly
+    // less atomic on Windows, but avoids false "Access is denied" failures
+    // when saving a normal existing document.
+    match fs::remove_file(path) {
+      Ok(()) => {},
+      Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+      Err(error) => return Err(error),
+    }
+  }
+  temp_path.persist(path).map(|_| ()).map_err(|error| error.error)
 }
 
 pub(super) fn recovery_path_for_document(path: &PathBuf) -> PathBuf {
@@ -282,17 +296,8 @@ fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
 }
 
 fn encode_run_styles(styles: RunStyles) -> u8 {
-  let mut bits = 0;
-  if styles.cite {
-    bits |= 1 << 0;
-  }
+  let mut bits = encode_run_semantic_style(styles.semantic);
   if styles.direct_underline {
-    bits |= 1 << 1;
-  }
-  if styles.emphasis {
-    bits |= 1 << 2;
-  }
-  if styles.style_underline {
     bits |= 1 << 3;
   }
   bits
@@ -304,7 +309,10 @@ fn encode_run_styles(styles: RunStyles) -> u8 {
     }
 }
 
-fn decode_run_styles(bits: u8) -> io::Result<RunStyles> {
+fn decode_run_styles(bits: u8, version: u32) -> io::Result<RunStyles> {
+  if version == 1 {
+    return decode_v1_run_styles(bits);
+  }
   let highlight = match (bits >> 4) & 0b11 {
     0 => None,
     1 => Some(HighlightStyle::Spoken),
@@ -316,10 +324,58 @@ fn decode_run_styles(bits: u8) -> io::Result<RunStyles> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid run style bits"));
   }
   Ok(RunStyles {
-    cite: bits & (1 << 0) != 0,
+    semantic: decode_run_semantic_style(bits & 0b0000_0111)?,
+    direct_underline: bits & (1 << 3) != 0,
+    highlight,
+  })
+}
+
+fn encode_run_semantic_style(style: RunSemanticStyle) -> u8 {
+  match style {
+    RunSemanticStyle::Plain => 0,
+    RunSemanticStyle::Cite => 1,
+    RunSemanticStyle::Emphasis => 2,
+    RunSemanticStyle::Underline => 3,
+    RunSemanticStyle::Condensed => 4,
+    RunSemanticStyle::Ultracondensed => 5,
+  }
+}
+
+fn decode_run_semantic_style(value: u8) -> io::Result<RunSemanticStyle> {
+  match value {
+    0 => Ok(RunSemanticStyle::Plain),
+    1 => Ok(RunSemanticStyle::Cite),
+    2 => Ok(RunSemanticStyle::Emphasis),
+    3 => Ok(RunSemanticStyle::Underline),
+    4 => Ok(RunSemanticStyle::Condensed),
+    5 => Ok(RunSemanticStyle::Ultracondensed),
+    _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid run semantic style")),
+  }
+}
+
+fn decode_v1_run_styles(bits: u8) -> io::Result<RunStyles> {
+  let highlight = match (bits >> 4) & 0b11 {
+    0 => None,
+    1 => Some(HighlightStyle::Spoken),
+    2 => Some(HighlightStyle::Insert),
+    3 => Some(HighlightStyle::Alternative),
+    _ => unreachable!(),
+  };
+  if bits & 0b1100_0000 != 0 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid run style bits"));
+  }
+  let semantic = if bits & (1 << 3) != 0 {
+    RunSemanticStyle::Underline
+  } else if bits & (1 << 2) != 0 {
+    RunSemanticStyle::Emphasis
+  } else if bits & (1 << 0) != 0 {
+    RunSemanticStyle::Cite
+  } else {
+    RunSemanticStyle::Plain
+  };
+  Ok(RunStyles {
+    semantic,
     direct_underline: bits & (1 << 1) != 0,
-    emphasis: bits & (1 << 2) != 0,
-    style_underline: bits & (1 << 3) != 0,
     highlight,
   })
 }

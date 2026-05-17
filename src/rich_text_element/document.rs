@@ -145,11 +145,20 @@ pub(super) struct InputParagraph {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct RunStyles {
-  pub cite: bool,
+  pub semantic: RunSemanticStyle,
   pub direct_underline: bool,
-  pub emphasis: bool,
-  pub style_underline: bool,
   pub highlight: Option<HighlightStyle>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum RunSemanticStyle {
+  #[default]
+  Plain,
+  Cite,
+  Emphasis,
+  Underline,
+  Condensed,
+  Ultracondensed,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -165,6 +174,8 @@ pub enum RunStyle {
   Cite,
   Underline,
   Emphasis,
+  Condensed,
+  Ultracondensed,
   HighlightSpoken,
   HighlightInsert,
   HighlightAlternative,
@@ -181,10 +192,12 @@ impl From<RunStyle> for RunStyles {
 impl RunStyles {
   pub fn apply(&mut self, style: RunStyle) {
     match style {
-      RunStyle::Plain => {},
-      RunStyle::Cite => self.cite = true,
-      RunStyle::Underline => self.style_underline = true,
-      RunStyle::Emphasis => self.emphasis = true,
+      RunStyle::Plain => self.semantic = RunSemanticStyle::Plain,
+      RunStyle::Cite => self.semantic = RunSemanticStyle::Cite,
+      RunStyle::Underline => self.semantic = RunSemanticStyle::Underline,
+      RunStyle::Emphasis => self.semantic = RunSemanticStyle::Emphasis,
+      RunStyle::Condensed => self.semantic = RunSemanticStyle::Condensed,
+      RunStyle::Ultracondensed => self.semantic = RunSemanticStyle::Ultracondensed,
       RunStyle::HighlightSpoken => self.highlight = Some(HighlightStyle::Spoken),
       RunStyle::HighlightInsert => self.highlight = Some(HighlightStyle::Insert),
       RunStyle::HighlightAlternative => self.highlight = Some(HighlightStyle::Alternative),
@@ -213,6 +226,8 @@ pub struct DocumentTheme {
   pub pageless_inset_bottom: Pixels,
   pub body_font_size: Pixels,
   pub cite_font_size: Pixels,
+  pub condensed_font_size: Pixels,
+  pub ultracondensed_font_size: Pixels,
   pub pocket_font_size: Pixels,
   pub hat_font_size: Pixels,
   pub block_font_size: Pixels,
@@ -262,6 +277,8 @@ impl Default for DocumentTheme {
       pageless_inset_bottom: px(24.0),
       body_font_size: pt(11.0),
       cite_font_size: pt(13.0),
+      condensed_font_size: pt(8.0),
+      ultracondensed_font_size: pt(3.0),
       pocket_font_size: pt(26.0),
       hat_font_size: pt(22.0),
       block_font_size: pt(16.0),
