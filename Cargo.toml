@@ -11,4 +11,6 @@ gpui-component-assets = "0.5.1"
 crop = "0.4.3"
 unicode-segmentation = "1"
 serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
 uuid = { version = "1.23.1", features = ["serde", "v4"] }
+tempfile = "3"

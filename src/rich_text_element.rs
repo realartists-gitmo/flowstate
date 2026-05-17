@@ -3,7 +3,7 @@ use std::{
   collections::hash_map::DefaultHasher,
   fs,
   hash::{Hash, Hasher},
-  io::{self, Cursor, Read},
+  io::{self, Cursor, Read, Write},
   ops::Range,
   path::{Path, PathBuf},
   rc::Rc,
@@ -12,12 +12,14 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, AvailableSpace, Background, Bounds, Context, CursorStyle, Element, ElementId, Entity, FocusHandle, Focusable, FontStyle, FontWeight,
-  GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-  Pixels, Point, Render, ScrollHandle, ShapedLine, SharedString, Size, StatefulInteractiveElement, Style, Subscription, TextRun as GpuiTextRun,
-  Timer, Window, actions, black, div, fill, font, hsla, point, prelude::*, px, rgb, size,
+  App, AvailableSpace, Background, Bounds, ClipboardItem, Context, CursorStyle, Element, ElementId, Entity, FocusHandle, Focusable, FontStyle,
+  FontWeight, GlobalElementId, Hsla, InspectorElementId, IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent,
+  MouseUpEvent, Pixels, Point, Render, ScrollHandle, ShapedLine, SharedString, Size, StatefulInteractiveElement, Style, Subscription,
+  TextRun as GpuiTextRun, Timer, Window, actions, black, div, fill, font, hsla, point, prelude::*, px, rgb, size,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+use serde::{Deserialize, Serialize};
+use tempfile::NamedTempFile;
 use unicode_segmentation::GraphemeCursor;
 
 // All editing-action types live in the `rich_text_editor` namespace so the
@@ -39,7 +41,29 @@ actions!(
     SelectLineStart,
     SelectLineEnd,
     SelectAll,
+    MoveWordLeft,
+    MoveWordRight,
+    SelectWordLeft,
+    SelectWordRight,
+    DeleteWordBackward,
+    DeleteWordForward,
+    PageUp,
+    PageDown,
+    SelectPageUp,
+    SelectPageDown,
+    MoveDocumentStart,
+    MoveDocumentEnd,
+    SelectDocumentStart,
+    SelectDocumentEnd,
+    Copy,
+    Cut,
+    Paste,
     Save,
+    Undo,
+    Redo,
+    ToggleUnderline,
+    ToggleEmphasis,
+    ClearHighlight,
     Backspace,
     Delete,
     InsertNewline,
@@ -59,6 +83,19 @@ enum VDir {
   Down,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SelectionGranularity {
+  Character,
+  Word,
+  Paragraph,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct RichClipboardFragment {
+  format: String,
+  paragraphs: Vec<InputParagraph>,
+}
+
 #[derive(Clone, Debug)]
 pub struct Document {
   pub text: Rope,
@@ -66,14 +103,15 @@ pub struct Document {
   pub theme: DocumentTheme,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paragraph {
   pub style: ParagraphStyle,
   pub byte_range: Range<usize>,
   pub runs: Vec<TextRun>,
+  pub version: u64,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ParagraphStyle {
   Pocket,
   Hat,
@@ -84,25 +122,25 @@ pub enum ParagraphStyle {
   Undertag,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TextRun {
   pub len: usize,
   pub styles: RunStyles,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct InputRun {
   text: String,
   styles: RunStyles,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct InputParagraph {
   style: ParagraphStyle,
   runs: Vec<InputRun>,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct RunStyles {
   pub cite: bool,
   pub direct_underline: bool,
@@ -111,7 +149,7 @@ pub struct RunStyles {
   pub highlight: Option<HighlightStyle>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum HighlightStyle {
   Spoken,
   Insert,
@@ -336,6 +374,7 @@ pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
       style,
       byte_range: start..end,
       runs: merge_adjacent_runs(runs),
+      version: 0,
     });
   }
 
@@ -354,6 +393,11 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
     fs::create_dir_all(parent)?;
   }
   validate_document(document)?;
+  let bytes = serialize_db8(document)?;
+  write_bytes_atomic(path, &bytes)
+}
+
+fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
   let mut bytes = Vec::new();
   bytes.extend_from_slice(DB8_MAGIC);
   bytes.extend_from_slice(&DB8_VERSION.to_le_bytes());
@@ -371,7 +415,51 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
       bytes.push(encode_run_styles(run.styles));
     }
   }
-  fs::write(path, bytes)
+  Ok(bytes)
+}
+
+fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
+  let parent = path.parent().unwrap_or_else(|| Path::new("."));
+  fs::create_dir_all(parent)?;
+  let mut temp = NamedTempFile::new_in(parent)?;
+  temp.write_all(bytes)?;
+  temp.as_file_mut().sync_all()?;
+  temp.persist(path).map(|_| ()).map_err(|error| error.error)
+}
+
+fn recovery_path_for_document(path: &PathBuf) -> PathBuf {
+  let mut recovery_path = path.clone();
+  let file_name = path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .map(|name| format!("{name}.recovery"))
+    .unwrap_or_else(|| "untitled.db8.recovery".to_string());
+  recovery_path.set_file_name(file_name);
+  recovery_path
+}
+
+fn document_fingerprint(document: &Document) -> u64 {
+  let mut hasher = DefaultHasher::new();
+  document_text_slice(document, 0..document.text.byte_len()).hash(&mut hasher);
+  for paragraph in &document.paragraphs {
+    paragraph.style.hash(&mut hasher);
+    paragraph.byte_range.start.hash(&mut hasher);
+    paragraph.byte_range.end.hash(&mut hasher);
+    paragraph.runs.hash(&mut hasher);
+  }
+  hasher.finish()
+}
+
+fn documents_equivalent(left: &Document, right: &Document) -> bool {
+  if left.text.byte_len() != right.text.byte_len() || left.paragraphs.len() != right.paragraphs.len() {
+    return false;
+  }
+  for (left, right) in left.paragraphs.iter().zip(&right.paragraphs) {
+    if left.style != right.style || left.byte_range != right.byte_range || left.runs != right.runs {
+      return false;
+    }
+  }
+  document_text_slice(left, 0..left.text.byte_len()) == document_text_slice(right, 0..right.text.byte_len())
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -395,14 +483,40 @@ impl EditorSelection {
   }
 }
 
+#[derive(Clone, Debug)]
+struct EditRecord {
+  before_document: Document,
+  before_selection: EditorSelection,
+  after_document: Document,
+  after_selection: EditorSelection,
+}
+
+#[derive(Clone, Debug)]
+pub enum SaveStatus {
+  Saved,
+  Dirty,
+  Saving,
+  SaveFailed(String),
+}
+
 pub struct RichTextEditor {
   focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
   scroll_handle: ScrollHandle,
   document_path: Option<PathBuf>,
+  recovery_path: Option<PathBuf>,
   document: Document,
   selection: EditorSelection,
+  edit_generation: u64,
+  saved_fingerprint: u64,
+  save_status: SaveStatus,
+  undo_stack: Vec<EditRecord>,
+  redo_stack: Vec<EditRecord>,
+  recovery_write_in_progress: bool,
+  recovery_write_pending: bool,
+  pending_styles: Option<RunStyles>,
   selecting: bool,
+  drag_granularity: SelectionGranularity,
   last_drag_position: Option<Point<Pixels>>,
   autoscroll_active: bool,
   caret_visible: bool,
@@ -422,10 +536,20 @@ impl RichTextEditor {
       focus_handle: cx.focus_handle(),
       focus_subscriptions: Vec::new(),
       scroll_handle: ScrollHandle::new(),
+      recovery_path: document_path.as_ref().map(recovery_path_for_document),
       document_path,
+      saved_fingerprint: document_fingerprint(&document),
       document,
       selection: EditorSelection::caret(),
+      edit_generation: 0,
+      save_status: SaveStatus::Saved,
+      undo_stack: Vec::new(),
+      redo_stack: Vec::new(),
+      recovery_write_in_progress: false,
+      recovery_write_pending: false,
+      pending_styles: None,
       selecting: false,
+      drag_granularity: SelectionGranularity::Character,
       last_drag_position: None,
       autoscroll_active: false,
       caret_visible: true,
@@ -440,77 +564,108 @@ impl RichTextEditor {
     &self.document
   }
 
-  #[allow(dead_code)]
-  pub fn apply_run_style_to_selection(&mut self, style: RunStyle, cx: &mut Context<Self>) {
-    if self.selection.is_caret() {
+  pub fn save_status(&self) -> &SaveStatus {
+    &self.save_status
+  }
+
+  pub fn has_unsaved_changes(&self) -> bool {
+    document_fingerprint(&self.document) != self.saved_fingerprint
+  }
+
+  pub fn save(&mut self, cx: &mut Context<Self>) -> io::Result<()> {
+    let Some(path) = self.document_path.clone() else {
+      return Ok(());
+    };
+    self.save_status = SaveStatus::Saving;
+    cx.notify();
+    let result = write_db8(&path, &self.document);
+    match result {
+      Ok(()) => {
+        self.saved_fingerprint = document_fingerprint(&self.document);
+        self.save_status = SaveStatus::Saved;
+        if let Some(path) = &self.recovery_path {
+          let _ = fs::remove_file(path);
+        }
+        cx.notify();
+        Ok(())
+      },
+      Err(error) => {
+        self.save_status = SaveStatus::SaveFailed(error.to_string());
+        cx.notify();
+        Err(error)
+      },
+    }
+  }
+
+  pub fn undo(&mut self, cx: &mut Context<Self>) {
+    let Some(record) = self.undo_stack.pop() else {
       return;
-    }
-    let range = self.selection.normalized();
-    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-      let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
-      let end = if paragraph_ix == range.end.paragraph {
-        range.end.byte
-      } else {
-        paragraph_text_len(&self.document.paragraphs[paragraph_ix])
-      };
-      apply_style_to_paragraph_range(&mut self.document, paragraph_ix, start..end, style);
-    }
-    cx.notify();
+    };
+    self.document = record.before_document.clone();
+    self.selection = record.before_selection.clone();
+    self.redo_stack.push(record);
+    self.after_history_restore(cx);
   }
 
-  #[allow(dead_code)]
-  pub fn set_paragraph_style_for_selection(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
-    let range = self.selection.normalized();
-    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-      if let Some(paragraph) = self.document.paragraphs.get_mut(paragraph_ix) {
-        paragraph.style = style;
-      }
-    }
-    cx.notify();
+  pub fn redo(&mut self, cx: &mut Context<Self>) {
+    let Some(record) = self.redo_stack.pop() else {
+      return;
+    };
+    self.document = record.after_document.clone();
+    self.selection = record.after_selection.clone();
+    self.undo_stack.push(record);
+    self.after_history_restore(cx);
   }
 
-  // -------- Action handlers (bound to keystrokes in main.rs) -----------
-  // Each handler delegates to a movement/edit primitive defined below.
-  // The signatures all match what `cx.listener(...)` expects:
-  //   fn(&mut Self, &Action, &mut Window, &mut Context<Self>).
-
-  fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+  pub fn move_left(&mut self, cx: &mut Context<Self>) {
     self.move_horizontal(HDir::Left, false, cx);
   }
-  fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn move_right(&mut self, cx: &mut Context<Self>) {
     self.move_horizontal(HDir::Right, false, cx);
   }
-  fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn move_up(&mut self, cx: &mut Context<Self>) {
     self.move_vertical(VDir::Up, false, cx);
   }
-  fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn move_down(&mut self, cx: &mut Context<Self>) {
     self.move_vertical(VDir::Down, false, cx);
   }
-  fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn move_line_start(&mut self, cx: &mut Context<Self>) {
     self.move_line_edge(true, false, cx);
   }
-  fn on_move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn move_line_end(&mut self, cx: &mut Context<Self>) {
     self.move_line_edge(false, false, cx);
   }
-  fn on_select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_left(&mut self, cx: &mut Context<Self>) {
     self.move_horizontal(HDir::Left, true, cx);
   }
-  fn on_select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_right(&mut self, cx: &mut Context<Self>) {
     self.move_horizontal(HDir::Right, true, cx);
   }
-  fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_up(&mut self, cx: &mut Context<Self>) {
     self.move_vertical(VDir::Up, true, cx);
   }
-  fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_down(&mut self, cx: &mut Context<Self>) {
     self.move_vertical(VDir::Down, true, cx);
   }
-  fn on_select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_line_start(&mut self, cx: &mut Context<Self>) {
     self.move_line_edge(true, true, cx);
   }
-  fn on_select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_line_end(&mut self, cx: &mut Context<Self>) {
     self.move_line_edge(false, true, cx);
   }
-  fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+
+  pub fn select_all(&mut self, cx: &mut Context<Self>) {
     if self.document.paragraphs.is_empty() {
       return;
     }
@@ -533,22 +688,300 @@ impl RichTextEditor {
     self.reset_caret_blink(cx);
     cx.notify();
   }
-  fn on_save(&mut self, _: &Save, _: &mut Window, _: &mut Context<Self>) {
-    let Some(path) = &self.document_path else {
+
+  pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(self.word_left(self.selection.head), false, cx);
+  }
+
+  pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(self.word_right(self.selection.head), false, cx);
+  }
+
+  pub fn select_word_left(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(self.word_left(self.selection.head), true, cx);
+  }
+
+  pub fn select_word_right(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(self.word_right(self.selection.head), true, cx);
+  }
+
+  pub fn page_up(&mut self, cx: &mut Context<Self>) {
+    self.page_move(VDir::Up, false, cx);
+  }
+
+  pub fn page_down(&mut self, cx: &mut Context<Self>) {
+    self.page_move(VDir::Down, false, cx);
+  }
+
+  pub fn select_page_up(&mut self, cx: &mut Context<Self>) {
+    self.page_move(VDir::Up, true, cx);
+  }
+
+  pub fn select_page_down(&mut self, cx: &mut Context<Self>) {
+    self.page_move(VDir::Down, true, cx);
+  }
+
+  pub fn move_document_start(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(DocumentOffset::default(), false, cx);
+  }
+
+  pub fn move_document_end(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(document_end(&self.document), false, cx);
+  }
+
+  pub fn select_document_start(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(DocumentOffset::default(), true, cx);
+  }
+
+  pub fn select_document_end(&mut self, cx: &mut Context<Self>) {
+    self.move_to_offset(document_end(&self.document), true, cx);
+  }
+
+  pub fn insert_text_command(&mut self, text: &str, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| editor.insert_text(text, cx));
+  }
+
+  pub fn backspace_command(&mut self, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| editor.backspace(cx));
+  }
+
+  pub fn delete_forward_command(&mut self, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| editor.delete_forward(cx));
+  }
+
+  pub fn insert_paragraph_break_command(&mut self, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
+  }
+
+  pub fn delete_word_backward_command(&mut self, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| {
+      if editor.selection.is_caret() {
+        let head = editor.selection.head;
+        let anchor = editor.word_left(head);
+        editor.selection = EditorSelection { anchor, head };
+      }
+      editor.delete_selection_internal();
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  pub fn delete_word_forward_command(&mut self, cx: &mut Context<Self>) {
+    self.apply_document_edit(cx, |editor, cx| {
+      if editor.selection.is_caret() {
+        let anchor = editor.selection.head;
+        let head = editor.word_right(anchor);
+        editor.selection = EditorSelection { anchor, head };
+      }
+      editor.delete_selection_internal();
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  pub fn copy(&self, cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      return;
+    }
+    let text = selected_plain_text(&self.document, self.selection.normalized());
+    let fragment = selected_rich_fragment(&self.document, self.selection.normalized());
+    cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(text, fragment));
+  }
+
+  pub fn cut(&mut self, cx: &mut Context<Self>) {
+    self.copy(cx);
+    self.apply_document_edit(cx, |editor, cx| {
+      editor.delete_selection_internal();
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  pub fn paste(&mut self, cx: &mut Context<Self>) {
+    let Some(item) = cx.read_from_clipboard() else {
       return;
     };
-    if let Err(error) = write_db8(path, &self.document) {
-      eprintln!("failed to save {}: {error}", path.display());
+    if let Some(fragment) = item
+      .metadata()
+      .and_then(|metadata| serde_json::from_str::<RichClipboardFragment>(metadata).ok())
+      .filter(|fragment| fragment.format == "debateprocessor.rich-text-fragment.v1")
+    {
+      self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
+    } else if let Some(text) = item.text() {
+      self.apply_document_edit(cx, |editor, cx| editor.insert_plain_text_fragment(&text, cx));
     }
   }
+
+  pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+    self.toggle_underline_kind(None, cx);
+  }
+
+  pub fn toggle_emphasis(&mut self, cx: &mut Context<Self>) {
+    self.toggle_run_style_flag(|styles| styles.emphasis, |styles, value| styles.emphasis = value, cx);
+  }
+
+  pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
+    self.set_highlight_internal(Some(highlight), cx);
+  }
+
+  pub fn clear_highlight(&mut self, cx: &mut Context<Self>) {
+    self.set_highlight_internal(None, cx);
+  }
+
+  #[allow(dead_code)]
+  pub fn apply_run_style_to_selection(&mut self, style: RunStyle, cx: &mut Context<Self>) {
+    let before_document = self.document.clone();
+    let before_selection = self.selection.clone();
+    if self.selection.is_caret() {
+      return;
+    }
+    let range = self.selection.normalized();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+      let end = if paragraph_ix == range.end.paragraph {
+        range.end.byte
+      } else {
+        paragraph_text_len(&self.document.paragraphs[paragraph_ix])
+      };
+      apply_style_to_paragraph_range(&mut self.document, paragraph_ix, start..end, style);
+    }
+    self.finish_document_edit(before_document, before_selection, cx);
+  }
+
+  #[allow(dead_code)]
+  pub fn set_paragraph_style_for_selection(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
+    let before_document = self.document.clone();
+    let before_selection = self.selection.clone();
+    let range = self.selection.normalized();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      if let Some(paragraph) = self.document.paragraphs.get_mut(paragraph_ix) {
+        paragraph.style = style;
+        bump_paragraph_version(paragraph);
+      }
+    }
+    self.finish_document_edit(before_document, before_selection, cx);
+  }
+
+  // -------- Action handlers (bound to keystrokes in main.rs) -----------
+  // Each handler delegates to a movement/edit primitive defined below.
+  // The signatures all match what `cx.listener(...)` expects:
+  //   fn(&mut Self, &Action, &mut Window, &mut Context<Self>).
+
+  fn on_move_left(&mut self, _: &MoveLeft, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_left(cx);
+  }
+  fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_right(cx);
+  }
+  fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_up(cx);
+  }
+  fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_down(cx);
+  }
+  fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_line_start(cx);
+  }
+  fn on_move_line_end(&mut self, _: &MoveLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_line_end(cx);
+  }
+  fn on_select_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_left(cx);
+  }
+  fn on_select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_right(cx);
+  }
+  fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_up(cx);
+  }
+  fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_down(cx);
+  }
+  fn on_select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_line_start(cx);
+  }
+  fn on_select_line_end(&mut self, _: &SelectLineEnd, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_line_end(cx);
+  }
+  fn on_select_all(&mut self, _: &SelectAll, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_all(cx);
+  }
+  fn on_move_word_left(&mut self, _: &MoveWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_word_left(cx);
+  }
+  fn on_move_word_right(&mut self, _: &MoveWordRight, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_word_right(cx);
+  }
+  fn on_select_word_left(&mut self, _: &SelectWordLeft, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_word_left(cx);
+  }
+  fn on_select_word_right(&mut self, _: &SelectWordRight, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_word_right(cx);
+  }
+  fn on_delete_word_backward(&mut self, _: &DeleteWordBackward, _: &mut Window, cx: &mut Context<Self>) {
+    self.delete_word_backward_command(cx);
+  }
+  fn on_delete_word_forward(&mut self, _: &DeleteWordForward, _: &mut Window, cx: &mut Context<Self>) {
+    self.delete_word_forward_command(cx);
+  }
+  fn on_page_up(&mut self, _: &PageUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.page_up(cx);
+  }
+  fn on_page_down(&mut self, _: &PageDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.page_down(cx);
+  }
+  fn on_select_page_up(&mut self, _: &SelectPageUp, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_page_up(cx);
+  }
+  fn on_select_page_down(&mut self, _: &SelectPageDown, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_page_down(cx);
+  }
+  fn on_move_document_start(&mut self, _: &MoveDocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_document_start(cx);
+  }
+  fn on_move_document_end(&mut self, _: &MoveDocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+    self.move_document_end(cx);
+  }
+  fn on_select_document_start(&mut self, _: &SelectDocumentStart, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_document_start(cx);
+  }
+  fn on_select_document_end(&mut self, _: &SelectDocumentEnd, _: &mut Window, cx: &mut Context<Self>) {
+    self.select_document_end(cx);
+  }
+  fn on_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+    self.copy(cx);
+  }
+  fn on_cut(&mut self, _: &Cut, _: &mut Window, cx: &mut Context<Self>) {
+    self.cut(cx);
+  }
+  fn on_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
+    self.paste(cx);
+  }
+  fn on_save(&mut self, _: &Save, _: &mut Window, cx: &mut Context<Self>) {
+    if let Err(error) = self.save(cx) {
+      eprintln!("failed to save: {error}");
+    }
+  }
+  fn on_undo(&mut self, _: &Undo, _: &mut Window, cx: &mut Context<Self>) {
+    self.undo(cx);
+  }
+  fn on_redo(&mut self, _: &Redo, _: &mut Window, cx: &mut Context<Self>) {
+    self.redo(cx);
+  }
+  fn on_toggle_underline(&mut self, _: &ToggleUnderline, _: &mut Window, cx: &mut Context<Self>) {
+    self.toggle_underline(cx);
+  }
+  fn on_toggle_emphasis(&mut self, _: &ToggleEmphasis, _: &mut Window, cx: &mut Context<Self>) {
+    self.toggle_emphasis(cx);
+  }
+  fn on_clear_highlight(&mut self, _: &ClearHighlight, _: &mut Window, cx: &mut Context<Self>) {
+    self.clear_highlight(cx);
+  }
   fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
-    self.backspace(cx);
+    self.backspace_command(cx);
   }
   fn on_delete(&mut self, _: &Delete, _: &mut Window, cx: &mut Context<Self>) {
-    self.delete_forward(cx);
+    self.delete_forward_command(cx);
   }
   fn on_insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
-    self.insert_paragraph_break(cx);
+    self.insert_paragraph_break_command(cx);
   }
 
   // Raw key handler: routes printable characters to `insert_text`. Non-
@@ -585,14 +1018,308 @@ impl RichTextEditor {
       } else {
         key_char.to_string()
       };
-      self.insert_text(&key_char, cx);
+      self.insert_text_command(&key_char, cx);
     }
 
     #[cfg(not(target_os = "windows"))]
     {
       let _ = window;
-      self.insert_text(key_char, cx);
+      self.insert_text_command(key_char, cx);
     }
+  }
+
+  fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
+    let before_document = self.document.clone();
+    let before_selection = self.selection.clone();
+    edit(self, cx);
+    self.finish_document_edit(before_document, before_selection, cx);
+  }
+
+  fn finish_document_edit(&mut self, before_document: Document, before_selection: EditorSelection, cx: &mut Context<Self>) {
+    if documents_equivalent(&before_document, &self.document) && before_selection == self.selection {
+      return;
+    }
+    let record = EditRecord {
+      before_document,
+      before_selection,
+      after_document: self.document.clone(),
+      after_selection: self.selection.clone(),
+    };
+    self.undo_stack.push(record);
+    self.redo_stack.clear();
+    self.mark_document_changed(cx);
+  }
+
+  fn mark_document_changed(&mut self, cx: &mut Context<Self>) {
+    self.edit_generation = self.edit_generation.wrapping_add(1);
+    self.refresh_save_status();
+    self.schedule_recovery_write(cx);
+    cx.notify();
+  }
+
+  fn after_history_restore(&mut self, cx: &mut Context<Self>) {
+    self.goal_x = None;
+    self.last_layout = None;
+    self.edit_generation = self.edit_generation.wrapping_add(1);
+    self.refresh_save_status();
+    self.scroll_head_into_view();
+    self.reset_caret_blink(cx);
+    self.schedule_recovery_write(cx);
+    cx.notify();
+  }
+
+  fn refresh_save_status(&mut self) {
+    let fingerprint = document_fingerprint(&self.document);
+    self.save_status = if fingerprint == self.saved_fingerprint {
+      SaveStatus::Saved
+    } else {
+      SaveStatus::Dirty
+    };
+  }
+
+  fn schedule_recovery_write(&mut self, cx: &mut Context<Self>) {
+    let Some(path) = self.recovery_path.clone() else {
+      return;
+    };
+    if !self.has_unsaved_changes() {
+      return;
+    }
+    if self.recovery_write_in_progress {
+      self.recovery_write_pending = true;
+      return;
+    }
+
+    self.recovery_write_in_progress = true;
+    cx.spawn(async move |editor, cx| {
+      Timer::after(Duration::from_millis(750)).await;
+      let snapshot = editor
+        .update(cx, |editor, _| {
+          editor.recovery_write_pending = false;
+          editor.document.clone()
+        })
+        .ok();
+      if let Some(document) = snapshot {
+        let write_result = cx
+          .background_executor()
+          .spawn(async move { write_db8(path, &document) })
+          .await;
+        if let Err(error) = write_result {
+          eprintln!("failed to write recovery file: {error}");
+        }
+      }
+      let _ = editor.update(cx, |editor, cx| {
+        editor.recovery_write_in_progress = false;
+        if editor.recovery_write_pending {
+          editor.schedule_recovery_write(cx);
+        }
+      });
+    })
+    .detach();
+  }
+
+  fn move_to_offset(&mut self, new_head: DocumentOffset, extend: bool, cx: &mut Context<Self>) {
+    let anchor = if extend { self.selection.anchor } else { new_head };
+    let selection = EditorSelection { anchor, head: new_head };
+    if self.selection == selection {
+      self.goal_x = None;
+      return;
+    }
+    self.selection = selection;
+    self.goal_x = None;
+    self.scroll_head_into_view();
+    self.reset_caret_blink(cx);
+    cx.notify();
+  }
+
+  fn word_left(&self, offset: DocumentOffset) -> DocumentOffset {
+    global_to_document_offset(
+      &self.document,
+      previous_debate_word_boundary(&full_document_text(&self.document), global_byte(&self.document, offset)),
+    )
+  }
+
+  fn word_right(&self, offset: DocumentOffset) -> DocumentOffset {
+    global_to_document_offset(
+      &self.document,
+      next_debate_word_boundary(&full_document_text(&self.document), global_byte(&self.document, offset)),
+    )
+  }
+
+  fn page_move(&mut self, dir: VDir, extend: bool, cx: &mut Context<Self>) {
+    let Some(layout) = self.last_layout.as_ref() else {
+      return;
+    };
+    let Some(bounds) = layout.bounds else {
+      return;
+    };
+    let delta = (bounds.size.height - px(40.0)).max(px(40.0));
+    let signed_delta = match dir {
+      VDir::Up => delta,
+      VDir::Down => -delta,
+    };
+    let old_offset = self.scroll_handle.offset();
+    let new_offset = clamp_scroll_offset(&self.scroll_handle, point(old_offset.x, old_offset.y + signed_delta));
+    self.scroll_handle.set_offset(new_offset);
+
+    let head = self.selection.head;
+    let Some(caret) = caret_bounds(layout, head, bounds.origin) else {
+      cx.notify();
+      return;
+    };
+    let target_y = match dir {
+      VDir::Up => (caret.origin.y - delta).max(bounds.top()),
+      VDir::Down => (caret.origin.y + delta).min(bounds.bottom()),
+    };
+    let target = layout.hit_test(point(caret.origin.x, target_y));
+    self.move_to_offset(target, extend, cx);
+  }
+
+  fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
+    self.pending_styles = None;
+    self.goal_x = None;
+    self.scroll_head_into_view();
+    self.reset_caret_blink(cx);
+    cx.notify();
+  }
+
+  fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
+    if fragment.paragraphs.is_empty() {
+      return;
+    }
+    if !self.selection.is_caret() {
+      self.delete_selection_internal();
+    }
+    let mut caret = self.selection.head;
+    for (paragraph_ix, paragraph) in fragment.paragraphs.iter().enumerate() {
+      if paragraph_ix > 0 {
+        split_paragraph_at(&mut self.document, caret.paragraph, caret.byte);
+        caret = DocumentOffset {
+          paragraph: caret.paragraph + 1,
+          byte: 0,
+        };
+        if let Some(target) = self.document.paragraphs.get_mut(caret.paragraph) {
+          target.style = paragraph.style;
+          bump_paragraph_version(target);
+        }
+      }
+      for run in &paragraph.runs {
+        insert_text_at(&mut self.document, caret.paragraph, caret.byte, &run.text, run.styles);
+        caret.byte += run.text.len();
+      }
+    }
+    self.selection = EditorSelection { anchor: caret, head: caret };
+    self.after_text_mutation(cx);
+  }
+
+  fn insert_plain_text_fragment(&mut self, text: &str, cx: &mut Context<Self>) {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.is_empty() {
+      return;
+    }
+    let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
+    let styles = self.styles_at_caret();
+    let fragment = RichClipboardFragment {
+      format: "debateprocessor.rich-text-fragment.v1".to_string(),
+      paragraphs: normalized
+        .split('\n')
+        .map(|line| InputParagraph {
+          style: paragraph_style,
+          runs: if line.is_empty() {
+            Vec::new()
+          } else {
+            vec![InputRun {
+              text: line.to_string(),
+              styles,
+            }]
+          },
+        })
+        .collect(),
+    };
+    self.insert_rich_fragment(fragment, cx);
+  }
+
+  fn toggle_underline_kind(&mut self, explicit_direct: Option<bool>, cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
+      let direct =
+        explicit_direct.unwrap_or_else(|| matches!(paragraph_style, ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag));
+      let mut styles = self.styles_at_caret();
+      if direct {
+        styles.direct_underline = !styles.direct_underline;
+      } else {
+        styles.style_underline = !styles.style_underline;
+      }
+      self.pending_styles = Some(styles);
+      self.reset_caret_blink(cx);
+      cx.notify();
+      return;
+    }
+
+    let range = self.selection.normalized();
+    let direct = explicit_direct.unwrap_or_else(|| selection_prefers_direct_underline(&self.document, range.clone()));
+    let has_any = selection_has_underline_kind(&self.document, range.clone(), direct);
+    self.apply_document_edit(cx, |editor, cx| {
+      mutate_runs_in_range(&mut editor.document, range, |styles| {
+        if direct {
+          styles.direct_underline = !has_any;
+        } else {
+          styles.style_underline = !has_any;
+        }
+      });
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  fn toggle_run_style_flag(&mut self, get: impl Fn(RunStyles) -> bool, set: impl Fn(&mut RunStyles, bool), cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      let mut styles = self.styles_at_caret();
+      let new_value = !get(styles);
+      set(&mut styles, new_value);
+      self.pending_styles = Some(styles);
+      self.reset_caret_blink(cx);
+      cx.notify();
+      return;
+    }
+
+    let range = self.selection.normalized();
+    let has_any = selection_run_styles(&self.document, range.clone())
+      .into_iter()
+      .any(&get);
+    self.apply_document_edit(cx, |editor, cx| {
+      mutate_runs_in_range(&mut editor.document, range, |styles| set(styles, !has_any));
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  fn set_highlight_internal(&mut self, highlight: Option<HighlightStyle>, cx: &mut Context<Self>) {
+    if self.selection.is_caret() {
+      let mut styles = self.styles_at_caret();
+      styles.highlight = highlight;
+      self.pending_styles = Some(styles);
+      self.reset_caret_blink(cx);
+      cx.notify();
+      return;
+    }
+
+    let range = self.selection.normalized();
+    self.apply_document_edit(cx, |editor, cx| {
+      mutate_runs_in_range(&mut editor.document, range, |styles| styles.highlight = highlight);
+      editor.after_text_mutation(cx);
+    });
+  }
+
+  fn styles_at_caret(&self) -> RunStyles {
+    if let Some(styles) = self.pending_styles {
+      return styles;
+    }
+    let caret = self.selection.head;
+    let paragraph = &self.document.paragraphs[caret.paragraph];
+    let (run_ix, _) = run_containing(paragraph, caret.byte);
+    paragraph
+      .runs
+      .get(run_ix)
+      .map(|run| run.styles)
+      .unwrap_or_default()
   }
 
   // -------- Movement primitives ----------------------------------------
@@ -753,7 +1480,9 @@ impl RichTextEditor {
     // Inherit styles from the run that contains the caret. With left-bias at
     // run boundaries this matches Word's "type continues the previous run's
     // styling" behavior.
-    let styles = {
+    let styles = if let Some(styles) = self.pending_styles {
+      styles
+    } else {
       let paragraph = &self.document.paragraphs[caret.paragraph];
       let (run_ix, _) = run_containing(paragraph, caret.byte);
       paragraph
@@ -768,10 +1497,7 @@ impl RichTextEditor {
       byte: caret.byte + text.len(),
     };
     self.selection = EditorSelection { anchor: new, head: new };
-    self.goal_x = None;
-    self.scroll_head_into_view();
-    self.reset_caret_blink(cx);
-    cx.notify();
+    self.after_text_mutation(cx);
   }
 
   // Helper for shared selection-deletion logic. Does NOT call `cx.notify()`.
@@ -799,10 +1525,7 @@ impl RichTextEditor {
   fn backspace(&mut self, cx: &mut Context<Self>) {
     if !self.selection.is_caret() {
       self.delete_selection_internal();
-      self.goal_x = None;
-      self.scroll_head_into_view();
-      self.reset_caret_blink(cx);
-      cx.notify();
+      self.after_text_mutation(cx);
       return;
     }
     let caret = self.selection.head;
@@ -835,19 +1558,13 @@ impl RichTextEditor {
       };
       self.selection = EditorSelection { anchor: new, head: new };
     }
-    self.goal_x = None;
-    self.scroll_head_into_view();
-    self.reset_caret_blink(cx);
-    cx.notify();
+    self.after_text_mutation(cx);
   }
 
   fn delete_forward(&mut self, cx: &mut Context<Self>) {
     if !self.selection.is_caret() {
       self.delete_selection_internal();
-      self.goal_x = None;
-      self.scroll_head_into_view();
-      self.reset_caret_blink(cx);
-      cx.notify();
+      self.after_text_mutation(cx);
       return;
     }
     let caret = self.selection.head;
@@ -868,10 +1585,7 @@ impl RichTextEditor {
       let next = next_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
       delete_range_in_paragraph(&mut self.document, caret.paragraph, caret.byte..next);
     }
-    self.goal_x = None;
-    self.scroll_head_into_view();
-    self.reset_caret_blink(cx);
-    cx.notify();
+    self.after_text_mutation(cx);
   }
 
   fn insert_paragraph_break(&mut self, cx: &mut Context<Self>) {
@@ -885,10 +1599,7 @@ impl RichTextEditor {
       byte: 0,
     };
     self.selection = EditorSelection { anchor: new, head: new };
-    self.goal_x = None;
-    self.scroll_head_into_view();
-    self.reset_caret_blink(cx);
-    cx.notify();
+    self.after_text_mutation(cx);
   }
 
   fn on_mouse_down(&mut self, event: &MouseDownEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -901,16 +1612,22 @@ impl RichTextEditor {
       .as_ref()
       .map(|layout| layout.hit_test(event.position))
       .unwrap_or_default();
-    self.selection = if event.modifiers.shift {
-      EditorSelection {
+    self.drag_granularity = match event.click_count {
+      0 | 1 => SelectionGranularity::Character,
+      2 => SelectionGranularity::Word,
+      _ => SelectionGranularity::Paragraph,
+    };
+    self.selection = match self.drag_granularity {
+      SelectionGranularity::Character if event.modifiers.shift => EditorSelection {
         anchor: self.selection.anchor,
         head: offset,
-      }
-    } else {
-      EditorSelection {
+      },
+      SelectionGranularity::Character => EditorSelection {
         anchor: offset,
         head: offset,
-      }
+      },
+      SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
+      SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
     self.reset_caret_blink(cx);
     cx.notify();
@@ -925,8 +1642,9 @@ impl RichTextEditor {
     self.ensure_drag_autoscroll_task(cx);
     if let Some(layout) = &self.last_layout {
       let head = layout.hit_test(event.position);
-      if self.selection.head != head {
-        self.selection.head = head;
+      let selection = expand_drag_selection(&self.document, self.selection.anchor, head, self.drag_granularity);
+      if self.selection != selection {
+        self.selection = selection;
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
         cx.notify();
@@ -938,6 +1656,7 @@ impl RichTextEditor {
 
   fn on_mouse_up(&mut self, _: &MouseUpEvent, _: &mut Window, _: &mut Context<Self>) {
     self.selecting = false;
+    self.drag_granularity = SelectionGranularity::Character;
     self.last_drag_position = None;
     self.autoscroll_active = false;
   }
@@ -1094,7 +1813,29 @@ impl Render for RichTextEditor {
       .on_action(cx.listener(Self::on_select_line_start))
       .on_action(cx.listener(Self::on_select_line_end))
       .on_action(cx.listener(Self::on_select_all))
+      .on_action(cx.listener(Self::on_move_word_left))
+      .on_action(cx.listener(Self::on_move_word_right))
+      .on_action(cx.listener(Self::on_select_word_left))
+      .on_action(cx.listener(Self::on_select_word_right))
+      .on_action(cx.listener(Self::on_delete_word_backward))
+      .on_action(cx.listener(Self::on_delete_word_forward))
+      .on_action(cx.listener(Self::on_page_up))
+      .on_action(cx.listener(Self::on_page_down))
+      .on_action(cx.listener(Self::on_select_page_up))
+      .on_action(cx.listener(Self::on_select_page_down))
+      .on_action(cx.listener(Self::on_move_document_start))
+      .on_action(cx.listener(Self::on_move_document_end))
+      .on_action(cx.listener(Self::on_select_document_start))
+      .on_action(cx.listener(Self::on_select_document_end))
+      .on_action(cx.listener(Self::on_copy))
+      .on_action(cx.listener(Self::on_cut))
+      .on_action(cx.listener(Self::on_paste))
       .on_action(cx.listener(Self::on_save))
+      .on_action(cx.listener(Self::on_undo))
+      .on_action(cx.listener(Self::on_redo))
+      .on_action(cx.listener(Self::on_toggle_underline))
+      .on_action(cx.listener(Self::on_toggle_emphasis))
+      .on_action(cx.listener(Self::on_clear_highlight))
       .on_action(cx.listener(Self::on_backspace))
       .on_action(cx.listener(Self::on_delete))
       .on_action(cx.listener(Self::on_insert_newline))
@@ -1243,14 +1984,11 @@ struct ParagraphCacheKey {
   fingerprint: u64,
 }
 
-fn paragraph_cache_key(document: &Document, paragraph: &Paragraph) -> ParagraphCacheKey {
+fn paragraph_cache_key(_document: &Document, paragraph: &Paragraph) -> ParagraphCacheKey {
   let mut hasher = DefaultHasher::new();
   paragraph.style.hash(&mut hasher);
-  paragraph_text(document, paragraph).hash(&mut hasher);
-  for run in &paragraph.runs {
-    run.len.hash(&mut hasher);
-    run.styles.hash(&mut hasher);
-  }
+  paragraph.version.hash(&mut hasher);
+  paragraph.byte_range.hash(&mut hasher);
   ParagraphCacheKey {
     fingerprint: hasher.finish(),
   }
@@ -2468,19 +3206,24 @@ fn x_for_byte(line: &LaidOutLine, byte: usize) -> Pixels {
 }
 
 fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, content_mask: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
-  let text_system = cx.text_system().clone();
+  let _ = cx;
   let baseline = line.baseline_y();
+  let line_bounds = Bounds::new(origin, size(px(f32::MAX / 4.0), line.line_height));
+  if !line_bounds.intersects(&content_mask) {
+    return;
+  }
   for segment in &line.segments {
     let segment_origin = origin + point(segment.x, baseline);
     for run in &segment.shaped.runs {
-      let glyph_bounds = text_system
-        .bounding_box(run.font_id, segment.font_size)
-        .size;
+      let run_bounds = Bounds::new(
+        point(segment_origin.x, origin.y + baseline - segment.ascent),
+        size(segment.width.max(px(1.0)), segment.ascent + segment.descent),
+      );
+      if !run_bounds.intersects(&content_mask) {
+        continue;
+      }
       for glyph in &run.glyphs {
         let glyph_origin = segment_origin + point(glyph.position.x, px(0.0));
-        if !Bounds::new(glyph_origin, glyph_bounds).intersects(&content_mask) {
-          continue;
-        }
         let result = if glyph.is_emoji {
           window.paint_emoji(glyph_origin, run.font_id, glyph.id, segment.font_size)
         } else {
@@ -2533,6 +3276,7 @@ fn apply_style_to_paragraph_range(document: &mut Document, paragraph_ix: usize, 
     }
   }
   paragraph.runs = merge_adjacent_runs(output);
+  bump_paragraph_version(paragraph);
 }
 
 fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
@@ -2588,6 +3332,109 @@ fn document_text_slice(document: &Document, range: Range<usize>) -> String {
   text
 }
 
+fn full_document_text(document: &Document) -> String {
+  document_text_slice(document, 0..document.text.byte_len())
+}
+
+fn document_end(document: &Document) -> DocumentOffset {
+  let paragraph = document.paragraphs.len().saturating_sub(1);
+  DocumentOffset {
+    paragraph,
+    byte: document
+      .paragraphs
+      .get(paragraph)
+      .map(paragraph_text_len)
+      .unwrap_or(0),
+  }
+}
+
+fn global_byte(document: &Document, offset: DocumentOffset) -> usize {
+  document.paragraphs[offset.paragraph].byte_range.start + offset.byte
+}
+
+fn global_to_document_offset(document: &Document, byte: usize) -> DocumentOffset {
+  let byte = byte.min(document.text.byte_len());
+  for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
+    if byte <= paragraph.byte_range.end {
+      return DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: byte
+          .saturating_sub(paragraph.byte_range.start)
+          .min(paragraph_text_len(paragraph)),
+      };
+    }
+  }
+  document_end(document)
+}
+
+fn selected_plain_text(document: &Document, range: Range<DocumentOffset>) -> String {
+  if range.start.paragraph == range.end.paragraph {
+    let paragraph = &document.paragraphs[range.start.paragraph];
+    return document_text_slice(
+      document,
+      paragraph.byte_range.start + range.start.byte..paragraph.byte_range.start + range.end.byte,
+    );
+  }
+
+  let mut text = String::new();
+  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+    if paragraph_ix > range.start.paragraph {
+      text.push('\n');
+    }
+    let paragraph = &document.paragraphs[paragraph_ix];
+    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph_text_len(paragraph)
+    };
+    text.push_str(&document_text_slice(
+      document,
+      paragraph.byte_range.start + start..paragraph.byte_range.start + end,
+    ));
+  }
+  text
+}
+
+fn selected_rich_fragment(document: &Document, range: Range<DocumentOffset>) -> RichClipboardFragment {
+  let mut paragraphs = Vec::new();
+  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+    let paragraph = &document.paragraphs[paragraph_ix];
+    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph_text_len(paragraph)
+    };
+    let mut runs = Vec::new();
+    let mut offset = 0;
+    for run in &paragraph.runs {
+      let run_start = offset;
+      let run_end = offset + run.len;
+      offset = run_end;
+      let clipped_start = run_start.max(start);
+      let clipped_end = run_end.min(end);
+      if clipped_start < clipped_end {
+        runs.push(InputRun {
+          text: document_text_slice(
+            document,
+            paragraph.byte_range.start + clipped_start..paragraph.byte_range.start + clipped_end,
+          ),
+          styles: run.styles,
+        });
+      }
+    }
+    paragraphs.push(InputParagraph {
+      style: paragraph.style,
+      runs,
+    });
+  }
+  RichClipboardFragment {
+    format: "debateprocessor.rich-text-fragment.v1".to_string(),
+    paragraphs,
+  }
+}
+
 fn shift_paragraphs_after(document: &mut Document, paragraph_ix: usize, delta: isize) {
   if delta == 0 {
     return;
@@ -2605,6 +3452,10 @@ fn shift_range(range: Range<usize>, delta: isize) -> Range<usize> {
     let delta = (-delta) as usize;
     range.start - delta..range.end - delta
   }
+}
+
+fn bump_paragraph_version(paragraph: &mut Paragraph) {
+  paragraph.version = paragraph.version.wrapping_add(1);
 }
 
 fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRun>) {
@@ -2647,12 +3498,14 @@ fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: usize)
   let old_end = paragraph.byte_range.end;
   document.paragraphs[paragraph_ix].byte_range = paragraph.byte_range.start..global;
   document.paragraphs[paragraph_ix].runs = left_runs;
+  bump_paragraph_version(&mut document.paragraphs[paragraph_ix]);
   document.paragraphs.insert(
     paragraph_ix + 1,
     Paragraph {
       style: paragraph.style,
       byte_range: global + 1..old_end + 1,
       runs: right_runs,
+      version: paragraph.version.wrapping_add(1),
     },
   );
   for paragraph in document.paragraphs.iter_mut().skip(paragraph_ix + 2) {
@@ -2683,6 +3536,7 @@ fn delete_cross_paragraph_range(document: &mut Document, range: Range<DocumentOf
   document.paragraphs[start_ix].runs = merge_adjacent_runs(merged_runs);
   document.paragraphs[start_ix].byte_range =
     start_para.byte_range.start..start_para.byte_range.start + paragraph_runs_len(&document.paragraphs[start_ix]);
+  bump_paragraph_version(&mut document.paragraphs[start_ix]);
   document.paragraphs.drain(start_ix + 1..=end_ix);
   for paragraph in document.paragraphs.iter_mut().skip(start_ix + 1) {
     paragraph.byte_range = shift_range(paragraph.byte_range.clone(), -(delete_len as isize));
@@ -2728,6 +3582,7 @@ fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize, tex
   shift_paragraphs_after(document, paragraph_ix, insert_len as isize);
   let paragraph = &mut document.paragraphs[paragraph_ix];
   paragraph.byte_range.end += insert_len;
+  bump_paragraph_version(paragraph);
   if paragraph.runs.is_empty() {
     paragraph.runs.push(TextRun { len: insert_len, styles });
     return;
@@ -2810,6 +3665,7 @@ fn delete_range_in_paragraph(document: &mut Document, paragraph_ix: usize, range
   shift_paragraphs_after(document, paragraph_ix, -(delete_len as isize));
   let paragraph = &mut document.paragraphs[paragraph_ix];
   paragraph.byte_range.end -= delete_len;
+  bump_paragraph_version(paragraph);
   let mut offset = 0;
   let mut new_runs: Vec<TextRun> = Vec::with_capacity(paragraph.runs.len());
   for run in paragraph.runs.drain(..) {
@@ -2832,6 +3688,235 @@ fn delete_range_in_paragraph(document: &mut Document, paragraph_ix: usize, range
     }
   }
   paragraph.runs = merge_adjacent_runs(new_runs);
+}
+
+fn is_word_char(ch: char) -> bool {
+  ch.is_alphanumeric() || ch == '_'
+}
+
+fn debate_word_char_at(text: &str, byte: usize) -> Option<char> {
+  text.get(byte..)?.chars().next()
+}
+
+fn is_debate_connector(text: &str, byte: usize) -> bool {
+  let Some(ch) = debate_word_char_at(text, byte) else {
+    return false;
+  };
+  if ch != '\'' && ch != '-' {
+    return false;
+  }
+  let prev = text[..byte].chars().next_back();
+  let next = text[byte + ch.len_utf8()..].chars().next();
+  prev.is_some_and(is_word_char) && next.is_some_and(is_word_char)
+}
+
+fn is_debate_word_byte(text: &str, byte: usize) -> bool {
+  debate_word_char_at(text, byte).is_some_and(is_word_char) || is_debate_connector(text, byte)
+}
+
+fn previous_char_boundary(text: &str, byte: usize) -> usize {
+  text[..byte]
+    .char_indices()
+    .next_back()
+    .map(|(ix, _)| ix)
+    .unwrap_or(0)
+}
+
+fn next_char_boundary(text: &str, byte: usize) -> usize {
+  let Some(ch) = debate_word_char_at(text, byte) else {
+    return text.len();
+  };
+  byte + ch.len_utf8()
+}
+
+fn previous_debate_word_boundary(text: &str, mut byte: usize) -> usize {
+  byte = byte.min(text.len());
+  while byte > 0 {
+    let prev = previous_char_boundary(text, byte);
+    if is_debate_word_byte(text, prev) {
+      break;
+    }
+    byte = prev;
+  }
+  while byte > 0 {
+    let prev = previous_char_boundary(text, byte);
+    if !is_debate_word_byte(text, prev) {
+      break;
+    }
+    byte = prev;
+  }
+  byte
+}
+
+fn next_debate_word_boundary(text: &str, mut byte: usize) -> usize {
+  byte = byte.min(text.len());
+  while byte < text.len() && !is_debate_word_byte(text, byte) {
+    byte = next_char_boundary(text, byte);
+  }
+  while byte < text.len() && is_debate_word_byte(text, byte) {
+    byte = next_char_boundary(text, byte);
+  }
+  byte
+}
+
+fn selection_for_word_at(document: &Document, offset: DocumentOffset) -> EditorSelection {
+  let text = full_document_text(document);
+  let global = global_byte(document, offset);
+  let start = previous_debate_word_boundary(&text, global);
+  let end = next_debate_word_boundary(&text, global);
+  EditorSelection {
+    anchor: global_to_document_offset(document, start),
+    head: global_to_document_offset(document, end),
+  }
+}
+
+fn selection_for_paragraph_at(document: &Document, paragraph: usize) -> EditorSelection {
+  let paragraph = paragraph.min(document.paragraphs.len().saturating_sub(1));
+  EditorSelection {
+    anchor: DocumentOffset { paragraph, byte: 0 },
+    head: DocumentOffset {
+      paragraph,
+      byte: paragraph_text_len(&document.paragraphs[paragraph]),
+    },
+  }
+}
+
+fn expand_drag_selection(
+  document: &Document,
+  anchor: DocumentOffset,
+  head: DocumentOffset,
+  granularity: SelectionGranularity,
+) -> EditorSelection {
+  match granularity {
+    SelectionGranularity::Character => EditorSelection { anchor, head },
+    SelectionGranularity::Word => {
+      let anchor_range = selection_for_word_at(document, anchor).normalized();
+      let head_range = selection_for_word_at(document, head).normalized();
+      if head < anchor {
+        EditorSelection {
+          anchor: anchor_range.end,
+          head: head_range.start,
+        }
+      } else {
+        EditorSelection {
+          anchor: anchor_range.start,
+          head: head_range.end,
+        }
+      }
+    },
+    SelectionGranularity::Paragraph => {
+      if head < anchor {
+        EditorSelection {
+          anchor: DocumentOffset {
+            paragraph: anchor.paragraph,
+            byte: paragraph_text_len(&document.paragraphs[anchor.paragraph]),
+          },
+          head: DocumentOffset {
+            paragraph: head.paragraph,
+            byte: 0,
+          },
+        }
+      } else {
+        EditorSelection {
+          anchor: DocumentOffset {
+            paragraph: anchor.paragraph,
+            byte: 0,
+          },
+          head: DocumentOffset {
+            paragraph: head.paragraph,
+            byte: paragraph_text_len(&document.paragraphs[head.paragraph]),
+          },
+        }
+      }
+    },
+  }
+}
+
+fn selection_run_styles(document: &Document, range: Range<DocumentOffset>) -> Vec<RunStyles> {
+  let mut styles = Vec::new();
+  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+    let paragraph = &document.paragraphs[paragraph_ix];
+    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph_text_len(paragraph)
+    };
+    let mut offset = 0;
+    for run in &paragraph.runs {
+      let run_start = offset;
+      let run_end = offset + run.len;
+      offset = run_end;
+      if run_start < end && run_end > start {
+        styles.push(run.styles);
+      }
+    }
+  }
+  styles
+}
+
+fn selection_prefers_direct_underline(document: &Document, range: Range<DocumentOffset>) -> bool {
+  (range.start.paragraph..=range.end.paragraph).any(|paragraph_ix| {
+    matches!(
+      document.paragraphs[paragraph_ix].style,
+      ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag
+    )
+  })
+}
+
+fn selection_has_underline_kind(document: &Document, range: Range<DocumentOffset>, direct: bool) -> bool {
+  selection_run_styles(document, range)
+    .into_iter()
+    .any(|styles| if direct { styles.direct_underline } else { styles.style_underline })
+}
+
+fn mutate_runs_in_range(document: &mut Document, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
+  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+    let paragraph = &mut document.paragraphs[paragraph_ix];
+    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph_text_len(paragraph)
+    };
+    if start >= end {
+      continue;
+    }
+
+    let mut new_runs = Vec::with_capacity(paragraph.runs.len() + 2);
+    let mut offset = 0;
+    for run in paragraph.runs.drain(..) {
+      let run_start = offset;
+      let run_end = offset + run.len;
+      offset = run_end;
+      if run_end <= start || run_start >= end {
+        new_runs.push(run);
+        continue;
+      }
+      if run_start < start {
+        new_runs.push(TextRun {
+          len: start - run_start,
+          styles: run.styles,
+        });
+      }
+      let selected_start = run_start.max(start);
+      let selected_end = run_end.min(end);
+      let mut selected_styles = run.styles;
+      mutate(&mut selected_styles);
+      new_runs.push(TextRun {
+        len: selected_end - selected_start,
+        styles: selected_styles,
+      });
+      if run_end > end {
+        new_runs.push(TextRun {
+          len: run_end - end,
+          styles: run.styles,
+        });
+      }
+    }
+    paragraph.runs = merge_adjacent_runs(new_runs);
+    bump_paragraph_version(paragraph);
+  }
 }
 
 // Locate the `LaidOutLine` containing the given offset. Returns
@@ -3097,6 +4182,7 @@ fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) ->
       style: paragraph.style,
       byte_range: start..end,
       runs: merge_adjacent_runs(runs),
+      version: 0,
     });
   }
   if stored_paragraphs.is_empty() {
@@ -3104,6 +4190,7 @@ fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) ->
       style: ParagraphStyle::Normal,
       byte_range: 0..0,
       runs: Vec::new(),
+      version: 0,
     });
   }
   Document {
