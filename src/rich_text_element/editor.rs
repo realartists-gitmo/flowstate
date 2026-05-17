@@ -8,7 +8,8 @@ use std::{
 
 use gpui::{
   App, Bounds, ClipboardItem, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
-  MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, Size, Subscription, Timer, Window, actions, div, point, prelude::*, px, size,
+  MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollStrategy, Size, Subscription, Timer, Window, actions, div, point, prelude::*,
+  px, size,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
@@ -827,7 +828,7 @@ impl RichTextEditor {
       .resize(self.document.paragraphs.len(), None);
     let viewport_width = self.scroll_handle.bounds().size.width;
     let width = if viewport_width > px(1.0) { viewport_width } else { px(900.0) };
-    self.ensure_exact_active_paragraph_heights(width, window, cx);
+    self.ensure_exact_interaction_paragraph_heights(width, window, cx);
     Rc::new(
       self
         .document
@@ -849,27 +850,86 @@ impl RichTextEditor {
     )
   }
 
-  fn ensure_exact_active_paragraph_heights(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-    for paragraph_ix in self.active_height_range() {
+  fn ensure_exact_interaction_paragraph_heights(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    let mut ranges = vec![self.active_height_range(), self.predicted_visible_height_range(width)];
+    if !self.visible_layout_range.is_empty() {
+      ranges.push(expand_paragraph_range(
+        self.visible_layout_range.clone(),
+        self.document.paragraphs.len(),
+        2,
+      ));
+    }
+
+    for range in ranges {
+      for paragraph_ix in range {
+        self.ensure_exact_paragraph_height(paragraph_ix, width, window, cx);
+      }
+    }
+  }
+
+  fn ensure_exact_paragraph_height(&mut self, paragraph_ix: usize, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return;
+    };
+    let key = paragraph_cache_key(&self.document, paragraph);
+    let cache_is_current = self
+      .paragraph_height_cache
+      .get(paragraph_ix)
+      .and_then(|entry| *entry)
+      .is_some_and(|entry| entry.key == key && entry.width == width);
+    if cache_is_current {
+      return;
+    }
+    let layout = build_single_paragraph_layout(&self.document, paragraph_ix, width, None, window, cx);
+    self.paragraph_height_cache[paragraph_ix] = Some(ParagraphHeightCacheEntry {
+      key,
+      width,
+      height: layout.size.height,
+    });
+  }
+
+  fn predicted_visible_height_range(&self, width: Pixels) -> Range<usize> {
+    let paragraph_count = self.document.paragraphs.len();
+    if paragraph_count == 0 {
+      return 0..0;
+    }
+
+    let viewport = self.scroll_handle.bounds();
+    let viewport_height = if viewport.size.height > px(1.0) {
+      viewport.size.height
+    } else {
+      px(1000.0)
+    };
+    let scroll_top = -self.scroll_handle.offset().y;
+    let scroll_bottom = scroll_top + viewport_height + px(256.0);
+    let mut y = px(0.0);
+    let mut start = 0;
+    let mut found_start = false;
+
+    for paragraph_ix in 0..paragraph_count {
       let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
-        continue;
+        break;
       };
       let key = paragraph_cache_key(&self.document, paragraph);
-      let cache_is_current = self
+      let height = self
         .paragraph_height_cache
         .get(paragraph_ix)
         .and_then(|entry| *entry)
-        .is_some_and(|entry| entry.key == key && entry.width == width);
-      if cache_is_current {
-        continue;
+        .filter(|entry| entry.key == key && entry.width == width)
+        .map(|entry| entry.height)
+        .unwrap_or_else(|| estimate_paragraph_item_height(&self.document, paragraph_ix, width));
+      let next_y = y + height;
+      if !found_start && next_y >= scroll_top - px(256.0) {
+        start = paragraph_ix;
+        found_start = true;
       }
-      let layout = build_single_paragraph_layout(&self.document, paragraph_ix, width, None, window, cx);
-      self.paragraph_height_cache[paragraph_ix] = Some(ParagraphHeightCacheEntry {
-        key,
-        width,
-        height: layout.size.height,
-      });
+      if found_start && y > scroll_bottom {
+        return expand_paragraph_range(start..paragraph_ix + 1, paragraph_count, 2);
+      }
+      y = next_y;
     }
+
+    expand_paragraph_range(start..paragraph_count, paragraph_count, 2)
   }
 
   fn active_height_range(&self) -> Range<usize> {
@@ -1276,6 +1336,11 @@ impl RichTextEditor {
         return;
       };
       let Some((p_ix, l_ix)) = locate_line(layout, head) else {
+        // The caret can briefly point at a paragraph that the virtual list has
+        // not mounted yet. Keep the paragraph moving into view so the next
+        // layout frame can restore normal visual-line navigation.
+        self.scroll_head_paragraph_into_view(dir);
+        cx.notify();
         return;
       };
       let cur_line = &layout.paragraphs[p_ix].lines[l_ix];
@@ -1287,7 +1352,11 @@ impl RichTextEditor {
         VDir::Down => find_line_below(layout, p_ix, l_ix),
       };
       let Some((np, nl)) = next else {
-        return;
+        // `last_layout` only contains mounted virtual-list rows. At the top or
+        // bottom edge of that mounted slice, move through the document model
+        // and reveal the adjacent paragraph instead of treating the edge as
+        // the start/end of the file.
+        return self.move_to_adjacent_unmounted_paragraph(dir, extend, cur_x, cx);
       };
       let target_line = &layout.paragraphs[np].lines[nl];
       let new_byte = target_line.hit_test_x(cur_x);
@@ -1310,6 +1379,49 @@ impl RichTextEditor {
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
     cx.notify();
+  }
+
+  fn move_to_adjacent_unmounted_paragraph(&mut self, dir: VDir, extend: bool, goal_x: Pixels, cx: &mut Context<Self>) {
+    let head = self.selection.head;
+    let Some(target_paragraph) = self.adjacent_document_paragraph(head.paragraph, dir) else {
+      return;
+    };
+    let target_byte = match dir {
+      VDir::Up => paragraph_text_len(&self.document.paragraphs[target_paragraph]),
+      VDir::Down => 0,
+    };
+    let new_head = DocumentOffset {
+      paragraph: target_paragraph,
+      byte: target_byte,
+    };
+    let anchor = if extend { self.selection.anchor } else { new_head };
+    self.selection = EditorSelection { anchor, head: new_head };
+    self.goal_x = Some(goal_x);
+    self.scroll_paragraph_into_view(target_paragraph, dir);
+    self.reset_caret_blink(cx);
+    cx.notify();
+  }
+
+  fn scroll_head_paragraph_into_view(&self, dir: VDir) {
+    self.scroll_paragraph_into_view(self.selection.head.paragraph, dir);
+  }
+
+  fn scroll_paragraph_into_view(&self, paragraph_ix: usize, dir: VDir) {
+    if paragraph_ix >= self.document.paragraphs.len() {
+      return;
+    }
+    let strategy = match dir {
+      VDir::Up => ScrollStrategy::Bottom,
+      VDir::Down => ScrollStrategy::Top,
+    };
+    self.scroll_handle.scroll_to_item(paragraph_ix, strategy);
+  }
+
+  fn adjacent_document_paragraph(&self, paragraph_ix: usize, dir: VDir) -> Option<usize> {
+    match dir {
+      VDir::Up => paragraph_ix.checked_sub(1),
+      VDir::Down => (paragraph_ix + 1 < self.document.paragraphs.len()).then_some(paragraph_ix + 1),
+    }
   }
 
   // Home / End: jump to the start or end of the current visual (wrapped) line.
@@ -1771,4 +1883,13 @@ fn windows_apply_capslock(text: &str) -> String {
   } else {
     text.to_string()
   }
+}
+
+fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: usize) -> Range<usize> {
+  if paragraph_count == 0 {
+    return 0..0;
+  }
+  let start = range.start.saturating_sub(padding).min(paragraph_count);
+  let end = range.end.saturating_add(padding).min(paragraph_count).max(start);
+  start..end
 }
