@@ -66,6 +66,7 @@ actions!(
     Backspace,
     Delete,
     InsertNewline,
+    InsertSoftLineBreak,
   ]
 );
 
@@ -999,6 +1000,9 @@ impl RichTextEditor {
   }
   fn on_insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
     self.insert_paragraph_break_command(cx);
+  }
+  fn on_insert_soft_line_break(&mut self, _: &InsertSoftLineBreak, _: &mut Window, cx: &mut Context<Self>) {
+    self.insert_text_command(SOFT_LINE_BREAK_STR, cx);
   }
 
   // Raw key handler: routes printable characters to `insert_text`. Non-
@@ -2174,8 +2178,16 @@ impl RichTextEditor {
     if let Some(active_drag) = self.active_text_drag.take() {
       let drop = self.hit_test_document_position(event.position, window, cx);
       self.move_rich_text_fragment(active_drag, drop, cx);
+    } else if self.pending_text_drag.take().is_some() {
+      let caret = self.hit_test_document_position(event.position, window, cx);
+      self.selection = EditorSelection {
+        anchor: caret,
+        head: caret,
+      };
+      self.scroll_head_into_view();
+      self.reset_caret_blink(cx);
+      cx.notify();
     }
-    self.pending_text_drag = None;
     self.selecting = false;
     self.drag_granularity = SelectionGranularity::Character;
     self.last_drag_position = None;
@@ -2413,6 +2425,7 @@ impl Render for RichTextEditor {
       .on_action(cx.listener(Self::on_backspace))
       .on_action(cx.listener(Self::on_delete))
       .on_action(cx.listener(Self::on_insert_newline))
+      .on_action(cx.listener(Self::on_insert_soft_line_break))
       // Catch printable characters (anything with a `key_char`) and insert
       // them as text. Action keys (arrows, Enter, etc.) have `key_char = None`
       // so they fall through to the action system above.

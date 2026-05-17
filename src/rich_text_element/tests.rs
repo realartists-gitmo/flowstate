@@ -275,6 +275,31 @@ fn move_rich_text_operation_undo_redo_restores_source_and_drop() {
 }
 
 #[test]
+fn soft_line_break_stays_inside_paragraph_and_copies_as_newline() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("alphaomega")],
+    }],
+  );
+  insert_text_at(&mut document, 0, "alpha".len(), SOFT_LINE_BREAK_STR, RunStyles::default());
+
+  assert_eq!(document.paragraphs.len(), 1);
+  assert_eq!(paragraph_text(&document, 0), format!("alpha{SOFT_LINE_BREAK_STR}omega"));
+  assert_eq!(
+    selected_plain_text(
+      &document,
+      DocumentOffset { paragraph: 0, byte: 0 }..DocumentOffset {
+        paragraph: 0,
+        byte: paragraph_text_len(&document.paragraphs[0]),
+      },
+    ),
+    "alpha\nomega"
+  );
+}
+
+#[test]
 fn find_text_ranges_returns_document_offsets_across_paragraphs() {
   let document = document_from_input(
     DocumentTheme::default(),

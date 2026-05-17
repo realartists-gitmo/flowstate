@@ -184,7 +184,7 @@ pub(super) fn find_text_ranges(document: &Document, query: &str) -> Vec<Range<Do
 pub(super) fn selected_plain_text(document: &Document, range: Range<DocumentOffset>) -> String {
   if range.start.paragraph == range.end.paragraph {
     let paragraph_range = paragraph_byte_range(document, range.start.paragraph);
-    return document_text_slice(document, paragraph_range.start + range.start.byte..paragraph_range.start + range.end.byte);
+    return clipboard_plain_text(document_text_slice(document, paragraph_range.start + range.start.byte..paragraph_range.start + range.end.byte));
   }
 
   let mut text = String::new();
@@ -200,9 +200,17 @@ pub(super) fn selected_plain_text(document: &Document, range: Range<DocumentOffs
       paragraph_text_len(paragraph)
     };
     let paragraph_range = paragraph_byte_range(document, paragraph_ix);
-    text.push_str(&document_text_slice(document, paragraph_range.start + start..paragraph_range.start + end));
+    text.push_str(&clipboard_plain_text(document_text_slice(document, paragraph_range.start + start..paragraph_range.start + end)));
   }
   text
+}
+
+fn clipboard_plain_text(text: String) -> String {
+  if text.contains(SOFT_LINE_BREAK) {
+    text.replace(SOFT_LINE_BREAK, "\n")
+  } else {
+    text
+  }
 }
 
 pub(super) fn selected_rich_fragment(document: &Document, range: Range<DocumentOffset>) -> RichClipboardFragment {

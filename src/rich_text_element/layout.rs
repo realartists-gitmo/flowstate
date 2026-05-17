@@ -492,7 +492,8 @@ pub(super) fn estimate_paragraph_item_height(document: &Document, paragraph_ix: 
   let avg_char_width = (p_format.font_size * 0.52).max(px(1.0));
   let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
   let text_len = paragraph_text_len(paragraph);
-  let estimated_lines = (text_len / chars_per_line).saturating_add(1).max(1);
+  let forced_line_count = paragraph_text(document, paragraph_ix).matches(SOFT_LINE_BREAK).count();
+  let estimated_lines = (text_len / chars_per_line).saturating_add(1).saturating_add(forced_line_count).max(1);
   let line_gap = p_format.font_size * document.theme.line_gap_fraction;
   let line_height = (p_format.font_size + line_gap) * p_format.line_spacing;
   let mut height = p_format.spacing_before + content_top + line_height * estimated_lines as f32 + content_top + p_format.spacing_after;
@@ -518,13 +519,85 @@ pub(super) fn wrap_lines(
   if text.is_empty() {
     return vec![shape_line(document, paragraph, p_format, text, 0..0, &mut shape_cache, window, cx)];
   }
+  if text.contains(SOFT_LINE_BREAK) {
+    let mut lines = Vec::new();
+    let mut segment_start = 0;
+    for (break_ix, ch) in text.char_indices().filter(|(_, ch)| *ch == SOFT_LINE_BREAK) {
+      push_wrapped_soft_segment(
+        &mut lines,
+        document,
+        paragraph,
+        p_format.clone(),
+        text,
+        segment_start..break_ix,
+        max_width,
+        &mut shape_cache,
+        window,
+        cx,
+      );
+      segment_start = break_ix + ch.len_utf8();
+    }
+    push_wrapped_soft_segment(
+      &mut lines,
+      document,
+      paragraph,
+      p_format,
+      text,
+      segment_start..text.len(),
+      max_width,
+      &mut shape_cache,
+      window,
+      cx,
+    );
+    return lines;
+  }
+
+  wrap_text_segment(document, paragraph, p_format, text, 0..text.len(), max_width, &mut shape_cache, window, cx)
+}
+
+fn push_wrapped_soft_segment(
+  lines: &mut Vec<LaidOutLine>,
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  text: &str,
+  segment: Range<usize>,
+  max_width: Pixels,
+  shape_cache: &mut FragmentShapeCache,
+  window: &mut Window,
+  cx: &mut App,
+) {
+  if segment.is_empty() {
+    lines.push(shape_line(document, paragraph, p_format, "", segment, shape_cache, window, cx));
+  } else {
+    lines.extend(wrap_text_segment(document, paragraph, p_format, text, segment, max_width, shape_cache, window, cx));
+  }
+}
+
+fn wrap_text_segment(
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  text: &str,
+  segment: Range<usize>,
+  max_width: Pixels,
+  shape_cache: &mut FragmentShapeCache,
+  window: &mut Window,
+  cx: &mut App,
+) -> Vec<LaidOutLine> {
+  if segment.is_empty() {
+    return vec![shape_line(document, paragraph, p_format, "", segment, shape_cache, window, cx)];
+  }
 
   let mut lines = Vec::new();
-  let mut start = 0;
-  let break_ends = wrap_break_ends(text);
+  let mut start = segment.start;
+  let break_ends = wrap_break_ends(&text[segment.clone()])
+    .into_iter()
+    .map(|byte| segment.start + byte)
+    .collect::<Vec<_>>();
   let mut break_cursor = 0;
 
-  while start < text.len() {
+  while start < segment.end {
     while break_cursor < break_ends.len() && break_ends[break_cursor] <= start {
       break_cursor += 1;
     }
@@ -541,14 +614,14 @@ pub(super) fn wrap_lines(
         text,
         start..break_at,
         break_at - start,
-        &mut shape_cache,
+        shape_cache,
         window,
       );
       if candidate_width > max_width {
         let line_end = last_break
           .filter(|break_at| *break_at > start)
           .unwrap_or_else(|| {
-            first_overflow_line_end(document, paragraph, &p_format, text, start, break_at, max_width, &mut shape_cache, window)
+            first_overflow_line_end(document, paragraph, &p_format, text, start, break_at, max_width, shape_cache, window)
           });
         lines.push(shape_line(
           document,
@@ -556,7 +629,7 @@ pub(super) fn wrap_lines(
           p_format.clone(),
           text[start..line_end].trim_end(),
           start..line_end,
-          &mut shape_cache,
+          shape_cache,
           window,
           cx,
         ));
@@ -577,9 +650,9 @@ pub(super) fn wrap_lines(
       paragraph,
       &p_format,
       text,
-      start..text.len(),
-      text.len() - start,
-      &mut shape_cache,
+      start..segment.end,
+      segment.end - start,
+      shape_cache,
       window,
     );
     if remaining_width <= max_width {
@@ -587,9 +660,9 @@ pub(super) fn wrap_lines(
         document,
         paragraph,
         p_format,
-        &text[start..],
-        start..text.len(),
-        &mut shape_cache,
+        &text[start..segment.end],
+        start..segment.end,
+        shape_cache,
         window,
         cx,
       ));
@@ -605,9 +678,9 @@ pub(super) fn wrap_lines(
           &p_format,
           text,
           start,
-          text.len(),
+          segment.end,
           max_width,
-          &mut shape_cache,
+          shape_cache,
           window,
         )
       });
@@ -617,7 +690,7 @@ pub(super) fn wrap_lines(
       p_format.clone(),
       text[start..line_end].trim_end(),
       start..line_end,
-      &mut shape_cache,
+      shape_cache,
       window,
       cx,
     ));

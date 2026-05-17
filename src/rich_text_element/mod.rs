@@ -22,7 +22,7 @@ pub use editor::*;
 pub use persistence::{load_or_create_document, read_db8, write_db8};
 
 // Internal imports used by sibling modules via `use super::*;`.
-use document::{InputParagraph, InputRun, ParagraphOffsetIndex, RichClipboardFragment, paragraphs_mut};
+use document::{InputParagraph, InputRun, ParagraphOffsetIndex, RichClipboardFragment, SOFT_LINE_BREAK, SOFT_LINE_BREAK_STR, paragraphs_mut};
 use edit_ops::*;
 use editor::{DocumentSpan, SelectionGranularity};
 use element::*;

@@ -8,6 +8,9 @@ use serde::{Deserialize, Serialize};
 // the parent module. `ParagraphOffsetIndex`'s methods invoke them.
 use super::{paragraph_width, paragraph_widths};
 
+pub(super) const SOFT_LINE_BREAK: char = '\u{2028}';
+pub(super) const SOFT_LINE_BREAK_STR: &str = "\u{2028}";
+
 // -- Clipboard fragment ---------------------------------------------------
 
 /// Internal clipboard fragment used to round-trip rich text via the system

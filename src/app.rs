@@ -6,7 +6,7 @@ use gpui::{
 };
 
 use crate::rich_text_element::{
-  Backspace, ClearHighlight, Copy, Cut, Delete, DeleteWordBackward, DeleteWordForward, Document, InsertNewline, MoveDocumentEnd,
+  Backspace, ClearHighlight, Copy, Cut, Delete, DeleteWordBackward, DeleteWordForward, Document, InsertNewline, InsertSoftLineBreak, MoveDocumentEnd,
   MoveDocumentStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, PageDown, PageUp, Paste,
   Redo, RichTextEditor, Save, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
   SelectPageDown, SelectPageUp, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, ClearFormatting, SetHighlightSpoken, SetParagraphAnalytic,
@@ -122,6 +122,7 @@ pub fn register_rich_text_editor_keybindings(cx: &mut App) {
     KeyBinding::new("backspace", Backspace, ctx),
     KeyBinding::new("delete", Delete, ctx),
     KeyBinding::new("enter", InsertNewline, ctx),
+    KeyBinding::new("shift-enter", InsertSoftLineBreak, ctx),
   ]);
 }
 
