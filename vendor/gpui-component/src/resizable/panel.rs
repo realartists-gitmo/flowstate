@@ -134,10 +134,16 @@ impl RenderOnce for ResizablePanelGroup {
             v_flex()
         };
 
-        // Sync panels to the state
-        let panels_count = self.children.len();
+        // Sync panels to the state before rendering them. This includes each
+        // panel's initial size and growth policy so state and flex layout do
+        // not disagree during the first measured frame.
+        let panel_configs = self
+            .children
+            .iter()
+            .map(|panel| (panel.initial_size, panel.grow))
+            .collect();
         state.update(cx, |state, cx| {
-            state.sync_panels_count(self.axis, panels_count, cx);
+            state.sync_panels(self.axis, panel_configs, cx);
         });
 
         container
