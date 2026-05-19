@@ -1,12 +1,6 @@
-use gpui::{App, KeyBinding};
+mod keymap;
 
-use crate::rich_text_element::{
-  Backspace, ClearFormatting, ClearHighlight, Copy, Cut, Delete, DeleteWordBackward, DeleteWordForward, InsertNewline, InsertSoftLineBreak,
-  MoveDocumentEnd, MoveDocumentStart, MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, PageDown,
-  PageUp, Paste, Redo, Save, SelectAll, SelectDocumentEnd, SelectDocumentStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart,
-  SelectPageDown, SelectPageUp, SelectRight, SelectUp, SelectWordLeft, SelectWordRight, SetHighlightSpoken, SetParagraphAnalytic,
-  SetParagraphBlock, SetParagraphHat, SetParagraphPocket, SetParagraphTag, ToggleCite, ToggleEmphasis, ToggleUnderline, Undo,
-};
+pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 
@@ -16,7 +10,7 @@ pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 /// ribbon, toolbar, context menu, command palette, or future scripting API must
 /// have an entry here. UI code should route through these IDs instead of
 /// inventing one-off button handlers that cannot be rebound or displayed.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, serde::Deserialize, serde::Serialize)]
 pub enum CommandId {
   MoveLeft,
   MoveRight,
@@ -168,78 +162,4 @@ pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
 
 pub fn label_for(id: CommandId) -> &'static str {
   command_spec(id).map(|spec| spec.label).unwrap_or("Unknown Command")
-}
-
-/// Register default GPUI keybindings for editor commands.
-///
-/// Keep this function in lockstep with `COMMAND_SPECS`. Future custom keymap
-/// support should build replacement `KeyBinding`s from the same command IDs.
-pub fn register_default_keybindings(cx: &mut App) {
-  let ctx = Some(RICH_TEXT_CONTEXT);
-  cx.bind_keys([
-    KeyBinding::new("left", MoveLeft, ctx),
-    KeyBinding::new("right", MoveRight, ctx),
-    KeyBinding::new("up", MoveUp, ctx),
-    KeyBinding::new("down", MoveDown, ctx),
-    KeyBinding::new("home", MoveLineStart, ctx),
-    KeyBinding::new("end", MoveLineEnd, ctx),
-    KeyBinding::new("shift-left", SelectLeft, ctx),
-    KeyBinding::new("shift-right", SelectRight, ctx),
-    KeyBinding::new("shift-up", SelectUp, ctx),
-    KeyBinding::new("shift-down", SelectDown, ctx),
-    KeyBinding::new("shift-home", SelectLineStart, ctx),
-    KeyBinding::new("shift-end", SelectLineEnd, ctx),
-    KeyBinding::new("ctrl-left", MoveWordLeft, ctx),
-    KeyBinding::new("ctrl-right", MoveWordRight, ctx),
-    KeyBinding::new("alt-left", MoveWordLeft, ctx),
-    KeyBinding::new("alt-right", MoveWordRight, ctx),
-    KeyBinding::new("ctrl-shift-left", SelectWordLeft, ctx),
-    KeyBinding::new("ctrl-shift-right", SelectWordRight, ctx),
-    KeyBinding::new("alt-shift-left", SelectWordLeft, ctx),
-    KeyBinding::new("alt-shift-right", SelectWordRight, ctx),
-    KeyBinding::new("ctrl-backspace", DeleteWordBackward, ctx),
-    KeyBinding::new("ctrl-delete", DeleteWordForward, ctx),
-    KeyBinding::new("pageup", PageUp, ctx),
-    KeyBinding::new("pagedown", PageDown, ctx),
-    KeyBinding::new("shift-pageup", SelectPageUp, ctx),
-    KeyBinding::new("shift-pagedown", SelectPageDown, ctx),
-    KeyBinding::new("ctrl-home", MoveDocumentStart, ctx),
-    KeyBinding::new("ctrl-end", MoveDocumentEnd, ctx),
-    KeyBinding::new("ctrl-shift-home", SelectDocumentStart, ctx),
-    KeyBinding::new("ctrl-shift-end", SelectDocumentEnd, ctx),
-    KeyBinding::new("cmd-a", SelectAll, ctx),
-    KeyBinding::new("ctrl-a", SelectAll, ctx),
-    KeyBinding::new("cmd-c", Copy, ctx),
-    KeyBinding::new("ctrl-c", Copy, ctx),
-    KeyBinding::new("cmd-x", Cut, ctx),
-    KeyBinding::new("ctrl-x", Cut, ctx),
-    KeyBinding::new("cmd-v", Paste, ctx),
-    KeyBinding::new("ctrl-v", Paste, ctx),
-    KeyBinding::new("cmd-s", Save, ctx),
-    KeyBinding::new("ctrl-s", Save, ctx),
-    KeyBinding::new("cmd-z", Undo, ctx),
-    KeyBinding::new("ctrl-z", Undo, ctx),
-    KeyBinding::new("cmd-shift-z", Redo, ctx),
-    KeyBinding::new("ctrl-shift-z", Redo, ctx),
-    KeyBinding::new("ctrl-y", Redo, ctx),
-    KeyBinding::new("f4", SetParagraphPocket, ctx),
-    KeyBinding::new("f5", SetParagraphHat, ctx),
-    KeyBinding::new("f6", SetParagraphBlock, ctx),
-    KeyBinding::new("f7", SetParagraphTag, ctx),
-    KeyBinding::new("ctrl-f7", SetParagraphAnalytic, ctx),
-    KeyBinding::new("f8", ToggleCite, ctx),
-    KeyBinding::new("f9", ToggleUnderline, ctx),
-    KeyBinding::new("cmd-u", ToggleUnderline, ctx),
-    KeyBinding::new("ctrl-u", ToggleUnderline, ctx),
-    KeyBinding::new("f10", ToggleEmphasis, ctx),
-    KeyBinding::new("f11", SetHighlightSpoken, ctx),
-    KeyBinding::new("f12", ClearFormatting, ctx),
-    KeyBinding::new("cmd-b", ToggleEmphasis, ctx),
-    KeyBinding::new("ctrl-b", ToggleEmphasis, ctx),
-    KeyBinding::new("ctrl-shift-h", ClearHighlight, ctx),
-    KeyBinding::new("backspace", Backspace, ctx),
-    KeyBinding::new("delete", Delete, ctx),
-    KeyBinding::new("enter", InsertNewline, ctx),
-    KeyBinding::new("shift-enter", InsertSoftLineBreak, ctx),
-  ]);
 }

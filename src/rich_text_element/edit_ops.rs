@@ -383,7 +383,11 @@ pub(super) fn update_paragraph_offsets_after_len_change(document: &mut Document,
   document
     .offset_index
     .update_paragraph_width(paragraph_ix, &document.paragraphs);
-  refresh_paragraph_range(document, paragraph_ix);
+  // Editing one paragraph shifts every following paragraph's global byte
+  // range. Keep the cached ranges in sync for consumers like the outline.
+  for ix in paragraph_ix..document.paragraphs.len() {
+    refresh_paragraph_range(document, ix);
+  }
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within

@@ -9,6 +9,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::rich_text_element::RichTextEditor;
+use crate::ribbon::EditorRibbon;
 use crate::workspace::icons::{AppIcon, icon_button};
 use crate::workspace::Workspace;
 
@@ -17,6 +18,7 @@ pub struct DocumentPanel {
   title: SharedString,
   path: Option<PathBuf>,
   editor: Entity<RichTextEditor>,
+  ribbon: Entity<EditorRibbon>,
   workspace: WeakEntity<Workspace>,
   focus_handle: FocusHandle,
   active: bool,
@@ -29,6 +31,7 @@ impl DocumentPanel {
     workspace: WeakEntity<Workspace>,
     cx: &mut Context<Self>,
   ) -> Self {
+    let ribbon = cx.new(|_| EditorRibbon::new(editor.clone()));
     let title = path
       .as_ref()
       .and_then(|path| path.file_name())
@@ -40,6 +43,7 @@ impl DocumentPanel {
       title: title.into(),
       path,
       editor,
+      ribbon,
       workspace,
       focus_handle: cx.focus_handle(),
       active: false,
@@ -52,6 +56,10 @@ impl DocumentPanel {
 
   pub fn editor(&self) -> Entity<RichTextEditor> {
     self.editor.clone()
+  }
+
+  pub fn ribbon(&self) -> Entity<EditorRibbon> {
+    self.ribbon.clone()
   }
 
   pub fn title_text(&self) -> SharedString {

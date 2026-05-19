@@ -264,6 +264,23 @@ pub struct RichTextEditorStyleState {
   pub highlight: SelectionState<Option<HighlightStyle>>,
 }
 
+/// Runtime behavior preferences for the editor.
+///
+/// This is intentionally separate from document data. Future settings UI can
+/// edit this object without changing saved DB8 content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RichTextEditorConfig {
+  pub smart_word_selection: bool,
+}
+
+impl Default for RichTextEditorConfig {
+  fn default() -> Self {
+    Self {
+      smart_word_selection: true,
+    }
+  }
+}
+
 struct ItemSizesCache {
   width: Pixels,
   paragraph_count: usize,
@@ -377,6 +394,7 @@ pub struct RichTextEditor {
   recovery_path: Option<PathBuf>,
   pub(super) document: Document,
   pub(super) selection: EditorSelection,
+  config: RichTextEditorConfig,
   edit_generation: u64,
   saved_generation: u64,
   next_edit_generation: u64,
@@ -387,9 +405,13 @@ pub struct RichTextEditor {
   recovery_write_pending: bool,
   last_recovery_generation: u64,
   paste_cache: Option<PasteCache>,
-  pending_styles: Option<RunStyles>,
+  pub(super) pending_styles: Option<RunStyles>,
+  pub(super) armed_inline_tool: Option<ArmedInlineTool>,
   selecting: bool,
   drag_granularity: SelectionGranularity,
+  drag_anchor: Option<DocumentOffset>,
+  smart_selection_left_anchor_word: bool,
+  smart_selection_exact_override: bool,
   last_drag_position: Option<Point<Pixels>>,
   pending_text_drag: Option<PendingTextDrag>,
   active_text_drag: Option<ActiveTextDrag>,
@@ -428,6 +450,7 @@ impl RichTextEditor {
       document_path,
       document,
       selection: EditorSelection::caret(),
+      config: RichTextEditorConfig::default(),
       edit_generation: 0,
       saved_generation: 0,
       next_edit_generation: 1,
@@ -439,8 +462,12 @@ impl RichTextEditor {
       last_recovery_generation: 0,
       paste_cache: None,
       pending_styles: None,
+      armed_inline_tool: None,
       selecting: false,
       drag_granularity: SelectionGranularity::Character,
+      drag_anchor: None,
+      smart_selection_left_anchor_word: false,
+      smart_selection_exact_override: false,
       last_drag_position: None,
       pending_text_drag: None,
       active_text_drag: None,
@@ -466,6 +493,19 @@ impl RichTextEditor {
 
   pub fn document(&self) -> &Document {
     &self.document
+  }
+
+  pub fn config(&self) -> &RichTextEditorConfig {
+    &self.config
+  }
+
+  pub fn update_config(
+    &mut self,
+    update: impl FnOnce(&mut RichTextEditorConfig),
+    cx: &mut Context<Self>,
+  ) {
+    update(&mut self.config);
+    cx.notify();
   }
 
   pub fn save_status(&self) -> &SaveStatus {
@@ -857,6 +897,18 @@ impl RichTextEditor {
     self.toggle_underline_kind(None, cx);
   }
 
+  /// Toggle any semantic inline style for the current selection or caret.
+  ///
+  /// The ribbon can call this generic method instead of matching each style to
+  /// a shortcut-specific wrapper like `toggle_cite` or `toggle_emphasis`.
+  pub fn toggle_semantic_style_for_selection(
+    &mut self,
+    semantic: RunSemanticStyle,
+    cx: &mut Context<Self>,
+  ) {
+    self.toggle_semantic_style(semantic, cx);
+  }
+
   pub fn toggle_emphasis(&mut self, cx: &mut Context<Self>) {
     self.toggle_semantic_style(RunSemanticStyle::Emphasis, cx);
   }
@@ -875,6 +927,18 @@ impl RichTextEditor {
 
   pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
     self.set_highlight_internal(Some(highlight), cx);
+  }
+
+  /// Set or clear the highlight style for the current selection or caret.
+  ///
+  /// `None` clears highlights. `Some(...)` applies the requested highlight, or
+  /// toggles it off when the whole selection already has that highlight.
+  pub fn set_highlight_for_selection(
+    &mut self,
+    highlight: Option<HighlightStyle>,
+    cx: &mut Context<Self>,
+  ) {
+    self.set_highlight_internal(highlight, cx);
   }
 
   pub fn clear_highlight(&mut self, cx: &mut Context<Self>) {
@@ -1129,7 +1193,7 @@ impl RichTextEditor {
     }
   }
 
-  fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
+  pub(super) fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
     self.apply_document_edit_with_capture_range(cx, None, edit);
   }
 
@@ -1724,7 +1788,7 @@ impl RichTextEditor {
     self.move_to_offset(target, extend, cx);
   }
 
-  fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
+  pub(super) fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
     self.pending_styles = None;
     self.goal_x = None;
     self.scroll_head_into_view();
@@ -1861,7 +1925,7 @@ impl RichTextEditor {
     });
   }
 
-  fn styles_at_caret(&self) -> RunStyles {
+  pub(super) fn styles_at_caret(&self) -> RunStyles {
     if let Some(styles) = self.pending_styles {
       return styles;
     }
@@ -2272,6 +2336,9 @@ impl RichTextEditor {
     self.last_drag_position = Some(event.position);
     self.goal_x = None;
     let offset = self.hit_test_document_position(event.position, window, cx);
+    self.drag_anchor = None;
+    self.smart_selection_left_anchor_word = false;
+    self.smart_selection_exact_override = false;
     if event.click_count <= 1 && !event.modifiers.shift && !self.selection.is_caret() && offset_in_range(offset, self.selection.normalized()) {
       self.selecting = false;
       self.pending_text_drag = Some(PendingTextDrag {
@@ -2303,6 +2370,7 @@ impl RichTextEditor {
       SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
       SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
+    self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
     cx.notify();
   }
@@ -2342,7 +2410,24 @@ impl RichTextEditor {
     self.autoscroll_for_drag(event.position);
     self.ensure_drag_autoscroll_task(cx);
     let head = self.hit_test_document_position(event.position, window, cx);
-    let selection = expand_drag_selection(&self.document, self.selection.anchor, head, self.drag_granularity);
+    let anchor = self.drag_anchor.unwrap_or(self.selection.anchor);
+    if self.config.smart_word_selection && self.drag_granularity == SelectionGranularity::Character && !event.modifiers.alt {
+      if !offset_is_in_same_word_as(&self.document, anchor, head) {
+        self.smart_selection_left_anchor_word = true;
+      } else if self.smart_selection_left_anchor_word {
+        self.smart_selection_exact_override = true;
+      }
+    }
+    let selection = expand_mouse_selection(
+      &self.document,
+      anchor,
+      head,
+      self.drag_granularity,
+      MouseSelectionOptions {
+        smart_word_selection: self.config.smart_word_selection,
+        exact: event.modifiers.alt || self.smart_selection_exact_override,
+      },
+    );
     if self.selection != selection {
       self.selection = selection;
       self.scroll_head_into_view();
@@ -2367,8 +2452,14 @@ impl RichTextEditor {
       self.reset_caret_blink(cx);
       cx.notify();
     }
+    if self.selecting {
+      self.apply_armed_inline_tool_to_selection(cx);
+    }
     self.selecting = false;
     self.drag_granularity = SelectionGranularity::Character;
+    self.drag_anchor = None;
+    self.smart_selection_left_anchor_word = false;
+    self.smart_selection_exact_override = false;
     self.last_drag_position = None;
     self.autoscroll_active = false;
   }
@@ -2416,7 +2507,7 @@ impl RichTextEditor {
     self.mark_document_changed(after_generation, cx);
   }
 
-  fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
+  pub(super) fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
     self.caret_visible = true;
     self.ensure_caret_blink_task(cx);
   }

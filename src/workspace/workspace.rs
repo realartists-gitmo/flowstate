@@ -629,15 +629,30 @@ impl Workspace {
   }
 
   fn render_ribbon(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let active_ribbon = self
+      .active_document_id
+      .and_then(|active_id| {
+        self
+          .document_panels
+          .iter()
+          .find(|panel| panel.read(cx).id() == active_id)
+          .map(|panel| panel.read(cx).ribbon())
+      });
+    let show_placeholder = active_ribbon.is_none();
+
     h_flex()
       .h(px(76.0))
       .w_full()
       .items_center()
-      .px_2()
       .border_b_1()
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
-      .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Ribbon placeholder"))
+      .when_some(active_ribbon, |this, ribbon| this.child(ribbon))
+      .when(show_placeholder, |this| {
+        this
+          .px_2()
+          .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Ribbon placeholder"))
+      })
   }
 
   fn render_workspace_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

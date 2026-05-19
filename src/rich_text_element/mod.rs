@@ -9,6 +9,8 @@ mod element;
 mod layout;
 mod paint;
 mod persistence;
+mod selection;
+mod tools;
 mod word_boundary;
 
 pub use demo::demo_document;
@@ -20,6 +22,7 @@ pub use editor::*;
 // re-export stays in place.
 #[allow(unused_imports)]
 pub use persistence::{load_or_create_document, read_db8, write_db8};
+pub use tools::ArmedInlineTool;
 
 // Internal imports used by sibling modules via `use super::*;`.
 use document::{InputParagraph, InputRun, ParagraphOffsetIndex, RichClipboardFragment, SOFT_LINE_BREAK, SOFT_LINE_BREAK_STR, paragraphs_mut};
@@ -29,6 +32,7 @@ use element::*;
 use layout::*;
 use paint::*;
 use persistence::recovery_path_for_document;
+use selection::*;
 use word_boundary::*;
 
 // Private re-imports for the test module. Tests live in `mod tests;` (a child
