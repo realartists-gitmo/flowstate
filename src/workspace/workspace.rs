@@ -450,7 +450,6 @@ impl Workspace {
 
     v_flex()
       .flex_1()
-      .size_full()
       .overflow_hidden()
       .bg(cx.theme().background)
       .child(
@@ -566,6 +565,7 @@ impl Workspace {
   fn render_top_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     h_flex()
       .h(px(36.0))
+      .flex_none()
       .w_full()
       .items_center()
       .pl_2()
@@ -1216,7 +1216,7 @@ fn styles_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .on_click(cx.listener(|workspace, _, _, cx| {
-          workspace.styles_settings_open = true;
+          workspace.styles_settings_open = !workspace.styles_settings_open;
           cx.stop_propagation();
           cx.notify();
         })),
