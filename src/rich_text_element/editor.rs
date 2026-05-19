@@ -857,6 +857,18 @@ impl RichTextEditor {
     self.toggle_underline_kind(None, cx);
   }
 
+  /// Toggle any semantic inline style for the current selection or caret.
+  ///
+  /// The ribbon can call this generic method instead of matching each style to
+  /// a shortcut-specific wrapper like `toggle_cite` or `toggle_emphasis`.
+  pub fn toggle_semantic_style_for_selection(
+    &mut self,
+    semantic: RunSemanticStyle,
+    cx: &mut Context<Self>,
+  ) {
+    self.toggle_semantic_style(semantic, cx);
+  }
+
   pub fn toggle_emphasis(&mut self, cx: &mut Context<Self>) {
     self.toggle_semantic_style(RunSemanticStyle::Emphasis, cx);
   }
@@ -875,6 +887,18 @@ impl RichTextEditor {
 
   pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
     self.set_highlight_internal(Some(highlight), cx);
+  }
+
+  /// Set or clear the highlight style for the current selection or caret.
+  ///
+  /// `None` clears highlights. `Some(...)` applies the requested highlight, or
+  /// toggles it off when the whole selection already has that highlight.
+  pub fn set_highlight_for_selection(
+    &mut self,
+    highlight: Option<HighlightStyle>,
+    cx: &mut Context<Self>,
+  ) {
+    self.set_highlight_internal(highlight, cx);
   }
 
   pub fn clear_highlight(&mut self, cx: &mut Context<Self>) {
