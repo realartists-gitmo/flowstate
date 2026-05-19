@@ -393,11 +393,7 @@ impl Workspace {
         let title = panel.title_text();
         let dirty = panel.is_dirty(cx);
         let title = truncate_tab_title(&title, 32);
-        let label = if dirty {
-          format!("{title} *").into()
-        } else {
-          title.into()
-        };
+        let label = if dirty { format!("*{title}").into() } else { title.into() };
         DocumentTab {
           id: panel.id(),
           label,

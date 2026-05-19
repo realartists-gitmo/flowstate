@@ -1,10 +1,10 @@
 use gpui::{
-  Context, Entity, IntoElement, ParentElement as _, Render, Window, div, prelude::*, rgb,
+  Context, Entity, IntoElement, ParentElement as _, Render, Window, div, prelude::*,
 };
 use gpui_component::button::{
   Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _,
 };
-use gpui_component::{Selectable as _, Sizable as _};
+use gpui_component::{ActiveTheme as _, Selectable as _, Sizable as _};
 
 use crate::rich_text_element::{
   ArmedInlineTool, HighlightStyle, ParagraphStyle, RichTextEditor, RichTextEditorStyleState,
@@ -74,8 +74,8 @@ impl Render for EditorRibbon {
       .px_3()
       .py_2()
       .border_b_1()
-      .border_color(rgb(0xd8dce2))
-      .bg(rgb(0xf6f7f9))
+      .border_color(cx.theme().border)
+      .bg(cx.theme().secondary)
       .child(ribbon_group(
         "Styles",
         ButtonGroup::new("paragraph-styles")
@@ -94,6 +94,7 @@ impl Render for EditorRibbon {
                 });
               })
           })),
+        cx,
       ))
       .child(ribbon_group(
         "Inline",
@@ -129,6 +130,7 @@ impl Render for EditorRibbon {
                 });
               })
           }),
+        cx,
       ))
       .child(ribbon_group(
         "Highlight",
@@ -164,6 +166,7 @@ impl Render for EditorRibbon {
                 });
               })
           }),
+        cx,
       ))
       .child(ribbon_group(
         "Reset",
@@ -179,15 +182,16 @@ impl Render for EditorRibbon {
               });
             })
         },
+        cx,
       ))
   }
 }
 
-fn ribbon_group(label: &'static str, controls: impl IntoElement) -> impl IntoElement {
+fn ribbon_group(label: &'static str, controls: impl IntoElement, cx: &mut Context<EditorRibbon>) -> impl IntoElement {
   div()
     .flex()
     .flex_col()
     .gap_1()
-    .child(div().text_xs().text_color(rgb(0x5c6675)).child(label))
+    .child(div().text_xs().text_color(cx.theme().muted_foreground).child(label))
     .child(controls)
 }
