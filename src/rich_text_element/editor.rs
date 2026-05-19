@@ -264,6 +264,23 @@ pub struct RichTextEditorStyleState {
   pub highlight: SelectionState<Option<HighlightStyle>>,
 }
 
+/// Runtime behavior preferences for the editor.
+///
+/// This is intentionally separate from document data. Future settings UI can
+/// edit this object without changing saved DB8 content.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RichTextEditorConfig {
+  pub smart_word_selection: bool,
+}
+
+impl Default for RichTextEditorConfig {
+  fn default() -> Self {
+    Self {
+      smart_word_selection: true,
+    }
+  }
+}
+
 struct ItemSizesCache {
   width: Pixels,
   paragraph_count: usize,
@@ -377,6 +394,7 @@ pub struct RichTextEditor {
   recovery_path: Option<PathBuf>,
   pub(super) document: Document,
   pub(super) selection: EditorSelection,
+  config: RichTextEditorConfig,
   edit_generation: u64,
   saved_generation: u64,
   next_edit_generation: u64,
@@ -391,6 +409,9 @@ pub struct RichTextEditor {
   pub(super) armed_inline_tool: Option<ArmedInlineTool>,
   selecting: bool,
   drag_granularity: SelectionGranularity,
+  drag_anchor: Option<DocumentOffset>,
+  smart_selection_left_anchor_word: bool,
+  smart_selection_exact_override: bool,
   last_drag_position: Option<Point<Pixels>>,
   pending_text_drag: Option<PendingTextDrag>,
   active_text_drag: Option<ActiveTextDrag>,
@@ -429,6 +450,7 @@ impl RichTextEditor {
       document_path,
       document,
       selection: EditorSelection::caret(),
+      config: RichTextEditorConfig::default(),
       edit_generation: 0,
       saved_generation: 0,
       next_edit_generation: 1,
@@ -443,6 +465,9 @@ impl RichTextEditor {
       armed_inline_tool: None,
       selecting: false,
       drag_granularity: SelectionGranularity::Character,
+      drag_anchor: None,
+      smart_selection_left_anchor_word: false,
+      smart_selection_exact_override: false,
       last_drag_position: None,
       pending_text_drag: None,
       active_text_drag: None,
@@ -468,6 +493,19 @@ impl RichTextEditor {
 
   pub fn document(&self) -> &Document {
     &self.document
+  }
+
+  pub fn config(&self) -> &RichTextEditorConfig {
+    &self.config
+  }
+
+  pub fn update_config(
+    &mut self,
+    update: impl FnOnce(&mut RichTextEditorConfig),
+    cx: &mut Context<Self>,
+  ) {
+    update(&mut self.config);
+    cx.notify();
   }
 
   pub fn save_status(&self) -> &SaveStatus {
@@ -2298,6 +2336,9 @@ impl RichTextEditor {
     self.last_drag_position = Some(event.position);
     self.goal_x = None;
     let offset = self.hit_test_document_position(event.position, window, cx);
+    self.drag_anchor = None;
+    self.smart_selection_left_anchor_word = false;
+    self.smart_selection_exact_override = false;
     if event.click_count <= 1 && !event.modifiers.shift && !self.selection.is_caret() && offset_in_range(offset, self.selection.normalized()) {
       self.selecting = false;
       self.pending_text_drag = Some(PendingTextDrag {
@@ -2329,6 +2370,7 @@ impl RichTextEditor {
       SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
       SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
+    self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
     cx.notify();
   }
@@ -2368,7 +2410,24 @@ impl RichTextEditor {
     self.autoscroll_for_drag(event.position);
     self.ensure_drag_autoscroll_task(cx);
     let head = self.hit_test_document_position(event.position, window, cx);
-    let selection = expand_drag_selection(&self.document, self.selection.anchor, head, self.drag_granularity);
+    let anchor = self.drag_anchor.unwrap_or(self.selection.anchor);
+    if self.config.smart_word_selection && self.drag_granularity == SelectionGranularity::Character && !event.modifiers.alt {
+      if !offset_is_in_same_word_as(&self.document, anchor, head) {
+        self.smart_selection_left_anchor_word = true;
+      } else if self.smart_selection_left_anchor_word {
+        self.smart_selection_exact_override = true;
+      }
+    }
+    let selection = expand_mouse_selection(
+      &self.document,
+      anchor,
+      head,
+      self.drag_granularity,
+      MouseSelectionOptions {
+        smart_word_selection: self.config.smart_word_selection,
+        exact: event.modifiers.alt || self.smart_selection_exact_override,
+      },
+    );
     if self.selection != selection {
       self.selection = selection;
       self.scroll_head_into_view();
@@ -2398,6 +2457,9 @@ impl RichTextEditor {
     }
     self.selecting = false;
     self.drag_granularity = SelectionGranularity::Character;
+    self.drag_anchor = None;
+    self.smart_selection_left_anchor_word = false;
+    self.smart_selection_exact_override = false;
     self.last_drag_position = None;
     self.autoscroll_active = false;
   }

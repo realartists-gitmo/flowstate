@@ -9,6 +9,7 @@ mod element;
 mod layout;
 mod paint;
 mod persistence;
+mod selection;
 mod tools;
 mod word_boundary;
 
@@ -31,6 +32,7 @@ use element::*;
 use layout::*;
 use paint::*;
 use persistence::recovery_path_for_document;
+use selection::*;
 use word_boundary::*;
 
 // Private re-imports for the test module. Tests live in `mod tests;` (a child

@@ -22,11 +22,11 @@ fn is_debate_connector(text: &str, byte: usize) -> bool {
   prev.is_some_and(is_word_char) && next.is_some_and(is_word_char)
 }
 
-fn is_debate_word_byte(text: &str, byte: usize) -> bool {
+pub(super) fn is_debate_word_byte(text: &str, byte: usize) -> bool {
   debate_word_char_at(text, byte).is_some_and(is_word_char) || is_debate_connector(text, byte)
 }
 
-fn previous_char_boundary(text: &str, byte: usize) -> usize {
+pub(super) fn previous_char_boundary(text: &str, byte: usize) -> usize {
   text[..byte]
     .char_indices()
     .next_back()
@@ -34,7 +34,7 @@ fn previous_char_boundary(text: &str, byte: usize) -> usize {
     .unwrap_or(0)
 }
 
-fn next_char_boundary(text: &str, byte: usize) -> usize {
+pub(super) fn next_char_boundary(text: &str, byte: usize) -> usize {
   let Some(ch) = debate_word_char_at(text, byte) else {
     return text.len();
   };
@@ -60,6 +60,10 @@ fn previous_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+pub(super) fn previous_debate_word_boundary_in_paragraph_text(text: &str, byte: usize) -> usize {
+  previous_debate_word_boundary(text, byte)
+}
+
 fn next_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte < text.len() && !is_debate_word_byte(text, byte) {
@@ -69,6 +73,10 @@ fn next_debate_word_boundary(text: &str, mut byte: usize) -> usize {
     byte = next_char_boundary(text, byte);
   }
   byte
+}
+
+pub(super) fn next_debate_word_boundary_in_paragraph_text(text: &str, byte: usize) -> usize {
+  next_debate_word_boundary(text, byte)
 }
 
 pub(super) fn previous_debate_word_boundary_in_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
