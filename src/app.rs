@@ -1,7 +1,9 @@
 use std::path::PathBuf;
 
 use gpui::{App, Application, Context, Entity, IntoElement, Render, Window, div, prelude::*, rgb};
+use gpui_component::{Theme, ThemeRegistry};
 
+use crate::app_settings::load_app_settings;
 use crate::commands::register_default_keybindings;
 use crate::rich_text_element::{Document, RichTextEditor, demo_document, write_db8};
 use crate::workspace::open_workspace_window;
@@ -63,9 +65,23 @@ pub fn write_demo_document() -> anyhow::Result<()> {
 pub fn run_standalone(document_path: PathBuf) {
   Application::new().with_assets(gpui_component_assets::Assets).run(|cx: &mut App| {
     gpui_component::init(cx);
+    apply_saved_theme(cx);
     register_rich_text_editor_keybindings(cx);
     open_workspace_window(document_path, cx);
     cx.activate(true);
   });
+}
+
+fn apply_saved_theme(cx: &mut App) {
+  let Some(theme_name) = load_app_settings().theme_name else {
+    return;
+  };
+  let Some(theme) = ThemeRegistry::global(cx).themes().get(theme_name.as_str()).cloned() else {
+    return;
+  };
+
+  let mode = theme.mode;
+  Theme::global_mut(cx).apply_config(&theme);
+  Theme::change(mode, None, cx);
 }
 

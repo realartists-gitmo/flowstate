@@ -3,16 +3,18 @@ use std::{cell::Cell, collections::HashSet, path::PathBuf, rc::Rc};
 use gpui::{
   App, Bounds, ClickEvent, Context, Entity, InteractiveElement, IntoElement, MouseButton, PromptButton, PromptLevel, Render, ScrollHandle,
   SharedString, Subscription, Window, WindowBounds, WindowControlArea, WindowOptions, PathPromptOptions, Pixels, TitlebarOptions, div, prelude::*,
-  point, px, rgb, size,
+  black, point, px, size, white,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::list::ListItem;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
-use gpui_component::{Disableable, IconName, Selectable, Sizable, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable, IconName, Selectable, Sizable, Theme, ThemeRegistry, h_flex, v_flex};
 use uuid::Uuid;
 
+use crate::app_settings::save_theme_name;
 use crate::rich_text_element::{Document, ParagraphStyle, RichTextEditor, demo_document, load_or_create_document};
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::icons::{AppIcon, icon_button};
@@ -401,9 +403,9 @@ impl Render for Workspace {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
       .size_full()
-      .bg(rgb(0xf1f5f9))
+      .bg(cx.theme().background)
       .child(self.render_top_bar(window, cx))
-      .when(!self.ribbon_collapsed, |this| this.child(self.render_ribbon()))
+      .when(!self.ribbon_collapsed, |this| this.child(self.render_ribbon(cx)))
       .child(self.render_workspace_body(cx))
       .child(self.render_status_bar(cx))
   }
@@ -417,8 +419,8 @@ impl Workspace {
       .items_center()
       .pl_2()
       .border_b_1()
-      .border_color(rgb(0xdbe3ee))
-      .bg(rgb(0xffffff))
+      .border_color(cx.theme().title_bar_border)
+      .bg(cx.theme().title_bar)
       // With a transparent system titlebar, this GPUI-drawn bar becomes the
       // visual titlebar. Let empty space in it drag the native window.
       .on_mouse_down(MouseButton::Left, |_, window, _| window.start_window_move())
@@ -429,7 +431,7 @@ impl Workspace {
           .gap_1()
           .child(top_bar_button("top-file", "File"))
           .child(top_bar_button("top-styles", "Styles"))
-          .child(top_bar_button("top-themes", "Themes"))
+          .child(theme_top_bar_button(cx))
           .child(top_bar_button("top-settings", "Settings")),
       )
       .child(div().flex_1())
@@ -449,6 +451,7 @@ impl Workspace {
           window.minimize_window();
         }),
         false,
+        cx,
       ))
       .child(window_control_button(
         "window-maximize",
@@ -459,6 +462,7 @@ impl Workspace {
           window.zoom_window();
         }),
         false,
+        cx,
       ))
       .child(window_control_button(
         "window-close",
@@ -469,19 +473,20 @@ impl Workspace {
           workspace.request_close_window(window, cx);
         }),
         true,
+        cx,
       ))
   }
 
-  fn render_ribbon(&self) -> impl IntoElement {
+  fn render_ribbon(&self, cx: &mut Context<Self>) -> impl IntoElement {
     h_flex()
       .h(px(76.0))
       .w_full()
       .items_center()
       .px_2()
       .border_b_1()
-      .border_color(rgb(0xdbe3ee))
-      .bg(rgb(0xf8fafc))
-      .child(div().text_xs().text_color(rgb(0x64748b)).child("Ribbon placeholder"))
+      .border_color(cx.theme().border)
+      .bg(cx.theme().background)
+      .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Ribbon placeholder"))
   }
 
   fn render_workspace_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -519,7 +524,7 @@ impl Workspace {
           .size(px(300.0))
           .size_range(px(220.0)..px(520.0))
           .grow(false)
-          .child(self.render_toolkit()),
+          .child(self.render_toolkit(cx)),
       )
   }
 
@@ -534,8 +539,9 @@ impl Workspace {
       .gap_1()
       .p_2()
       .border_r_1()
-      .border_color(rgb(0xdbe3ee))
-      .bg(rgb(0xf8fafc))
+      .border_color(cx.theme().sidebar_border)
+      .bg(cx.theme().sidebar)
+      .text_color(cx.theme().sidebar_foreground)
       .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Outline"))
       .child(
         div()
@@ -592,7 +598,7 @@ impl Workspace {
                       .min_w_0()
                       .px_1()
                       .overflow_hidden()
-                      .text_color(rgb(0x0f172a))
+                      .text_color(cx.theme().sidebar_foreground)
                       .whitespace_nowrap()
                       .when(is_active_outline, |this| {
                         this.child(
@@ -602,9 +608,9 @@ impl Workspace {
                             .left_0()
                             .right_0()
                             .bottom_0()
-                            .bg(rgb(0xdbeafe))
+                            .bg(cx.theme().sidebar_accent)
                             .border_1()
-                            .border_color(rgb(0x93c5fd))
+                            .border_color(cx.theme().primary)
                             .rounded(px(4.0)),
                         )
                       })
@@ -630,7 +636,7 @@ impl Workspace {
       .w_full()
       .h_full()
       .overflow_hidden()
-      .bg(rgb(0xffffff))
+      .bg(cx.theme().background)
       .when(!self.document_panels.is_empty(), |this| this.child(self.render_document_tab_bar(active_index, cx)))
       .child(
         div()
@@ -645,10 +651,17 @@ impl Workspace {
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
+    let active_tab_fg = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).document().theme.default_text_color)
+      .unwrap_or_else(black);
     TabBar::new("document-tab-bar")
       .xsmall()
       .track_scroll(&self.tab_bar_scroll_handle)
       .menu(true)
+      .active_tab_bg(white())
+      .active_tab_fg(active_tab_fg)
       .selected_index(active_index)
       .on_click({
         let tabs = tabs.clone();
@@ -688,7 +701,7 @@ impl Workspace {
       .items_center()
       .justify_center()
       .gap_3()
-      .bg(rgb(0xffffff))
+      .bg(cx.theme().background)
       .child(div().text_xl().font_weight(gpui::FontWeight::SEMIBOLD).child("No document open"))
       .child(
         h_flex()
@@ -698,30 +711,29 @@ impl Workspace {
       )
   }
 
-  fn render_toolkit(&self) -> impl IntoElement {
+  fn render_toolkit(&self, cx: &mut Context<Self>) -> impl IntoElement {
     v_flex()
       .size_full()
       .h_full()
       .gap_2()
       .p_3()
       .border_l_1()
-      .border_color(rgb(0xdbe3ee))
-      .bg(rgb(0xf8fafc))
+      .border_color(cx.theme().border)
+      .bg(cx.theme().background)
       .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child("Toolkit"))
-      .child(div().text_sm().text_color(rgb(0x64748b)).child("Search, file tools, and document utilities will live here."))
+      .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Search, file tools, and document utilities will live here."))
   }
 
   fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-    let _ = cx;
     h_flex()
       .h(px(26.0))
       .w_full()
       .items_center()
       .px_2()
       .border_t_1()
-      .border_color(rgb(0xdbe3ee))
-      .bg(rgb(0xffffff))
-      .child(div().text_xs().text_color(rgb(0x64748b)).child("Bottom bar placeholder"))
+      .border_color(cx.theme().border)
+      .bg(cx.theme().background)
+      .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Bottom bar placeholder"))
   }
 }
 
@@ -1008,6 +1020,7 @@ fn window_control_button(
   area: WindowControlArea,
   on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
   destructive: bool,
+  cx: &mut Context<Workspace>,
 ) -> impl IntoElement {
   div()
     .id(id)
@@ -1018,12 +1031,12 @@ fn window_control_button(
     .items_center()
     .justify_center()
     .text_size(px(12.0))
-    .text_color(rgb(0x475569))
+    .text_color(cx.theme().muted_foreground)
     .hover(|this| {
       if destructive {
-        this.bg(rgb(0xdc2626)).text_color(rgb(0xffffff))
+        this.bg(cx.theme().danger).text_color(cx.theme().danger_foreground)
       } else {
-        this.bg(rgb(0xe2e8f0)).text_color(rgb(0x0f172a))
+        this.bg(cx.theme().secondary_hover).text_color(cx.theme().foreground)
       }
     })
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1049,6 +1062,58 @@ fn top_bar_button(id: &'static str, label: &'static str) -> impl IntoElement {
         .ghost()
         .on_click(|_, _, cx| cx.stop_propagation()),
     )
+}
+
+fn theme_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+  let current_theme = Theme::global(cx).theme_name().to_string();
+  let theme_names = ThemeRegistry::global(cx)
+    .sorted_themes()
+    .into_iter()
+    .map(|theme| theme.name.to_string())
+    .collect::<Vec<_>>();
+
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    .child(
+      Button::new("top-themes")
+        .label("Themes")
+        .xsmall()
+        .ghost()
+        .dropdown_menu(move |menu, _, _| {
+          theme_names.iter().fold(menu, |menu, theme_name| {
+            let selected = theme_name == &current_theme;
+            let label = theme_name.clone();
+            let theme_name = theme_name.clone();
+            menu.item(
+              PopupMenuItem::new(label)
+                .checked(selected)
+                .on_click(move |_, window, cx| {
+                  apply_app_theme(&theme_name, Some(window), cx);
+                }),
+            )
+          })
+        }),
+    )
+}
+
+fn apply_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) {
+  let Some(theme) = ThemeRegistry::global(cx).themes().get(theme_name).cloned() else {
+    return;
+  };
+
+  let mode = theme.mode;
+  Theme::global_mut(cx).apply_config(&theme);
+  Theme::change(mode, window, cx);
+  cx.refresh_windows();
+
+  if let Err(error) = save_theme_name(theme_name) {
+    eprintln!("failed to save theme setting: {error}");
+  }
 }
 
 fn safe_prefix_boundary(text: &str, max: usize) -> usize {

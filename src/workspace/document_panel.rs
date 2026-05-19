@@ -2,9 +2,9 @@ use std::path::PathBuf;
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, WeakEntity, Window, div, prelude::*,
-  rgb,
 };
 use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelState};
+use gpui_component::ActiveTheme as _;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -148,10 +148,10 @@ impl Panel for DocumentPanel {
 }
 
 impl Render for DocumentPanel {
-  fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     div()
       .size_full()
-      .bg(rgb(0xffffff))
+      .bg(cx.theme().background)
       .child(self.editor.clone())
   }
 }

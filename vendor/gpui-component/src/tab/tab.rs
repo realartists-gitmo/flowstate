@@ -393,6 +393,8 @@ pub struct Tab {
     size: Size,
     pub(super) disabled: bool,
     pub(super) selected: bool,
+    pub(super) active_bg: Option<Hsla>,
+    pub(super) active_fg: Option<Hsla>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
 }
 
@@ -436,6 +438,8 @@ impl Default for Tab {
             children: Vec::new(),
             disabled: false,
             selected: false,
+            active_bg: None,
+            active_fg: None,
             prefix: None,
             suffix: None,
             variant: TabVariant::default(),
@@ -520,6 +524,18 @@ impl Tab {
         self
     }
 
+    /// Override the outer background color used when this tab is selected.
+    pub fn active_bg(mut self, bg: Hsla) -> Self {
+        self.active_bg = Some(bg);
+        self
+    }
+
+    /// Override the foreground color used when this tab is selected.
+    pub fn active_fg(mut self, fg: Hsla) -> Self {
+        self.active_fg = Some(fg);
+        self
+    }
+
     /// Set id to the tab.
     pub(super) fn id(mut self, id: impl Into<ElementId>) -> Self {
         self.id = id.into();
@@ -572,6 +588,12 @@ impl RenderOnce for Tab {
         } else {
             self.variant.normal(cx)
         };
+        if self.selected && let Some(active_bg) = self.active_bg {
+            tab_style.bg = active_bg;
+        }
+        if self.selected && let Some(active_fg) = self.active_fg {
+            tab_style.fg = active_fg;
+        }
         let mut hover_style = self.variant.hovered(self.selected, cx);
         if self.disabled {
             tab_style = self.variant.disabled(self.selected, cx);

@@ -9,7 +9,7 @@ use std::{
 use gpui::{
   App, Bounds, ClipboardItem, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
   MouseMoveEvent, MouseUpEvent, Pixels, Point, Render, ScrollStrategy, Size, Subscription, Timer, Window, actions, div, point, prelude::*,
-  px, size,
+  px, rgb, size,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
@@ -2543,6 +2543,7 @@ impl Render for RichTextEditor {
       .size_full()
       .id("rich-text-editor")
       .relative()
+      .bg(rgb(0xffffff))
       .track_focus(&self.focus_handle(cx))
       .key_context("RichTextEditor")
       .cursor(CursorStyle::IBeam)

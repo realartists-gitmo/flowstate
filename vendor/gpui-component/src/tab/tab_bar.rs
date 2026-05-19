@@ -1,5 +1,5 @@
 use gpui::{
-    div, prelude::FluentBuilder as _, px, AnyElement, App, Corner, Div, Edges, ElementId,
+    div, prelude::FluentBuilder as _, px, AnyElement, App, Corner, Div, Edges, ElementId, Hsla,
     InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful,
     StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
 };
@@ -22,6 +22,8 @@ pub struct TabBar {
     children: SmallVec<[Tab; 2]>,
     last_empty_space: AnyElement,
     selected_index: Option<usize>,
+    active_tab_bg: Option<Hsla>,
+    active_tab_fg: Option<Hsla>,
     variant: TabVariant,
     size: Size,
     menu: bool,
@@ -44,6 +46,8 @@ impl TabBar {
             size: Size::default(),
             last_empty_space: div().w_3().into_any_element(),
             selected_index: None,
+            active_tab_bg: None,
+            active_tab_fg: None,
             on_click: None,
             menu: false,
             tab_item_top_offset: px(0.),
@@ -119,6 +123,18 @@ impl TabBar {
     /// Set the selected index of the TabBar.
     pub fn selected_index(mut self, index: usize) -> Self {
         self.selected_index = Some(index);
+        self
+    }
+
+    /// Override the outer background color used by the selected tab.
+    pub fn active_tab_bg(mut self, bg: Hsla) -> Self {
+        self.active_tab_bg = Some(bg);
+        self
+    }
+
+    /// Override the foreground color used by the selected tab.
+    pub fn active_tab_fg(mut self, fg: Hsla) -> Self {
+        self.active_tab_fg = Some(fg);
         self
     }
 
@@ -255,6 +271,12 @@ impl RenderOnce for TabBar {
                             .mt(self.tab_item_top_offset)
                             .with_variant(self.variant)
                             .with_size(self.size)
+                            .when_some(self.active_tab_bg, |this, active_bg| {
+                                this.active_bg(active_bg)
+                            })
+                            .when_some(self.active_tab_fg, |this, active_fg| {
+                                this.active_fg(active_fg)
+                            })
                             .when_some(self.selected_index, |this, selected_ix| {
                                 this.selected(selected_ix == ix)
                             })
