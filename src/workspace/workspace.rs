@@ -1092,6 +1092,7 @@ fn theme_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _, _| {
+          let menu = menu.scrollable(true);
           theme_names.iter().fold(menu, |menu, theme_name| {
             let selected = theme_name == &current_theme;
             let label = theme_name.clone();
