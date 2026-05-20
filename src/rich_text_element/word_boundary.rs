@@ -154,6 +154,16 @@ pub(super) fn next_debate_word_boundary_in_document(document: &Document, offset:
 }
 
 pub(super) fn selection_for_word_at(document: &Document, offset: DocumentOffset) -> EditorSelection {
+  let Some(paragraph) = document.paragraphs.get(offset.paragraph) else {
+    return EditorSelection {
+      anchor: DocumentOffset::default(),
+      head: DocumentOffset::default(),
+    };
+  };
+  let paragraph_len = paragraph_text_len(paragraph);
+  if paragraph_len == 0 || offset.byte >= paragraph_len {
+    return selection_for_paragraph_at(document, offset.paragraph);
+  }
   EditorSelection {
     anchor: previous_debate_word_boundary_in_document(document, offset),
     head: next_debate_word_boundary_in_document(document, offset),

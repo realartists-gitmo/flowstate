@@ -28,6 +28,11 @@ impl RichTextEditor {
     tool: ArmedInlineTool,
     cx: &mut Context<Self>,
   ) {
+    if matches!(self.selected_block, Some(BlockSelection::TableCell { .. })) {
+      self.armed_inline_tool = None;
+      self.force_apply_inline_tool_to_current_target(tool, cx);
+      return;
+    }
     if self.selection.is_caret() {
       self.armed_inline_tool = Some(tool);
       self.apply_inline_tool_to_pending_styles(tool);
@@ -77,6 +82,29 @@ impl RichTextEditor {
   }
 
   fn force_apply_inline_tool_to_selection(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) {
+    self.force_apply_inline_tool_to_current_target(tool, cx);
+  }
+
+  fn force_apply_inline_tool_to_current_target(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+      self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
+        if paragraph.text.is_empty() {
+          return;
+        }
+        if paragraph.paragraph.runs.is_empty() {
+          paragraph.paragraph.runs.push(TextRun {
+            len: paragraph.text.len(),
+            styles: RunStyles::default(),
+          });
+        }
+        for run in &mut paragraph.paragraph.runs {
+          apply_inline_tool_to_styles(tool, &mut run.styles);
+        }
+        paragraph.paragraph.runs = merge_adjacent_runs(std::mem::take(&mut paragraph.paragraph.runs));
+        paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
+      });
+      return;
+    }
     if self.selection.is_caret() {
       return;
     }

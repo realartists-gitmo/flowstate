@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::{COMMAND_SPECS, CommandId};
 use crate::rich_text_element::{
   Backspace, ClearFormatting, ClearHighlight, Copy, Cut, Delete, DeleteWordBackward,
-  DeleteWordForward, InsertNewline, InsertSoftLineBreak, MoveDocumentEnd, MoveDocumentStart,
+  DeleteWordForward, InsertEquation, InsertImage, InsertNewline, InsertSoftLineBreak, InsertTable, MoveDocumentEnd, MoveDocumentStart,
   MoveDown, MoveLeft, MoveLineEnd, MoveLineStart, MoveRight, MoveUp, MoveWordLeft,
   MoveWordRight, PageDown, PageUp, Paste, Redo, Save, SelectAll, SelectDocumentEnd,
   SelectDocumentStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectPageDown,
@@ -133,6 +133,9 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     CommandId::SetHighlightSpoken => Box::new(SetHighlightSpoken),
     CommandId::ClearFormatting => Box::new(ClearFormatting),
     CommandId::ClearHighlight => Box::new(ClearHighlight),
+    CommandId::InsertImage => Box::new(InsertImage),
+    CommandId::InsertTable => Box::new(InsertTable),
+    CommandId::InsertEquation => Box::new(InsertEquation),
     CommandId::Backspace => Box::new(Backspace),
     CommandId::Delete => Box::new(Delete),
     CommandId::InsertNewline => Box::new(InsertNewline),

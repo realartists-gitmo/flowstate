@@ -13,6 +13,9 @@ use super::*;
 #[derive(Clone)]
 pub(super) struct LayoutState {
   pub(super) paragraphs: Vec<LaidOutParagraph>,
+  pub(super) blocks: Vec<LaidOutBlock>,
+  pub(super) paragraph_to_block: Vec<usize>,
+  pub(super) block_to_paragraph: Vec<Option<usize>>,
   pub(super) bounds: Option<Bounds<Pixels>>,
   pub(super) size: Size<Pixels>,
   pub(super) width: Pixels,
@@ -20,6 +23,18 @@ pub(super) struct LayoutState {
 }
 
 impl LayoutState {
+  pub(super) fn block_count(&self) -> usize {
+    self.blocks.len()
+  }
+
+  pub(super) fn paragraph_block_ix(&self, paragraph_ix: usize) -> Option<usize> {
+    self.paragraph_to_block.get(paragraph_ix).copied()
+  }
+
+  pub(super) fn block_paragraph_ix(&self, block_ix: usize) -> Option<usize> {
+    self.block_to_paragraph.get(block_ix).copied().flatten()
+  }
+
   pub(super) fn hit_test(&self, position: Point<Pixels>) -> DocumentOffset {
     let position = match self.bounds {
       Some(bounds) => position - bounds.origin,
@@ -54,6 +69,50 @@ pub(super) struct LaidOutParagraph {
   pub(super) bottom: Pixels,
   pub(super) lines: Vec<LaidOutLine>,
   pub(super) borders: Vec<RunRect>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(super) enum LaidOutBlock {
+  Paragraph(LaidOutParagraph),
+  Image(LaidOutObjectBlock),
+  Equation(LaidOutObjectBlock),
+  Table(LaidOutTable),
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(super) struct LaidOutObjectBlock {
+  pub(super) block_ix: usize,
+  pub(super) top: Pixels,
+  pub(super) bottom: Pixels,
+  pub(super) bounds: Bounds<Pixels>,
+  pub(super) render_ready: bool,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(super) struct LaidOutTable {
+  pub(super) block_ix: usize,
+  pub(super) top: Pixels,
+  pub(super) bottom: Pixels,
+  pub(super) bounds: Bounds<Pixels>,
+  pub(super) rows: Vec<LaidOutTableRow>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(super) struct LaidOutTableRow {
+  pub(super) top: Pixels,
+  pub(super) bottom: Pixels,
+  pub(super) cells: Vec<LaidOutTableCell>,
+}
+
+#[derive(Clone)]
+#[allow(dead_code)]
+pub(super) struct LaidOutTableCell {
+  pub(super) bounds: Bounds<Pixels>,
+  pub(super) blocks: Vec<LaidOutBlock>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -406,6 +465,9 @@ pub(super) fn build_layout(
   }
 
   let layout = LayoutState {
+    blocks: paragraphs.iter().cloned().map(LaidOutBlock::Paragraph).collect(),
+    paragraph_to_block: (0..paragraphs.len()).collect(),
+    block_to_paragraph: (0..paragraphs.len()).map(Some).collect(),
     paragraphs,
     bounds: None,
     size: size(max_width, y + document.theme.pageless_inset_bottom),
@@ -415,7 +477,11 @@ pub(super) fn build_layout(
   log_timing(
     "build layout",
     timing,
-    format!("paragraphs={} shaped={shaped_count} reused={reused_count}", layout.paragraphs.len()),
+    format!(
+      "blocks={} paragraphs={} shaped={shaped_count} reused={reused_count}",
+      layout.block_count(),
+      layout.paragraphs.len()
+    ),
   );
   layout
 }
@@ -436,6 +502,9 @@ pub(super) fn build_single_paragraph_layout(
     height += document.theme.pageless_inset_bottom;
   }
   let layout = LayoutState {
+    blocks: vec![LaidOutBlock::Paragraph(paragraph.clone())],
+    paragraph_to_block: vec![0],
+    block_to_paragraph: vec![Some(paragraph_ix)],
     paragraphs: vec![paragraph],
     bounds: None,
     size: size(max_width.max(width), height),
@@ -448,6 +517,348 @@ pub(super) fn build_single_paragraph_layout(
     format!("paragraph={paragraph_ix} shaped={} reused={}", usize::from(!reused), usize::from(reused)),
   );
   layout
+}
+
+#[allow(dead_code)]
+pub(super) fn build_structural_block_layout(
+  document: &Document,
+  width: Pixels,
+  previous_layout: Option<&LayoutState>,
+  window: &mut Window,
+  cx: &mut App,
+) -> Vec<LaidOutBlock> {
+  let mut y = document.theme.pageless_inset_top;
+  let mut paragraph_ix = 0;
+  let previous_layout = previous_layout.filter(|layout| layout.width == width);
+  let mut blocks = Vec::with_capacity(document.blocks.len());
+
+  for (block_ix, block) in document.blocks.iter().enumerate() {
+    match block {
+      Block::Paragraph(_) => {
+        if paragraph_ix >= document.paragraphs.len() {
+          continue;
+        }
+        let previous_paragraph = previous_layout.and_then(|layout| paragraph_layout(layout, paragraph_ix));
+        let (paragraph, next_y, _, _) = layout_paragraph_at(document, paragraph_ix, width, y, previous_paragraph, window, cx);
+        y = next_y;
+        paragraph_ix += 1;
+        blocks.push(LaidOutBlock::Paragraph(paragraph));
+      },
+      Block::Image(image) => {
+        let height = image_placeholder_height(document, image, width);
+        let bounds = structural_block_bounds(document, width, y, height);
+        blocks.push(LaidOutBlock::Image(LaidOutObjectBlock {
+          block_ix,
+          top: y,
+          bottom: y + height,
+          bounds,
+          render_ready: false,
+        }));
+        y += height + document.theme.paragraph_after;
+      },
+      Block::Equation(equation) => {
+        let height = equation_placeholder_height(document, equation);
+        let bounds = structural_block_bounds(document, width, y, height);
+        blocks.push(LaidOutBlock::Equation(LaidOutObjectBlock {
+          block_ix,
+          top: y,
+          bottom: y + height,
+          bounds,
+          render_ready: false,
+        }));
+        y += height + document.theme.paragraph_after;
+      },
+      Block::Table(table) => {
+        let table = layout_table_block(document, block_ix, table, width, y, window, cx);
+        y = table.bottom + document.theme.paragraph_after;
+        blocks.push(LaidOutBlock::Table(table));
+      },
+    }
+  }
+
+  blocks
+}
+
+fn structural_block_bounds(document: &Document, width: Pixels, y: Pixels, height: Pixels) -> Bounds<Pixels> {
+  let left = document.theme.pageless_inset_x;
+  let block_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  Bounds::new(point(left, y), size(block_width, height.max(px(1.0))))
+}
+
+fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
+  let available_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let intrinsic = image_intrinsic_size(document, image);
+  match image.sizing {
+    ImageSizing::Fixed { height_px: Some(height_px), .. } => px(height_px as f32),
+    ImageSizing::Fixed { width_px, height_px: None } => image_height_for_width(intrinsic, px(width_px as f32)).unwrap_or(px(160.0)),
+    ImageSizing::FitWidth => image_height_for_width(intrinsic, available_width).unwrap_or((available_width * 0.5625).max(px(72.0))),
+    ImageSizing::Intrinsic => intrinsic.map(|(_, height)| height).unwrap_or(px(160.0)),
+  }
+}
+
+#[cfg(test)]
+pub(super) fn image_layout_height_for_test(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
+  image_placeholder_height(document, image, width)
+}
+
+fn image_intrinsic_size(document: &Document, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
+  let asset = document.assets.assets.get(&image.asset_id)?;
+  let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
+  if size.width == 0 || size.height == 0 {
+    return None;
+  }
+  Some((px(size.width as f32), px(size.height as f32)))
+}
+
+fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) -> Option<Pixels> {
+  let (intrinsic_width, intrinsic_height) = intrinsic?;
+  let intrinsic_width: f32 = intrinsic_width.into();
+  let intrinsic_height: f32 = intrinsic_height.into();
+  if intrinsic_width <= 0.0 || intrinsic_height <= 0.0 {
+    return None;
+  }
+  let width: f32 = width.into();
+  Some(px(((width / intrinsic_width) * intrinsic_height).max(1.0)))
+}
+
+fn equation_placeholder_height(document: &Document, equation: &EquationBlock) -> Pixels {
+  match equation.display {
+    EquationDisplay::Display => (document.theme.body_font_size * 2.5).max(px(40.0)),
+    EquationDisplay::InlineLikeParagraph => (document.theme.body_font_size * 1.5).max(px(24.0)),
+  }
+}
+
+pub(super) fn layout_structural_block_at(
+  document: &Document,
+  block_ix: usize,
+  width: Pixels,
+  y: Pixels,
+  window: &mut Window,
+  cx: &mut App,
+) -> Option<LaidOutBlock> {
+  match document.blocks.get(block_ix)? {
+    Block::Paragraph(_) => None,
+    Block::Image(image) => {
+      let height = image_placeholder_height(document, image, width);
+      Some(LaidOutBlock::Image(LaidOutObjectBlock {
+        block_ix,
+        top: y,
+        bottom: y + height,
+        bounds: structural_block_bounds(document, width, y, height),
+        render_ready: false,
+      }))
+    },
+    Block::Equation(equation) => {
+      let height = equation_placeholder_height(document, equation);
+      Some(LaidOutBlock::Equation(LaidOutObjectBlock {
+        block_ix,
+        top: y,
+        bottom: y + height,
+        bounds: structural_block_bounds(document, width, y, height),
+        render_ready: false,
+      }))
+    },
+    Block::Table(table) => Some(LaidOutBlock::Table(layout_table_block(document, block_ix, table, width, y, window, cx))),
+  }
+}
+
+pub(super) fn structural_block_height(block: &LaidOutBlock) -> Pixels {
+  match block {
+    LaidOutBlock::Paragraph(paragraph) => paragraph.bottom - paragraph.top,
+    LaidOutBlock::Image(object) | LaidOutBlock::Equation(object) => object.bottom - object.top,
+    LaidOutBlock::Table(table) => table.bottom - table.top,
+  }
+}
+
+fn layout_table_block(
+  document: &Document,
+  block_ix: usize,
+  table: &TableBlock,
+  width: Pixels,
+  y: Pixels,
+  window: &mut Window,
+  cx: &mut App,
+) -> LaidOutTable {
+  let table_left = document.theme.pageless_inset_x;
+  let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let column_count = table
+    .column_widths
+    .len()
+    .max(table.rows.iter().map(|row| row.cells.len()).max().unwrap_or(1))
+    .max(1);
+  let column_widths = resolved_table_column_widths(table, table_width, column_count);
+  let mut row_top = y;
+  let mut rows = Vec::with_capacity(table.rows.len());
+
+  for row in &table.rows {
+    let row_height = table_row_height(document, row, &column_widths, window, cx);
+    let mut x = table_left;
+    let mut cells = Vec::with_capacity(row.cells.len());
+    let mut column_ix = 0;
+    for cell in &row.cells {
+      let span = cell.col_span.max(1) as usize;
+      let cell_width = spanned_column_width(&column_widths, column_ix, span);
+      let cell_bounds = Bounds::new(point(x, row_top), size(cell_width, row_height));
+      cells.push(LaidOutTableCell {
+        bounds: cell_bounds,
+        blocks: layout_table_cell_blocks(document, cell, cell_bounds, window, cx),
+      });
+      x += cell_width;
+      column_ix += span;
+    }
+    rows.push(LaidOutTableRow {
+      top: row_top,
+      bottom: row_top + row_height,
+      cells,
+    });
+    row_top += row_height;
+  }
+
+  LaidOutTable {
+    block_ix,
+    top: y,
+    bottom: row_top,
+    bounds: Bounds::new(point(table_left, y), size(table_width, (row_top - y).max(px(1.0)))),
+    rows,
+  }
+}
+
+fn table_row_height(document: &Document, row: &TableRow, column_widths: &[Pixels], window: &mut Window, cx: &mut App) -> Pixels {
+  let mut column_ix = 0;
+  row
+    .cells
+    .iter()
+    .map(|cell| {
+      let span = cell.col_span.max(1) as usize;
+      let width = spanned_column_width(column_widths, column_ix, span);
+      column_ix += span;
+      table_cell_height(document, cell, width, window, cx)
+    })
+    .fold(px(28.0), Pixels::max)
+}
+
+fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_count: usize) -> Vec<Pixels> {
+  let mut fixed_total = px(0.0);
+  let mut fraction_total = 0u32;
+  let mut auto_count = 0usize;
+  for ix in 0..column_count {
+    match table.column_widths.get(ix).unwrap_or(&TableColumnWidth::Fraction(1)) {
+      TableColumnWidth::FixedPx(width) => fixed_total += px(*width as f32),
+      TableColumnWidth::Fraction(fraction) => fraction_total = fraction_total.saturating_add((*fraction).max(1)),
+      TableColumnWidth::Auto => auto_count += 1,
+    }
+  }
+  let remaining = (table_width - fixed_total).max(px(1.0));
+  let denominator = fraction_total.saturating_add(auto_count as u32).max(1);
+  (0..column_count)
+    .map(|ix| match table.column_widths.get(ix).unwrap_or(&TableColumnWidth::Fraction(1)) {
+      TableColumnWidth::FixedPx(width) => px(*width as f32).max(px(8.0)),
+      TableColumnWidth::Fraction(fraction) => remaining * ((*fraction).max(1) as f32 / denominator as f32),
+      TableColumnWidth::Auto => remaining * (1.0 / denominator as f32),
+    })
+    .collect()
+}
+
+fn spanned_column_width(column_widths: &[Pixels], column_ix: usize, span: usize) -> Pixels {
+  let end = column_ix.saturating_add(span).min(column_widths.len());
+  let width = column_widths
+    .get(column_ix..end)
+    .unwrap_or(&[])
+    .iter()
+    .copied()
+    .fold(px(0.0), |sum, width| sum + width);
+  width.max(px(1.0))
+}
+
+fn table_cell_height(document: &Document, cell: &TableCell, width: Pixels, window: &mut Window, cx: &mut App) -> Pixels {
+  let padding = table_cell_padding();
+  let content_width = (width - padding * 2.0).max(px(1.0));
+  let mut y = padding;
+  if cell.blocks.is_empty() {
+    return px(28.0);
+  }
+  for block in &cell.blocks {
+    match block {
+      TableCellBlock::Paragraph(paragraph) => {
+        let laid_out = layout_table_cell_paragraph(document, paragraph, 0, content_width, padding, y, window, cx);
+        y = laid_out.bottom + px(2.0);
+      },
+      TableCellBlock::Table(table) => {
+        let laid_out = layout_table_block(document, 0, table, content_width + document.theme.pageless_inset_x * 2.0, y, window, cx);
+        y = laid_out.bottom + px(2.0);
+      },
+    }
+  }
+  (y + padding).max(px(28.0))
+}
+
+fn layout_table_cell_blocks(
+  document: &Document,
+  cell: &TableCell,
+  bounds: Bounds<Pixels>,
+  window: &mut Window,
+  cx: &mut App,
+) -> Vec<LaidOutBlock> {
+  let padding = table_cell_padding();
+  let content_width = (bounds.size.width - padding * 2.0).max(px(1.0));
+  let mut y = bounds.origin.y + padding;
+  let mut blocks = Vec::with_capacity(cell.blocks.len());
+  for (ix, block) in cell.blocks.iter().enumerate() {
+    match block {
+      TableCellBlock::Paragraph(paragraph) => {
+        let laid_out = layout_table_cell_paragraph(document, paragraph, ix, content_width, bounds.origin.x + padding, y, window, cx);
+        y = laid_out.bottom + px(2.0);
+        blocks.push(LaidOutBlock::Paragraph(laid_out));
+      },
+      TableCellBlock::Table(table) => {
+        let laid_out = layout_table_block(document, 0, table, content_width + document.theme.pageless_inset_x * 2.0, y, window, cx);
+        y = laid_out.bottom + px(2.0);
+        blocks.push(LaidOutBlock::Table(laid_out));
+      },
+    }
+  }
+  blocks
+}
+
+fn layout_table_cell_paragraph(
+  document: &Document,
+  cell_paragraph: &TableCellParagraph,
+  index: usize,
+  width: Pixels,
+  x: Pixels,
+  y: Pixels,
+  window: &mut Window,
+  cx: &mut App,
+) -> LaidOutParagraph {
+  let paragraph = &cell_paragraph.paragraph;
+  let p_format = paragraph_format(document, paragraph.style);
+  let cache_key = paragraph_cache_key(document, paragraph);
+  let lines = wrap_lines(document, paragraph, p_format.clone(), &cell_paragraph.text, width, window, cx);
+  let mut laid_out_lines = Vec::with_capacity(lines.len());
+  let mut line_y = y;
+  for mut line in lines {
+    line.origin.x = x
+      + match p_format.align {
+        ParagraphAlign::Left => px(0.0),
+        ParagraphAlign::Center => (width - line.width).max(px(0.0)) / 2.0,
+      };
+    line.origin.y = line_y;
+    line_y += line.line_height;
+    laid_out_lines.push(line);
+  }
+  LaidOutParagraph {
+    index,
+    cache_key,
+    len: cell_paragraph.text.len(),
+    top: y,
+    bottom: line_y,
+    lines: laid_out_lines,
+    borders: Vec::new(),
+  }
+}
+
+pub(super) fn table_cell_padding() -> Pixels {
+  px(5.0)
 }
 
 pub(super) fn layout_paragraph_at(
@@ -550,6 +961,106 @@ pub(super) fn estimate_paragraph_item_height(document: &Document, paragraph_ix: 
     height += document.theme.pageless_inset_bottom;
   }
   height.max(line_height)
+}
+
+pub(super) fn estimate_structural_block_item_height(document: &Document, block_ix: usize, width: Pixels) -> Pixels {
+  let Some(block) = document.blocks.get(block_ix) else {
+    return px(1.0);
+  };
+  match block {
+    Block::Paragraph(_) => {
+      let paragraph_ix = document
+        .blocks
+        .iter()
+        .take(block_ix + 1)
+        .filter(|block| matches!(block, Block::Paragraph(_)))
+        .count()
+        .saturating_sub(1);
+      estimate_paragraph_item_height(document, paragraph_ix, width)
+    },
+    Block::Image(image) => image_placeholder_height(document, image, width) + document.theme.paragraph_after,
+    Block::Equation(equation) => equation_placeholder_height(document, equation) + document.theme.paragraph_after,
+    Block::Table(table) => table_placeholder_height(document, table, width) + document.theme.paragraph_after,
+  }
+}
+
+fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixels) -> Pixels {
+  let line_height = (document.theme.body_font_size * document.theme.line_spacing).max(px(16.0));
+  let column_count = table
+    .column_widths
+    .len()
+    .max(table.rows.iter().map(|row| row.cells.len()).max().unwrap_or(1))
+    .max(1);
+  let content_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let column_widths = resolved_table_column_widths(table, content_width, column_count);
+  let height = table
+    .rows
+    .iter()
+    .map(|row| {
+      let mut column_ix = 0;
+      row
+        .cells
+        .iter()
+        .map(|cell| {
+          let span = cell.col_span.max(1) as usize;
+          let _column_width = spanned_column_width(&column_widths, column_ix, span);
+          column_ix += span;
+          let paragraph_count = cell.blocks.iter().filter(|block| matches!(block, TableCellBlock::Paragraph(_))).count().max(1);
+          line_height * paragraph_count as f32 + table_cell_padding() * 2.0
+        })
+        .fold(px(28.0), Pixels::max)
+    })
+    .fold(px(0.0), |height, row_height| height + row_height);
+  if height > px(0.0) {
+    return height;
+  }
+  let laid_out = layout_table_block_without_text(document, table, width, px(0.0));
+  if laid_out.rows.is_empty() {
+    return (document.theme.body_font_size * document.theme.line_spacing).max(px(24.0));
+  }
+  laid_out.bottom - laid_out.top
+}
+
+fn layout_table_block_without_text(document: &Document, table: &TableBlock, width: Pixels, y: Pixels) -> LaidOutTable {
+  let table_left = document.theme.pageless_inset_x;
+  let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let column_count = table
+    .column_widths
+    .len()
+    .max(table.rows.iter().map(|row| row.cells.len()).max().unwrap_or(1))
+    .max(1);
+  let column_widths = resolved_table_column_widths(table, table_width, column_count);
+  let mut row_top = y;
+  let mut rows = Vec::with_capacity(table.rows.len());
+  for row in &table.rows {
+    let row_height = px(28.0);
+    let mut x = table_left;
+    let mut cells = Vec::with_capacity(row.cells.len());
+    let mut column_ix = 0;
+    for cell in &row.cells {
+      let span = cell.col_span.max(1) as usize;
+      let cell_width = spanned_column_width(&column_widths, column_ix, span);
+      cells.push(LaidOutTableCell {
+        bounds: Bounds::new(point(x, row_top), size(cell_width, row_height)),
+        blocks: Vec::new(),
+      });
+      x += cell_width;
+      column_ix += span;
+    }
+    rows.push(LaidOutTableRow {
+      top: row_top,
+      bottom: row_top + row_height,
+      cells,
+    });
+    row_top += row_height;
+  }
+  LaidOutTable {
+    block_ix: 0,
+    top: y,
+    bottom: row_top,
+    bounds: Bounds::new(point(table_left, y), size(table_width, (row_top - y).max(px(1.0)))),
+    rows,
+  }
 }
 
 pub(super) fn wrap_lines(
@@ -1310,6 +1821,7 @@ pub(super) fn paragraph_layout(layout: &LayoutState, paragraph: usize) -> Option
 }
 
 pub(super) fn paragraph_layout_index(layout: &LayoutState, paragraph: usize) -> Option<usize> {
+  let _ = layout.paragraph_block_ix(paragraph);
   if layout
     .paragraphs
     .get(paragraph)

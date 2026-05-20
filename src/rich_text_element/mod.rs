@@ -14,7 +14,11 @@ mod tools;
 mod word_boundary;
 
 pub use demo::demo_document;
-pub use document::{Document, DocumentOffset, DocumentTheme, HighlightStyle, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyle, RunStyles, TextRun, ThemeUnderline};
+pub use document::{
+  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, Document, DocumentOffset, DocumentTheme, EquationBlock, EquationDisplay, EquationSyntax,
+  HighlightStyle, ImageBlock, ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyle, RunStyles, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
+  TableColumnWidth, TableRow, TableStyle, TextRun, ThemeUnderline, DocumentPosition, ObjectAffinity,
+};
 pub use element::RichTextDocumentElement;
 pub use editor::*;
 // `read_db8` is part of the public persistence API even though only tests
@@ -25,7 +29,12 @@ pub use persistence::{load_or_create_document, read_db8, write_db8};
 pub use tools::ArmedInlineTool;
 
 // Internal imports used by sibling modules via `use super::*;`.
-use document::{InputParagraph, InputRun, ParagraphOffsetIndex, RichClipboardFragment, SOFT_LINE_BREAK, SOFT_LINE_BREAK_STR, paragraphs_mut};
+use document::{
+  InputParagraph, InputRun, ParagraphOffsetIndex, RichClipboardFragment, SOFT_LINE_BREAK, SOFT_LINE_BREAK_STR, block_ix_for_paragraph,
+  paragraph_blocks_from_paragraphs, paragraphs_mut, replace_paragraph_blocks, update_paragraph_block, InputAsset, InputBlock, InputBlockAlignment,
+  InputEquationBlock, InputEquationDisplay, InputEquationSyntax,
+  InputImageBlock, InputImageSizing, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow, InputTableStyle,
+};
 use edit_ops::*;
 use editor::{DocumentSpan, SelectionGranularity};
 use element::*;

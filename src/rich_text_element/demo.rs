@@ -35,9 +35,12 @@ pub(super) fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputPar
     });
   }
   let offset_index = ParagraphOffsetIndex::new(&stored_paragraphs);
+  let blocks = paragraph_blocks_from_paragraphs(&stored_paragraphs);
   Document {
     text: Rope::from(text),
     paragraphs: Arc::new(stored_paragraphs),
+    blocks: Arc::new(blocks),
+    assets: AssetStore::default(),
     offset_index,
     theme,
   }

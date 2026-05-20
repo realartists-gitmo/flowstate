@@ -36,7 +36,22 @@ pub(super) struct VirtualParagraphElement {
   pub(super) layout: WordElementLayout,
 }
 
+#[derive(Clone)]
+pub(super) struct VirtualBlockElement {
+  pub(super) editor: Entity<RichTextEditor>,
+  pub(super) block_ix: usize,
+  pub(super) layout: WordElementLayout,
+}
+
 impl IntoElement for VirtualParagraphElement {
+  type Element = Self;
+
+  fn into_element(self) -> Self::Element {
+    self
+  }
+}
+
+impl IntoElement for VirtualBlockElement {
   type Element = Self;
 
   fn into_element(self) -> Self::Element {
@@ -194,6 +209,98 @@ impl Element for VirtualParagraphElement {
     };
     if let Some(layout) = self.layout.0.borrow().as_ref().cloned() {
       paint_layout(layout.as_ref(), Some(&selection), drag_selection.as_ref(), show_caret, caret_width, window, cx);
+    }
+  }
+}
+
+impl Element for VirtualBlockElement {
+  type RequestLayoutState = ();
+  type PrepaintState = ();
+
+  fn id(&self) -> Option<ElementId> {
+    None
+  }
+
+  fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    None
+  }
+
+  fn request_layout(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    window: &mut Window,
+    _cx: &mut App,
+  ) -> (LayoutId, Self::RequestLayoutState) {
+    let editor = self.editor.clone();
+    let block_ix = self.block_ix;
+    let layout_cell = self.layout.clone();
+    let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, cx| {
+      let width = known
+        .width
+        .or(match available.width {
+          AvailableSpace::Definite(width) => Some(width),
+          _ => Some(px(900.0)),
+        })
+        .unwrap_or(px(900.0));
+      editor.update(cx, |editor, cx| editor.note_measured_item_width(width, cx));
+      let (block, paragraph_after, snap_underline_rules_to_pixels) = editor.update(cx, |editor, cx| {
+        (
+          layout_structural_block_at(&editor.document, block_ix, width, px(0.0), window, cx),
+          editor.document.theme.paragraph_after,
+          editor.document.theme.snap_underline_rules_to_pixels,
+        )
+      });
+      let height = block.as_ref().map(structural_block_height).unwrap_or(px(1.0)) + paragraph_after;
+      let layout = LayoutState {
+        paragraphs: Vec::new(),
+        blocks: block.into_iter().collect(),
+        paragraph_to_block: Vec::new(),
+        block_to_paragraph: vec![None],
+        bounds: None,
+        size: gpui::size(width, height),
+        width,
+        snap_underline_rules_to_pixels,
+      };
+      layout_cell.0.borrow_mut().replace(Rc::new(layout));
+      gpui::size(width, height)
+    });
+    (layout_id, ())
+  }
+
+  fn prepaint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+    if let Some(layout) = self.layout.0.borrow_mut().as_mut() {
+      Rc::make_mut(layout).bounds = Some(bounds);
+    }
+  }
+
+  fn paint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _prepaint: &mut Self::PrepaintState,
+    window: &mut Window,
+    cx: &mut App,
+  ) {
+    let selected_block = self.editor.read(cx).selected_block;
+    let Some(layout) = self.layout.0.borrow().as_ref().cloned() else {
+      return;
+    };
+    let Some(bounds) = layout.bounds else {
+      return;
+    };
+    for block in &layout.blocks {
+      paint_structural_block(block, selected_block, bounds.origin, window, cx);
     }
   }
 }

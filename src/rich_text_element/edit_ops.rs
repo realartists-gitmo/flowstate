@@ -1,4 +1,4 @@
-use std::ops::Range;
+use std::{ops::Range, sync::Arc};
 
 use super::*;
 
@@ -45,6 +45,7 @@ pub(super) fn apply_style_to_paragraph_range(document: &mut Document, paragraph_
   if new_runs != old_runs {
     paragraph.runs = new_runs;
     bump_paragraph_version(paragraph);
+    update_paragraph_block(document, paragraph_ix);
   } else {
     paragraph.runs = old_runs;
   }
@@ -108,6 +109,12 @@ pub(super) fn apply_document_span_replacement(document: &mut Document, current: 
     .saturating_add(current.paragraphs.len())
     .min(document.paragraphs.len());
   paragraphs_mut(document).splice(current.start_paragraph..paragraph_end, replacement.paragraphs.clone());
+  replace_paragraph_blocks(
+    document,
+    current.start_paragraph,
+    paragraph_end.saturating_sub(current.start_paragraph),
+    &replacement.paragraphs,
+  );
   rebuild_document_offset_index(document);
 }
 
@@ -247,6 +254,8 @@ pub(super) fn selected_rich_fragment(document: &Document, range: Range<DocumentO
   RichClipboardFragment {
     format: "debateprocessor.rich-text-fragment.v1".to_string(),
     paragraphs,
+    blocks: Vec::new(),
+    assets: Vec::new(),
   }
 }
 
@@ -297,15 +306,23 @@ pub(super) fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, b
   paragraphs[paragraph_ix].byte_range = paragraph_range.start..global;
   paragraphs[paragraph_ix].runs = left_runs;
   bump_paragraph_version(&mut paragraphs[paragraph_ix]);
+  let new_paragraph = Paragraph {
+    style: paragraph.style,
+    byte_range: global + 1..old_end + 1,
+    runs: right_runs,
+    version: paragraph.version.wrapping_add(1),
+  };
   paragraphs.insert(
     paragraph_ix + 1,
-    Paragraph {
-      style: paragraph.style,
-      byte_range: global + 1..old_end + 1,
-      runs: right_runs,
-      version: paragraph.version.wrapping_add(1),
-    },
+    new_paragraph.clone(),
   );
+  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
+    let blocks = Arc::make_mut(&mut document.blocks);
+    if let Some(block) = blocks.get_mut(block_ix) {
+      *block = Block::Paragraph(document.paragraphs[paragraph_ix].clone());
+    }
+    blocks.insert(block_ix + 1, Block::Paragraph(new_paragraph));
+  }
   rebuild_document_offset_index(document);
 }
 
@@ -336,6 +353,7 @@ pub(super) fn delete_cross_paragraph_range(document: &mut Document, range: Range
   paragraphs[start_ix].byte_range = start_para_range.start..start_para_range.start + paragraph_runs_len(&paragraphs[start_ix]);
   bump_paragraph_version(&mut paragraphs[start_ix]);
   paragraphs.drain(start_ix + 1..=end_ix);
+  replace_paragraph_blocks(document, start_ix, end_ix - start_ix + 1, &[document.paragraphs[start_ix].clone()]);
   let _ = delete_len;
   rebuild_document_offset_index(document);
 }
@@ -388,6 +406,7 @@ pub(super) fn update_paragraph_offsets_after_len_change(document: &mut Document,
   for ix in paragraph_ix..document.paragraphs.len() {
     refresh_paragraph_range(document, ix);
   }
+  update_paragraph_block(document, paragraph_ix);
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within
@@ -610,6 +629,7 @@ pub(super) fn clear_whole_paragraph_formatting(document: &mut Document, paragrap
   paragraph.runs = merge_adjacent_runs(std::mem::take(&mut paragraph.runs));
   if paragraph.style != old_style || paragraph.runs != old_runs {
     bump_paragraph_version(paragraph);
+    update_paragraph_block(document, paragraph_ix);
   }
 }
 
@@ -684,6 +704,7 @@ pub(super) fn mutate_runs_in_range(document: &mut Document, range: Range<Documen
     if new_runs != old_runs {
       paragraph.runs = new_runs;
       bump_paragraph_version(paragraph);
+      update_paragraph_block(document, paragraph_ix);
     } else {
       paragraph.runs = old_runs;
     }

@@ -1,4 +1,5 @@
 use super::*;
+use gpui::px;
 
 #[test]
 fn paragraph_edit_helpers_preserve_text_and_styles() {
@@ -242,6 +243,649 @@ fn db8_round_trip_preserves_empty_styled_paragraphs() {
   assert_eq!(paragraph_text_len(&loaded.paragraphs[0]), 0);
   assert!(loaded.paragraphs[0].runs.is_empty());
   assert_eq!(paragraph_text(&loaded, 1), "body");
+}
+
+#[test]
+fn db8_v4_round_trip_preserves_mixed_block_order_and_assets() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Pocket,
+        runs: vec![plain("Heading")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("After image")],
+      },
+    ],
+  );
+  let asset_id = AssetId(42);
+  document.assets.assets.insert(
+    asset_id,
+    AssetRecord {
+      id: asset_id,
+      mime_type: "image/png".into(),
+      original_name: Some("figure.png".into()),
+      content_hash: 99,
+      bytes: std::sync::Arc::new(vec![1, 2, 3, 4]),
+    },
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Image(ImageBlock {
+      asset_id,
+      alt_text: "figure".into(),
+      caption: None,
+      sizing: ImageSizing::FitWidth,
+      alignment: BlockAlignment::Center,
+      version: 0,
+    }),
+    Block::Paragraph(document.paragraphs[1].clone()),
+    Block::Equation(EquationBlock {
+      source: "x^2 + y^2 = z^2".into(),
+      syntax: EquationSyntax::Latex,
+      display: EquationDisplay::Display,
+      version: 0,
+    }),
+  ]);
+
+  let path = std::env::temp_dir().join(format!("debateprocessor-blocks-{}.db8", uuid::Uuid::new_v4()));
+  write_db8(&path, &document).unwrap();
+  let loaded = read_db8(&path).unwrap();
+  let _ = std::fs::remove_file(path);
+
+  assert_eq!(loaded.blocks.len(), 4);
+  assert!(matches!(loaded.blocks[0], Block::Paragraph(_)));
+  assert!(matches!(loaded.blocks[1], Block::Image(_)));
+  assert!(matches!(loaded.blocks[2], Block::Paragraph(_)));
+  assert!(matches!(loaded.blocks[3], Block::Equation(_)));
+  assert_eq!(loaded.assets.assets[&asset_id].bytes.as_slice(), &[1, 2, 3, 4]);
+}
+
+#[test]
+fn image_fit_width_layout_uses_asset_aspect_ratio() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let asset_id = AssetId(7);
+  document.assets.assets.insert(
+    asset_id,
+    AssetRecord {
+      id: asset_id,
+      mime_type: "image/png".into(),
+      original_name: None,
+      content_hash: 0,
+      bytes: std::sync::Arc::new(test_png_2x1()),
+    },
+  );
+  let image = ImageBlock {
+    asset_id,
+    alt_text: "".into(),
+    caption: None,
+    sizing: ImageSizing::FitWidth,
+    alignment: BlockAlignment::Left,
+    version: 0,
+  };
+
+  let width = document.theme.pageless_inset_x * 2.0 + px(200.0);
+  assert_eq!(image_layout_height_for_test(&document, &image, width), px(100.0));
+}
+
+#[test]
+fn paragraph_sync_preserves_non_text_blocks_when_paragraphs_are_removed() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("before")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("after")],
+      },
+    ],
+  );
+  let image = Block::Image(ImageBlock {
+    asset_id: AssetId(99),
+    alt_text: "image".into(),
+    caption: None,
+    sizing: ImageSizing::FitWidth,
+    alignment: BlockAlignment::Center,
+    version: 0,
+  });
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    image.clone(),
+    Block::Paragraph(document.paragraphs[1].clone()),
+  ]);
+
+  let current = capture_document_span(&document, 0..2);
+  apply_document_span_replacement(
+    &mut document,
+    &current,
+    &DocumentSpan {
+      start_paragraph: 0,
+      text: "after".to_string(),
+      paragraphs: vec![Paragraph {
+        style: ParagraphStyle::Normal,
+        byte_range: 0.."after".len(),
+        runs: vec![TextRun {
+          len: "after".len(),
+          styles: RunStyles::default(),
+        }],
+        version: 0,
+      }],
+    },
+  );
+
+  assert_eq!(document.paragraphs.len(), 1);
+  assert!(document.blocks.iter().any(|block| matches!(block, Block::Image(_))));
+}
+
+#[test]
+fn deleting_empty_paragraph_above_image_keeps_image_before_next_paragraph() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("before")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: Vec::new(),
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("after")],
+      },
+    ],
+  );
+  let image = Block::Image(ImageBlock {
+    asset_id: AssetId(100),
+    alt_text: "image".into(),
+    caption: None,
+    sizing: ImageSizing::FitWidth,
+    alignment: BlockAlignment::Center,
+    version: 0,
+  });
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Paragraph(document.paragraphs[1].clone()),
+    image,
+    Block::Paragraph(document.paragraphs[2].clone()),
+  ]);
+
+  delete_cross_paragraph_range(
+    &mut document,
+    DocumentOffset {
+      paragraph: 0,
+      byte: "before".len(),
+    }..DocumentOffset { paragraph: 1, byte: 0 },
+  );
+
+  assert_eq!(document.paragraphs.len(), 2);
+  assert!(matches!(document.blocks[0], Block::Paragraph(_)));
+  assert!(matches!(document.blocks[1], Block::Image(_)));
+  assert!(matches!(document.blocks[2], Block::Paragraph(_)));
+}
+
+fn test_png_2x1() -> Vec<u8> {
+  vec![
+    137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0, 0, 0, 244, 34, 127, 138, 0,
+    0, 0, 12, 73, 68, 65, 84, 8, 29, 99, 248, 15, 4, 0, 9, 251, 3, 253, 167, 170, 43, 113, 0, 0, 0, 0, 73, 69, 78, 68, 174,
+    66, 96, 130,
+  ]
+}
+
+#[test]
+fn db8_v4_round_trip_preserves_table_cell_paragraph_and_run_styles() {
+  let emphasized = RunStyles::default().with(RunStyle::Emphasis).with(RunStyle::HighlightSpoken);
+  let cell_paragraph = Paragraph {
+    style: ParagraphStyle::Tag,
+    byte_range: 0.."cell".len(),
+    runs: vec![TextRun {
+      len: "cell".len(),
+      styles: emphasized,
+    }],
+    version: 0,
+  };
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("before")],
+    }],
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Table(TableBlock {
+      rows: vec![TableRow {
+        cells: vec![TableCell {
+          blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
+            paragraph: cell_paragraph.clone(),
+            text: "cell".to_string(),
+          })],
+          row_span: 1,
+          col_span: 1,
+        }],
+      }],
+      column_widths: vec![TableColumnWidth::Fraction(1)],
+      style: TableStyle { header_row: true },
+      version: 0,
+    }),
+  ]);
+
+  let path = std::env::temp_dir().join(format!("debateprocessor-table-{}.db8", uuid::Uuid::new_v4()));
+  write_db8(&path, &document).unwrap();
+  let loaded = read_db8(&path).unwrap();
+  let _ = std::fs::remove_file(path);
+
+  let Block::Table(table) = &loaded.blocks[1] else {
+    panic!("expected table block");
+  };
+  assert!(table.style.header_row);
+  let TableCellBlock::Paragraph(loaded_paragraph) = &table.rows[0].cells[0].blocks[0] else {
+    panic!("expected table-cell paragraph");
+  };
+  assert_eq!(loaded_paragraph.paragraph.style, ParagraphStyle::Tag);
+  assert_eq!(loaded_paragraph.paragraph.runs, cell_paragraph.runs);
+  assert_eq!(loaded_paragraph.text, "cell");
+}
+
+#[test]
+fn block_delete_operation_undo_redo_preserves_non_text_block() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let equation = Block::Equation(EquationBlock {
+    source: "a^2+b^2=c^2".into(),
+    syntax: EquationSyntax::Latex,
+    display: EquationDisplay::Display,
+    version: 0,
+  });
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    equation.clone(),
+  ]);
+
+  let op = EditOperation::DeleteBlock {
+    block_ix: 1,
+    block: equation,
+  };
+  op.redo(&mut document);
+  assert_eq!(document.blocks.len(), 1);
+  op.undo(&mut document);
+  assert_eq!(document.blocks.len(), 2);
+  assert!(matches!(document.blocks[1], Block::Equation(_)));
+}
+
+#[test]
+fn insert_blocks_operation_undo_redo_preserves_inserted_table_and_equation() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let blocks = vec![
+    Block::Table(TableBlock {
+      rows: vec![TableRow {
+        cells: vec![TableCell {
+          blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
+            paragraph: Paragraph {
+              style: ParagraphStyle::Normal,
+              byte_range: 0..0,
+              runs: Vec::new(),
+              version: 0,
+            },
+            text: String::new(),
+          })],
+          row_span: 1,
+          col_span: 1,
+        }],
+      }],
+      column_widths: vec![TableColumnWidth::Fraction(1)],
+      style: TableStyle { header_row: false },
+      version: 0,
+    }),
+    Block::Equation(EquationBlock {
+      source: "x=1".into(),
+      syntax: EquationSyntax::Latex,
+      display: EquationDisplay::Display,
+      version: 0,
+    }),
+  ];
+
+  let op = EditOperation::InsertBlocks {
+    block_ix: 1,
+    blocks: blocks.clone(),
+  };
+  op.redo(&mut document);
+  assert_eq!(document.blocks.len(), 3);
+  assert!(matches!(document.blocks[1], Block::Table(_)));
+  assert!(matches!(document.blocks[2], Block::Equation(_)));
+  op.undo(&mut document);
+  assert_eq!(document.blocks.len(), 1);
+  op.redo(&mut document);
+  assert_eq!(document.blocks.len(), 3);
+}
+
+#[test]
+fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let before = Block::Table(TableBlock {
+    rows: vec![TableRow {
+      cells: vec![TableCell {
+        blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
+          paragraph: Paragraph {
+            style: ParagraphStyle::Normal,
+            byte_range: 0..0,
+            runs: Vec::new(),
+            version: 0,
+          },
+          text: String::new(),
+        })],
+        row_span: 1,
+        col_span: 1,
+      }],
+    }],
+    column_widths: vec![TableColumnWidth::Fraction(1)],
+    style: TableStyle { header_row: false },
+    version: 0,
+  });
+  let mut after = before.clone();
+  let Block::Table(table) = &mut after else {
+    unreachable!();
+  };
+  table.rows.push(table.rows[0].clone());
+  table.version = 1;
+  document.blocks = std::sync::Arc::new(vec![Block::Paragraph(document.paragraphs[0].clone()), before.clone()]);
+
+  let op = EditOperation::ReplaceBlock {
+    block_ix: 1,
+    before,
+    after,
+  };
+  op.redo(&mut document);
+  let Block::Table(table) = &document.blocks[1] else {
+    panic!("expected table");
+  };
+  assert_eq!(table.rows.len(), 2);
+  op.undo(&mut document);
+  let Block::Table(table) = &document.blocks[1] else {
+    panic!("expected table");
+  };
+  assert_eq!(table.rows.len(), 1);
+}
+
+#[test]
+fn table_cell_text_edit_is_a_replace_block_history_operation() {
+  let before = Block::Table(TableBlock {
+    rows: vec![TableRow {
+      cells: vec![TableCell {
+        blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
+          paragraph: Paragraph {
+            style: ParagraphStyle::Normal,
+            byte_range: 0..0,
+            runs: Vec::new(),
+            version: 0,
+          },
+          text: String::new(),
+        })],
+        row_span: 1,
+        col_span: 1,
+      }],
+    }],
+    column_widths: vec![TableColumnWidth::Fraction(1)],
+    style: TableStyle { header_row: false },
+    version: 0,
+  });
+  let mut after = before.clone();
+  let Block::Table(table) = &mut after else {
+    unreachable!();
+  };
+  let TableCellBlock::Paragraph(paragraph) = &mut table.rows[0].cells[0].blocks[0] else {
+    unreachable!();
+  };
+  paragraph.text = "cell".to_string();
+  paragraph.paragraph.byte_range = 0.."cell".len();
+  paragraph.paragraph.runs = vec![TextRun {
+    len: "cell".len(),
+    styles: RunStyles::default(),
+  }];
+  table.version = 1;
+
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  document.blocks = std::sync::Arc::new(vec![Block::Paragraph(document.paragraphs[0].clone()), before.clone()]);
+  let op = EditOperation::ReplaceBlock {
+    block_ix: 1,
+    before,
+    after,
+  };
+  op.redo(&mut document);
+  let Block::Table(table) = &document.blocks[1] else {
+    panic!("expected table");
+  };
+  let TableCellBlock::Paragraph(paragraph) = &table.rows[0].cells[0].blocks[0] else {
+    panic!("expected paragraph");
+  };
+  assert_eq!(paragraph.text, "cell");
+  op.undo(&mut document);
+  let Block::Table(table) = &document.blocks[1] else {
+    panic!("expected table");
+  };
+  let TableCellBlock::Paragraph(paragraph) = &table.rows[0].cells[0].blocks[0] else {
+    panic!("expected paragraph");
+  };
+  assert!(paragraph.text.is_empty());
+}
+
+#[test]
+fn replace_block_operation_undo_redo_preserves_equation_source_changes() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let before = Block::Equation(EquationBlock {
+    source: "x".into(),
+    syntax: EquationSyntax::Latex,
+    display: EquationDisplay::Display,
+    version: 0,
+  });
+  let after = Block::Equation(EquationBlock {
+    source: "x+1".into(),
+    syntax: EquationSyntax::Latex,
+    display: EquationDisplay::Display,
+    version: 1,
+  });
+  document.blocks = std::sync::Arc::new(vec![Block::Paragraph(document.paragraphs[0].clone()), before.clone()]);
+  let op = EditOperation::ReplaceBlock {
+    block_ix: 1,
+    before,
+    after,
+  };
+  op.redo(&mut document);
+  let Block::Equation(equation) = &document.blocks[1] else {
+    panic!("expected equation");
+  };
+  assert_eq!(equation.source.as_ref(), "x+1");
+  op.undo(&mut document);
+  let Block::Equation(equation) = &document.blocks[1] else {
+    panic!("expected equation");
+  };
+  assert_eq!(equation.source.as_ref(), "x");
+}
+
+#[test]
+fn default_inserted_table_shape_round_trips_through_db8() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  let table = Block::Table(TableBlock {
+    rows: (0..2)
+      .map(|_| TableRow {
+        cells: (0..2)
+          .map(|_| TableCell {
+            blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
+              paragraph: Paragraph {
+                style: ParagraphStyle::Normal,
+                byte_range: 0..0,
+                runs: Vec::new(),
+                version: 0,
+              },
+              text: String::new(),
+            })],
+            row_span: 1,
+            col_span: 1,
+          })
+          .collect(),
+      })
+      .collect(),
+    column_widths: vec![TableColumnWidth::Fraction(1), TableColumnWidth::Fraction(1)],
+    style: TableStyle { header_row: false },
+    version: 0,
+  });
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    table,
+  ]);
+
+  let path = std::env::temp_dir().join(format!("debateprocessor-default-table-{}.db8", uuid::Uuid::new_v4()));
+  write_db8(&path, &document).unwrap();
+  let loaded = read_db8(&path).unwrap();
+  let _ = std::fs::remove_file(path);
+
+  let Block::Table(table) = &loaded.blocks[1] else {
+    panic!("expected table block");
+  };
+  assert_eq!(table.rows.len(), 2);
+  assert!(table.rows.iter().all(|row| row.cells.len() == 2));
+  assert_eq!(table.column_widths.len(), 2);
+}
+
+#[test]
+fn table_cell_paragraph_clipboard_conversion_preserves_text_and_styles() {
+  let styles = RunStyles::default().with(RunStyle::Emphasis);
+  let paragraph = InputParagraph {
+    style: ParagraphStyle::Tag,
+    runs: vec![InputRun {
+      text: "cell text".to_string(),
+      styles,
+    }],
+  };
+  let cell = table_cell_paragraph_from_input_paragraph(&paragraph);
+  assert_eq!(cell.text, "cell text");
+  assert_eq!(cell.paragraph.style, ParagraphStyle::Tag);
+  assert_eq!(cell.paragraph.runs[0].styles, styles);
+
+  let restored = input_paragraph_from_table_cell_paragraph(&cell);
+  assert_eq!(input_paragraph_text(&restored), "cell text");
+  assert_eq!(restored.style, ParagraphStyle::Tag);
+  assert_eq!(restored.runs[0].styles, styles);
+}
+
+#[test]
+fn double_click_at_text_paragraph_end_selects_only_that_paragraph() {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("first paragraph")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("next paragraph")],
+      },
+    ],
+  );
+
+  let selection = selection_for_word_at(
+    &document,
+    DocumentOffset {
+      paragraph: 0,
+      byte: "first paragraph".len(),
+    },
+  );
+
+  assert_eq!(
+    selection,
+    EditorSelection {
+      anchor: DocumentOffset { paragraph: 0, byte: 0 },
+      head: DocumentOffset {
+        paragraph: 0,
+        byte: "first paragraph".len(),
+      },
+    }
+  );
+}
+
+#[test]
+fn double_click_empty_paragraph_selects_only_empty_paragraph() {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("before")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: Vec::new(),
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("after")],
+      },
+    ],
+  );
+
+  let selection = selection_for_word_at(
+    &document,
+    DocumentOffset {
+      paragraph: 1,
+      byte: 0,
+    },
+  );
+
+  assert_eq!(
+    selection,
+    EditorSelection {
+      anchor: DocumentOffset { paragraph: 1, byte: 0 },
+      head: DocumentOffset { paragraph: 1, byte: 0 },
+    }
+  );
 }
 
 #[test]

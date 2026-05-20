@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use gpui::{App, Background, Bounds, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, size};
+use gpui::{App, Background, Bounds, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, rgb, size};
 
 use super::*;
 
@@ -87,7 +87,128 @@ pub(super) fn paint_layout(
     caret.size.width = caret_width;
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), black()));
   }
-  log_timing("paint layout", timing, format!("visible_paragraphs={visible_count}"));
+  log_timing("paint layout", timing, format!("blocks={} visible_paragraphs={visible_count}", layout.block_count()));
+}
+
+pub(super) fn paint_structural_block(
+  block: &LaidOutBlock,
+  selected_block: Option<BlockSelection>,
+  origin: Point<Pixels>,
+  window: &mut Window,
+  cx: &mut App,
+) {
+  let content_mask = window.content_mask().bounds;
+  match block {
+    LaidOutBlock::Paragraph(paragraph) => paint_table_paragraph(paragraph, origin, content_mask, window, cx),
+    LaidOutBlock::Image(object) => paint_object_block(object, "Image", selected_block, origin, content_mask, window),
+    LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", selected_block, origin, content_mask, window),
+    LaidOutBlock::Table(table) => paint_table_block(table, selected_block, origin, content_mask, window, cx),
+  }
+}
+
+fn paint_object_block(
+  object: &LaidOutObjectBlock,
+  _label: &str,
+  selected_block: Option<BlockSelection>,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  window: &mut Window,
+) {
+  let bounds = object.bounds.shift(origin);
+  if !bounds.intersects(&content_mask) {
+    return;
+  }
+  let selected = matches!(
+    selected_block,
+    Some(BlockSelection::Image(ix) | BlockSelection::Equation(ix)) if ix == object.block_ix
+  );
+  window.paint_quad(fill(bounds, Background::from(rgb(0xffffff))));
+  window.paint_quad(fill(
+    snap_rule_bounds(Bounds::new(bounds.origin, size(bounds.size.width, px(1.0))), RuleSnap::Horizontal, window),
+    Background::from(if selected { rgb(0x0969da) } else { rgb(0xb7b7b7) }),
+  ));
+  window.paint_quad(fill(
+    snap_rule_bounds(Bounds::new(point(bounds.origin.x, bounds.bottom() - px(1.0)), size(bounds.size.width, px(1.0))), RuleSnap::Horizontal, window),
+    Background::from(if selected { rgb(0x0969da) } else { rgb(0xb7b7b7) }),
+  ));
+}
+
+fn paint_table_block(
+  table: &LaidOutTable,
+  selected_block: Option<BlockSelection>,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  window: &mut Window,
+  cx: &mut App,
+) {
+  let selected = matches!(
+    selected_block,
+    Some(BlockSelection::Table(block_ix) | BlockSelection::TableCell { block_ix, .. }) if block_ix == table.block_ix
+  );
+  let table_bounds = table.bounds.shift(origin);
+  if !table_bounds.intersects(&content_mask) {
+    return;
+  }
+  for (row_ix, row) in table.rows.iter().enumerate() {
+    for (cell_ix, cell) in row.cells.iter().enumerate() {
+      let cell_bounds = cell.bounds.shift(origin);
+      if !cell_bounds.intersects(&content_mask) {
+        continue;
+      }
+      let cell_selected = matches!(
+        selected_block,
+        Some(BlockSelection::TableCell { block_ix, row_ix: selected_row, cell_ix: selected_cell })
+          if block_ix == table.block_ix && selected_row == row_ix && selected_cell == cell_ix
+      );
+      window.paint_quad(fill(cell_bounds, Background::from(if cell_selected { rgb(0xeaf4ff) } else { rgb(0xffffff) })));
+      paint_table_cell_rules(cell_bounds, selected || cell_selected, window);
+      for block in &cell.blocks {
+        match block {
+          LaidOutBlock::Paragraph(paragraph) => paint_table_paragraph(paragraph, origin, content_mask, window, cx),
+          LaidOutBlock::Table(table) => paint_table_block(table, None, origin, content_mask, window, cx),
+          LaidOutBlock::Image(object) => paint_object_block(object, "Image", None, origin, content_mask, window),
+          LaidOutBlock::Equation(object) => paint_object_block(object, "Equation", None, origin, content_mask, window),
+        }
+      }
+    }
+  }
+}
+
+fn paint_table_cell_rules(bounds: Bounds<Pixels>, selected: bool, window: &mut Window) {
+  let color = if selected { rgb(0x0969da) } else { rgb(0x808080) };
+  let background = Background::from(color);
+  window.paint_quad(fill(snap_rule_bounds(Bounds::new(bounds.origin, size(bounds.size.width, px(1.0))), RuleSnap::Horizontal, window), background));
+  window.paint_quad(fill(
+    snap_rule_bounds(Bounds::new(point(bounds.origin.x, bounds.bottom() - px(1.0)), size(bounds.size.width, px(1.0))), RuleSnap::Horizontal, window),
+    background,
+  ));
+  window.paint_quad(fill(snap_rule_bounds(Bounds::new(bounds.origin, size(px(1.0), bounds.size.height)), RuleSnap::Vertical, window), background));
+  window.paint_quad(fill(
+    snap_rule_bounds(Bounds::new(point(bounds.right() - px(1.0), bounds.origin.y), size(px(1.0), bounds.size.height)), RuleSnap::Vertical, window),
+    background,
+  ));
+}
+
+fn paint_table_paragraph(
+  paragraph: &LaidOutParagraph,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  window: &mut Window,
+  cx: &mut App,
+) {
+  for line in &paragraph.lines {
+    if line_intersects_mask(line, origin, content_mask) {
+      paint_line_text(line, origin + line.origin, content_mask, window, cx);
+    }
+  }
+  for line in &paragraph.lines {
+    if !line_intersects_mask(line, origin, content_mask) {
+      continue;
+    }
+    for underline in &line.underlines {
+      window.paint_quad(fill(snap_horizontal_rule_to_device_pixels(underline.bounds.shift(origin + line.origin), window), Background::from(underline.color)));
+    }
+  }
 }
 
 pub(super) fn visible_paragraph_range(layout: &LayoutState, origin: Point<Pixels>, mask: Bounds<Pixels>) -> Range<usize> {

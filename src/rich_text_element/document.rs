@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use crop::Rope;
 use gpui::{Hsla, Pixels, SharedString, black, px, rgb};
@@ -19,7 +19,12 @@ pub(super) const SOFT_LINE_BREAK_STR: &str = "\u{2028}";
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct RichClipboardFragment {
   pub(super) format: String,
+  #[serde(default)]
   pub(super) paragraphs: Vec<InputParagraph>,
+  #[serde(default)]
+  pub(super) blocks: Vec<InputBlock>,
+  #[serde(default)]
+  pub(super) assets: Vec<InputAsset>,
 }
 
 // -- Document and paragraphs ---------------------------------------------
@@ -28,6 +33,8 @@ pub(super) struct RichClipboardFragment {
 pub struct Document {
   pub text: Rope,
   pub paragraphs: Arc<Vec<Paragraph>>,
+  pub blocks: Arc<Vec<Block>>,
+  pub assets: AssetStore,
   // Auxiliary Fenwick-tree index over per-paragraph byte widths. Kept in sync
   // with `paragraphs` by the edit helpers in `edit_ops`. Not part of the
   // public API.
@@ -37,6 +44,72 @@ pub struct Document {
 
 pub(super) fn paragraphs_mut(document: &mut Document) -> &mut Vec<Paragraph> {
   Arc::make_mut(&mut document.paragraphs)
+}
+
+pub(super) fn paragraph_blocks_from_paragraphs(paragraphs: &[Paragraph]) -> Vec<Block> {
+  paragraphs.iter().cloned().map(Block::Paragraph).collect()
+}
+
+pub(super) fn block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -> Option<usize> {
+  let mut paragraph_ix = 0;
+  for (block_ix, block) in document.blocks.iter().enumerate() {
+    if matches!(block, Block::Paragraph(_)) {
+      if paragraph_ix == target_paragraph_ix {
+        return Some(block_ix);
+      }
+      paragraph_ix += 1;
+    }
+  }
+  None
+}
+
+pub(super) fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
+  let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
+    return;
+  };
+  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix)
+    && let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(block_ix)
+  {
+    *block = Block::Paragraph(paragraph);
+  }
+}
+
+pub(super) fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
+  let mut paragraph_ix = 0;
+  let mut output = Vec::with_capacity(document.blocks.len() + replacements.len());
+  let mut inserted_replacements = false;
+
+  for block in document.blocks.iter() {
+    match block {
+      Block::Paragraph(_) if paragraph_ix >= start_paragraph && paragraph_ix < start_paragraph + old_count => {
+        if !inserted_replacements {
+          output.extend(replacements.iter().cloned().map(Block::Paragraph));
+          inserted_replacements = true;
+        }
+        paragraph_ix += 1;
+      },
+      Block::Paragraph(paragraph) => {
+        if !inserted_replacements && paragraph_ix >= start_paragraph {
+          output.extend(replacements.iter().cloned().map(Block::Paragraph));
+          inserted_replacements = true;
+        }
+        output.push(Block::Paragraph(paragraph.clone()));
+        paragraph_ix += 1;
+      },
+      Block::Image(_) | Block::Equation(_) | Block::Table(_) => output.push(block.clone()),
+    }
+  }
+
+  if !inserted_replacements {
+    output.extend(replacements.iter().cloned().map(Block::Paragraph));
+  }
+  if output.is_empty()
+    && let Some(paragraph) = document.paragraphs.first()
+  {
+    output.push(Block::Paragraph(paragraph.clone()));
+  }
+
+  document.blocks = Arc::new(output);
 }
 
 /// Fenwick-tree (binary indexed tree) over the byte widths of each paragraph,
@@ -143,11 +216,221 @@ pub(super) struct InputParagraph {
   pub(super) runs: Vec<InputRun>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputAsset {
+  pub(super) id: AssetId,
+  pub(super) mime_type: String,
+  pub(super) original_name: Option<String>,
+  pub(super) content_hash: u64,
+  pub(super) bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum InputBlock {
+  Paragraph(InputParagraph),
+  Image(InputImageBlock),
+  Equation(InputEquationBlock),
+  Table(InputTableBlock),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputImageBlock {
+  pub(super) asset_id: AssetId,
+  pub(super) alt_text: String,
+  pub(super) caption: Option<InputParagraph>,
+  pub(super) sizing: InputImageSizing,
+  pub(super) alignment: InputBlockAlignment,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum InputImageSizing {
+  Intrinsic,
+  FitWidth,
+  Fixed { width_px: u32, height_px: Option<u32> },
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(super) enum InputBlockAlignment {
+  Left,
+  Center,
+  Right,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputEquationBlock {
+  pub(super) source: String,
+  pub(super) syntax: InputEquationSyntax,
+  pub(super) display: InputEquationDisplay,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(super) enum InputEquationSyntax {
+  Latex,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub(super) enum InputEquationDisplay {
+  Display,
+  InlineLikeParagraph,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputTableBlock {
+  pub(super) rows: Vec<InputTableRow>,
+  pub(super) column_widths: Vec<InputTableColumnWidth>,
+  pub(super) style: InputTableStyle,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputTableRow {
+  pub(super) cells: Vec<InputTableCell>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputTableCell {
+  pub(super) blocks: Vec<InputTableCellBlock>,
+  pub(super) row_span: u16,
+  pub(super) col_span: u16,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum InputTableCellBlock {
+  Paragraph(InputParagraph),
+  Table(InputTableBlock),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) enum InputTableColumnWidth {
+  Auto,
+  FixedPx(u32),
+  Fraction(u32),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(super) struct InputTableStyle {
+  pub(super) header_row: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct RunStyles {
   pub semantic: RunSemanticStyle,
   pub direct_underline: bool,
   pub highlight: Option<HighlightStyle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Block {
+  Paragraph(Paragraph),
+  Image(ImageBlock),
+  Equation(EquationBlock),
+  Table(TableBlock),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AssetStore {
+  pub assets: HashMap<AssetId, AssetRecord>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct AssetId(pub u128);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetRecord {
+  pub id: AssetId,
+  pub mime_type: SharedString,
+  pub original_name: Option<SharedString>,
+  pub content_hash: u64,
+  pub bytes: Arc<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImageBlock {
+  pub asset_id: AssetId,
+  pub alt_text: SharedString,
+  pub caption: Option<Paragraph>,
+  pub sizing: ImageSizing,
+  pub alignment: BlockAlignment,
+  pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ImageSizing {
+  Intrinsic,
+  FitWidth,
+  Fixed { width_px: u32, height_px: Option<u32> },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BlockAlignment {
+  #[default]
+  Left,
+  Center,
+  Right,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EquationBlock {
+  pub source: SharedString,
+  pub syntax: EquationSyntax,
+  pub display: EquationDisplay,
+  pub version: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EquationSyntax {
+  #[default]
+  Latex,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EquationDisplay {
+  #[default]
+  Display,
+  InlineLikeParagraph,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableBlock {
+  pub rows: Vec<TableRow>,
+  pub column_widths: Vec<TableColumnWidth>,
+  pub style: TableStyle,
+  pub version: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableRow {
+  pub cells: Vec<TableCell>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableCell {
+  pub blocks: Vec<TableCellBlock>,
+  pub row_span: u16,
+  pub col_span: u16,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableCellBlock {
+  Paragraph(TableCellParagraph),
+  Table(TableBlock),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableCellParagraph {
+  pub paragraph: Paragraph,
+  pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableColumnWidth {
+  Auto,
+  FixedPx(u32),
+  Fraction(u32),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableStyle {
+  pub header_row: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -443,6 +726,31 @@ impl Default for DocumentTheme {
 pub struct DocumentOffset {
   pub paragraph: usize,
   pub byte: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ObjectAffinity {
+  #[default]
+  Before,
+  After,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DocumentPosition {
+  Text {
+    block_ix: usize,
+    byte: usize,
+  },
+  Object {
+    block_ix: usize,
+    affinity: ObjectAffinity,
+  },
+  TableCell {
+    table_block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    inner: Box<DocumentPosition>,
+  },
 }
 
 // -- Tiny unit-conversion helpers -----------------------------------------
