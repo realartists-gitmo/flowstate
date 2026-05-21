@@ -31,7 +31,7 @@ pub struct FileSearchOverlay {
 
 impl FileSearchOverlay {
   pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search .db8 files by name"));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name_.db8"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| match event {
       InputEvent::Change => overlay.refresh_results(cx),
       _ => {},
