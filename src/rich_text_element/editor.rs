@@ -14,7 +14,7 @@ use crop::Rope;
 use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
   InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-  Render, ScrollStrategy, SharedString, Size, Subscription, Timer, Window, actions, div, img, point, prelude::*, px, rgb, size,
+  Render, ScrollStrategy, SharedString, Size, Subscription, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
@@ -728,7 +728,7 @@ impl RichTextEditor {
     };
     let viewport = self.scroll_handle.bounds();
     let document_point = point(position.x - viewport.left(), position.y - viewport.top() - self.scroll_handle.offset().y);
-    let source_height = px(18.0);
+    let source_height = px(22.0);
     let source_top = object.bounds.bottom() - self.document.theme.paragraph_after - source_height;
     if document_point.y < source_top || document_point.y > object.bounds.bottom() {
       return None;
@@ -5367,7 +5367,10 @@ impl Render for RichTextEditor {
                         if editor.finish_table_column_resize_drag(cx) {
                           return;
                         }
-                        if !matches!(editor.selected_block, Some(BlockSelection::TableCell { .. })) {
+                        if !matches!(
+                          editor.selected_block,
+                          Some(BlockSelection::TableCell { .. } | BlockSelection::Equation(_))
+                        ) {
                           editor.select_block_from_click(block_ix, selection, event.position, window, cx);
                         }
                       });
@@ -5989,11 +5992,15 @@ fn render_equation_block(
       .px_2()
       .py_1()
       .text_xs()
+      .line_height(relative(1.15))
       .font_family("Consolas")
       .text_color(rgb(0x000000))
       .bg(rgb(0xf6f8fa))
+      .relative()
+      .h(px(22.0))
       .flex()
       .flex_row()
+      .items_center()
       .children(equation_source_text_elements(&equation.source, source_selection))
       .into_any_element()
   };
@@ -6059,33 +6066,37 @@ fn equation_source_text_elements(source: &str, selection: Option<EquationSourceS
     .map(|selection| selection.caret_visible)
     .unwrap_or(false);
   let mut children = Vec::new();
-  let mut rendered_caret = false;
+  const SOURCE_CHAR_WIDTH: f32 = 7.0;
   for (byte, ch) in source.char_indices() {
-    if caret == Some(byte) && caret_visible {
-      children.push(
-        div()
-          .text_color(rgb(0x000000))
-          .child("|")
-          .into_any_element(),
-      );
-      rendered_caret = true;
-    }
     let end = byte + ch.len_utf8();
     let selected = range
       .as_ref()
       .is_some_and(|range| byte < range.end && end > range.start);
     children.push(
       div()
+        .w(px(SOURCE_CHAR_WIDTH))
+        .h_full()
+        .flex_none()
+        .flex()
+        .items_center()
         .when(selected, |this| this.bg(rgb(0x0969da)).text_color(rgb(0xffffff)))
         .child(ch.to_string())
         .into_any_element(),
     );
   }
-  if !rendered_caret && caret == Some(source.len()) && caret_visible {
+  if let Some(caret) = caret
+    && caret_visible
+  {
+    let caret_ix = char_index_for_byte(source, caret);
     children.push(
       div()
+        .absolute()
+        .top(px(3.0))
+        .bottom(px(3.0))
+        .left(px(caret_ix as f32 * SOURCE_CHAR_WIDTH))
+        .w(px(1.0))
+        .bg(rgb(0x000000))
         .text_color(rgb(0x000000))
-        .child("|")
         .into_any_element(),
     );
   }
@@ -6098,6 +6109,13 @@ fn byte_for_char_index(text: &str, char_ix: usize) -> usize {
     .nth(char_ix)
     .map(|(byte, _)| byte)
     .unwrap_or(text.len())
+}
+
+fn char_index_for_byte(text: &str, byte: usize) -> usize {
+  text
+    .char_indices()
+    .take_while(|(char_byte, _)| *char_byte < byte)
+    .count()
 }
 
 struct EquationRenderer;
