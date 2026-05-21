@@ -863,6 +863,14 @@ impl Workspace {
   }
 
   fn render_resizable_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    if self.document_panels.is_empty() {
+      return div()
+        .flex_1()
+        .overflow_hidden()
+        .child(self.render_document_pane(cx))
+        .into_any_element();
+    }
+
     if self.ribbon_collapsed {
       return div()
         .flex_1()
@@ -1149,7 +1157,7 @@ impl Workspace {
           .child(
             Button::new("empty-open-demo")
               .icon(IconName::FolderOpen)
-              .label("Open Demo")
+              .label("Open Demo [REMOVE THIS IN PROD]")
               .on_click(open_demo),
           ),
       )
@@ -1276,7 +1284,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
   });
 }
 
-pub fn open_workspace_window(document_path: PathBuf, cx: &mut App) {
+pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
   let bounds = Bounds::centered(None, size(px(1100.0), px(780.0)), cx);
   cx.open_window(
     WindowOptions {
@@ -1290,7 +1298,7 @@ pub fn open_workspace_window(document_path: PathBuf, cx: &mut App) {
     },
     |window, cx| {
       window.set_window_title("Odrenrir - Debate Processor");
-      let workspace = cx.new(|cx| Workspace::new(Some(document_path), window, cx));
+      let workspace = cx.new(|cx| Workspace::new(document_path, window, cx));
       install_workspace_close_prompt(workspace.clone(), window, cx);
       cx.new(|cx| Root::new(workspace, window, cx))
     },

@@ -12,9 +12,9 @@ use debateprocessor::{run_standalone, write_demo_document};
 #[derive(Parser)]
 #[command(name = "debateprocessor", about = "A rich-text editor for debate documents.")]
 struct Cli {
-  /// Path to the `.db8` document to open. Defaults to `data/demo.db8` when omitted.
-  #[arg(value_name = "PATH", default_value = "data/demo.db8")]
-  path: PathBuf,
+  /// Optional path to the `.db8` document to open.
+  #[arg(value_name = "PATH")]
+  path: Option<PathBuf>,
 
   /// Write a freshly generated demo document to `data/demo.db8` and exit.
   /// Mutually exclusive with providing a `PATH`.

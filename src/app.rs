@@ -62,7 +62,7 @@ pub fn write_demo_document() -> anyhow::Result<()> {
 }
 
 /// Run the rich text processor by itself for focused component development.
-pub fn run_standalone(document_path: PathBuf) {
+pub fn run_standalone(document_path: Option<PathBuf>) {
   Application::new()
     .with_assets(gpui_component_assets::Assets)
     .run(|cx: &mut App| {
