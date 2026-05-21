@@ -6,6 +6,7 @@ use gpui_component::dock::{Panel, PanelControl, PanelEvent, PanelInfo, PanelStat
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::app_settings::load_ribbon_mode;
 use crate::ribbon::EditorRibbon;
 use crate::rich_text_element::RichTextEditor;
 use crate::workspace::Workspace;
@@ -24,7 +25,8 @@ pub struct DocumentPanel {
 
 impl DocumentPanel {
   pub fn new(path: Option<PathBuf>, editor: Entity<RichTextEditor>, workspace: WeakEntity<Workspace>, cx: &mut Context<Self>) -> Self {
-    let ribbon = cx.new(|_| EditorRibbon::new(editor.clone()));
+    let ribbon_mode = load_ribbon_mode();
+    let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
     let title = path
       .as_ref()
       .and_then(|path| path.file_name())

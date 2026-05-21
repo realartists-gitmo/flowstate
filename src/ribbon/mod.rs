@@ -7,7 +7,10 @@
 mod editor_ribbon;
 mod style_catalog;
 
-pub use editor_ribbon::EditorRibbon;
+pub use editor_ribbon::{
+  EditorRibbon, LegacyStylesRibbon, ModernRibbonOptions, ModernStylesRibbon, OverflowBehavior, RibbonAccent, RibbonCommand, RibbonCommandGroup,
+  RibbonCommandId, RibbonDensity, RibbonMode, ShortcutVisibility, StylesRibbon,
+};
 pub use style_catalog::{
   HIGHLIGHT_STYLE_SPECS, HighlightStyleSpec, PARAGRAPH_STYLE_SPECS, ParagraphStyleSpec, SEMANTIC_STYLE_SPECS, SemanticStyleSpec,
 };

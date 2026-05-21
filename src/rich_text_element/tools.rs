@@ -41,6 +41,35 @@ impl RichTextEditor {
     self.apply_inline_tool_to_selection_with_current_behavior(tool, cx);
   }
 
+  /// Toggle a ribbon-style inline tool on or off.
+  ///
+  /// When the caret has an armed tool, choosing the same tool again should
+  /// disarm it and undo the pending caret style. With selected text this keeps
+  /// the existing document-style toggle behavior.
+  pub fn toggle_inline_tool(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) {
+    if self.selection.is_caret() && self.armed_inline_tool == Some(tool) {
+      self.armed_inline_tool = None;
+      self.apply_inline_tool_to_pending_styles(tool);
+      self.reset_caret_blink(cx);
+      cx.notify();
+      return;
+    }
+
+    self.activate_inline_tool(tool, cx);
+  }
+
+  pub fn clear_matching_armed_inline_tool(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) -> bool {
+    if self.selection.is_caret() && self.armed_inline_tool == Some(tool) {
+      self.armed_inline_tool = None;
+      self.apply_inline_tool_to_pending_styles(tool);
+      self.reset_caret_blink(cx);
+      cx.notify();
+      return true;
+    }
+
+    false
+  }
+
   pub fn clear_armed_inline_tool(&mut self, cx: &mut Context<Self>) {
     if self.armed_inline_tool.is_some() {
       self.armed_inline_tool = None;
@@ -136,7 +165,7 @@ fn apply_inline_tool_to_caret_styles(editor: &RichTextEditor, tool: ArmedInlineT
       }
     },
     ArmedInlineTool::Highlight(highlight) => {
-      styles.highlight = Some(highlight);
+      styles.highlight = if styles.highlight == Some(highlight) { None } else { Some(highlight) };
     },
   }
 }

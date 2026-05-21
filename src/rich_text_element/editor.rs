@@ -880,7 +880,7 @@ impl RichTextEditor {
         .sizes
         .iter()
         .take(block_ix)
-        .fold(px(0.0), |top, size| top + size.height),
+      .fold(px(0.0), |top, size| top + size.height),
     )
   }
 
@@ -1193,6 +1193,10 @@ impl RichTextEditor {
       ),
       highlight: selection_state_from_values(run_styles.iter().map(|styles| styles.highlight)),
     }
+  }
+
+  pub fn document_theme(&self) -> DocumentTheme {
+    self.document.theme.clone()
   }
 
   pub fn has_unsaved_changes(&self) -> bool {
@@ -2691,6 +2695,9 @@ impl RichTextEditor {
   }
 
   pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+    if self.clear_matching_armed_inline_tool(ArmedInlineTool::Underline, cx) {
+      return;
+    }
     self.toggle_underline_kind(None, cx);
   }
 
@@ -2699,6 +2706,9 @@ impl RichTextEditor {
   /// The ribbon can call this generic method instead of matching each style to
   /// a shortcut-specific wrapper like `toggle_cite` or `toggle_emphasis`.
   pub fn toggle_semantic_style_for_selection(&mut self, semantic: RunSemanticStyle, cx: &mut Context<Self>) {
+    if self.clear_matching_armed_inline_tool(ArmedInlineTool::Semantic(semantic), cx) {
+      return;
+    }
     self.toggle_semantic_style(semantic, cx);
   }
 
@@ -2719,6 +2729,9 @@ impl RichTextEditor {
   }
 
   pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
+    if self.clear_matching_armed_inline_tool(ArmedInlineTool::Highlight(highlight), cx) {
+      return;
+    }
     self.set_highlight_internal(Some(highlight), cx);
   }
 

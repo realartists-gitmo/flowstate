@@ -4,12 +4,29 @@ use gpui::{Hsla, px};
 use gpui_component::PixelsExt;
 use serde::{Deserialize, Serialize};
 
+use crate::ribbon::RibbonMode;
 use crate::rich_text_element::{DocumentTheme, ThemeUnderline};
 
 #[derive(Default, Deserialize, Serialize)]
+#[serde(default)]
 pub struct AppSettings {
   pub theme_name: Option<String>,
   pub document_theme: Option<DocumentThemeSettings>,
+  pub editor: EditorSettings,
+}
+
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(default)]
+pub struct EditorSettings {
+  pub ribbon_mode: RibbonMode,
+}
+
+impl Default for EditorSettings {
+  fn default() -> Self {
+    Self {
+      ribbon_mode: RibbonMode::default(),
+    }
+  }
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -146,6 +163,10 @@ pub fn load_document_theme() -> DocumentTheme {
     .unwrap_or_default()
 }
 
+pub fn load_ribbon_mode() -> RibbonMode {
+  load_app_settings().editor.ribbon_mode
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 pub fn save_theme_name(theme_name: &str) -> io::Result<()> {
@@ -157,6 +178,12 @@ pub fn save_theme_name(theme_name: &str) -> io::Result<()> {
 pub fn save_document_theme(theme: &DocumentTheme) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.document_theme = Some(DocumentThemeSettings::from(theme));
+  save_app_settings(settings)
+}
+
+pub fn save_ribbon_mode(ribbon_mode: RibbonMode) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.editor.ribbon_mode = ribbon_mode;
   save_app_settings(settings)
 }
 
