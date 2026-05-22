@@ -437,13 +437,50 @@ impl Workspace {
   }
 
   pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+    self.prepare_active_editor_for_container_resize(self.expected_document_width_after_outline_toggle(cx), cx);
     self.outline_collapsed = !self.outline_collapsed;
     cx.notify();
   }
 
   pub fn toggle_toolkit(&mut self, cx: &mut Context<Self>) {
+    self.prepare_active_editor_for_container_resize(self.expected_document_width_after_toolkit_toggle(cx), cx);
     self.toolkit_collapsed = !self.toolkit_collapsed;
     cx.notify();
+  }
+
+  fn prepare_active_editor_for_container_resize(&mut self, expected_width: Option<Pixels>, cx: &mut Context<Self>) {
+    let Some(editor) = self.active_editor.clone() else {
+      return;
+    };
+    editor.update(cx, |editor, cx| editor.prepare_for_container_resize(expected_width, cx));
+  }
+
+  fn current_document_panel_width(&self, cx: &mut Context<Self>) -> Option<Pixels> {
+    self.content_resizable_state.read(cx).sizes().first().copied()
+  }
+
+  fn expected_document_width_after_outline_toggle(&self, cx: &mut Context<Self>) -> Option<Pixels> {
+    let current_document_width = self.current_document_panel_width(cx)?;
+    let outline_sizes = self.body_resizable_state.read(cx).sizes().clone();
+    let current_outline_width = outline_sizes.first().copied().unwrap_or(px(240.0));
+    let delta = if self.outline_collapsed {
+      px(30.0) - px(240.0)
+    } else {
+      current_outline_width - px(30.0)
+    };
+    Some((current_document_width + delta).max(px(360.0)))
+  }
+
+  fn expected_document_width_after_toolkit_toggle(&self, cx: &mut Context<Self>) -> Option<Pixels> {
+    let sizes = self.content_resizable_state.read(cx).sizes().clone();
+    let current_document_width = sizes.first().copied()?;
+    let current_toolkit_width = sizes.get(1).copied().unwrap_or(px(300.0));
+    let delta = if self.toolkit_collapsed {
+      px(30.0) - px(300.0)
+    } else {
+      current_toolkit_width - px(30.0)
+    };
+    Some((current_document_width + delta).max(px(360.0)))
   }
 
   fn refresh_outline_tree(&mut self, cx: &mut Context<Self>) {
