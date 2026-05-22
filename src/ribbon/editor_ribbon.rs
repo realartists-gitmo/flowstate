@@ -1,5 +1,5 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
+  AnyElement, App, Context, Edges, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
   relative,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
@@ -842,23 +842,6 @@ fn modern_highlight_menu(
               )
             }),
         )
-        .child(
-          div()
-            .absolute()
-            .right(caret_width - px(1.0))
-            .top(px(1.0))
-            .bottom(px(1.0))
-            .w(px(3.0))
-            .flex()
-            .justify_center()
-            .bg(cx.theme().background)
-            .child(
-              div()
-                .w(px(1.0))
-                .h_full()
-                .bg(cx.theme().border)
-            )
-        ),
     )
     .into_any_element()
 }
