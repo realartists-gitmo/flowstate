@@ -527,6 +527,7 @@ pub struct RichTextEditor {
   pub(super) pending_styles: Option<RunStyles>,
   pub(super) armed_inline_tool: Option<ArmedInlineTool>,
   pub(super) current_highlight_style: HighlightStyle,
+  pub(super) current_highlight_choice: Option<HighlightStyle>,
   selecting: bool,
   drag_granularity: SelectionGranularity,
   drag_anchor: Option<DocumentOffset>,
@@ -594,6 +595,7 @@ impl RichTextEditor {
       pending_styles: None,
       armed_inline_tool: None,
       current_highlight_style: HighlightStyle::Spoken,
+      current_highlight_choice: Some(HighlightStyle::Spoken),
       selecting: false,
       drag_granularity: SelectionGranularity::Character,
       drag_anchor: None,
@@ -2857,6 +2859,7 @@ impl RichTextEditor {
 
   pub fn set_highlight(&mut self, highlight: HighlightStyle, cx: &mut Context<Self>) {
     self.current_highlight_style = highlight;
+    self.current_highlight_choice = Some(highlight);
     if self.clear_matching_armed_inline_tool(ArmedInlineTool::Highlight(highlight), cx) {
       return;
     }
@@ -4960,11 +4963,17 @@ impl RichTextEditor {
       self.delete_selection_internal();
     }
     let caret = self.selection.head;
+    let starts_empty_paragraph = caret.byte == paragraph_text_len(&self.document.paragraphs[caret.paragraph]);
     split_paragraph_at(&mut self.document, caret.paragraph, caret.byte);
     let new = DocumentOffset {
       paragraph: caret.paragraph + 1,
       byte: 0,
     };
+    if starts_empty_paragraph {
+      // Pressing Enter at the end starts a genuinely fresh paragraph. Reset it
+      // so header/inline/highlight styling does not leak into the next line.
+      clear_whole_paragraph_formatting(&mut self.document, new.paragraph);
+    }
     self.selection = EditorSelection { anchor: new, head: new };
     self.after_text_mutation(cx);
   }

@@ -12,6 +12,7 @@ pub enum ArmedInlineTool {
   Underline,
   Strikethrough,
   Highlight(HighlightStyle),
+  ClearHighlight,
 }
 
 impl RichTextEditor {
@@ -23,8 +24,12 @@ impl RichTextEditor {
     self.current_highlight_style
   }
 
+  pub fn current_highlight_choice(&self) -> Option<HighlightStyle> {
+    self.current_highlight_choice
+  }
+
   pub fn highlight_mode_active(&self) -> bool {
-    matches!(self.armed_inline_tool, Some(ArmedInlineTool::Highlight(_)))
+    matches!(self.armed_inline_tool, Some(ArmedInlineTool::Highlight(_) | ArmedInlineTool::ClearHighlight))
   }
 
   /// Select the highlight picker mode.
@@ -36,6 +41,7 @@ impl RichTextEditor {
     match highlight {
       Some(highlight) => {
         self.current_highlight_style = highlight;
+        self.current_highlight_choice = Some(highlight);
         self.armed_inline_tool = Some(ArmedInlineTool::Highlight(highlight));
 
         if self.selection.is_caret() {
@@ -46,7 +52,8 @@ impl RichTextEditor {
         }
       },
       None => {
-        self.armed_inline_tool = None;
+        self.current_highlight_choice = None;
+        self.armed_inline_tool = Some(ArmedInlineTool::ClearHighlight);
 
         if self.selection.is_caret() {
           let mut styles = self.styles_at_caret();
@@ -63,7 +70,7 @@ impl RichTextEditor {
   }
 
   pub fn toggle_highlight_mode(&mut self, cx: &mut Context<Self>) {
-    if matches!(self.armed_inline_tool, Some(ArmedInlineTool::Highlight(_))) {
+    if self.highlight_mode_active() {
       self.armed_inline_tool = None;
       if self.selection.is_caret() {
         self.pending_styles = None;
@@ -73,10 +80,13 @@ impl RichTextEditor {
       return;
     }
 
-    self.armed_inline_tool = Some(ArmedInlineTool::Highlight(self.current_highlight_style));
+    self.armed_inline_tool = Some(match self.current_highlight_choice {
+      Some(highlight) => ArmedInlineTool::Highlight(highlight),
+      None => ArmedInlineTool::ClearHighlight,
+    });
     if self.selection.is_caret() {
       let mut styles = self.styles_at_caret();
-      styles.highlight = Some(self.current_highlight_style);
+      styles.highlight = self.current_highlight_choice;
       self.pending_styles = Some(styles);
       self.reset_caret_blink(cx);
     }
@@ -84,7 +94,11 @@ impl RichTextEditor {
   }
 
   pub fn apply_current_highlight_to_selection(&mut self, cx: &mut Context<Self>) {
-    self.force_apply_inline_tool_to_current_target(ArmedInlineTool::Highlight(self.current_highlight_style), cx);
+    let tool = match self.current_highlight_choice {
+      Some(highlight) => ArmedInlineTool::Highlight(highlight),
+      None => ArmedInlineTool::ClearHighlight,
+    };
+    self.force_apply_inline_tool_to_current_target(tool, cx);
   }
 
   /// Activate a Word-highlighter-like inline tool.
@@ -169,6 +183,7 @@ impl RichTextEditor {
       ArmedInlineTool::Underline => self.toggle_underline(cx),
       ArmedInlineTool::Strikethrough => self.toggle_strikethrough(cx),
       ArmedInlineTool::Highlight(highlight) => self.set_highlight(highlight, cx),
+      ArmedInlineTool::ClearHighlight => self.set_highlight_for_selection(None, cx),
     }
   }
 
@@ -240,6 +255,9 @@ fn apply_inline_tool_to_caret_styles(editor: &RichTextEditor, tool: ArmedInlineT
     ArmedInlineTool::Highlight(highlight) => {
       styles.highlight = if styles.highlight == Some(highlight) { None } else { Some(highlight) };
     },
+    ArmedInlineTool::ClearHighlight => {
+      styles.highlight = None;
+    },
   }
 }
 
@@ -260,6 +278,9 @@ fn apply_inline_tool_to_styles(tool: ArmedInlineTool, styles: &mut RunStyles) {
     },
     ArmedInlineTool::Highlight(highlight) => {
       styles.highlight = Some(highlight);
+    },
+    ArmedInlineTool::ClearHighlight => {
+      styles.highlight = None;
     },
   }
 }

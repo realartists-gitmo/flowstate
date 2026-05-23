@@ -1,10 +1,10 @@
 use gpui::{
-  AnyElement, App, Context, Edges, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
+  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
   relative,
 };
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
 use gpui_component::kbd::Kbd;
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::menu::PopupMenuItem;
 use gpui_component::button::DropdownButton;
 use gpui_component::{ActiveTheme as _, Disableable as _, Icon, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _};
 use gpui_component::Size;
@@ -144,7 +144,7 @@ impl Render for EditorRibbon {
         editor.style_state(),
         editor.armed_inline_tool(),
         editor.document_theme(),
-        editor.current_highlight_style(),
+        editor.current_highlight_choice(),
         editor.highlight_mode_active(),
       )
     };
@@ -405,7 +405,7 @@ impl ModernStylesRibbon {
     style_state: &RichTextEditorStyleState,
     armed_tool: Option<ArmedInlineTool>,
     document_theme: &DocumentTheme,
-    current_highlight: HighlightStyle,
+    current_highlight: Option<HighlightStyle>,
     highlight_mode_active: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
@@ -760,7 +760,6 @@ fn modern_highlight_menu(
   let document_theme = document_theme.clone();
 
   let chip_height = metrics.chip_height;
-  let caret_width = px(f32::from(chip_height).round());
 
   div()
     .flex()
@@ -782,7 +781,12 @@ fn modern_highlight_menu(
                 .ghost()
                 .h(chip_height)
                 .px(metrics.chip_padding_x)
-                .selected(mode_active)
+                .when(mode_active, |this| {
+                  this
+                    .bg(cx.theme().secondary_active)
+                    .border_color(cx.theme().border)
+                    .text_color(cx.theme().foreground)
+                })
                 .tooltip_with_action("Highlight mode", &ApplyHighlightToSelection, Some("RichTextEditor"))
                 .child(match accent {
                   RibbonAccent::Transparent => transparent_accent_bar(cx),
@@ -850,7 +854,7 @@ fn modern_command_groups(
   state: &RichTextEditorStyleState,
   armed_tool: Option<ArmedInlineTool>,
   document_theme: &DocumentTheme,
-  current_highlight: HighlightStyle,
+  current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommandGroup> {
   vec![
@@ -964,26 +968,24 @@ fn inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInl
 
 fn highlight_commands(
   document_theme: &DocumentTheme,
-  current_highlight: HighlightStyle,
+  current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommand> {
-  let selected_highlight = highlight_mode_active.then_some(current_highlight);
-
   vec![RibbonCommand {
-    id: RibbonCommandId::ToggleHighlightMode(selected_highlight),
+    id: RibbonCommandId::ToggleHighlightMode(current_highlight),
     label: "",
     group_id: "highlight",
     shortcut: None,
     command_id: None,
     priority: 74,
-    accent: Some(match selected_highlight {
-      Some(style) => RibbonAccent::Color(highlight_color(style, document_theme)),
+    accent: Some(match current_highlight {
+      Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
       None => RibbonAccent::Transparent,
     }),
     selected: highlight_mode_active,
     disabled: false,
     overflow_behavior: OverflowBehavior::KeepVisible,
-    checked_highlight: selected_highlight,
+    checked_highlight: current_highlight,
   }]
 }
 
