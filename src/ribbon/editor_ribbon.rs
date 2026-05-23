@@ -420,6 +420,36 @@ pub struct RibbonCommandGroup {
   pub commands: Vec<RibbonCommand>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RibbonLabel {
+  text: &'static str,
+  icon_path: Option<&'static str>,
+}
+
+impl RibbonLabel {
+  fn for_command(command: &RibbonCommand) -> Self {
+    let icon_path = match command.id {
+      RibbonCommandId::Semantic(RunSemanticStyle::Emphasis) => Some("icons/bold.svg"),
+      RibbonCommandId::Underline => Some("icons/underline.svg"),
+      RibbonCommandId::Strikethrough => Some("icons/strikethrough.svg"),
+      RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
+      RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
+      RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
+      _ => None,
+    };
+    Self {
+      text: command.label,
+      icon_path,
+    }
+  }
+
+  // Future settings should choose whether this renders `icon_path` or `text`
+  // so users can switch the ribbon between icon and text label modes.
+  fn prefers_icon(self) -> bool {
+    self.icon_path.is_some()
+  }
+}
+
 impl ModernStylesRibbon {
   fn render(
     editor: Entity<RichTextEditor>,
@@ -553,6 +583,15 @@ fn clamp_pixels(value: gpui::Pixels, min: gpui::Pixels, max: gpui::Pixels) -> gp
   px(value.as_f32().clamp(min.as_f32(), max.as_f32()))
 }
 
+fn group_outer_width(content_width: gpui::Pixels, has_divider: bool, metrics: RibbonLayoutMetrics) -> gpui::Pixels {
+  let divider_chrome = if has_divider {
+    metrics.group_divider_padding_left.as_f32() + 1.0
+  } else {
+    0.0
+  };
+  px(content_width.as_f32() + divider_chrome)
+}
+
 fn modern_group(
   has_divider: bool,
   group: &RibbonCommandGroup,
@@ -567,8 +606,7 @@ fn modern_group(
     .flex()
     .flex_row()
     .flex_none()
-    .min_w_0()
-    .when_some(wrap_width, |this, wrap_width| this.w(wrap_width))
+    .when_some(wrap_width, |this, wrap_width| this.w(group_outer_width(wrap_width, has_divider, metrics)))
     .gap_2()
     .when(has_divider, |this| {
       this
@@ -600,7 +638,7 @@ fn modern_group(
             .items_center()
             .content_start()
             .gap(metrics.chip_gap)
-            .min_w_0()
+            .when_some(wrap_width, |this, wrap_width| this.w(wrap_width))
             .children(group.commands.iter().map(|command| {
               if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
                 modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
@@ -680,16 +718,10 @@ fn balanced_group_width(
     return group_row_width(group, metrics, 1, window, cx);
   }
 
-  let command_widths = group
-    .commands
-    .iter()
-    .map(|command| command_chip_width(command, metrics, window, cx).as_f32())
-    .collect::<Vec<_>>();
-  let total_width = command_widths.iter().sum::<f32>() + metrics.chip_gap.as_f32() * command_widths.len().saturating_sub(1) as f32;
-  let target_width = total_width / rows as f32;
-  let widest_command = command_widths.iter().copied().fold(0.0, f32::max);
-
-  px(target_width.max(widest_command))
+  // Use the same chunking model as the rendered command order. This width is
+  // the sum of each column's widest button, so GPUI's flex-wrap has enough
+  // horizontal room to keep the visual row count at or below `rows`.
+  group_row_width(group, metrics, rows, window, cx)
 }
 
 fn command_chip_width(
@@ -698,7 +730,16 @@ fn command_chip_width(
   window: &mut Window,
   cx: &mut Context<EditorRibbon>,
 ) -> gpui::Pixels {
-  let label_width = measure_ribbon_text(command.label, metrics.chip_text_size, window, cx).as_f32();
+  let label = RibbonLabel::for_command(command);
+  let label_width = if label.prefers_icon() {
+    0.0
+  } else {
+    measure_ribbon_text(label.text, metrics.chip_text_size, window, cx).as_f32()
+  };
+  let icon_width = label
+    .icon_path
+    .map(|_| metrics.chip_height.as_f32())
+    .unwrap_or(0.0);
   let shortcut_width = command
     .shortcut
     .as_ref()
@@ -713,7 +754,7 @@ fn command_chip_width(
   };
   let chrome_width = metrics.chip_padding_x.as_f32() * 2.0 + component_padding_x.as_f32() * 2.0 + 10.0 + caret_width;
 
-  px(label_width + shortcut_width + accent_width + chrome_width)
+  px(label_width.max(icon_width) + shortcut_width + accent_width + chrome_width)
 }
 
 fn measure_ribbon_text(text: &str, font_size: gpui::Pixels, window: &mut Window, _cx: &mut App) -> gpui::Pixels {
@@ -738,6 +779,8 @@ fn modern_command_chip(
   let command_id = command.id;
   let tooltip = command_tooltip(command);
   let shortcut = command.shortcut.clone();
+  let label = RibbonLabel::for_command(command);
+  let icon_path = label.prefers_icon().then_some(label.icon_path).flatten();
 
   Button::new(("modern-ribbon-command", ribbon_command_key(command_id)))
     .xsmall()
@@ -757,15 +800,18 @@ fn modern_command_chip(
         .text_color(cx.theme().foreground)
     })
     .when_some(command.accent, |this, accent| this.child(accent_dot(accent_color(accent, cx))))
-    .child(
-      div()
-        .flex_none()
-        .text_size(metrics.chip_text_size)
-        .line_height(relative(1.0))
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(command.label),
-    )
+    .when_some(icon_path, |this, path| this.child(Icon::default().path(path).xsmall()))
+    .when(icon_path.is_none(), |this| {
+      this.child(
+        div()
+          .flex_none()
+          .text_size(metrics.chip_text_size)
+          .line_height(relative(1.0))
+          .whitespace_nowrap()
+          .text_ellipsis()
+          .child(label.text),
+      )
+    })
     .when(show_shortcut(options), |this| {
       this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
     })
@@ -889,6 +935,7 @@ fn modern_condensed_menu(
   let mode_active = command.selected;
   let checked = command.selected;
   let chip_height = metrics.chip_height;
+  let label = RibbonLabel::for_command(command);
 
   DropdownButton::new("modern-ribbon-condensed-dropdown")
     .with_size(Size::Size(chip_height))
@@ -907,15 +954,18 @@ fn modern_condensed_menu(
             .text_color(cx.theme().foreground)
         })
         .tooltip("Condensed")
-        .child(
-          div()
-            .flex_none()
-            .text_size(metrics.chip_text_size)
-            .line_height(relative(1.0))
-            .whitespace_nowrap()
-            .text_ellipsis()
-            .child("Condensed"),
-        )
+        .when_some(label.icon_path, |this, path| this.child(Icon::default().path(path).xsmall()))
+        .when(!label.prefers_icon(), |this| {
+          this.child(
+            div()
+              .flex_none()
+              .text_size(metrics.chip_text_size)
+              .line_height(relative(1.0))
+              .whitespace_nowrap()
+              .text_ellipsis()
+              .child(label.text),
+          )
+        })
         .on_click({
           let editor = editor.clone();
           move |_, _, cx| {
@@ -1263,7 +1313,7 @@ fn highlight_commands(
 ) -> Vec<RibbonCommand> {
   vec![RibbonCommand {
     id: RibbonCommandId::ToggleHighlightMode(current_highlight),
-    label: "",
+    label: "Highlight",
     group_id: "highlight",
     shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
     command_id: Some(CommandId::ApplyHighlightToSelection),

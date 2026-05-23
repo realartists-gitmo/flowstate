@@ -84,7 +84,12 @@ impl AssetSource for AppAssets {
   fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
     match path {
       "icons/save.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/save.svg")))),
+      "icons/bold.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/bold.svg")))),
+      "icons/eraser.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/eraser.svg")))),
       "icons/highlighter.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/highlighter.svg")))),
+      "icons/shrink.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/shrink.svg")))),
+      "icons/strikethrough.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/strikethrough.svg")))),
+      "icons/underline.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/underline.svg")))),
       "icons/panel-top-open.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-open.svg")))),
       "icons/panel-top-close.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-close.svg")))),
       _ => gpui_component_assets::Assets.load(path),
@@ -96,8 +101,23 @@ impl AssetSource for AppAssets {
     if "icons/save.svg".starts_with(path) {
       assets.push("icons/save.svg".into());
     }
+    if "icons/bold.svg".starts_with(path) {
+      assets.push("icons/bold.svg".into());
+    }
+    if "icons/eraser.svg".starts_with(path) {
+      assets.push("icons/eraser.svg".into());
+    }
     if "icons/highlighter.svg".starts_with(path) {
       assets.push("icons/highlighter.svg".into());
+    }
+    if "icons/shrink.svg".starts_with(path) {
+      assets.push("icons/shrink.svg".into());
+    }
+    if "icons/strikethrough.svg".starts_with(path) {
+      assets.push("icons/strikethrough.svg".into());
+    }
+    if "icons/underline.svg".starts_with(path) {
+      assets.push("icons/underline.svg".into());
     }
     if "icons/panel-top-open.svg".starts_with(path) {
       assets.push("icons/panel-top-open.svg".into());
