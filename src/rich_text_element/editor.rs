@@ -703,11 +703,7 @@ impl RichTextEditor {
           },
         );
       },
-      CanonicalOperation::SplitParagraph {
-        paragraph,
-        byte,
-        ..
-      } => {
+      CanonicalOperation::SplitParagraph { paragraph, byte, .. } => {
         if let Some(paragraph_ix) = self.identity_map.paragraph_index(*paragraph) {
           split_paragraph_at(&mut self.document, paragraph_ix, *byte);
         }
@@ -723,10 +719,7 @@ impl RichTextEditor {
           let byte = paragraph_text_len(&self.document.paragraphs[first_ix]);
           delete_cross_paragraph_range(
             &mut self.document,
-            DocumentOffset {
-              paragraph: first_ix,
-              byte,
-            }..DocumentOffset {
+            DocumentOffset { paragraph: first_ix, byte }..DocumentOffset {
               paragraph: second_ix,
               byte: 0,
             },
@@ -742,11 +735,7 @@ impl RichTextEditor {
           update_paragraph_block(&mut self.document, paragraph_ix);
         }
       },
-      CanonicalOperation::SetRunStyles {
-        paragraph,
-        range,
-        styles,
-      } => {
+      CanonicalOperation::SetRunStyles { paragraph, range, styles } => {
         if let Some(paragraph_ix) = self.identity_map.paragraph_index(*paragraph) {
           mutate_runs_in_range(
             &mut self.document,
@@ -5395,8 +5384,14 @@ impl RichTextEditor {
       }],
       canonical_operations: vec![CanonicalOperation::ReplaceParagraphSpan {
         start_paragraph: self.identity_map.paragraph_id(inserted_start.paragraph),
-        before: capture_document_span(&self.document, inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len())),
-        after: capture_document_span(&self.document, inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len())),
+        before: capture_document_span(
+          &self.document,
+          inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len()),
+        ),
+        after: capture_document_span(
+          &self.document,
+          inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len()),
+        ),
       }],
     });
     self.redo_stack.clear();

@@ -30,7 +30,9 @@ impl DocumentIdentityMap {
   pub(super) fn reconcile(&mut self, document: &Document) {
     resize_ids(&mut self.paragraph_ids, document.paragraphs.len(), ParagraphId);
     resize_ids(&mut self.block_ids, document.blocks.len(), BlockId);
-    self.table_cell_ids.resize_with(document.blocks.len(), Vec::new);
+    self
+      .table_cell_ids
+      .resize_with(document.blocks.len(), Vec::new);
     self.table_cell_ids.truncate(document.blocks.len());
     for (block_ix, block) in document.blocks.iter().enumerate() {
       let Block::Table(table) = block else {
@@ -64,9 +66,11 @@ impl DocumentIdentityMap {
   }
 
   pub(super) fn paragraph_index(&self, id: ParagraphId) -> Option<usize> {
-    self.paragraph_ids.iter().position(|candidate| *candidate == id)
+    self
+      .paragraph_ids
+      .iter()
+      .position(|candidate| *candidate == id)
   }
-
 }
 
 fn resize_ids<T>(ids: &mut Vec<T>, len: usize, wrap: impl Fn(u128) -> T)

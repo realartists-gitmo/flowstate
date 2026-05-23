@@ -68,7 +68,7 @@ pub const SEMANTIC_STYLE_SPECS: &[SemanticStyleSpec] = &[
   },
   SemanticStyleSpec {
     style: RunSemanticStyle::Ultracondensed,
-    label: "Ultra",
+    label: "Ultracondensed",
   },
 ];
 

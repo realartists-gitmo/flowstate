@@ -1,7 +1,7 @@
 use gpui::{Context, IntoElement, Pixels, div, prelude::*, px};
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::resizable::{h_resizable, resizable_panel};
-use gpui_component::{ActiveTheme as _, Disableable as _, IconName, Selectable as _, Sizable, v_flex};
+use gpui_component::{ActiveTheme as _, IconName, Sizable, v_flex};
 
 use super::Workspace;
 
@@ -38,11 +38,6 @@ impl Workspace {
 
   fn render_toolkit(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let open_file_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
-    let invisibility_enabled = self
-      .active_editor
-      .as_ref()
-      .is_some_and(|editor| editor.read(cx).invisibility_mode());
-
     v_flex()
       .size_full()
       .h_full()
@@ -82,19 +77,6 @@ impl Workspace {
           .label("Find DB8 File")
           .small()
           .on_click(open_file_search),
-      )
-      .child(
-        Button::new("toolkit-invisibility-mode")
-          .icon(IconName::EyeOff)
-          .label("Invisibility Mode")
-          .small()
-          .selected(invisibility_enabled)
-          .disabled(self.active_editor.is_none())
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            if let Some(editor) = workspace.active_editor.clone() {
-              editor.update(cx, |editor, cx| editor.toggle_invisibility_mode(cx));
-            }
-          })),
       )
       .child(
         div()

@@ -1,8 +1,8 @@
 // Submodules. Public items are re-exported below to preserve the old
 // `rich_text_element` API, while internal imports keep sibling modules able to
 // share implementation details without exposing them outside this module tree.
-mod demo;
 mod collaboration;
+mod demo;
 mod document;
 mod edit_ops;
 mod editor;
@@ -15,8 +15,8 @@ mod selection;
 mod tools;
 mod word_boundary;
 
-pub use demo::{blank_document, demo_document};
 pub use collaboration::{BlockId, CanonicalOperation, CollaborationEdit, ParagraphId, TableCellId};
+pub use demo::{blank_document, demo_document};
 pub use document::{
   AssetId, AssetRecord, AssetStore, Block, BlockAlignment, Document, DocumentOffset, DocumentPosition, DocumentTheme, EquationBlock,
   EquationDisplay, EquationSyntax, HighlightStyle, ImageBlock, ImageSizing, ObjectAffinity, Paragraph, ParagraphStyle, RunSemanticStyle,
@@ -33,13 +33,13 @@ pub use persistence::{load_or_create_document, read_db8, write_db8};
 pub use tools::ArmedInlineTool;
 
 // Internal imports used by sibling modules via `use super::*;`.
+use collaboration::DocumentIdentityMap;
 use document::{
   InputAsset, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing,
   InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow, InputTableStyle,
   ParagraphOffsetIndex, RichClipboardFragment, SOFT_LINE_BREAK, SOFT_LINE_BREAK_STR, block_ix_for_paragraph, document_offset_for_position,
   document_position_for_offset, paragraph_blocks_from_paragraphs, paragraphs_mut, replace_paragraph_blocks, update_paragraph_block,
 };
-use collaboration::DocumentIdentityMap;
 use edit_ops::*;
 use editor::SelectionGranularity;
 use element::*;

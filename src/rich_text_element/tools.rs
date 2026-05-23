@@ -97,11 +97,7 @@ impl RichTextEditor {
   }
 
   pub fn apply_current_highlight_to_selection(&mut self, cx: &mut Context<Self>) {
-    let tool = match self.current_highlight_choice {
-      Some(highlight) => ArmedInlineTool::Highlight(highlight),
-      None => ArmedInlineTool::ClearHighlight,
-    };
-    self.force_apply_inline_tool_to_current_target(tool, cx);
+    self.set_highlight_for_selection(self.current_highlight_choice, cx);
   }
 
   /// Activate a Word-highlighter-like inline tool.

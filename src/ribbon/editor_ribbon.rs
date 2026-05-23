@@ -6,7 +6,7 @@ use gpui_component::button::DropdownButton;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, default_keys_for};
@@ -66,6 +66,7 @@ pub struct EditorRibbon {
   mode: RibbonMode,
   modern_options: ModernRibbonOptions,
   height: gpui::Pixels,
+  read_mode: RibbonReadMode,
 }
 
 /// Compatibility name for code that wants to talk in settings terms.
@@ -82,6 +83,7 @@ impl EditorRibbon {
       mode,
       modern_options: ModernRibbonOptions::default(),
       height: default_ribbon_height(),
+      read_mode: RibbonReadMode::Base,
     }
   }
 
@@ -137,7 +139,7 @@ impl EditorRibbon {
 
 impl Render for EditorRibbon {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let (style_state, armed_tool, document_theme, current_highlight, highlight_mode_active) = {
+    let (style_state, armed_tool, document_theme, current_highlight, highlight_mode_active, read_enabled) = {
       let editor = self.editor.read(cx);
       (
         editor.style_state(),
@@ -145,8 +147,14 @@ impl Render for EditorRibbon {
         editor.document_theme(),
         editor.current_highlight_choice(),
         editor.highlight_mode_active(),
+        editor.invisibility_mode(),
       )
     };
+    if read_enabled {
+      self.read_mode = RibbonReadMode::Read;
+    } else if self.read_mode == RibbonReadMode::Read {
+      self.read_mode = RibbonReadMode::Base;
+    }
 
     match self.mode {
       RibbonMode::Legacy => LegacyStylesRibbon::render(self.editor.clone(), &style_state, armed_tool, cx),
@@ -159,6 +167,7 @@ impl Render for EditorRibbon {
         highlight_mode_active,
         self.modern_options,
         self.height,
+        self.read_mode,
         window.viewport_size().width,
         window,
         cx,
@@ -192,19 +201,24 @@ impl LegacyStylesRibbon {
         ButtonGroup::new("paragraph-styles")
           .compact()
           .outline()
-          .children(PARAGRAPH_STYLE_SPECS.iter().map(|spec| {
-            let editor = editor.clone();
-            let style = spec.style;
-            Button::new(("paragraph-style", style as u64))
-              .label(spec.label)
-              .selected(EditorRibbon::paragraph_selected(style_state, style))
-              .tooltip(spec.label)
-              .on_click(move |_, _, cx| {
-                editor.update(cx, |editor, cx| {
-                  editor.set_paragraph_style_for_selection(style, cx);
-                });
-              })
-          })),
+          .children(
+            PARAGRAPH_STYLE_SPECS
+              .iter()
+              .filter(|spec| spec.style != ParagraphStyle::Normal)
+              .map(|spec| {
+                let editor = editor.clone();
+                let style = spec.style;
+                Button::new(("paragraph-style", style as u64))
+                  .label(spec.label)
+                  .selected(EditorRibbon::paragraph_selected(style_state, style))
+                  .tooltip(spec.label)
+                  .on_click(move |_, _, cx| {
+                    editor.update(cx, |editor, cx| {
+                      editor.set_paragraph_style_for_selection(style, cx);
+                    });
+                  })
+              }),
+          ),
         cx,
       ))
       .child(legacy_ribbon_group(
@@ -244,7 +258,7 @@ impl LegacyStylesRibbon {
           .child({
             let editor = editor.clone();
             Toggle::new("strikethrough-style")
-              .label("Strike")
+              .label("Strikethrough")
               .small()
               .outline()
               .checked(EditorRibbon::strikethrough_selected(style_state, armed_tool))
@@ -297,7 +311,7 @@ impl LegacyStylesRibbon {
         {
           let editor = editor.clone();
           Button::new("clear-formatting")
-            .label("Clear Formatting")
+            .label("Clear")
             .small()
             .ghost()
             .on_click(move |_, _, cx| {
@@ -328,6 +342,13 @@ fn legacy_ribbon_group(label: &'static str, controls: impl IntoElement, cx: &mut
 }
 
 pub struct ModernStylesRibbon;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RibbonReadMode {
+  Base,
+  Read,
+  Send,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct RibbonLayoutMetrics {
@@ -367,6 +388,7 @@ pub enum OverflowBehavior {
 pub enum RibbonCommandId {
   Paragraph(ParagraphStyle),
   Semantic(RunSemanticStyle),
+  CondensedMenu,
   Underline,
   Strikethrough,
   Highlight(HighlightStyle),
@@ -408,20 +430,29 @@ impl ModernStylesRibbon {
     highlight_mode_active: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
-    available_width: gpui::Pixels,
+    read_mode: RibbonReadMode,
+    _available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
   ) -> AnyElement {
     let groups = modern_command_groups(style_state, armed_tool, document_theme, current_highlight, highlight_mode_active);
     let mut metrics = RibbonLayoutMetrics::from_height(height);
     let rows_allowed_by_height = metrics.max_chip_rows;
-    let rows_requested_by_width = rows_that_fit_width(&groups, metrics, available_width, window, cx);
-    // Width can ask for more rows, but height decides whether those rows can
-    // actually be displayed without clipping into the document tabs below.
-    metrics.max_chip_rows = rows_requested_by_width.min(rows_allowed_by_height);
+    // Use vertical ribbon room proactively. Width pressure can force wrapping,
+    // but when there is spare height we still prefer balanced columns over one
+    // long horizontal strip.
+    metrics.max_chip_rows = rows_allowed_by_height;
     let wrap_widths = groups
       .iter()
-      .map(|group| (metrics.max_chip_rows > 1).then(|| group_row_width(group, metrics, metrics.max_chip_rows, window, cx)))
+      .map(|group| {
+        (metrics.max_chip_rows > 1).then(|| {
+          if group.id == "keyed" {
+            balanced_group_width(group, metrics, metrics.max_chip_rows, window, cx)
+          } else {
+            group_row_width(group, metrics, metrics.max_chip_rows, window, cx)
+          }
+        })
+      })
       .collect::<Vec<_>>();
 
     div()
@@ -447,11 +478,10 @@ impl ModernStylesRibbon {
           .child(
             div()
               .flex()
-              .flex_1()
+              .flex_none()
               .flex_row()
               .flex_nowrap()
               .items_start()
-              .justify_between()
               .gap(metrics.group_gap)
               .min_w_0()
               .children(
@@ -459,7 +489,8 @@ impl ModernStylesRibbon {
                   modern_group(index > 0, group, editor.clone(), document_theme, options, metrics, wrap_widths[index], cx)
                 }),
               ),
-          ),
+          )
+          .child(read_mode_grid(editor.clone(), read_mode, metrics, cx)),
       )
       .into_any_element()
   }
@@ -473,7 +504,18 @@ impl RibbonLayoutMetrics {
     let group_padding_top = px(3.0 + 3.0 * scale);
     let chip_gap = px(2.0 + 4.0 * scale);
     let chip_height = px(20.0 + 10.0 * scale);
-    let max_chip_rows = chip_rows_for_height(height, chip_height, chip_gap, group_padding_top);
+    let group_label_height = px(12.0);
+    let group_body_gap = px(3.0);
+    let group_bottom_guard = px(5.0);
+    let max_chip_rows = chip_rows_for_height(
+      height,
+      chip_height,
+      chip_gap,
+      group_padding_top,
+      group_label_height,
+      group_body_gap,
+      group_bottom_guard,
+    );
     let outer_padding_x = px(8.0);
     let inner_padding_x = px(8.0);
     let group_divider_padding_left = px(8.0);
@@ -525,9 +567,8 @@ fn modern_group(
     .flex()
     .flex_row()
     .flex_none()
-    .flex_grow()
     .min_w_0()
-    .when_some(wrap_width, |this, wrap_width| this.max_w(wrap_width))
+    .when_some(wrap_width, |this, wrap_width| this.w(wrap_width))
     .gap_2()
     .when(has_divider, |this| {
       this
@@ -563,6 +604,8 @@ fn modern_group(
             .children(group.commands.iter().map(|command| {
               if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
                 modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
+                modern_condensed_menu(command, editor.clone(), metrics, cx)
               } else {
                 modern_command_chip(command, editor.clone(), options, metrics, cx)
               }
@@ -572,25 +615,27 @@ fn modern_group(
     .into_any_element()
 }
 
-fn chip_rows_for_height(height: gpui::Pixels, chip_height: gpui::Pixels, chip_gap: gpui::Pixels, group_padding_top: gpui::Pixels) -> usize {
-  // The label, top padding, and bottom breathing room are fixed vertical costs
-  // before chips can stack. Calculate this instead of using a magic threshold
-  // so the default 112px ribbon can wrap to two rows when the window is narrow.
-  let fixed_height = group_padding_top.as_f32() + 10.0 + 3.0 + 2.0;
+fn chip_rows_for_height(
+  height: gpui::Pixels,
+  chip_height: gpui::Pixels,
+  chip_gap: gpui::Pixels,
+  group_padding_top: gpui::Pixels,
+  group_label_height: gpui::Pixels,
+  group_body_gap: gpui::Pixels,
+  group_bottom_guard: gpui::Pixels,
+) -> usize {
+  // Match the actual modern group stack: top padding + label + label/body gap
+  // + N chip rows + row gaps + bottom guard. If this ever overestimates rows,
+  // bottom-row buttons clip during ribbon resizing.
+  let fixed_height = group_padding_top.as_f32() + group_label_height.as_f32() + group_body_gap.as_f32() + group_bottom_guard.as_f32();
   let available_for_chips = (height.as_f32() - fixed_height).max(0.0);
-  let one_row = chip_height.as_f32();
-  let two_rows = chip_height.as_f32() * 2.0 + chip_gap.as_f32();
-  let three_rows = chip_height.as_f32() * 3.0 + chip_gap.as_f32() * 2.0;
-
-  if available_for_chips >= three_rows {
-    3
-  } else if available_for_chips >= two_rows {
-    2
-  } else if available_for_chips >= one_row {
-    1
-  } else {
-    1
+  for rows in (1_usize..=3).rev() {
+    let needed = chip_height.as_f32() * rows as f32 + chip_gap.as_f32() * rows.saturating_sub(1) as f32;
+    if available_for_chips >= needed {
+      return rows;
+    }
   }
+  1
 }
 
 fn command_columns(commands: &[RibbonCommand], max_rows: usize) -> Vec<Vec<&RibbonCommand>> {
@@ -599,45 +644,6 @@ fn command_columns(commands: &[RibbonCommand], max_rows: usize) -> Vec<Vec<&Ribb
     .chunks(rows)
     .map(|chunk| chunk.iter().collect())
     .collect()
-}
-
-fn rows_that_fit_width(
-  groups: &[RibbonCommandGroup],
-  metrics: RibbonLayoutMetrics,
-  available_width: gpui::Pixels,
-  window: &mut Window,
-  cx: &mut Context<EditorRibbon>,
-) -> usize {
-  // Keep room for the collapse button overlay.
-  let available_width = (available_width - metrics.outer_padding_x * 2.0 - metrics.inner_padding_x * 2.0 - px(48.0)).max(px(0.0));
-  let max_rows = groups
-    .iter()
-    .map(|group| group.commands.len())
-    .max()
-    .unwrap_or(1)
-    .min(3)
-    .max(1);
-
-  (1..=max_rows)
-    .find(|rows| total_group_row_width(groups, metrics, *rows, window, cx) <= available_width)
-    .unwrap_or(max_rows)
-}
-
-fn total_group_row_width(
-  groups: &[RibbonCommandGroup],
-  metrics: RibbonLayoutMetrics,
-  rows: usize,
-  window: &mut Window,
-  cx: &mut Context<EditorRibbon>,
-) -> gpui::Pixels {
-  let group_widths = groups
-    .iter()
-    .map(|group| group_row_width(group, metrics, rows, window, cx).as_f32())
-    .sum::<f32>();
-  let group_gaps = metrics.group_gap.as_f32() * groups.len().saturating_sub(1) as f32;
-  let divider_padding = metrics.group_divider_padding_left.as_f32() * groups.len().saturating_sub(1) as f32;
-
-  px(group_widths + group_gaps + divider_padding)
 }
 
 fn group_row_width(
@@ -662,6 +668,30 @@ fn group_row_width(
   px(commands_width + gap_width)
 }
 
+fn balanced_group_width(
+  group: &RibbonCommandGroup,
+  metrics: RibbonLayoutMetrics,
+  max_rows: usize,
+  window: &mut Window,
+  cx: &mut Context<EditorRibbon>,
+) -> gpui::Pixels {
+  let rows = max_rows.clamp(1, 3).min(group.commands.len().max(1));
+  if rows <= 1 {
+    return group_row_width(group, metrics, 1, window, cx);
+  }
+
+  let command_widths = group
+    .commands
+    .iter()
+    .map(|command| command_chip_width(command, metrics, window, cx).as_f32())
+    .collect::<Vec<_>>();
+  let total_width = command_widths.iter().sum::<f32>() + metrics.chip_gap.as_f32() * command_widths.len().saturating_sub(1) as f32;
+  let target_width = total_width / rows as f32;
+  let widest_command = command_widths.iter().copied().fold(0.0, f32::max);
+
+  px(target_width.max(widest_command))
+}
+
 fn command_chip_width(
   command: &RibbonCommand,
   metrics: RibbonLayoutMetrics,
@@ -676,7 +706,7 @@ fn command_chip_width(
     .unwrap_or(0.0);
   let accent_width = if command.accent.is_some() { 14.0 } else { 0.0 };
   let component_padding_x = px(4.0);
-  let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu) {
+  let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu) {
     10.0
   } else {
     0.0
@@ -850,6 +880,224 @@ fn modern_highlight_menu(
     .into_any_element()
 }
 
+fn modern_condensed_menu(
+  command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let mode_active = command.selected;
+  let checked = command.selected;
+  let chip_height = metrics.chip_height;
+
+  DropdownButton::new("modern-ribbon-condensed-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .button(
+      Button::new("modern-ribbon-condensed-toggle")
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .when(mode_active, |this| {
+          this
+            .bg(cx.theme().secondary_active)
+            .border_color(cx.theme().border)
+            .text_color(cx.theme().foreground)
+        })
+        .tooltip("Condensed")
+        .child(
+          div()
+            .flex_none()
+            .text_size(metrics.chip_text_size)
+            .line_height(relative(1.0))
+            .whitespace_nowrap()
+            .text_ellipsis()
+            .child("Condensed"),
+        )
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            editor.update(cx, |editor, cx| {
+              editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
+            });
+          }
+        }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let editor_for_condensed = editor.clone();
+      let editor_for_ultra = editor.clone();
+      menu
+        .min_w(px(190.0))
+        .item(
+          PopupMenuItem::new("Condensed")
+            .checked(checked)
+            .on_click(move |_, _, cx| {
+              editor_for_condensed.update(cx, |editor, cx| {
+                editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
+              });
+            }),
+        )
+        .item(PopupMenuItem::new("Ultracondensed").on_click(move |_, _, cx| {
+          editor_for_ultra.update(cx, |editor, cx| {
+            editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Ultracondensed), cx);
+          });
+        }))
+    })
+    .into_any_element()
+}
+
+fn read_mode_grid(
+  editor: Entity<RichTextEditor>,
+  read_mode: RibbonReadMode,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let stack_rows = read_mode_rows_fit(metrics);
+  div()
+    .flex()
+    .flex_col()
+    .flex_none()
+    .gap_0p5()
+    .pl(metrics.group_divider_padding_left)
+    .border_l_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .child(
+      div()
+        .text_size(px(10.0))
+        .font_medium()
+        .text_color(cx.theme().muted_foreground)
+        .child("Views"),
+    )
+    .child(
+      div()
+        .flex()
+        .when(stack_rows, |this| this.flex_col())
+        .when(!stack_rows, |this| this.flex_row().flex_wrap())
+        .gap(metrics.chip_gap)
+        .child(read_mode_row("Base", RibbonReadMode::Base, read_mode, editor.clone(), metrics, cx))
+        .child(read_mode_row("Read", RibbonReadMode::Read, read_mode, editor.clone(), metrics, cx))
+        .child(read_mode_row("Send", RibbonReadMode::Send, read_mode, editor, metrics, cx)),
+    )
+    .into_any_element()
+}
+
+fn read_mode_rows_fit(metrics: RibbonLayoutMetrics) -> bool {
+  let label_height = 12.0;
+  let label_gap = 2.0;
+  let bottom_guard = 5.0;
+  let fixed_height = metrics.group_padding_top.as_f32() + label_height + label_gap + bottom_guard;
+  let rows_height = metrics.chip_height.as_f32() * 3.0 + metrics.chip_gap.as_f32() * 2.0;
+  metrics.height.as_f32() - fixed_height >= rows_height
+}
+
+fn read_mode_row(
+  label: &'static str,
+  mode: RibbonReadMode,
+  current: RibbonReadMode,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let selected = mode == current;
+  let eye_editor = editor.clone();
+  // Keep these controls aligned with the rest of the ribbon: all ribbon
+  // buttons should use the same xsmall + compact scaling unless the whole
+  // ribbon sizing model changes.
+  div()
+    .flex()
+    .flex_row()
+    .items_center()
+    .gap(metrics.chip_gap)
+    .child(
+      Button::new(("read-mode-label", read_mode_key(mode)))
+        .xsmall()
+        .compact()
+        .outline()
+        .h(metrics.chip_height)
+        .w(px(52.0))
+        .px(metrics.chip_padding_x)
+        .label(label),
+    )
+    .child(
+      Button::new(("read-mode-eye", read_mode_key(mode)))
+        .xsmall()
+        .compact()
+        .outline()
+        .h(metrics.chip_height)
+        .w(metrics.chip_height)
+        .icon(if selected { IconName::Eye } else { IconName::EyeOff })
+        .selected(selected)
+        .on_click(cx.listener(move |ribbon, _, _, cx| {
+          ribbon.read_mode = mode;
+          eye_editor.update(cx, |editor, cx| {
+            editor.set_invisibility_mode(mode == RibbonReadMode::Read, cx);
+          });
+          cx.notify();
+        })),
+    )
+    .child(save_dropdown(mode, editor, metrics, cx))
+    .into_any_element()
+}
+
+fn save_dropdown(
+  mode: RibbonReadMode,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  _cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let enabled = mode == RibbonReadMode::Base;
+  let chip_height = metrics.chip_height;
+  DropdownButton::new(("read-mode-save-dropdown", read_mode_key(mode)))
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .button(
+      Button::new(("read-mode-save", read_mode_key(mode)))
+        .xsmall()
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .tooltip("Save")
+        .child(Icon::default().path("icons/save.svg").xsmall())
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            if enabled {
+              editor.update(cx, |editor, cx| {
+                let _ = editor.save(cx);
+              });
+            }
+          }
+        }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let db8_editor = editor.clone();
+      menu
+        .min_w(px(150.0))
+        .item(PopupMenuItem::new("Save as DB8").on_click(move |_, _, cx| {
+          if enabled {
+            db8_editor.update(cx, |editor, cx| {
+              let _ = editor.save(cx);
+            });
+          }
+        }))
+        .item(PopupMenuItem::new("Save as DOCX"))
+        .item(PopupMenuItem::new("Save as PDF"))
+    })
+    .into_any_element()
+}
+
+fn read_mode_key(mode: RibbonReadMode) -> u64 {
+  match mode {
+    RibbonReadMode::Base => 1,
+    RibbonReadMode::Read => 2,
+    RibbonReadMode::Send => 3,
+  }
+}
+
 fn modern_command_groups(
   state: &RichTextEditorStyleState,
   armed_tool: Option<ArmedInlineTool>,
@@ -857,85 +1105,69 @@ fn modern_command_groups(
   current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommandGroup> {
+  let mut keyed = Vec::new();
+  let mut unkeyed = Vec::new();
+
+  keyed.extend(
+    paragraph_commands(state)
+      .into_iter()
+      .filter(|command| command.command_id.is_some()),
+  );
+  keyed.extend(keyed_inline_commands(state, armed_tool));
+  keyed.extend(highlight_commands(document_theme, current_highlight, highlight_mode_active));
+  keyed.push(clear_formatting_command("keyed"));
+  keyed.sort_by_key(|command| command_sort_key(command.command_id));
+
+  unkeyed.extend(unkeyed_inline_commands(state, armed_tool));
+
   vec![
     RibbonCommandGroup {
-      id: "styles",
-      label: "Styles",
-      commands: PARAGRAPH_STYLE_SPECS
-        .iter()
-        .map(|spec| {
-          let command_id = paragraph_command_id(spec.style);
-          RibbonCommand {
-            id: RibbonCommandId::Paragraph(spec.style),
-            label: spec.label,
-            group_id: "styles",
-            shortcut: command_id.and_then(shortcut_for),
-            command_id,
-            priority: paragraph_priority(spec.style),
-            accent: None,
-            selected: EditorRibbon::paragraph_selected(state, spec.style),
-            disabled: false,
-            overflow_behavior: paragraph_overflow_behavior(spec.style),
-            checked_highlight: None,
-          }
-        })
-        .collect(),
+      id: "keyed",
+      label: "Keybinds",
+      commands: keyed,
     },
     RibbonCommandGroup {
-      id: "inline",
-      label: "Inline",
-      commands: inline_commands(state, armed_tool),
-    },
-    RibbonCommandGroup {
-      id: "highlight",
-      label: "Highlight",
-      commands: highlight_commands(document_theme, current_highlight, highlight_mode_active),
-    },
-    RibbonCommandGroup {
-      id: "reset",
-      label: "Reset",
-      commands: vec![RibbonCommand {
-        id: RibbonCommandId::ClearFormatting,
-        label: "Clear Formatting",
-        group_id: "reset",
-        shortcut: shortcut_for(CommandId::ClearFormatting),
-        command_id: Some(CommandId::ClearFormatting),
-        priority: 90,
-        accent: None,
-        selected: false,
-        disabled: false,
-        overflow_behavior: OverflowBehavior::KeepVisible,
-        checked_highlight: None,
-      }],
+      id: "unkeyed",
+      label: "No Keybind",
+      commands: unkeyed,
     },
   ]
 }
 
-fn inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
-  let mut commands = SEMANTIC_STYLE_SPECS
+fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
+  PARAGRAPH_STYLE_SPECS
     .iter()
+    .filter(|spec| spec.style != ParagraphStyle::Normal)
     .map(|spec| {
-      let command_id = semantic_command_id(spec.style);
+      let command_id = paragraph_command_id(spec.style);
       RibbonCommand {
-        id: RibbonCommandId::Semantic(spec.style),
+        id: RibbonCommandId::Paragraph(spec.style),
         label: spec.label,
-        group_id: "inline",
+        group_id: "keyed",
         shortcut: command_id.and_then(shortcut_for),
         command_id,
-        priority: semantic_priority(spec.style),
+        priority: paragraph_priority(spec.style),
         accent: None,
-        selected: EditorRibbon::semantic_selected(state, armed_tool, spec.style),
+        selected: EditorRibbon::paragraph_selected(state, spec.style),
         disabled: false,
-        overflow_behavior: semantic_overflow_behavior(spec.style),
+        overflow_behavior: paragraph_overflow_behavior(spec.style),
         checked_highlight: None,
       }
     })
+    .collect()
+}
+
+fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
+  let mut commands = SEMANTIC_STYLE_SPECS
+    .iter()
+    .filter(|spec| matches!(spec.style, RunSemanticStyle::Cite | RunSemanticStyle::Emphasis))
+    .map(|spec| semantic_command(spec.style, spec.label, "keyed", state, armed_tool))
     .collect::<Vec<_>>();
 
   commands.push(RibbonCommand {
     id: RibbonCommandId::Underline,
     label: "Underline",
-    group_id: "inline",
+    group_id: "keyed",
     shortcut: shortcut_for(CommandId::ToggleUnderline),
     command_id: Some(CommandId::ToggleUnderline),
     priority: 82,
@@ -945,21 +1177,83 @@ fn inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInl
     overflow_behavior: OverflowBehavior::KeepVisible,
     checked_highlight: None,
   });
-  commands.push(RibbonCommand {
-    id: RibbonCommandId::Strikethrough,
-    label: "Strike",
-    group_id: "inline",
-    shortcut: shortcut_for(CommandId::ToggleStrikethrough),
-    command_id: Some(CommandId::ToggleStrikethrough),
-    priority: 81,
+  commands
+}
+
+fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
+  vec![
+    RibbonCommand {
+      id: RibbonCommandId::CondensedMenu,
+      label: "Condensed",
+      group_id: "unkeyed",
+      shortcut: None,
+      command_id: None,
+      priority: 76,
+      accent: None,
+      selected: matches!(
+        armed_tool,
+        Some(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed))
+      ) || matches!(
+        state.semantic,
+        SelectionState::Uniform(RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed)
+      ),
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: None,
+    },
+    RibbonCommand {
+      id: RibbonCommandId::Strikethrough,
+      label: "Strikethrough",
+      group_id: "unkeyed",
+      shortcut: None,
+      command_id: None,
+      priority: 81,
+      accent: None,
+      selected: EditorRibbon::strikethrough_selected(state, armed_tool),
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: None,
+    },
+  ]
+}
+
+fn semantic_command(
+  style: RunSemanticStyle,
+  label: &'static str,
+  group_id: &'static str,
+  state: &RichTextEditorStyleState,
+  armed_tool: Option<ArmedInlineTool>,
+) -> RibbonCommand {
+  let command_id = semantic_command_id(style);
+  RibbonCommand {
+    id: RibbonCommandId::Semantic(style),
+    label,
+    group_id,
+    shortcut: command_id.and_then(shortcut_for),
+    command_id,
+    priority: semantic_priority(style),
     accent: None,
-    selected: EditorRibbon::strikethrough_selected(state, armed_tool),
+    selected: EditorRibbon::semantic_selected(state, armed_tool, style),
+    disabled: false,
+    overflow_behavior: semantic_overflow_behavior(style),
+    checked_highlight: None,
+  }
+}
+
+fn clear_formatting_command(group_id: &'static str) -> RibbonCommand {
+  RibbonCommand {
+    id: RibbonCommandId::ClearFormatting,
+    label: "Clear",
+    group_id,
+    shortcut: shortcut_for(CommandId::ClearFormatting),
+    command_id: Some(CommandId::ClearFormatting),
+    priority: 90,
+    accent: None,
+    selected: false,
     disabled: false,
     overflow_behavior: OverflowBehavior::KeepVisible,
     checked_highlight: None,
-  });
-
-  commands
+  }
 }
 
 fn highlight_commands(
@@ -971,8 +1265,8 @@ fn highlight_commands(
     id: RibbonCommandId::ToggleHighlightMode(current_highlight),
     label: "",
     group_id: "highlight",
-    shortcut: None,
-    command_id: None,
+    shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
+    command_id: Some(CommandId::ApplyHighlightToSelection),
     priority: 74,
     accent: Some(match current_highlight {
       Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
@@ -985,6 +1279,24 @@ fn highlight_commands(
   }]
 }
 
+fn command_sort_key(command_id: Option<CommandId>) -> u16 {
+  match command_id {
+    Some(CommandId::SetParagraphPocket) => 400,
+    Some(CommandId::SetParagraphHat) => 500,
+    Some(CommandId::SetParagraphBlock) => 600,
+    Some(CommandId::SetParagraphTag) => 700,
+    Some(CommandId::SetParagraphAnalytic) => 701,
+    Some(CommandId::ToggleCite) => 800,
+    Some(CommandId::SetParagraphUndertag) => 801,
+    Some(CommandId::ToggleUnderline) => 900,
+    Some(CommandId::ToggleEmphasis) => 1000,
+    Some(CommandId::ApplyHighlightToSelection) => 1100,
+    Some(CommandId::ClearFormatting) => 1200,
+    Some(_) => 9000,
+    None => 9500,
+  }
+}
+
 fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, cx: &mut Context<RichTextEditor>) {
   match command_id {
     RibbonCommandId::Paragraph(style) => {
@@ -992,6 +1304,9 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     },
     RibbonCommandId::Semantic(style) => {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
+    },
+    RibbonCommandId::CondensedMenu => {
+      editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
     },
     RibbonCommandId::Underline => {
       editor.toggle_inline_tool(ArmedInlineTool::Underline, cx);
@@ -1183,6 +1498,7 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
   match command_id {
     RibbonCommandId::Paragraph(style) => 1_000 + style as u64,
     RibbonCommandId::Semantic(style) => 2_000 + style as u64,
+    RibbonCommandId::CondensedMenu => 2_900,
     RibbonCommandId::Underline => 3_000,
     RibbonCommandId::Strikethrough => 3_100,
     RibbonCommandId::Highlight(style) => 4_000 + style as u64,
