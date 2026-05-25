@@ -13,7 +13,7 @@ use gpui_component::{
 };
 
 use crate::{
-  file_search::{Db8FileSearch, FileSearchHit, default_global_search_root},
+  file_search::{DocumentFileSearch, FileSearchHit, default_global_search_root},
   workspace::Workspace,
 };
 
@@ -22,16 +22,17 @@ const RESULT_LIMIT: usize = 10;
 pub struct FileSearchOverlay {
   workspace: WeakEntity<Workspace>,
   search_input: Entity<InputState>,
-  search: Option<Rc<Db8FileSearch>>,
+  search: Option<Rc<DocumentFileSearch>>,
   hits: Vec<FileSearchHit>,
   selected: usize,
+  loading: bool,
   error: Option<SharedString>,
   _input_subscription: Subscription,
 }
 
 impl FileSearchOverlay {
   pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name_.db8"));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8 or file_name.docx"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| match event {
       InputEvent::Change => overlay.refresh_results(cx),
       _ => {},
@@ -43,6 +44,7 @@ impl FileSearchOverlay {
       search: None,
       hits: Vec::new(),
       selected: 0,
+      loading: true,
       error: None,
       _input_subscription,
     };
@@ -55,19 +57,35 @@ impl FileSearchOverlay {
   }
 
   fn rebuild_index(&mut self, cx: &mut Context<Self>) {
-    match Db8FileSearch::new(default_global_search_root()) {
-      Ok(search) => {
-        self.error = None;
-        self.search = Some(Rc::new(search));
-        self.refresh_results(cx);
-      },
-      Err(error) => {
-        self.error = Some(format!("File search unavailable: {error}").into());
-        self.search = None;
-        self.hits.clear();
-      },
-    }
+    self.loading = true;
+    self.error = None;
+    self.search = None;
+    self.hits.clear();
     cx.notify();
+
+    cx.spawn(async move |overlay, cx| {
+      let search = cx
+        .background_executor()
+        .spawn(async move { DocumentFileSearch::new(default_global_search_root()) })
+        .await;
+
+      let _ = overlay.update(cx, |overlay, cx| {
+        overlay.loading = false;
+        match search {
+          Ok(search) => {
+            overlay.search = Some(Rc::new(search));
+            overlay.refresh_results(cx);
+          },
+          Err(error) => {
+            overlay.error = Some(format!("File search unavailable: {error}").into());
+            overlay.search = None;
+            overlay.hits.clear();
+            cx.notify();
+          },
+        }
+      });
+    })
+    .detach();
   }
 
   fn refresh_results(&mut self, cx: &mut Context<Self>) {
@@ -239,10 +257,12 @@ impl Render for FileSearchOverlay {
               })
               .when(!has_hits, |this| {
                 let message = self.error.clone().unwrap_or_else(|| {
-                  if query.trim().is_empty() {
-                    "No .db8 files indexed"
+                  if self.loading {
+                    "Indexing documents..."
+                  } else if query.trim().is_empty() {
+                    "No .db8 or .docx files indexed"
                   } else {
-                    "No matching .db8 files"
+                    "No matching .db8 or .docx files"
                   }
                   .into()
                 });
