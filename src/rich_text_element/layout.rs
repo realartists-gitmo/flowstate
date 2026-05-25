@@ -45,7 +45,7 @@ impl LayoutState {
       if position.y < paragraph.top {
         return DocumentOffset {
           paragraph: paragraph.index,
-          byte: 0,
+          byte: paragraph.byte_range.start,
         };
       }
       return paragraph.hit_test(position);
@@ -53,11 +53,11 @@ impl LayoutState {
     let Some(last) = self.paragraphs.last() else {
       return DocumentOffset::default();
     };
-    DocumentOffset {
-      paragraph: last.index,
-      byte: last.len,
-    }
+  DocumentOffset {
+    paragraph: last.index,
+    byte: last.byte_range.end.min(last.len),
   }
+}
 }
 
 #[derive(Clone)]
@@ -65,6 +65,7 @@ pub(super) struct LaidOutParagraph {
   pub(super) index: usize,
   pub(super) cache_key: ParagraphCacheKey,
   pub(super) len: usize,
+  pub(super) byte_range: Range<usize>,
   pub(super) top: Pixels,
   pub(super) bottom: Pixels,
   pub(super) lines: Vec<LaidOutLine>,
@@ -160,8 +161,17 @@ impl LaidOutParagraph {
     }
     DocumentOffset {
       paragraph: self.index,
-      byte: self.len,
+      byte: self.byte_range.end.min(self.len),
     }
+  }
+
+  pub(super) fn contains_byte(&self, byte: usize) -> bool {
+    if self.byte_range.start == self.byte_range.end {
+      return byte == self.byte_range.start;
+    }
+
+    (byte >= self.byte_range.start && byte < self.byte_range.end)
+      || (byte == self.byte_range.end && self.byte_range.end == self.len)
   }
 }
 
@@ -520,6 +530,7 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
           .map(|paragraph| paragraph_cache_key(document, paragraph))
           .unwrap_or(ParagraphCacheKey { fingerprint: 0 }),
         len: 0,
+        byte_range: 0..0,
         top: px(0.0),
         bottom: px(0.0),
         lines: Vec::new(),
@@ -914,6 +925,7 @@ fn layout_table_cell_paragraph(
     index,
     cache_key,
     len: cell_paragraph.text.len(),
+    byte_range: 0..cell_paragraph.text.len(),
     top: y,
     bottom: line_y,
     lines: laid_out_lines,
@@ -992,6 +1004,7 @@ pub(super) fn layout_paragraph_at(
       index: paragraph_ix,
       cache_key,
       len: paragraph_text.len(),
+      byte_range: 0..paragraph_text.len(),
       top: y,
       bottom,
       lines: laid_out_lines,
@@ -1001,6 +1014,220 @@ pub(super) fn layout_paragraph_at(
     max_width,
     false,
   )
+}
+
+pub(super) const DEFAULT_PARAGRAPH_CHUNK_TARGET_LINES: usize = 96;
+
+pub(super) struct ParagraphChunkBuildResult {
+  pub(super) layout: LayoutState,
+  pub(super) start_byte: usize,
+  pub(super) next_byte: usize,
+  pub(super) complete: bool,
+}
+
+pub(super) fn build_paragraph_chunk_layout_with_visibility(
+  document: &Document,
+  paragraph_ix: usize,
+  width: Pixels,
+  start_byte: usize,
+  target_lines: usize,
+  invisibility_mode: bool,
+  window: &mut Window,
+  cx: &mut App,
+) -> Option<ParagraphChunkBuildResult> {
+  let projected_document = invisibility_mode
+    .then(|| invisibility_projected_document(document, paragraph_ix))
+    .flatten();
+  let layout_document = projected_document.as_ref().unwrap_or(document);
+  let layout_paragraph_ix = if projected_document.is_some() { 0 } else { paragraph_ix };
+  let is_first_document_paragraph = paragraph_ix == 0;
+  let is_last_document_paragraph = paragraph_ix + 1 == document.paragraphs.len();
+  let mut result = layout_paragraph_chunk_at(
+    layout_document,
+    layout_paragraph_ix,
+    paragraph_ix,
+    width,
+    start_byte,
+    target_lines,
+    is_first_document_paragraph,
+    is_last_document_paragraph,
+    window,
+    cx,
+  )?;
+  if projected_document.is_some()
+    && let Some(paragraph) = result.layout.paragraphs.first_mut()
+  {
+    paragraph.index = paragraph_ix;
+  }
+  Some(result)
+}
+
+fn layout_paragraph_chunk_at(
+  document: &Document,
+  layout_paragraph_ix: usize,
+  display_paragraph_ix: usize,
+  width: Pixels,
+  start_byte: usize,
+  target_lines: usize,
+  is_first_document_paragraph: bool,
+  is_last_document_paragraph: bool,
+  window: &mut Window,
+  cx: &mut App,
+) -> Option<ParagraphChunkBuildResult> {
+  let paragraph = document.paragraphs.get(layout_paragraph_ix)?;
+  let paragraph_text = paragraph_text(document, layout_paragraph_ix);
+  let len = paragraph_text.len();
+  let start_byte = clamp_to_char_boundary(&paragraph_text, start_byte.min(len));
+  let p_format = paragraph_format(document, paragraph.style);
+  let cache_key = paragraph_cache_key(document, paragraph);
+  let pageless_left = document.theme.pageless_inset_x;
+  let pageless_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
+  let border = p_format.border;
+  let border_inset = border.map_or(px(0.0), |border| border.width + border.space_x);
+  let content_left = pageless_left + border_inset;
+  let content_width = (pageless_width - border_inset * 2.0).max(px(1.0));
+  let is_first_chunk = start_byte == 0;
+  let chunk_target_lines = target_lines.max(1);
+  let mut shape_cache = FragmentShapeCache::default();
+  let (lines, next_byte, complete) = wrap_lines_limited(
+    document,
+    paragraph,
+    p_format.clone(),
+    &paragraph_text,
+    start_byte,
+    chunk_target_lines,
+    content_width,
+    &mut shape_cache,
+    window,
+    cx,
+  );
+
+  let paragraph_top = if is_first_chunk {
+    let mut top = p_format.spacing_before;
+    if is_first_document_paragraph {
+      top += document.theme.pageless_inset_top;
+    }
+    top
+  } else {
+    px(0.0)
+  };
+  let content_top = if is_first_chunk {
+    border.map_or(px(0.0), |border| border.width + border.space_y)
+  } else {
+    px(0.0)
+  };
+  let mut max_width = width;
+  let mut laid_out_lines = Vec::with_capacity(lines.len());
+  let mut line_y = paragraph_top + content_top;
+  for mut line in lines {
+    line.origin.x = content_left
+      + match p_format.align {
+        ParagraphAlign::Left => px(0.0),
+        ParagraphAlign::Center => (content_width - line.width).max(px(0.0)) / 2.0,
+      };
+    line.origin.y = line_y;
+    line_y += line.line_height;
+    max_width = max_width.max(line.origin.x + line.width);
+    laid_out_lines.push(line);
+  }
+
+  let tail_space = if complete {
+    let mut tail = border.map_or(px(0.0), |border| border.width + border.space_y) + p_format.spacing_after;
+    if is_last_document_paragraph {
+      tail += document.theme.pageless_inset_bottom;
+    }
+    tail
+  } else {
+    px(0.0)
+  };
+  let row_bottom = line_y + tail_space;
+  let byte_range_end = if complete { len } else { next_byte.min(len) };
+  let mut borders = Vec::new();
+  if let Some(border) = border {
+    push_chunk_box_rules(
+      &mut borders,
+      Bounds::new(point(pageless_left, paragraph_top), size(pageless_width, (row_bottom - paragraph_top).max(px(1.0)))),
+      border.width,
+      document.theme.default_text_color,
+      is_first_chunk,
+      complete,
+    );
+  }
+
+  let paragraph = LaidOutParagraph {
+    index: display_paragraph_ix,
+    cache_key,
+    len,
+    byte_range: start_byte..byte_range_end,
+    top: paragraph_top,
+    bottom: row_bottom,
+    lines: laid_out_lines,
+    borders,
+  };
+  let layout = LayoutState {
+    blocks: vec![LaidOutBlock::Paragraph(paragraph.clone())],
+    paragraph_to_block: vec![0],
+    block_to_paragraph: vec![Some(display_paragraph_ix)],
+    paragraphs: vec![paragraph],
+    bounds: None,
+    size: size(max_width.max(width), row_bottom.max(px(1.0))),
+    width,
+    snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
+  };
+  Some(ParagraphChunkBuildResult {
+    layout,
+    start_byte,
+    next_byte: byte_range_end,
+    complete,
+  })
+}
+
+fn clamp_to_char_boundary(text: &str, mut byte: usize) -> usize {
+  byte = byte.min(text.len());
+  while byte > 0 && !text.is_char_boundary(byte) {
+    byte -= 1;
+  }
+  byte
+}
+
+fn push_chunk_box_rules(
+  rects: &mut Vec<RunRect>,
+  bounds: Bounds<Pixels>,
+  thickness: Pixels,
+  color: Hsla,
+  include_top: bool,
+  include_bottom: bool,
+) {
+  if include_top {
+    rects.push(RunRect {
+      bounds: Bounds::new(bounds.origin, size(bounds.size.width, thickness)),
+      color,
+      snap: RuleSnap::Horizontal,
+    });
+  }
+  if include_bottom {
+    rects.push(RunRect {
+      bounds: Bounds::new(
+        point(bounds.origin.x, bounds.origin.y + bounds.size.height - thickness),
+        size(bounds.size.width, thickness),
+      ),
+      color,
+      snap: RuleSnap::Horizontal,
+    });
+  }
+  rects.push(RunRect {
+    bounds: Bounds::new(bounds.origin, size(thickness, bounds.size.height)),
+    color,
+    snap: RuleSnap::Vertical,
+  });
+  rects.push(RunRect {
+    bounds: Bounds::new(
+      point(bounds.origin.x + bounds.size.width - thickness, bounds.origin.y),
+      size(thickness, bounds.size.height),
+    ),
+    color,
+    snap: RuleSnap::Vertical,
+  });
 }
 
 pub(super) fn estimate_paragraph_item_height(document: &Document, paragraph_ix: usize, width: Pixels) -> Pixels {
@@ -1230,6 +1457,209 @@ pub(super) fn wrap_lines(
     window,
     cx,
   )
+}
+
+fn wrap_lines_limited(
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  text: &str,
+  start_byte: usize,
+  max_lines: usize,
+  max_width: Pixels,
+  shape_cache: &mut FragmentShapeCache,
+  window: &mut Window,
+  cx: &mut App,
+) -> (Vec<LaidOutLine>, usize, bool) {
+  let max_lines = max_lines.max(1);
+  let start_byte = clamp_to_char_boundary(text, start_byte.min(text.len()));
+  if text.is_empty() {
+    return (
+      vec![shape_line(document, paragraph, p_format, text, 0..0, shape_cache, window, cx)],
+      0,
+      true,
+    );
+  }
+  if start_byte >= text.len() {
+    return (Vec::new(), text.len(), true);
+  }
+
+  let mut lines = Vec::new();
+  let mut segment_start = start_byte;
+  while segment_start < text.len() && lines.len() < max_lines {
+    let soft_break = text[segment_start..]
+      .char_indices()
+      .find_map(|(offset, ch)| (ch == SOFT_LINE_BREAK).then_some((segment_start + offset, ch.len_utf8())));
+    let (segment_end, break_len, has_break) = soft_break
+      .map(|(byte, len)| (byte, len, true))
+      .unwrap_or((text.len(), 0, false));
+    let remaining = max_lines - lines.len();
+    if segment_start == segment_end {
+      lines.push(shape_line(
+        document,
+        paragraph,
+        p_format.clone(),
+        "",
+        segment_start..segment_start,
+        shape_cache,
+        window,
+        cx,
+      ));
+      segment_start = segment_end + break_len;
+      if lines.len() >= max_lines {
+        return (lines, segment_start.min(text.len()), segment_start >= text.len());
+      }
+      continue;
+    }
+
+    let (mut segment_lines, next_byte, segment_complete) = wrap_text_segment_limited(
+      document,
+      paragraph,
+      p_format.clone(),
+      text,
+      segment_start..segment_end,
+      max_width,
+      remaining,
+      shape_cache,
+      window,
+      cx,
+    );
+    lines.append(&mut segment_lines);
+    if !segment_complete {
+      return (lines, next_byte, false);
+    }
+
+    segment_start = if has_break { segment_end + break_len } else { segment_end };
+    if !has_break {
+      return (lines, text.len(), true);
+    }
+  }
+
+  (lines, segment_start.min(text.len()), segment_start >= text.len())
+}
+
+fn wrap_text_segment_limited(
+  document: &Document,
+  paragraph: &Paragraph,
+  p_format: EffectiveParagraphFormat,
+  text: &str,
+  segment: Range<usize>,
+  max_width: Pixels,
+  max_lines: usize,
+  shape_cache: &mut FragmentShapeCache,
+  window: &mut Window,
+  cx: &mut App,
+) -> (Vec<LaidOutLine>, usize, bool) {
+  if segment.is_empty() {
+    return (
+      vec![shape_line(document, paragraph, p_format, "", segment.clone(), shape_cache, window, cx)],
+      segment.end,
+      true,
+    );
+  }
+
+  let max_lines = max_lines.max(1);
+  let mut lines = Vec::new();
+  let mut start = segment.start;
+  let break_ends = wrap_break_ends(&text[segment.clone()])
+    .into_iter()
+    .map(|byte| segment.start + byte)
+    .collect::<Vec<_>>();
+  let mut break_cursor = 0;
+
+  while start < segment.end {
+    while break_cursor < break_ends.len() && break_ends[break_cursor] <= start {
+      break_cursor += 1;
+    }
+    let mut last_break = None;
+    let mut wrapped = false;
+    let mut scan_ix = break_cursor;
+
+    while scan_ix < break_ends.len() {
+      let break_at = break_ends[scan_ix];
+      let candidate_width = measure_line_width(
+        document,
+        paragraph,
+        &p_format,
+        text,
+        start..break_at,
+        break_at - start,
+        shape_cache,
+        window,
+      );
+      if candidate_width > max_width {
+        let line_end = last_break
+          .filter(|break_at| *break_at > start)
+          .unwrap_or_else(|| first_overflow_line_end(document, paragraph, &p_format, text, start, break_at, max_width, shape_cache, window));
+        lines.push(shape_line(
+          document,
+          paragraph,
+          p_format.clone(),
+          text[start..line_end].trim_end(),
+          start..line_end,
+          shape_cache,
+          window,
+          cx,
+        ));
+        start = skip_leading_whitespace(text, line_end);
+        wrapped = true;
+        if lines.len() >= max_lines {
+          return (lines, start.min(segment.end), start >= segment.end);
+        }
+        break;
+      }
+      last_break = Some(break_at);
+      scan_ix += 1;
+    }
+
+    if wrapped {
+      continue;
+    }
+
+    let remaining_width = measure_line_width(
+      document,
+      paragraph,
+      &p_format,
+      text,
+      start..segment.end,
+      segment.end - start,
+      shape_cache,
+      window,
+    );
+    if remaining_width <= max_width {
+      lines.push(shape_line(
+        document,
+        paragraph,
+        p_format,
+        &text[start..segment.end],
+        start..segment.end,
+        shape_cache,
+        window,
+        cx,
+      ));
+      return (lines, segment.end, true);
+    }
+
+    let line_end = last_break
+      .filter(|break_at| *break_at > start)
+      .unwrap_or_else(|| first_overflow_line_end(document, paragraph, &p_format, text, start, segment.end, max_width, shape_cache, window));
+    lines.push(shape_line(
+      document,
+      paragraph,
+      p_format.clone(),
+      text[start..line_end].trim_end(),
+      start..line_end,
+      shape_cache,
+      window,
+      cx,
+    ));
+    start = skip_leading_whitespace(text, line_end);
+    if lines.len() >= max_lines {
+      return (lines, start.min(segment.end), start >= segment.end);
+    }
+  }
+
+  (lines, segment.end, true)
 }
 
 fn push_wrapped_soft_segment(
@@ -1952,7 +2382,7 @@ fn line_ix_for_byte(paragraph: &LaidOutParagraph, byte: usize) -> Option<usize> 
 // to the next line — matching Word's "caret-at-start-of-next-line"
 // convention. This is exactly the disambiguation called out in the plan.
 pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(usize, usize)> {
-  let p_ix = paragraph_layout_index(layout, off.paragraph)?;
+  let p_ix = paragraph_layout_index_for_offset(layout, off)?;
   let para = &layout.paragraphs[p_ix];
   let mut low = 0;
   let mut high = para.lines.len();
@@ -1983,6 +2413,16 @@ pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(
 pub(super) fn paragraph_layout(layout: &LayoutState, paragraph: usize) -> Option<&LaidOutParagraph> {
   let layout_ix = paragraph_layout_index(layout, paragraph)?;
   layout.paragraphs.get(layout_ix)
+}
+
+pub(super) fn paragraph_layout_index_for_offset(layout: &LayoutState, offset: DocumentOffset) -> Option<usize> {
+  layout
+    .paragraphs
+    .iter()
+    .enumerate()
+    .find(|(_, paragraph)| paragraph.index == offset.paragraph && paragraph.contains_byte(offset.byte))
+    .map(|(ix, _)| ix)
+    .or_else(|| paragraph_layout_index(layout, offset.paragraph))
 }
 
 pub(super) fn paragraph_layout_index(layout: &LayoutState, paragraph: usize) -> Option<usize> {

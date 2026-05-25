@@ -2,17 +2,39 @@ use std::sync::Arc;
 
 use crop::Rope;
 use gpui::{Pixels, Size};
-use std::rc::Rc;
+use std::{ops::Range, rc::Rc};
 
 use super::*;
 
 pub(super) struct ItemSizesCache {
   pub(super) width: Pixels,
+  pub(super) block_count: usize,
   pub(super) item_count: usize,
   pub(super) invisibility_mode: bool,
   pub(super) height_revision: u64,
-  pub(super) visibility: VisibilityIndex,
+  pub(super) items: Rc<Vec<VirtualItem>>,
+  pub(super) block_item_ranges: Vec<Range<usize>>,
+  pub(super) block_heights: Vec<Pixels>,
   pub(super) sizes: Rc<Vec<Size<Pixels>>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) enum VirtualItem {
+  HiddenBlock {
+    block_ix: usize,
+  },
+  ParagraphChunk {
+    block_ix: usize,
+    paragraph_ix: usize,
+    chunk_ix: usize,
+  },
+  ParagraphRemainder {
+    block_ix: usize,
+    paragraph_ix: usize,
+  },
+  StructuralBlock {
+    block_ix: usize,
+  },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

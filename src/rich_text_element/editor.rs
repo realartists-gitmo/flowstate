@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap, hash_map::DefaultHasher},
+  collections::{HashMap, VecDeque, hash_map::DefaultHasher},
   fs,
   hash::{Hash, Hasher},
   io,
@@ -346,43 +346,30 @@ impl Default for RichTextEditorConfig {
 }
 
 #[derive(Clone)]
-struct ParagraphLayoutCacheEntry {
+struct ParagraphChunkLayoutCacheEntry {
   key: ParagraphCacheKey,
   width: Pixels,
-  layout: Rc<LayoutState>,
+  invisibility_mode: bool,
+  chunks: Vec<ParagraphChunkLayout>,
+  complete: bool,
+  exact_height: Pixels,
 }
 
 #[derive(Clone)]
-struct ParagraphModeCache<T> {
-  normal: Option<T>,
-  invisibility: Option<T>,
+struct ParagraphChunkLayout {
+  start_byte: usize,
+  end_byte: usize,
+  height: Pixels,
+  layout: Rc<LayoutState>,
 }
 
-impl<T> Default for ParagraphModeCache<T> {
-  fn default() -> Self {
-    Self {
-      normal: None,
-      invisibility: None,
-    }
-  }
-}
-
-impl<T> ParagraphModeCache<T> {
-  fn get(&self, invisibility_mode: bool) -> Option<&T> {
-    if invisibility_mode {
-      self.invisibility.as_ref()
-    } else {
-      self.normal.as_ref()
-    }
-  }
-
-  fn set(&mut self, invisibility_mode: bool, value: T) {
-    if invisibility_mode {
-      self.invisibility = Some(value);
-    } else {
-      self.normal = Some(value);
-    }
-  }
+#[derive(Clone, Debug)]
+pub(crate) struct ItemSizeBenchmarkResult {
+  pub(crate) elapsed: Duration,
+  pub(crate) cache_hit: bool,
+  pub(crate) item_count: usize,
+  pub(crate) exact_height_count: usize,
+  pub(crate) total_height: f32,
 }
 
 #[derive(Clone)]
@@ -584,8 +571,10 @@ pub struct RichTextEditor {
   pub(super) caret_visible: bool,
   caret_blink_active: bool,
   last_layout: Option<Rc<LayoutState>>,
-  paragraph_layout_cache: Vec<ParagraphModeCache<ParagraphLayoutCacheEntry>>,
-  paragraph_height_cache: Vec<ParagraphModeCache<ParagraphHeightCacheEntry>>,
+  paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
+  pending_chunk_prefetch: bool,
+  chunk_prefetch_queue: VecDeque<usize>,
+  paragraph_height_cache: Vec<Option<ParagraphHeightCacheEntry>>,
   paragraph_height_cache_revision: u64,
   item_sizes_cache: Option<ItemSizesCache>,
   height_prefix_index: HeightPrefixIndex,
@@ -655,8 +644,10 @@ impl RichTextEditor {
       caret_visible: true,
       caret_blink_active: false,
       last_layout: None,
-      paragraph_layout_cache: vec![ParagraphModeCache::default(); paragraph_count],
-      paragraph_height_cache: vec![ParagraphModeCache::default(); paragraph_count],
+      paragraph_chunk_layout_cache: vec![None; paragraph_count],
+      pending_chunk_prefetch: false,
+      chunk_prefetch_queue: VecDeque::new(),
+      paragraph_height_cache: vec![None; paragraph_count],
       paragraph_height_cache_revision: 0,
       item_sizes_cache: None,
       height_prefix_index: HeightPrefixIndex::default(),
@@ -1086,15 +1077,23 @@ impl RichTextEditor {
   }
 
   fn block_top_for_index(&self, block_ix: usize) -> Option<Pixels> {
-    if self.height_prefix_index.len() == self.document.blocks.len() {
-      return Some(self.height_prefix_index.item_top(block_ix));
+    if let Some(cache) = &self.item_sizes_cache
+      && self.height_prefix_index.len() == cache.item_count
+      && let Some(range) = cache.block_item_ranges.get(block_ix)
+    {
+      return Some(self.height_prefix_index.item_top(range.start));
     }
     let sizes = self.item_sizes_cache.as_ref()?;
+    let item_start = sizes
+      .block_item_ranges
+      .get(block_ix)
+      .map(|range| range.start)
+      .unwrap_or(block_ix);
     Some(
       sizes
         .sizes
         .iter()
-        .take(block_ix)
+        .take(item_start)
         .fold(px(0.0), |top, size| top + size.height),
     )
   }
@@ -1103,7 +1102,7 @@ impl RichTextEditor {
     let Some(sizes) = &self.item_sizes_cache else {
       return;
     };
-    let Some(row_size) = sizes.sizes.get(block_ix).copied() else {
+    let Some(row_height) = sizes.block_heights.get(block_ix).copied() else {
       return;
     };
     let Some(top) = self.block_top_for_index(block_ix) else {
@@ -1112,7 +1111,7 @@ impl RichTextEditor {
     let viewport = self.scroll_handle.bounds();
     let rect = Bounds::new(
       point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + top),
-      size(viewport.size.width, row_size.height),
+      size(viewport.size.width, row_height),
     );
     scroll_rect_into_view(&self.scroll_handle, rect, px(8.0));
   }
@@ -1440,18 +1439,13 @@ impl RichTextEditor {
 
   fn invalidate_document_layout_caches(&mut self) {
     self.last_layout = None;
-    self.paragraph_layout_cache.clear();
-    self.paragraph_height_cache = vec![ParagraphModeCache::default(); self.document.paragraphs.len()];
+    self.paragraph_chunk_layout_cache = vec![None; self.document.paragraphs.len()];
+    self.pending_chunk_prefetch = false;
+    self.chunk_prefetch_queue.clear();
+    self.paragraph_height_cache = vec![None; self.document.paragraphs.len()];
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
     self.item_sizes_cache = None;
     self.height_prefix_index = HeightPrefixIndex::default();
-  }
-
-  fn invalidate_viewport_layout(&mut self) {
-    self.last_layout = None;
-    self.item_sizes_cache = None;
-    self.height_prefix_index = HeightPrefixIndex::default();
-    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
   }
 
   pub fn invisibility_mode(&self) -> bool {
@@ -1463,7 +1457,7 @@ impl RichTextEditor {
       return;
     }
     self.invisibility_mode = enabled;
-    self.invalidate_viewport_layout();
+    self.invalidate_document_layout_caches();
     self.scroll_head_into_view();
     cx.notify();
   }
@@ -1540,12 +1534,10 @@ impl RichTextEditor {
       self.reset_caret_blink(cx);
 
       let width = self.current_layout_width();
-      let end = (paragraph_ix + 40).min(self.document.paragraphs.len());
-      // Snapping by offset needs an exact cumulative height before the target.
-      // If earlier rows still use estimates, the first snap can land slightly
-      // above or below the requested paragraph and then shift after rendering.
-      for ix in 0..end {
-        self.ensure_exact_paragraph_height(ix, width, window, cx);
+      let start = paragraph_ix.saturating_sub(2);
+      let end = (paragraph_ix + 6).min(self.document.paragraphs.len());
+      for ix in start..end {
+        self.ensure_next_paragraph_chunk(ix, width, window, cx);
       }
       self.item_sizes_cache = None;
       let _ = self.paragraph_item_sizes(window, cx);
@@ -2609,11 +2601,20 @@ impl RichTextEditor {
 
   fn place_block_insertion_from_point(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
     let width = self.current_layout_width();
-    self.ensure_exact_interaction_paragraph_heights(width, window, cx);
+    self.ensure_exact_interaction_chunks(width, window, cx);
     let viewport = self.scroll_handle.bounds();
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
-    if self.height_prefix_index.len() == self.document.blocks.len() {
-      let block_ix = self.height_prefix_index.lower_bound(content_y);
+    if let Some(cache) = &self.item_sizes_cache
+      && self.height_prefix_index.len() == cache.item_count
+    {
+      let item_ix = self.height_prefix_index.lower_bound(content_y);
+      let block_ix = match cache.items.get(item_ix) {
+        Some(VirtualItem::HiddenBlock { block_ix }
+        | VirtualItem::StructuralBlock { block_ix }
+        | VirtualItem::ParagraphChunk { block_ix, .. }
+        | VirtualItem::ParagraphRemainder { block_ix, .. }) => *block_ix,
+        None => 0,
+      };
       if let Some(selection) = self.selection_for_object_block(block_ix) {
         self.select_block(selection, cx);
         return;
@@ -3515,10 +3516,10 @@ impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self
       .paragraph_height_cache
-      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
+      .resize(self.document.paragraphs.len(), None);
     self
-      .paragraph_layout_cache
-      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
+      .paragraph_chunk_layout_cache
+      .resize(self.document.paragraphs.len(), None);
     let viewport_width = self.scroll_handle.bounds().size.width;
     let has_measured_viewport = viewport_width > px(1.0);
     if !has_measured_viewport {
@@ -3528,81 +3529,426 @@ impl RichTextEditor {
       .measured_item_width
       .unwrap_or(if has_measured_viewport { viewport_width } else { px(900.0) });
     if has_measured_viewport && self.initial_layout_hidden {
-      self.ensure_exact_initial_viewport_heights(width, window, cx);
+      self.ensure_exact_initial_viewport_chunks(width, window, cx);
     }
-    self.ensure_exact_interaction_paragraph_heights(width, window, cx);
     if let Some(cache) = &self.item_sizes_cache
       && cache.width == width
-      && cache.item_count == self.document.blocks.len()
+      && cache.block_count == self.document.blocks.len()
+      && cache.invisibility_mode == self.invisibility_mode
+      && cache.height_revision == self.paragraph_height_cache_revision
+    {
+      return cache.sizes.clone();
+    }
+    self.ensure_exact_interaction_chunks(width, window, cx);
+    if let Some(cache) = &self.item_sizes_cache
+      && cache.width == width
+      && cache.block_count == self.document.blocks.len()
       && cache.invisibility_mode == self.invisibility_mode
       && cache.height_revision == self.paragraph_height_cache_revision
     {
       return cache.sizes.clone();
     }
     let visibility = VisibilityIndex::build(&self.document, self.invisibility_mode);
-    let sizes = Rc::new(
-      self
-        .document
-        .blocks
-        .iter()
-        .enumerate()
-        .map(|(block_ix, block)| {
-          if !visibility.is_visible(block_ix) {
-            return size(width, px(0.0));
-          }
-          let Block::Paragraph(_) = block else {
-            let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), window, cx)
-              .as_ref()
-              .map(structural_block_height)
-              .unwrap_or_else(|| estimate_structural_block_item_height(&self.document, block_ix, width));
-            return size(width, height + self.document.theme.paragraph_after);
-          };
-          let Some(paragraph_ix) = visibility.paragraph_ix_for_block(block_ix) else {
-            return size(width, px(1.0));
-          };
-          let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
-            return size(width, px(1.0));
-          };
-          let key = paragraph_cache_key(&self.document, paragraph);
-          let height = self
-            .paragraph_height_cache
-            .get(paragraph_ix)
-            .and_then(|entry| entry.get(self.invisibility_mode))
-            .copied()
-            .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
-            .map(|entry| entry.height)
-            .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
-          size(width, height)
-        })
-        .collect::<Vec<_>>(),
-    );
+    let (items, block_item_ranges, block_heights, sizes) = self.virtual_item_sizes(width, &visibility, window, cx);
     self.height_prefix_index.rebuild(sizes.as_ref());
+    let item_count = sizes.len();
     self.item_sizes_cache = Some(ItemSizesCache {
       width,
-      item_count: self.document.blocks.len(),
+      block_count: self.document.blocks.len(),
+      item_count,
       invisibility_mode: self.invisibility_mode,
       height_revision: self.paragraph_height_cache_revision,
-      visibility,
+      items,
+      block_item_ranges,
+      block_heights,
       sizes: sizes.clone(),
     });
+    self.schedule_chunk_prefetch(width, window, cx);
     sizes
   }
 
-  fn ensure_exact_interaction_paragraph_heights(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+  pub(crate) fn benchmark_paragraph_item_sizes(
+    &mut self,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> ItemSizeBenchmarkResult {
+    self.measured_item_width = Some(width);
+    let cache_hit = self.item_sizes_cache.as_ref().is_some_and(|cache| {
+      cache.width == width
+        && cache.block_count == self.document.blocks.len()
+        && cache.invisibility_mode == self.invisibility_mode
+        && cache.height_revision == self.paragraph_height_cache_revision
+    });
+    let start = Instant::now();
+    let sizes = self.paragraph_item_sizes(window, cx);
+    let elapsed = start.elapsed();
+    let exact_height_count = self
+      .paragraph_chunk_layout_cache
+      .iter()
+      .filter_map(|entry| entry.as_ref())
+      .map(|entry| entry.chunks.len())
+      .sum();
+    let total_height = sizes
+      .iter()
+      .map(|size| {
+        let height: f32 = size.height.into();
+        height
+      })
+      .sum();
+    ItemSizeBenchmarkResult {
+      elapsed,
+      cache_hit,
+      item_count: sizes.len(),
+      exact_height_count,
+      total_height,
+    }
+  }
+
+  pub(crate) fn benchmark_invalidate_document_layout_caches(&mut self) {
+    self.invalidate_document_layout_caches();
+  }
+
+  fn virtual_item_sizes(
+    &mut self,
+    width: Pixels,
+    visibility: &VisibilityIndex,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>) {
+    let mut items = Vec::new();
+    let mut sizes = Vec::new();
+    let mut block_item_ranges = Vec::with_capacity(self.document.blocks.len());
+    let mut block_heights = Vec::with_capacity(self.document.blocks.len());
+
+    for block_ix in 0..self.document.blocks.len() {
+      let block_start = items.len();
+      let mut block_height = px(0.0);
+      if !visibility.is_visible(block_ix) {
+        items.push(VirtualItem::HiddenBlock { block_ix });
+        sizes.push(size(width, px(0.0)));
+        block_item_ranges.push(block_start..items.len());
+        block_heights.push(px(0.0));
+        continue;
+      }
+
+      match self.document.blocks.get(block_ix) {
+        Some(Block::Paragraph(_)) => {
+          let Some(paragraph_ix) = visibility.paragraph_ix_for_block(block_ix) else {
+            items.push(VirtualItem::HiddenBlock { block_ix });
+            sizes.push(size(width, px(0.0)));
+            block_item_ranges.push(block_start..items.len());
+            block_heights.push(px(0.0));
+            continue;
+          };
+          self.ensure_current_chunk_cache_entry(paragraph_ix, width);
+          let (chunk_heights, complete) = self
+            .paragraph_chunk_layout_cache
+            .get(paragraph_ix)
+            .and_then(|entry| entry.as_ref())
+            .map(|entry| {
+              (
+                entry
+                  .chunks
+                  .iter()
+                  .map(|chunk| chunk.height)
+                  .collect::<Vec<_>>(),
+                entry.complete,
+              )
+            })
+            .unwrap_or_else(|| (Vec::new(), false));
+
+          for (chunk_ix, height) in chunk_heights.into_iter().enumerate() {
+            items.push(VirtualItem::ParagraphChunk {
+              block_ix,
+              paragraph_ix,
+              chunk_ix,
+            });
+            sizes.push(size(width, height));
+            block_height += height;
+          }
+
+          if !complete {
+            let estimate = self.paragraph_remainder_estimate(paragraph_ix, width);
+            items.push(VirtualItem::ParagraphRemainder {
+              block_ix,
+              paragraph_ix,
+            });
+            sizes.push(size(width, estimate));
+            block_height += estimate;
+          } else if block_start == items.len() {
+            // A complete empty paragraph still needs one exact row.
+            self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
+            if let Some(chunk) = self
+              .paragraph_chunk_layout_cache
+              .get(paragraph_ix)
+              .and_then(|entry| entry.as_ref())
+              .and_then(|entry| entry.chunks.first())
+            {
+              items.push(VirtualItem::ParagraphChunk {
+                block_ix,
+                paragraph_ix,
+                chunk_ix: 0,
+              });
+              sizes.push(size(width, chunk.height));
+              block_height += chunk.height;
+            }
+          }
+        },
+        Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
+          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), window, cx)
+            .as_ref()
+            .map(structural_block_height)
+            .unwrap_or_else(|| estimate_structural_block_item_height(&self.document, block_ix, width))
+            + self.document.theme.paragraph_after;
+          items.push(VirtualItem::StructuralBlock { block_ix });
+          sizes.push(size(width, height));
+          block_height += height;
+        },
+        None => {
+          items.push(VirtualItem::HiddenBlock { block_ix });
+          sizes.push(size(width, px(0.0)));
+        },
+      }
+      block_item_ranges.push(block_start..items.len());
+      block_heights.push(block_height);
+    }
+
+    (Rc::new(items), block_item_ranges, block_heights, Rc::new(sizes))
+  }
+
+  fn ensure_current_chunk_cache_entry(&mut self, paragraph_ix: usize, width: Pixels) -> bool {
+    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return false;
+    };
+    self
+      .paragraph_chunk_layout_cache
+      .resize(self.document.paragraphs.len(), None);
+    let key = paragraph_cache_key(&self.document, paragraph);
+    let reset = self
+      .paragraph_chunk_layout_cache
+      .get(paragraph_ix)
+      .and_then(|entry| entry.as_ref())
+      .is_none_or(|entry| entry.key != key || entry.width != width || entry.invisibility_mode != self.invisibility_mode);
+    if reset {
+      self.paragraph_chunk_layout_cache[paragraph_ix] = Some(ParagraphChunkLayoutCacheEntry {
+        key,
+        width,
+        invisibility_mode: self.invisibility_mode,
+        chunks: Vec::new(),
+        complete: false,
+        exact_height: px(0.0),
+      });
+    }
+    true
+  }
+
+  fn ensure_next_paragraph_chunk(
+    &mut self,
+    paragraph_ix: usize,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    if !self.ensure_current_chunk_cache_entry(paragraph_ix, width) {
+      return false;
+    }
+    let (start_byte, already_complete) = {
+      let Some(entry) = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+      else {
+        return false;
+      };
+      (
+        entry
+          .chunks
+          .last()
+          .map(|chunk| chunk.end_byte)
+          .unwrap_or(0),
+        entry.complete,
+      )
+    };
+    if already_complete {
+      return true;
+    }
+
+    let Some(result) = build_paragraph_chunk_layout_with_visibility(
+      &self.document,
+      paragraph_ix,
+      width,
+      start_byte,
+      DEFAULT_PARAGRAPH_CHUNK_TARGET_LINES,
+      self.invisibility_mode,
+      window,
+      cx,
+    ) else {
+      return false;
+    };
+    let height = result.layout.size.height;
+    let layout = Rc::new(result.layout);
+    let Some(entry) = self
+      .paragraph_chunk_layout_cache
+      .get_mut(paragraph_ix)
+      .and_then(|entry| entry.as_mut())
+    else {
+      return false;
+    };
+    if entry
+      .chunks
+      .last()
+      .is_some_and(|chunk| chunk.end_byte == result.next_byte && result.next_byte == result.start_byte)
+    {
+      entry.complete = true;
+      return true;
+    }
+    entry.exact_height += height;
+    entry.chunks.push(ParagraphChunkLayout {
+      start_byte: result.start_byte,
+      end_byte: result.next_byte,
+      height,
+      layout,
+    });
+    entry.complete = result.complete;
+    if entry.complete {
+      self
+        .paragraph_height_cache
+        .resize(self.document.paragraphs.len(), None);
+      self.paragraph_height_cache[paragraph_ix] = Some(ParagraphHeightCacheEntry {
+        key: entry.key,
+        width,
+        invisibility_mode: self.invisibility_mode,
+        height: entry.exact_height,
+      });
+    }
+    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    self.item_sizes_cache = None;
+    true
+  }
+
+  fn ensure_paragraph_chunk(
+    &mut self,
+    paragraph_ix: usize,
+    chunk_ix: usize,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    loop {
+      let ready = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+        .is_some_and(|entry| entry.chunks.get(chunk_ix).is_some() || entry.complete);
+      if ready {
+        return true;
+      }
+      if !self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
+        return false;
+      }
+    }
+  }
+
+  fn paragraph_chunk_layout_state(&self, paragraph_ix: usize, chunk_ix: usize, width: Pixels) -> Option<Rc<LayoutState>> {
+    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let key = paragraph_cache_key(&self.document, paragraph);
+    self
+      .paragraph_chunk_layout_cache
+      .get(paragraph_ix)
+      .and_then(|entry| entry.as_ref())
+      .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+      .and_then(|entry| entry.chunks.get(chunk_ix))
+      .map(|chunk| chunk.layout.clone())
+  }
+
+  pub(super) fn layout_paragraph_chunk_for_element(
+    &mut self,
+    paragraph_ix: usize,
+    chunk_ix: usize,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Option<LayoutState> {
+    self.note_measured_item_width(width, cx);
+    self.ensure_paragraph_chunk(paragraph_ix, chunk_ix, width, window, cx);
+    self
+      .paragraph_chunk_layout_state(paragraph_ix, chunk_ix, width)
+      .map(|layout| layout.as_ref().clone())
+  }
+
+  pub(super) fn materialize_paragraph_remainder_for_render(
+    &mut self,
+    paragraph_ix: usize,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.note_measured_item_width(width, cx);
+    if self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
+      self.item_sizes_cache = None;
+      cx.notify();
+    }
+  }
+
+  fn paragraph_chunk_containing_byte(&self, paragraph_ix: usize, byte: usize, width: Pixels) -> Option<(usize, Rc<LayoutState>)> {
+    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let paragraph_len = paragraph_text_len(paragraph);
+    let key = paragraph_cache_key(&self.document, paragraph);
+    self
+      .paragraph_chunk_layout_cache
+      .get(paragraph_ix)
+      .and_then(|entry| entry.as_ref())
+      .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+      .and_then(|entry| {
+        entry
+          .chunks
+          .iter()
+          .enumerate()
+          .find(|(_, chunk)| {
+            byte >= chunk.start_byte && (byte < chunk.end_byte || (byte == chunk.end_byte && chunk.end_byte == paragraph_len))
+          })
+          .map(|(ix, chunk)| (ix, chunk.layout.clone()))
+      })
+  }
+
+  fn paragraph_remainder_estimate(&self, paragraph_ix: usize, width: Pixels) -> Pixels {
+    let estimated_total = estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode);
+    let exact_height = self
+      .paragraph_chunk_layout_cache
+      .get(paragraph_ix)
+      .and_then(|entry| entry.as_ref())
+      .map(|entry| entry.exact_height)
+      .unwrap_or(px(0.0));
+    let remaining = (estimated_total - exact_height).max(self.document.theme.body_font_size * self.document.theme.line_spacing);
+    let text_len = self
+      .document
+      .paragraphs
+      .get(paragraph_ix)
+      .map(paragraph_text_len)
+      .unwrap_or(0);
+    if text_len > 16 * 1024 || estimated_total > self.scroll_handle.bounds().size.height.max(px(700.0)) * 1.5 {
+      remaining.max(self.scroll_handle.bounds().size.height.max(px(700.0)) + px(1024.0))
+    } else {
+      remaining
+    }
+  }
+
+  fn ensure_exact_interaction_chunks(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
     let mut ranges = vec![self.active_height_range(), self.predicted_visible_height_range(width)];
     if !self.visible_layout_range.is_empty() {
-      let visible_paragraph_range = self.paragraph_range_for_block_range(self.visible_layout_range.clone());
+      let visible_paragraph_range = self.paragraph_range_for_item_range(self.visible_layout_range.clone());
       ranges.push(expand_paragraph_range(visible_paragraph_range, self.document.paragraphs.len(), 2));
     }
 
     for range in ranges {
       for paragraph_ix in range {
-        self.ensure_exact_paragraph_height(paragraph_ix, width, window, cx);
+        self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
       }
     }
   }
 
-  fn ensure_exact_initial_viewport_heights(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+  fn ensure_exact_initial_viewport_chunks(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
     let paragraph_count = self.document.paragraphs.len();
     if paragraph_count == 0 {
       return;
@@ -3613,46 +3959,116 @@ impl RichTextEditor {
     let mut accumulated = px(0.0);
 
     for paragraph_ix in 0..paragraph_count {
-      self.ensure_exact_paragraph_height(paragraph_ix, width, window, cx);
-      let Some(height) = self
-        .paragraph_height_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.get(self.invisibility_mode))
-        .copied()
-        .map(|entry| entry.height)
-      else {
-        continue;
-      };
-      accumulated += height;
+      loop {
+        let before = self
+          .paragraph_chunk_layout_cache
+          .get(paragraph_ix)
+          .and_then(|entry| entry.as_ref())
+          .map(|entry| entry.chunks.len())
+          .unwrap_or(0);
+        if !self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
+          break;
+        }
+        let Some(entry) = self
+          .paragraph_chunk_layout_cache
+          .get(paragraph_ix)
+          .and_then(|entry| entry.as_ref())
+        else {
+          break;
+        };
+        if let Some(chunk) = entry.chunks.get(before) {
+          accumulated += chunk.height;
+        }
+        if accumulated >= target_height || entry.complete {
+          break;
+        }
+      }
       if accumulated >= target_height {
         break;
       }
     }
   }
 
-  fn ensure_exact_paragraph_height(&mut self, paragraph_ix: usize, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
-      return;
-    };
-    let key = paragraph_cache_key(&self.document, paragraph);
-    let cache_is_current = self
-      .paragraph_height_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.get(self.invisibility_mode))
-      .copied()
-      .is_some_and(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode);
-    if cache_is_current {
+  fn schedule_chunk_prefetch(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    if self.pending_chunk_prefetch {
       return;
     }
-    let layout = build_single_paragraph_layout_with_visibility(&self.document, paragraph_ix, width, None, self.invisibility_mode, window, cx);
-    self.cache_paragraph_layout(paragraph_ix, width, Rc::new(layout.clone()));
-    self.paragraph_height_cache[paragraph_ix].set(self.invisibility_mode, ParagraphHeightCacheEntry {
-      key,
-      width,
-      invisibility_mode: self.invisibility_mode,
-      height: layout.size.height,
+    let paragraph_count = self.document.paragraphs.len();
+    if paragraph_count == 0 {
+      return;
+    }
+
+    let mut queue = VecDeque::new();
+    let mut queued = vec![false; paragraph_count];
+    for range in [
+      self.active_height_range(),
+      self.predicted_visible_height_range(width),
+    ] {
+      for paragraph_ix in expand_paragraph_range(range, paragraph_count, 3) {
+        if !queued[paragraph_ix] {
+          queued[paragraph_ix] = true;
+          queue.push_back(paragraph_ix);
+        }
+      }
+    }
+    if queue.is_empty() {
+      return;
+    }
+    self.chunk_prefetch_queue = queue;
+    self.pending_chunk_prefetch = true;
+    cx.on_next_frame(window, move |editor, window, cx| {
+      editor.pending_chunk_prefetch = false;
+      editor.run_chunk_prefetch_budget(width, window, cx);
     });
-    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+  }
+
+  fn run_chunk_prefetch_budget(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    if self.current_layout_width() != width {
+      self.chunk_prefetch_queue.clear();
+      return;
+    }
+    let start = Instant::now();
+    let budget = Duration::from_millis(8);
+    let mut changed = false;
+    while let Some(paragraph_ix) = self.chunk_prefetch_queue.pop_front() {
+      let before = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+        .map(|entry| entry.chunks.len())
+        .unwrap_or(0);
+      if self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
+        let after = self
+          .paragraph_chunk_layout_cache
+          .get(paragraph_ix)
+          .and_then(|entry| entry.as_ref())
+          .map(|entry| entry.chunks.len())
+          .unwrap_or(before);
+        changed |= after != before;
+        let incomplete = self
+          .paragraph_chunk_layout_cache
+          .get(paragraph_ix)
+          .and_then(|entry| entry.as_ref())
+          .is_some_and(|entry| !entry.complete);
+        if incomplete {
+          self.chunk_prefetch_queue.push_back(paragraph_ix);
+        }
+      }
+      if start.elapsed() >= budget {
+        break;
+      }
+    }
+    if changed {
+      self.item_sizes_cache = None;
+      cx.notify();
+    }
+    if !self.chunk_prefetch_queue.is_empty() && !self.pending_chunk_prefetch {
+      self.pending_chunk_prefetch = true;
+      cx.on_next_frame(window, move |editor, window, cx| {
+        editor.pending_chunk_prefetch = false;
+        editor.run_chunk_prefetch_budget(width, window, cx);
+      });
+    }
   }
 
   fn schedule_viewport_size_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -3667,56 +4083,57 @@ impl RichTextEditor {
     });
   }
 
-  fn cache_paragraph_layout(&mut self, paragraph_ix: usize, width: Pixels, layout: Rc<LayoutState>) {
-    self
-      .paragraph_layout_cache
-      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
-    let Some(paragraph) = layout.paragraphs.first() else {
-      return;
-    };
-    self.paragraph_layout_cache[paragraph_ix].set(self.invisibility_mode, ParagraphLayoutCacheEntry {
-      key: paragraph.cache_key,
-      width,
-      layout,
-    });
-  }
-
-  fn cached_paragraph_layout(&self, paragraph_ix: usize, width: Pixels) -> Option<Rc<LayoutState>> {
-    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
-    let key = paragraph_cache_key(&self.document, paragraph);
-    self
-      .paragraph_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.get(self.invisibility_mode))
-      .filter(|entry| entry.key == key && entry.width == width)
-      .map(|entry| entry.layout.clone())
-  }
-
-  fn document_layout_for_paragraph(&self, paragraph_ix: usize, width: Pixels) -> Option<LayoutState> {
-    let mut layout = self
-      .cached_paragraph_layout(paragraph_ix, width)?
-      .as_ref()
-      .clone();
+  fn document_layout_for_offset(&self, offset: DocumentOffset, width: Pixels) -> Option<LayoutState> {
+    let (chunk_ix, _chunk_layout) = self.paragraph_chunk_containing_byte(offset.paragraph, offset.byte, width)?;
     let viewport = self.scroll_handle.bounds();
-    let row_top = if self.height_prefix_index.len() == self.document.blocks.len() {
-      self
-        .block_ix_for_paragraph(paragraph_ix)
-        .map(|block_ix| self.height_prefix_index.item_top(block_ix))
-        .unwrap_or(px(0.0))
-    } else {
-      px(0.0)
-    };
-    layout.bounds = Some(Bounds::new(
-      point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
-      size(width, layout.size.height),
-    ));
-    Some(layout)
+    let entry = self
+      .paragraph_chunk_layout_cache
+      .get(offset.paragraph)
+      .and_then(|entry| entry.as_ref())?;
+    let start = chunk_ix.saturating_sub(1);
+    let end = (chunk_ix + 2).min(entry.chunks.len());
+    let mut paragraphs = Vec::new();
+    for ix in start..end {
+      let chunk = &entry.chunks[ix];
+      let mut paragraph = chunk.layout.paragraphs.first()?.clone();
+      let row_top = self.item_top_for_paragraph_chunk(offset.paragraph, ix).unwrap_or(px(0.0));
+      paragraph.shift_y(viewport.top() + self.scroll_handle.offset().y + row_top + paragraph.top);
+      paragraphs.push(paragraph);
+    }
+    if paragraphs.is_empty() {
+      return None;
+    }
+    let mut paragraph_to_block = vec![usize::MAX; self.document.paragraphs.len()];
+    let block_to_paragraph = paragraphs
+      .iter()
+      .enumerate()
+      .map(|(layout_ix, paragraph)| {
+        if paragraph.index < paragraph_to_block.len() && paragraph_to_block[paragraph.index] == usize::MAX {
+          paragraph_to_block[paragraph.index] = layout_ix;
+        }
+        Some(paragraph.index)
+      })
+      .collect::<Vec<_>>();
+    Some(LayoutState {
+      blocks: paragraphs
+        .iter()
+        .cloned()
+        .map(LaidOutBlock::Paragraph)
+        .collect(),
+      paragraph_to_block,
+      block_to_paragraph,
+      paragraphs,
+      bounds: Some(Bounds::new(point(viewport.left(), px(0.0)), self.scroll_handle.content_size())),
+      size: self.scroll_handle.content_size(),
+      width,
+      snap_underline_rules_to_pixels: self.document.theme.snap_underline_rules_to_pixels,
+    })
   }
 
   fn layout_for_offset(&self, offset: DocumentOffset) -> Option<LayoutState> {
     let width = self.current_layout_width();
     self
-      .document_layout_for_paragraph(offset.paragraph, width)
+      .document_layout_for_offset(offset, width)
       .or_else(|| {
         self
           .last_layout
@@ -3736,16 +4153,45 @@ impl RichTextEditor {
       return Some(layout.hit_test(position));
     }
     let paragraph_count = self.document.paragraphs.len();
-    if paragraph_count == 0 || self.height_prefix_index.len() != self.document.blocks.len() {
+    let Some(cache) = &self.item_sizes_cache else {
+      return None;
+    };
+    if paragraph_count == 0 || self.height_prefix_index.len() != cache.item_count {
       return None;
     }
     let viewport = self.scroll_handle.bounds();
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
-    let block_ix = self.height_prefix_index.lower_bound(content_y);
-    let paragraph_ix = self.paragraph_ix_for_block(block_ix)?;
-    self
-      .document_layout_for_paragraph(paragraph_ix, self.current_layout_width())
-      .map(|layout| layout.hit_test(position))
+    let item_ix = self.height_prefix_index.lower_bound(content_y);
+    match cache.items.get(item_ix) {
+      Some(VirtualItem::ParagraphChunk {
+        paragraph_ix,
+        chunk_ix,
+        ..
+      }) => {
+        let width = self.current_layout_width();
+        let mut layout = self.paragraph_chunk_layout_state(*paragraph_ix, *chunk_ix, width)?.as_ref().clone();
+        let row_top = self.height_prefix_index.item_top(item_ix);
+        layout.bounds = Some(Bounds::new(
+          point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
+          size(width, layout.size.height),
+        ));
+        Some(layout.hit_test(position))
+      },
+      Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => Some(DocumentOffset {
+        paragraph: *paragraph_ix,
+        byte: self
+          .paragraph_chunk_layout_cache
+          .get(*paragraph_ix)
+          .and_then(|entry| entry.as_ref())
+          .and_then(|entry| entry.chunks.last())
+          .map(|chunk| chunk.end_byte)
+          .unwrap_or(0),
+      }),
+      Some(VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix }) => self
+        .paragraph_ix_for_block(*block_ix)
+        .map(|paragraph| DocumentOffset { paragraph, byte: 0 }),
+      None => None,
+    }
   }
 
   fn current_layout_width(&self) -> Pixels {
@@ -3767,6 +4213,27 @@ impl RichTextEditor {
       }
     }
     None
+  }
+
+  fn item_top_for_paragraph_chunk(&self, paragraph_ix: usize, chunk_ix: usize) -> Option<Pixels> {
+    let cache = self.item_sizes_cache.as_ref()?;
+    if self.height_prefix_index.len() != cache.item_count {
+      return None;
+    }
+    cache
+      .items
+      .iter()
+      .enumerate()
+      .find_map(|(item_ix, item)| match item {
+        VirtualItem::ParagraphChunk {
+          paragraph_ix: item_paragraph_ix,
+          chunk_ix: item_chunk_ix,
+          ..
+        } if *item_paragraph_ix == paragraph_ix && *item_chunk_ix == chunk_ix => {
+          Some(self.height_prefix_index.item_top(item_ix))
+        },
+        _ => None,
+      })
   }
 
   fn selection_for_object_block(&self, block_ix: usize) -> Option<BlockSelection> {
@@ -3864,11 +4331,19 @@ impl RichTextEditor {
     None
   }
 
-  fn paragraph_range_for_block_range(&self, block_range: Range<usize>) -> Range<usize> {
+  fn paragraph_range_for_item_range(&self, item_range: Range<usize>) -> Range<usize> {
+    let Some(cache) = &self.item_sizes_cache else {
+      return 0..0;
+    };
     let mut first = None;
     let mut last = None;
-    for block_ix in block_range {
-      if let Some(paragraph_ix) = self.paragraph_ix_for_block(block_ix) {
+    for item_ix in item_range {
+      let paragraph_ix = match cache.items.get(item_ix) {
+        Some(VirtualItem::ParagraphChunk { paragraph_ix, .. } | VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => Some(*paragraph_ix),
+        Some(VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix }) => self.paragraph_ix_for_block(*block_ix),
+        None => None,
+      };
+      if let Some(paragraph_ix) = paragraph_ix {
         first.get_or_insert(paragraph_ix);
         last = Some(paragraph_ix);
       }
@@ -3893,12 +4368,14 @@ impl RichTextEditor {
     };
     let scroll_top = -self.scroll_handle.offset().y;
     let scroll_bottom = scroll_top + viewport_height + px(256.0);
-    if self.height_prefix_index.len() == self.document.blocks.len() {
-      let start_block = self
+    if let Some(cache) = &self.item_sizes_cache
+      && self.height_prefix_index.len() == cache.item_count
+    {
+      let start_item = self
         .height_prefix_index
         .lower_bound((scroll_top - px(256.0)).max(px(0.0)));
-      let end_block = (self.height_prefix_index.lower_bound(scroll_bottom) + 1).min(self.document.blocks.len());
-      let paragraph_range = self.paragraph_range_for_block_range(start_block..end_block.max(start_block + 1));
+      let end_item = (self.height_prefix_index.lower_bound(scroll_bottom) + 1).min(cache.item_count);
+      let paragraph_range = self.paragraph_range_for_item_range(start_item..end_item.max(start_item + 1));
       if !paragraph_range.is_empty() {
         return expand_paragraph_range(paragraph_range, paragraph_count, 2);
       }
@@ -3915,9 +4392,8 @@ impl RichTextEditor {
       let height = self
         .paragraph_height_cache
         .get(paragraph_ix)
-        .and_then(|entry| entry.get(self.invisibility_mode))
-        .copied()
-        .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+        .and_then(|entry| *entry)
+        .filter(|entry| entry.key == key && entry.width == width)
         .map(|entry| entry.height)
         .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
       let next_y = y + height;
@@ -3942,13 +4418,13 @@ impl RichTextEditor {
       self.pending_snap_to_paragraph = None;
       return;
     };
-    if paragraph_ix >= self.document.paragraphs.len() || self.height_prefix_index.len() != self.document.blocks.len() {
+    let Some(item_top) = self.item_top_for_paragraph_chunk(paragraph_ix, 0).or_else(|| self.block_top_for_index(block_ix)) else {
       self.pending_snap_to_paragraph = None;
       return;
-    }
+    };
 
     let mut offset = self.scroll_handle.offset();
-    offset.y = -self.height_prefix_index.item_top(block_ix);
+    offset.y = -item_top;
     self.scroll_handle.set_offset(offset);
 
     if remaining > 1 {
@@ -3970,38 +4446,6 @@ impl RichTextEditor {
       .min(paragraph_count)
       .max(start + 1);
     start..end
-  }
-
-  pub(super) fn update_paragraph_height_cache(
-    &mut self,
-    paragraph_ix: usize,
-    width: Pixels,
-    key: ParagraphCacheKey,
-    height: Pixels,
-    cx: &mut Context<Self>,
-  ) {
-    self.note_measured_item_width(width, cx);
-    self
-      .paragraph_height_cache
-      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
-    let entry = ParagraphHeightCacheEntry {
-      key,
-      width,
-      invisibility_mode: self.invisibility_mode,
-      height,
-    };
-    if self
-      .paragraph_height_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.get(self.invisibility_mode))
-      .copied()
-      == Some(entry)
-    {
-      return;
-    }
-    self.paragraph_height_cache[paragraph_ix].set(self.invisibility_mode, entry);
-    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-    cx.notify();
   }
 
   pub(super) fn note_measured_item_width(&mut self, width: Pixels, cx: &mut Context<Self>) {
@@ -4033,20 +4477,16 @@ impl RichTextEditor {
     self.visible_layout_generation
   }
 
-  pub(super) fn store_visible_paragraph_layout(&mut self, generation: u64, paragraph_ix: usize, layout: &LayoutState, bounds: Bounds<Pixels>) {
-    let Some(block_ix) = self.block_ix_for_paragraph(paragraph_ix) else {
-      return;
-    };
-    if generation != self.visible_layout_generation || !self.visible_layout_range.contains(&block_ix) {
+  pub(super) fn store_visible_paragraph_chunk_layout(&mut self, generation: u64, item_ix: usize, layout: &LayoutState, bounds: Bounds<Pixels>) {
+    if generation != self.visible_layout_generation || !self.visible_layout_range.contains(&item_ix) {
       return;
     }
-    self.cache_paragraph_layout(paragraph_ix, layout.width, Rc::new(layout.clone()));
     let Some(source) = layout.paragraphs.first() else {
       return;
     };
     let mut paragraph = source.clone();
     paragraph.shift_y(bounds.origin.y + source.top);
-    let part_ix = block_ix - self.visible_layout_range.start;
+    let part_ix = item_ix - self.visible_layout_range.start;
     if let Some(slot) = self.visible_layout_parts.get_mut(part_ix) {
       *slot = Some(paragraph);
     }
@@ -4059,17 +4499,25 @@ impl RichTextEditor {
     if paragraphs.is_empty() {
       return;
     }
+    let mut paragraph_to_block = vec![usize::MAX; self.document.paragraphs.len()];
+    let block_to_paragraph = paragraphs
+      .iter()
+      .enumerate()
+      .map(|(layout_ix, paragraph)| {
+        if paragraph.index < paragraph_to_block.len() && paragraph_to_block[paragraph.index] == usize::MAX {
+          paragraph_to_block[paragraph.index] = layout_ix;
+        }
+        Some(paragraph.index)
+      })
+      .collect::<Vec<_>>();
     self.last_layout = Some(Rc::new(LayoutState {
       blocks: paragraphs
         .iter()
         .cloned()
         .map(LaidOutBlock::Paragraph)
         .collect(),
-      paragraph_to_block: (0..paragraphs.len()).collect(),
-      block_to_paragraph: paragraphs
-        .iter()
-        .map(|paragraph| Some(paragraph.index))
-        .collect(),
+      paragraph_to_block,
+      block_to_paragraph,
       paragraphs,
       bounds: Some(Bounds::new(point(bounds.origin.x, px(0.0)), self.scroll_handle.content_size())),
       size: self.scroll_handle.content_size(),
@@ -4944,7 +5392,15 @@ impl RichTextEditor {
       VDir::Up => ScrollStrategy::Bottom,
       VDir::Down => ScrollStrategy::Top,
     };
-    self.scroll_handle.scroll_to_item(paragraph_ix, strategy);
+    let item_ix = self
+      .item_sizes_cache
+      .as_ref()
+      .and_then(|cache| {
+        let block_ix = self.block_ix_for_paragraph(paragraph_ix)?;
+        cache.block_item_ranges.get(block_ix).map(|range| range.start)
+      })
+      .unwrap_or(paragraph_ix);
+    self.scroll_handle.scroll_to_item(item_ix, strategy);
   }
 
   fn adjacent_document_paragraph(&self, paragraph_ix: usize, dir: VDir) -> Option<usize> {
@@ -4969,38 +5425,49 @@ impl RichTextEditor {
     }
     let viewport = self.scroll_handle.bounds();
     let width = if viewport.size.width > px(1.0) { viewport.size.width } else { px(900.0) };
-    self.ensure_exact_interaction_paragraph_heights(width, window, cx);
+    self.ensure_exact_interaction_chunks(width, window, cx);
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
-    let paragraph_ix = if self.height_prefix_index.len() == self.document.blocks.len() {
-      let block_ix = self.height_prefix_index.lower_bound(content_y);
-      self
-        .paragraph_ix_for_block(block_ix)
-        .unwrap_or(self.selection.head.paragraph.min(paragraph_count - 1))
+    let (paragraph_ix, chunk_ix) = if let Some(cache) = &self.item_sizes_cache
+      && self.height_prefix_index.len() == cache.item_count
+    {
+      let item_ix = self.height_prefix_index.lower_bound(content_y);
+      let item = cache.items.get(item_ix).cloned();
+      match item {
+        Some(VirtualItem::ParagraphChunk {
+          paragraph_ix,
+          chunk_ix,
+          ..
+        }) => (paragraph_ix, Some(chunk_ix)),
+        Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
+          self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
+          (paragraph_ix, None)
+        },
+        Some(VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix }) => (
+          self
+            .paragraph_ix_for_block(block_ix)
+            .unwrap_or(self.selection.head.paragraph.min(paragraph_count - 1)),
+          None,
+        ),
+        None => (self.selection.head.paragraph.min(paragraph_count - 1), None),
+      }
     } else {
-      self.selection.head.paragraph.min(paragraph_count - 1)
+      (self.selection.head.paragraph.min(paragraph_count - 1), None)
     };
-    if let Some(layout) = self.document_layout_for_paragraph(paragraph_ix, width) {
+    if let Some(chunk_ix) = chunk_ix
+      && let Some(mut layout) = self.paragraph_chunk_layout_state(paragraph_ix, chunk_ix, width).map(|layout| layout.as_ref().clone())
+    {
+      let row_top = self.item_top_for_paragraph_chunk(paragraph_ix, chunk_ix).unwrap_or(px(0.0));
+      layout.bounds = Some(Bounds::new(
+        point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
+        size(width, layout.size.height),
+      ));
       return layout.hit_test(position);
     }
-    let layout = Rc::new(build_single_paragraph_layout_with_visibility(
-      &self.document,
-      paragraph_ix,
-      width,
-      None,
-      self.invisibility_mode,
-      window,
-      cx,
-    ));
-    self.cache_paragraph_layout(paragraph_ix, width, layout.clone());
-    let mut layout = layout.as_ref().clone();
-    let row_top = if self.height_prefix_index.len() == self.document.blocks.len() {
-      self
-        .block_ix_for_paragraph(paragraph_ix)
-        .map(|block_ix| self.height_prefix_index.item_top(block_ix))
-        .unwrap_or(px(0.0))
-    } else {
-      px(0.0)
+    self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
+    let Some(mut layout) = self.paragraph_chunk_layout_state(paragraph_ix, 0, width).map(|layout| layout.as_ref().clone()) else {
+      return DocumentOffset { paragraph: paragraph_ix, byte: 0 };
     };
+    let row_top = self.item_top_for_paragraph_chunk(paragraph_ix, 0).unwrap_or(px(0.0));
     layout.bounds = Some(Bounds::new(
       point(viewport.left(), viewport.top() + self.scroll_handle.offset().y + row_top),
       size(width, layout.size.height),
@@ -5602,6 +6069,11 @@ impl Render for RichTextEditor {
     self.apply_pending_paragraph_snap(cx);
     let scroll_handle = self.scroll_handle.clone();
     let render_item_sizes = item_sizes.clone();
+    let render_items = self
+      .item_sizes_cache
+      .as_ref()
+      .map(|cache| cache.items.clone())
+      .unwrap_or_else(|| Rc::new(Vec::new()));
     div()
       .size_full()
       .id("rich-text-editor")
@@ -5676,26 +6148,34 @@ impl Render for RichTextEditor {
       .drag_over::<ExternalPaths>(|style, _, _, _| style)
       .on_drop(cx.listener(Self::on_file_drop))
       .child(
-        v_virtual_list(cx.entity(), "rich-text-virtual-document", item_sizes, move |editor, range, _window, cx| {
+        v_virtual_list(cx.entity(), "rich-text-virtual-document", item_sizes, move |editor, range, window, cx| {
           let generation = editor.begin_visible_layout(range.clone());
           range
-            .map(|block_ix| {
-              if editor
-                .item_sizes_cache
-                .as_ref()
-                .is_some_and(|cache| !cache.visibility.is_visible(block_ix))
-              {
+            .map(|item_ix| {
+              let Some(item) = render_items.get(item_ix).cloned() else {
                 return div().size_full().into_any_element();
-              }
-              if let Some(paragraph_ix) = editor.paragraph_ix_for_block(block_ix) {
-                VirtualParagraphElement {
-                  editor: cx.entity(),
+              };
+              match item {
+                VirtualItem::HiddenBlock { .. } => div().size_full().into_any_element(),
+                VirtualItem::ParagraphChunk {
                   paragraph_ix,
+                  chunk_ix,
+                  ..
+                } => VirtualParagraphChunkElement {
+                  editor: cx.entity(),
+                  item_ix,
+                  paragraph_ix,
+                  chunk_ix,
                   generation,
                   layout: WordElementLayout::default(),
                 }
-                .into_any_element()
-              } else {
+                .into_any_element(),
+                VirtualItem::ParagraphRemainder { paragraph_ix, .. } => {
+                  let width = editor.current_layout_width();
+                  editor.materialize_paragraph_remainder_for_render(paragraph_ix, width, window, cx);
+                  div().size_full().into_any_element()
+                },
+                VirtualItem::StructuralBlock { block_ix } => {
                 let editor_entity = cx.entity();
                 let selection = match editor.document.blocks.get(block_ix) {
                   Some(Block::Image(_)) => Some(BlockSelection::Image(block_ix)),
@@ -5739,7 +6219,7 @@ impl Render for RichTextEditor {
                       &editor.document,
                       image,
                       block_ix,
-                      render_item_sizes.get(block_ix).copied().unwrap_or_else(|| size(px(900.0), px(1.0))),
+                      render_item_sizes.get(item_ix).copied().unwrap_or_else(|| size(px(900.0), px(1.0))),
                       editor.selected_block,
                       editor_entity.clone(),
                     ),
@@ -5747,7 +6227,7 @@ impl Render for RichTextEditor {
                       &editor.document,
                       equation,
                       block_ix,
-                      render_item_sizes.get(block_ix).copied().unwrap_or_else(|| size(px(900.0), px(1.0))),
+                      render_item_sizes.get(item_ix).copied().unwrap_or_else(|| size(px(900.0), px(1.0))),
                       editor.selected_block == Some(BlockSelection::Equation(block_ix)) || editor.block_is_inside_text_selection(block_ix),
                       editor.equation_source_selection_for_render(block_ix),
                     ),
@@ -5759,6 +6239,7 @@ impl Render for RichTextEditor {
                     .into_any_element(),
                   })
                   .into_any_element()
+                },
               }
             })
             .collect::<Vec<_>>()
