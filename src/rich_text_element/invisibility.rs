@@ -59,7 +59,7 @@ impl VisibilityIndex {
   }
 }
 
-fn paragraph_is_visible(paragraph: &Paragraph) -> bool {
+pub(super) fn paragraph_is_visible(paragraph: &Paragraph) -> bool {
   matches!(
     paragraph.style,
     ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block | ParagraphStyle::Tag | ParagraphStyle::Undertag

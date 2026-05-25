@@ -124,6 +124,7 @@ pub(super) struct ParagraphCacheKey {
 pub(super) struct ParagraphHeightCacheEntry {
   pub(super) key: ParagraphCacheKey,
   pub(super) width: Pixels,
+  pub(super) invisibility_mode: bool,
   pub(super) height: Pixels,
 }
 
@@ -504,6 +505,35 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
 ) -> LayoutState {
   let timing = Instant::now();
   let start_y = if paragraph_ix == 0 { document.theme.pageless_inset_top } else { px(0.0) };
+  if invisibility_mode
+    && document
+      .paragraphs
+      .get(paragraph_ix)
+      .is_some_and(|paragraph| !paragraph_is_visible(paragraph))
+  {
+    return LayoutState {
+      blocks: vec![LaidOutBlock::Paragraph(LaidOutParagraph {
+        index: paragraph_ix,
+        cache_key: document
+          .paragraphs
+          .get(paragraph_ix)
+          .map(|paragraph| paragraph_cache_key(document, paragraph))
+          .unwrap_or(ParagraphCacheKey { fingerprint: 0 }),
+        len: 0,
+        top: px(0.0),
+        bottom: px(0.0),
+        lines: Vec::new(),
+        borders: Vec::new(),
+      })],
+      paragraph_to_block: vec![0],
+      block_to_paragraph: vec![Some(paragraph_ix)],
+      paragraphs: Vec::new(),
+      bounds: None,
+      size: size(width, px(0.0)),
+      width,
+      snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
+    };
+  }
   let projected_document = invisibility_mode
     .then(|| invisibility_projected_document(document, paragraph_ix))
     .flatten();
@@ -983,6 +1013,14 @@ pub(super) fn estimate_paragraph_item_height_with_visibility(
   width: Pixels,
   invisibility_mode: bool,
 ) -> Pixels {
+  if invisibility_mode
+    && document
+      .paragraphs
+      .get(paragraph_ix)
+      .is_some_and(|paragraph| !paragraph_is_visible(paragraph))
+  {
+    return px(0.0);
+  }
   let projected_document = invisibility_mode
     .then(|| invisibility_projected_document(document, paragraph_ix))
     .flatten();

@@ -353,6 +353,39 @@ struct ParagraphLayoutCacheEntry {
 }
 
 #[derive(Clone)]
+struct ParagraphModeCache<T> {
+  normal: Option<T>,
+  invisibility: Option<T>,
+}
+
+impl<T> Default for ParagraphModeCache<T> {
+  fn default() -> Self {
+    Self {
+      normal: None,
+      invisibility: None,
+    }
+  }
+}
+
+impl<T> ParagraphModeCache<T> {
+  fn get(&self, invisibility_mode: bool) -> Option<&T> {
+    if invisibility_mode {
+      self.invisibility.as_ref()
+    } else {
+      self.normal.as_ref()
+    }
+  }
+
+  fn set(&mut self, invisibility_mode: bool, value: T) {
+    if invisibility_mode {
+      self.invisibility = Some(value);
+    } else {
+      self.normal = Some(value);
+    }
+  }
+}
+
+#[derive(Clone)]
 enum PasteCache {
   Rich { metadata: String, fragment: RichClipboardFragment },
   Plain { text: String },
@@ -551,8 +584,8 @@ pub struct RichTextEditor {
   pub(super) caret_visible: bool,
   caret_blink_active: bool,
   last_layout: Option<Rc<LayoutState>>,
-  paragraph_layout_cache: Vec<Option<ParagraphLayoutCacheEntry>>,
-  paragraph_height_cache: Vec<Option<ParagraphHeightCacheEntry>>,
+  paragraph_layout_cache: Vec<ParagraphModeCache<ParagraphLayoutCacheEntry>>,
+  paragraph_height_cache: Vec<ParagraphModeCache<ParagraphHeightCacheEntry>>,
   paragraph_height_cache_revision: u64,
   item_sizes_cache: Option<ItemSizesCache>,
   height_prefix_index: HeightPrefixIndex,
@@ -622,8 +655,8 @@ impl RichTextEditor {
       caret_visible: true,
       caret_blink_active: false,
       last_layout: None,
-      paragraph_layout_cache: vec![None; paragraph_count],
-      paragraph_height_cache: vec![None; paragraph_count],
+      paragraph_layout_cache: vec![ParagraphModeCache::default(); paragraph_count],
+      paragraph_height_cache: vec![ParagraphModeCache::default(); paragraph_count],
       paragraph_height_cache_revision: 0,
       item_sizes_cache: None,
       height_prefix_index: HeightPrefixIndex::default(),
@@ -1408,10 +1441,17 @@ impl RichTextEditor {
   fn invalidate_document_layout_caches(&mut self) {
     self.last_layout = None;
     self.paragraph_layout_cache.clear();
-    self.paragraph_height_cache = vec![None; self.document.paragraphs.len()];
+    self.paragraph_height_cache = vec![ParagraphModeCache::default(); self.document.paragraphs.len()];
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
     self.item_sizes_cache = None;
     self.height_prefix_index = HeightPrefixIndex::default();
+  }
+
+  fn invalidate_viewport_layout(&mut self) {
+    self.last_layout = None;
+    self.item_sizes_cache = None;
+    self.height_prefix_index = HeightPrefixIndex::default();
+    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
   }
 
   pub fn invisibility_mode(&self) -> bool {
@@ -1423,7 +1463,7 @@ impl RichTextEditor {
       return;
     }
     self.invisibility_mode = enabled;
-    self.invalidate_document_layout_caches();
+    self.invalidate_viewport_layout();
     self.scroll_head_into_view();
     cx.notify();
   }
@@ -3475,10 +3515,10 @@ impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self
       .paragraph_height_cache
-      .resize(self.document.paragraphs.len(), None);
+      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
     self
       .paragraph_layout_cache
-      .resize(self.document.paragraphs.len(), None);
+      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
     let viewport_width = self.scroll_handle.bounds().size.width;
     let has_measured_viewport = viewport_width > px(1.0);
     if !has_measured_viewport {
@@ -3527,8 +3567,9 @@ impl RichTextEditor {
           let height = self
             .paragraph_height_cache
             .get(paragraph_ix)
-            .and_then(|entry| *entry)
-            .filter(|entry| entry.key == key && entry.width == width)
+            .and_then(|entry| entry.get(self.invisibility_mode))
+            .copied()
+            .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
             .map(|entry| entry.height)
             .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
           size(width, height)
@@ -3576,7 +3617,8 @@ impl RichTextEditor {
       let Some(height) = self
         .paragraph_height_cache
         .get(paragraph_ix)
-        .and_then(|entry| *entry)
+        .and_then(|entry| entry.get(self.invisibility_mode))
+        .copied()
         .map(|entry| entry.height)
       else {
         continue;
@@ -3596,16 +3638,18 @@ impl RichTextEditor {
     let cache_is_current = self
       .paragraph_height_cache
       .get(paragraph_ix)
-      .and_then(|entry| *entry)
-      .is_some_and(|entry| entry.key == key && entry.width == width);
+      .and_then(|entry| entry.get(self.invisibility_mode))
+      .copied()
+      .is_some_and(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode);
     if cache_is_current {
       return;
     }
     let layout = build_single_paragraph_layout_with_visibility(&self.document, paragraph_ix, width, None, self.invisibility_mode, window, cx);
     self.cache_paragraph_layout(paragraph_ix, width, Rc::new(layout.clone()));
-    self.paragraph_height_cache[paragraph_ix] = Some(ParagraphHeightCacheEntry {
+    self.paragraph_height_cache[paragraph_ix].set(self.invisibility_mode, ParagraphHeightCacheEntry {
       key,
       width,
+      invisibility_mode: self.invisibility_mode,
       height: layout.size.height,
     });
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
@@ -3626,11 +3670,11 @@ impl RichTextEditor {
   fn cache_paragraph_layout(&mut self, paragraph_ix: usize, width: Pixels, layout: Rc<LayoutState>) {
     self
       .paragraph_layout_cache
-      .resize(self.document.paragraphs.len(), None);
+      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
     let Some(paragraph) = layout.paragraphs.first() else {
       return;
     };
-    self.paragraph_layout_cache[paragraph_ix] = Some(ParagraphLayoutCacheEntry {
+    self.paragraph_layout_cache[paragraph_ix].set(self.invisibility_mode, ParagraphLayoutCacheEntry {
       key: paragraph.cache_key,
       width,
       layout,
@@ -3643,7 +3687,7 @@ impl RichTextEditor {
     self
       .paragraph_layout_cache
       .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
+      .and_then(|entry| entry.get(self.invisibility_mode))
       .filter(|entry| entry.key == key && entry.width == width)
       .map(|entry| entry.layout.clone())
   }
@@ -3871,8 +3915,9 @@ impl RichTextEditor {
       let height = self
         .paragraph_height_cache
         .get(paragraph_ix)
-        .and_then(|entry| *entry)
-        .filter(|entry| entry.key == key && entry.width == width)
+        .and_then(|entry| entry.get(self.invisibility_mode))
+        .copied()
+        .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
         .map(|entry| entry.height)
         .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
       let next_y = y + height;
@@ -3938,18 +3983,23 @@ impl RichTextEditor {
     self.note_measured_item_width(width, cx);
     self
       .paragraph_height_cache
-      .resize(self.document.paragraphs.len(), None);
-    let entry = ParagraphHeightCacheEntry { key, width, height };
+      .resize(self.document.paragraphs.len(), ParagraphModeCache::default());
+    let entry = ParagraphHeightCacheEntry {
+      key,
+      width,
+      invisibility_mode: self.invisibility_mode,
+      height,
+    };
     if self
       .paragraph_height_cache
       .get(paragraph_ix)
+      .and_then(|entry| entry.get(self.invisibility_mode))
       .copied()
-      .flatten()
       == Some(entry)
     {
       return;
     }
-    self.paragraph_height_cache[paragraph_ix] = Some(entry);
+    self.paragraph_height_cache[paragraph_ix].set(self.invisibility_mode, entry);
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
     cx.notify();
   }

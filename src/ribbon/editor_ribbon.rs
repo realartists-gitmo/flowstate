@@ -66,7 +66,6 @@ pub struct EditorRibbon {
   mode: RibbonMode,
   modern_options: ModernRibbonOptions,
   height: gpui::Pixels,
-  read_mode: RibbonReadMode,
 }
 
 /// Compatibility name for code that wants to talk in settings terms.
@@ -83,7 +82,6 @@ impl EditorRibbon {
       mode,
       modern_options: ModernRibbonOptions::default(),
       height: default_ribbon_height(),
-      read_mode: RibbonReadMode::Base,
     }
   }
 
@@ -139,7 +137,7 @@ impl EditorRibbon {
 
 impl Render for EditorRibbon {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let (style_state, armed_tool, document_theme, current_highlight, highlight_mode_active, read_enabled) = {
+    let (style_state, armed_tool, document_theme, current_highlight, highlight_mode_active, invisibility_mode) = {
       let editor = self.editor.read(cx);
       (
         editor.style_state(),
@@ -150,11 +148,6 @@ impl Render for EditorRibbon {
         editor.invisibility_mode(),
       )
     };
-    if read_enabled {
-      self.read_mode = RibbonReadMode::Read;
-    } else if self.read_mode == RibbonReadMode::Read {
-      self.read_mode = RibbonReadMode::Base;
-    }
 
     match self.mode {
       RibbonMode::Legacy => LegacyStylesRibbon::render(self.editor.clone(), &style_state, armed_tool, cx),
@@ -165,9 +158,9 @@ impl Render for EditorRibbon {
         &document_theme,
         current_highlight,
         highlight_mode_active,
+        invisibility_mode,
         self.modern_options,
         self.height,
-        self.read_mode,
         window.viewport_size().width,
         window,
         cx,
@@ -343,13 +336,6 @@ fn legacy_ribbon_group(label: &'static str, controls: impl IntoElement, cx: &mut
 
 pub struct ModernStylesRibbon;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RibbonReadMode {
-  Base,
-  Read,
-  Send,
-}
-
 #[derive(Clone, Copy, Debug)]
 struct RibbonLayoutMetrics {
   height: gpui::Pixels,
@@ -458,9 +444,9 @@ impl ModernStylesRibbon {
     document_theme: &DocumentTheme,
     current_highlight: Option<HighlightStyle>,
     highlight_mode_active: bool,
+    invisibility_mode: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
-    read_mode: RibbonReadMode,
     _available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
@@ -520,7 +506,7 @@ impl ModernStylesRibbon {
                 }),
               ),
           )
-          .child(read_mode_grid(editor.clone(), read_mode, metrics, cx)),
+          .child(invisibility_mode_button(editor.clone(), invisibility_mode, metrics, cx)),
       )
       .into_any_element()
   }
@@ -998,13 +984,12 @@ fn modern_condensed_menu(
     .into_any_element()
 }
 
-fn read_mode_grid(
+fn invisibility_mode_button(
   editor: Entity<RichTextEditor>,
-  read_mode: RibbonReadMode,
+  invisibility_mode: bool,
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
-  let stack_rows = read_mode_rows_fit(metrics);
   div()
     .flex()
     .flex_col()
@@ -1021,131 +1006,22 @@ fn read_mode_grid(
         .child("Views"),
     )
     .child(
-      div()
-        .flex()
-        .when(stack_rows, |this| this.flex_col())
-        .when(!stack_rows, |this| this.flex_row().flex_wrap())
-        .gap(metrics.chip_gap)
-        .child(read_mode_row("Base", RibbonReadMode::Base, read_mode, editor.clone(), metrics, cx))
-        .child(read_mode_row("Read", RibbonReadMode::Read, read_mode, editor.clone(), metrics, cx))
-        .child(read_mode_row("Send", RibbonReadMode::Send, read_mode, editor, metrics, cx)),
-    )
-    .into_any_element()
-}
-
-fn read_mode_rows_fit(metrics: RibbonLayoutMetrics) -> bool {
-  let label_height = 12.0;
-  let label_gap = 2.0;
-  let bottom_guard = 5.0;
-  let fixed_height = metrics.group_padding_top.as_f32() + label_height + label_gap + bottom_guard;
-  let rows_height = metrics.chip_height.as_f32() * 3.0 + metrics.chip_gap.as_f32() * 2.0;
-  metrics.height.as_f32() - fixed_height >= rows_height
-}
-
-fn read_mode_row(
-  label: &'static str,
-  mode: RibbonReadMode,
-  current: RibbonReadMode,
-  editor: Entity<RichTextEditor>,
-  metrics: RibbonLayoutMetrics,
-  cx: &mut Context<EditorRibbon>,
-) -> AnyElement {
-  let selected = mode == current;
-  let eye_editor = editor.clone();
-  // Keep these controls aligned with the rest of the ribbon: all ribbon
-  // buttons should use the same xsmall + compact scaling unless the whole
-  // ribbon sizing model changes.
-  div()
-    .flex()
-    .flex_row()
-    .items_center()
-    .gap(metrics.chip_gap)
-    .child(
-      Button::new(("read-mode-label", read_mode_key(mode)))
-        .xsmall()
-        .compact()
-        .outline()
-        .h(metrics.chip_height)
-        .w(px(52.0))
-        .px(metrics.chip_padding_x)
-        .label(label),
-    )
-    .child(
-      Button::new(("read-mode-eye", read_mode_key(mode)))
+      Button::new("invisibility-mode-toggle")
         .xsmall()
         .compact()
         .outline()
         .h(metrics.chip_height)
         .w(metrics.chip_height)
-        .icon(if selected { IconName::Eye } else { IconName::EyeOff })
-        .selected(selected)
-        .on_click(cx.listener(move |ribbon, _, _, cx| {
-          ribbon.read_mode = mode;
-          eye_editor.update(cx, |editor, cx| {
-            editor.set_invisibility_mode(mode == RibbonReadMode::Read, cx);
+        .icon(if invisibility_mode { IconName::EyeOff } else { IconName::Eye })
+        .selected(invisibility_mode)
+        .tooltip("Invisibility mode")
+        .on_click(move |_, _, cx| {
+          editor.update(cx, |editor, cx| {
+            editor.toggle_invisibility_mode(cx);
           });
-          cx.notify();
-        })),
-    )
-    .child(save_dropdown(mode, editor, metrics, cx))
-    .into_any_element()
-}
-
-fn save_dropdown(
-  mode: RibbonReadMode,
-  editor: Entity<RichTextEditor>,
-  metrics: RibbonLayoutMetrics,
-  _cx: &mut Context<EditorRibbon>,
-) -> AnyElement {
-  let enabled = mode == RibbonReadMode::Base;
-  let chip_height = metrics.chip_height;
-  DropdownButton::new(("read-mode-save-dropdown", read_mode_key(mode)))
-    .with_size(Size::Size(chip_height))
-    .compact()
-    .outline()
-    .button(
-      Button::new(("read-mode-save", read_mode_key(mode)))
-        .xsmall()
-        .compact()
-        .ghost()
-        .h(chip_height)
-        .px(metrics.chip_padding_x)
-        .tooltip("Save")
-        .child(Icon::default().path("icons/save.svg").xsmall())
-        .on_click({
-          let editor = editor.clone();
-          move |_, _, cx| {
-            if enabled {
-              editor.update(cx, |editor, cx| {
-                let _ = editor.save(cx);
-              });
-            }
-          }
         }),
     )
-    .dropdown_menu(move |menu, _, _| {
-      let db8_editor = editor.clone();
-      menu
-        .min_w(px(150.0))
-        .item(PopupMenuItem::new("Save as DB8").on_click(move |_, _, cx| {
-          if enabled {
-            db8_editor.update(cx, |editor, cx| {
-              let _ = editor.save(cx);
-            });
-          }
-        }))
-        .item(PopupMenuItem::new("Save as DOCX"))
-        .item(PopupMenuItem::new("Save as PDF"))
-    })
     .into_any_element()
-}
-
-fn read_mode_key(mode: RibbonReadMode) -> u64 {
-  match mode {
-    RibbonReadMode::Base => 1,
-    RibbonReadMode::Read => 2,
-    RibbonReadMode::Send => 3,
-  }
 }
 
 fn modern_command_groups(
