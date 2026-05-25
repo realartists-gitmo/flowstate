@@ -1512,14 +1512,12 @@ dependencies = [
  "imagesize",
  "mathjax_svg",
  "rdocx",
- "regex",
  "resvg",
  "serde",
  "serde_json",
  "tempfile",
  "unicode-segmentation",
  "uuid",
- "zip",
 ]
 
 [[package]]
