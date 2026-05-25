@@ -2,6 +2,7 @@
 // `rich_text_element` API, while internal imports keep sibling modules able to
 // share implementation details without exposing them outside this module tree.
 mod collaboration;
+mod benchmarks;
 mod demo;
 mod document;
 mod edit_ops;
@@ -16,6 +17,7 @@ mod tools;
 mod word_boundary;
 
 pub use collaboration::{BlockId, CanonicalOperation, CollaborationEdit, ParagraphId, TableCellId};
+pub use benchmarks::{BenchmarkOptions, BenchmarkRunner};
 pub use demo::{blank_document, demo_document, document_from_paragraphs};
 pub use document::{
   AssetId, AssetRecord, AssetStore, Block, BlockAlignment, Document, DocumentOffset, DocumentParagraphInput, DocumentPosition, DocumentRunInput,
@@ -66,11 +68,11 @@ use std::time::Instant;
 // instrument their own work.
 const TIMING_ENV: &str = "DEBATEPROCESSOR_TIMING";
 
-pub(super) fn timing_enabled() -> bool {
+pub(crate) fn timing_enabled() -> bool {
   std::env::var_os(TIMING_ENV).is_some()
 }
 
-pub(super) fn log_timing(label: &str, start: Instant, detail: impl AsRef<str>) {
+pub(crate) fn log_timing(label: &str, start: Instant, detail: impl AsRef<str>) {
   if timing_enabled() {
     eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail.as_ref());
   }

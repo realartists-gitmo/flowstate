@@ -29,9 +29,11 @@ impl IntoElement for RichTextDocumentElement {
 }
 
 #[derive(Clone)]
-pub(super) struct VirtualParagraphElement {
+pub(super) struct VirtualParagraphChunkElement {
   pub(super) editor: Entity<RichTextEditor>,
+  pub(super) item_ix: usize,
   pub(super) paragraph_ix: usize,
+  pub(super) chunk_ix: usize,
   pub(super) generation: u64,
   pub(super) layout: WordElementLayout,
 }
@@ -43,7 +45,7 @@ pub(super) struct VirtualBlockElement {
   pub(super) layout: WordElementLayout,
 }
 
-impl IntoElement for VirtualParagraphElement {
+impl IntoElement for VirtualParagraphChunkElement {
   type Element = Self;
 
   fn into_element(self) -> Self::Element {
@@ -114,7 +116,7 @@ impl Element for RichTextDocumentElement {
   }
 }
 
-impl Element for VirtualParagraphElement {
+impl Element for VirtualParagraphChunkElement {
   type RequestLayoutState = ();
   type PrepaintState = ();
 
@@ -135,6 +137,7 @@ impl Element for VirtualParagraphElement {
   ) -> (LayoutId, Self::RequestLayoutState) {
     let editor = self.editor.clone();
     let paragraph_ix = self.paragraph_ix;
+    let chunk_ix = self.chunk_ix;
     let layout_cell = self.layout.clone();
     let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, cx| {
       let width = known
@@ -144,32 +147,13 @@ impl Element for VirtualParagraphElement {
           _ => Some(px(900.0)),
         })
         .unwrap_or(px(900.0));
-      editor.update(cx, |editor, cx| editor.note_measured_item_width(width, cx));
-      let previous_layout = layout_cell.0.borrow().clone();
       let layout = editor.update(cx, |editor, cx| {
-        build_single_paragraph_layout_with_visibility(
-          &editor.document,
-          paragraph_ix,
-          width,
-          previous_layout.as_deref(),
-          editor.invisibility_mode(),
-          window,
-          cx,
-        )
+        editor.layout_paragraph_chunk_for_element(paragraph_ix, chunk_ix, width, window, cx)
       });
+      let Some(layout) = layout else {
+        return gpui::size(width, px(1.0));
+      };
       let size = layout.size;
-      let cache_key = editor.update(cx, |editor, _cx| {
-        editor
-          .document
-          .paragraphs
-          .get(paragraph_ix)
-          .map(|paragraph| paragraph_cache_key(&editor.document, paragraph))
-      });
-      if let Some(key) = cache_key {
-        editor.update(cx, |editor, cx| {
-          editor.update_paragraph_height_cache(paragraph_ix, width, key, size.height, cx)
-        });
-      }
       layout_cell.0.borrow_mut().replace(Rc::new(layout));
       size
     });
@@ -194,7 +178,7 @@ impl Element for VirtualParagraphElement {
       layout.clone()
     };
     self.editor.update(cx, |editor, _| {
-      editor.store_visible_paragraph_layout(self.generation, self.paragraph_ix, layout.as_ref(), bounds);
+      editor.store_visible_paragraph_chunk_layout(self.generation, self.item_ix, layout.as_ref(), bounds);
     });
   }
 
@@ -208,21 +192,38 @@ impl Element for VirtualParagraphElement {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (selection, drag_selection, show_caret, caret_width) = {
+    let (selection, drag_selection, caret_offset, caret_width) = {
       let editor = self.editor.read(cx);
       let drag_selection = editor.drag_source_selection();
       (
         editor.selection.clone(),
         drag_selection,
-        editor.selection.is_caret()
+        (editor.selection.is_caret()
           && editor.selected_block.is_none()
           && editor.selection.head.paragraph == self.paragraph_ix
           && editor.caret_visible
-          && editor.focus_handle.is_focused(window),
+          && editor.focus_handle.is_focused(window))
+        .then_some(editor.selection.head),
         editor.caret_paint_width(),
       )
     };
     if let Some(layout) = self.layout.0.borrow().as_ref().cloned() {
+      let show_caret = caret_offset.is_some_and(|offset| {
+        layout.paragraphs.first().is_some_and(|paragraph| {
+          if !paragraph.contains_byte(offset.byte) {
+            return false;
+          }
+
+          // Treat chunk ownership as end-exclusive when deciding which
+          // VirtualParagraphChunkElement paints the caret. At a boundary byte,
+          // the trailing chunk should win; otherwise both adjacent chunks can
+          // claim the same caret position when `contains_byte` is inclusive.
+          offset
+            .byte
+            .checked_add(1)
+            .is_some_and(|next_byte| paragraph.contains_byte(next_byte))
+        })
+      });
       paint_layout(
         layout.as_ref(),
         Some(&selection),
