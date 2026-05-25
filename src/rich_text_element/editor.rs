@@ -1438,6 +1438,48 @@ impl RichTextEditor {
     self.height_prefix_index = HeightPrefixIndex::default();
   }
 
+  fn invalidate_stale_paragraph_layout_caches(&mut self) {
+    self.last_layout = None;
+    let paragraph_count = self.document.paragraphs.len();
+    let width = self.current_layout_width();
+    self
+      .paragraph_chunk_layout_cache
+      .resize(paragraph_count, None);
+    self.paragraph_height_cache.resize(paragraph_count, None);
+
+    for paragraph_ix in 0..paragraph_count {
+      let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+        self.paragraph_chunk_layout_cache[paragraph_ix] = None;
+        self.paragraph_height_cache[paragraph_ix] = None;
+        continue;
+      };
+      let key = paragraph_cache_key(&self.document, paragraph);
+      let chunk_valid = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+        .is_some_and(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode);
+      if !chunk_valid {
+        self.paragraph_chunk_layout_cache[paragraph_ix] = None;
+      }
+
+      let height_valid = self
+        .paragraph_height_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+        .is_some_and(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode);
+      if !height_valid {
+        self.paragraph_height_cache[paragraph_ix] = None;
+      }
+    }
+
+    self.pending_chunk_prefetch = false;
+    self.chunk_prefetch_queue.clear();
+    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    self.item_sizes_cache = None;
+    self.height_prefix_index = HeightPrefixIndex::default();
+  }
+
   pub fn invisibility_mode(&self) -> bool {
     self.invisibility_mode
   }
@@ -4757,7 +4799,7 @@ impl RichTextEditor {
   pub(super) fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
     self.pending_styles = None;
     self.goal_x = None;
-    self.invalidate_document_layout_caches();
+    self.invalidate_stale_paragraph_layout_caches();
     self.pending_scroll_head_after_layout = true;
     self.reset_caret_blink(cx);
     cx.notify();
@@ -6166,8 +6208,8 @@ impl Render for RichTextEditor {
       });
     }
     let hide_until_viewport_measured = self.scroll_handle.bounds().size.width <= px(1.0);
-    let item_sizes = self.paragraph_item_sizes(window, cx);
-    let has_startup_layout_width = self.measured_item_width.is_some() || self.document.paragraphs.is_empty() || item_sizes.is_empty();
+    let _ = self.paragraph_item_sizes(window, cx);
+    let has_startup_layout_width = self.measured_item_width.is_some() || self.document.paragraphs.is_empty();
     if !hide_until_viewport_measured && self.initial_layout_hidden && has_startup_layout_width {
       // The VirtualList row positions and the paragraph layouts now agree on
       // width, so the first visible frame can use the same geometry that later
@@ -6177,6 +6219,7 @@ impl Render for RichTextEditor {
     let hide_initial_layout = hide_until_viewport_measured || self.initial_layout_hidden;
     self.apply_pending_paragraph_snap(cx);
     self.apply_pending_head_scroll_after_layout(window, cx);
+    let item_sizes = self.paragraph_item_sizes(window, cx);
     let scroll_handle = self.scroll_handle.clone();
     let render_item_sizes = item_sizes.clone();
     let render_items = self
