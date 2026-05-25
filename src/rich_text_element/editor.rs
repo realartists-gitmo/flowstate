@@ -3111,7 +3111,7 @@ impl RichTextEditor {
     let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.strikethrough);
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| styles.strikethrough = !all_selected);
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -3190,7 +3190,7 @@ impl RichTextEditor {
         }
       }
       editor.pending_styles = None;
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -3218,7 +3218,7 @@ impl RichTextEditor {
     if self.selection.is_caret() {
       return;
     }
-    self.apply_document_edit(cx, |editor, _| {
+    self.apply_document_edit(cx, |editor, cx| {
       let range = editor.selection.normalized();
       for paragraph_ix in range.start.paragraph..=range.end.paragraph {
         let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
@@ -3229,6 +3229,7 @@ impl RichTextEditor {
         };
         apply_style_to_paragraph_range(&mut editor.document, paragraph_ix, start..end, style);
       }
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -3242,7 +3243,7 @@ impl RichTextEditor {
       });
       return;
     }
-    self.apply_document_edit(cx, |editor, _| {
+    self.apply_document_edit(cx, |editor, cx| {
       let range = editor.selection.normalized();
       for paragraph_ix in range.start.paragraph..=range.end.paragraph {
         if let Some(paragraph) = paragraphs_mut(&mut editor.document).get_mut(paragraph_ix) {
@@ -3252,6 +3253,7 @@ impl RichTextEditor {
           }
         }
       }
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -4854,6 +4856,14 @@ impl RichTextEditor {
     cx.notify();
   }
 
+  pub(super) fn after_formatting_mutation(&mut self, cx: &mut Context<Self>) {
+    self.pending_styles = None;
+    self.goal_x = None;
+    self.invalidate_stale_paragraph_layout_caches();
+    self.reset_caret_blink(cx);
+    cx.notify();
+  }
+
   fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
     if !fragment.blocks.is_empty() {
       self.insert_block_fragment(fragment, cx);
@@ -5213,7 +5223,7 @@ impl RichTextEditor {
           }
         }
       });
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -5266,7 +5276,7 @@ impl RichTextEditor {
       mutate_runs_in_range(&mut editor.document, range, |styles| {
         styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
       });
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 
@@ -5319,7 +5329,7 @@ impl RichTextEditor {
     let target_highlight = if all_selected { None } else { highlight };
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| styles.highlight = target_highlight);
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 

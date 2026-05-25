@@ -226,7 +226,7 @@ impl RichTextEditor {
       mutate_runs_in_range(&mut editor.document, range, |styles| {
         apply_inline_tool_to_styles(tool, styles);
       });
-      editor.after_text_mutation(cx);
+      editor.after_formatting_mutation(cx);
     });
   }
 }
