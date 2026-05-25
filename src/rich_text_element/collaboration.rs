@@ -48,6 +48,17 @@ impl DocumentIdentityMap {
     }
   }
 
+  pub(super) fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
+    self
+      .paragraph_ids
+      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), ParagraphId(uuid::Uuid::new_v4().as_u128()));
+    let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
+    self
+      .block_ids
+      .insert(block_insert_ix, BlockId(uuid::Uuid::new_v4().as_u128()));
+    self.table_cell_ids.insert(block_insert_ix, Vec::new());
+  }
+
   pub(super) fn paragraph_id(&self, paragraph_ix: usize) -> Option<ParagraphId> {
     self.paragraph_ids.get(paragraph_ix).copied()
   }

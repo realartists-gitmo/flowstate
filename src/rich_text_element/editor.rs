@@ -358,7 +358,7 @@ pub struct RichTextEditorConfig {
 
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
-    Self { smart_word_selection: true }
+    Self { smart_word_selection: false }
   }
 }
 
@@ -495,6 +495,12 @@ struct VisibleChunkAnchor {
 struct ScrollAnchorLock {
   anchor: ScrollAnchorSnapshot,
   offset_y: Pixels,
+}
+
+enum RecoveryWriteDecision {
+  Write { generation: u64, document: Document },
+  Rescheduled,
+  Idle,
 }
 
 impl ScrollAnchorSnapshot {
@@ -1845,7 +1851,17 @@ impl RichTextEditor {
   }
 
   pub fn insert_paragraph_break_command(&mut self, cx: &mut Context<Self>) {
-    self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
+    if !self.selection.is_caret() {
+      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
+      return;
+    }
+
+    let caret = self.selection.head;
+    let Some(block_ix) = block_ix_for_paragraph(&self.document, caret.paragraph) else {
+      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
+      return;
+    };
+    self.insert_paragraph_break_at_caret(caret, block_ix, cx);
   }
 
   pub fn delete_word_backward_command(&mut self, cx: &mut Context<Self>) {
@@ -3628,6 +3644,42 @@ impl RichTextEditor {
     self.mark_document_changed_with_reconcile(after_generation, identity_shape_changed, cx);
   }
 
+  fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, block_ix: usize, cx: &mut Context<Self>) {
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
+    self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
+    self.insert_paragraph_break(cx);
+    self.layout_invalidation_hint = None;
+    self.identity_map.insert_split_paragraph(caret.paragraph, block_ix);
+    let after_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 2);
+
+    if before_span == after_span && before_selection == self.selection {
+      return;
+    }
+
+    let record = EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span.clone(),
+        after: after_span.clone(),
+      }],
+      canonical_operations: vec![CanonicalOperation::ReplaceParagraphSpan {
+        start_paragraph: self.identity_map.paragraph_id(caret.paragraph),
+        before: before_span,
+        after: after_span,
+      }],
+    };
+    self.undo_stack.push(record);
+    self.redo_stack.clear();
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+  }
+
   fn mark_document_changed(&mut self, generation: u64, cx: &mut Context<Self>) {
     self.mark_document_changed_with_reconcile(generation, true, cx);
   }
@@ -3677,7 +3729,7 @@ impl RichTextEditor {
     let Some(lock) = &self.scroll_anchor_lock else {
       return None;
     };
-    if (lock.offset_y - self.scroll_handle.offset().y).abs() > px(0.1) {
+    if (lock.offset_y - self.scroll_handle.offset().y).abs() > px(0.001) {
       self.scroll_anchor_lock = None;
       return None;
     }
@@ -5198,34 +5250,46 @@ impl RichTextEditor {
     cx.spawn(async move |editor, cx| {
       Timer::after(Duration::from_millis(750)).await;
       let snapshot_timing = Instant::now();
-      let snapshot = editor
-        .update(cx, |editor, _| {
-          editor.recovery_write_pending = false;
-          if !editor.has_unsaved_changes() || editor.last_recovery_generation == editor.edit_generation {
-            None
+      let decision = editor
+        .update(cx, |editor, cx| {
+          if editor.recovery_write_pending {
+            editor.recovery_write_pending = false;
+            editor.recovery_write_in_progress = false;
+            editor.schedule_recovery_write(cx);
+            RecoveryWriteDecision::Rescheduled
+          } else if !editor.has_unsaved_changes() || editor.last_recovery_generation == editor.edit_generation {
+            editor.recovery_write_in_progress = false;
+            RecoveryWriteDecision::Idle
           } else {
-            Some((editor.edit_generation, editor.document.clone()))
+            RecoveryWriteDecision::Write {
+              generation: editor.edit_generation,
+              document: editor.document.clone(),
+            }
           }
         })
         .ok();
       log_timing("recovery snapshot", snapshot_timing, "");
-      if let Some(Some((generation, document))) = snapshot {
-        let write_timing = Instant::now();
-        let paragraph_count = document.paragraphs.len();
-        let write_result = cx
-          .background_executor()
-          .spawn(async move { write_db8(path, &document) })
-          .await;
-        log_timing("recovery write", write_timing, format!("paragraphs={paragraph_count}"));
-        match write_result {
-          Ok(()) => {
-            let _ = editor.update(cx, |editor, _| {
-              editor.last_recovery_generation = editor.last_recovery_generation.max(generation);
-            });
-          },
-          Err(error) => {
-            eprintln!("failed to write recovery file: {error}");
-          },
+      let Some(RecoveryWriteDecision::Write { generation, document }) = decision else {
+        return;
+      };
+      let write_timing = Instant::now();
+      let paragraph_count = document.paragraphs.len();
+      let write_result = cx
+        .background_executor()
+        .spawn(async move {
+          let document = detach_document_for_background_write(&document);
+          write_db8(path, &document)
+        })
+        .await;
+      log_timing("recovery write", write_timing, format!("paragraphs={paragraph_count}"));
+      match write_result {
+        Ok(()) => {
+          let _ = editor.update(cx, |editor, _| {
+            editor.last_recovery_generation = editor.last_recovery_generation.max(generation);
+          });
+        },
+        Err(error) => {
+          eprintln!("failed to write recovery file: {error}");
         }
       }
       let _ = editor.update(cx, |editor, cx| {
@@ -7035,6 +7099,17 @@ fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_by
   let target = start + ((end - start) as f32 * ratio.clamp(0.0, 1.0)).round() as usize;
   let text = paragraph_text(document, paragraph_ix);
   floor_char_boundary(&text, target.min(text.len()))
+}
+
+fn detach_document_for_background_write(document: &Document) -> Document {
+  Document {
+    text: document.text.clone(),
+    paragraphs: Arc::new(document.paragraphs.as_ref().clone()),
+    blocks: Arc::new(document.blocks.as_ref().clone()),
+    assets: document.assets.clone(),
+    offset_index: document.offset_index.clone(),
+    theme: document.theme.clone(),
+  }
 }
 
 fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
