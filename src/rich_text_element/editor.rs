@@ -367,7 +367,7 @@ pub struct RichTextEditorConfig {
 
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
-    Self { smart_word_selection: false }
+    Self { smart_word_selection: true }
   }
 }
 
@@ -854,6 +854,18 @@ impl RichTextEditor {
 
   pub fn update_config(&mut self, update: impl FnOnce(&mut RichTextEditorConfig), cx: &mut Context<Self>) {
     update(&mut self.config);
+    cx.notify();
+  }
+
+  pub fn set_smart_word_selection(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    if self.config.smart_word_selection != enabled {
+      self.config.smart_word_selection = enabled;
+      cx.notify();
+    }
+  }
+
+  pub fn toggle_smart_word_selection(&mut self, cx: &mut Context<Self>) {
+    self.config.smart_word_selection = !self.config.smart_word_selection;
     cx.notify();
   }
 

@@ -4,9 +4,9 @@ use std::{
 };
 
 use gpui::{
-  App, Application, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, InteractiveElement, KeyBinding,
-  ParentElement, PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Result, SharedString, Styled,
-  Window, actions, div, prelude::*, px, relative, rgb,
+  App, Application, AssetSource, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+  ParentElement, PromptButton, PromptHandle, PromptLevel, PromptResponse, Render, RenderablePromptHandle, Result, SharedString, Styled, Window,
+  actions, div, prelude::*, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeRegistry, h_flex, v_flex};
@@ -165,36 +165,39 @@ impl Render for FlowPromptRenderer {
           .on_action(cx.listener(Self::on_accept))
           .on_action(cx.listener(Self::on_cancel))
           .child(
-            h_flex().items_start().gap_3().child(
-              div()
-                .flex_none()
-                .size_8()
-                .rounded(px(8.0))
-                .bg(accent.opacity(0.14))
-                .flex()
-                .items_center()
-                .justify_center()
-                .child(Icon::new(icon).with_size(px(18.0)).text_color(accent)),
-            )
-            .child(
-              v_flex()
-                .gap_1()
-                .child(
-                  div()
-                    .text_lg()
-                    .font_semibold()
-                    .line_height(relative(1.2))
-                    .text_color(cx.theme().foreground)
-                    .child(self.message.clone()),
-                )
-                .children(self.detail.clone().map(|detail| {
-                  div()
-                    .text_sm()
-                    .line_height(relative(1.45))
-                    .text_color(cx.theme().muted_foreground)
-                    .child(detail)
-                })),
-            ),
+            h_flex()
+              .items_start()
+              .gap_3()
+              .child(
+                div()
+                  .flex_none()
+                  .size_8()
+                  .rounded(px(8.0))
+                  .bg(accent.opacity(0.14))
+                  .flex()
+                  .items_center()
+                  .justify_center()
+                  .child(Icon::new(icon).with_size(px(18.0)).text_color(accent)),
+              )
+              .child(
+                v_flex()
+                  .gap_1()
+                  .child(
+                    div()
+                      .text_lg()
+                      .font_semibold()
+                      .line_height(relative(1.2))
+                      .text_color(cx.theme().foreground)
+                      .child(self.message.clone()),
+                  )
+                  .children(self.detail.clone().map(|detail| {
+                    div()
+                      .text_sm()
+                      .line_height(relative(1.45))
+                      .text_color(cx.theme().muted_foreground)
+                      .child(detail)
+                  })),
+              ),
           )
           .child(
             h_flex()

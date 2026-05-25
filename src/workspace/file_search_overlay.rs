@@ -182,8 +182,10 @@ impl Render for FileSearchOverlay {
       .flex()
       .items_center()
       .justify_center()
+      .occlude()
       .on_key_down(cx.listener(Self::on_key_down))
       .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+      .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
         v_flex()
           .w(px(680.0))
