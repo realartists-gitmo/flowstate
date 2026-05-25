@@ -14,7 +14,7 @@ use crop::Rope;
 use gpui::{
   App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
   InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-  Render, ScrollStrategy, SharedString, Size, Subscription, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
+  Render, SharedString, Size, Subscription, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
@@ -1583,12 +1583,12 @@ impl RichTextEditor {
     self.move_horizontal(HDir::Right, false, cx);
   }
 
-  pub fn move_up(&mut self, cx: &mut Context<Self>) {
-    self.move_vertical(VDir::Up, false, cx);
+  pub fn move_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_vertical(VDir::Up, false, window, cx);
   }
 
-  pub fn move_down(&mut self, cx: &mut Context<Self>) {
-    self.move_vertical(VDir::Down, false, cx);
+  pub fn move_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_vertical(VDir::Down, false, window, cx);
   }
 
   pub fn move_line_start(&mut self, cx: &mut Context<Self>) {
@@ -1607,12 +1607,12 @@ impl RichTextEditor {
     self.move_horizontal(HDir::Right, true, cx);
   }
 
-  pub fn select_up(&mut self, cx: &mut Context<Self>) {
-    self.move_vertical(VDir::Up, true, cx);
+  pub fn select_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_vertical(VDir::Up, true, window, cx);
   }
 
-  pub fn select_down(&mut self, cx: &mut Context<Self>) {
-    self.move_vertical(VDir::Down, true, cx);
+  pub fn select_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_vertical(VDir::Down, true, window, cx);
   }
 
   pub fn select_line_start(&mut self, cx: &mut Context<Self>) {
@@ -2602,6 +2602,7 @@ impl RichTextEditor {
   fn place_block_insertion_from_point(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
     let width = self.current_layout_width();
     self.ensure_exact_interaction_chunks(width, window, cx);
+    let _ = self.paragraph_item_sizes(window, cx);
     let viewport = self.scroll_handle.bounds();
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
     if let Some(cache) = &self.item_sizes_cache
@@ -3184,11 +3185,11 @@ impl RichTextEditor {
   fn on_move_right(&mut self, _: &MoveRight, _: &mut Window, cx: &mut Context<Self>) {
     self.move_right(cx);
   }
-  fn on_move_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
-    self.move_up(cx);
+  fn on_move_up(&mut self, _: &MoveUp, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_up(window, cx);
   }
-  fn on_move_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
-    self.move_down(cx);
+  fn on_move_down(&mut self, _: &MoveDown, window: &mut Window, cx: &mut Context<Self>) {
+    self.move_down(window, cx);
   }
   fn on_move_line_start(&mut self, _: &MoveLineStart, _: &mut Window, cx: &mut Context<Self>) {
     self.move_line_start(cx);
@@ -3202,11 +3203,11 @@ impl RichTextEditor {
   fn on_select_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
     self.select_right(cx);
   }
-  fn on_select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
-    self.select_up(cx);
+  fn on_select_up(&mut self, _: &SelectUp, window: &mut Window, cx: &mut Context<Self>) {
+    self.select_up(window, cx);
   }
-  fn on_select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
-    self.select_down(cx);
+  fn on_select_down(&mut self, _: &SelectDown, window: &mut Window, cx: &mut Context<Self>) {
+    self.select_down(window, cx);
   }
   fn on_select_line_start(&mut self, _: &SelectLineStart, _: &mut Window, cx: &mut Context<Self>) {
     self.select_line_start(cx);
@@ -3912,6 +3913,71 @@ impl RichTextEditor {
       })
   }
 
+  fn ensure_paragraph_chunk_containing_byte(
+    &mut self,
+    paragraph_ix: usize,
+    byte: usize,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Option<usize> {
+    loop {
+      if let Some((chunk_ix, _)) = self.paragraph_chunk_containing_byte(paragraph_ix, byte, width) {
+        return Some(chunk_ix);
+      }
+      let before_len = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())
+        .map(|entry| entry.chunks.len())
+        .unwrap_or(0);
+      if !self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
+        return None;
+      }
+      let after = self
+        .paragraph_chunk_layout_cache
+        .get(paragraph_ix)
+        .and_then(|entry| entry.as_ref())?;
+      if after.complete && after.chunks.len() == before_len {
+        return self
+          .paragraph_chunk_containing_byte(paragraph_ix, byte, width)
+          .map(|(chunk_ix, _)| chunk_ix);
+      }
+    }
+  }
+
+  fn ensure_vertical_navigation_chunks(
+    &mut self,
+    head: DocumentOffset,
+    dir: VDir,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(chunk_ix) = self.ensure_paragraph_chunk_containing_byte(head.paragraph, head.byte, width, window, cx) else {
+      return;
+    };
+    match dir {
+      VDir::Down => {
+        let needs_next_chunk = self
+          .paragraph_chunk_layout_cache
+          .get(head.paragraph)
+          .and_then(|entry| entry.as_ref())
+          .is_some_and(|entry| chunk_ix + 1 >= entry.chunks.len() && !entry.complete);
+        if needs_next_chunk {
+          self.ensure_next_paragraph_chunk(head.paragraph, width, window, cx);
+        }
+      },
+      VDir::Up => {
+        if chunk_ix == 0
+          && let Some(prev) = head.paragraph.checked_sub(1)
+        {
+          self.ensure_next_paragraph_chunk(prev, width, window, cx);
+        }
+      },
+    }
+  }
+
   fn paragraph_remainder_estimate(&self, paragraph_ix: usize, width: Pixels) -> Pixels {
     let estimated_total = estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode);
     let exact_height = self
@@ -4132,26 +4198,10 @@ impl RichTextEditor {
 
   fn layout_for_offset(&self, offset: DocumentOffset) -> Option<LayoutState> {
     let width = self.current_layout_width();
-    self
-      .document_layout_for_offset(offset, width)
-      .or_else(|| {
-        self
-          .last_layout
-          .as_ref()
-          .filter(|layout| paragraph_layout(layout, offset.paragraph).is_some())
-          .map(|layout| layout.as_ref().clone())
-      })
+    self.document_layout_for_offset(offset, width)
   }
 
   fn hit_test_cached_position(&self, position: Point<Pixels>) -> Option<DocumentOffset> {
-    if let Some(layout) = self.last_layout.as_ref()
-      && let (Some(first), Some(last)) = (layout.paragraphs.first(), layout.paragraphs.last())
-      && position.y >= first.top
-      && position.y <= last.bottom
-    {
-      let _ = layout.block_paragraph_ix(layout.paragraph_block_ix(first.index).unwrap_or(0));
-      return Some(layout.hit_test(position));
-    }
     let paragraph_count = self.document.paragraphs.len();
     let Some(cache) = &self.item_sizes_cache else {
       return None;
@@ -5289,8 +5339,12 @@ impl RichTextEditor {
     }
   }
 
-  fn move_vertical(&mut self, dir: VDir, extend: bool, cx: &mut Context<Self>) {
+  fn move_vertical(&mut self, dir: VDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
+    self.pending_snap_to_paragraph = None;
     let head = self.selection.head;
+    let width = self.current_layout_width();
+    self.ensure_vertical_navigation_chunks(head, dir, width, window, cx);
+    let _ = self.paragraph_item_sizes(window, cx);
     // Compute the new head while only reading layout snapshots. Use a local
     // scope so we can mutate selection afterwards without borrow conflicts.
     let (new_head, used_goal_x) = {
@@ -5298,10 +5352,6 @@ impl RichTextEditor {
         return;
       };
       let Some((p_ix, l_ix)) = locate_line(&layout, head) else {
-        // The caret can briefly point at a paragraph that the virtual list has
-        // not mounted yet. Keep the paragraph moving into view so the next
-        // layout frame can restore normal visual-line navigation.
-        self.scroll_head_paragraph_into_view(dir);
         cx.notify();
         return;
       };
@@ -5314,7 +5364,7 @@ impl RichTextEditor {
         VDir::Down => find_line_below(&layout, p_ix, l_ix),
       };
       let Some((np, nl)) = next else {
-        return self.move_to_adjacent_unmounted_paragraph(dir, extend, cur_x, cx);
+        return self.move_to_adjacent_unmounted_paragraph(dir, extend, cur_x, window, cx);
       };
       let target_line = &layout.paragraphs[np].lines[nl];
       let new_byte = target_line.hit_test_x(cur_x);
@@ -5339,11 +5389,29 @@ impl RichTextEditor {
     cx.notify();
   }
 
-  fn move_to_adjacent_unmounted_paragraph(&mut self, dir: VDir, extend: bool, goal_x: Pixels, cx: &mut Context<Self>) {
+  fn move_to_adjacent_unmounted_paragraph(&mut self, dir: VDir, extend: bool, goal_x: Pixels, window: &mut Window, cx: &mut Context<Self>) {
     let head = self.selection.head;
     let Some(target_paragraph) = self.adjacent_document_paragraph(head.paragraph, dir) else {
       return;
     };
+    let width = self.current_layout_width();
+    match dir {
+      VDir::Up => {
+        while self
+          .paragraph_chunk_layout_cache
+          .get(target_paragraph)
+          .and_then(|entry| entry.as_ref())
+          .is_none_or(|entry| !entry.complete)
+        {
+          if !self.ensure_next_paragraph_chunk(target_paragraph, width, window, cx) {
+            break;
+          }
+        }
+      },
+      VDir::Down => {
+        self.ensure_next_paragraph_chunk(target_paragraph, width, window, cx);
+      },
+    }
     let target_byte = match self.layout_for_offset(DocumentOffset {
       paragraph: target_paragraph,
       byte: 0,
@@ -5375,32 +5443,9 @@ impl RichTextEditor {
     let anchor = if extend { self.selection.anchor } else { new_head };
     self.selection = EditorSelection { anchor, head: new_head };
     self.goal_x = Some(goal_x);
-    self.scroll_paragraph_into_view(target_paragraph, dir);
+    self.scroll_head_into_view();
     self.reset_caret_blink(cx);
     cx.notify();
-  }
-
-  fn scroll_head_paragraph_into_view(&self, dir: VDir) {
-    self.scroll_paragraph_into_view(self.selection.head.paragraph, dir);
-  }
-
-  fn scroll_paragraph_into_view(&self, paragraph_ix: usize, dir: VDir) {
-    if paragraph_ix >= self.document.paragraphs.len() {
-      return;
-    }
-    let strategy = match dir {
-      VDir::Up => ScrollStrategy::Bottom,
-      VDir::Down => ScrollStrategy::Top,
-    };
-    let item_ix = self
-      .item_sizes_cache
-      .as_ref()
-      .and_then(|cache| {
-        let block_ix = self.block_ix_for_paragraph(paragraph_ix)?;
-        cache.block_item_ranges.get(block_ix).map(|range| range.start)
-      })
-      .unwrap_or(paragraph_ix);
-    self.scroll_handle.scroll_to_item(item_ix, strategy);
   }
 
   fn adjacent_document_paragraph(&self, paragraph_ix: usize, dir: VDir) -> Option<usize> {
@@ -5411,14 +5456,6 @@ impl RichTextEditor {
   }
 
   fn hit_test_document_position(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> DocumentOffset {
-    if let Some(layout) = self.last_layout.as_ref()
-      && let (Some(first), Some(last)) = (layout.paragraphs.first(), layout.paragraphs.last())
-      && position.y >= first.top
-      && position.y <= last.bottom
-    {
-      return layout.hit_test(position);
-    }
-
     let paragraph_count = self.document.paragraphs.len();
     if paragraph_count == 0 {
       return DocumentOffset::default();
@@ -5426,6 +5463,7 @@ impl RichTextEditor {
     let viewport = self.scroll_handle.bounds();
     let width = if viewport.size.width > px(1.0) { viewport.size.width } else { px(900.0) };
     self.ensure_exact_interaction_chunks(width, window, cx);
+    let _ = self.paragraph_item_sizes(window, cx);
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
     let (paragraph_ix, chunk_ix) = if let Some(cache) = &self.item_sizes_cache
       && self.height_prefix_index.len() == cache.item_count
@@ -6018,8 +6056,7 @@ impl RichTextEditor {
               return false;
             }
 
-            if let Some(layout) = &editor.last_layout {
-              let head = layout.hit_test(position);
+            if let Some(head) = editor.hit_test_cached_position(position) {
               if editor.selection.head != head {
                 editor.selection.head = head;
               }

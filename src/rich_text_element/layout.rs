@@ -15,6 +15,7 @@ pub(super) struct LayoutState {
   pub(super) paragraphs: Vec<LaidOutParagraph>,
   pub(super) blocks: Vec<LaidOutBlock>,
   pub(super) paragraph_to_block: Vec<usize>,
+  #[allow(dead_code)]
   pub(super) block_to_paragraph: Vec<Option<usize>>,
   pub(super) bounds: Option<Bounds<Pixels>>,
   pub(super) size: Size<Pixels>,
@@ -31,6 +32,7 @@ impl LayoutState {
     self.paragraph_to_block.get(paragraph_ix).copied()
   }
 
+  #[allow(dead_code)]
   pub(super) fn block_paragraph_ix(&self, block_ix: usize) -> Option<usize> {
     self.block_to_paragraph.get(block_ix).copied().flatten()
   }
