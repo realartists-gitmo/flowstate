@@ -1037,6 +1037,14 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
   window: &mut Window,
   cx: &mut App,
 ) -> Option<ParagraphChunkBuildResult> {
+  if invisibility_mode
+    && document
+      .paragraphs
+      .get(paragraph_ix)
+      .is_some_and(|paragraph| !paragraph_is_visible(paragraph))
+  {
+    return None;
+  }
   let projected_document = invisibility_mode
     .then(|| invisibility_projected_document(document, paragraph_ix))
     .flatten();
