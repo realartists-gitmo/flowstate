@@ -1083,19 +1083,7 @@ impl RichTextEditor {
     {
       return Some(self.height_prefix_index.item_top(range.start));
     }
-    let sizes = self.item_sizes_cache.as_ref()?;
-    let item_start = sizes
-      .block_item_ranges
-      .get(block_ix)
-      .map(|range| range.start)
-      .unwrap_or(block_ix);
-    Some(
-      sizes
-        .sizes
-        .iter()
-        .take(item_start)
-        .fold(px(0.0), |top, size| top + size.height),
-    )
+    None
   }
 
   fn scroll_block_into_view(&self, block_ix: usize) {
@@ -5465,31 +5453,12 @@ impl RichTextEditor {
     self.ensure_exact_interaction_chunks(width, window, cx);
     let _ = self.paragraph_item_sizes(window, cx);
     let content_y = (position.y - viewport.top() - self.scroll_handle.offset().y).max(px(0.0));
-    let (paragraph_ix, chunk_ix) = if let Some(cache) = &self.item_sizes_cache
-      && self.height_prefix_index.len() == cache.item_count
-    {
-      let item_ix = self.height_prefix_index.lower_bound(content_y);
-      let item = cache.items.get(item_ix).cloned();
-      match item {
-        Some(VirtualItem::ParagraphChunk {
-          paragraph_ix,
-          chunk_ix,
-          ..
-        }) => (paragraph_ix, Some(chunk_ix)),
-        Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
-          self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
-          (paragraph_ix, None)
-        },
-        Some(VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix }) => (
-          self
-            .paragraph_ix_for_block(block_ix)
-            .unwrap_or(self.selection.head.paragraph.min(paragraph_count - 1)),
-          None,
-        ),
-        None => (self.selection.head.paragraph.min(paragraph_count - 1), None),
-      }
-    } else {
-      (self.selection.head.paragraph.min(paragraph_count - 1), None)
+    let (paragraph_ix, chunk_ix) = match self.virtual_text_item_at_content_y(content_y, width, window, cx) {
+      Some((paragraph_ix, chunk_ix)) => (paragraph_ix, chunk_ix),
+      None => {
+        let fallback = self.selection.head.paragraph.min(paragraph_count - 1);
+        (fallback, self.ensure_paragraph_chunk_containing_byte(fallback, self.selection.head.byte, width, window, cx))
+      },
     };
     if let Some(chunk_ix) = chunk_ix
       && let Some(mut layout) = self.paragraph_chunk_layout_state(paragraph_ix, chunk_ix, width).map(|layout| layout.as_ref().clone())
@@ -5511,6 +5480,39 @@ impl RichTextEditor {
       size(width, layout.size.height),
     ));
     layout.hit_test(position)
+  }
+
+  fn virtual_text_item_at_content_y(
+    &mut self,
+    content_y: Pixels,
+    width: Pixels,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Option<(usize, Option<usize>)> {
+    for _ in 0..2 {
+      let cache = self.item_sizes_cache.as_ref()?;
+      if self.height_prefix_index.len() != cache.item_count {
+        return None;
+      }
+      let item_ix = self.height_prefix_index.lower_bound(content_y);
+      match cache.items.get(item_ix).cloned() {
+        Some(VirtualItem::ParagraphChunk {
+          paragraph_ix,
+          chunk_ix,
+          ..
+        }) => return Some((paragraph_ix, Some(chunk_ix))),
+        Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
+          self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
+          let _ = self.paragraph_item_sizes(window, cx);
+          continue;
+        },
+        Some(VirtualItem::HiddenBlock { block_ix } | VirtualItem::StructuralBlock { block_ix }) => {
+          return self.paragraph_ix_for_block(block_ix).map(|paragraph_ix| (paragraph_ix, None));
+        },
+        None => return None,
+      }
+    }
+    None
   }
 
   // Home / End: jump to the start or end of the current visual (wrapped) line.
