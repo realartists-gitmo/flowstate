@@ -45,13 +45,16 @@ impl RichTextEditor {
       Some(highlight) => {
         self.current_highlight_style = highlight;
         self.current_highlight_choice = Some(highlight);
-        self.armed_inline_tool = Some(ArmedInlineTool::Highlight(highlight));
 
         if self.selection.is_caret() {
+          self.armed_inline_tool = Some(ArmedInlineTool::Highlight(highlight));
           let mut styles = self.styles_at_caret();
           styles.highlight = Some(highlight);
           self.pending_styles = Some(styles);
           self.reset_caret_blink(cx);
+        } else {
+          self.armed_inline_tool = None;
+          self.set_highlight_for_selection(Some(highlight), cx);
         }
       },
       None => {
@@ -73,11 +76,15 @@ impl RichTextEditor {
   }
 
   pub fn toggle_highlight_mode(&mut self, cx: &mut Context<Self>) {
+    if !self.selection.is_caret() {
+      self.armed_inline_tool = None;
+      self.set_highlight_for_selection(self.current_highlight_choice, cx);
+      return;
+    }
+
     if self.highlight_mode_active() {
       self.armed_inline_tool = None;
-      if self.selection.is_caret() {
-        self.pending_styles = None;
-      }
+      self.pending_styles = None;
       self.reset_caret_blink(cx);
       cx.notify();
       return;
