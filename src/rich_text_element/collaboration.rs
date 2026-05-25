@@ -49,9 +49,10 @@ impl DocumentIdentityMap {
   }
 
   pub(super) fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
-    self
-      .paragraph_ids
-      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), ParagraphId(uuid::Uuid::new_v4().as_u128()));
+    self.paragraph_ids.insert(
+      (paragraph_ix + 1).min(self.paragraph_ids.len()),
+      ParagraphId(uuid::Uuid::new_v4().as_u128()),
+    );
     let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
     self
       .block_ids

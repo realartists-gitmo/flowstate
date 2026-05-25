@@ -19,12 +19,14 @@ pub struct AppSettings {
 #[serde(default)]
 pub struct EditorSettings {
   pub ribbon_mode: RibbonMode,
+  pub smart_word_selection: bool,
 }
 
 impl Default for EditorSettings {
   fn default() -> Self {
     Self {
       ribbon_mode: RibbonMode::default(),
+      smart_word_selection: true,
     }
   }
 }
@@ -167,6 +169,10 @@ pub fn load_ribbon_mode() -> RibbonMode {
   load_app_settings().editor.ribbon_mode
 }
 
+pub fn load_smart_word_selection() -> bool {
+  load_app_settings().editor.smart_word_selection
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 pub fn save_theme_name(theme_name: &str) -> io::Result<()> {
@@ -184,6 +190,12 @@ pub fn save_document_theme(theme: &DocumentTheme) -> io::Result<()> {
 pub fn save_ribbon_mode(ribbon_mode: RibbonMode) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.editor.ribbon_mode = ribbon_mode;
+  save_app_settings(settings)
+}
+
+pub fn save_smart_word_selection(enabled: bool) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.editor.smart_word_selection = enabled;
   save_app_settings(settings)
 }
 

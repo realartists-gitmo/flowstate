@@ -358,7 +358,7 @@ pub struct RichTextEditorConfig {
 
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
-    Self { smart_word_selection: false }
+    Self { smart_word_selection: true }
   }
 }
 
@@ -535,11 +535,7 @@ impl HeightPrefixIndex {
   }
 
   fn item_top(&self, ix: usize) -> Pixels {
-    self
-      .origins
-      .get(ix)
-      .copied()
-      .unwrap_or(self.total)
+    self.origins.get(ix).copied().unwrap_or(self.total)
   }
 
   fn lower_bound(&self, target: Pixels) -> usize {
@@ -849,6 +845,18 @@ impl RichTextEditor {
 
   pub fn update_config(&mut self, update: impl FnOnce(&mut RichTextEditorConfig), cx: &mut Context<Self>) {
     update(&mut self.config);
+    cx.notify();
+  }
+
+  pub fn set_smart_word_selection(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    if self.config.smart_word_selection != enabled {
+      self.config.smart_word_selection = enabled;
+      cx.notify();
+    }
+  }
+
+  pub fn toggle_smart_word_selection(&mut self, cx: &mut Context<Self>) {
+    self.config.smart_word_selection = !self.config.smart_word_selection;
     cx.notify();
   }
 
@@ -3626,8 +3634,7 @@ impl RichTextEditor {
       before: before_span.clone(),
       after: after_span.clone(),
     }];
-    let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len()
-      || before_block_count != self.document.blocks.len();
+    let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len() || before_block_count != self.document.blocks.len();
     let record = EditRecord {
       before_selection,
       before_generation,
@@ -3653,7 +3660,9 @@ impl RichTextEditor {
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.insert_paragraph_break(cx);
     self.layout_invalidation_hint = None;
-    self.identity_map.insert_split_paragraph(caret.paragraph, block_ix);
+    self
+      .identity_map
+      .insert_split_paragraph(caret.paragraph, block_ix);
     let after_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 2);
 
     if before_span == after_span && before_selection == self.selection {
@@ -3834,7 +3843,9 @@ impl RichTextEditor {
     }
     let viewport_height = self.scroll_handle.bounds().size.height.max(px(0.0));
     let max_scroll_top = (px(self.height_prefix_index.total_height()) - viewport_height).max(px(0.0));
-    let scroll_top = (self.height_prefix_index.item_top(item_ix) + delta).max(px(0.0)).min(max_scroll_top);
+    let scroll_top = (self.height_prefix_index.item_top(item_ix) + delta)
+      .max(px(0.0))
+      .min(max_scroll_top);
     let mut offset = self.scroll_handle.offset();
     let new_y = -scroll_top;
     if offset.y != new_y {
@@ -3854,11 +3865,7 @@ impl RichTextEditor {
     }
     match anchor {
       ScrollAnchorSnapshot::Item { item, .. } => match item {
-        VirtualItem::ParagraphChunk {
-          paragraph_ix,
-          chunk_ix,
-          ..
-        } => self
+        VirtualItem::ParagraphChunk { paragraph_ix, chunk_ix, .. } => self
           .paragraph_chunk_item_ix(*paragraph_ix, *chunk_ix)
           .map(|item_ix| (item_ix, anchor.delta())),
         VirtualItem::ParagraphRemainder { paragraph_ix, .. } => cache
@@ -3889,7 +3896,9 @@ impl RichTextEditor {
             .filter(|(_, chunk)| chunk.end_byte > *start_byte)
           {
             if *delta <= consumed + chunk.height {
-              let chunk_delta = (*delta - consumed).max(px(0.0)).min(chunk.height.max(px(0.0)));
+              let chunk_delta = (*delta - consumed)
+                .max(px(0.0))
+                .min(chunk.height.max(px(0.0)));
               return self
                 .paragraph_chunk_item_ix(*paragraph_ix, chunk_ix)
                 .map(|item_ix| (item_ix, chunk_delta));
@@ -3903,16 +3912,15 @@ impl RichTextEditor {
           {
             return Some((item_ix, (*delta - consumed).max(px(0.0))));
           }
-          return entry
-            .chunks
-            .last()
-            .and_then(|chunk| {
-              let chunk_ix = entry.chunks.len().checked_sub(1)?;
-              let chunk_delta = (*delta - consumed).max(px(0.0)).min(chunk.height.max(px(0.0)));
-              self
-                .paragraph_chunk_item_ix(*paragraph_ix, chunk_ix)
-                .map(|item_ix| (item_ix, chunk_delta))
-            });
+          return entry.chunks.last().and_then(|chunk| {
+            let chunk_ix = entry.chunks.len().checked_sub(1)?;
+            let chunk_delta = (*delta - consumed)
+              .max(px(0.0))
+              .min(chunk.height.max(px(0.0)));
+            self
+              .paragraph_chunk_item_ix(*paragraph_ix, chunk_ix)
+              .map(|item_ix| (item_ix, chunk_delta))
+          });
         }
         cache
           .paragraph_remainder_items
@@ -4010,8 +4018,7 @@ impl RichTextEditor {
     cx: &mut Context<Self>,
   ) -> Rc<Vec<Size<Pixels>>> {
     let (items, block_item_ranges, block_heights, sizes) = self.virtual_item_sizes(width, window, cx);
-    let (paragraph_chunk_item_ranges, paragraph_remainder_items) =
-      item_lookup_for_virtual_items(items.as_ref(), self.document.paragraphs.len());
+    let (paragraph_chunk_item_ranges, paragraph_remainder_items) = item_lookup_for_virtual_items(items.as_ref(), self.document.paragraphs.len());
     self.height_prefix_index.rebuild(sizes.as_ref());
     let item_count = sizes.len();
     self.item_sizes_cache = Some(ItemSizesCache {
@@ -4409,16 +4416,7 @@ impl RichTextEditor {
     let budget = Duration::from_millis(14);
     let mut changed = false;
     for (paragraph_ix, start_byte, target) in remainders {
-      changed |= self.materialize_paragraph_remainder_until(
-        paragraph_ix,
-        width,
-        start_byte,
-        target,
-        started,
-        budget,
-        window,
-        cx,
-      );
+      changed |= self.materialize_paragraph_remainder_until(paragraph_ix, width, start_byte, target, started, budget, window, cx);
       if started.elapsed() >= budget {
         break;
       }
@@ -5290,7 +5288,7 @@ impl RichTextEditor {
         },
         Err(error) => {
           eprintln!("failed to write recovery file: {error}");
-        }
+        },
       }
       let _ = editor.update(cx, |editor, cx| {
         editor.recovery_write_in_progress = false;
@@ -7040,19 +7038,14 @@ fn windows_apply_capslock(text: &str) -> String {
   }
 }
 
-fn item_lookup_for_virtual_items(
-  items: &[VirtualItem],
-  paragraph_count: usize,
-) -> (Vec<Range<usize>>, Vec<Option<usize>>) {
+fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) -> (Vec<Range<usize>>, Vec<Option<usize>>) {
   let mut paragraph_chunk_item_ranges = vec![0..0; paragraph_count];
   let mut paragraph_remainder_items = vec![None; paragraph_count];
 
   for (item_ix, item) in items.iter().enumerate() {
     match item {
       VirtualItem::ParagraphChunk {
-        paragraph_ix,
-        chunk_ix: _,
-        ..
+        paragraph_ix, chunk_ix: _, ..
       } => {
         if let Some(range) = paragraph_chunk_item_ranges.get_mut(*paragraph_ix) {
           if range.start == range.end {

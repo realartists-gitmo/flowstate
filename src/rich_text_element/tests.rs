@@ -50,6 +50,11 @@ fn document_rope_edits_keep_utf8_byte_offsets() {
 }
 
 #[test]
+fn smart_word_selection_is_enabled_by_default() {
+  assert!(RichTextEditorConfig::default().smart_word_selection);
+}
+
+#[test]
 fn smart_mouse_selection_snaps_across_words_but_not_inside_one_word() {
   let document = document_from_input(
     DocumentTheme::default(),

@@ -5,7 +5,7 @@ use gpui::{
   Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, TitlebarOptions, WeakEntity, Window, WindowBounds,
   WindowControlArea, WindowOptions, black, div, point, prelude::*, px, rgb, size, white,
 };
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputState, NumberInput};
 use gpui_component::list::ListItem;
@@ -20,7 +20,7 @@ use gpui_component::{
 };
 use uuid::Uuid;
 
-use crate::app_settings::{load_document_theme, save_document_theme, save_theme_name};
+use crate::app_settings::{load_document_theme, load_smart_word_selection, save_document_theme, save_smart_word_selection, save_theme_name};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::rich_text_element::{
   Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, demo_document, load_or_create_document,
@@ -123,6 +123,10 @@ impl Workspace {
     // local user preference loaded from app settings.
     document.theme = load_document_theme();
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
+    let smart_word_selection = load_smart_word_selection();
+    editor.update(cx, |editor, cx| {
+      editor.set_smart_word_selection(smart_word_selection, cx);
+    });
     self
       .editor_subscriptions
       .push(cx.observe(&editor, |workspace, editor, cx| {
@@ -735,6 +739,12 @@ impl Workspace {
           "Open a document to preview style values."
         })
         .resettable(false)
+        .group(
+          SettingGroup::new()
+            .title("Editing")
+            .description("Selection behavior for text editing.")
+            .item(smart_word_selection_item(workspace.clone())),
+        )
         .group(
           SettingGroup::new()
             .title("Apply to All")
@@ -2379,6 +2389,66 @@ fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>,
     }
 
     workspace.apply_document_theme_to_open_editors(theme, cx);
+  });
+}
+
+fn smart_word_selection_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let enabled = active_smart_word_selection(cx, &workspace);
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_4()
+      .child(
+        div()
+          .flex_1()
+          .min_w_0()
+          .child(div().text_sm().child("Smart word selection"))
+          .child(
+            div()
+              .text_xs()
+              .text_color(cx.theme().muted_foreground)
+              .child("Snap mouse drag selections to whole words after crossing a word boundary."),
+          ),
+      )
+      .child(
+        Toggle::new("document-style-smart-word-selection")
+          .small()
+          .outline()
+          .checked(enabled)
+          .on_click({
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              update_smart_word_selection(cx, &workspace, !enabled);
+            }
+          }),
+      )
+      .into_any_element()
+  })
+}
+
+fn active_smart_word_selection(cx: &App, workspace: &WeakEntity<Workspace>) -> bool {
+  workspace
+    .upgrade()
+    .and_then(|workspace| workspace.read(cx).active_editor.clone())
+    .map(|editor| editor.read(cx).config().smart_word_selection)
+    .unwrap_or_else(load_smart_word_selection)
+}
+
+fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
+  if let Err(error) = save_smart_word_selection(enabled) {
+    eprintln!("failed to save smart word selection setting: {error}");
+  }
+
+  let _ = workspace.update(cx, |workspace, cx| {
+    for panel in &workspace.document_panels {
+      let editor = panel.read(cx).editor();
+      editor.update(cx, |editor, cx| {
+        editor.set_smart_word_selection(enabled, cx);
+      });
+    }
+    cx.notify();
   });
 }
 
