@@ -75,6 +75,10 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
 
 fn document_for_serialization(document: &Document) -> Document {
   let mut document = document.clone();
+  // Recovery/autosave can snapshot while live editing is still settling; make
+  // sure byte offsets are derived from the paragraph projection we are about
+  // to serialize instead of trusting cached offsets.
+  rebuild_document_offset_index(&mut document);
   document.blocks = Arc::new(serializable_blocks(&document));
   document
 }
