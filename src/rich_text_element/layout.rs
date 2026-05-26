@@ -1954,7 +1954,11 @@ fn first_break_over_width(
   let mut lower = range.start;
   let mut step = 1usize;
   let probe = loop {
-    let probe = range.start.saturating_add(step).saturating_sub(1).min(range.end - 1);
+    let probe = range
+      .start
+      .saturating_add(step)
+      .saturating_sub(1)
+      .min(range.end - 1);
     let break_at = break_ends[probe];
     let candidate_width = measure_line_width(
       document,
@@ -2065,14 +2069,20 @@ fn nth_char_boundary_after(text: &str, start: usize, n: usize) -> Option<usize> 
   if n == 0 {
     return text[start..].chars().next().map(|ch| start + ch.len_utf8());
   }
-  text[start..].char_indices().nth(n).map(|(relative_byte, ch)| start + relative_byte + ch.len_utf8())
+  text[start..]
+    .char_indices()
+    .nth(n)
+    .map(|(relative_byte, ch)| start + relative_byte + ch.len_utf8())
 }
 
 fn nth_char_after(text: &str, start: usize, n: usize) -> Option<(usize, usize, char)> {
-  text[start..].char_indices().nth(n).map(|(relative_byte, ch)| {
-    let byte_ix = start + relative_byte;
-    (byte_ix, byte_ix + ch.len_utf8(), ch)
-  })
+  text[start..]
+    .char_indices()
+    .nth(n)
+    .map(|(relative_byte, ch)| {
+      let byte_ix = start + relative_byte;
+      (byte_ix, byte_ix + ch.len_utf8(), ch)
+    })
 }
 
 pub(super) fn measure_line_width(
@@ -2115,8 +2125,13 @@ pub(super) fn measure_line_width(
     let run_end = clamp_to_char_boundary(paragraph_text, fragment.run_range.end.min(paragraph_text.len())).max(run_start);
     let run_text = &paragraph_text[run_start..run_end];
     let shaped = shape_fragment_cached(window, run_text, format.clone(), run_start, fragment.styles, shape_cache);
-    let fragment_start = fragment.source_start.saturating_sub(run_start).min(run_text.len());
-    let fragment_end = fragment_start.saturating_add(text.len()).min(run_text.len());
+    let fragment_start = fragment
+      .source_start
+      .saturating_sub(run_start)
+      .min(run_text.len());
+    let fragment_end = fragment_start
+      .saturating_add(text.len())
+      .min(run_text.len());
     let fragment_width = (shaped.x_for_index(fragment_end) - shaped.x_for_index(fragment_start)).max(px(0.0));
     if format.border_width > px(0.0) {
       width += document.theme.box_padding_left;
