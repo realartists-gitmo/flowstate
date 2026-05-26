@@ -632,6 +632,7 @@ pub struct RichTextEditor {
   paragraph_height_cache_revision: u64,
   item_sizes_cache: Option<ItemSizesCache>,
   layout_invalidation_hint: Option<Range<usize>>,
+  suppress_mutation_notify: usize,
   last_scroll_anchor: Option<ScrollAnchorSnapshot>,
   scroll_anchor_lock: Option<ScrollAnchorLock>,
   height_prefix_index: HeightPrefixIndex,
@@ -717,6 +718,7 @@ impl RichTextEditor {
       paragraph_height_cache_revision: 0,
       item_sizes_cache: None,
       layout_invalidation_hint: None,
+      suppress_mutation_notify: 0,
       last_scroll_anchor: None,
       scroll_anchor_lock: None,
       height_prefix_index: HeightPrefixIndex::default(),
@@ -3781,7 +3783,9 @@ impl RichTextEditor {
     let before_range = capture_range.unwrap_or_else(|| self.edit_capture_range());
     let before_span = capture_document_span(&self.document, before_range);
     self.layout_invalidation_hint = Some(before_span.start_paragraph..before_span.start_paragraph + before_span.paragraphs.len());
+    self.suppress_mutation_notify += 1;
     edit(self, cx);
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
     self.layout_invalidation_hint = None;
     let paragraph_delta = self.document.paragraphs.len() as isize - before_paragraph_count as isize;
     let after_count = before_span
@@ -3856,7 +3860,9 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let before_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
+    self.suppress_mutation_notify += 1;
     self.insert_paragraph_break(cx);
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
     self.layout_invalidation_hint = None;
     self
       .identity_map
@@ -3902,6 +3908,12 @@ impl RichTextEditor {
     self.refresh_save_status();
     self.schedule_recovery_write(cx);
     cx.notify();
+  }
+
+  fn notify_after_mutation(&self, cx: &mut Context<Self>) {
+    if self.suppress_mutation_notify == 0 {
+      cx.notify();
+    }
   }
 
   fn after_history_restore(&mut self, cx: &mut Context<Self>) {
@@ -5705,7 +5717,7 @@ impl RichTextEditor {
     }
     self.pending_scroll_head_after_layout = true;
     self.reset_caret_blink(cx);
-    cx.notify();
+    self.notify_after_mutation(cx);
   }
 
   pub(super) fn after_formatting_mutation(&mut self, cx: &mut Context<Self>) {
@@ -5717,7 +5729,7 @@ impl RichTextEditor {
       self.invalidate_stale_paragraph_layout_caches();
     }
     self.reset_caret_blink(cx);
-    cx.notify();
+    self.notify_after_mutation(cx);
   }
 
   fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
