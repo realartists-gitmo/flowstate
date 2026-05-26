@@ -652,6 +652,14 @@ pub struct RichTextEditor {
 }
 
 impl RichTextEditor {
+  pub fn clear_document_equation_caches(&self) {
+    let keys = self.document.blocks.iter().filter_map(|block| match block {
+      Block::Equation(equation) => Some((equation.source.to_string(), matches!(equation.display, EquationDisplay::Display))),
+      _ => None,
+    });
+    EquationRenderer::clear_entries(keys);
+  }
+
   pub fn new_with_path(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
     let paragraph_count = document.paragraphs.len();
     let saved_generation = if document_path.is_some() { 0 } else { u64::MAX };
@@ -7960,14 +7968,39 @@ fn char_index_for_byte(text: &str, byte: usize) -> usize {
     .count()
 }
 
+static EQUATION_SVG_CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
+static EQUATION_PNG_CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
+
 struct EquationRenderer;
 
 impl EquationRenderer {
+  fn clear_entries(keys: impl IntoIterator<Item = (String, bool)>) {
+    let keys: Vec<_> = keys.into_iter().collect();
+    if keys.is_empty() {
+      return;
+    }
+
+    if let Some(cache) = EQUATION_SVG_CACHE.get()
+      && let Ok(mut cache) = cache.lock()
+    {
+      for key in &keys {
+        cache.remove(key);
+      }
+    }
+
+    if let Some(cache) = EQUATION_PNG_CACHE.get()
+      && let Ok(mut cache) = cache.lock()
+    {
+      for key in &keys {
+        cache.remove(key);
+      }
+    }
+  }
+
   fn svg_bytes(equation: &EquationBlock) -> Result<Arc<Vec<u8>>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
     let display = matches!(equation.display, EquationDisplay::Display);
     let key = (equation.source.to_string(), display);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = EQUATION_SVG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
       return cached;
     }
@@ -7985,10 +8018,9 @@ impl EquationRenderer {
   }
 
   fn png_bytes(equation: &EquationBlock) -> Result<Arc<Vec<u8>>, String> {
-    static CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
     let display = matches!(equation.display, EquationDisplay::Display);
     let key = (equation.source.to_string(), display);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = EQUATION_PNG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
       return cached;
     }

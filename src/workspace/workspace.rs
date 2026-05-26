@@ -158,6 +158,14 @@ impl Workspace {
   }
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
+    if let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    {
+      let editor = panel.read(cx).editor();
+      let _ = editor.update(cx, |editor, _| editor.clear_document_equation_caches());
+    }
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
