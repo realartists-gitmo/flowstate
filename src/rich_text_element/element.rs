@@ -1,7 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-  App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window, px,
+  App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window,
+  px, relative,
 };
 
 use super::*;
@@ -45,6 +46,9 @@ pub(super) struct VirtualBlockElement {
   pub(super) layout: WordElementLayout,
 }
 
+#[derive(Clone)]
+pub(super) struct EmptyVirtualItemElement;
+
 impl IntoElement for VirtualParagraphChunkElement {
   type Element = Self;
 
@@ -54,6 +58,14 @@ impl IntoElement for VirtualParagraphChunkElement {
 }
 
 impl IntoElement for VirtualBlockElement {
+  type Element = Self;
+
+  fn into_element(self) -> Self::Element {
+    self
+  }
+}
+
+impl IntoElement for EmptyVirtualItemElement {
   type Element = Self;
 
   fn into_element(self) -> Self::Element {
@@ -144,7 +156,7 @@ impl Element for VirtualParagraphChunkElement {
   type PrepaintState = ();
 
   fn id(&self) -> Option<ElementId> {
-    None
+    Some(paragraph_chunk_element_id(self.paragraph_ix, self.chunk_ix))
   }
 
   fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -262,7 +274,7 @@ impl Element for VirtualBlockElement {
   type PrepaintState = ();
 
   fn id(&self) -> Option<ElementId> {
-    None
+    Some(structural_block_element_id(self.block_ix))
   }
 
   fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
@@ -353,6 +365,69 @@ impl Element for VirtualBlockElement {
       paint_structural_block(block, selected_block, table_cell_caret, text_selected, bounds.origin, window, cx);
     }
   }
+}
+
+impl Element for EmptyVirtualItemElement {
+  type RequestLayoutState = ();
+  type PrepaintState = ();
+
+  fn id(&self) -> Option<ElementId> {
+    None
+  }
+
+  fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    None
+  }
+
+  fn request_layout(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> (LayoutId, Self::RequestLayoutState) {
+    let mut style = Style::default();
+    style.size.width = relative(1.0).into();
+    style.size.height = relative(1.0).into();
+    (window.request_layout(style, None, cx), ())
+  }
+
+  fn prepaint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+  }
+
+  fn paint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _prepaint: &mut Self::PrepaintState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+  }
+}
+
+const STRUCTURAL_BLOCK_ELEMENT_ID_TAG: u64 = 1 << 63;
+
+fn paragraph_chunk_element_id(paragraph_ix: usize, chunk_ix: usize) -> ElementId {
+  ElementId::Integer(packed_element_pair(paragraph_ix, chunk_ix) & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG)
+}
+
+fn structural_block_element_id(block_ix: usize) -> ElementId {
+  ElementId::Integer(STRUCTURAL_BLOCK_ELEMENT_ID_TAG | (block_ix as u64 & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG))
+}
+
+fn packed_element_pair(first: usize, second: usize) -> u64 {
+  ((first as u64 & 0x7fff_ffff) << 32) ^ (second as u64 & 0xffff_ffff)
 }
 
 pub(super) fn request_word_layout(document: Document, layout_cell: WordElementLayout, window: &mut Window) -> (LayoutId, ()) {

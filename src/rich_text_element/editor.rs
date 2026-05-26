@@ -382,6 +382,7 @@ struct ParagraphChunkLayoutCacheEntry {
   width: Pixels,
   invisibility_mode: bool,
   paragraph_text: Option<Rc<str>>,
+  wrap_break_ends: Option<Rc<Vec<usize>>>,
   chunks: Vec<ParagraphChunkLayout>,
   complete: bool,
   exact_height: Pixels,
@@ -4299,12 +4300,19 @@ impl RichTextEditor {
       .and_then(|entry| entry.as_ref())
       .is_none_or(|entry| entry.key != key || entry.width != width || entry.invisibility_mode != self.invisibility_mode);
     if reset {
-      let paragraph_text = (!self.invisibility_mode).then(|| Rc::<str>::from(paragraph_text(&self.document, paragraph_ix)));
+      let (paragraph_text, wrap_break_ends) = if self.invisibility_mode {
+        (None, None)
+      } else {
+        let paragraph_text = Rc::<str>::from(paragraph_text(&self.document, paragraph_ix));
+        let wrap_break_ends = Rc::new(wrap_break_ends(&paragraph_text));
+        (Some(paragraph_text), Some(wrap_break_ends))
+      };
       self.paragraph_chunk_layout_cache[paragraph_ix] = Some(ParagraphChunkLayoutCacheEntry {
         key,
         width,
         invisibility_mode: self.invisibility_mode,
         paragraph_text,
+        wrap_break_ends,
         chunks: Vec::new(),
         complete: false,
         exact_height: px(0.0),
@@ -4340,7 +4348,7 @@ impl RichTextEditor {
     if !self.ensure_current_chunk_cache_entry(paragraph_ix, width) {
       return false;
     }
-    let (start_byte, already_complete, paragraph_text) = {
+    let (start_byte, already_complete, paragraph_text, wrap_break_ends) = {
       let Some(entry) = self
         .paragraph_chunk_layout_cache
         .get(paragraph_ix)
@@ -4352,6 +4360,7 @@ impl RichTextEditor {
         entry.chunks.last().map(|chunk| chunk.end_byte).unwrap_or(0),
         entry.complete,
         entry.paragraph_text.clone(),
+        entry.wrap_break_ends.clone(),
       )
     };
     if already_complete {
@@ -4366,6 +4375,7 @@ impl RichTextEditor {
       target_lines,
       self.invisibility_mode,
       paragraph_text.as_deref(),
+      wrap_break_ends.as_deref().map(Vec::as_slice),
       window,
       cx,
     ) else {
@@ -4822,7 +4832,7 @@ impl RichTextEditor {
       expand_paragraph_range(active, paragraph_count, 2),
     ] {
       for paragraph_ix in range {
-        if !queued[paragraph_ix] && self.paragraph_visible_in_current_mode(paragraph_ix) {
+        if !queued[paragraph_ix] && self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
           queued[paragraph_ix] = true;
           queue.push_back(paragraph_ix);
         }
@@ -4852,7 +4862,7 @@ impl RichTextEditor {
     let scroll_anchor = self.capture_scroll_anchor();
     let mut changed = false;
     while let Some(paragraph_ix) = self.chunk_prefetch_queue.pop_front() {
-      if !self.paragraph_visible_in_current_mode(paragraph_ix) {
+      if !self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
         continue;
       }
       let before = self
@@ -4876,12 +4886,7 @@ impl RichTextEditor {
           .map(|entry| entry.chunks.len())
           .unwrap_or(before);
         changed |= after != before;
-        let incomplete = self
-          .paragraph_chunk_layout_cache
-          .get(paragraph_ix)
-          .and_then(|entry| entry.as_ref())
-          .is_some_and(|entry| !entry.complete);
-        if incomplete {
+        if self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
           self.chunk_prefetch_queue.push_back(paragraph_ix);
         }
       }
@@ -4902,6 +4907,22 @@ impl RichTextEditor {
         editor.run_chunk_prefetch_budget(width, window, cx);
       });
     }
+  }
+
+  fn paragraph_needs_chunk_prefetch(&self, paragraph_ix: usize, width: Pixels) -> bool {
+    if !self.paragraph_visible_in_current_mode(paragraph_ix) {
+      return false;
+    }
+    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return false;
+    };
+    let key = paragraph_cache_key(&self.document, paragraph);
+    self
+      .paragraph_chunk_layout_cache
+      .get(paragraph_ix)
+      .and_then(|entry| entry.as_ref())
+      .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+      .is_none_or(|entry| !entry.complete)
   }
 
   fn is_interacting(&self) -> bool {
@@ -7060,10 +7081,10 @@ impl Render for RichTextEditor {
           range
             .map(|item_ix| {
               let Some(item) = render_items.get(item_ix).cloned() else {
-                return div().size_full().into_any_element();
+                return EmptyVirtualItemElement.into_any_element();
               };
               match item {
-                VirtualItem::HiddenBlock { .. } => div().size_full().into_any_element(),
+                VirtualItem::HiddenBlock { .. } => EmptyVirtualItemElement.into_any_element(),
                 VirtualItem::ParagraphChunk {
                   paragraph_ix,
                   chunk_ix,
@@ -7091,7 +7112,7 @@ impl Render for RichTextEditor {
                     }
                     .into_any_element()
                   } else {
-                    div().size_full().into_any_element()
+                    EmptyVirtualItemElement.into_any_element()
                   }
                 },
                 VirtualItem::StructuralBlock { block_ix } => {

@@ -1043,6 +1043,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
   target_lines: usize,
   invisibility_mode: bool,
   paragraph_text_override: Option<&str>,
+  wrap_break_ends_override: Option<&[usize]>,
   window: &mut Window,
   cx: &mut App,
 ) -> Option<ParagraphChunkBuildResult> {
@@ -1071,6 +1072,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
     is_first_document_paragraph,
     is_last_document_paragraph,
     paragraph_text_override.filter(|_| projected_document.is_none()),
+    wrap_break_ends_override.filter(|_| projected_document.is_none()),
     window,
     cx,
   )?;
@@ -1092,6 +1094,7 @@ fn layout_paragraph_chunk_at(
   is_first_document_paragraph: bool,
   is_last_document_paragraph: bool,
   paragraph_text_override: Option<&str>,
+  wrap_break_ends_override: Option<&[usize]>,
   window: &mut Window,
   cx: &mut App,
 ) -> Option<ParagraphChunkBuildResult> {
@@ -1121,6 +1124,7 @@ fn layout_paragraph_chunk_at(
     start_byte,
     chunk_target_lines,
     content_width,
+    wrap_break_ends_override,
     &mut shape_cache,
     window,
     cx,
@@ -1502,6 +1506,7 @@ fn wrap_lines_limited(
   start_byte: usize,
   max_lines: usize,
   max_width: Pixels,
+  wrap_break_ends_override: Option<&[usize]>,
   shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
   cx: &mut App,
@@ -1555,6 +1560,7 @@ fn wrap_lines_limited(
       segment_start..segment_end,
       max_width,
       remaining,
+      wrap_break_ends_override,
       shape_cache,
       window,
       cx,
@@ -1581,6 +1587,7 @@ fn wrap_text_segment_limited(
   segment: Range<usize>,
   max_width: Pixels,
   max_lines: usize,
+  wrap_break_ends_override: Option<&[usize]>,
   shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
   cx: &mut App,
@@ -1596,10 +1603,16 @@ fn wrap_text_segment_limited(
   let max_lines = max_lines.max(1);
   let mut lines = Vec::new();
   let mut start = segment.start;
-  let break_ends = wrap_break_ends(&text[segment.clone()])
-    .into_iter()
-    .map(|byte| segment.start + byte)
-    .collect::<Vec<_>>();
+  let computed_break_ends;
+  let break_ends = if let Some(break_ends) = wrap_break_ends_override {
+    break_ends
+  } else {
+    computed_break_ends = wrap_break_ends(&text[segment.clone()])
+      .into_iter()
+      .map(|byte| segment.start + byte)
+      .collect::<Vec<_>>();
+    computed_break_ends.as_slice()
+  };
 
   while start < segment.end {
     let break_cursor = first_break_after(&break_ends, start);
@@ -2040,6 +2053,13 @@ pub(super) fn measure_line_width(
   .max(rendered_start);
   let rendered_range = rendered_start..rendered_end;
   let rendered_text = &paragraph_text[rendered_range.clone()];
+  let measure_key = LineMeasureCacheKey {
+    start: rendered_range.start,
+    end: rendered_range.end,
+  };
+  if let Some(width) = shape_cache.line_widths.get(&measure_key) {
+    return *width;
+  }
   for fragment in fragments_for_range(paragraph, &rendered_range, rendered_text) {
     let text = &rendered_text[fragment.line_range.clone()];
     if text.is_empty() {
@@ -2055,6 +2075,7 @@ pub(super) fn measure_line_width(
       width += document.theme.box_padding_right;
     }
   }
+  shape_cache.line_widths.insert(measure_key, width);
   width
 }
 
@@ -2169,6 +2190,7 @@ pub(super) fn shape_line(
 #[derive(Default)]
 pub(super) struct FragmentShapeCache {
   shapes: FxHashMap<FragmentShapeCacheKey, ShapedLine>,
+  line_widths: FxHashMap<LineMeasureCacheKey, Pixels>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -2176,6 +2198,12 @@ pub(super) struct FragmentShapeCacheKey {
   source_start: usize,
   len: usize,
   styles: RunStyles,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct LineMeasureCacheKey {
+  start: usize,
+  end: usize,
 }
 
 pub(super) fn shape_fragment_cached(
