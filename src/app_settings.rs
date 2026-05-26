@@ -444,7 +444,7 @@ fn settings_path() -> PathBuf {
   if cfg!(target_os = "windows") {
     if let Some(appdata) = env::var_os("APPDATA") {
       return PathBuf::from(appdata)
-        .join("Odrenrir")
+        .join("Flowstate")
         .join("settings.json");
     }
   }
