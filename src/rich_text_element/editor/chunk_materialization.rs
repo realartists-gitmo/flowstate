@@ -35,7 +35,7 @@ impl RichTextEditor {
     let mut changed = false;
     for (paragraph_ix, start_byte, target) in remainders {
       changed |= self.materialize_paragraph_remainder_until(paragraph_ix, width, start_byte, target, started, budget, window, cx);
-      if started.elapsed() >= budget {
+      if !DISABLE_SCROLL_LIMITING_FUNCTIONS && started.elapsed() >= budget {
         break;
       }
     }
@@ -77,7 +77,7 @@ impl RichTextEditor {
   ) -> bool {
     let mut changed = false;
     loop {
-      if started.elapsed() >= budget {
+      if !DISABLE_SCROLL_LIMITING_FUNCTIONS && started.elapsed() >= budget {
         break;
       }
       let (exact_after_start, complete) = self.paragraph_exact_height_after_byte(paragraph_ix, start_byte);
