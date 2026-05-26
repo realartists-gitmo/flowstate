@@ -187,44 +187,14 @@ impl RichTextEditor {
 
   pub(super) fn materialize_paragraph_remainder_for_render(
     &mut self,
-    paragraph_ix: usize,
+    _paragraph_ix: usize,
     width: Pixels,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Option<usize> {
     self.note_measured_item_width(width, cx);
-    let previous_chunk_count = self
-      .paragraph_chunk_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
-      .map(|entry| entry.chunks.len())
-      .unwrap_or(0);
-    if self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx) {
-      let after = self
-        .paragraph_chunk_layout_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
-        .map(|entry| entry.chunks.len())
-        .unwrap_or(previous_chunk_count);
-      if after != previous_chunk_count {
-        // This can be called from VirtualList item construction during
-        // prepaint. Do not rebuild item sizes or restore scroll here; the
-        // current VirtualList pass is already using a local scroll offset and
-        // old origins. The next render pass will rebuild from the new chunk.
-        cx.notify();
-      }
-    }
-    self
-      .paragraph_chunk_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
-      .and_then(|entry| {
-        if entry.chunks.len() > previous_chunk_count {
-          Some(previous_chunk_count)
-        } else {
-          entry.chunks.len().checked_sub(1)
-        }
-      })
+    self.schedule_chunk_prefetch(width, window, cx);
+    None
   }
 
 }

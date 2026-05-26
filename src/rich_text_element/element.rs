@@ -1,8 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-  App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window,
-  px, relative,
+  App, AvailableSpace, Background, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
+  Style, Window, fill, point, px, relative, rgb, size,
 };
 
 use super::*;
@@ -49,6 +49,9 @@ pub(super) struct VirtualBlockElement {
 #[derive(Clone)]
 pub(super) struct EmptyVirtualItemElement;
 
+#[derive(Clone)]
+pub(super) struct LoadingVirtualParagraphElement;
+
 impl IntoElement for VirtualParagraphChunkElement {
   type Element = Self;
 
@@ -66,6 +69,14 @@ impl IntoElement for VirtualBlockElement {
 }
 
 impl IntoElement for EmptyVirtualItemElement {
+  type Element = Self;
+
+  fn into_element(self) -> Self::Element {
+    self
+  }
+}
+
+impl IntoElement for LoadingVirtualParagraphElement {
   type Element = Self;
 
   fn into_element(self) -> Self::Element {
@@ -413,6 +424,79 @@ impl Element for EmptyVirtualItemElement {
     _window: &mut Window,
     _cx: &mut App,
   ) {
+  }
+}
+
+impl Element for LoadingVirtualParagraphElement {
+  type RequestLayoutState = ();
+  type PrepaintState = ();
+
+  fn id(&self) -> Option<ElementId> {
+    None
+  }
+
+  fn source_location(&self) -> Option<&'static core::panic::Location<'static>> {
+    None
+  }
+
+  fn request_layout(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    window: &mut Window,
+    cx: &mut App,
+  ) -> (LayoutId, Self::RequestLayoutState) {
+    let mut style = Style::default();
+    style.size.width = relative(1.0).into();
+    style.size.height = relative(1.0).into();
+    (window.request_layout(style, None, cx), ())
+  }
+
+  fn prepaint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    _bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _window: &mut Window,
+    _cx: &mut App,
+  ) {
+  }
+
+  fn paint(
+    &mut self,
+    _id: Option<&GlobalElementId>,
+    _inspector_id: Option<&InspectorElementId>,
+    bounds: Bounds<Pixels>,
+    _request_layout: &mut Self::RequestLayoutState,
+    _prepaint: &mut Self::PrepaintState,
+    window: &mut Window,
+    _cx: &mut App,
+  ) {
+    paint_loading_text_bars(bounds, window);
+  }
+}
+
+fn paint_loading_text_bars(bounds: Bounds<Pixels>, window: &mut Window) {
+  let line_height = px(22.0);
+  let bar_height = px(7.0);
+  let top_padding = px(10.0);
+  let left_padding = px(76.0).min(bounds.size.width * 0.18);
+  let right_padding = px(52.0).min(bounds.size.width * 0.14);
+  let available_width = (bounds.size.width - left_padding - right_padding).max(px(24.0));
+  let color = Background::from(rgb(0xd8dadd));
+  let widths = [0.92_f32, 0.76, 0.88, 0.64, 0.82, 0.70];
+
+  let mut y = bounds.top() + top_padding;
+  let bottom = bounds.bottom() - top_padding;
+  let mut ix = 0usize;
+  while y + bar_height <= bottom {
+    let width = available_width * widths[ix % widths.len()];
+    let origin = point(bounds.left() + left_padding, y);
+    let bar_bounds = Bounds::new(origin, size(width, bar_height));
+    window.paint_quad(fill(bar_bounds, color));
+    y += line_height;
+    ix += 1;
   }
 }
 

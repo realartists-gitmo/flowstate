@@ -57,8 +57,12 @@ impl RichTextEditor {
       caret_visible: true,
       caret_blink_active: false,
       last_text_input_at: None,
+      last_scroll_input_at: None,
+      last_observed_scroll_y: None,
       pending_typing_prefetch_resume: false,
+      pending_scroll_prefetch_resume: false,
       resume_chunk_prefetch_after_typing: false,
+      resume_chunk_prefetch_after_scroll: false,
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
       pending_chunk_prefetch: false,
       chunk_prefetch_queue: VecDeque::new(),
@@ -138,6 +142,10 @@ impl RichTextEditor {
     self.autoscroll_active = false;
     self.caret_visible = false;
     self.caret_blink_active = false;
+    self.last_scroll_input_at = None;
+    self.last_observed_scroll_y = None;
+    self.pending_scroll_prefetch_resume = false;
+    self.resume_chunk_prefetch_after_scroll = false;
     self.last_text_input_at = None;
     self.pending_typing_prefetch_resume = false;
     self.resume_chunk_prefetch_after_typing = false;

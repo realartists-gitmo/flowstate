@@ -416,11 +416,8 @@ impl RichTextEditor {
     }
 
     let width = self.current_layout_width();
-    if self.materialize_visible_remainders_for_scroll(width, None, window, cx)
-      && let Some(cache) = &self.item_sizes_cache
-    {
-      item_sizes = cache.sizes.clone();
-    }
+    self.note_scroll_position_for_prefetch(cx);
+    self.schedule_chunk_prefetch(width, window, cx);
     let items = self
       .item_sizes_cache
       .as_ref()

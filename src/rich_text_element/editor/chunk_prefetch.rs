@@ -3,6 +3,7 @@ impl RichTextEditor {
     if self.disposed {
       self.pending_chunk_prefetch = false;
       self.resume_chunk_prefetch_after_typing = false;
+      self.resume_chunk_prefetch_after_scroll = false;
       self.chunk_prefetch_queue.clear();
       return;
     }
@@ -10,6 +11,12 @@ impl RichTextEditor {
       self.resume_chunk_prefetch_after_typing = true;
       self.chunk_prefetch_queue.clear();
       self.schedule_typing_prefetch_resume(cx);
+      return;
+    }
+    if self.recently_scrolled() {
+      self.resume_chunk_prefetch_after_scroll = true;
+      self.chunk_prefetch_queue.clear();
+      self.schedule_scroll_prefetch_resume(cx);
       return;
     }
     if self.is_interacting() {
@@ -62,6 +69,7 @@ impl RichTextEditor {
     if self.disposed {
       self.pending_chunk_prefetch = false;
       self.resume_chunk_prefetch_after_typing = false;
+      self.resume_chunk_prefetch_after_scroll = false;
       self.chunk_prefetch_queue.clear();
       return;
     }
@@ -73,6 +81,12 @@ impl RichTextEditor {
       self.resume_chunk_prefetch_after_typing = true;
       self.chunk_prefetch_queue.clear();
       self.schedule_typing_prefetch_resume(cx);
+      return;
+    }
+    if self.recently_scrolled() {
+      self.resume_chunk_prefetch_after_scroll = true;
+      self.chunk_prefetch_queue.clear();
+      self.schedule_scroll_prefetch_resume(cx);
       return;
     }
     if self.is_interacting() {
@@ -153,11 +167,15 @@ impl RichTextEditor {
   }
 
   fn maybe_resume_chunk_prefetch_after_typing(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
-    if !self.resume_chunk_prefetch_after_typing {
+    if !self.resume_chunk_prefetch_after_typing && !self.resume_chunk_prefetch_after_scroll {
       return;
     }
     if self.recently_typed() {
       self.schedule_typing_prefetch_resume(cx);
+      return;
+    }
+    if self.recently_scrolled() {
+      self.schedule_scroll_prefetch_resume(cx);
       return;
     }
     if self.is_interacting() {
@@ -168,6 +186,7 @@ impl RichTextEditor {
 
   fn is_interacting(&self) -> bool {
     self.recently_typed()
+      || self.recently_scrolled()
       || self.selecting
       || self.pending_text_drag.is_some()
       || self.active_text_drag.is_some()
@@ -180,16 +199,43 @@ impl RichTextEditor {
     self.last_text_input_at = Some(Instant::now());
   }
 
+  fn note_scroll_position_for_prefetch(&mut self, cx: &mut Context<Self>) {
+    let scroll_y = self.scroll_handle.offset().y;
+    if self
+      .last_observed_scroll_y
+      .is_some_and(|last_scroll_y| (last_scroll_y - scroll_y).abs() > px(0.5))
+    {
+      self.last_scroll_input_at = Some(Instant::now());
+      self.resume_chunk_prefetch_after_scroll = true;
+      self.chunk_prefetch_queue.clear();
+      self.schedule_scroll_prefetch_resume(cx);
+    }
+    self.last_observed_scroll_y = Some(scroll_y);
+  }
+
   fn recently_typed(&self) -> bool {
     self
       .last_text_input_at
       .is_some_and(|last_input| last_input.elapsed() < TYPING_PREFETCH_SUPPRESSION_WINDOW)
   }
 
+  fn recently_scrolled(&self) -> bool {
+    self
+      .last_scroll_input_at
+      .is_some_and(|last_input| last_input.elapsed() < SCROLL_PREFETCH_SUPPRESSION_WINDOW)
+  }
+
   fn typing_prefetch_resume_delay(&self) -> Duration {
     self
       .last_text_input_at
       .and_then(|last_input| TYPING_PREFETCH_SUPPRESSION_WINDOW.checked_sub(last_input.elapsed()))
+      .unwrap_or(Duration::ZERO)
+  }
+
+  fn scroll_prefetch_resume_delay(&self) -> Duration {
+    self
+      .last_scroll_input_at
+      .and_then(|last_input| SCROLL_PREFETCH_SUPPRESSION_WINDOW.checked_sub(last_input.elapsed()))
       .unwrap_or(Duration::ZERO)
   }
 
@@ -210,6 +256,30 @@ impl RichTextEditor {
           editor.schedule_typing_prefetch_resume(cx);
         } else {
           editor.resume_chunk_prefetch_after_typing = true;
+          cx.notify();
+        }
+      });
+    })
+    .detach();
+  }
+
+  fn schedule_scroll_prefetch_resume(&mut self, cx: &mut Context<Self>) {
+    if self.disposed || self.pending_scroll_prefetch_resume {
+      return;
+    }
+    self.pending_scroll_prefetch_resume = true;
+    let delay = self.scroll_prefetch_resume_delay();
+    cx.spawn(async move |editor, cx| {
+      Timer::after(delay).await;
+      let _ = editor.update(cx, |editor, cx| {
+        editor.pending_scroll_prefetch_resume = false;
+        if editor.disposed {
+          return;
+        }
+        if editor.recently_scrolled() {
+          editor.schedule_scroll_prefetch_resume(cx);
+        } else {
+          editor.resume_chunk_prefetch_after_scroll = true;
           cx.notify();
         }
       });

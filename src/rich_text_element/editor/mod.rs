@@ -27,6 +27,7 @@ const SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS: u64 = 8;
 const SCROLL_FOREGROUND_MAX_CHUNK_LINES: usize = 96;
 const SCROLLBAR_DRAG_MAX_FPS: usize = 60;
 const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(150);
+const SCROLL_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(120);
 // Diagnostic switch: keep cheap height/item-size caches, but do not retain
 // expensive shaped paragraph LayoutState caches for offscreen rows.
 const RETAIN_OFFSCREEN_PARAGRAPH_LAYOUT_CACHE: bool = true;
@@ -673,8 +674,12 @@ pub struct RichTextEditor {
   pub(super) caret_visible: bool,
   caret_blink_active: bool,
   last_text_input_at: Option<Instant>,
+  last_scroll_input_at: Option<Instant>,
+  last_observed_scroll_y: Option<Pixels>,
   pending_typing_prefetch_resume: bool,
+  pending_scroll_prefetch_resume: bool,
   resume_chunk_prefetch_after_typing: bool,
+  resume_chunk_prefetch_after_scroll: bool,
   paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
   pending_chunk_prefetch: bool,
   chunk_prefetch_queue: VecDeque<usize>,

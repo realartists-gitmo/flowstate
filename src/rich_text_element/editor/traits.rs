@@ -141,7 +141,7 @@ impl Render for RichTextEditor {
                     }
                     .into_any_element()
                   } else {
-                    EmptyVirtualItemElement.into_any_element()
+                    LoadingVirtualParagraphElement.into_any_element()
                   }
                 },
                 VirtualItem::StructuralBlock { block_ix } => {
@@ -228,4 +228,3 @@ impl Render for RichTextEditor {
       )
   }
 }
-
