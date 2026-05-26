@@ -584,6 +584,7 @@ pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
   scroll_handle: VirtualListScrollHandle,
+  disposed: bool,
   document_path: Option<PathBuf>,
   recovery_path: Option<PathBuf>,
   pub(super) document: Document,
@@ -668,6 +669,7 @@ impl RichTextEditor {
       focus_handle: cx.focus_handle(),
       focus_subscriptions: Vec::new(),
       scroll_handle: VirtualListScrollHandle::new(),
+      disposed: false,
       recovery_path: document_path.as_ref().map(recovery_path_for_document),
       document_path,
       document,
@@ -733,6 +735,77 @@ impl RichTextEditor {
 
   pub fn document(&self) -> &Document {
     &self.document
+  }
+
+  pub fn dispose_for_close(&mut self) {
+    if self.disposed {
+      return;
+    }
+
+    self.clear_document_equation_caches();
+    self.disposed = true;
+    self.focus_subscriptions = Vec::new();
+    self.release_transient_memory();
+
+    self.document_path = None;
+    self.recovery_path = None;
+    self.document = blank_document();
+    self.identity_map = DocumentIdentityMap::new(&self.document);
+    self.selection = EditorSelection::caret();
+    self.edit_generation = 0;
+    self.saved_generation = 0;
+    self.next_edit_generation = 1;
+    self.save_status = SaveStatus::Saved;
+    self.last_recovery_generation = 0;
+  }
+
+  fn release_transient_memory(&mut self) {
+    self.undo_stack = Vec::new();
+    self.redo_stack = Vec::new();
+    self.last_collaboration_edit = None;
+    self.recovery_write_in_progress = false;
+    self.recovery_write_pending = false;
+    self.paste_cache = None;
+    self.pending_styles = None;
+    self.armed_inline_tool = None;
+    self.selecting = false;
+    self.drag_granularity = SelectionGranularity::Character;
+    self.drag_anchor = None;
+    self.smart_selection_left_anchor_word = false;
+    self.smart_selection_exact_override = false;
+    self.last_drag_position = None;
+    self.pending_text_drag = None;
+    self.active_text_drag = None;
+    self.image_resize_drag = None;
+    self.table_column_resize_drag = None;
+    self.selected_block = None;
+    self.table_cell_block_ix = 0;
+    self.table_cell_anchor = 0;
+    self.table_cell_caret = 0;
+    self.equation_source_anchor = 0;
+    self.equation_source_caret = 0;
+    self.autoscroll_active = false;
+    self.caret_visible = false;
+    self.caret_blink_active = false;
+    self.paragraph_chunk_layout_cache = Vec::new();
+    self.pending_chunk_prefetch = false;
+    self.chunk_prefetch_queue = VecDeque::new();
+    self.paragraph_height_cache = Vec::new();
+    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    self.item_sizes_cache = None;
+    self.layout_invalidation_hint = None;
+    self.last_scroll_anchor = None;
+    self.scroll_anchor_lock = None;
+    self.height_prefix_index = HeightPrefixIndex::default();
+    self.measured_item_width = None;
+    self.pending_viewport_size_refresh = false;
+    self.initial_layout_hidden = true;
+    self.pending_snap_to_paragraph = None;
+    self.pending_scroll_head_after_layout = false;
+    self.visible_layout_generation = self.visible_layout_generation.wrapping_add(1);
+    self.visible_layout_range = 0..0;
+    self.visible_chunk_anchors = Vec::new();
+    self.goal_x = None;
   }
 
   pub fn last_collaboration_edit(&self) -> Option<&CollaborationEdit> {
@@ -1649,6 +1722,9 @@ impl RichTextEditor {
   }
 
   pub fn save(&mut self, cx: &mut Context<Self>) -> io::Result<()> {
+    if self.disposed {
+      return Err(io::Error::new(io::ErrorKind::NotFound, "editor is closed"));
+    }
     let Some(path) = self.document_path.clone() else {
       return Err(io::Error::new(io::ErrorKind::InvalidInput, "choose a save location before saving"));
     };
@@ -1656,12 +1732,18 @@ impl RichTextEditor {
   }
 
   pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> io::Result<()> {
+    if self.disposed {
+      return Err(io::Error::new(io::ErrorKind::NotFound, "editor is closed"));
+    }
     self.document_path = Some(path.clone());
     self.recovery_path = Some(recovery_path_for_document(&path));
     self.save_to_path(path, cx)
   }
 
   fn save_to_path(&mut self, path: PathBuf, cx: &mut Context<Self>) -> io::Result<()> {
+    if self.disposed {
+      return Err(io::Error::new(io::ErrorKind::NotFound, "editor is closed"));
+    }
     self.save_status = SaveStatus::Saving;
     cx.notify();
     let result = write_db8(&path, &self.document);
@@ -2845,7 +2927,11 @@ impl RichTextEditor {
         return;
       };
       editor
-        .update(cx, |editor, cx| editor.insert_image_block(asset, alt_text, cx))
+        .update(cx, |editor, cx| {
+          if !editor.disposed {
+            editor.insert_image_block(asset, alt_text, cx);
+          }
+        })
         .ok();
     })
     .detach();
@@ -4822,6 +4908,11 @@ impl RichTextEditor {
   }
 
   fn schedule_chunk_prefetch(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.pending_chunk_prefetch = false;
+      self.chunk_prefetch_queue.clear();
+      return;
+    }
     if self.is_interacting() {
       self.chunk_prefetch_queue.clear();
       return;
@@ -4855,12 +4946,22 @@ impl RichTextEditor {
     }
     self.pending_chunk_prefetch = true;
     cx.on_next_frame(window, move |editor, window, cx| {
+      if editor.disposed {
+        editor.pending_chunk_prefetch = false;
+        editor.chunk_prefetch_queue.clear();
+        return;
+      }
       editor.pending_chunk_prefetch = false;
       editor.run_chunk_prefetch_budget(width, window, cx);
     });
   }
 
   fn run_chunk_prefetch_budget(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.pending_chunk_prefetch = false;
+      self.chunk_prefetch_queue.clear();
+      return;
+    }
     if self.current_layout_width() != width || self.is_interacting() {
       self.chunk_prefetch_queue.clear();
       return;
@@ -4911,6 +5012,11 @@ impl RichTextEditor {
     if !self.chunk_prefetch_queue.is_empty() && !self.pending_chunk_prefetch {
       self.pending_chunk_prefetch = true;
       cx.on_next_frame(window, move |editor, window, cx| {
+        if editor.disposed {
+          editor.pending_chunk_prefetch = false;
+          editor.chunk_prefetch_queue.clear();
+          return;
+        }
         editor.pending_chunk_prefetch = false;
         editor.run_chunk_prefetch_budget(width, window, cx);
       });
@@ -4952,11 +5058,19 @@ impl RichTextEditor {
   }
 
   fn schedule_viewport_size_refresh(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.pending_viewport_size_refresh = false;
+      return;
+    }
     if self.pending_viewport_size_refresh {
       return;
     }
     self.pending_viewport_size_refresh = true;
     cx.on_next_frame(window, |editor, _, cx| {
+      if editor.disposed {
+        editor.pending_viewport_size_refresh = false;
+        return;
+      }
       editor.pending_viewport_size_refresh = false;
       editor.item_sizes_cache = None;
       cx.notify();
@@ -5440,6 +5554,11 @@ impl RichTextEditor {
   }
 
   fn schedule_recovery_write(&mut self, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.recovery_write_in_progress = false;
+      self.recovery_write_pending = false;
+      return;
+    }
     let Some(path) = self.recovery_path.clone() else {
       return;
     };
@@ -5460,7 +5579,11 @@ impl RichTextEditor {
       let snapshot_timing = Instant::now();
       let decision = editor
         .update(cx, |editor, cx| {
-          if editor.recovery_write_pending {
+          if editor.disposed {
+            editor.recovery_write_pending = false;
+            editor.recovery_write_in_progress = false;
+            RecoveryWriteDecision::Idle
+          } else if editor.recovery_write_pending {
             editor.recovery_write_pending = false;
             editor.recovery_write_in_progress = false;
             editor.schedule_recovery_write(cx);
@@ -5501,6 +5624,11 @@ impl RichTextEditor {
         },
       }
       let _ = editor.update(cx, |editor, cx| {
+        if editor.disposed {
+          editor.recovery_write_pending = false;
+          editor.recovery_write_in_progress = false;
+          return;
+        }
         editor.recovery_write_in_progress = false;
         if editor.recovery_write_pending {
           editor.schedule_recovery_write(cx);
@@ -6865,11 +6993,20 @@ impl RichTextEditor {
   }
 
   pub(super) fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.caret_visible = false;
+      self.caret_blink_active = false;
+      return;
+    }
     self.caret_visible = true;
     self.ensure_caret_blink_task(cx);
   }
 
   fn ensure_caret_blink_task(&mut self, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.caret_blink_active = false;
+      return;
+    }
     if self.caret_blink_active {
       return;
     }
@@ -6879,7 +7016,9 @@ impl RichTextEditor {
         Timer::after(Duration::from_millis(530)).await;
         let keep_running = editor
           .update(cx, |editor, cx| {
-            if !editor.caret_blink_active {
+            if editor.disposed || !editor.caret_blink_active {
+              editor.caret_blink_active = false;
+              editor.caret_visible = false;
               return false;
             }
             editor.caret_visible = !editor.caret_visible;
@@ -6896,6 +7035,10 @@ impl RichTextEditor {
   }
 
   fn ensure_focus_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.focus_subscriptions = Vec::new();
+      return;
+    }
     if !self.focus_subscriptions.is_empty() {
       return;
     }
@@ -6936,6 +7079,10 @@ impl RichTextEditor {
   }
 
   fn ensure_drag_autoscroll_task(&mut self, cx: &mut Context<Self>) {
+    if self.disposed {
+      self.autoscroll_active = false;
+      return;
+    }
     if self.autoscroll_active || !self.selecting {
       return;
     }
@@ -6952,6 +7099,10 @@ impl RichTextEditor {
         Timer::after(Duration::from_millis(16)).await;
         let keep_running = editor
           .update(cx, |editor, cx| {
+            if editor.disposed {
+              editor.autoscroll_active = false;
+              return false;
+            }
             let Some(position) = editor.last_drag_position else {
               editor.autoscroll_active = false;
               return false;
@@ -6981,6 +7132,13 @@ impl RichTextEditor {
       }
     })
     .detach();
+  }
+}
+
+impl Drop for RichTextEditor {
+  fn drop(&mut self) {
+    self.clear_document_equation_caches();
+    self.release_transient_memory();
   }
 }
 

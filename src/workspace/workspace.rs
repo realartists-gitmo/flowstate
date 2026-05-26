@@ -158,24 +158,30 @@ impl Workspace {
   }
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
+    let closing_active_document = self.active_document_id == Some(panel_id);
     if let Some(panel) = self
       .document_panels
       .iter()
       .find(|panel| panel.read(cx).id() == panel_id)
     {
       let editor = panel.read(cx).editor();
-      let _ = editor.update(cx, |editor, _| editor.clear_document_equation_caches());
+      let _ = editor.update(cx, |editor, _| editor.dispose_for_close());
     }
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
-    if self.active_document_id == Some(panel_id) {
+    if closing_active_document {
       self.active_document_id = self.document_panels.last().map(|panel| panel.read(cx).id());
       self.active_editor = self
         .document_panels
         .last()
         .map(|panel| panel.read(cx).editor());
+      self.outline_cache = None;
+      self.outline_caret_paragraph = self
+        .active_editor
+        .as_ref()
+        .map(|editor| editor.read(cx).caret_paragraph());
     }
     if self.active_document_id.is_none() {
       self.outline_cache = None;
@@ -184,6 +190,8 @@ impl Workspace {
       self
         .outline_tree
         .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
+    } else if closing_active_document {
+      self.refresh_outline_tree(cx);
     }
     cx.notify();
   }
