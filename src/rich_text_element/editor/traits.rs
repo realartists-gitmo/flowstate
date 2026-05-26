@@ -224,8 +224,11 @@ impl Render for RichTextEditor {
           .left_0()
           .right_0()
           .bottom_0()
-          .child(Scrollbar::vertical(&self.scroll_handle).scrollbar_show(ScrollbarShow::Always).max_fps(SCROLLBAR_DRAG_MAX_FPS)),
+          .child(
+            Scrollbar::vertical(&self.scroll_handle)
+              .scrollbar_show(ScrollbarShow::Always)
+              .when(!DISABLE_SCROLL_LIMITING_FUNCTIONS, |this| this.max_fps(SCROLLBAR_DRAG_MAX_FPS)),
+          ),
       )
   }
 }
-
