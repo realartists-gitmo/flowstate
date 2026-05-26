@@ -1947,8 +1947,37 @@ fn first_break_over_width(
   shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
 ) -> Option<usize> {
-  let mut low = range.start;
-  let mut high = range.end;
+  if range.start >= range.end {
+    return None;
+  }
+
+  let mut lower = range.start;
+  let mut step = 1usize;
+  let probe = loop {
+    let probe = range.start.saturating_add(step).saturating_sub(1).min(range.end - 1);
+    let break_at = break_ends[probe];
+    let candidate_width = measure_line_width(
+      document,
+      paragraph,
+      p_format,
+      text,
+      start..break_at,
+      break_at - start,
+      shape_cache,
+      window,
+    );
+    if candidate_width > max_width {
+      break probe;
+    }
+    if probe + 1 >= range.end {
+      return None;
+    }
+    lower = probe + 1;
+    step = step.saturating_mul(2);
+  };
+
+  let mut low = lower;
+  let mut high = probe;
   while low < high {
     let mid = low + (high - low) / 2;
     let break_at = break_ends[mid];
@@ -2000,22 +2029,22 @@ pub(super) fn first_overflow_line_end(
   shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
 ) -> usize {
-  let chars: Vec<_> = text[start..limit]
+  let mut chars = text[start..limit]
     .char_indices()
     .map(|(relative_byte, ch)| {
       let byte_ix = start + relative_byte;
       (byte_ix, byte_ix + ch.len_utf8(), ch)
-    })
-    .collect();
-  if chars.is_empty() {
+    });
+  let Some(first_char) = chars.next() else {
     return limit;
-  }
+  };
+  let char_count = chars.count() + 1;
 
   let mut low = 0;
-  let mut high = chars.len();
+  let mut high = char_count;
   while low < high {
     let mid = (low + high) / 2;
-    let end = chars[mid].1;
+    let end = nth_char_boundary_after(text, start, mid).unwrap_or(limit);
     let width = measure_line_width(document, paragraph, p_format, text, start..end, end - start, shape_cache, window);
     if width > max_width {
       high = mid;
@@ -2024,10 +2053,26 @@ pub(super) fn first_overflow_line_end(
     }
   }
 
-  let Some((byte_ix, end, ch)) = chars.get(low).copied() else {
-    return limit;
+  let (byte_ix, end, ch) = if low == 0 {
+    first_char
+  } else {
+    nth_char_after(text, start, low).unwrap_or((limit, limit, '\0'))
   };
   if is_wrap_break(ch) || byte_ix == start { end } else { byte_ix }
+}
+
+fn nth_char_boundary_after(text: &str, start: usize, n: usize) -> Option<usize> {
+  if n == 0 {
+    return text[start..].chars().next().map(|ch| start + ch.len_utf8());
+  }
+  text[start..].char_indices().nth(n).map(|(relative_byte, ch)| start + relative_byte + ch.len_utf8())
+}
+
+fn nth_char_after(text: &str, start: usize, n: usize) -> Option<(usize, usize, char)> {
+  text[start..].char_indices().nth(n).map(|(relative_byte, ch)| {
+    let byte_ix = start + relative_byte;
+    (byte_ix, byte_ix + ch.len_utf8(), ch)
+  })
 }
 
 pub(super) fn measure_line_width(
@@ -2066,11 +2111,17 @@ pub(super) fn measure_line_width(
       continue;
     }
     let format = run_format(document, p_format.clone(), fragment.styles);
-    let shaped = shape_fragment_cached(window, text, format.clone(), fragment.source_start, fragment.styles, shape_cache);
+    let run_start = clamp_to_char_boundary(paragraph_text, fragment.run_range.start.min(paragraph_text.len()));
+    let run_end = clamp_to_char_boundary(paragraph_text, fragment.run_range.end.min(paragraph_text.len())).max(run_start);
+    let run_text = &paragraph_text[run_start..run_end];
+    let shaped = shape_fragment_cached(window, run_text, format.clone(), run_start, fragment.styles, shape_cache);
+    let fragment_start = fragment.source_start.saturating_sub(run_start).min(run_text.len());
+    let fragment_end = fragment_start.saturating_add(text.len()).min(run_text.len());
+    let fragment_width = (shaped.x_for_index(fragment_end) - shaped.x_for_index(fragment_start)).max(px(0.0));
     if format.border_width > px(0.0) {
       width += document.theme.box_padding_left;
     }
-    width += shaped.width;
+    width += fragment_width;
     if format.border_width > px(0.0) {
       width += document.theme.box_padding_right;
     }
@@ -2260,6 +2311,7 @@ fn font_metrics_for_format(format: &EffectiveRunFormat, cx: &mut App) -> (Pixels
 pub(super) struct VisualFragment {
   pub(super) styles: RunStyles,
   pub(super) line_range: Range<usize>,
+  pub(super) run_range: Range<usize>,
   pub(super) source_start: usize,
 }
 
@@ -2284,6 +2336,7 @@ pub(super) fn fragments_for_range(paragraph: &Paragraph, range: &Range<usize>, r
     fragments.push(VisualFragment {
       styles: run.styles,
       line_range: line_start..line_end,
+      run_range: run_start..run_end,
       source_start: range.start + line_start,
     });
   }

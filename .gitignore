@@ -2,3 +2,5 @@
 /Junk
 /demo
 /perf_fixtures
+flamegraph.svg
+perf.data
