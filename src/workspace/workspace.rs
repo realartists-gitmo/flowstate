@@ -50,7 +50,7 @@ pub struct Workspace {
   collapsed_outline_items: HashSet<usize>,
   outline_revision: u64,
   outline_caret_paragraph: Option<usize>,
-  editor_subscriptions: Vec<Subscription>,
+  editor_subscriptions: Vec<(Uuid, Subscription)>,
   styles_settings_open: bool,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
 }
@@ -127,15 +127,6 @@ impl Workspace {
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);
     });
-    self
-      .editor_subscriptions
-      .push(cx.observe(&editor, |workspace, editor, cx| {
-        let caret_paragraph = Some(editor.read(cx).caret_paragraph());
-        if workspace.outline_caret_paragraph != caret_paragraph {
-          workspace.outline_caret_paragraph = caret_paragraph;
-          cx.notify();
-        }
-      }));
     let workspace = cx.entity().downgrade();
     let title = path
       .as_ref()
@@ -144,6 +135,16 @@ impl Workspace {
       .or_else(|| Some(self.next_untitled_title(cx)));
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, cx));
     let id = panel.read(cx).id();
+    self.editor_subscriptions.push((
+      id,
+      cx.observe(&editor, |workspace, editor, cx| {
+        let caret_paragraph = Some(editor.read(cx).caret_paragraph());
+        if workspace.outline_caret_paragraph != caret_paragraph {
+          workspace.outline_caret_paragraph = caret_paragraph;
+          cx.notify();
+        }
+      }),
+    ));
     self.active_document_id = Some(id);
     self.active_editor = Some(editor);
     self.document_panels.push(panel.clone());
@@ -160,12 +161,18 @@ impl Workspace {
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
+    self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     if self.active_document_id == Some(panel_id) {
       self.active_document_id = self.document_panels.last().map(|panel| panel.read(cx).id());
       self.active_editor = self
         .document_panels
         .last()
         .map(|panel| panel.read(cx).editor());
+    }
+    if self.active_document_id.is_none() {
+      self.outline_cache = None;
+      self.outline_caret_paragraph = None;
+      self.collapsed_outline_items.clear();
     }
     cx.notify();
   }
