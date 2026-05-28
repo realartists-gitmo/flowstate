@@ -1,2 +1,6 @@
 [target.x86_64-pc-windows-msvc]
 linker = "rust-lld.exe"
+
+[alias]
+survey = "run --profile profiler --features profiler"
+product = "run --profile product"
