@@ -1,37 +1,3 @@
-fn window_control_button(
-  id: &'static str,
-  icon: IconName,
-  area: WindowControlArea,
-  on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-  destructive: bool,
-  cx: &mut Context<Workspace>,
-) -> impl IntoElement {
-  div()
-    .id(id)
-    .window_control_area(area)
-    .w(px(46.0))
-    .h_full()
-    .flex()
-    .items_center()
-    .justify_center()
-    .text_size(px(12.0))
-    .text_color(cx.theme().muted_foreground)
-    .hover(|this| {
-      if destructive {
-        this
-          .bg(cx.theme().danger)
-          .text_color(cx.theme().danger_foreground)
-      } else {
-        this
-          .bg(cx.theme().secondary_hover)
-          .text_color(cx.theme().foreground)
-      }
-    })
-    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-    .on_click(on_click)
-    .child(icon)
-}
-
 fn styles_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   div()
     .h_full()
@@ -245,4 +211,3 @@ fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_o
         .anchor(Corner::BottomLeft),
     )
 }
-

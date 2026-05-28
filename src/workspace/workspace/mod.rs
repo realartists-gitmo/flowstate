@@ -1,9 +1,9 @@
 use std::{cell::Cell, collections::HashSet, path::{Path, PathBuf}, rc::Rc};
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Axis, Bounds, ClickEvent, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement,
-  MouseButton, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, TitlebarOptions,
-  WeakEntity, Window, WindowBounds, WindowControlArea, WindowOptions, black, div, point, prelude::*, px, rgb, size, white,
+  AnyElement, AnyWindowHandle, App, Axis, Bounds, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement,
+  MouseButton, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
+  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, rgb, size, white,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
@@ -17,7 +17,7 @@ use gpui_component::setting::{NumberFieldOptions, SettingField, SettingGroup, Se
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
-  ActiveTheme as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, h_flex, v_flex,
+  ActiveTheme as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar, h_flex, v_flex,
 };
 use uuid::Uuid;
 

@@ -1,12 +1,13 @@
 use std::rc::Rc;
 
 use crate::{
-    ActiveTheme, Icon, IconName, InteractiveElementExt as _, Sizable as _, StyledExt, h_flex,
+    ActiveTheme, Colorize, Icon, IconName, IconNamed as _, InteractiveElementExt as _,
+    Sizable as _, StyledExt, h_flex,
 };
 use gpui::{
     AnyElement, App, ClickEvent, Context, Decorations, Hsla, InteractiveElement, IntoElement,
     MouseButton, ParentElement, Pixels, Render, RenderOnce, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, TitlebarOptions, Window, WindowControlArea, div,
+    StyleRefinement, Styled, TitlebarOptions, Window, WindowControlArea, div, svg,
     prelude::FluentBuilder as _, px,
 };
 use smallvec::SmallVec;
@@ -131,7 +132,7 @@ impl ControlIcon {
 
     #[inline]
     fn hover_bg(&self, cx: &App) -> Hsla {
-        if self.is_close() {
+        if self.is_close() && !cfg!(target_os = "linux") {
             cx.theme().danger
         } else {
             cx.theme().secondary_hover
@@ -140,7 +141,7 @@ impl ControlIcon {
 
     #[inline]
     fn active_bg(&self, cx: &mut App) -> Hsla {
-        if self.is_close() {
+        if self.is_close() && !cfg!(target_os = "linux") {
             cx.theme().danger_active
         } else {
             cx.theme().secondary_active
@@ -152,7 +153,17 @@ impl RenderOnce for ControlIcon {
     fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         let is_linux = cfg!(target_os = "linux");
         let is_windows = cfg!(target_os = "windows");
-        let hover_fg = self.hover_fg(cx);
+        let is_linux_close = is_linux && self.is_close();
+        let default_fg = if is_linux_close {
+            cx.theme().secondary_foreground
+        } else {
+            cx.theme().foreground
+        };
+        let hover_fg = if is_linux_close {
+            default_fg.darken(0.25)
+        } else {
+            self.hover_fg(cx)
+        };
         let hover_bg = self.hover_bg(cx);
         let active_bg = self.active_bg(cx);
         let icon = self.clone();
@@ -164,15 +175,28 @@ impl RenderOnce for ControlIcon {
         div()
             .id(self.id())
             .flex()
-            .w(TITLE_BAR_HEIGHT)
+            .w(if is_linux_close { px(28.0) } else { TITLE_BAR_HEIGHT })
             .h_full()
             .flex_shrink_0()
             .justify_center()
             .content_center()
             .items_center()
-            .text_color(cx.theme().foreground)
-            .hover(|style| style.bg(hover_bg).text_color(hover_fg))
-            .active(|style| style.bg(active_bg).text_color(hover_fg))
+            .when(is_linux_close, |this| this.group("linux-window-close"))
+            .text_color(default_fg)
+            .hover(move |style| {
+                if is_linux_close {
+                    style.text_color(hover_fg)
+                } else {
+                    style.bg(hover_bg).text_color(hover_fg)
+                }
+            })
+            .active(move |style| {
+                if is_linux_close {
+                    style.text_color(hover_fg)
+                } else {
+                    style.bg(active_bg).text_color(hover_fg)
+                }
+            })
             .when(is_windows, |this| {
                 this.window_control_area(self.window_control_area())
             })
@@ -196,7 +220,16 @@ impl RenderOnce for ControlIcon {
                     }
                 })
             })
-            .child(Icon::new(self.icon()).small())
+            .child(if is_linux_close {
+                svg()
+                    .path(self.icon().path())
+                    .size_3p5()
+                    .text_color(default_fg)
+                    .group_hover("linux-window-close", move |this| this.text_color(hover_fg))
+                    .into_any_element()
+            } else {
+                Icon::new(self.icon()).small().into_any_element()
+            })
     }
 }
 
@@ -211,18 +244,28 @@ impl RenderOnce for WindowControls {
             return div().id("window-controls");
         }
 
-        h_flex()
+        let controls = h_flex()
             .id("window-controls")
             .items_center()
             .flex_shrink_0()
-            .h_full()
-            .child(ControlIcon::minimize())
-            .child(if window.is_maximized() {
-                ControlIcon::restore()
+            .h_full();
+
+        if cfg!(target_os = "linux") {
+            if matches!(window.window_decorations(), Decorations::Client { .. }) {
+                controls.child(ControlIcon::close(self.on_close_window))
             } else {
-                ControlIcon::maximize()
-            })
-            .child(ControlIcon::close(self.on_close_window))
+                controls
+            }
+        } else {
+            controls
+                .child(ControlIcon::minimize())
+                .child(if window.is_maximized() {
+                    ControlIcon::restore()
+                } else {
+                    ControlIcon::maximize()
+                })
+                .child(ControlIcon::close(self.on_close_window))
+        }
     }
 }
 

@@ -79,11 +79,8 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
   cx.open_window(
     WindowOptions {
       window_bounds: Some(WindowBounds::Maximized(bounds)),
-      titlebar: Some(TitlebarOptions {
-        title: Some("Flowstate".into()),
-        appears_transparent: true,
-        traffic_light_position: Some(point(px(12.0), px(18.0))),
-      }),
+      titlebar: Some(TitleBar::title_bar_options()),
+      window_decorations: window_decorations(),
       ..Default::default()
     },
     |window, cx| {
@@ -94,4 +91,14 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
     },
   )
   .unwrap();
+}
+
+#[cfg(target_os = "linux")]
+fn window_decorations() -> Option<WindowDecorations> {
+  Some(WindowDecorations::Client)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn window_decorations() -> Option<WindowDecorations> {
+  None
 }
