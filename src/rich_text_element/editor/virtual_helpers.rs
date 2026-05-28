@@ -5,7 +5,7 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
   for (item_ix, item) in items.iter().enumerate() {
     match item {
       VirtualItem::ParagraphChunk {
-        paragraph_ix, chunk_ix: _, ..
+        paragraph_ix, ..
       } => {
         if let Some(range) = paragraph_chunk_item_ranges.get_mut(*paragraph_ix) {
           if range.start == range.end {
@@ -25,6 +25,62 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
   }
 
   (paragraph_chunk_item_ranges, paragraph_remainder_items)
+}
+
+fn patch_item_lookup_for_paragraph_range(
+  paragraph_chunk_item_ranges: &mut [Range<usize>],
+  paragraph_remainder_items: &mut [Option<usize>],
+  items: &[VirtualItem],
+  replace_start: usize,
+  new_len: usize,
+  range: Range<usize>,
+  item_delta: isize,
+) -> Option<()> {
+  for paragraph_ix in range.clone() {
+    if let Some(chunk_range) = paragraph_chunk_item_ranges.get_mut(paragraph_ix) {
+      *chunk_range = 0..0;
+    }
+    if let Some(remainder_item) = paragraph_remainder_items.get_mut(paragraph_ix) {
+      *remainder_item = None;
+    }
+  }
+
+  for (relative_item_ix, item) in items.get(replace_start..replace_start + new_len)?.iter().enumerate() {
+    let item_ix = replace_start + relative_item_ix;
+    match item {
+      VirtualItem::ParagraphChunk {
+        paragraph_ix, ..
+      } if range.contains(paragraph_ix) => {
+        if let Some(chunk_range) = paragraph_chunk_item_ranges.get_mut(*paragraph_ix) {
+          if chunk_range.start == chunk_range.end {
+            *chunk_range = item_ix..item_ix + 1;
+          } else {
+            chunk_range.end = chunk_range.end.max(item_ix + 1);
+          }
+        }
+      },
+      VirtualItem::ParagraphRemainder { paragraph_ix, .. } if range.contains(paragraph_ix) => {
+        if let Some(remainder_item) = paragraph_remainder_items.get_mut(*paragraph_ix) {
+          *remainder_item = Some(item_ix);
+        }
+      },
+      _ => {},
+    }
+  }
+
+  if item_delta != 0 {
+    for chunk_range in paragraph_chunk_item_ranges.iter_mut().skip(range.end) {
+      if chunk_range.start != chunk_range.end {
+        chunk_range.start = chunk_range.start.checked_add_signed(item_delta)?;
+        chunk_range.end = chunk_range.end.checked_add_signed(item_delta)?;
+      }
+    }
+    for remainder_item in paragraph_remainder_items.iter_mut().skip(range.end).flatten() {
+      *remainder_item = remainder_item.checked_add_signed(item_delta)?;
+    }
+  }
+
+  Some(())
 }
 
 fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: usize) -> Range<usize> {

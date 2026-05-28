@@ -4,15 +4,17 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
     let raw = read_u64(&mut cursor)?;
     usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text length overflows usize"))?
   };
-  let mut text_bytes = vec![0; text_len];
-  cursor.read_exact(&mut text_bytes)?;
-  let text = String::from_utf8(text_bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text is not UTF-8"))?;
+  let text_bytes = read_bytes(&mut cursor, text_len, "DB8 text")?;
+  let text = std::str::from_utf8(text_bytes)
+    .map(|text| text.to_owned())
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text is not UTF-8"))?;
 
   let asset_count = {
     let raw = read_u64(&mut cursor)?;
     usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 asset count overflows usize"))?
   };
   let mut assets = AssetStore::default();
+  assets.assets.reserve(asset_count);
   for _ in 0..asset_count {
     let asset = read_asset_record(&mut cursor)?;
     assets.assets.insert(asset.id, asset);
@@ -51,16 +53,14 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
     theme: DocumentTheme::default(),
   };
   validate_document(&document)?;
-  log_timing(
-    "db8 read",
-    timing,
+  log_timing_lazy("db8 read", timing, || {
     format!(
       "bytes={} blocks={} paragraphs={}",
       document.text.byte_len(),
       document.blocks.len(),
       document.paragraphs.len()
-    ),
-  );
+    )
+  });
   Ok(document)
 }
 
@@ -70,9 +70,8 @@ fn read_block_record(cursor: &mut Cursor<&[u8]>) -> io::Result<Block> {
     let raw = read_u64(cursor)?;
     usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 block payload length overflows usize"))?
   };
-  let mut payload = vec![0; payload_len];
-  cursor.read_exact(&mut payload)?;
-  let mut payload = Cursor::new(payload.as_slice());
+  let payload = read_bytes(cursor, payload_len, "DB8 block payload")?;
+  let mut payload = Cursor::new(payload);
   match kind {
     BLOCK_PARAGRAPH => read_paragraph_payload(&mut payload).map(Block::Paragraph),
     BLOCK_IMAGE => read_image_payload(&mut payload).map(Block::Image),
@@ -338,8 +337,7 @@ fn read_asset_record(cursor: &mut Cursor<&[u8]>) -> io::Result<AssetRecord> {
   };
   let content_hash = read_u64(cursor)?;
   let byte_len = read_len(cursor, "DB8 asset byte length")?;
-  let mut bytes = vec![0; byte_len];
-  cursor.read_exact(&mut bytes)?;
+  let bytes = read_bytes(cursor, byte_len, "DB8 asset bytes")?.to_vec();
   Ok(AssetRecord {
     id,
     mime_type,
@@ -364,8 +362,8 @@ fn write_asset_record(bytes: &mut Vec<u8>, asset: &AssetRecord) {
   bytes.extend_from_slice(&asset.bytes);
 }
 
-pub fn recovery_path_for_document(path: &PathBuf) -> PathBuf {
-  let mut recovery_path = path.clone();
+pub fn recovery_path_for_document(path: &Path) -> PathBuf {
+  let mut recovery_path = path.to_path_buf();
   let file_name = path
     .file_name()
     .and_then(|name| name.to_str())

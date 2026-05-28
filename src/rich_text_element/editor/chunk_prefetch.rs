@@ -24,21 +24,23 @@ impl RichTextEditor {
 
     let mut queue = VecDeque::new();
     let mut prep_queue = Vec::new();
-    let mut queued = vec![false; paragraph_count];
     let active = self.active_height_range();
     let predicted = self.predicted_visible_height_range(width);
+    let mut candidates = Vec::with_capacity(predicted.len().saturating_add(active.len()).saturating_add(16));
     for range in [
       expand_paragraph_range(predicted.clone(), paragraph_count, 4),
       expand_paragraph_range(active, paragraph_count, 2),
     ] {
-      for paragraph_ix in range {
-        if !queued[paragraph_ix] && self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
-          queued[paragraph_ix] = true;
-          if self.valid_paragraph_prep(paragraph_ix).is_some() {
-            queue.push_back(paragraph_ix);
-          } else {
-            prep_queue.push(paragraph_ix);
-          }
+      candidates.extend(range);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    for paragraph_ix in candidates {
+      if paragraph_ix < paragraph_count && self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
+        if self.valid_paragraph_prep(paragraph_ix).is_some() {
+          queue.push_back(paragraph_ix);
+        } else {
+          prep_queue.push(paragraph_ix);
         }
       }
     }

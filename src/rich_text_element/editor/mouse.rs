@@ -368,10 +368,10 @@ impl RichTextEditor {
               return false;
             }
 
-            if let Some(head) = editor.hit_test_cached_position(position) {
-              if editor.selection.head != head {
-                editor.selection.head = head;
-              }
+            if let Some(head) = editor.hit_test_cached_position(position)
+              && editor.selection.head != head
+            {
+              editor.selection.head = head;
             }
             cx.notify();
             true

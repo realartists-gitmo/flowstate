@@ -55,27 +55,24 @@ impl RichTextEditor {
     Some(prep)
   }
 
-  fn request_layout_prep(&mut self, width: Pixels, paragraphs: Vec<usize>, cx: &mut Context<Self>) {
+  fn request_layout_prep(&mut self, width: Pixels, mut paragraphs: Vec<usize>, cx: &mut Context<Self>) {
     if self.disposed || paragraphs.is_empty() {
       return;
     }
-    let mut request = LayoutPrepRequest {
+    paragraphs.retain(|paragraph_ix| {
+      *paragraph_ix < self.document.paragraphs.len() && self.paragraph_needs_layout_prep(*paragraph_ix)
+    });
+    paragraphs.sort_unstable();
+    paragraphs.dedup();
+    if paragraphs.is_empty() {
+      return;
+    }
+    let request = LayoutPrepRequest {
       width,
       edit_generation: self.edit_generation,
       invisibility_mode: self.invisibility_mode,
-      paragraphs: Vec::new(),
+      paragraphs,
     };
-    for paragraph_ix in paragraphs {
-      if paragraph_ix < self.document.paragraphs.len()
-        && self.paragraph_needs_layout_prep(paragraph_ix)
-        && !request.paragraphs.contains(&paragraph_ix)
-      {
-        request.paragraphs.push(paragraph_ix);
-      }
-    }
-    if request.paragraphs.is_empty() {
-      return;
-    }
     if self.pending_layout_prep_task.is_some() {
       self.merge_pending_layout_prep_request(request);
       return;
@@ -93,11 +90,9 @@ impl RichTextEditor {
       return;
     }
     pending.width = request.width;
-    for paragraph_ix in request.paragraphs {
-      if !pending.paragraphs.contains(&paragraph_ix) {
-        pending.paragraphs.push(paragraph_ix);
-      }
-    }
+    pending.paragraphs.extend(request.paragraphs);
+    pending.paragraphs.sort_unstable();
+    pending.paragraphs.dedup();
   }
 
   fn start_layout_prep_task(&mut self, request: LayoutPrepRequest, cx: &mut Context<Self>) {
@@ -131,14 +126,12 @@ impl RichTextEditor {
           .background_executor()
           .spawn(async move { build_paragraph_prep_batch(batch) })
           .await;
-        log_timing(
-          "layout prep batch",
-          timing,
+        log_timing_lazy("layout prep batch", timing, || {
           format!(
             "requested={} completed={} bytes={}",
             result.requested, result.completed, result.text_bytes
-          ),
-        );
+          )
+        });
         let _ = editor.update(cx, |editor, cx| {
           editor.pending_layout_prep_task = None;
           editor.install_layout_prep_batch(width, result, cx);

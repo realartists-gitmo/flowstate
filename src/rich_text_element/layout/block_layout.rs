@@ -40,15 +40,13 @@ pub(super) fn build_layout(
     width,
     snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
   };
-  log_timing(
-    "build layout",
-    timing,
+  log_timing_lazy("build layout", timing, || {
     format!(
       "blocks={} paragraphs={} shaped={shaped_count} reused={reused_count}",
       layout.block_count(),
       layout.paragraphs.len()
-    ),
-  );
+    )
+  });
   layout
 }
 
@@ -115,11 +113,9 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
     width,
     snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
   };
-  log_timing(
-    "build visible paragraph",
-    timing,
-    format!("paragraph={paragraph_ix} shaped={} reused={}", usize::from(!reused), usize::from(reused)),
-  );
+  log_timing_lazy("build visible paragraph", timing, || {
+    format!("paragraph={paragraph_ix} shaped={} reused={}", usize::from(!reused), usize::from(reused))
+  });
   layout
 }
 

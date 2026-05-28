@@ -1,7 +1,8 @@
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 use crop::Rope;
 use gpui::{Hsla, Pixels, SharedString, black, px, rgb};
+use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 // `paragraph_widths` and `paragraph_width` are free helpers that still live in

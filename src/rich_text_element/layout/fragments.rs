@@ -25,4 +25,3 @@ pub(super) fn fragments_for_range(paragraph: &Paragraph, range: &Range<usize>, r
   }
   fragments
 }
-

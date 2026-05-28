@@ -232,6 +232,5 @@ fn truncate_outline_label(label: &str, width: Pixels, window: &mut Window, cx: &
   cx.text_system()
     .line_wrapper(text_style.font(), font_size)
     .truncate_line(label.to_string().into(), width, "…", &mut runs)
-    .into()
 }
 

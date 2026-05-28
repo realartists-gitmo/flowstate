@@ -1,5 +1,5 @@
 use std::{
-  collections::{HashMap, VecDeque, hash_map::DefaultHasher},
+  collections::{VecDeque, hash_map::DefaultHasher},
   fs,
   hash::{Hash, Hasher},
   io,
@@ -18,6 +18,7 @@ use gpui::{
 };
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
+use rustc_hash::FxHashMap;
 use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
@@ -181,8 +182,8 @@ pub(super) enum EditOperation {
     after: Block,
   },
   ReplaceDocument {
-    before: Document,
-    after: Document,
+    before: Box<Document>,
+    after: Box<Document>,
   },
   MoveRichText {
     source_range: Range<DocumentOffset>,
@@ -214,7 +215,7 @@ impl EditOperation {
         }
       },
       Self::ReplaceDocument { before, .. } => {
-        *document = before.clone();
+        *document = before.as_ref().clone();
       },
       Self::MoveRichText {
         source_range,
@@ -257,7 +258,7 @@ impl EditOperation {
         }
       },
       Self::ReplaceDocument { after, .. } => {
-        *document = after.clone();
+        *document = after.as_ref().clone();
       },
       Self::MoveRichText {
         source_range,
@@ -612,7 +613,7 @@ struct RenderLayoutSnapshot {
 }
 
 enum RecoveryWriteDecision {
-  Write { generation: u64, document: Document },
+  Write { generation: u64, document: Box<Document> },
   Rescheduled,
   Idle,
 }
@@ -660,11 +661,10 @@ impl HeightPrefixIndex {
     }
 
     let removed = range.end - range.start;
-    let replacement_heights = sizes.iter().map(|size| size.height).collect::<Vec<_>>();
-    self.heights.splice(range.clone(), replacement_heights);
+    self.heights.splice(range.clone(), sizes.iter().map(|size| size.height));
     self
       .origins
-      .splice(range.clone(), std::iter::repeat(px(0.0)).take(sizes.len()));
+      .splice(range.clone(), std::iter::repeat_n(px(0.0), sizes.len()));
     if self.origins.len() != self.heights.len() || self.heights.len() + removed < sizes.len() {
       return false;
     }

@@ -1,5 +1,4 @@
 use std::{
-  collections::{HashMap, HashSet},
   io,
   path::Path,
 };
@@ -8,6 +7,8 @@ use rdocx::Document as RDocxDocument;
 use rdocx_opc::OpcPackage;
 use rdocx_oxml::document::CT_Document;
 use rdocx_oxml::properties::{CT_PPr, CT_RPr};
+use rdocx_oxml::shared::ST_Underline;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
@@ -105,13 +106,13 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
-  let mut paragraph_property_cache: HashMap<Option<String>, CT_PPr> = HashMap::new();
-  let mut run_property_cache: HashMap<(Option<String>, Option<String>), CT_RPr> = HashMap::new();
+  let mut paragraph_property_cache: FxHashMap<Option<String>, CT_PPr> = FxHashMap::default();
+  let mut run_property_cache: FxHashMap<(Option<String>, Option<String>), CT_RPr> = FxHashMap::default();
   let mut runs_imported = 0usize;
   let mut unknown_paragraph_styles = Vec::new();
   let mut unknown_run_styles = Vec::new();
-  let mut unknown_paragraph_style_seen = HashSet::new();
-  let mut unknown_run_style_seen = HashSet::new();
+  let mut unknown_paragraph_style_seen = FxHashSet::default();
+  let mut unknown_run_style_seen = FxHashSet::default();
   let mut current_section_has_underline = false;
   let mut after_heading_seeking_text = false;
 
@@ -346,20 +347,20 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
 }
 
 struct StyleResolver {
-  names_by_id: HashMap<String, String>,
-  known_paragraph_style_ids: HashSet<String>,
-  paragraph_styles_by_id: HashMap<String, Option<ParagraphStyle>>,
-  character_heading_styles_by_id: HashMap<String, Option<ParagraphStyle>>,
-  run_semantics_by_id: HashMap<String, Option<RunSemanticStyle>>,
+  names_by_id: FxHashMap<String, String>,
+  known_paragraph_style_ids: FxHashSet<String>,
+  paragraph_styles_by_id: FxHashMap<String, Option<ParagraphStyle>>,
+  character_heading_styles_by_id: FxHashMap<String, Option<ParagraphStyle>>,
+  run_semantics_by_id: FxHashMap<String, Option<RunSemanticStyle>>,
 }
 
 impl StyleResolver {
   fn new(docx: &RDocxDocument) -> Self {
-    let mut names_by_id = HashMap::new();
-    let mut known_paragraph_style_ids = HashSet::new();
-    let mut paragraph_styles_by_id = HashMap::new();
-    let mut character_heading_styles_by_id = HashMap::new();
-    let mut run_semantics_by_id = HashMap::new();
+    let mut names_by_id = FxHashMap::default();
+    let mut known_paragraph_style_ids = FxHashSet::default();
+    let mut paragraph_styles_by_id = FxHashMap::default();
+    let mut character_heading_styles_by_id = FxHashMap::default();
+    let mut run_semantics_by_id = FxHashMap::default();
 
     for style in docx.styles() {
       let style_id = style.style_id();
@@ -666,7 +667,7 @@ fn count_trimmed_chars(text: &str, mut count: usize, mut leading: bool, mut pend
 }
 
 fn most_common_half_point_size(runs: &[RunFact], indices: &[usize]) -> Option<f64> {
-  let mut counts: HashMap<i32, usize> = HashMap::new();
+  let mut counts: FxHashMap<i32, usize> = FxHashMap::default();
   for ix in indices {
     let Some(size) = runs[*ix].size_pt else {
       continue;
@@ -745,6 +746,38 @@ fn canonical_run_style_name(name: &str) -> Option<&'static str> {
   }
 }
 
+fn normalized_style_token(name: &str) -> String {
+  name
+    .chars()
+    .filter(|ch| ch.is_ascii_alphanumeric())
+    .flat_map(char::to_lowercase)
+    .collect()
+}
+
+fn underline_is_on(underline: &Option<ST_Underline>) -> bool {
+  matches!(underline, Some(value) if *value != ST_Underline::None)
+}
+
+fn push_unique_with_seen(values: &mut Vec<String>, seen: &mut FxHashSet<String>, value: &str) {
+  if !seen.contains(value) {
+    let value = value.to_string();
+    seen.insert(value.clone());
+    values.push(value);
+  }
+}
+
+fn rdocx_error(error: rdocx::Error) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn rdocx_opc_error(error: rdocx_opc::OpcError) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+fn rdocx_oxml_error(error: rdocx_oxml::error::OxmlError) -> io::Error {
+  io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -762,20 +795,20 @@ mod tests {
 
   fn style_resolver() -> StyleResolver {
     StyleResolver {
-      names_by_id: HashMap::from([
+      names_by_id: FxHashMap::from_iter([
         ("Heading3Char".to_string(), "Heading 3 Char".to_string()),
         ("BlockChar".to_string(), "Block Char".to_string()),
         ("Emphasis".to_string(), "Emphasis".to_string()),
         ("Heading3".to_string(), "Heading 3".to_string()),
       ]),
-      known_paragraph_style_ids: HashSet::from(["Heading3".to_string()]),
-      paragraph_styles_by_id: HashMap::from([("Heading3".to_string(), Some(ParagraphStyle::Block))]),
-      character_heading_styles_by_id: HashMap::from([
+      known_paragraph_style_ids: FxHashSet::from_iter(["Heading3".to_string()]),
+      paragraph_styles_by_id: FxHashMap::from_iter([("Heading3".to_string(), Some(ParagraphStyle::Block))]),
+      character_heading_styles_by_id: FxHashMap::from_iter([
         ("Heading3Char".to_string(), Some(ParagraphStyle::Block)),
         ("BlockChar".to_string(), Some(ParagraphStyle::Block)),
         ("Emphasis".to_string(), None),
       ]),
-      run_semantics_by_id: HashMap::from([
+      run_semantics_by_id: FxHashMap::from_iter([
         ("Heading3Char".to_string(), Some(RunSemanticStyle::Emphasis)),
         ("BlockChar".to_string(), Some(RunSemanticStyle::Emphasis)),
         ("Emphasis".to_string(), Some(RunSemanticStyle::Emphasis)),
@@ -957,38 +990,4 @@ mod tests {
 
     assert_eq!(run_styles.highlight, Some(HighlightStyle::Spoken));
   }
-}
-
-fn normalized_style_token(name: &str) -> String {
-  name
-    .chars()
-    .filter(|ch| ch.is_ascii_alphanumeric())
-    .flat_map(char::to_lowercase)
-    .collect()
-}
-
-fn underline_is_on<T: std::fmt::Debug>(underline: &Option<T>) -> bool {
-  underline
-    .as_ref()
-    .is_some_and(|value| format!("{value:?}") != "None")
-}
-
-fn push_unique_with_seen(values: &mut Vec<String>, seen: &mut HashSet<String>, value: &str) {
-  if !seen.contains(value) {
-    let value = value.to_string();
-    seen.insert(value.clone());
-    values.push(value);
-  }
-}
-
-fn rdocx_error(error: rdocx::Error) -> io::Error {
-  io::Error::new(io::ErrorKind::InvalidData, error)
-}
-
-fn rdocx_opc_error(error: rdocx_opc::OpcError) -> io::Error {
-  io::Error::new(io::ErrorKind::InvalidData, error)
-}
-
-fn rdocx_oxml_error(error: rdocx_oxml::error::OxmlError) -> io::Error {
-  io::Error::new(io::ErrorKind::InvalidData, error)
 }

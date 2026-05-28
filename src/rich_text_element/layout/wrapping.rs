@@ -564,10 +564,13 @@ fn first_break_over_width(
 }
 
 pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
-  text
-    .char_indices()
-    .filter_map(|(byte_ix, ch)| is_wrap_break(ch).then_some(byte_ix + ch.len_utf8()))
-    .collect()
+  let mut breaks = Vec::with_capacity((text.len() / 8).min(4096));
+  for (byte_ix, ch) in text.char_indices() {
+    if is_wrap_break(ch) {
+      breaks.push(byte_ix + ch.len_utf8());
+    }
+  }
+  breaks
 }
 
 pub(super) fn is_wrap_break(ch: char) -> bool {

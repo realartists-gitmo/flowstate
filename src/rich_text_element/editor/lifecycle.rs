@@ -1,7 +1,7 @@
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
     let keys = self.document.blocks.iter().filter_map(|block| match block {
-      Block::Equation(equation) => Some((equation.source.to_string(), matches!(equation.display, EquationDisplay::Display))),
+      Block::Equation(equation) => Some((equation.source.clone(), matches!(equation.display, EquationDisplay::Display))),
       _ => None,
     });
     EquationRenderer::clear_entries(keys);
@@ -16,7 +16,7 @@ impl RichTextEditor {
       focus_subscriptions: Vec::new(),
       scroll_handle: VirtualListScrollHandle::new(),
       disposed: false,
-      recovery_path: document_path.as_ref().map(recovery_path_for_document),
+      recovery_path: document_path.as_deref().map(recovery_path_for_document),
       document_path,
       document,
       selection: EditorSelection::caret(),

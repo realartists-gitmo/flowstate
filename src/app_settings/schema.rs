@@ -133,8 +133,9 @@ pub struct StoredHsla {
   a: f32,
 }
 
-#[derive(Clone, Copy, Deserialize, Serialize)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 pub enum ThemeUnderlineSetting {
+  #[default]
   None,
   Single,
   Double,
@@ -143,12 +144,6 @@ pub enum ThemeUnderlineSetting {
 impl Default for DocumentThemeSettings {
   fn default() -> Self {
     Self::from(&DocumentTheme::default())
-  }
-}
-
-impl Default for ThemeUnderlineSetting {
-  fn default() -> Self {
-    Self::None
   }
 }
 

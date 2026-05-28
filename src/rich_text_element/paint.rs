@@ -92,11 +92,9 @@ pub(super) fn paint_layout(
     caret.size.width = caret_width;
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), black()));
   }
-  log_timing(
-    "paint layout",
-    timing,
-    format!("blocks={} visible_paragraphs={visible_count}", layout.block_count()),
-  );
+  log_timing_lazy("paint layout", timing, || {
+    format!("blocks={} visible_paragraphs={visible_count}", layout.block_count())
+  });
 }
 
 pub(super) fn paint_structural_block(

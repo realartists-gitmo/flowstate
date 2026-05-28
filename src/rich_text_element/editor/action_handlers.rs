@@ -179,10 +179,10 @@ impl RichTextEditor {
     if m.control || m.platform {
       return;
     }
-    if event.keystroke.key == "tab" {
-      if self.move_selected_table_cell(!m.shift, cx) {
-        return;
-      }
+    if event.keystroke.key == "tab"
+      && self.move_selected_table_cell(!m.shift, cx)
+    {
+      return;
     }
     #[cfg(target_os = "windows")]
     let key_char = event

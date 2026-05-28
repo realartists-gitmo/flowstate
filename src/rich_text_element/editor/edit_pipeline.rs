@@ -94,7 +94,9 @@ impl RichTextEditor {
       );
     let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
     self.finish_document_edit(before_span, before_selection, before_block_count, after_span, cx);
-    log_timing("edit command", timing, format!("paragraphs={}", self.document.paragraphs.len()));
+    log_timing_lazy("edit command", timing, || {
+      format!("paragraphs={}", self.document.paragraphs.len())
+    });
   }
 
   fn edit_capture_range(&self) -> Range<usize> {

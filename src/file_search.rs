@@ -1,5 +1,4 @@
 use std::{
-  cmp::Ordering,
   fs,
   path::{Path, PathBuf},
 };
@@ -11,7 +10,28 @@ pub struct FileSearchHit {
 
 pub struct DocumentFileSearch {
   root: PathBuf,
-  files: Vec<PathBuf>,
+  files: Vec<DocumentFileEntry>,
+}
+
+struct DocumentFileEntry {
+  path: PathBuf,
+  file_name_lower: String,
+  full_path_lower: String,
+}
+
+impl DocumentFileEntry {
+  fn new(path: PathBuf) -> Self {
+    let file_name_lower = path
+      .file_name()
+      .map(|name| name.to_string_lossy().to_ascii_lowercase())
+      .unwrap_or_default();
+    let full_path_lower = path.to_string_lossy().to_ascii_lowercase();
+    Self {
+      path,
+      file_name_lower,
+      full_path_lower,
+    }
+  }
 }
 
 impl DocumentFileSearch {
@@ -19,7 +39,8 @@ impl DocumentFileSearch {
     let root = normalize_search_root(root)?;
     let mut files = Vec::new();
     collect_document_files(&root, &mut files);
-    files.sort_by(|a, b| compare_paths_for_display(a, b));
+    let mut files = files.into_iter().map(DocumentFileEntry::new).collect::<Vec<_>>();
+    files.sort_by(|a, b| a.full_path_lower.cmp(&b.full_path_lower));
     Ok(Self { root, files })
   }
 
@@ -82,46 +103,48 @@ fn should_descend_into(path: &Path) -> bool {
   !name.starts_with('.')
 }
 
-fn search_document_files(files: &[PathBuf], typed_query: &str, limit: usize) -> Vec<FileSearchHit> {
+fn search_document_files(files: &[DocumentFileEntry], typed_query: &str, limit: usize) -> Vec<FileSearchHit> {
   let query = typed_query.trim().to_ascii_lowercase();
   if query.is_empty() {
     return files
       .iter()
       .take(limit)
-      .cloned()
-      .map(|path| FileSearchHit { path })
+      .map(|entry| FileSearchHit {
+        path: entry.path.clone(),
+      })
       .collect();
   }
 
   let mut scored = files
     .iter()
-    .filter_map(|path| match_path(path, &query).map(|score| (score, path)))
+    .filter_map(|entry| match_path(entry, &query).map(|score| (score, entry)))
     .collect::<Vec<_>>();
-  scored.sort_by(|(a_score, a_path), (b_score, b_path)| {
+  scored.sort_by(|(a_score, a_entry), (b_score, b_entry)| {
     a_score
       .cmp(b_score)
-      .then_with(|| compare_paths_for_display(a_path, b_path))
+      .then_with(|| a_entry.full_path_lower.cmp(&b_entry.full_path_lower))
   });
 
   scored
     .into_iter()
     .take(limit)
-    .map(|(_, path)| FileSearchHit { path: path.clone() })
+    .map(|(_, entry)| FileSearchHit {
+      path: entry.path.clone(),
+    })
     .collect()
 }
 
-fn match_path(path: &Path, query: &str) -> Option<usize> {
-  let file_name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
-  if let Some(index) = file_name.find(query) {
+fn match_path(entry: &DocumentFileEntry, query: &str) -> Option<usize> {
+  if let Some(index) = entry.file_name_lower.find(query) {
     return Some(index);
   }
 
-  let full_path = path.to_string_lossy().to_ascii_lowercase();
-  if let Some(index) = full_path.find(query) {
-    return Some(file_name.len() + index);
+  if let Some(index) = entry.full_path_lower.find(query) {
+    return Some(entry.file_name_lower.len() + index);
   }
 
-  fuzzy_subsequence_score(&file_name, query).or_else(|| fuzzy_subsequence_score(&full_path, query).map(|score| file_name.len() + score))
+  fuzzy_subsequence_score(&entry.file_name_lower, query)
+    .or_else(|| fuzzy_subsequence_score(&entry.full_path_lower, query).map(|score| entry.file_name_lower.len() + score))
 }
 
 fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<usize> {
@@ -134,10 +157,6 @@ fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<usize> {
   }
 
   Some(score)
-}
-
-fn compare_paths_for_display(a: &Path, b: &Path) -> Ordering {
-  a.to_string_lossy().cmp(&b.to_string_lossy())
 }
 
 fn is_supported_document_path(path: &Path) -> bool {

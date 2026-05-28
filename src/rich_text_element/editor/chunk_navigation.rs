@@ -1,16 +1,22 @@
 impl RichTextEditor {
   fn paragraph_chunk_containing_byte(&self, paragraph_ix: usize, byte: usize, width: Pixels) -> Option<(usize, Rc<LayoutState>)> {
     let paragraph_len = self.document.paragraphs.get(paragraph_ix).map(paragraph_text_len)?;
-    self
-      .valid_chunk_cache_entry(paragraph_ix, width)
-      .and_then(|entry| {
-        entry
-          .chunks
-          .iter()
-          .enumerate()
-          .find(|(_, chunk)| byte >= chunk.start_byte && (byte < chunk.end_byte || (byte == chunk.end_byte && chunk.end_byte == paragraph_len)))
-          .map(|(ix, chunk)| (ix, chunk.layout.clone()))
-      })
+    let entry = self.valid_chunk_cache_entry(paragraph_ix, width)?;
+    let chunks = &entry.chunks;
+    let mut low = 0usize;
+    let mut high = chunks.len();
+    while low < high {
+      let mid = low + (high - low) / 2;
+      let chunk = &chunks[mid];
+      if byte < chunk.start_byte {
+        high = mid;
+      } else if byte < chunk.end_byte || (byte == chunk.end_byte && chunk.end_byte == paragraph_len) {
+        return Some((mid, chunk.layout.clone()));
+      } else {
+        low = mid + 1;
+      }
+    }
+    None
   }
 
   fn ensure_paragraph_chunk_containing_byte(
@@ -107,27 +113,30 @@ impl RichTextEditor {
       ranges.push(expand_paragraph_range(visible_paragraph_range, paragraph_count, 2));
     }
 
-    let mut queued = vec![false; paragraph_count];
     let active = self.active_height_range();
     let visible = if self.visible_layout_range.is_empty() {
       0..0
     } else {
       self.paragraph_range_for_item_range(self.visible_layout_range.clone())
     };
-    let mut prep_queue = Vec::new();
+    let candidate_capacity = ranges.iter().map(|range| range.len()).sum();
+    let mut candidates = Vec::with_capacity(candidate_capacity);
     for range in ranges {
-      for paragraph_ix in range {
-        if paragraph_ix >= paragraph_count || queued[paragraph_ix] || !self.paragraph_visible_in_current_mode(paragraph_ix) {
-          continue;
-        }
-        queued[paragraph_ix] = true;
-        let urgent = active.contains(&paragraph_ix) || visible.contains(&paragraph_ix);
-        if !urgent && self.valid_paragraph_prep(paragraph_ix).is_none() {
-          prep_queue.push(paragraph_ix);
-          continue;
-        }
-        self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
+      candidates.extend(range);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    let mut prep_queue = Vec::new();
+    for paragraph_ix in candidates {
+      if paragraph_ix >= paragraph_count || !self.paragraph_visible_in_current_mode(paragraph_ix) {
+        continue;
       }
+      let urgent = active.contains(&paragraph_ix) || visible.contains(&paragraph_ix);
+      if !urgent && self.valid_paragraph_prep(paragraph_ix).is_none() {
+        prep_queue.push(paragraph_ix);
+        continue;
+      }
+      self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
     }
     if !prep_queue.is_empty() {
       self.request_layout_prep(width, prep_queue, cx);

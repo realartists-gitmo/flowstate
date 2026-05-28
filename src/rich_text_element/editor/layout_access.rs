@@ -121,7 +121,7 @@ impl RichTextEditor {
           .map(|size| size.height)
           .unwrap_or(px(1.0))
           .max(px(1.0));
-        let ratio = f32::from((content_y - row_top).max(px(0.0)) / row_height).clamp(0.0, 1.0);
+        let ratio = ((content_y - row_top).max(px(0.0)) / row_height).clamp(0.0, 1.0);
         let byte = byte_at_ratio_in_paragraph(&self.document, *paragraph_ix, start_byte, paragraph_len, ratio);
         Some(DocumentOffset {
           paragraph: *paragraph_ix,

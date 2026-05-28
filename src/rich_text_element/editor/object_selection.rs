@@ -451,8 +451,8 @@ impl RichTextEditor {
       after_selection: self.selection.clone(),
       after_generation,
       operations: vec![EditOperation::ReplaceDocument {
-        before: before_document,
-        after: after_document,
+        before: Box::new(before_document),
+        after: Box::new(after_document),
       }],
       canonical_operations: vec![CanonicalOperation::ReplaceDocument],
     });

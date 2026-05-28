@@ -2171,6 +2171,7 @@ version = "0.1.0"
 dependencies = [
  "crop",
  "gpui",
+ "rustc-hash 2.1.2",
  "serde",
  "tempfile",
  "uuid",
@@ -2184,6 +2185,7 @@ dependencies = [
  "rdocx",
  "rdocx-opc",
  "rdocx-oxml",
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]

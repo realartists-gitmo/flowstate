@@ -1,3 +1,6 @@
+type ParagraphRangeItemSizes = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
+type FullItemSizes = (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>);
+
 impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self
@@ -154,9 +157,15 @@ impl RichTextEditor {
         }
       }
 
-      let (paragraph_chunk_item_ranges, paragraph_remainder_items) = item_lookup_for_virtual_items(&items[..], paragraph_count);
-      cache.paragraph_chunk_item_ranges = paragraph_chunk_item_ranges;
-      cache.paragraph_remainder_items = paragraph_remainder_items;
+      patch_item_lookup_for_paragraph_range(
+        &mut cache.paragraph_chunk_item_ranges,
+        &mut cache.paragraph_remainder_items,
+        &items[..],
+        replace_start,
+        new_len,
+        range.clone(),
+        item_delta,
+      )?;
       cache.item_count = sizes.len();
       cache.height_revision = self.paragraph_height_cache_revision;
       cache.sizes.clone()
@@ -179,21 +188,21 @@ impl RichTextEditor {
     width: Pixels,
     _window: &mut Window,
     _cx: &mut Context<Self>,
-  ) -> Option<(Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>)> {
+  ) -> Option<ParagraphRangeItemSizes> {
     let mut items = Vec::with_capacity(range.len());
     let mut sizes = Vec::with_capacity(range.len());
     let mut block_item_ranges = Vec::with_capacity(range.len());
     let mut block_heights = Vec::with_capacity(range.len());
 
     for paragraph_ix in range {
-      let paragraph = self.document.paragraphs.get(paragraph_ix)?.clone();
+      let paragraph = self.document.paragraphs.get(paragraph_ix)?;
       if !matches!(self.document.blocks.get(paragraph_ix), Some(Block::Paragraph(_))) {
         return None;
       }
 
       let block_start = items.len();
       let mut block_height = px(0.0);
-      if self.invisibility_mode && !paragraph_is_visible(&paragraph) {
+      if self.invisibility_mode && !paragraph_is_visible(paragraph) {
         block_item_ranges.push(block_start..items.len());
         block_heights.push(px(0.0));
         continue;
@@ -301,7 +310,7 @@ impl RichTextEditor {
     width: Pixels,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) -> (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>) {
+  ) -> FullItemSizes {
     let block_count = self.document.blocks.len();
     let mut items = Vec::with_capacity(block_count);
     let mut sizes = Vec::with_capacity(block_count);

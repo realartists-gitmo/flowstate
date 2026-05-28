@@ -177,11 +177,11 @@ impl RichTextEditor {
     self.apply_document_edit(cx, |editor, cx| {
       let range = editor.selection.normalized();
       for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-        if let Some(paragraph) = paragraphs_mut(&mut editor.document).get_mut(paragraph_ix) {
-          if paragraph.style != style {
-            paragraph.style = style;
-            bump_paragraph_version(paragraph);
-          }
+        if let Some(paragraph) = paragraphs_mut(&mut editor.document).get_mut(paragraph_ix)
+          && paragraph.style != style
+        {
+          paragraph.style = style;
+          bump_paragraph_version(paragraph);
         }
       }
       editor.after_formatting_mutation(cx);

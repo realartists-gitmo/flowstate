@@ -131,7 +131,7 @@ impl RichTextEditor {
           } else {
             RecoveryWriteDecision::Write {
               generation: editor.edit_generation,
-              document: editor.document.clone(),
+              document: Box::new(editor.document.clone()),
             }
           }
         })
@@ -149,7 +149,7 @@ impl RichTextEditor {
           write_db8(path, &document)
         })
         .await;
-      log_timing("recovery write", write_timing, format!("paragraphs={paragraph_count}"));
+      log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));
       match write_result {
         Ok(()) => {
           let _ = editor.update(cx, |editor, _| {

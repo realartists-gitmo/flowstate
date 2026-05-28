@@ -16,7 +16,7 @@ impl RichTextEditor {
     };
     let viewport = self.scroll_handle.bounds();
     let scroll_bottom = (-self.scroll_handle.offset().y).max(px(0.0)) + viewport.size.height.max(px(700.0)) + overscan;
-    let mut remainders = Vec::new();
+    let mut remainders = Vec::with_capacity(visible_range.len());
     for item_ix in visible_range {
       if let Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) = cache.items.get(item_ix) {
         let row_top = self.height_prefix_index.item_top(item_ix);
@@ -118,18 +118,26 @@ impl RichTextEditor {
     else {
       return (px(0.0), false);
     };
-    let height = entry
-      .chunks
-      .iter()
-      .filter(|chunk| chunk.end_byte > start_byte)
-      .map(|chunk| chunk.height)
-      .fold(px(0.0), |acc, height| acc + height);
+    let mut start_ix = 0usize;
+    let mut end_ix = entry.chunks.len();
+    while start_ix < end_ix {
+      let mid = start_ix + (end_ix - start_ix) / 2;
+      if entry.chunks[mid].end_byte > start_byte {
+        end_ix = mid;
+      } else {
+        start_ix = mid + 1;
+      }
+    }
+    let mut height = px(0.0);
+    for chunk in &entry.chunks[start_ix..] {
+      height += chunk.height;
+    }
     (height, entry.complete)
   }
 
   fn catch_up_chunk_target_lines(&self, remaining: Pixels) -> usize {
     let line_height = (self.document.theme.body_font_size * self.document.theme.line_spacing * 1.35).max(px(12.0));
-    let approximate_lines = f32::from(remaining / line_height).ceil() as usize;
+    let approximate_lines = (remaining / line_height).ceil() as usize;
     approximate_lines.clamp(DEFAULT_PARAGRAPH_CHUNK_TARGET_LINES, SCROLL_FOREGROUND_MAX_CHUNK_LINES)
   }
 

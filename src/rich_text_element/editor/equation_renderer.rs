@@ -1,7 +1,7 @@
 struct EquationRenderer;
 
 impl EquationRenderer {
-  fn clear_entries(keys: impl IntoIterator<Item = (String, bool)>) {
+  fn clear_entries(keys: impl IntoIterator<Item = (SharedString, bool)>) {
     let keys: Vec<_> = keys.into_iter().collect();
     if keys.is_empty() {
       return;
@@ -26,15 +26,15 @@ impl EquationRenderer {
 
   fn svg_bytes(equation: &EquationBlock) -> Result<Arc<Vec<u8>>, String> {
     let display = matches!(equation.display, EquationDisplay::Display);
-    let key = (equation.source.to_string(), display);
-    let cache = EQUATION_SVG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (equation.source.clone(), display);
+    let cache = EQUATION_SVG_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
       return cached;
     }
     let result = if display {
-      mathjax_svg::convert_to_svg(&key.0)
+      mathjax_svg::convert_to_svg(key.0.as_ref())
     } else {
-      mathjax_svg::convert_to_svg_inline(&key.0)
+      mathjax_svg::convert_to_svg_inline(key.0.as_ref())
     }
     .map(|svg| Arc::new(pad_mathjax_svg_viewbox(&svg).into_bytes()))
     .map_err(|error| error.to_string());
@@ -46,8 +46,8 @@ impl EquationRenderer {
 
   fn png_bytes(equation: &EquationBlock) -> Result<Arc<Vec<u8>>, String> {
     let display = matches!(equation.display, EquationDisplay::Display);
-    let key = (equation.source.to_string(), display);
-    let cache = EQUATION_PNG_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let key = (equation.source.clone(), display);
+    let cache = EQUATION_PNG_CACHE.get_or_init(|| Mutex::new(FxHashMap::default()));
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
       return cached;
     }

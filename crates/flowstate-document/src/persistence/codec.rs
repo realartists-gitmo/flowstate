@@ -42,11 +42,25 @@ fn read_len(cursor: &mut Cursor<&[u8]>, label: &'static str) -> io::Result<usize
   usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{label} overflows usize")))
 }
 
+fn read_bytes<'a>(cursor: &mut Cursor<&'a [u8]>, len: usize, label: &'static str) -> io::Result<&'a [u8]> {
+  let start = usize::try_from(cursor.position())
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("{label} cursor position overflows usize")))?;
+  let end = start
+    .checked_add(len)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} length overflows usize")))?;
+  if end > cursor.get_ref().len() {
+    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("{label} is truncated")));
+  }
+  cursor.set_position(end as u64);
+  Ok(&cursor.get_ref()[start..end])
+}
+
 fn read_string(cursor: &mut Cursor<&[u8]>) -> io::Result<String> {
   let len = read_len(cursor, "DB8 string length")?;
-  let mut bytes = vec![0; len];
-  cursor.read_exact(&mut bytes)?;
-  String::from_utf8(bytes).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 string is not UTF-8"))
+  let bytes = read_bytes(cursor, len, "DB8 string")?;
+  std::str::from_utf8(bytes)
+    .map(|text| text.to_owned())
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 string is not UTF-8"))
 }
 
 fn write_string(bytes: &mut Vec<u8>, value: &str) {
