@@ -31,6 +31,7 @@ pub struct RichTextEditorView {
   editor: Entity<RichTextEditor>,
 }
 
+#[hotpath::measure_all]
 impl RichTextEditorView {
   /// Create a new editor entity from a loaded document.
   pub fn new(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
@@ -49,6 +50,7 @@ impl RichTextEditorView {
   }
 }
 
+#[hotpath::measure_all]
 impl Render for RichTextEditorView {
   fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
     div()
@@ -63,10 +65,12 @@ impl Render for RichTextEditorView {
 /// Host applications should call this once during GPUI app startup. The
 /// keybindings target the `RichTextEditor` key context, so they only fire when
 /// the rich text component has focus.
+#[hotpath::measure]
 pub fn register_rich_text_editor_keybindings(cx: &mut App) {
   register_default_keybindings(cx);
 }
 
+#[hotpath::measure]
 fn install_prompt_renderer(cx: &mut App) {
   cx.bind_keys([
     KeyBinding::new("enter", FlowPromptAccept, Some(PROMPT_CONTEXT)),
@@ -75,6 +79,7 @@ fn install_prompt_renderer(cx: &mut App) {
   cx.set_prompt_builder(flow_prompt_renderer);
 }
 
+#[hotpath::measure]
 fn flow_prompt_renderer(
   level: PromptLevel,
   message: &str,
@@ -104,6 +109,7 @@ struct FlowPromptRenderer {
   focus: FocusHandle,
 }
 
+#[hotpath::measure_all]
 impl FlowPromptRenderer {
   fn accept_index(&self) -> Option<usize> {
     self
@@ -134,6 +140,7 @@ impl FlowPromptRenderer {
   }
 }
 
+#[hotpath::measure_all]
 impl Render for FlowPromptRenderer {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let (icon, accent) = match self.level {
@@ -234,6 +241,7 @@ impl Render for FlowPromptRenderer {
   }
 }
 
+#[hotpath::measure]
 fn wrap_prompt_detail(detail: &str) -> String {
   const MAX_RUN: usize = 72;
   let mut wrapped = String::with_capacity(detail.len() + detail.len() / MAX_RUN);
@@ -263,6 +271,7 @@ fn wrap_prompt_detail(detail: &str) -> String {
 
 impl EventEmitter<PromptResponse> for FlowPromptRenderer {}
 
+#[hotpath::measure_all]
 impl Focusable for FlowPromptRenderer {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus.clone()
@@ -271,12 +280,14 @@ impl Focusable for FlowPromptRenderer {
 
 /// Regenerate the bundled demo document. Kept in the library so other tooling
 /// can call the same maintenance path as the standalone binary.
+#[hotpath::measure]
 pub fn write_demo_document() -> anyhow::Result<()> {
   write_db8("data/demo.db8", &demo_document())?;
   Ok(())
 }
 
 /// Run the rich text processor by itself for focused component development.
+#[hotpath::measure]
 pub fn run_standalone(document_path: Option<PathBuf>) {
   Application::new()
     .with_assets(AppAssets)
@@ -293,6 +304,7 @@ pub fn run_standalone(document_path: Option<PathBuf>) {
 
 struct AppAssets;
 
+#[hotpath::measure_all]
 impl AssetSource for AppAssets {
   fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
     match path {
@@ -309,6 +321,7 @@ impl AssetSource for AppAssets {
     }
   }
 
+  #[hotpath::measure]
   fn list(&self, path: &str) -> Result<Vec<SharedString>> {
     let mut assets = gpui_component_assets::Assets.list(path)?;
     if "icons/save.svg".starts_with(path) {
@@ -342,6 +355,7 @@ impl AssetSource for AppAssets {
   }
 }
 
+#[hotpath::measure]
 fn init_theme_registry(cx: &mut App) {
   let themes_dir = vendored_themes_dir();
   if let Err(error) = ThemeRegistry::watch_dir(themes_dir, cx, apply_saved_theme) {
@@ -349,6 +363,7 @@ fn init_theme_registry(cx: &mut App) {
   }
 }
 
+#[hotpath::measure]
 fn vendored_themes_dir() -> PathBuf {
   let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
   manifest_dir
@@ -357,6 +372,7 @@ fn vendored_themes_dir() -> PathBuf {
     .join("themes")
 }
 
+#[hotpath::measure]
 fn apply_saved_theme(cx: &mut App) {
   if let Some(theme_name) = load_app_settings().theme_name
     && let Some(theme) = ThemeRegistry::global(cx)
@@ -372,6 +388,7 @@ fn apply_saved_theme(cx: &mut App) {
   apply_global_ui_font(cx);
 }
 
+#[hotpath::measure]
 fn apply_global_ui_font(cx: &mut App) {
   let mono_font_family = Theme::global(cx).mono_font_family.clone();
   Theme::global_mut(cx).font_family = mono_font_family;

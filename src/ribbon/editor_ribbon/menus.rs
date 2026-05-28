@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn modern_highlight_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
@@ -101,6 +102,7 @@ fn modern_highlight_menu(
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn modern_condensed_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
@@ -173,6 +175,7 @@ fn modern_condensed_menu(
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn invisibility_mode_button(
   editor: Entity<RichTextEditor>,
   invisibility_mode: bool,

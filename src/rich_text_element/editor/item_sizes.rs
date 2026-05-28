@@ -1,6 +1,7 @@
 type ParagraphRangeItemSizes = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
 type FullItemSizes = (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>);
 
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self

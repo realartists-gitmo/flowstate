@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn paragraph_visible_in_current_mode(&self, paragraph_ix: usize) -> bool {
     !self.invisibility_mode

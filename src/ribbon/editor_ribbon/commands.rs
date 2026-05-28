@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn modern_command_groups(
   state: &RichTextEditorStyleState,
   armed_tool: Option<ArmedInlineTool>,
@@ -34,6 +35,7 @@ fn modern_command_groups(
   ]
 }
 
+#[hotpath::measure]
 fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
   PARAGRAPH_STYLE_SPECS
     .iter()
@@ -57,6 +59,7 @@ fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
     .collect()
 }
 
+#[hotpath::measure]
 fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
   let mut commands = SEMANTIC_STYLE_SPECS
     .iter()
@@ -80,6 +83,7 @@ fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<Ar
   commands
 }
 
+#[hotpath::measure]
 fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
   vec![
     RibbonCommand {
@@ -117,6 +121,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
   ]
 }
 
+#[hotpath::measure]
 fn semantic_command(
   style: RunSemanticStyle,
   label: &'static str,
@@ -140,6 +145,7 @@ fn semantic_command(
   }
 }
 
+#[hotpath::measure]
 fn clear_formatting_command(group_id: &'static str) -> RibbonCommand {
   RibbonCommand {
     id: RibbonCommandId::ClearFormatting,
@@ -156,6 +162,7 @@ fn clear_formatting_command(group_id: &'static str) -> RibbonCommand {
   }
 }
 
+#[hotpath::measure]
 fn highlight_commands(
   document_theme: &DocumentTheme,
   current_highlight: Option<HighlightStyle>,

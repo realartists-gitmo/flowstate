@@ -25,6 +25,7 @@ pub struct BenchmarkOptions {
   pub include_paint: bool,
 }
 
+#[hotpath::measure_all]
 impl Default for BenchmarkOptions {
   fn default() -> Self {
     Self {
@@ -51,6 +52,7 @@ enum BenchmarkState {
   Failed { message: String },
 }
 
+#[hotpath::measure_all]
 impl BenchmarkRunner {
   pub fn new(options: BenchmarkOptions) -> Self {
     Self {
@@ -60,6 +62,7 @@ impl BenchmarkRunner {
   }
 }
 
+#[hotpath::measure_all]
 impl Render for BenchmarkRunner {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     if matches!(self.state, BenchmarkState::Queued) {
@@ -81,6 +84,7 @@ impl Render for BenchmarkRunner {
   }
 }
 
+#[hotpath::measure_all]
 impl BenchmarkRunner {
   fn mark_running(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.state = BenchmarkState::Running;
@@ -151,6 +155,7 @@ struct DurationStats {
   samples: usize,
 }
 
+#[hotpath::measure_all]
 impl DurationStats {
   fn from_samples(samples: &[Duration]) -> Self {
     let samples_len = samples.len().max(1);
@@ -206,6 +211,7 @@ struct FidelityReport {
   warnings: Vec<String>,
 }
 
+#[hotpath::measure_all]
 impl FidelityReport {
   fn check(&mut self, condition: bool, message: impl Into<String>) {
     self.checks += 1;

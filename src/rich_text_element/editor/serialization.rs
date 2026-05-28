@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn canonical_insert_text_operations(paragraph_id: ParagraphId, start_byte: usize, paragraph: &InputParagraph) -> Vec<CanonicalOperation> {
   let mut byte = start_byte;
   let mut operations = Vec::with_capacity(paragraph.runs.len());
@@ -15,10 +16,12 @@ fn canonical_insert_text_operations(paragraph_id: ParagraphId, start_byte: usize
   operations
 }
 
+#[hotpath::measure]
 pub(super) fn input_paragraph_text(paragraph: &InputParagraph) -> String {
   paragraph.runs.iter().map(|run| run.text.as_str()).collect()
 }
 
+#[hotpath::measure]
 fn collect_block_assets(block: &Block, assets: &AssetStore, output: &mut Vec<InputAsset>) {
   match block {
     Block::Image(image) => {
@@ -47,6 +50,7 @@ fn collect_block_assets(block: &Block, assets: &AssetStore, output: &mut Vec<Inp
   }
 }
 
+#[hotpath::measure]
 fn input_block_from_block(block: &Block) -> InputBlock {
   match block {
     Block::Paragraph(paragraph) => InputBlock::Paragraph(input_paragraph_from_paragraph(paragraph)),
@@ -73,6 +77,7 @@ fn input_block_from_block(block: &Block) -> InputBlock {
   }
 }
 
+#[hotpath::measure]
 fn block_from_input_block(block: &InputBlock) -> Block {
   match block {
     InputBlock::Paragraph(paragraph) => Block::Paragraph(paragraph_from_input_paragraph(paragraph)),
@@ -101,6 +106,7 @@ fn block_from_input_block(block: &InputBlock) -> Block {
   }
 }
 
+#[hotpath::measure]
 fn input_paragraph_from_paragraph(paragraph: &Paragraph) -> InputParagraph {
   InputParagraph {
     style: paragraph.style,
@@ -115,6 +121,7 @@ fn input_paragraph_from_paragraph(paragraph: &Paragraph) -> InputParagraph {
   }
 }
 
+#[hotpath::measure]
 fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
@@ -141,6 +148,7 @@ fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize,
   }
 }
 
+#[hotpath::measure]
 pub(super) fn input_paragraph_from_table_cell_paragraph(paragraph: &TableCellParagraph) -> InputParagraph {
   let mut byte = 0;
   InputParagraph {
@@ -162,6 +170,7 @@ pub(super) fn input_paragraph_from_table_cell_paragraph(paragraph: &TableCellPar
   }
 }
 
+#[hotpath::measure]
 fn input_paragraph_from_table_cell_range(paragraph: &TableCellParagraph, range: Range<usize>) -> InputParagraph {
   let start = range.start.min(paragraph.text.len());
   let end = range.end.min(paragraph.text.len()).max(start);
@@ -190,6 +199,7 @@ fn input_paragraph_from_table_cell_range(paragraph: &TableCellParagraph, range: 
   }
 }
 
+#[hotpath::measure]
 fn paragraph_from_input_paragraph(paragraph: &InputParagraph) -> Paragraph {
   let len = paragraph.runs.iter().map(|run| run.text.len()).sum();
   Paragraph {
@@ -209,6 +219,7 @@ fn paragraph_from_input_paragraph(paragraph: &InputParagraph) -> Paragraph {
   }
 }
 
+#[hotpath::measure]
 pub(super) fn table_cell_paragraph_from_input_paragraph(paragraph: &InputParagraph) -> TableCellParagraph {
   let text = input_paragraph_text(paragraph);
   TableCellParagraph {
@@ -217,6 +228,7 @@ pub(super) fn table_cell_paragraph_from_input_paragraph(paragraph: &InputParagra
   }
 }
 
+#[hotpath::measure]
 fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
   InputTableBlock {
     rows: table
@@ -256,6 +268,7 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
   }
 }
 
+#[hotpath::measure]
 fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
   TableBlock {
     rows: table
@@ -296,6 +309,7 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
   }
 }
 
+#[hotpath::measure]
 fn input_alignment_from_alignment(alignment: BlockAlignment) -> InputBlockAlignment {
   match alignment {
     BlockAlignment::Left => InputBlockAlignment::Left,
@@ -304,6 +318,7 @@ fn input_alignment_from_alignment(alignment: BlockAlignment) -> InputBlockAlignm
   }
 }
 
+#[hotpath::measure]
 fn alignment_from_input_alignment(alignment: InputBlockAlignment) -> BlockAlignment {
   match alignment {
     InputBlockAlignment::Left => BlockAlignment::Left,

@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn move_to_offset(&mut self, new_head: DocumentOffset, extend: bool, cx: &mut Context<Self>) {
     let anchor = if extend { self.selection.anchor } else { new_head };

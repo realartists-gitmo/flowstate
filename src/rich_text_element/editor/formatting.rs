@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn toggle_underline(&mut self, cx: &mut Context<Self>) {
     if self.clear_matching_armed_inline_tool(ArmedInlineTool::Underline, cx) {

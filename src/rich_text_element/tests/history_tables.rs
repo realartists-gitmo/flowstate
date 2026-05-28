@@ -1,5 +1,6 @@
 
 #[test]
+#[hotpath::measure]
 fn block_delete_operation_undo_redo_preserves_non_text_block() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -28,6 +29,7 @@ fn block_delete_operation_undo_redo_preserves_non_text_block() {
 }
 
 #[test]
+#[hotpath::measure]
 fn insert_blocks_operation_undo_redo_preserves_inserted_table_and_equation() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -80,6 +82,7 @@ fn insert_blocks_operation_undo_redo_preserves_inserted_table_and_equation() {
 }
 
 #[test]
+#[hotpath::measure]
 fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -130,6 +133,7 @@ fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
 }
 
 #[test]
+#[hotpath::measure]
 fn table_cell_text_edit_is_a_replace_block_history_operation() {
   let before = Block::Table(TableBlock {
     rows: vec![TableRow {
@@ -194,6 +198,7 @@ fn table_cell_text_edit_is_a_replace_block_history_operation() {
 }
 
 #[test]
+#[hotpath::measure]
 fn replace_block_operation_undo_redo_preserves_equation_source_changes() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -229,6 +234,7 @@ fn replace_block_operation_undo_redo_preserves_equation_source_changes() {
 }
 
 #[test]
+#[hotpath::measure]
 fn default_inserted_table_shape_round_trips_through_db8() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -277,6 +283,7 @@ fn default_inserted_table_shape_round_trips_through_db8() {
 }
 
 #[test]
+#[hotpath::measure]
 fn table_cell_paragraph_clipboard_conversion_preserves_text_and_styles() {
   let styles = RunStyles::default().with(RunStyle::Emphasis);
   let paragraph = InputParagraph {
@@ -298,6 +305,7 @@ fn table_cell_paragraph_clipboard_conversion_preserves_text_and_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn splitting_table_cell_paragraph_preserves_text_and_run_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let mut cell = TableCell {
@@ -342,6 +350,7 @@ fn splitting_table_cell_paragraph_preserves_text_and_run_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn merging_table_cell_paragraphs_preserves_boundary_caret_and_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let mut cell = TableCell {
@@ -389,6 +398,7 @@ fn merging_table_cell_paragraphs_preserves_boundary_caret_and_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn inserting_rich_paragraphs_into_table_cell_preserves_tail_and_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let cite = RunStyles::default().with(RunStyle::Cite);

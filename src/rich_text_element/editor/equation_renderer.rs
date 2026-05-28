@@ -1,5 +1,6 @@
 struct EquationRenderer;
 
+#[hotpath::measure_all]
 impl EquationRenderer {
   fn clear_entries(keys: impl IntoIterator<Item = (SharedString, bool)>) {
     let keys: Vec<_> = keys.into_iter().collect();
@@ -61,6 +62,7 @@ impl EquationRenderer {
   }
 }
 
+#[hotpath::measure]
 fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
   const EQUATION_RASTER_SCALE: f32 = 4.0;
   let tree = resvg::usvg::Tree::from_data(svg, &resvg::usvg::Options::default()).map_err(|error| error.to_string())?;
@@ -77,6 +79,7 @@ fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
   pixmap.encode_png().map_err(|error| error.to_string())
 }
 
+#[hotpath::measure]
 fn pad_mathjax_svg_viewbox(svg: &str) -> String {
   let Some(viewbox_start) = svg.find("viewBox=\"") else {
     return svg.to_string();

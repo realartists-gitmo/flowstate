@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn build_layout(
   document: &Document,
   width: Pixels,
@@ -50,6 +51,7 @@ pub(super) fn build_layout(
   layout
 }
 
+#[hotpath::measure]
 pub(super) fn build_single_paragraph_layout_with_visibility(
   document: &Document,
   paragraph_ix: usize,
@@ -120,6 +122,7 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
 }
 
 #[allow(dead_code)]
+#[hotpath::measure]
 pub(super) fn build_structural_block_layout(
   document: &Document,
   width: Pixels,
@@ -179,12 +182,14 @@ pub(super) fn build_structural_block_layout(
   blocks
 }
 
+#[hotpath::measure]
 fn structural_block_bounds(document: &Document, width: Pixels, y: Pixels, height: Pixels) -> Bounds<Pixels> {
   let left = document.theme.pageless_inset_x;
   let block_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   Bounds::new(point(left, y), size(block_width, height.max(px(1.0))))
 }
 
+#[hotpath::measure]
 fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
   let available_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_intrinsic_size(document, image);
@@ -199,10 +204,12 @@ fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixe
 }
 
 #[cfg(test)]
+#[hotpath::measure]
 pub(super) fn image_layout_height_for_test(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
   image_placeholder_height(document, image, width)
 }
 
+#[hotpath::measure]
 fn image_intrinsic_size(document: &Document, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
   let asset = document.assets.assets.get(&image.asset_id)?;
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
@@ -212,6 +219,7 @@ fn image_intrinsic_size(document: &Document, image: &ImageBlock) -> Option<(Pixe
   Some((px(size.width as f32), px(size.height as f32)))
 }
 
+#[hotpath::measure]
 fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) -> Option<Pixels> {
   let (intrinsic_width, intrinsic_height) = intrinsic?;
   let intrinsic_width: f32 = intrinsic_width.into();
@@ -223,6 +231,7 @@ fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) ->
   Some(px(((width / intrinsic_width) * intrinsic_height).max(1.0)))
 }
 
+#[hotpath::measure]
 fn equation_placeholder_height(document: &Document, equation: &EquationBlock) -> Pixels {
   match equation.display {
     EquationDisplay::Display => (document.theme.body_font_size * 3.7).max(px(72.0)),
@@ -230,6 +239,7 @@ fn equation_placeholder_height(document: &Document, equation: &EquationBlock) ->
   }
 }
 
+#[hotpath::measure]
 pub(super) fn layout_structural_block_at(
   document: &Document,
   block_ix: usize,
@@ -264,6 +274,7 @@ pub(super) fn layout_structural_block_at(
   }
 }
 
+#[hotpath::measure]
 pub(super) fn structural_block_height(block: &LaidOutBlock) -> Pixels {
   match block {
     LaidOutBlock::Paragraph(paragraph) => paragraph.bottom - paragraph.top,

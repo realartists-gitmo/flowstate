@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn fragments_for_range(paragraph: &Paragraph, range: &Range<usize>, rendered_text: &str) -> Vec<VisualFragment> {
   let mut byte_offset = 0;
   let rendered_len = rendered_text.len();

@@ -1,5 +1,6 @@
 
 #[test]
+#[hotpath::measure]
 fn inline_decorations_merge_across_segment_splits() {
   let color = black();
   let merged = merge_inline_decorations(vec![
@@ -24,6 +25,7 @@ fn inline_decorations_merge_across_segment_splits() {
 }
 
 #[test]
+#[hotpath::measure]
 fn boxed_fragment_padding_is_only_applied_to_outer_emphasis_edges() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let highlighted_emphasis = emphasized.with(RunStyle::HighlightSpoken);
@@ -56,6 +58,7 @@ fn boxed_fragment_padding_is_only_applied_to_outer_emphasis_edges() {
 }
 
 #[test]
+#[hotpath::measure]
 fn dragged_text_drop_offset_adjusts_after_source_deletion() {
   let source = DocumentOffset { paragraph: 0, byte: 2 }..DocumentOffset { paragraph: 0, byte: 5 };
   assert_eq!(
@@ -75,6 +78,7 @@ fn dragged_text_drop_offset_adjusts_after_source_deletion() {
 }
 
 #[test]
+#[hotpath::measure]
 fn move_rich_text_operation_undo_redo_restores_source_and_drop() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let mut document = document_from_input(
@@ -143,6 +147,7 @@ fn move_rich_text_operation_undo_redo_restores_source_and_drop() {
 }
 
 #[test]
+#[hotpath::measure]
 fn soft_line_break_stays_inside_paragraph_and_copies_as_newline() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -168,6 +173,7 @@ fn soft_line_break_stays_inside_paragraph_and_copies_as_newline() {
 }
 
 #[test]
+#[hotpath::measure]
 fn find_text_ranges_returns_document_offsets_across_paragraphs() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -209,6 +215,7 @@ fn find_text_ranges_returns_document_offsets_across_paragraphs() {
 }
 
 #[test]
+#[hotpath::measure]
 fn cross_paragraph_style_mutation_keeps_runs_and_unselected_text_intact() {
   let mut document = document_from_input(
     DocumentTheme::default(),

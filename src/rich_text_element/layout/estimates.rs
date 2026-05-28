@@ -1,7 +1,9 @@
+#[hotpath::measure]
 pub(super) fn estimate_paragraph_item_height(document: &Document, paragraph_ix: usize, width: Pixels) -> Pixels {
   estimate_paragraph_item_height_with_visibility(document, paragraph_ix, width, false)
 }
 
+#[hotpath::measure]
 pub(super) fn estimate_paragraph_item_height_with_visibility(
   document: &Document,
   paragraph_ix: usize,
@@ -49,6 +51,7 @@ pub(super) fn estimate_paragraph_item_height_with_visibility(
   height.max(line_height)
 }
 
+#[hotpath::measure]
 pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &ParagraphPrep, width: Pixels) -> Pixels {
   if !prep.visible {
     return px(0.0);
@@ -78,6 +81,7 @@ pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &Pa
   height.max(line_height)
 }
 
+#[hotpath::measure]
 pub(super) fn estimate_structural_block_item_height(document: &Document, block_ix: usize, width: Pixels) -> Pixels {
   let Some(block) = document.blocks.get(block_ix) else {
     return px(1.0);
@@ -99,6 +103,7 @@ pub(super) fn estimate_structural_block_item_height(document: &Document, block_i
   }
 }
 
+#[hotpath::measure]
 fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixels) -> Pixels {
   let line_height = (document.theme.body_font_size * document.theme.line_spacing).max(px(16.0));
   let column_count = table
@@ -148,6 +153,7 @@ fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixe
   laid_out.bottom - laid_out.top
 }
 
+#[hotpath::measure]
 fn layout_table_block_without_text(document: &Document, table: &TableBlock, width: Pixels, y: Pixels) -> LaidOutTable {
   let table_left = document.theme.pageless_inset_x;
   let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));

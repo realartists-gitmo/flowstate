@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
     let keys = self.document.blocks.iter().filter_map(|block| match block {

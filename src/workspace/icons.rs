@@ -12,6 +12,7 @@ pub enum AppIcon {
   MultiPanel,
 }
 
+#[hotpath::measure]
 pub fn icon_button(id: impl Into<gpui::ElementId>, icon: AppIcon) -> Button {
   if matches!(icon, AppIcon::SaveFile) {
     return Button::new(id)
@@ -23,6 +24,7 @@ pub fn icon_button(id: impl Into<gpui::ElementId>, icon: AppIcon) -> Button {
 }
 
 #[cfg(target_os = "macos")]
+#[hotpath::measure]
 fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
   let symbol = match icon {
     AppIcon::Close => "xmark",
@@ -36,6 +38,7 @@ fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
 }
 
 #[cfg(not(target_os = "macos"))]
+#[hotpath::measure]
 fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
   let icon_name = match icon {
     AppIcon::Close => IconName::WindowClose,

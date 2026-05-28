@@ -20,6 +20,7 @@ pub struct DocumentIdentityMap {
   table_cell_ids: Vec<Vec<Vec<TableCellId>>>,
 }
 
+#[hotpath::measure_all]
 impl DocumentIdentityMap {
   pub fn new(document: &Document) -> Self {
     let mut this = Self::default();
@@ -85,6 +86,7 @@ impl DocumentIdentityMap {
   }
 }
 
+#[hotpath::measure]
 fn resize_ids<T>(ids: &mut Vec<T>, len: usize, wrap: impl Fn(u128) -> T)
 where
   T: std::marker::Copy,

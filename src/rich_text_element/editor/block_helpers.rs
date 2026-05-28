@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn insert_standalone_paragraphs_into_projection(
   document: &mut Document,
   insert_paragraph_ix: usize,

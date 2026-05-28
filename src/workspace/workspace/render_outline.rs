@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_left_nav(&mut self, nav_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
     if self.active_flow.is_some() {
@@ -268,6 +269,7 @@ struct FlowOutlineDrag {
   source_index: usize,
 }
 
+#[hotpath::measure_all]
 impl Render for FlowOutlineDrag {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     h_flex()
@@ -288,6 +290,7 @@ impl Render for FlowOutlineDrag {
   }
 }
 
+#[hotpath::measure]
 fn flow_drop_index(source_index: usize, target_index: usize) -> usize {
   if source_index < target_index {
     target_index.saturating_sub(1)

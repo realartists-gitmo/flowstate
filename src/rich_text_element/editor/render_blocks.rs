@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn render_image_block(
   document: &Document,
   image: &ImageBlock,
@@ -36,6 +37,7 @@ fn render_image_block(
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn image_resize_handles(editor: Entity<RichTextEditor>, block_ix: usize) -> Vec<gpui::AnyElement> {
   [
     ImageResizeHandle::TopLeft,
@@ -50,6 +52,7 @@ fn image_resize_handles(editor: Entity<RichTextEditor>, block_ix: usize) -> Vec<
   .collect()
 }
 
+#[hotpath::measure]
 fn image_resize_handle(editor: Entity<RichTextEditor>, block_ix: usize, handle: ImageResizeHandle) -> gpui::AnyElement {
   let cursor = match handle {
     ImageResizeHandle::Left | ImageResizeHandle::Right => CursorStyle::ResizeLeftRight,
@@ -95,6 +98,7 @@ fn image_resize_handle(editor: Entity<RichTextEditor>, block_ix: usize, handle: 
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn render_equation_block(
   document: &Document,
   equation: &EquationBlock,
@@ -179,6 +183,7 @@ fn render_equation_block(
   }
 }
 
+#[hotpath::measure]
 fn equation_source_text_elements(source: &str, selection: Option<EquationSourceSelection>) -> Vec<gpui::AnyElement> {
   let range = selection.and_then(|selection| {
     if selection.anchor == selection.caret {
@@ -229,6 +234,7 @@ fn equation_source_text_elements(source: &str, selection: Option<EquationSourceS
   children
 }
 
+#[hotpath::measure]
 fn byte_for_char_index(text: &str, char_ix: usize) -> usize {
   text
     .char_indices()
@@ -237,6 +243,7 @@ fn byte_for_char_index(text: &str, char_ix: usize) -> usize {
     .unwrap_or(text.len())
 }
 
+#[hotpath::measure]
 fn char_index_for_byte(text: &str, byte: usize) -> usize {
   text
     .char_indices()

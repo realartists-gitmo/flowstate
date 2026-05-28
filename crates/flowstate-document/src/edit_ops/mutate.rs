@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub fn mutate_runs_in_range(document: &mut Document, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
   for paragraph_ix in range.start.paragraph..=range.end.paragraph {
     let paragraph = &mut paragraphs_mut(document)[paragraph_ix];

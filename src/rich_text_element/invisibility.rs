@@ -33,6 +33,7 @@ pub(super) struct VisibilityIndex {
   visible_blocks: Vec<bool>,
 }
 
+#[hotpath::measure_all]
 impl VisibilityIndex {
   pub(super) fn build(document: &Document, invisibility_mode: bool) -> Self {
     let mut visible_blocks = Vec::with_capacity(document.blocks.len());
@@ -56,6 +57,7 @@ impl VisibilityIndex {
   }
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_is_visible(paragraph: &Paragraph) -> bool {
   matches!(
     paragraph.style,
@@ -65,6 +67,7 @@ pub(super) fn paragraph_is_visible(paragraph: &Paragraph) -> bool {
 
 pub(super) const INVISIBILITY_PROJECTED_VERSION_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
 
+#[hotpath::measure]
 pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix: usize) -> Option<Document> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   if !matches!(paragraph.style, ParagraphStyle::Normal) {
@@ -125,6 +128,7 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
   })
 }
 
+#[hotpath::measure]
 pub(super) fn run_is_visible(styles: RunStyles) -> bool {
   styles.semantic == RunSemanticStyle::Cite || matches!(styles.highlight, Some(HighlightStyle::Spoken | HighlightStyle::Alternative))
 }

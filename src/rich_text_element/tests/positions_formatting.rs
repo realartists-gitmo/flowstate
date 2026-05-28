@@ -1,5 +1,6 @@
 
 #[test]
+#[hotpath::measure]
 fn document_position_round_trips_top_level_text_blocks() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -44,6 +45,7 @@ fn document_position_round_trips_top_level_text_blocks() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_validation_rejects_zero_sized_fixed_images() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -74,6 +76,7 @@ fn db8_validation_rejects_zero_sized_fixed_images() {
 }
 
 #[test]
+#[hotpath::measure]
 fn double_click_at_text_paragraph_end_selects_only_that_paragraph() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -110,6 +113,7 @@ fn double_click_at_text_paragraph_end_selects_only_that_paragraph() {
 }
 
 #[test]
+#[hotpath::measure]
 fn double_click_empty_paragraph_selects_only_empty_paragraph() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -141,6 +145,7 @@ fn double_click_empty_paragraph_selects_only_empty_paragraph() {
 }
 
 #[test]
+#[hotpath::measure]
 fn selection_across_empty_paragraphs_and_clear_formatting_policy() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let mut document = document_from_input(
@@ -179,6 +184,7 @@ fn selection_across_empty_paragraphs_and_clear_formatting_policy() {
 }
 
 #[test]
+#[hotpath::measure]
 fn run_style_full_selection_toggle_policy() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let document = document_from_input(
@@ -208,6 +214,7 @@ fn run_style_full_selection_toggle_policy() {
 }
 
 #[test]
+#[hotpath::measure]
 fn semantic_run_styles_are_mutually_exclusive() {
   let mut styles = RunStyles::default().with(RunStyle::Emphasis);
   styles.apply(RunStyle::Condensed);
@@ -217,6 +224,7 @@ fn semantic_run_styles_are_mutually_exclusive() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_round_trip_preserves_condensed_semantic_styles() {
   let path = std::env::temp_dir().join(format!("flowstate-semantic-{}.db8", uuid::Uuid::new_v4()));
   let document = document_from_input(
@@ -244,6 +252,7 @@ fn db8_round_trip_preserves_condensed_semantic_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_save_can_replace_existing_file() {
   let path = std::env::temp_dir().join(format!("flowstate-replace-{}.db8", uuid::Uuid::new_v4()));
   let first = document_from_input(

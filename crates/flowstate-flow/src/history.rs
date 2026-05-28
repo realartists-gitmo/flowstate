@@ -16,6 +16,7 @@ pub struct History {
   actions: Vec<HistoryAction>,
 }
 
+#[hotpath::measure_all]
 impl History {
   pub fn add(&mut self, action_bundle: ActionBundle, before_focus: Option<NodeId>, after_focus: Option<NodeId>) {
     let keep = self.index.map_or(0, |index| index + 1);
@@ -69,6 +70,7 @@ pub struct HistoryHolder {
   last_added_owner: Option<NodeId>,
 }
 
+#[hotpath::measure_all]
 impl HistoryHolder {
   pub fn new() -> Self {
     let mut histories = FxHashMap::default();

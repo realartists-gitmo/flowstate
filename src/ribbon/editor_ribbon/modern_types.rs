@@ -76,6 +76,7 @@ struct RibbonLabel {
   icon_path: Option<&'static str>,
 }
 
+#[hotpath::measure_all]
 impl RibbonLabel {
   fn for_command(command: &RibbonCommand) -> Self {
     let icon_path = match command.id {

@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Render for EditorRibbon {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let (style_state, armed_tool, document_theme, current_highlight, highlight_mode_active, invisibility_mode) = {

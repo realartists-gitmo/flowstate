@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_resizable_workspace(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     if self.document_panels.is_empty() && self.flow_panels.is_empty() {

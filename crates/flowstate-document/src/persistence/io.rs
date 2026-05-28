@@ -27,6 +27,7 @@ const BLOCK_TABLE: u8 = 3;
 const TABLE_CELL_PARAGRAPH: u8 = 0;
 const TABLE_CELL_TABLE: u8 = 1;
 
+#[hotpath::measure]
 pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
   let path = path.as_ref();
   match read_db8(path) {
@@ -43,6 +44,7 @@ pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
   }
 }
 
+#[hotpath::measure]
 pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
   let timing = Instant::now();
   let bytes = fs::read(path)?;
@@ -59,6 +61,7 @@ pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
   read_db8_current(cursor, timing)
 }
 
+#[hotpath::measure]
 pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
   let path = path.as_ref();
   // Skip directory creation when the parent component is empty (e.g. a bare
@@ -73,6 +76,7 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
   write_bytes_atomic(path, &bytes)
 }
 
+#[hotpath::measure]
 fn document_for_serialization(document: &Document) -> Document {
   let mut document = document.clone();
   // Recovery/autosave can snapshot while live editing is still settling; make
@@ -83,6 +87,7 @@ fn document_for_serialization(document: &Document) -> Document {
   document
 }
 
+#[hotpath::measure]
 fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
   let estimated_asset_bytes = document
     .assets
@@ -116,6 +121,7 @@ fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
   Ok(bytes)
 }
 
+#[hotpath::measure]
 fn serializable_blocks(document: &Document) -> Vec<Block> {
   let mut paragraph_ix = 0;
   let mut blocks = Vec::with_capacity(document.blocks.len().max(document.paragraphs.len()));
@@ -147,6 +153,7 @@ fn serializable_blocks(document: &Document) -> Vec<Block> {
   blocks
 }
 
+#[hotpath::measure]
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   // Use "." as fallback when the path has no directory component (e.g. a bare
   // filename) so NamedTempFile::new_in doesn't receive an empty path.

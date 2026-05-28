@@ -46,6 +46,7 @@ pub(super) struct ParagraphPrepBatchResult {
   pub(super) preps: Vec<ParagraphPrep>,
 }
 
+#[hotpath::measure]
 pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> ParagraphPrepBatchResult {
   let mut preps = Vec::new();
   let mut text_bytes = 0usize;
@@ -89,6 +90,7 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
   }
 }
 
+#[hotpath::measure]
 pub(super) fn build_paragraph_prep(
   document: &Document,
   paragraph_ix: usize,
@@ -196,6 +198,7 @@ pub(super) fn build_paragraph_prep(
 mod prep_tests {
   use super::*;
 
+  #[hotpath::measure]
   fn input_run(text: &str, styles: RunStyles) -> InputRun {
     InputRun {
       text: text.to_string(),
@@ -204,6 +207,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn normal_prep_captures_text_runs_and_wrap_breaks() {
     let document = document_from_input(
       DocumentTheme::default(),
@@ -223,6 +227,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn invisibility_prep_projects_visible_runs() {
     let cite = RunStyles {
       semantic: RunSemanticStyle::Cite,
@@ -254,6 +259,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn invisibility_prep_hides_plain_normal_paragraphs() {
     let document = document_from_input(
       DocumentTheme::default(),
@@ -270,6 +276,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn prep_batch_defers_work_after_text_byte_limit() {
     let document = document_from_input(
       DocumentTheme::default(),

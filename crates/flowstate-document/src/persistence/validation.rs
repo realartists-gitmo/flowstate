@@ -1,5 +1,6 @@
 
 #[allow(dead_code)]
+#[hotpath::measure]
 fn document_fingerprint(document: &Document) -> u64 {
   let mut hasher = DefaultHasher::new();
   document_text_slice(document, 0..document.text.byte_len()).hash(&mut hasher);
@@ -13,6 +14,7 @@ fn document_fingerprint(document: &Document) -> u64 {
   hasher.finish()
 }
 
+#[hotpath::measure]
 fn validate_document(document: &Document) -> io::Result<()> {
   let text_len = document.text.byte_len();
   if document.paragraphs.is_empty() {
@@ -67,6 +69,7 @@ fn validate_document(document: &Document) -> io::Result<()> {
   Ok(())
 }
 
+#[hotpath::measure]
 fn validate_paragraph_block_projection(document: &Document) -> io::Result<()> {
   let paragraph_blocks = document
     .blocks
@@ -93,6 +96,7 @@ fn validate_paragraph_block_projection(document: &Document) -> io::Result<()> {
   Ok(())
 }
 
+#[hotpath::measure]
 fn validate_block_payload(block: &Block, document: &Document, table_depth: usize) -> io::Result<()> {
   match block {
     // Missing assets are allowed so a partially damaged document can still
@@ -109,6 +113,7 @@ fn validate_block_payload(block: &Block, document: &Document, table_depth: usize
   Ok(())
 }
 
+#[hotpath::measure]
 fn validate_image_payload(image: &ImageBlock, document: &Document) -> io::Result<()> {
   match image.sizing {
     ImageSizing::Fixed { width_px, height_px } => {
@@ -133,6 +138,7 @@ fn validate_image_payload(image: &ImageBlock, document: &Document) -> io::Result
   Ok(())
 }
 
+#[hotpath::measure]
 fn validate_equation_payload(equation: &EquationBlock) -> io::Result<()> {
   if equation.source.len() > 64 * 1024 {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "equation source is too large"));
@@ -140,6 +146,7 @@ fn validate_equation_payload(equation: &EquationBlock) -> io::Result<()> {
   Ok(())
 }
 
+#[hotpath::measure]
 fn validate_table_payload(table: &TableBlock, depth: usize) -> io::Result<()> {
   if depth > 8 {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "nested tables are too deep"));

@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(first_paragraph) = fragment.paragraphs.first() else {
     return offset;
@@ -8,6 +9,7 @@ pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, 
   insert_multi_paragraph_fragment_at(document, offset, fragment)
 }
 
+#[hotpath::measure]
 fn insert_single_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, paragraph: &InputParagraph) -> DocumentOffset {
   let text = input_paragraph_text(paragraph);
   if text.is_empty() {
@@ -36,6 +38,7 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
   }
 }
 
+#[hotpath::measure]
 fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(target) = document.paragraphs.get(offset.paragraph).cloned() else {
     return offset;
@@ -86,10 +89,12 @@ fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentO
   }
 }
 
+#[hotpath::measure]
 fn input_paragraph_text(paragraph: &InputParagraph) -> String {
   paragraph.runs.iter().map(|run| run.text.as_str()).collect()
 }
 
+#[hotpath::measure]
 fn input_paragraph_text_runs(paragraph: &InputParagraph) -> Vec<TextRun> {
   merge_adjacent_runs(
     paragraph

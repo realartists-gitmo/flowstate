@@ -19,6 +19,7 @@ struct DocumentFileEntry {
   full_path_lower: String,
 }
 
+#[hotpath::measure_all]
 impl DocumentFileEntry {
   fn new(path: PathBuf) -> Self {
     let file_name_lower = path
@@ -34,6 +35,7 @@ impl DocumentFileEntry {
   }
 }
 
+#[hotpath::measure_all]
 impl DocumentFileSearch {
   pub fn new(root: PathBuf) -> anyhow::Result<Self> {
     let root = normalize_search_root(root)?;
@@ -57,12 +59,14 @@ impl DocumentFileSearch {
   }
 }
 
+#[hotpath::measure]
 pub fn default_global_search_root() -> PathBuf {
   std::env::var_os("HOME")
     .map(PathBuf::from)
     .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
+#[hotpath::measure]
 fn normalize_search_root(root: PathBuf) -> anyhow::Result<PathBuf> {
   let root = root.canonicalize().unwrap_or(root);
   if !root.exists() {
@@ -74,6 +78,7 @@ fn normalize_search_root(root: PathBuf) -> anyhow::Result<PathBuf> {
   Ok(root)
 }
 
+#[hotpath::measure]
 fn collect_document_files(root: &Path, files: &mut Vec<PathBuf>) {
   let Ok(entries) = fs::read_dir(root) else {
     return;
@@ -95,6 +100,7 @@ fn collect_document_files(root: &Path, files: &mut Vec<PathBuf>) {
   }
 }
 
+#[hotpath::measure]
 fn should_descend_into(path: &Path) -> bool {
   let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
     return false;
@@ -103,6 +109,7 @@ fn should_descend_into(path: &Path) -> bool {
   !name.starts_with('.')
 }
 
+#[hotpath::measure]
 fn search_document_files(files: &[DocumentFileEntry], typed_query: &str, limit: usize) -> Vec<FileSearchHit> {
   let query = typed_query.trim().to_ascii_lowercase();
   if query.is_empty() {
@@ -134,6 +141,7 @@ fn search_document_files(files: &[DocumentFileEntry], typed_query: &str, limit: 
     .collect()
 }
 
+#[hotpath::measure]
 fn match_path(entry: &DocumentFileEntry, query: &str) -> Option<usize> {
   if let Some(index) = entry.file_name_lower.find(query) {
     return Some(index);
@@ -147,6 +155,7 @@ fn match_path(entry: &DocumentFileEntry, query: &str) -> Option<usize> {
     .or_else(|| fuzzy_subsequence_score(&entry.full_path_lower, query).map(|score| entry.file_name_lower.len() + score))
 }
 
+#[hotpath::measure]
 fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<usize> {
   let mut score = 0;
   let mut haystack_chars = haystack.char_indices();
@@ -159,6 +168,7 @@ fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<usize> {
   Some(score)
 }
 
+#[hotpath::measure]
 fn is_supported_document_path(path: &Path) -> bool {
   path
     .extension()

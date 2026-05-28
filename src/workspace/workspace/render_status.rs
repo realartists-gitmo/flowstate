@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn next_untitled_title(&self, cx: &App) -> String {
     let used = self

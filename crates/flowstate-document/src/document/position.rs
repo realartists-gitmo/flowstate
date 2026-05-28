@@ -33,11 +33,13 @@ pub enum DocumentPosition {
 // -- Tiny unit-conversion helpers -----------------------------------------
 
 /// Convert Word/PDF points to GPUI logical pixels (96 dpi).
+#[hotpath::measure]
 fn pt(value: f32) -> Pixels {
   px(value * 96.0 / 72.0)
 }
 
 /// Convert a DOCX border `w:sz` value (in eighths of a point) to logical px.
+#[hotpath::measure]
 fn border_eighth_points(value: f32) -> Pixels {
   pt(value / 8.0)
 }

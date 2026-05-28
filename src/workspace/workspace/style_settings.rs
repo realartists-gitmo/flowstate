@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn style_number_item(
   workspace: WeakEntity<Workspace>,
   title: &'static str,
@@ -20,10 +21,12 @@ fn style_number_item(
   .layout(Axis::Horizontal)
 }
 
+#[hotpath::measure]
 fn font_family_item(workspace: WeakEntity<Workspace>) -> SettingItem {
   SettingItem::render(move |_, window, cx| render_font_family_row(workspace.clone(), window, cx))
 }
 
+#[hotpath::measure]
 fn render_font_family_row(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
   let current = active_theme_value(cx, &workspace, |theme| theme.default_font_family.clone()).unwrap_or_else(|| SharedString::from("Carlito"));
   let fonts = system_font_families(cx, current.clone());
@@ -79,6 +82,7 @@ fn render_font_family_row(workspace: WeakEntity<Workspace>, window: &mut Window,
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn system_font_families(cx: &App, current: SharedString) -> Vec<SharedString> {
   let mut fonts = cx
     .text_system()
@@ -96,6 +100,7 @@ fn system_font_families(cx: &App, current: SharedString) -> Vec<SharedString> {
   fonts
 }
 
+#[hotpath::measure]
 fn style_face_item(
   workspace: WeakEntity<Workspace>,
   label: &'static str,
@@ -105,6 +110,7 @@ fn style_face_item(
   style_compact_item(workspace, label, |_| 0.0, |_, _| {}, None, get, set)
 }
 
+#[hotpath::measure]
 fn style_compact_item(
   workspace: WeakEntity<Workspace>,
   label: &'static str,
@@ -119,6 +125,7 @@ fn style_compact_item(
   })
 }
 
+#[hotpath::measure]
 fn render_style_compact_row(
   workspace: WeakEntity<Workspace>,
   label: &'static str,
@@ -245,6 +252,7 @@ fn render_style_compact_row(
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn style_color_item(
   workspace: WeakEntity<Workspace>,
   title: &'static str,
@@ -287,6 +295,7 @@ fn style_color_item(
   })
 }
 
+#[hotpath::measure]
 fn active_theme_value<T>(cx: &App, workspace: &WeakEntity<Workspace>, get: fn(&DocumentTheme) -> T) -> Option<T> {
   let workspace = workspace.upgrade()?;
   let workspace = workspace.read(cx);
@@ -297,6 +306,7 @@ fn active_theme_value<T>(cx: &App, workspace: &WeakEntity<Workspace>, get: fn(&D
   }
 }
 
+#[hotpath::measure]
 fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut DocumentTheme)) {
   let _ = workspace.update(cx, |workspace, cx| {
     let mut theme = workspace
@@ -319,6 +329,7 @@ fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>,
   });
 }
 
+#[hotpath::measure]
 fn smart_word_selection_item(workspace: WeakEntity<Workspace>) -> SettingItem {
   SettingItem::render(move |_, _, cx| {
     let enabled = active_smart_word_selection(cx, &workspace);
@@ -355,6 +366,7 @@ fn smart_word_selection_item(workspace: WeakEntity<Workspace>) -> SettingItem {
   })
 }
 
+#[hotpath::measure]
 fn active_smart_word_selection(cx: &App, workspace: &WeakEntity<Workspace>) -> bool {
   workspace
     .upgrade()
@@ -363,6 +375,7 @@ fn active_smart_word_selection(cx: &App, workspace: &WeakEntity<Workspace>) -> b
     .unwrap_or_else(load_smart_word_selection)
 }
 
+#[hotpath::measure]
 fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
   cx.background_executor()
     .spawn(async move {
@@ -383,6 +396,7 @@ fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, 
   });
 }
 
+#[hotpath::measure]
 fn render_apply_all_styles(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
   let font_size = window.use_keyed_state("style-apply-all-font-size", cx, |window, cx| {
     cx.new(|cx| {
@@ -457,14 +471,17 @@ fn render_apply_all_styles(workspace: WeakEntity<Workspace>, window: &mut Window
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn pixels_to_pt(value: Pixels) -> f64 {
   value.as_f64() * 72.0 / 96.0
 }
 
+#[hotpath::measure]
 fn pt_to_pixels(value: f64) -> Pixels {
   px((value as f32) * 96.0 / 72.0)
 }
 
+#[hotpath::measure]
 fn parse_hex_color(value: &str) -> Option<Hsla> {
   let value = value.trim().trim_start_matches('#');
   if value.len() != 6 {
@@ -475,11 +492,13 @@ fn parse_hex_color(value: &str) -> Option<Hsla> {
     .map(|hex| rgb(hex).into())
 }
 
+#[hotpath::measure]
 fn optional_f64(value: &str) -> Option<f64> {
   let value = value.trim();
   if value.is_empty() { None } else { value.parse::<f64>().ok() }
 }
 
+#[hotpath::measure]
 fn optional_hex_color(value: &str) -> Option<Hsla> {
   let value = value.trim();
   if value.is_empty() { None } else { parse_hex_color(value) }

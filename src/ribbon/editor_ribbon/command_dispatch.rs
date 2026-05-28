@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn command_sort_key(command_id: Option<CommandId>) -> u16 {
   match command_id {
     Some(CommandId::SetParagraphPocket) => 400,
@@ -16,6 +17,7 @@ fn command_sort_key(command_id: Option<CommandId>) -> u16 {
   }
 }
 
+#[hotpath::measure]
 fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, cx: &mut Context<RichTextEditor>) {
   match command_id {
     RibbonCommandId::Paragraph(style) => {
@@ -50,6 +52,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
   }
 }
 
+#[hotpath::measure]
 fn paragraph_command_id(style: ParagraphStyle) -> Option<CommandId> {
   match style {
     ParagraphStyle::Normal => None,
@@ -62,6 +65,7 @@ fn paragraph_command_id(style: ParagraphStyle) -> Option<CommandId> {
   }
 }
 
+#[hotpath::measure]
 fn semantic_command_id(style: RunSemanticStyle) -> Option<CommandId> {
   match style {
     RunSemanticStyle::Cite => Some(CommandId::ToggleCite),
@@ -73,6 +77,7 @@ fn semantic_command_id(style: RunSemanticStyle) -> Option<CommandId> {
   }
 }
 
+#[hotpath::measure]
 fn paragraph_priority(style: ParagraphStyle) -> u8 {
   match style {
     ParagraphStyle::Normal => 100,
@@ -85,6 +90,7 @@ fn paragraph_priority(style: ParagraphStyle) -> u8 {
   }
 }
 
+#[hotpath::measure]
 fn semantic_priority(style: RunSemanticStyle) -> u8 {
   match style {
     RunSemanticStyle::Cite => 92,
@@ -96,6 +102,7 @@ fn semantic_priority(style: RunSemanticStyle) -> u8 {
   }
 }
 
+#[hotpath::measure]
 fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   match style {
     ParagraphStyle::Normal | ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block => OverflowBehavior::KeepVisible,
@@ -103,6 +110,7 @@ fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   }
 }
 
+#[hotpath::measure]
 fn semantic_overflow_behavior(style: RunSemanticStyle) -> OverflowBehavior {
   match style {
     RunSemanticStyle::Cite | RunSemanticStyle::Emphasis | RunSemanticStyle::Underline => OverflowBehavior::KeepVisible,

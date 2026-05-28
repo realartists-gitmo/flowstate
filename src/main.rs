@@ -1,11 +1,33 @@
-use std::path::PathBuf;
+use std::{
+  alloc::{GlobalAlloc, Layout},
+  path::PathBuf,
+};
 
 use clap::Parser;
 
 use flowstate::{run_standalone, write_demo_document};
 
+struct FlowstateAllocator;
+
+impl Default for FlowstateAllocator {
+  fn default() -> Self {
+    Self
+  }
+}
+
+unsafe impl GlobalAlloc for FlowstateAllocator {
+  unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    unsafe { mimalloc::MiMalloc.alloc(layout) }
+  }
+
+  unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe { mimalloc::MiMalloc.dealloc(ptr, layout) }
+  }
+}
+
+#[cfg(not(feature = "hotpath-alloc"))]
 #[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+static GLOBAL: FlowstateAllocator = FlowstateAllocator;
 
 /// Command line arguments for the standalone rich text processor.
 ///
@@ -25,6 +47,7 @@ struct Cli {
   write_demo_db8: bool,
 }
 
+#[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
   let cli = Cli::parse();
 

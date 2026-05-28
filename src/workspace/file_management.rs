@@ -9,12 +9,14 @@ pub const UNTITLED_DOCUMENT_NAME: &str = "Untitled.db8";
 pub const UNTITLED_FLOW_NAME: &str = "Untitled.fl0";
 
 /// Create the document used by File > New and the empty-workspace New button.
+#[hotpath::measure]
 pub fn new_blank_document() -> Document {
   blank_document()
 }
 
 /// Use the process working directory as the first save location. If it cannot
 /// be read, fall back to the user's home directory, then the filesystem root.
+#[hotpath::measure]
 pub fn default_save_directory() -> PathBuf {
   std::env::current_dir()
     .ok()
@@ -24,6 +26,7 @@ pub fn default_save_directory() -> PathBuf {
 
 /// Keep untitled saves in the native `.db8` format even if the user types a
 /// bare filename in the save dialog.
+#[hotpath::measure]
 pub fn normalize_db8_path(path: PathBuf) -> PathBuf {
   if path.extension().is_some() {
     return path;
@@ -46,10 +49,12 @@ pub fn normalize_db8_path(path: PathBuf) -> PathBuf {
 }
 
 /// Keep flow saves in the native `.fl0` format when the user types a bare filename.
+#[hotpath::measure]
 pub fn normalize_fl0_path(path: PathBuf) -> PathBuf {
   normalize_path_with_extension(path, UNTITLED_FLOW_NAME, ".fl0")
 }
 
+#[hotpath::measure]
 fn normalize_path_with_extension(path: PathBuf, fallback_name: &str, extension: &str) -> PathBuf {
   if path.extension().is_some() {
     return path;

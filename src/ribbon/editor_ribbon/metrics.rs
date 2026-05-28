@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RibbonLayoutMetrics {
   fn from_height(height: gpui::Pixels) -> Self {
     let height = clamp_pixels(height, min_ribbon_height(), max_ribbon_height());
@@ -39,22 +40,27 @@ impl RibbonLayoutMetrics {
   }
 }
 
+#[hotpath::measure]
 fn default_ribbon_height() -> gpui::Pixels {
   px(112.0)
 }
 
+#[hotpath::measure]
 fn min_ribbon_height() -> gpui::Pixels {
   px(56.0)
 }
 
+#[hotpath::measure]
 fn max_ribbon_height() -> gpui::Pixels {
   px(158.0)
 }
 
+#[hotpath::measure]
 fn clamp_pixels(value: gpui::Pixels, min: gpui::Pixels, max: gpui::Pixels) -> gpui::Pixels {
   px(value.as_f32().clamp(min.as_f32(), max.as_f32()))
 }
 
+#[hotpath::measure]
 fn group_outer_width(content_width: gpui::Pixels, has_divider: bool, metrics: RibbonLayoutMetrics) -> gpui::Pixels {
   let divider_chrome = if has_divider {
     metrics.group_divider_padding_left.as_f32() + 1.0

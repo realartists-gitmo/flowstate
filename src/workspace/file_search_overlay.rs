@@ -31,6 +31,7 @@ pub struct FileSearchOverlay {
   _input_subscription: Subscription,
 }
 
+#[hotpath::measure_all]
 impl FileSearchOverlay {
   pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, or file_name.fl0"));
@@ -179,12 +180,14 @@ impl FileSearchOverlay {
 
 impl EventEmitter<()> for FileSearchOverlay {}
 
+#[hotpath::measure_all]
 impl Focusable for FileSearchOverlay {
   fn focus_handle(&self, cx: &App) -> FocusHandle {
     self.search_input.focus_handle(cx)
   }
 }
 
+#[hotpath::measure_all]
 impl Render for FileSearchOverlay {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let query = self.query(cx);

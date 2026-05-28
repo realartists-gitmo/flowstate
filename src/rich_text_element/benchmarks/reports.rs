@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn write_stats_tables(out: &mut String, stats: &DocumentStats) {
   let _ = writeln!(out, "### Model Shape");
   let _ = writeln!(out);
@@ -61,6 +62,7 @@ fn write_stats_tables(out: &mut String, stats: &DocumentStats) {
   let _ = writeln!(out);
 }
 
+#[hotpath::measure]
 fn write_fidelity_report(out: &mut String, fidelity: &FidelityReport) {
   let _ = writeln!(out, "### Fidelity Checks");
   let _ = writeln!(out);
@@ -87,6 +89,7 @@ fn write_fidelity_report(out: &mut String, fidelity: &FidelityReport) {
   let _ = writeln!(out);
 }
 
+#[hotpath::measure]
 fn write_roundtrip_report(out: &mut String, loaded: &LoadedDocument, iterations: usize) {
   let mut write_timings = Vec::with_capacity(iterations);
   let mut read_timings = Vec::with_capacity(iterations);

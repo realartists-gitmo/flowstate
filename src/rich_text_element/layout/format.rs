@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> EffectiveParagraphFormat {
   let theme = &document.theme;
   let normal = EffectiveParagraphFormat {
@@ -87,6 +88,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
   }
 }
 
+#[hotpath::measure]
 pub(super) fn run_format(document: &Document, paragraph: EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
   let theme = &document.theme;
   let mut format = EffectiveRunFormat {

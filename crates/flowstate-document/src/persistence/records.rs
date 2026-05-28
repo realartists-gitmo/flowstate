@@ -1,4 +1,5 @@
 
+#[hotpath::measure]
 fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Document> {
   let text_len = {
     let raw = read_u64(&mut cursor)?;
@@ -64,6 +65,7 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
   Ok(document)
 }
 
+#[hotpath::measure]
 fn read_block_record(cursor: &mut Cursor<&[u8]>) -> io::Result<Block> {
   let kind = read_u8(cursor)?;
   let payload_len = {
@@ -81,6 +83,7 @@ fn read_block_record(cursor: &mut Cursor<&[u8]>) -> io::Result<Block> {
   }
 }
 
+#[hotpath::measure]
 fn write_block_record(bytes: &mut Vec<u8>, block: &Block) {
   let mut payload = Vec::new();
   let kind = match block {
@@ -106,6 +109,7 @@ fn write_block_record(bytes: &mut Vec<u8>, block: &Block) {
   bytes.extend_from_slice(&payload);
 }
 
+#[hotpath::measure]
 fn read_paragraph_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<Paragraph> {
   let style = decode_paragraph_style(read_u8(cursor)?)?;
   let start = {
@@ -137,6 +141,7 @@ fn read_paragraph_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<Paragraph> {
   })
 }
 
+#[hotpath::measure]
 fn write_paragraph_payload(bytes: &mut Vec<u8>, paragraph: &Paragraph, range: Range<usize>) {
   bytes.push(encode_paragraph_style(paragraph.style));
   write_u64(bytes, range.start as u64);
@@ -148,6 +153,7 @@ fn write_paragraph_payload(bytes: &mut Vec<u8>, paragraph: &Paragraph, range: Ra
   }
 }
 
+#[hotpath::measure]
 fn read_image_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<ImageBlock> {
   let asset_id = AssetId(read_u128(cursor)?);
   let alt_text = read_string(cursor)?.into();
@@ -177,6 +183,7 @@ fn read_image_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<ImageBlock> {
   })
 }
 
+#[hotpath::measure]
 fn write_image_payload(bytes: &mut Vec<u8>, image: &ImageBlock) {
   write_u128(bytes, image.asset_id.0);
   write_string(bytes, image.alt_text.as_ref());
@@ -205,6 +212,7 @@ fn write_image_payload(bytes: &mut Vec<u8>, image: &ImageBlock) {
   bytes.push(encode_block_alignment(image.alignment));
 }
 
+#[hotpath::measure]
 fn read_equation_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<EquationBlock> {
   let syntax = match read_u8(cursor)? {
     0 => EquationSyntax::Latex,
@@ -223,6 +231,7 @@ fn read_equation_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<EquationBlock
   })
 }
 
+#[hotpath::measure]
 fn write_equation_payload(bytes: &mut Vec<u8>, equation: &EquationBlock) {
   bytes.push(match equation.syntax {
     EquationSyntax::Latex => 0,
@@ -234,6 +243,7 @@ fn write_equation_payload(bytes: &mut Vec<u8>, equation: &EquationBlock) {
   write_string(bytes, equation.source.as_ref());
 }
 
+#[hotpath::measure]
 fn read_table_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<TableBlock> {
   let column_count = read_len(cursor, "DB8 table column count")?;
   let mut column_widths = Vec::with_capacity(column_count.min(64));
@@ -271,6 +281,7 @@ fn read_table_payload(cursor: &mut Cursor<&[u8]>) -> io::Result<TableBlock> {
   })
 }
 
+#[hotpath::measure]
 fn write_table_payload(bytes: &mut Vec<u8>, table: &TableBlock) {
   write_u64(bytes, table.column_widths.len() as u64);
   for width in &table.column_widths {
@@ -301,6 +312,7 @@ fn write_table_payload(bytes: &mut Vec<u8>, table: &TableBlock) {
   }
 }
 
+#[hotpath::measure]
 fn read_table_cell_block(cursor: &mut Cursor<&[u8]>) -> io::Result<TableCellBlock> {
   match read_u8(cursor)? {
     TABLE_CELL_PARAGRAPH => {
@@ -313,6 +325,7 @@ fn read_table_cell_block(cursor: &mut Cursor<&[u8]>) -> io::Result<TableCellBloc
   }
 }
 
+#[hotpath::measure]
 fn write_table_cell_block(bytes: &mut Vec<u8>, block: &TableCellBlock) {
   match block {
     TableCellBlock::Paragraph(paragraph) => {
@@ -327,6 +340,7 @@ fn write_table_cell_block(bytes: &mut Vec<u8>, block: &TableCellBlock) {
   }
 }
 
+#[hotpath::measure]
 fn read_asset_record(cursor: &mut Cursor<&[u8]>) -> io::Result<AssetRecord> {
   let id = AssetId(read_u128(cursor)?);
   let mime_type = read_string(cursor)?.into();
@@ -347,6 +361,7 @@ fn read_asset_record(cursor: &mut Cursor<&[u8]>) -> io::Result<AssetRecord> {
   })
 }
 
+#[hotpath::measure]
 fn write_asset_record(bytes: &mut Vec<u8>, asset: &AssetRecord) {
   write_u128(bytes, asset.id.0);
   write_string(bytes, asset.mime_type.as_ref());
@@ -362,6 +377,7 @@ fn write_asset_record(bytes: &mut Vec<u8>, asset: &AssetRecord) {
   bytes.extend_from_slice(&asset.bytes);
 }
 
+#[hotpath::measure]
 pub fn recovery_path_for_document(path: &Path) -> PathBuf {
   let mut recovery_path = path.to_path_buf();
   let file_name = path

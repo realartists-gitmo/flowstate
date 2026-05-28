@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) -> (Vec<Range<usize>>, Vec<Option<usize>>) {
   let mut paragraph_chunk_item_ranges = vec![0..0; paragraph_count];
   let mut paragraph_remainder_items = vec![None; paragraph_count];
@@ -27,6 +28,7 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
   (paragraph_chunk_item_ranges, paragraph_remainder_items)
 }
 
+#[hotpath::measure]
 fn patch_item_lookup_for_paragraph_range(
   paragraph_chunk_item_ranges: &mut [Range<usize>],
   paragraph_remainder_items: &mut [Option<usize>],
@@ -83,6 +85,7 @@ fn patch_item_lookup_for_paragraph_range(
   Some(())
 }
 
+#[hotpath::measure]
 fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: usize) -> Range<usize> {
   if paragraph_count == 0 {
     return 0..0;
@@ -96,6 +99,7 @@ fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: 
   start..end
 }
 
+#[hotpath::measure]
 fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_byte: usize, end_byte: usize, ratio: f32) -> usize {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
     return 0;
@@ -110,6 +114,7 @@ fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_by
   floor_char_boundary(&text, target.min(text.len()))
 }
 
+#[hotpath::measure]
 fn detach_document_for_background_write(document: &Document) -> Document {
   Document {
     text: document.text.clone(),
@@ -121,6 +126,7 @@ fn detach_document_for_background_write(document: &Document) -> Document {
   }
 }
 
+#[hotpath::measure]
 fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte > 0 && !text.is_char_boundary(byte) {

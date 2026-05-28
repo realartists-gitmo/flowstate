@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn measure_line_width(
   document: &Document,
   paragraph: &Paragraph,
@@ -56,6 +57,7 @@ pub(super) fn measure_line_width(
   width
 }
 
+#[hotpath::measure]
 pub(super) fn shape_line(
   document: &Document,
   paragraph: &Paragraph,
@@ -178,6 +180,7 @@ struct LineMeasureCacheKey {
   end: usize,
 }
 
+#[hotpath::measure]
 pub(super) fn shape_fragment_cached(
   window: &mut Window,
   text: &str,
@@ -199,6 +202,7 @@ pub(super) fn shape_fragment_cached(
   shaped
 }
 
+#[hotpath::measure]
 pub(super) fn shape_fragment(window: &mut Window, text: &str, format: &EffectiveRunFormat) -> ShapedLine {
   let mut run_font = font(format.font_family.clone());
   run_font.weight = if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
@@ -222,6 +226,7 @@ pub(super) struct FormattedFragment {
   pub(super) format: EffectiveRunFormat,
 }
 
+#[hotpath::measure]
 pub(super) fn formatted_fragments_for_range(
   document: &Document,
   p_format: &EffectiveParagraphFormat,
@@ -260,6 +265,7 @@ pub(super) fn formatted_fragments_for_range(
   fragments
 }
 
+#[hotpath::measure]
 pub(super) fn boxed_fragment_padding(
   fragments: &[FormattedFragment],
   fragment_ix: usize,
@@ -292,6 +298,7 @@ pub(super) fn boxed_fragment_padding(
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn font_metrics_for_format(format: &EffectiveRunFormat, cx: &mut App) -> (Pixels, Pixels) {
   let key = FontMetricsCacheKey {
     font_family: format.font_family.clone(),

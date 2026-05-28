@@ -1,6 +1,7 @@
 const LAYOUT_PREP_MAX_PARAGRAPHS_PER_BATCH: usize = 96;
 const LAYOUT_PREP_MAX_TEXT_BYTES_PER_BATCH: usize = 512 * 1024;
 
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn resize_layout_aux_caches(&mut self) {
     let paragraph_count = self.document.paragraphs.len();

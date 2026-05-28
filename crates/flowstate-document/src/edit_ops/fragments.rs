@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub fn selected_rich_fragment(document: &Document, range: Range<DocumentOffset>) -> RichClipboardFragment {
   let mut paragraphs = Vec::new();
   for paragraph_ix in range.start.paragraph..=range.end.paragraph {

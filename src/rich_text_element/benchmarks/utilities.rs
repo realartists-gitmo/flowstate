@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn first_window_range(document: &Document, paragraph_count: usize) -> Range<DocumentOffset> {
   let end_paragraph = document
     .paragraphs
@@ -10,6 +11,7 @@ fn first_window_range(document: &Document, paragraph_count: usize) -> Range<Docu
   }
 }
 
+#[hotpath::measure]
 fn top_selection(document: &Document) -> Option<EditorSelection> {
   if document.paragraphs.is_empty() {
     return None;
@@ -20,12 +22,14 @@ fn top_selection(document: &Document) -> Option<EditorSelection> {
   })
 }
 
+#[hotpath::measure]
 fn first_char_range(document: &Document, paragraph_ix: usize) -> Option<Range<usize>> {
   let text = paragraph_text(document, paragraph_ix);
   let ch = text.chars().next()?;
   Some(0..ch.len_utf8())
 }
 
+#[hotpath::measure]
 fn safe_mid_byte(document: &Document, paragraph_ix: usize) -> usize {
   let text = paragraph_text(document, paragraph_ix);
   if text.is_empty() {
@@ -40,6 +44,7 @@ fn safe_mid_byte(document: &Document, paragraph_ix: usize) -> usize {
     .unwrap_or(0)
 }
 
+#[hotpath::measure]
 fn fingerprint_document(document: &Document) -> u64 {
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
   for chunk in document.text.chunks() {
@@ -72,6 +77,7 @@ fn fingerprint_document(document: &Document) -> u64 {
   hasher.finish()
 }
 
+#[hotpath::measure]
 fn hash_block(block: &Block, hasher: &mut impl Hasher) {
   match block {
     Block::Paragraph(paragraph) => {
@@ -101,6 +107,7 @@ fn hash_block(block: &Block, hasher: &mut impl Hasher) {
   }
 }
 
+#[hotpath::measure]
 fn hash_optional_paragraph(paragraph: Option<&Paragraph>, hasher: &mut impl Hasher) {
   match paragraph {
     Some(paragraph) => {
@@ -111,12 +118,14 @@ fn hash_optional_paragraph(paragraph: Option<&Paragraph>, hasher: &mut impl Hash
   }
 }
 
+#[hotpath::measure]
 fn hash_paragraph(paragraph: &Paragraph, hasher: &mut impl Hasher) {
   paragraph.style.hash(hasher);
   paragraph.runs.hash(hasher);
   paragraph.version.hash(hasher);
 }
 
+#[hotpath::measure]
 fn hash_table(table: &TableBlock, hasher: &mut impl Hasher) {
   table.version.hash(hasher);
   table.style.header_row.hash(hasher);
@@ -157,6 +166,7 @@ fn hash_table(table: &TableBlock, hasher: &mut impl Hasher) {
   }
 }
 
+#[hotpath::measure]
 fn hash_image_sizing(sizing: &ImageSizing, hasher: &mut impl Hasher) {
   match sizing {
     ImageSizing::Intrinsic => 0u8.hash(hasher),
@@ -169,6 +179,7 @@ fn hash_image_sizing(sizing: &ImageSizing, hasher: &mut impl Hasher) {
   }
 }
 
+#[hotpath::measure]
 fn hash_block_alignment(alignment: BlockAlignment, hasher: &mut impl Hasher) {
   match alignment {
     BlockAlignment::Left => 0u8.hash(hasher),
@@ -177,12 +188,14 @@ fn hash_block_alignment(alignment: BlockAlignment, hasher: &mut impl Hasher) {
   }
 }
 
+#[hotpath::measure]
 fn hash_equation_syntax(syntax: EquationSyntax, hasher: &mut impl Hasher) {
   match syntax {
     EquationSyntax::Latex => 0u8.hash(hasher),
   }
 }
 
+#[hotpath::measure]
 fn hash_equation_display(display: EquationDisplay, hasher: &mut impl Hasher) {
   match display {
     EquationDisplay::Display => 0u8.hash(hasher),
@@ -190,6 +203,7 @@ fn hash_equation_display(display: EquationDisplay, hasher: &mut impl Hasher) {
   }
 }
 
+#[hotpath::measure]
 fn paragraph_style_names() -> [(ParagraphStyle, &'static str); 7] {
   [
     (ParagraphStyle::Pocket, "Pocket"),
@@ -202,6 +216,7 @@ fn paragraph_style_names() -> [(ParagraphStyle, &'static str); 7] {
   ]
 }
 
+#[hotpath::measure]
 fn semantic_style_names() -> [(RunSemanticStyle, &'static str); 6] {
   [
     (RunSemanticStyle::Plain, "Plain"),
@@ -213,6 +228,7 @@ fn semantic_style_names() -> [(RunSemanticStyle, &'static str); 6] {
   ]
 }
 
+#[hotpath::measure]
 fn highlight_style_names() -> [(Option<HighlightStyle>, &'static str); 4] {
   [
     (None, "None"),
@@ -222,6 +238,7 @@ fn highlight_style_names() -> [(Option<HighlightStyle>, &'static str); 4] {
   ]
 }
 
+#[hotpath::measure]
 fn div_duration(duration: Duration, divisor: u32) -> Duration {
   if divisor == 0 {
     Duration::default()
@@ -230,19 +247,23 @@ fn div_duration(duration: Duration, divisor: u32) -> Duration {
   }
 }
 
+#[hotpath::measure]
 fn ms(duration: Duration) -> f64 {
   duration.as_secs_f64() * 1000.0
 }
 
+#[hotpath::measure]
 fn px_to_f32(pixels: Pixels) -> f32 {
   let value: f32 = pixels.into();
   value
 }
 
+#[hotpath::measure]
 fn md(value: &str) -> String {
   value.replace('|', "\\|").replace('\n', " ")
 }
 
+#[hotpath::measure]
 fn build_profile() -> &'static str {
   if cfg!(debug_assertions) { "debug" } else { "release" }
 }

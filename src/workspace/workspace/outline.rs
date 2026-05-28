@@ -8,6 +8,7 @@ struct OutlineCache {
   tree_items: Vec<TreeItem>,
 }
 
+#[hotpath::measure_all]
 impl OutlineCache {
   fn new(document_id: Uuid, signature: OutlineSignature) -> Self {
     let nodes = outline_nodes_from_entries(&signature.entries);
@@ -54,6 +55,7 @@ struct OutlineNode {
   children: Vec<OutlineNode>,
 }
 
+#[hotpath::measure]
 fn insert_outline_node(nodes: &mut Vec<OutlineNode>, level: usize, node: OutlineNode) {
   if level == 0 {
     nodes.push(node);
@@ -71,6 +73,7 @@ fn insert_outline_node(nodes: &mut Vec<OutlineNode>, level: usize, node: Outline
   }
 }
 
+#[hotpath::measure]
 fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize>) -> TreeItem {
   let paragraph_ix = node.paragraph_ix;
   TreeItem::new(outline_item_id(paragraph_ix), node.text.clone())
@@ -85,11 +88,13 @@ fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize
 }
 
 #[cfg(test)]
+#[hotpath::measure]
 fn outline_nodes(document: &Document) -> Vec<OutlineNode> {
   let signature = outline_signature(document);
   outline_nodes_from_entries(&signature.entries)
 }
 
+#[hotpath::measure]
 fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
   let mut roots = Vec::<OutlineNode>::new();
   for entry in entries {
@@ -107,6 +112,7 @@ fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
   roots
 }
 
+#[hotpath::measure]
 fn outline_signature(document: &Document) -> OutlineSignature {
   let mut entries = Vec::new();
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
@@ -126,6 +132,7 @@ fn outline_signature(document: &Document) -> OutlineSignature {
   }
 }
 
+#[hotpath::measure]
 fn collect_visible_outline_paragraphs(nodes: &[OutlineNode], collapsed_items: &HashSet<usize>, output: &mut Vec<usize>) {
   for node in nodes {
     output.push(node.paragraph_ix);
@@ -135,6 +142,7 @@ fn collect_visible_outline_paragraphs(nodes: &[OutlineNode], collapsed_items: &H
   }
 }
 
+#[hotpath::measure]
 fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], caret_paragraph: usize) -> Option<usize> {
   let mut low = 0usize;
   let mut high = visible_paragraphs.len();
@@ -151,6 +159,7 @@ fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], c
     .and_then(|ix| visible_paragraphs.get(ix).copied())
 }
 
+#[hotpath::measure]
 fn outline_level(style: ParagraphStyle) -> Option<usize> {
   match style {
     ParagraphStyle::Pocket => Some(0),
@@ -161,14 +170,17 @@ fn outline_level(style: ParagraphStyle) -> Option<usize> {
   }
 }
 
+#[hotpath::measure]
 fn outline_item_id(paragraph_ix: usize) -> String {
   format!("paragraph:{paragraph_ix}")
 }
 
+#[hotpath::measure]
 fn outline_paragraph_ix(id: &str) -> Option<usize> {
   id.strip_prefix("paragraph:")?.parse().ok()
 }
 
+#[hotpath::measure]
 fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   const MAX_BYTES: usize = 80;
@@ -207,6 +219,7 @@ fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
   }
 }
 
+#[hotpath::measure]
 fn outline_label_width(nav_width: Pixels, depth: usize) -> Pixels {
   // Mirrors the outline row layout: nav padding, row indentation, disclosure
   // slot, row gap, and right padding are fixed, so the remaining width is the
@@ -215,6 +228,7 @@ fn outline_label_width(nav_width: Pixels, depth: usize) -> Pixels {
   (nav_width - px(56.0) - px(12.0) * depth).max(px(32.0))
 }
 
+#[hotpath::measure]
 fn outline_label_text_width(label_width: Pixels, window: &Window) -> Pixels {
   // The measured blue label rect includes `.px_1()` padding on both sides.
   // Truncation must target the inner text box, with a small paint tolerance so
@@ -222,6 +236,7 @@ fn outline_label_text_width(label_width: Pixels, window: &Window) -> Pixels {
   (label_width - window.rem_size() * 0.5 - px(2.0)).max(px(1.0))
 }
 
+#[hotpath::measure]
 fn truncate_outline_label(label: &str, width: Pixels, window: &mut Window, cx: &mut App) -> SharedString {
   let text_style = window.text_style();
   // Keep this in sync with the outline row's `.text_xs()` style. GPUI's text

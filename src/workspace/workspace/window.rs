@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut Window, cx: &mut App) {
   let prompt_open = Rc::new(Cell::new(false));
   let allow_close = Rc::new(Cell::new(false));
@@ -74,6 +75,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
   });
 }
 
+#[hotpath::measure]
 pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
   let bounds = Bounds::centered(None, size(px(1100.0), px(780.0)), cx);
   cx.open_window(

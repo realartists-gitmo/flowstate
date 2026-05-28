@@ -125,6 +125,7 @@ pub struct EditorSelection {
   pub head: DocumentOffset,
 }
 
+#[hotpath::measure_all]
 impl EditorSelection {
   fn caret() -> Self {
     let zero = DocumentOffset::default();
@@ -193,6 +194,7 @@ pub(super) enum EditOperation {
   },
 }
 
+#[hotpath::measure_all]
 impl EditOperation {
   pub(super) fn undo(&self, document: &mut Document) {
     match self {
@@ -291,6 +293,7 @@ pub enum SelectionState<T> {
   Mixed,
 }
 
+#[hotpath::measure_all]
 impl<T> SelectionState<T> {
   pub fn is_mixed(&self) -> bool {
     matches!(self, Self::Mixed)
@@ -302,12 +305,14 @@ struct SelectionStateBuilder<T> {
   state: SelectionState<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> Default for SelectionStateBuilder<T> {
   fn default() -> Self {
     Self { state: SelectionState::None }
   }
 }
 
+#[hotpath::measure_all]
 impl<T: core::marker::Copy + Eq> SelectionStateBuilder<T> {
   fn push(&mut self, value: T) {
     match self.state {
@@ -326,10 +331,12 @@ impl<T: core::marker::Copy + Eq> SelectionStateBuilder<T> {
   }
 }
 
+#[hotpath::measure]
 fn offset_in_range(offset: DocumentOffset, range: Range<DocumentOffset>) -> bool {
   range.start <= offset && offset <= range.end
 }
 
+#[hotpath::measure]
 fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
   let ax: f32 = a.x.into();
   let ay: f32 = a.y.into();
@@ -340,10 +347,12 @@ fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
   dx * dx + dy * dy
 }
 
+#[hotpath::measure]
 fn is_single_grapheme_text_insert(text: &str) -> bool {
   !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK) && text.graphemes(true).take(2).count() == 1
 }
 
+#[hotpath::measure]
 pub(super) fn adjust_drop_after_source_delete(drop: DocumentOffset, source: Range<DocumentOffset>) -> DocumentOffset {
   if drop <= source.start {
     return drop;
@@ -391,6 +400,7 @@ pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
 }
 
+#[hotpath::measure_all]
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
     Self { smart_word_selection: true }
@@ -424,6 +434,7 @@ struct ParagraphPrepSlot {
   invisible: Option<Arc<ParagraphPrep>>,
 }
 
+#[hotpath::measure_all]
 impl ParagraphPrepSlot {
   fn get(&self, invisibility_mode: bool) -> Option<&Arc<ParagraphPrep>> {
     if invisibility_mode {
@@ -525,6 +536,7 @@ enum ImageResizeHandle {
   BottomRight,
 }
 
+#[hotpath::measure_all]
 impl ImageResizeHandle {
   fn horizontal_sign(self) -> f32 {
     match self {
@@ -618,6 +630,7 @@ enum RecoveryWriteDecision {
   Idle,
 }
 
+#[hotpath::measure_all]
 impl ScrollAnchorSnapshot {
   fn delta(&self) -> Pixels {
     match self {
@@ -640,6 +653,7 @@ impl ScrollAnchorSnapshot {
   }
 }
 
+#[hotpath::measure_all]
 impl HeightPrefixIndex {
   fn rebuild(&mut self, sizes: &[Size<Pixels>]) {
     self.heights.clear();

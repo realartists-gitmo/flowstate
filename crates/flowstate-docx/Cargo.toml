@@ -5,7 +5,13 @@ edition = "2024"
 
 [dependencies]
 flowstate-document = { path = "../flowstate-document" }
+hotpath = "0.16.1"
 rdocx = "0.1.2"
 rdocx-opc = "0.1.2"
 rdocx-oxml = "0.1.2"
 rustc-hash = "2.1.2"
+
+[features]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc"]

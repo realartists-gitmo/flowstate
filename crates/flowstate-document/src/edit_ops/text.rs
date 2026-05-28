@@ -1,11 +1,14 @@
+#[hotpath::measure]
 pub fn paragraph_text(document: &Document, paragraph_ix: usize) -> String {
   document_text_slice(document, paragraph_byte_range(document, paragraph_ix))
 }
 
+#[hotpath::measure]
 pub fn paragraph_text_len(paragraph: &Paragraph) -> usize {
   paragraph_runs_len(paragraph)
 }
 
+#[hotpath::measure]
 pub fn document_text_slice(document: &Document, range: Range<usize>) -> String {
   let mut text = String::with_capacity(range.end - range.start);
   for chunk in document.text.byte_slice(range).chunks() {
@@ -14,6 +17,7 @@ pub fn document_text_slice(document: &Document, range: Range<usize>) -> String {
   text
 }
 
+#[hotpath::measure]
 pub fn capture_document_span(document: &Document, range: Range<usize>) -> DocumentSpan {
   let start = range.start.min(document.paragraphs.len());
   let end = range.end.min(document.paragraphs.len()).max(start);
@@ -30,6 +34,7 @@ pub fn capture_document_span(document: &Document, range: Range<usize>) -> Docume
   }
 }
 
+#[hotpath::measure]
 pub fn apply_document_span_replacement(document: &mut Document, current: &DocumentSpan, replacement: &DocumentSpan) {
   let byte_range = paragraph_span_byte_range(document, current.start_paragraph, current.paragraphs.len());
   document.text.delete(byte_range.clone());
@@ -48,6 +53,7 @@ pub fn apply_document_span_replacement(document: &mut Document, current: &Docume
   rebuild_document_offset_index(document);
 }
 
+#[hotpath::measure]
 pub fn paragraph_span_byte_range(document: &Document, start_paragraph: usize, paragraph_count: usize) -> Range<usize> {
   if paragraph_count == 0 || start_paragraph >= document.paragraphs.len() {
     let byte = document
@@ -62,10 +68,12 @@ pub fn paragraph_span_byte_range(document: &Document, start_paragraph: usize, pa
 }
 
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn full_document_text(document: &Document) -> String {
   document_text_slice(document, 0..document.text.byte_len())
 }
 
+#[hotpath::measure]
 pub fn document_end(document: &Document) -> DocumentOffset {
   let paragraph = document.paragraphs.len().saturating_sub(1);
   DocumentOffset {
@@ -79,11 +87,13 @@ pub fn document_end(document: &Document) -> DocumentOffset {
 }
 
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn global_byte(document: &Document, offset: DocumentOffset) -> usize {
   paragraph_byte_range(document, offset.paragraph).start + offset.byte
 }
 
 #[allow(dead_code)]
+#[hotpath::measure]
 pub fn global_to_document_offset(document: &Document, byte: usize) -> DocumentOffset {
   let byte = byte.min(document.text.byte_len());
   let mut low = 0;
@@ -107,6 +117,7 @@ pub fn global_to_document_offset(document: &Document, byte: usize) -> DocumentOf
   }
 }
 
+#[hotpath::measure]
 pub fn find_text_ranges(document: &Document, query: &str) -> Vec<Range<DocumentOffset>> {
   if query.is_empty() {
     return Vec::new();
@@ -118,6 +129,7 @@ pub fn find_text_ranges(document: &Document, query: &str) -> Vec<Range<DocumentO
     .collect()
 }
 
+#[hotpath::measure]
 pub fn selected_plain_text(document: &Document, range: Range<DocumentOffset>) -> String {
   if range.start.paragraph == range.end.paragraph {
     let paragraph_range = paragraph_byte_range(document, range.start.paragraph);
@@ -148,6 +160,7 @@ pub fn selected_plain_text(document: &Document, range: Range<DocumentOffset>) ->
   text
 }
 
+#[hotpath::measure]
 fn clipboard_plain_text(text: String) -> String {
   if text.contains(SOFT_LINE_BREAK) {
     text.replace(SOFT_LINE_BREAK, "\n")

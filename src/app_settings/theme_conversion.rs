@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl From<&DocumentTheme> for DocumentThemeSettings {
   fn from(theme: &DocumentTheme) -> Self {
     Self {
@@ -93,6 +94,7 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
   }
 }
 
+#[hotpath::measure_all]
 impl From<DocumentThemeSettings> for DocumentTheme {
   fn from(settings: DocumentThemeSettings) -> Self {
     Self {
@@ -188,6 +190,7 @@ impl From<DocumentThemeSettings> for DocumentTheme {
   }
 }
 
+#[hotpath::measure_all]
 impl From<Hsla> for StoredHsla {
   fn from(color: Hsla) -> Self {
     Self {
@@ -199,6 +202,7 @@ impl From<Hsla> for StoredHsla {
   }
 }
 
+#[hotpath::measure_all]
 impl From<StoredHsla> for Hsla {
   fn from(color: StoredHsla) -> Self {
     Hsla {
@@ -210,6 +214,7 @@ impl From<StoredHsla> for Hsla {
   }
 }
 
+#[hotpath::measure_all]
 impl From<ThemeUnderline> for ThemeUnderlineSetting {
   fn from(value: ThemeUnderline) -> Self {
     match value {
@@ -220,6 +225,7 @@ impl From<ThemeUnderline> for ThemeUnderlineSetting {
   }
 }
 
+#[hotpath::measure_all]
 impl From<ThemeUnderlineSetting> for ThemeUnderline {
   fn from(value: ThemeUnderlineSetting) -> Self {
     match value {

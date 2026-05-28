@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn begin_visible_layout(&mut self, range: Range<usize>) -> u64 {
     if self.initial_layout_hidden

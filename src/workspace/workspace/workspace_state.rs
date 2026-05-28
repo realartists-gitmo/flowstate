@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   pub fn toggle_ribbon(&mut self, cx: &mut Context<Self>) {
     self.ribbon_collapsed = !self.ribbon_collapsed;

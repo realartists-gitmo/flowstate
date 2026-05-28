@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn insert_default_table(&mut self, rows: usize, columns: usize, cx: &mut Context<Self>) {
     let rows = rows.clamp(1, 20);

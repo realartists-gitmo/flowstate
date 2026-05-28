@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn paragraph_chunk_containing_byte(&self, paragraph_ix: usize, byte: usize, width: Pixels) -> Option<(usize, Rc<LayoutState>)> {
     let paragraph_len = self.document.paragraphs.get(paragraph_ix).map(paragraph_text_len)?;

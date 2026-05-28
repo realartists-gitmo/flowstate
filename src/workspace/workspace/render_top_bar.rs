@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_top_bar(&mut self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     h_flex()

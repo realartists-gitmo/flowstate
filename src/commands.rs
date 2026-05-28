@@ -174,16 +174,19 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
 ];
 
+#[hotpath::measure]
 pub fn command_spec(id: CommandId) -> Option<&'static CommandSpec> {
   COMMAND_SPECS.iter().find(|spec| spec.id == id)
 }
 
+#[hotpath::measure]
 pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
   command_spec(id)
     .map(|spec| spec.default_keys)
     .unwrap_or(&[])
 }
 
+#[hotpath::measure]
 pub fn label_for(id: CommandId) -> &'static str {
   command_spec(id)
     .map(|spec| spec.label)

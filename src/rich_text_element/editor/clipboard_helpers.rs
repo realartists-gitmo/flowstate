@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn block_fragment_plain_text(fragment: &RichClipboardFragment) -> String {
   let mut parts = fragment
     .paragraphs
@@ -19,6 +20,7 @@ fn block_fragment_plain_text(fragment: &RichClipboardFragment) -> String {
   parts.join("\n")
 }
 
+#[hotpath::measure]
 fn table_plain_text(table: &InputTableBlock) -> String {
   table
     .rows

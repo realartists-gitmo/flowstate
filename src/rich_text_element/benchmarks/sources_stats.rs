@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn benchmark_sources(options: &BenchmarkOptions) -> Vec<BenchmarkSource> {
   if !options.paths.is_empty() {
     return options
@@ -23,6 +24,7 @@ fn benchmark_sources(options: &BenchmarkOptions) -> Vec<BenchmarkSource> {
   }
 }
 
+#[hotpath::measure]
 fn load_document_source(source: &BenchmarkSource, iterations: usize) -> Result<LoadedDocument, String> {
   let iterations = iterations.max(1);
   let mut timings = Vec::with_capacity(iterations);
@@ -52,6 +54,7 @@ fn load_document_source(source: &BenchmarkSource, iterations: usize) -> Result<L
   })
 }
 
+#[hotpath::measure]
 fn source_label(source: &BenchmarkSource) -> String {
   match source {
     BenchmarkSource::Path(path) => path
@@ -62,6 +65,7 @@ fn source_label(source: &BenchmarkSource) -> String {
   }
 }
 
+#[hotpath::measure]
 fn document_stats(document: &Document) -> DocumentStats {
   let mut stats = DocumentStats {
     text_bytes: document.text.byte_len(),
@@ -128,6 +132,7 @@ fn document_stats(document: &Document) -> DocumentStats {
   stats
 }
 
+#[hotpath::measure]
 fn accumulate_table_stats(table: &TableBlock, stats: &mut DocumentStats, nested: bool) {
   stats.tables += 1;
   stats.nested_tables += usize::from(nested);
@@ -145,6 +150,7 @@ fn accumulate_table_stats(table: &TableBlock, stats: &mut DocumentStats, nested:
   }
 }
 
+#[hotpath::measure]
 fn check_document_fidelity(document: &Document) -> FidelityReport {
   let mut report = FidelityReport::default();
   let full_text = full_document_text(document);
@@ -211,6 +217,7 @@ fn check_document_fidelity(document: &Document) -> FidelityReport {
   report
 }
 
+#[hotpath::measure]
 fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: &str) {
   let widest_row = table
     .rows

@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn capture_scroll_anchor(&mut self) -> Option<ScrollAnchorSnapshot> {
     if let Some(anchor) = self.capture_locked_scroll_anchor() {

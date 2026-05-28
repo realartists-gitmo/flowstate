@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn find_text(&self, query: &str) -> Vec<Range<DocumentOffset>> {
     find_text_ranges(&self.document, query)
