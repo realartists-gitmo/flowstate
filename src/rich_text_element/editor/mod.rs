@@ -23,7 +23,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
-const DISABLE_SCROLL_LIMITING_FUNCTIONS: bool = false;
+const DISABLE_SCROLL_LIMITING_FUNCTIONS: bool = cfg!(target_os = "linux");
 const SCROLL_FOREGROUND_OVERSCAN_PX: f32 = 384.0;
 const SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS: u64 = 8;
 const SCROLL_FOREGROUND_MAX_CHUNK_LINES: usize = 96;
