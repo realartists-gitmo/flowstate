@@ -38,14 +38,15 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
         Ok(0) => {
           let mut ok = true;
           for panel in dirty_panels {
-            match panel.save(cx).await {
-              Ok(()) => {},
-              Err(error) => {
+            match panel.save(window_handle, cx).await {
+              PanelSaveOutcome::Saved => {},
+              PanelSaveOutcome::Cancelled => {
                 ok = false;
-                let detail = error;
-                let _ = window_handle.update(cx, |_, window, cx| {
-                  window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-                });
+                break;
+              },
+              PanelSaveOutcome::Failed(error) => {
+                ok = false;
+                show_save_failed(window_handle, cx, error);
                 break;
               },
             }

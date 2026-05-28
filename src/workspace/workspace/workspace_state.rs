@@ -127,15 +127,31 @@ impl Workspace {
     let mut panels = self
       .document_panels
       .iter()
-      .filter(|panel| panel.read(cx).is_dirty(cx))
-      .map(|panel| PanelKind::Document(panel.read(cx).editor()))
+      .filter_map(|panel| {
+        let panel_state = panel.read(cx);
+        if !panel_state.is_dirty(cx) {
+          return None;
+        }
+        Some(PanelKind::Document {
+          panel: panel.clone(),
+          editor: panel_state.editor(),
+        })
+      })
       .collect::<Vec<_>>();
     panels.extend(
       self
         .flow_panels
         .iter()
-        .filter(|panel| panel.read(cx).is_dirty(cx))
-        .map(|panel| PanelKind::Flow(panel.read(cx).editor())),
+        .filter_map(|panel| {
+          let panel_state = panel.read(cx);
+          if !panel_state.is_dirty(cx) {
+            return None;
+          }
+          Some(PanelKind::Flow {
+            panel: panel.clone(),
+            editor: panel_state.editor(),
+          })
+        }),
     );
     panels
   }

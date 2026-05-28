@@ -42,6 +42,7 @@ impl Workspace {
     &mut self,
     mut document: Document,
     path: Option<PathBuf>,
+    title: Option<String>,
     _window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
@@ -54,10 +55,13 @@ impl Workspace {
       editor.set_smart_word_selection(smart_word_selection, cx);
     });
     let workspace = cx.entity().downgrade();
-    let title = path
-      .as_ref()
-      .and_then(|path| path.file_name())
-      .map(|name| name.to_string_lossy().to_string())
+    let title = title
+      .or_else(|| {
+        path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .map(|name| name.to_string_lossy().to_string())
+      })
       .or_else(|| Some(self.next_untitled_title(cx)));
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, cx));
     let id = panel.read(cx).id();
@@ -176,10 +180,10 @@ impl Workspace {
         .spawn(async move { load_workspace_document(path) })
         .await;
       match loaded {
-        Ok(LoadedWorkspaceDocument::Document { document, path }) => {
+        Ok(LoadedWorkspaceDocument::Document { document, path, title }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
-              workspace.add_document_panel(*document, path, window, cx);
+              workspace.add_document_panel_with_title(*document, path, title, window, cx);
             });
           });
         },
@@ -226,7 +230,19 @@ impl Workspace {
   }
 
   fn add_document_panel(&mut self, document: Document, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_document_panel(document, path, window, cx);
+    self.create_document_panel(document, path, None, window, cx);
+    cx.notify();
+  }
+
+  fn add_document_panel_with_title(
+    &mut self,
+    document: Document,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.create_document_panel(document, path, title, window, cx);
     cx.notify();
   }
 
@@ -600,6 +616,7 @@ enum LoadedWorkspaceDocument {
   Document {
     document: Box<Document>,
     path: Option<PathBuf>,
+    title: Option<String>,
   },
   Flow {
     document: flowstate_flow::FlowDocument,
@@ -615,9 +632,10 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
     });
   }
   load_document_for_open(&path)
-    .map(|(document, path)| LoadedWorkspaceDocument::Document {
-      document: Box::new(document),
-      path,
+    .map(|loaded| LoadedWorkspaceDocument::Document {
+      document: Box::new(loaded.document),
+      path: loaded.path,
+      title: loaded.title,
     })
     .map_err(|error| error.to_string())
 }
