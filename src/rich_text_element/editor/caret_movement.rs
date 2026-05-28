@@ -210,9 +210,7 @@ impl RichTextEditor {
     match dir {
       VDir::Up => {
         while self
-          .paragraph_chunk_layout_cache
-          .get(target_paragraph)
-          .and_then(|entry| entry.as_ref())
+          .valid_chunk_cache_entry(target_paragraph, width)
           .is_none_or(|entry| !entry.complete)
         {
           if !self.ensure_next_paragraph_chunk(target_paragraph, width, window, cx) {

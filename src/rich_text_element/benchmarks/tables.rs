@@ -62,13 +62,25 @@ fn write_layout_table(out: &mut String, rows: &[LayoutBenchRow]) {
   let _ = writeln!(out);
   let _ = writeln!(
     out,
-    "| width | cold hit | hot hit | invis hit | items | exact heights cold/hot/invis | total height cold/hot/invis | visibility visible/invisible mean ms |"
+    "| width | cold hit | hot hit | invis hit | items | exact heights cold/hot/invis | total height cold/hot/invis | prep req/done/inst/stale | prep batches/KB | UI chunks/ms | budget overruns prefetch/scroll | visibility visible/invisible mean ms |"
   );
-  let _ = writeln!(out, "|---:|---|---|---|---:|---|---|---:|");
+  let _ = writeln!(out, "|---:|---|---|---|---:|---|---|---|---|---|---|---:|");
   for row in rows {
+    let prep_requested = row.item_sizes_cold.prep_requested + row.item_sizes_hot.prep_requested + row.item_sizes_invisible.prep_requested;
+    let prep_completed = row.item_sizes_cold.prep_completed + row.item_sizes_hot.prep_completed + row.item_sizes_invisible.prep_completed;
+    let prep_installed = row.item_sizes_cold.prep_installed + row.item_sizes_hot.prep_installed + row.item_sizes_invisible.prep_installed;
+    let prep_stale = row.item_sizes_cold.prep_stale + row.item_sizes_hot.prep_stale + row.item_sizes_invisible.prep_stale;
+    let prep_batches = row.item_sizes_cold.prep_batches + row.item_sizes_hot.prep_batches + row.item_sizes_invisible.prep_batches;
+    let prep_bytes = row.item_sizes_cold.prep_text_bytes + row.item_sizes_hot.prep_text_bytes + row.item_sizes_invisible.prep_text_bytes;
+    let ui_chunk_builds = row.item_sizes_cold.ui_chunk_builds + row.item_sizes_hot.ui_chunk_builds + row.item_sizes_invisible.ui_chunk_builds;
+    let ui_chunk_time = row.item_sizes_cold.ui_chunk_build_time + row.item_sizes_hot.ui_chunk_build_time + row.item_sizes_invisible.ui_chunk_build_time;
+    let prefetch_overruns =
+      row.item_sizes_cold.prefetch_budget_overruns + row.item_sizes_hot.prefetch_budget_overruns + row.item_sizes_invisible.prefetch_budget_overruns;
+    let scroll_overruns =
+      row.item_sizes_cold.scroll_budget_overruns + row.item_sizes_hot.scroll_budget_overruns + row.item_sizes_invisible.scroll_budget_overruns;
     let _ = writeln!(
       out,
-      "| {:.0} | {} | {} | {} | {} | {}/{}/{} | {:.1}/{:.1}/{:.1} | {:.3}/{:.3} |",
+      "| {:.0} | {} | {} | {} | {} | {}/{}/{} | {:.1}/{:.1}/{:.1} | {}/{}/{}/{} | {}/{:.1} | {}/{:.3} | {}/{} | {:.3}/{:.3} |",
       row.width,
       row.item_sizes_cold.cache_hit,
       row.item_sizes_hot.cache_hit,
@@ -80,6 +92,16 @@ fn write_layout_table(out: &mut String, rows: &[LayoutBenchRow]) {
       row.item_sizes_cold.total_height,
       row.item_sizes_hot.total_height,
       row.item_sizes_invisible.total_height,
+      prep_requested,
+      prep_completed,
+      prep_installed,
+      prep_stale,
+      prep_batches,
+      prep_bytes as f32 / 1024.0,
+      ui_chunk_builds,
+      ms(ui_chunk_time),
+      prefetch_overruns,
+      scroll_overruns,
       ms(row.visibility_visible.mean),
       ms(row.visibility_invisible.mean)
     );

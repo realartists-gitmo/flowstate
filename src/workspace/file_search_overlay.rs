@@ -1,4 +1,4 @@
-use std::{path::PathBuf, rc::Rc};
+use std::{path::PathBuf, sync::Arc};
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, ParentElement, Render,
@@ -22,9 +22,10 @@ const RESULT_LIMIT: usize = 10;
 pub struct FileSearchOverlay {
   workspace: WeakEntity<Workspace>,
   search_input: Entity<InputState>,
-  search: Option<Rc<DocumentFileSearch>>,
+  search: Option<Arc<DocumentFileSearch>>,
   hits: Vec<FileSearchHit>,
   selected: usize,
+  search_generation: u64,
   loading: bool,
   error: Option<SharedString>,
   _input_subscription: Subscription,
@@ -33,9 +34,10 @@ pub struct FileSearchOverlay {
 impl FileSearchOverlay {
   pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, or file_name.fl0"));
-    let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| match event {
-      InputEvent::Change => overlay.refresh_results(cx),
-      _ => {},
+    let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| {
+      if let InputEvent::Change = event {
+        overlay.refresh_results(cx);
+      }
     });
 
     let mut overlay = Self {
@@ -44,6 +46,7 @@ impl FileSearchOverlay {
       search: None,
       hits: Vec::new(),
       selected: 0,
+      search_generation: 0,
       loading: true,
       error: None,
       _input_subscription,
@@ -73,7 +76,7 @@ impl FileSearchOverlay {
         overlay.loading = false;
         match search {
           Ok(search) => {
-            overlay.search = Some(Rc::new(search));
+            overlay.search = Some(Arc::new(search));
             overlay.refresh_results(cx);
           },
           Err(error) => {
@@ -90,13 +93,29 @@ impl FileSearchOverlay {
 
   fn refresh_results(&mut self, cx: &mut Context<Self>) {
     let query = self.query(cx);
-    self.hits = self
-      .search
-      .as_ref()
-      .map(|search| search.search(&query, RESULT_LIMIT))
-      .unwrap_or_default();
-    self.selected = 0;
-    cx.notify();
+    let Some(search) = self.search.clone() else {
+      self.hits.clear();
+      self.selected = 0;
+      cx.notify();
+      return;
+    };
+    self.search_generation = self.search_generation.wrapping_add(1);
+    let generation = self.search_generation;
+    cx.spawn(async move |overlay, cx| {
+      let hits = cx
+        .background_executor()
+        .spawn(async move { search.search(&query, RESULT_LIMIT) })
+        .await;
+      let _ = overlay.update(cx, |overlay, cx| {
+        if overlay.search_generation != generation {
+          return;
+        }
+        overlay.hits = hits;
+        overlay.selected = 0;
+        cx.notify();
+      });
+    })
+    .detach();
   }
 
   fn query(&self, cx: &App) -> String {

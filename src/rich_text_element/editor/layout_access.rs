@@ -32,9 +32,7 @@ impl RichTextEditor {
     let (chunk_ix, _chunk_layout) = self.paragraph_chunk_containing_byte(offset.paragraph, offset.byte, width)?;
     let viewport = self.scroll_handle.bounds();
     let entry = self
-      .paragraph_chunk_layout_cache
-      .get(offset.paragraph)
-      .and_then(|entry| entry.as_ref())?;
+      .valid_chunk_cache_entry(offset.paragraph, width)?;
     let start = chunk_ix.saturating_sub(1);
     let end = (chunk_ix + 2).min(entry.chunks.len());
     let mut paragraphs = Vec::new();
@@ -112,9 +110,7 @@ impl RichTextEditor {
           .map(paragraph_text_len)
           .unwrap_or(0);
         let start_byte = self
-          .paragraph_chunk_layout_cache
-          .get(*paragraph_ix)
-          .and_then(|entry| entry.as_ref())
+          .valid_chunk_cache_entry(*paragraph_ix, self.current_layout_width())
           .and_then(|entry| entry.chunks.last())
           .map(|chunk| chunk.end_byte)
           .unwrap_or(0);
@@ -125,7 +121,7 @@ impl RichTextEditor {
           .map(|size| size.height)
           .unwrap_or(px(1.0))
           .max(px(1.0));
-        let ratio = f32::from((content_y - row_top).max(px(0.0)) / row_height).clamp(0.0, 1.0);
+        let ratio = ((content_y - row_top).max(px(0.0)) / row_height).clamp(0.0, 1.0);
         let byte = byte_at_ratio_in_paragraph(&self.document, *paragraph_ix, start_byte, paragraph_len, ratio);
         Some(DocumentOffset {
           paragraph: *paragraph_ix,
@@ -145,6 +141,11 @@ impl RichTextEditor {
     }
     let viewport_width = self.scroll_handle.bounds().size.width;
     if viewport_width > px(1.0) { viewport_width } else { px(900.0) }
+  }
+
+  pub(crate) fn prepare_for_workspace_width_delta(&mut self, delta: Pixels, cx: &mut Context<Self>) {
+    let width = (self.current_layout_width() + delta).max(px(1.0));
+    self.note_measured_item_width(width, cx);
   }
 
   fn block_ix_for_paragraph(&self, target_paragraph_ix: usize) -> Option<usize> {
@@ -332,9 +333,20 @@ impl RichTextEditor {
         .paragraph_height_cache
         .get(paragraph_ix)
         .and_then(|entry| *entry)
-        .filter(|entry| entry.key == key && entry.width == width)
+        .filter(|entry| {
+          entry.key == key
+            && entry.width == width
+            && entry.invisibility_mode == self.invisibility_mode
+            && entry.edit_generation == self.edit_generation
+        })
         .map(|entry| entry.height)
-        .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
+        .unwrap_or_else(|| {
+          self
+            .valid_paragraph_prep(paragraph_ix)
+            .as_deref()
+            .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, width))
+            .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode))
+        });
       let next_y = y + height;
       if !found_start && next_y >= scroll_top - px(256.0) {
         start = paragraph_ix;
@@ -450,7 +462,13 @@ impl RichTextEditor {
       return;
     }
     self.measured_item_width = Some(width);
+    self.clear_layout_work_caches();
+    self.paragraph_chunk_layout_cache = vec![None; self.document.paragraphs.len()];
+    self.paragraph_height_cache = vec![None; self.document.paragraphs.len()];
+    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    self.item_sizes_cache = None;
     self.pending_item_sizes_patch_range = None;
+    self.height_prefix_index = HeightPrefixIndex::default();
     cx.notify();
   }
 

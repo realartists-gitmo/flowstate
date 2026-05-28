@@ -451,8 +451,8 @@ impl RichTextEditor {
       after_selection: self.selection.clone(),
       after_generation,
       operations: vec![EditOperation::ReplaceDocument {
-        before: before_document,
-        after: after_document,
+        before: Box::new(before_document),
+        after: Box::new(after_document),
       }],
       canonical_operations: vec![CanonicalOperation::ReplaceDocument],
     });
@@ -499,6 +499,7 @@ impl RichTextEditor {
       }],
     });
     self.redo_stack.clear();
+    self.clear_layout_work_caches();
     self.item_sizes_cache = None;
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
     self.mark_document_changed(after_generation, cx);

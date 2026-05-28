@@ -174,8 +174,8 @@ fn wrap_text_segment_limited(
   };
 
   while start < segment.end {
-    let break_cursor = first_break_after(&break_ends, start);
-    let break_limit = first_break_after(&break_ends, segment.end);
+    let break_cursor = first_break_after(break_ends, start);
+    let break_limit = first_break_after(break_ends, segment.end);
     let last_break = if break_cursor < break_limit {
       if let Some(over_ix) = first_break_over_width(
         document,
@@ -183,7 +183,7 @@ fn wrap_text_segment_limited(
         &p_format,
         text,
         start,
-        &break_ends,
+        break_ends,
         break_cursor..break_limit,
         max_width,
         shape_cache,
@@ -564,10 +564,13 @@ fn first_break_over_width(
 }
 
 pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
-  text
-    .char_indices()
-    .filter_map(|(byte_ix, ch)| is_wrap_break(ch).then_some(byte_ix + ch.len_utf8()))
-    .collect()
+  let mut breaks = Vec::with_capacity((text.len() / 8).min(4096));
+  for (byte_ix, ch) in text.char_indices() {
+    if is_wrap_break(ch) {
+      breaks.push(byte_ix + ch.len_utf8());
+    }
+  }
+  breaks
 }
 
 pub(super) fn is_wrap_break(ch: char) -> bool {

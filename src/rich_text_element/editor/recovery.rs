@@ -44,9 +44,15 @@ impl RichTextEditor {
     self
       .paragraph_chunk_layout_cache
       .resize(paragraph_count, None);
+    self
+      .paragraph_shaping_cache
+      .resize_with(paragraph_count, || None);
     for (paragraph_ix, entry) in self.paragraph_chunk_layout_cache.iter_mut().enumerate() {
       if paragraph_ix < keep_start || paragraph_ix >= keep_end {
         *entry = None;
+        if let Some(shape_cache) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
+          *shape_cache = None;
+        }
       }
     }
     self
@@ -125,7 +131,7 @@ impl RichTextEditor {
           } else {
             RecoveryWriteDecision::Write {
               generation: editor.edit_generation,
-              document: editor.document.clone(),
+              document: Box::new(editor.document.clone()),
             }
           }
         })
@@ -143,7 +149,7 @@ impl RichTextEditor {
           write_db8(path, &document)
         })
         .await;
-      log_timing("recovery write", write_timing, format!("paragraphs={paragraph_count}"));
+      log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));
       match write_result {
         Ok(()) => {
           let _ = editor.update(cx, |editor, _| {

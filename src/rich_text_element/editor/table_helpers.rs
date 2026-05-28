@@ -32,10 +32,10 @@ fn fixed_table_column_widths_from_layout(table: &TableBlock, layout: &LaidOutTab
   let column_count = table_column_count(table).max(1);
   let mut widths = vec![120; column_count];
   for (ix, width) in table.column_widths.iter().enumerate() {
-    if ix < widths.len() {
-      if let TableColumnWidth::FixedPx(width) = width {
-        widths[ix] = *width;
-      }
+    if ix < widths.len()
+      && let TableColumnWidth::FixedPx(width) = width
+    {
+      widths[ix] = *width;
     }
   }
   let Some(first_layout_row) = layout.rows.first() else {
@@ -182,14 +182,12 @@ pub(super) fn insert_table_cell_paragraphs_at(
   let mut caret_block_ix = paragraph_ix;
   let mut caret_byte = first_insert_start + first.text.len();
 
-  let mut insert_ix = paragraph_ix + 1;
-  for inserted_paragraph in inserted {
+  for (insert_ix, inserted_paragraph) in (paragraph_ix + 1..).zip(inserted) {
     caret_block_ix = insert_ix;
     caret_byte = inserted_paragraph.text.len();
     cell
       .blocks
       .insert(insert_ix, TableCellBlock::Paragraph(inserted_paragraph));
-    insert_ix += 1;
   }
 
   let TableCellBlock::Paragraph(caret_paragraph) = cell.blocks.get_mut(caret_block_ix)? else {

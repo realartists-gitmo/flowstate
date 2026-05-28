@@ -306,9 +306,14 @@ fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>,
       .unwrap_or_else(load_document_theme);
     update(&mut theme);
 
-    if let Err(error) = save_document_theme(&theme) {
-      eprintln!("failed to save document style settings: {error}");
-    }
+    let theme_for_save = theme.clone();
+    cx.background_executor()
+      .spawn(async move {
+        if let Err(error) = save_document_theme(&theme_for_save) {
+          eprintln!("failed to save document style settings: {error}");
+        }
+      })
+      .detach();
 
     workspace.apply_document_theme_to_open_editors(theme, cx);
   });
@@ -359,9 +364,13 @@ fn active_smart_word_selection(cx: &App, workspace: &WeakEntity<Workspace>) -> b
 }
 
 fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
-  if let Err(error) = save_smart_word_selection(enabled) {
-    eprintln!("failed to save smart word selection setting: {error}");
-  }
+  cx.background_executor()
+    .spawn(async move {
+      if let Err(error) = save_smart_word_selection(enabled) {
+        eprintln!("failed to save smart word selection setting: {error}");
+      }
+    })
+    .detach();
 
   let _ = workspace.update(cx, |workspace, cx| {
     for panel in &workspace.document_panels {

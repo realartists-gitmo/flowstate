@@ -1,4 +1,4 @@
-use std::{cell::Cell, collections::HashSet, path::{Path, PathBuf}, rc::Rc};
+use std::{cell::Cell, collections::HashSet, fs, path::{Path, PathBuf}, rc::Rc};
 
 use gpui::{
   AnyElement, App, Axis, Bounds, ClickEvent, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, PathPromptOptions,
@@ -25,7 +25,7 @@ use crate::app_settings::{load_document_theme, load_smart_word_selection, save_d
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, demo_document, load_or_create_document, paragraph_byte_range,
+  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, load_or_create_document, paragraph_byte_range, read_db8,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -35,6 +35,7 @@ use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
+const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;

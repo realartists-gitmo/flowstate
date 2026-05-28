@@ -50,8 +50,16 @@ impl Workspace {
   fn render_workspace_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     let panel_sizes = self.body_resizable_state.read(cx).sizes().clone();
     let nav_width = panel_sizes.first().copied().unwrap_or(px(240.0));
-    let outline_width = if self.outline_collapsed { px(30.0) } else { px(240.0) };
-    let outline_range_end = if self.outline_collapsed { px(30.0) } else { px(420.0) };
+    let outline_width = if self.outline_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH
+    } else {
+      px(240.0)
+    };
+    let outline_range_end = if self.outline_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH
+    } else {
+      px(420.0)
+    };
 
     h_resizable("workspace-body-resizable")
       .with_state(&self.body_resizable_state)

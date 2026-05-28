@@ -46,10 +46,9 @@ impl RichTextEditor {
     let delta = (content_y - item_top).max(px(0.0));
     match item {
       VirtualItem::ParagraphRemainder { paragraph_ix, .. } => {
+        let width = self.current_layout_width();
         let start_byte = self
-          .paragraph_chunk_layout_cache
-          .get(paragraph_ix)
-          .and_then(|entry| entry.as_ref())
+          .valid_chunk_cache_entry(paragraph_ix, width)
           .and_then(|entry| entry.chunks.last())
           .map(|chunk| chunk.end_byte)
           .unwrap_or(0);
@@ -166,10 +165,9 @@ impl RichTextEditor {
         start_byte,
         delta,
       } => {
+        let width = self.current_layout_width();
         let entry = self
-          .paragraph_chunk_layout_cache
-          .get(*paragraph_ix)
-          .and_then(|entry| entry.as_ref());
+          .valid_chunk_cache_entry(*paragraph_ix, width);
         if let Some(entry) = entry {
           let mut consumed = px(0.0);
           for (chunk_ix, chunk) in entry
@@ -222,10 +220,9 @@ impl RichTextEditor {
   }
 
   fn paragraph_remainder_start_byte(&self, paragraph_ix: usize) -> usize {
+    let width = self.current_layout_width();
     self
-      .paragraph_chunk_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
+      .valid_chunk_cache_entry(paragraph_ix, width)
       .and_then(|entry| entry.chunks.last())
       .map(|chunk| chunk.end_byte)
       .unwrap_or(0)

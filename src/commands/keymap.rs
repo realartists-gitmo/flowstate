@@ -62,7 +62,7 @@ pub fn register_keymap(cx: &mut App, keymap: &Keymap) {
   let bindings = keymap
     .entries
     .iter()
-    .filter_map(|entry| keybinding_for_entry(entry));
+    .filter_map(keybinding_for_entry);
   cx.bind_keys(bindings);
 }
 

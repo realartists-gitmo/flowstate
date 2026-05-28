@@ -282,7 +282,11 @@ impl RichTextEditor {
       let Some(path) = paths.into_iter().next() else {
         return;
       };
-      let Some((asset, alt_text)) = image_asset_from_path(&path) else {
+      let image_asset = cx
+        .background_executor()
+        .spawn(async move { image_asset_from_path(&path) })
+        .await;
+      let Some((asset, alt_text)) = image_asset else {
         return;
       };
       editor
@@ -297,16 +301,36 @@ impl RichTextEditor {
   }
 
   fn on_file_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
-    let image_assets = paths
-      .paths()
-      .iter()
-      .filter_map(|path| image_asset_from_path(path))
-      .collect::<Vec<_>>();
-    if image_assets.is_empty() {
+    let paths = paths.paths().to_vec();
+    if paths.is_empty() {
       return;
     }
-    self.place_block_insertion_from_point(window.mouse_position(), window, cx);
-    self.insert_image_assets(image_assets, cx);
+    let position = window.mouse_position();
+    let window_handle = window.window_handle();
+    cx.spawn(async move |editor, cx| {
+      let image_assets = cx
+        .background_executor()
+        .spawn(async move {
+          paths
+            .iter()
+            .filter_map(|path| image_asset_from_path(path))
+            .collect::<Vec<_>>()
+        })
+        .await;
+      if image_assets.is_empty() {
+        return;
+      }
+      let _ = window_handle.update(cx, |_, window, cx| {
+        let _ = editor.update(cx, |editor, cx| {
+          if editor.disposed {
+            return;
+          }
+          editor.place_block_insertion_from_point(position, window, cx);
+          editor.insert_image_assets(image_assets, cx);
+        });
+      });
+    })
+    .detach();
   }
 
   fn place_block_insertion_from_point(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
@@ -344,17 +368,18 @@ impl RichTextEditor {
   }
 
   fn insert_clipboard_image(&mut self, image: Image, cx: &mut Context<Self>) {
-    let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
-    let mut hasher = DefaultHasher::new();
-    image.bytes.hash(&mut hasher);
-    let asset = AssetRecord {
-      id: asset_id,
-      mime_type: image.format.mime_type().into(),
-      original_name: None,
-      content_hash: hasher.finish(),
-      bytes: Arc::new(image.bytes),
-    };
-    self.insert_image_block(asset, "Pasted image", cx);
+    cx.spawn(async move |editor, cx| {
+      let (asset, alt_text) = cx
+        .background_executor()
+        .spawn(async move { image_asset_from_image(image) })
+        .await;
+      let _ = editor.update(cx, |editor, cx| {
+        if !editor.disposed {
+          editor.insert_image_block(asset, alt_text, cx);
+        }
+      });
+    })
+    .detach();
   }
 
 }

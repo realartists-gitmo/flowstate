@@ -160,7 +160,7 @@ fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> imp
 fn insert_image_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
-      let _ = editor.update(cx, |editor, cx| editor.prompt_insert_image(cx));
+      editor.update(cx, |editor, cx| editor.prompt_insert_image(cx));
     }
   });
 }
@@ -168,7 +168,7 @@ fn insert_image_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
 fn insert_default_table_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
-      let _ = editor.update(cx, |editor, cx| editor.insert_default_table(2, 2, cx));
+      editor.update(cx, |editor, cx| editor.insert_default_table(2, 2, cx));
     }
   });
 }
@@ -176,7 +176,7 @@ fn insert_default_table_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut
 fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
-      let _ = editor.update(cx, |editor, cx| editor.insert_equation("x^2 + y^2 = z^2", cx));
+      editor.update(cx, |editor, cx| editor.insert_equation("x^2 + y^2 = z^2", cx));
     }
   });
 }

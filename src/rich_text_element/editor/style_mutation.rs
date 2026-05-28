@@ -8,7 +8,7 @@ impl RichTextEditor {
         .selected_table_cell_paragraph()
         .map(|paragraph| paragraph.paragraph.style)
         .unwrap_or(ParagraphStyle::Normal);
-      let direct = explicit_direct.unwrap_or_else(|| matches!(paragraph_style, ParagraphStyle::Tag | ParagraphStyle::Analytic));
+      let direct = explicit_direct.unwrap_or(matches!(paragraph_style, ParagraphStyle::Tag | ParagraphStyle::Analytic));
       let all_selected = self
         .selected_table_cell_paragraph()
         .map(|paragraph| {
@@ -48,7 +48,7 @@ impl RichTextEditor {
     }
     if self.selection.is_caret() {
       let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
-      let direct = explicit_direct.unwrap_or_else(|| matches!(paragraph_style, ParagraphStyle::Tag | ParagraphStyle::Analytic));
+      let direct = explicit_direct.unwrap_or(matches!(paragraph_style, ParagraphStyle::Tag | ParagraphStyle::Analytic));
       let mut styles = self.styles_at_caret();
       if direct {
         styles.direct_underline = !styles.direct_underline;

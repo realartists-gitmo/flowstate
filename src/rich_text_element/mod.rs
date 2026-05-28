@@ -44,6 +44,12 @@ pub(crate) fn log_timing(label: &str, start: Instant, detail: impl AsRef<str>) {
   }
 }
 
+pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
+  if timing_enabled() {
+    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());
+  }
+}
+
 #[cfg(test)]
 use editor::{EditOperation, adjust_drop_after_source_delete};
 

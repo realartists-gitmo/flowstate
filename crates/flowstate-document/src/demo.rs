@@ -5,7 +5,12 @@ use crop::Rope;
 use super::*;
 
 pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) -> Document {
-  let mut text = String::new();
+  let text_capacity = paragraphs
+    .iter()
+    .map(|paragraph| paragraph.runs.iter().map(|run| run.text.len()).sum::<usize>())
+    .sum::<usize>()
+    + paragraphs.len().saturating_sub(1);
+  let mut text = String::with_capacity(text_capacity);
   let mut stored_paragraphs = Vec::with_capacity(paragraphs.len());
   for (ix, paragraph) in paragraphs.into_iter().enumerate() {
     if ix > 0 {
@@ -26,6 +31,40 @@ pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>
       version: 0,
     });
   }
+  document_from_stored_paragraphs(theme, text, stored_paragraphs)
+}
+
+pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentParagraphInput>) -> Document {
+  let text_capacity = paragraphs
+    .iter()
+    .map(|paragraph| paragraph.runs.iter().map(|run| run.text.len()).sum::<usize>())
+    .sum::<usize>()
+    + paragraphs.len().saturating_sub(1);
+  let mut text = String::with_capacity(text_capacity);
+  let mut stored_paragraphs = Vec::with_capacity(paragraphs.len());
+  for (ix, paragraph) in paragraphs.into_iter().enumerate() {
+    if ix > 0 {
+      text.push('\n');
+    }
+    let start = text.len();
+    let mut runs = Vec::with_capacity(paragraph.runs.len());
+    for run in paragraph.runs {
+      let len = run.text.len();
+      text.push_str(&run.text);
+      runs.push(TextRun { len, styles: run.styles });
+    }
+    let end = text.len();
+    stored_paragraphs.push(Paragraph {
+      style: paragraph.style,
+      byte_range: start..end,
+      runs: merge_adjacent_runs(runs),
+      version: 0,
+    });
+  }
+  document_from_stored_paragraphs(theme, text, stored_paragraphs)
+}
+
+fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut stored_paragraphs: Vec<Paragraph>) -> Document {
   if stored_paragraphs.is_empty() {
     stored_paragraphs.push(Paragraph {
       style: ParagraphStyle::Normal,
@@ -44,26 +83,6 @@ pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>
     offset_index,
     theme,
   }
-}
-
-pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentParagraphInput>) -> Document {
-  document_from_input(
-    theme,
-    paragraphs
-      .into_iter()
-      .map(|paragraph| InputParagraph {
-        style: paragraph.style,
-        runs: paragraph
-          .runs
-          .into_iter()
-          .map(|run| InputRun {
-            text: run.text,
-            styles: run.styles,
-          })
-          .collect(),
-      })
-      .collect(),
-  )
 }
 
 pub fn blank_document() -> Document {

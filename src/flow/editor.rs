@@ -12,7 +12,7 @@ use flowstate_flow::{
 };
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-  ParentElement, Render, Subscription, Window, div, prelude::*, px,
+  ParentElement, Render, Subscription, Task, Window, div, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -118,24 +118,45 @@ impl FlowEditor {
     self.dirty || self.pending_edit.is_some()
   }
 
-  pub fn save(&mut self, cx: &mut Context<Self>) -> std::io::Result<()> {
+  pub fn save(&mut self, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
     self.resolve_pending_edit(cx);
     let Some(path) = self.path.clone() else {
-      return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "flow has no save path"));
+      return cx
+        .background_executor()
+        .spawn(async { Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "flow has no save path")) });
     };
-    save_flow_document(&path, &self.document).map_err(std::io::Error::other)?;
-    self.dirty = false;
-    cx.notify();
-    Ok(())
+    self.save_to_path(path, cx)
   }
 
-  pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> std::io::Result<()> {
+  pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
     self.resolve_pending_edit(cx);
-    save_flow_document(&path, &self.document).map_err(std::io::Error::other)?;
-    self.path = Some(path);
-    self.dirty = false;
-    cx.notify();
-    Ok(())
+    self.path = Some(path.clone());
+    self.save_to_path(path, cx)
+  }
+
+  fn save_to_path(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
+    let saved_document = self.document.clone();
+    cx.spawn(async move |editor, cx| {
+      let write_result = cx
+        .background_executor()
+        .spawn({
+          let saved_document = saved_document.clone();
+          async move { save_flow_document(&path, &saved_document).map_err(std::io::Error::other) }
+        })
+        .await;
+      match write_result {
+        Ok(()) => {
+          let _ = editor.update(cx, |editor, cx| {
+            if editor.pending_edit.is_none() && editor.document == saved_document {
+              editor.dirty = false;
+            }
+            cx.notify();
+          });
+          Ok(())
+        },
+        Err(error) => Err(error),
+      }
+    })
   }
 
   pub fn discard_recovery_file(&mut self) {}

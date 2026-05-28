@@ -118,10 +118,10 @@ fn validate_image_payload(image: &ImageBlock, document: &Document) -> io::Result
     },
     ImageSizing::Intrinsic | ImageSizing::FitWidth => {},
   }
-  if let Some(caption) = &image.caption {
-    if paragraph_runs_len(caption) != paragraph_text_len(caption) {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "image caption run lengths are invalid"));
-    }
+  if let Some(caption) = &image.caption
+    && paragraph_runs_len(caption) != paragraph_text_len(caption)
+  {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "image caption run lengths are invalid"));
   }
   if let Some(asset) = document.assets.assets.get(&image.asset_id) {
     let mut hasher = DefaultHasher::new();

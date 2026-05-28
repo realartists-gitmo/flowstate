@@ -164,23 +164,41 @@ impl Workspace {
 
   pub fn open_demo_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let path = PathBuf::from("data/demo.db8");
-    let document = load_or_create_document(&path).unwrap_or_else(|_| demo_document());
-    self.add_document_panel(document, Some(path), window, cx);
+    self.open_document_path(path, window, cx);
   }
 
   pub fn open_document_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-    if is_flow_path(&path) {
-      let document = flowstate_flow::load_flow_document_or_new(&path);
-      self.add_flow_panel(document, Some(path), window, cx);
-      return;
-    }
-    match load_document_for_open(&path) {
-      Ok((document, document_path)) => self.add_document_panel(document, document_path, window, cx),
-      Err(error) => {
-        let detail = format!("Failed to open {}: {error}", path.display());
-        drop(window.prompt(PromptLevel::Critical, "Open failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
-      },
-    }
+    let window_handle = window.window_handle();
+    cx.spawn(async move |workspace, cx| {
+      let path_for_error = path.clone();
+      let loaded = cx
+        .background_executor()
+        .spawn(async move { load_workspace_document(path) })
+        .await;
+      match loaded {
+        Ok(LoadedWorkspaceDocument::Document { document, path }) => {
+          let _ = window_handle.update(cx, |_, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+              workspace.add_document_panel(*document, path, window, cx);
+            });
+          });
+        },
+        Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
+          let _ = window_handle.update(cx, |_, window, cx| {
+            let _ = workspace.update(cx, |workspace, cx| {
+              workspace.add_flow_panel(document, Some(path), window, cx);
+            });
+          });
+        },
+        Err(error) => {
+          let detail = format!("Failed to open {}: {error}", path_for_error.display());
+          let _ = window_handle.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Critical, "Open failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+          });
+        },
+      }
+    })
+    .detach();
   }
 
   pub fn prompt_open_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -198,28 +216,9 @@ impl Workspace {
       let Some(path) = paths.into_iter().next() else {
         return;
       };
-      if is_flow_path(&path) {
-        let document = flowstate_flow::load_flow_document_or_new(&path);
-        let _ = window_handle.update(cx, |_, window, cx| {
-          let _ = workspace.update(cx, |workspace, cx| {
-            workspace.add_flow_panel(document, Some(path), window, cx);
-          });
-        });
-        return;
-      }
-      let (document, document_path) = match load_document_for_open(&path) {
-        Ok(result) => result,
-        Err(error) => {
-          let detail = format!("Failed to open {}: {error}", path.display());
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Open failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
-          return;
-        },
-      };
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| {
-          workspace.add_document_panel(document, document_path, window, cx);
+          workspace.open_document_path(path, window, cx);
         });
       });
     })
@@ -300,7 +299,7 @@ impl Workspace {
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       let should_close = match answer.await {
-        Ok(0) => match panel_kind.save(cx) {
+        Ok(0) => match panel_kind.save(cx).await {
           Ok(()) => true,
           Err(error) => {
             eprintln!("failed to save before close: {error}");
@@ -349,7 +348,7 @@ impl Workspace {
         Ok(0) => {
           let mut ok = true;
           for panel in dirty_panels {
-            match panel.save(cx) {
+            match panel.save(cx).await {
               Ok(()) => {},
               Err(error) => {
                 ok = false;
@@ -385,13 +384,17 @@ impl Workspace {
         self.prompt_save_active_as(editor, window, cx);
         return;
       }
-      match editor.update(cx, |editor, cx| editor.save(cx)) {
-        Ok(()) => {},
-        Err(error) => {
+      let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+      let window_handle = window.window_handle();
+      cx.spawn(async move |_, cx| {
+        if let Err(error) = save_task.await {
           let detail = error.to_string();
-          drop(window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
-        },
-      }
+          let _ = window_handle.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+          });
+        }
+      })
+      .detach();
       cx.notify();
       return;
     }
@@ -400,13 +403,17 @@ impl Workspace {
         self.prompt_save_active_flow_as(editor, window, cx);
         return;
       }
-      match editor.update(cx, |editor, cx| editor.save(cx)) {
-        Ok(()) => {},
-        Err(error) => {
+      let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+      let window_handle = window.window_handle();
+      cx.spawn(async move |_, cx| {
+        if let Err(error) = save_task.await {
           let detail = error.to_string();
-          drop(window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
-        },
-      }
+          let _ = window_handle.update(cx, |_, window, cx| {
+            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+          });
+        }
+      })
+      .detach();
       cx.notify();
     }
   }
@@ -468,23 +475,25 @@ impl Workspace {
       };
 
       match editor.update(cx, |editor, cx| editor.save_as(path.clone(), cx)) {
-        Ok(Ok(())) => {
-          let _ = workspace.update(cx, |workspace, cx| {
-            if let Some(panel) = workspace
-              .document_panels
-              .iter()
-              .find(|panel| panel.read(cx).id() == panel_id)
-            {
-              panel.update(cx, |panel, cx| panel.set_path(path, cx));
-            }
-            cx.notify();
-          });
-        },
-        Ok(Err(error)) => {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
+        Ok(task) => match task.await {
+          Ok(()) => {
+            let _ = workspace.update(cx, |workspace, cx| {
+              if let Some(panel) = workspace
+                .document_panels
+                .iter()
+                .find(|panel| panel.read(cx).id() == panel_id)
+              {
+                panel.update(cx, |panel, cx| panel.set_path(path, cx));
+              }
+              cx.notify();
+            });
+          },
+          Err(error) => {
+            let detail = error.to_string();
+            let _ = window_handle.update(cx, |_, window, cx| {
+              window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+            });
+          },
         },
         Err(error) => {
           eprintln!("failed to access editor before save: {error}");
@@ -518,23 +527,25 @@ impl Workspace {
       };
 
       match editor.update(cx, |editor, cx| editor.save_as(path.clone(), cx)) {
-        Ok(Ok(())) => {
-          let _ = workspace.update(cx, |workspace, cx| {
-            if let Some(panel) = workspace
-              .flow_panels
-              .iter()
-              .find(|panel| panel.read(cx).id() == panel_id)
-            {
-              panel.update(cx, |panel, cx| panel.set_path(path, cx));
-            }
-            cx.notify();
-          });
-        },
-        Ok(Err(error)) => {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
+        Ok(task) => match task.await {
+          Ok(()) => {
+            let _ = workspace.update(cx, |workspace, cx| {
+              if let Some(panel) = workspace
+                .flow_panels
+                .iter()
+                .find(|panel| panel.read(cx).id() == panel_id)
+              {
+                panel.update(cx, |panel, cx| panel.set_path(path, cx));
+              }
+              cx.notify();
+            });
+          },
+          Err(error) => {
+            let detail = error.to_string();
+            let _ = window_handle.update(cx, |_, window, cx| {
+              window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+            });
+          },
         },
         Err(error) => {
           eprintln!("failed to access flow before save: {error}");
@@ -560,21 +571,15 @@ impl PanelKind {
     }
   }
 
-  fn save(&self, cx: &mut gpui::AsyncApp) -> Result<(), String> {
+  async fn save(&self, cx: &mut gpui::AsyncApp) -> Result<(), String> {
     match self {
-      PanelKind::Document(editor) => {
-        match editor.update(cx, |editor, cx| editor.save(cx)) {
-          Ok(Ok(())) => Ok(()),
-          Ok(Err(error)) => Err(error.to_string()),
-          Err(error) => Err(format!("failed to access editor before save: {error}")),
-        }
+      PanelKind::Document(editor) => match editor.update(cx, |editor, cx| editor.save(cx)) {
+        Ok(task) => task.await.map_err(|error| error.to_string()),
+        Err(error) => Err(format!("failed to access editor before save: {error}")),
       },
-      PanelKind::Flow(editor) => {
-        match editor.update(cx, |editor, cx| editor.save(cx)) {
-          Ok(Ok(())) => Ok(()),
-          Ok(Err(error)) => Err(error.to_string()),
-          Err(error) => Err(format!("failed to access flow before save: {error}")),
-        }
+      PanelKind::Flow(editor) => match editor.update(cx, |editor, cx| editor.save(cx)) {
+        Ok(task) => task.await.map_err(|error| error.to_string()),
+        Err(error) => Err(format!("failed to access flow before save: {error}")),
       },
     }
   }
@@ -582,13 +587,39 @@ impl PanelKind {
   fn discard(&self, cx: &mut gpui::AsyncApp) {
     match self {
       PanelKind::Document(editor) => {
-        let _ = editor.update(cx, |editor, _| editor.discard_recovery_file());
+        let _ = editor.update(cx, |editor, cx| editor.discard_recovery_file(cx));
       },
       PanelKind::Flow(editor) => {
         let _ = editor.update(cx, |editor, _| editor.discard_recovery_file());
       },
     }
   }
+}
+
+enum LoadedWorkspaceDocument {
+  Document {
+    document: Box<Document>,
+    path: Option<PathBuf>,
+  },
+  Flow {
+    document: flowstate_flow::FlowDocument,
+    path: PathBuf,
+  },
+}
+
+fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
+  if is_flow_path(&path) {
+    return Ok(LoadedWorkspaceDocument::Flow {
+      document: flowstate_flow::load_flow_document_or_new(&path),
+      path,
+    });
+  }
+  load_document_for_open(&path)
+    .map(|(document, path)| LoadedWorkspaceDocument::Document {
+      document: Box::new(document),
+      path,
+    })
+    .map_err(|error| error.to_string())
 }
 
 fn is_flow_path(path: &Path) -> bool {

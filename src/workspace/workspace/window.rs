@@ -38,7 +38,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
         Ok(0) => {
           let mut ok = true;
           for panel in dirty_panels {
-            match panel.save(cx) {
+            match panel.save(cx).await {
               Ok(()) => {},
               Err(error) => {
                 ok = false;

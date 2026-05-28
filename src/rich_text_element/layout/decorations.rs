@@ -51,14 +51,14 @@ pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<Run
   }
   let border_color = document.theme.default_text_color;
   let border_thickness = document.theme.emphasis_border_paint_width;
-  let borders = borders
-    .into_iter()
-    .flat_map(|bounds| box_rules(bounds, border_thickness, border_color))
-    .collect::<Vec<_>>();
   // Word paints fills before border rules. Keeping all run borders after all
   // run highlights prevents a following highlighted run from hiding the right
   // edge of the previous boxed run.
-  backgrounds.extend(borders);
+  backgrounds.extend(
+    borders
+      .into_iter()
+      .flat_map(|bounds| box_rules(bounds, border_thickness, border_color)),
+  );
   backgrounds
 }
 
@@ -138,64 +138,61 @@ pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, t
 }
 
 pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
-  let mut underlines = Vec::new();
+  let mut underlines = Vec::with_capacity(line.segments.len().saturating_mul(2));
   let baseline = line.baseline_y();
   for segment in &line.segments {
     match segment.format.underline {
       UnderlineKind::None => {},
       UnderlineKind::Single => {
         let (offset, thickness) = single_underline_metrics_for_segment(segment, document, cx);
-        underlines.push(DecorationSource {
+        underlines.push(Decoration::from(DecorationSource {
           x: segment.x,
           width: segment.width,
           y: baseline + offset,
           thickness,
           color: document.theme.default_text_color,
-        });
+        }));
       },
       UnderlineKind::Double => {
         let (offset, thickness) = double_underline_metrics_for_segment(document);
         let y = baseline + offset;
-        underlines.push(DecorationSource {
+        underlines.push(Decoration::from(DecorationSource {
           x: segment.x,
           width: segment.width,
           y,
           thickness,
           color: document.theme.default_text_color,
-        });
-        underlines.push(DecorationSource {
+        }));
+        underlines.push(Decoration::from(DecorationSource {
           x: segment.x,
           width: segment.width,
           y: y + thickness + document.theme.double_underline_gap,
           thickness,
           color: document.theme.default_text_color,
-        });
+        }));
       },
     }
   }
-  merge_inline_decorations(underlines.into_iter().map(Decoration::from).collect())
+  merge_inline_decorations(underlines)
 }
 
 pub(super) fn strikethroughs_for_line(document: &Document, line: &LaidOutLine) -> Vec<Decoration> {
   let baseline = line.baseline_y();
-  let decorations: Vec<DecorationSource> = line
-    .segments
-    .iter()
-    .enumerate()
-    .filter(|(_, segment)| segment.format.strikethrough)
-    .map(|(_, segment)| {
+  let mut decorations = Vec::with_capacity(line.segments.len());
+  for segment in &line.segments {
+    if segment.format.strikethrough {
       let thickness = document.theme.underline_rule_thickness.max(px(1.0));
       let y = baseline - segment.font_size * 0.30;
-      DecorationSource {
+      decorations.push(Decoration::from(DecorationSource {
         x: segment.x,
         width: segment.width,
         y,
         thickness,
         color: document.theme.default_text_color,
-      }
-    })
-    .collect();
-  merge_inline_decorations(decorations.into_iter().map(Decoration::from).collect())
+      }));
+    }
+  }
+  merge_inline_decorations(decorations)
 }
 
 #[derive(Clone, Copy)]

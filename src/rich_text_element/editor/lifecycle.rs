@@ -1,7 +1,7 @@
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
     let keys = self.document.blocks.iter().filter_map(|block| match block {
-      Block::Equation(equation) => Some((equation.source.to_string(), matches!(equation.display, EquationDisplay::Display))),
+      Block::Equation(equation) => Some((equation.source.clone(), matches!(equation.display, EquationDisplay::Display))),
       _ => None,
     });
     EquationRenderer::clear_entries(keys);
@@ -16,7 +16,7 @@ impl RichTextEditor {
       focus_subscriptions: Vec::new(),
       scroll_handle: VirtualListScrollHandle::new(),
       disposed: false,
-      recovery_path: document_path.as_ref().map(recovery_path_for_document),
+      recovery_path: document_path.as_deref().map(recovery_path_for_document),
       document_path,
       document,
       selection: EditorSelection::caret(),
@@ -60,6 +60,13 @@ impl RichTextEditor {
       pending_typing_prefetch_resume: false,
       resume_chunk_prefetch_after_typing: false,
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
+      paragraph_prep_cache: vec![ParagraphPrepSlot::default(); paragraph_count],
+      paragraph_shaping_cache: (0..paragraph_count).map(|_| None).collect(),
+      pending_layout_prep_task: None,
+      pending_layout_prep_request: None,
+      layout_generation: 0,
+      layout_prep_metrics: LayoutPrepMetrics::default(),
+      layout_runtime_metrics: LayoutRuntimeMetrics::default(),
       pending_chunk_prefetch: false,
       chunk_prefetch_queue: VecDeque::new(),
       paragraph_height_cache: vec![None; paragraph_count],
@@ -142,6 +149,13 @@ impl RichTextEditor {
     self.pending_typing_prefetch_resume = false;
     self.resume_chunk_prefetch_after_typing = false;
     self.paragraph_chunk_layout_cache = Vec::new();
+    self.paragraph_prep_cache = Vec::new();
+    self.paragraph_shaping_cache = Vec::new();
+    self.pending_layout_prep_task = None;
+    self.pending_layout_prep_request = None;
+    self.layout_generation = self.layout_generation.wrapping_add(1);
+    self.layout_prep_metrics = LayoutPrepMetrics::default();
+    self.layout_runtime_metrics = LayoutRuntimeMetrics::default();
     self.pending_chunk_prefetch = false;
     self.chunk_prefetch_queue = VecDeque::new();
     self.paragraph_height_cache = Vec::new();

@@ -5,13 +5,48 @@ impl Workspace {
   }
 
   pub fn toggle_outline(&mut self, cx: &mut Context<Self>) {
+    let width = self
+      .body_resizable_state
+      .read(cx)
+      .sizes()
+      .first()
+      .copied()
+      .unwrap_or(px(240.0));
+    let delta = if self.outline_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH - width
+    } else {
+      width - SIDE_PANEL_COLLAPSED_WIDTH
+    };
+    self.prepare_active_editor_for_width_delta(delta, cx);
     self.outline_collapsed = !self.outline_collapsed;
     cx.notify();
   }
 
   pub fn toggle_toolkit(&mut self, cx: &mut Context<Self>) {
+    let width = self
+      .content_resizable_state
+      .read(cx)
+      .sizes()
+      .get(1)
+      .copied()
+      .unwrap_or(px(300.0));
+    let delta = if self.toolkit_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH - width
+    } else {
+      width - SIDE_PANEL_COLLAPSED_WIDTH
+    };
+    self.prepare_active_editor_for_width_delta(delta, cx);
     self.toolkit_collapsed = !self.toolkit_collapsed;
     cx.notify();
+  }
+
+  fn prepare_active_editor_for_width_delta(&mut self, delta: Pixels, cx: &mut Context<Self>) {
+    if delta == px(0.0) {
+      return;
+    }
+    if let Some(editor) = self.active_editor.clone() {
+      editor.update(cx, |editor, cx| editor.prepare_for_workspace_width_delta(delta, cx));
+    }
   }
 
   fn refresh_outline_tree(&mut self, cx: &mut Context<Self>) {

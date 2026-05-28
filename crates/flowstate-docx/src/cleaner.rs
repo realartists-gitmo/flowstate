@@ -20,6 +20,7 @@ pub enum CleanAction {
 #[derive(Clone, Debug)]
 pub struct CleanedDocx {
   pub bytes: Vec<u8>,
+  pub main_document_xml: Option<Vec<u8>>,
   pub report: DocxCleanReport,
 }
 
@@ -54,9 +55,10 @@ pub fn clean_docx_bytes(bytes: &[u8]) -> std::io::Result<CleanedDocx> {
 }
 
 fn clean_docx_vec(bytes: Vec<u8>) -> std::io::Result<CleanedDocx> {
-  let (bytes, stats) = normalize_docx_formatting_values(bytes)?;
+  let (bytes, main_document_xml, stats) = normalize_docx_formatting_values(bytes)?;
   Ok(CleanedDocx {
     bytes,
+    main_document_xml,
     report: DocxCleanReport {
       stats,
       actions: CLEANING_RULES,
@@ -64,48 +66,54 @@ fn clean_docx_vec(bytes: Vec<u8>) -> std::io::Result<CleanedDocx> {
   })
 }
 
-fn normalize_docx_formatting_values(bytes: Vec<u8>) -> std::io::Result<(Vec<u8>, DocxCleanStats)> {
-  let mut package = match OpcPackage::from_reader(Cursor::new(&bytes)) {
+fn normalize_docx_formatting_values(bytes: Vec<u8>) -> std::io::Result<(Vec<u8>, Option<Vec<u8>>, DocxCleanStats)> {
+  let mut package = match OpcPackage::from_reader(Cursor::new(bytes.as_slice())) {
     Ok(package) => package,
-    Err(_) => return Ok((bytes, DocxCleanStats::default())),
+    Err(_) => return Ok((bytes, None, DocxCleanStats::default())),
   };
+  let main_document_part = package.main_document_part();
   let mut stats = DocxCleanStats::default();
 
-  for part in package.parts.values_mut() {
-    if !part_might_contain_word_xml(part) {
+  for (part_name, part) in package.parts.iter_mut() {
+    if !part_might_contain_word_xml(part_name, part) {
       continue;
     }
     let Ok(xml) = std::str::from_utf8(part) else {
       continue;
     };
     let (normalized, part_stats) = normalize_formatting_values_in_xml(xml);
-    if part_stats.has_changes() {
+    if let Some(normalized) = normalized {
       *part = normalized.into_bytes();
       stats.merge(part_stats);
     }
   }
 
+  let main_document_xml = main_document_part
+    .as_deref()
+    .and_then(|part_name| package.get_part(part_name))
+    .map(<[u8]>::to_vec);
+
   if !stats.has_changes() {
-    return Ok((bytes, stats));
+    return Ok((bytes, main_document_xml, stats));
   }
 
   let mut output = Cursor::new(Vec::new());
   package
     .write_to(&mut output)
     .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-  Ok((output.into_inner(), stats))
+  Ok((output.into_inner(), main_document_xml, stats))
 }
 
-fn part_might_contain_word_xml(part: &[u8]) -> bool {
-  part.starts_with(b"<?xml")
-    || part
-      .windows(3)
-      .any(|window| window == b"<w:" || window == b"<u ")
+fn part_might_contain_word_xml(part_name: &str, part: &[u8]) -> bool {
+  part_name.starts_with("/word/")
+    && part_name.ends_with(".xml")
+    && (part.starts_with(b"<?xml") || contains_bytes(part, b"<w:") || contains_bytes(part, b"<u "))
 }
 
-fn normalize_formatting_values_in_xml(xml: &str) -> (String, DocxCleanStats) {
-  let mut normalized = String::with_capacity(xml.len());
+fn normalize_formatting_values_in_xml(xml: &str) -> (Option<String>, DocxCleanStats) {
+  let mut normalized = None::<String>;
   let mut cursor = 0usize;
+  let mut flushed_cursor = 0usize;
   let mut stats = DocxCleanStats::default();
 
   while let Some(relative_start) = xml[cursor..].find('<') {
@@ -114,83 +122,91 @@ fn normalize_formatting_values_in_xml(xml: &str) -> (String, DocxCleanStats) {
       break;
     };
     let tag_end = tag_start + relative_end + 1;
-    normalized.push_str(&xml[cursor..tag_start]);
     let tag = &xml[tag_start..tag_end];
     let (tag, tag_stats) = normalize_formatting_tag(tag);
-    normalized.push_str(&tag);
-    stats.merge(tag_stats);
+    if tag_stats.has_changes() {
+      let normalized = normalized.get_or_insert_with(|| String::with_capacity(xml.len()));
+      normalized.push_str(&xml[flushed_cursor..tag_start]);
+      normalized.push_str(tag.as_deref().unwrap_or(&xml[tag_start..tag_end]));
+      flushed_cursor = tag_end;
+      stats.merge(tag_stats);
+    }
     cursor = tag_end;
   }
-  normalized.push_str(&xml[cursor..]);
 
-  if stats.has_changes() {
-    (normalized, stats)
-  } else {
-    (xml.to_string(), stats)
+  if let Some(normalized) = normalized.as_mut() {
+    normalized.push_str(&xml[flushed_cursor..]);
   }
+  (normalized, stats)
 }
 
-fn normalize_formatting_tag(tag: &str) -> (String, DocxCleanStats) {
+fn normalize_formatting_tag(tag: &str) -> (Option<String>, DocxCleanStats) {
   let Some(name) = tag_local_name(tag) else {
-    return (tag.to_string(), DocxCleanStats::default());
+    return (None, DocxCleanStats::default());
   };
-  let mut tag = tag.to_string();
+  let mut normalized = None::<String>;
   let mut stats = DocxCleanStats::default();
 
   match name {
     "style" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "type",
       supported_style_type,
       "paragraph",
       &mut stats.style_type_values_normalized,
     ),
     "jc" | "lvlJc" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "val",
       supported_justification_value,
       "left",
       &mut stats.justification_values_normalized,
     ),
     "u" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "val",
       supported_underline_value,
       "single",
       &mut stats.underline_values_normalized,
     ),
     "highlight" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "val",
       supported_highlight_value,
       "yellow",
       &mut stats.highlight_values_normalized,
     ),
     "tab" => {
-      normalize_attr(&mut tag, "val", supported_tab_alignment_value, "left", &mut stats.tab_values_normalized);
-      normalize_attr(&mut tag, "leader", supported_tab_leader_value, "none", &mut stats.tab_values_normalized);
+      normalize_attr(tag, &mut normalized, "val", supported_tab_alignment_value, "left", &mut stats.tab_values_normalized);
+      normalize_attr(tag, &mut normalized, "leader", supported_tab_leader_value, "none", &mut stats.tab_values_normalized);
     },
     "type" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "val",
       supported_section_type_value,
       "continuous",
       &mut stats.section_values_normalized,
     ),
     "pgSz" => normalize_attr(
-      &mut tag,
+      tag,
+      &mut normalized,
       "orient",
       supported_page_orientation_value,
       "portrait",
       &mut stats.section_values_normalized,
     ),
     "top" | "left" | "bottom" | "right" | "insideH" | "insideV" | "tl2br" | "tr2bl" | "bar" => {
-      normalize_attr(&mut tag, "val", supported_border_value, "single", &mut stats.border_values_normalized);
+      normalize_attr(tag, &mut normalized, "val", supported_border_value, "single", &mut stats.border_values_normalized);
     },
     _ => {},
   }
 
-  (tag, stats)
+  (normalized, stats)
 }
 
 fn tag_local_name(tag: &str) -> Option<&str> {
@@ -205,7 +221,15 @@ fn tag_local_name(tag: &str) -> Option<&str> {
   (!name.is_empty()).then_some(name)
 }
 
-fn normalize_attr(tag: &mut String, attr_name: &str, supported: fn(&str) -> bool, fallback: &str, count: &mut usize) {
+fn normalize_attr(
+  original_tag: &str,
+  normalized_tag: &mut Option<String>,
+  attr_name: &str,
+  supported: fn(&str) -> bool,
+  fallback: &str,
+  count: &mut usize,
+) {
+  let tag = normalized_tag.as_deref().unwrap_or(original_tag);
   let Some((value_start, value_end)) = attr_value_range(tag, attr_name) else {
     return;
   };
@@ -218,7 +242,7 @@ fn normalize_attr(tag: &mut String, attr_name: &str, supported: fn(&str) -> bool
   normalized.push_str(&tag[..value_start]);
   normalized.push_str(fallback);
   normalized.push_str(&tag[value_end..]);
-  *tag = normalized;
+  *normalized_tag = Some(normalized);
   *count += 1;
 }
 
@@ -260,6 +284,10 @@ fn attr_value_range(tag: &str, target_attr_name: &str) -> Option<(usize, usize)>
     return Some((value_start, value_end));
   }
   None
+}
+
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+  !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 impl DocxCleanStats {
@@ -375,6 +403,7 @@ mod tests {
   fn unsupported_underline_values_normalize_to_single() {
     let xml = r#"<w:rPr><w:u w:val="dashHeavy"/><w:u w:val='wavyDouble'/><w:u w:val="none"/></w:rPr>"#;
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);
+    let normalized = normalized.as_deref().unwrap_or(xml);
 
     assert_eq!(stats.underline_values_normalized, 2);
     assert!(normalized.contains(r#"<w:u w:val="single"/>"#));
@@ -388,13 +417,14 @@ mod tests {
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);
 
     assert_eq!(stats.underline_values_normalized, 0);
-    assert_eq!(normalized, xml);
+    assert!(normalized.is_none());
   }
 
   #[test]
   fn unsupported_parser_enum_values_are_normalized() {
     let xml = r#"<w:style w:type="weird"><w:jc w:val="thaiDistribute"/><w:highlight w:val="pink"/><w:top w:val="dashSmallGap"/><w:tab w:val="list" w:leader="equals"/><w:type w:val="other"/><w:pgSz w:orient="sideways"/></w:style>"#;
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);
+    let normalized = normalized.as_deref().unwrap_or(xml);
 
     assert_eq!(stats.style_type_values_normalized, 1);
     assert_eq!(stats.justification_values_normalized, 1);

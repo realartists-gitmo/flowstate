@@ -84,7 +84,19 @@ fn document_for_serialization(document: &Document) -> Document {
 }
 
 fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
-  let mut bytes = Vec::new();
+  let estimated_asset_bytes = document
+    .assets
+    .assets
+    .values()
+    .map(|asset| asset.bytes.len())
+    .sum::<usize>();
+  let mut bytes = Vec::with_capacity(
+    DB8_MAGIC.len()
+      + std::mem::size_of::<u32>()
+      + document.text.byte_len()
+      + estimated_asset_bytes
+      + document.blocks.len().saturating_mul(32),
+  );
   bytes.extend_from_slice(DB8_MAGIC);
   bytes.extend_from_slice(&DB8_VERSION.to_le_bytes());
   write_u64(&mut bytes, document.text.byte_len() as u64);
@@ -97,9 +109,8 @@ fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
     write_asset_record(&mut bytes, asset);
   }
 
-  let blocks = serializable_blocks(document);
-  write_u64(&mut bytes, blocks.len() as u64);
-  for block in &blocks {
+  write_u64(&mut bytes, document.blocks.len() as u64);
+  for block in document.blocks.iter() {
     write_block_record(&mut bytes, block);
   }
   Ok(bytes)

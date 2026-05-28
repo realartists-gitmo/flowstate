@@ -63,6 +63,8 @@ pub(super) fn paragraph_is_visible(paragraph: &Paragraph) -> bool {
   ) || paragraph.runs.iter().any(|run| run_is_visible(run.styles))
 }
 
+pub(super) const INVISIBILITY_PROJECTED_VERSION_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
+
 pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix: usize) -> Option<Document> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   if !matches!(paragraph.style, ParagraphStyle::Normal) {
@@ -110,7 +112,7 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
     runs,
     // Give the projected paragraph a distinct cache key from the source
     // paragraph so invisible-mode layout cannot reuse a full-text layout.
-    version: paragraph.version.wrapping_add(0x9E37_79B9_7F4A_7C15),
+    version: paragraph.version.wrapping_add(INVISIBILITY_PROJECTED_VERSION_OFFSET),
   };
   let paragraphs = Arc::new(vec![paragraph.clone()]);
   Some(Document {
@@ -123,6 +125,6 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
   })
 }
 
-fn run_is_visible(styles: RunStyles) -> bool {
+pub(super) fn run_is_visible(styles: RunStyles) -> bool {
   styles.semantic == RunSemanticStyle::Cite || matches!(styles.highlight, Some(HighlightStyle::Spoken | HighlightStyle::Alternative))
 }

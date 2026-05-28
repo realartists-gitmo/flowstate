@@ -244,6 +244,9 @@ fn char_index_for_byte(text: &str, byte: usize) -> usize {
     .count()
 }
 
-static EQUATION_SVG_CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
-static EQUATION_PNG_CACHE: OnceLock<Mutex<HashMap<(String, bool), Result<Arc<Vec<u8>>, String>>>> = OnceLock::new();
+type EquationCacheKey = (SharedString, bool);
+type EquationRenderCache = FxHashMap<EquationCacheKey, Result<Arc<Vec<u8>>, String>>;
+
+static EQUATION_SVG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
+static EQUATION_PNG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
 

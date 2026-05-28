@@ -1,5 +1,4 @@
 use std::{
-  borrow::Cow,
   hash::{Hash, Hasher},
   ops::Range,
 };
@@ -137,6 +136,7 @@ pub(super) struct ParagraphHeightCacheEntry {
   pub(super) key: ParagraphCacheKey,
   pub(super) width: Pixels,
   pub(super) invisibility_mode: bool,
+  pub(super) edit_generation: u64,
   pub(super) height: Pixels,
 }
 

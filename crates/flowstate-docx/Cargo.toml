@@ -8,3 +8,4 @@ flowstate-document = { path = "../flowstate-document" }
 rdocx = "0.1.2"
 rdocx-opc = "0.1.2"
 rdocx-oxml = "0.1.2"
+rustc-hash = "2.1.2"

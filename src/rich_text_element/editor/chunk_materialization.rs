@@ -16,7 +16,7 @@ impl RichTextEditor {
     };
     let viewport = self.scroll_handle.bounds();
     let scroll_bottom = (-self.scroll_handle.offset().y).max(px(0.0)) + viewport.size.height.max(px(700.0)) + overscan;
-    let mut remainders = Vec::new();
+    let mut remainders = Vec::with_capacity(visible_range.len());
     for item_ix in visible_range {
       if let Some(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) = cache.items.get(item_ix) {
         let row_top = self.height_prefix_index.item_top(item_ix);
@@ -29,6 +29,13 @@ impl RichTextEditor {
     if remainders.is_empty() {
       return false;
     }
+    let missing_prep = remainders
+      .iter()
+      .filter_map(|(paragraph_ix, _, _)| self.valid_paragraph_prep(*paragraph_ix).is_none().then_some(*paragraph_ix))
+      .collect::<Vec<_>>();
+    if !missing_prep.is_empty() {
+      self.request_layout_prep(width, missing_prep, cx);
+    }
 
     let started = Instant::now();
     let budget = Duration::from_millis(SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS);
@@ -36,6 +43,7 @@ impl RichTextEditor {
     for (paragraph_ix, start_byte, target) in remainders {
       changed |= self.materialize_paragraph_remainder_until(paragraph_ix, width, start_byte, target, started, budget, window, cx);
       if !DISABLE_SCROLL_LIMITING_FUNCTIONS && started.elapsed() >= budget {
+        self.layout_runtime_metrics.scroll_budget_overruns = self.layout_runtime_metrics.scroll_budget_overruns.saturating_add(1);
         break;
       }
     }
@@ -80,24 +88,20 @@ impl RichTextEditor {
       if !DISABLE_SCROLL_LIMITING_FUNCTIONS && started.elapsed() >= budget {
         break;
       }
-      let (exact_after_start, complete) = self.paragraph_exact_height_after_byte(paragraph_ix, start_byte);
+      let (exact_after_start, complete) = self.paragraph_exact_height_after_byte(paragraph_ix, start_byte, width);
       if complete || exact_after_start >= target {
         break;
       }
       let target_lines = self.catch_up_chunk_target_lines(target - exact_after_start);
       let before = self
-        .paragraph_chunk_layout_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
+        .valid_chunk_cache_entry(paragraph_ix, width)
         .map(|entry| entry.chunks.len())
         .unwrap_or(0);
       if !self.ensure_next_paragraph_chunk_with_target_lines(paragraph_ix, width, target_lines, window, cx) {
         break;
       }
       let after = self
-        .paragraph_chunk_layout_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
+        .valid_chunk_cache_entry(paragraph_ix, width)
         .map(|entry| entry.chunks.len())
         .unwrap_or(before);
       if after == before {
@@ -108,26 +112,32 @@ impl RichTextEditor {
     changed
   }
 
-  fn paragraph_exact_height_after_byte(&self, paragraph_ix: usize, start_byte: usize) -> (Pixels, bool) {
+  fn paragraph_exact_height_after_byte(&self, paragraph_ix: usize, start_byte: usize, width: Pixels) -> (Pixels, bool) {
     let Some(entry) = self
-      .paragraph_chunk_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
+      .valid_chunk_cache_entry(paragraph_ix, width)
     else {
       return (px(0.0), false);
     };
-    let height = entry
-      .chunks
-      .iter()
-      .filter(|chunk| chunk.end_byte > start_byte)
-      .map(|chunk| chunk.height)
-      .fold(px(0.0), |acc, height| acc + height);
+    let mut start_ix = 0usize;
+    let mut end_ix = entry.chunks.len();
+    while start_ix < end_ix {
+      let mid = start_ix + (end_ix - start_ix) / 2;
+      if entry.chunks[mid].end_byte > start_byte {
+        end_ix = mid;
+      } else {
+        start_ix = mid + 1;
+      }
+    }
+    let mut height = px(0.0);
+    for chunk in &entry.chunks[start_ix..] {
+      height += chunk.height;
+    }
     (height, entry.complete)
   }
 
   fn catch_up_chunk_target_lines(&self, remaining: Pixels) -> usize {
     let line_height = (self.document.theme.body_font_size * self.document.theme.line_spacing * 1.35).max(px(12.0));
-    let approximate_lines = f32::from(remaining / line_height).ceil() as usize;
+    let approximate_lines = (remaining / line_height).ceil() as usize;
     approximate_lines.clamp(DEFAULT_PARAGRAPH_CHUNK_TARGET_LINES, SCROLL_FOREGROUND_MAX_CHUNK_LINES)
   }
 

@@ -46,9 +46,14 @@ fn apply_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) 
   Theme::change(mode, window, cx);
   cx.refresh_windows();
 
-  if let Err(error) = save_theme_name(theme_name) {
-    eprintln!("failed to save theme setting: {error}");
-  }
+  let theme_name = theme_name.to_string();
+  cx.background_executor()
+    .spawn(async move {
+      if let Err(error) = save_theme_name(&theme_name) {
+        eprintln!("failed to save theme setting: {error}");
+      }
+    })
+    .detach();
 }
 
 fn truncate_tab_title(title: &str, max_chars: usize) -> String {

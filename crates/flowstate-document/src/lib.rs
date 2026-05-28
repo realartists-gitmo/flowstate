@@ -18,8 +18,8 @@ fn timing_enabled() -> bool {
   std::env::var_os(TIMING_ENV).is_some()
 }
 
-pub(crate) fn log_timing(label: &str, start: Instant, detail: impl AsRef<str>) {
+pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
   if timing_enabled() {
-    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail.as_ref());
+    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());
   }
 }

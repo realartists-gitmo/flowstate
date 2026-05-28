@@ -49,6 +49,35 @@ pub(super) fn estimate_paragraph_item_height_with_visibility(
   height.max(line_height)
 }
 
+pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &ParagraphPrep, width: Pixels) -> Pixels {
+  if !prep.visible {
+    return px(0.0);
+  }
+  let p_format = paragraph_format(document, prep.layout_style);
+  let border = p_format.border;
+  let border_inset = border.map_or(px(0.0), |border| border.width + border.space_x);
+  let content_top = border.map_or(px(0.0), |border| border.width + border.space_y);
+  let content_width = (width - document.theme.pageless_inset_x * 2.0 - border_inset * 2.0).max(px(1.0));
+  let avg_char_width = (p_format.font_size * 0.52).max(px(1.0));
+  let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
+  let text_len = prep.paragraph_text.len();
+  let forced_line_count = prep.paragraph_text.matches(SOFT_LINE_BREAK).count();
+  let estimated_lines = (text_len / chars_per_line)
+    .saturating_add(1)
+    .saturating_add(forced_line_count)
+    .max(1);
+  let line_gap = p_format.font_size * document.theme.line_gap_fraction;
+  let line_height = (p_format.font_size + line_gap) * p_format.line_spacing;
+  let mut height = p_format.spacing_before + content_top + line_height * estimated_lines as f32 + content_top + p_format.spacing_after;
+  if prep.paragraph_ix == 0 {
+    height += document.theme.pageless_inset_top;
+  }
+  if prep.paragraph_ix + 1 == document.paragraphs.len() {
+    height += document.theme.pageless_inset_bottom;
+  }
+  height.max(line_height)
+}
+
 pub(super) fn estimate_structural_block_item_height(document: &Document, block_ix: usize, width: Pixels) -> Pixels {
   let Some(block) = document.blocks.get(block_ix) else {
     return px(1.0);

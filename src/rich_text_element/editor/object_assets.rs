@@ -73,6 +73,22 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
   ))
 }
 
+fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
+  let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
+  let mut hasher = DefaultHasher::new();
+  image.bytes.hash(&mut hasher);
+  (
+    AssetRecord {
+      id: asset_id,
+      mime_type: image.format.mime_type().into(),
+      original_name: None,
+      content_hash: hasher.finish(),
+      bytes: Arc::new(image.bytes),
+    },
+    "Pasted image".into(),
+  )
+}
+
 fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
   match path
     .extension()?

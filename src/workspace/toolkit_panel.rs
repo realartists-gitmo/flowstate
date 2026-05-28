@@ -3,15 +3,23 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::{ActiveTheme as _, IconName, Sizable, v_flex};
 
-use super::Workspace;
+use super::{SIDE_PANEL_COLLAPSED_WIDTH, Workspace};
 
 impl Workspace {
   /// Renders the main editor area and the right-side Toolkit panel as one
   /// resizable horizontal split. Keeping this next to `render_toolkit` makes
   /// the panel's width, collapse state, and visible contents easier to evolve.
   pub(super) fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    let toolkit_width = if self.toolkit_collapsed { px(30.0) } else { px(300.0) };
-    let toolkit_range_end = if self.toolkit_collapsed { px(30.0) } else { px(520.0) };
+    let toolkit_width = if self.toolkit_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH
+    } else {
+      px(300.0)
+    };
+    let toolkit_range_end = if self.toolkit_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH
+    } else {
+      px(520.0)
+    };
 
     h_resizable("workspace-content-resizable")
       .with_state(&self.content_resizable_state)

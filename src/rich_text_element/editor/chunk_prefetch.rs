@@ -23,22 +23,34 @@ impl RichTextEditor {
     }
 
     let mut queue = VecDeque::new();
-    let mut queued = vec![false; paragraph_count];
+    let mut prep_queue = Vec::new();
     let active = self.active_height_range();
     let predicted = self.predicted_visible_height_range(width);
+    let mut candidates = Vec::with_capacity(predicted.len().saturating_add(active.len()).saturating_add(16));
     for range in [
       expand_paragraph_range(predicted.clone(), paragraph_count, 4),
       expand_paragraph_range(active, paragraph_count, 2),
     ] {
-      for paragraph_ix in range {
-        if !queued[paragraph_ix] && self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
-          queued[paragraph_ix] = true;
+      candidates.extend(range);
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+    for paragraph_ix in candidates {
+      if paragraph_ix < paragraph_count && self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
+        if self.valid_paragraph_prep(paragraph_ix).is_some() {
           queue.push_back(paragraph_ix);
+        } else {
+          prep_queue.push(paragraph_ix);
         }
       }
     }
+    if !prep_queue.is_empty() {
+      self.request_layout_prep(width, prep_queue, cx);
+    }
     if queue.is_empty() {
-      self.resume_chunk_prefetch_after_typing = false;
+      if self.pending_layout_prep_task.is_none() {
+        self.resume_chunk_prefetch_after_typing = false;
+      }
       return;
     }
     self.resume_chunk_prefetch_after_typing = false;
@@ -83,14 +95,17 @@ impl RichTextEditor {
     let budget = Duration::from_millis(6);
     let scroll_anchor = self.capture_scroll_anchor();
     let mut changed = false;
+    let mut missing_prep = Vec::new();
     while let Some(paragraph_ix) = self.chunk_prefetch_queue.pop_front() {
       if !self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
         continue;
       }
+      if self.valid_paragraph_prep(paragraph_ix).is_none() {
+        missing_prep.push(paragraph_ix);
+        continue;
+      }
       let before = self
-        .paragraph_chunk_layout_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
+        .valid_chunk_cache_entry(paragraph_ix, width)
         .map(|entry| entry.chunks.len())
         .unwrap_or(0);
       if self.ensure_next_paragraph_chunk_with_target_lines_internal(
@@ -102,9 +117,7 @@ impl RichTextEditor {
         cx,
       ) {
         let after = self
-          .paragraph_chunk_layout_cache
-          .get(paragraph_ix)
-          .and_then(|entry| entry.as_ref())
+          .valid_chunk_cache_entry(paragraph_ix, width)
           .map(|entry| entry.chunks.len())
           .unwrap_or(before);
         changed |= after != before;
@@ -113,8 +126,12 @@ impl RichTextEditor {
         }
       }
       if start.elapsed() >= budget {
+        self.layout_runtime_metrics.prefetch_budget_overruns = self.layout_runtime_metrics.prefetch_budget_overruns.saturating_add(1);
         break;
       }
+    }
+    if !missing_prep.is_empty() {
+      self.request_layout_prep(width, missing_prep, cx);
     }
     if changed {
       self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
@@ -140,15 +157,11 @@ impl RichTextEditor {
     if !self.paragraph_visible_in_current_mode(paragraph_ix) {
       return false;
     }
-    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+    if self.document.paragraphs.get(paragraph_ix).is_none() {
       return false;
-    };
-    let key = paragraph_cache_key(&self.document, paragraph);
+    }
     self
-      .paragraph_chunk_layout_cache
-      .get(paragraph_ix)
-      .and_then(|entry| entry.as_ref())
-      .filter(|entry| entry.key == key && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+      .valid_chunk_cache_entry(paragraph_ix, width)
       .is_none_or(|entry| !entry.complete)
   }
 

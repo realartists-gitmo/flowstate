@@ -37,6 +37,9 @@ flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { version = "0.6.1", features = ["component"] }
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+cosmic-text = { version = "0.14.2", default-features = false, features = ["shape-run-cache"] }
+
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
 

@@ -86,6 +86,7 @@ pub(super) struct ParagraphChunkBuildResult {
   pub(super) complete: bool,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn build_paragraph_chunk_layout_with_visibility(
   document: &Document,
   paragraph_ix: usize,
@@ -93,11 +94,41 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
   start_byte: usize,
   target_lines: usize,
   invisibility_mode: bool,
-  paragraph_text_override: Option<&str>,
-  wrap_break_ends_override: Option<&[usize]>,
+  paragraph_prep: Option<&ParagraphPrep>,
+  shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
   cx: &mut App,
 ) -> Option<ParagraphChunkBuildResult> {
+  if let Some(prep) = paragraph_prep
+    && prep.paragraph_ix == paragraph_ix
+    && prep.key.invisibility_mode == invisibility_mode
+  {
+    if !prep.visible {
+      return None;
+    }
+    let paragraph = Paragraph {
+      style: prep.layout_style,
+      byte_range: 0..prep.paragraph_text.len(),
+      runs: prep.layout_runs.as_ref().to_vec(),
+      version: prep.layout_version,
+    };
+    return layout_prepared_paragraph_chunk_at(
+      document,
+      &paragraph,
+      paragraph_ix,
+      width,
+      start_byte,
+      target_lines,
+      paragraph_ix == 0,
+      paragraph_ix + 1 == document.paragraphs.len(),
+      prep.paragraph_text.as_ref(),
+      Some(prep.wrap_break_ends.as_ref()),
+      shape_cache,
+      window,
+      cx,
+    );
+  }
+
   if invisibility_mode
     && document
       .paragraphs
@@ -122,8 +153,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
     target_lines,
     is_first_document_paragraph,
     is_last_document_paragraph,
-    paragraph_text_override.filter(|_| projected_document.is_none()),
-    wrap_break_ends_override.filter(|_| projected_document.is_none()),
+    shape_cache,
     window,
     cx,
   )?;
@@ -135,6 +165,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
   Some(result)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn layout_paragraph_chunk_at(
   document: &Document,
   layout_paragraph_ix: usize,
@@ -144,18 +175,47 @@ fn layout_paragraph_chunk_at(
   target_lines: usize,
   is_first_document_paragraph: bool,
   is_last_document_paragraph: bool,
-  paragraph_text_override: Option<&str>,
-  wrap_break_ends_override: Option<&[usize]>,
+  shape_cache: &mut FragmentShapeCache,
   window: &mut Window,
   cx: &mut App,
 ) -> Option<ParagraphChunkBuildResult> {
   let paragraph = document.paragraphs.get(layout_paragraph_ix)?;
-  let paragraph_text = paragraph_text_override
-    .map(Cow::Borrowed)
-    .unwrap_or_else(|| Cow::Owned(paragraph_text(document, layout_paragraph_ix)));
-  let paragraph_text = paragraph_text.as_ref();
+  let paragraph_text = paragraph_text(document, layout_paragraph_ix);
+  layout_prepared_paragraph_chunk_at(
+    document,
+    paragraph,
+    display_paragraph_ix,
+    width,
+    start_byte,
+    target_lines,
+    is_first_document_paragraph,
+    is_last_document_paragraph,
+    &paragraph_text,
+    None,
+    shape_cache,
+    window,
+    cx,
+  )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn layout_prepared_paragraph_chunk_at(
+  document: &Document,
+  paragraph: &Paragraph,
+  display_paragraph_ix: usize,
+  width: Pixels,
+  start_byte: usize,
+  target_lines: usize,
+  is_first_document_paragraph: bool,
+  is_last_document_paragraph: bool,
+  paragraph_text: &str,
+  wrap_break_ends_override: Option<&[usize]>,
+  shape_cache: &mut FragmentShapeCache,
+  window: &mut Window,
+  cx: &mut App,
+) -> Option<ParagraphChunkBuildResult> {
   let len = paragraph_text.len();
-  let start_byte = clamp_to_char_boundary(&paragraph_text, start_byte.min(len));
+  let start_byte = clamp_to_char_boundary(paragraph_text, start_byte.min(len));
   let p_format = paragraph_format(document, paragraph.style);
   let cache_key = paragraph_cache_key(document, paragraph);
   let pageless_left = document.theme.pageless_inset_x;
@@ -166,17 +226,16 @@ fn layout_paragraph_chunk_at(
   let content_width = (pageless_width - border_inset * 2.0).max(px(1.0));
   let is_first_chunk = start_byte == 0;
   let chunk_target_lines = target_lines.max(1);
-  let mut shape_cache = FragmentShapeCache::default();
   let (lines, next_byte, complete) = wrap_lines_limited(
     document,
     paragraph,
     p_format.clone(),
-    &paragraph_text,
+    paragraph_text,
     start_byte,
     chunk_target_lines,
     content_width,
     wrap_break_ends_override,
-    &mut shape_cache,
+    shape_cache,
     window,
     cx,
   );

@@ -9,7 +9,7 @@ pub enum Block {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AssetStore {
-  pub assets: HashMap<AssetId, AssetRecord>,
+  pub assets: FxHashMap<AssetId, AssetRecord>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]

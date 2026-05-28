@@ -37,7 +37,7 @@ pub(super) fn measure_line_width(
     let run_start = clamp_to_char_boundary(paragraph_text, fragment.fragment.run_range.start.min(paragraph_text.len()));
     let run_end = clamp_to_char_boundary(paragraph_text, fragment.fragment.run_range.end.min(paragraph_text.len())).max(run_start);
     let run_text = &paragraph_text[run_start..run_end];
-    let shaped = shape_fragment_cached(window, run_text, fragment.format.clone(), run_start, fragment.fragment.styles, shape_cache);
+    let shaped = shape_fragment_cached(window, run_text, &fragment.format, run_start, fragment.fragment.styles, shape_cache);
     let fragment_start = fragment
       .fragment
       .source_start
@@ -78,7 +78,7 @@ pub(super) fn shape_line(
       continue;
     }
     let format = fragment.format.clone();
-    let shaped = shape_fragment_cached(window, text, format.clone(), fragment.fragment.source_start, fragment.fragment.styles, shape_cache);
+    let shaped = shape_fragment_cached(window, text, &format, fragment.fragment.source_start, fragment.fragment.styles, shape_cache);
     let width = shaped.width;
     let (box_pad_left, box_pad_right) = boxed_fragment_padding(&fragments, fragment_ix, document.theme.box_padding_left, document.theme.box_padding_right);
     let segment_ascent = shaped.ascent;
@@ -103,7 +103,7 @@ pub(super) fn shape_line(
 
   if segments.is_empty() {
     let format = run_format(document, p_format.clone(), RunStyles::default());
-    let shaped = shape_fragment(window, "", format.clone());
+    let shaped = shape_fragment(window, "", &format);
     #[cfg(target_os = "linux")]
     let (segment_ascent, segment_descent) = {
       let (font_ascent, font_descent) = font_metrics_for_format(&format, cx);
@@ -181,7 +181,7 @@ struct LineMeasureCacheKey {
 pub(super) fn shape_fragment_cached(
   window: &mut Window,
   text: &str,
-  format: EffectiveRunFormat,
+  format: &EffectiveRunFormat,
   source_start: usize,
   styles: RunStyles,
   cache: &mut FragmentShapeCache,
@@ -199,8 +199,8 @@ pub(super) fn shape_fragment_cached(
   shaped
 }
 
-pub(super) fn shape_fragment(window: &mut Window, text: &str, format: EffectiveRunFormat) -> ShapedLine {
-  let mut run_font = font(format.font_family);
+pub(super) fn shape_fragment(window: &mut Window, text: &str, format: &EffectiveRunFormat) -> ShapedLine {
+  let mut run_font = font(format.font_family.clone());
   run_font.weight = if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
   run_font.style = if format.italic { FontStyle::Italic } else { FontStyle::Normal };
   let run = GpuiTextRun {
@@ -229,13 +229,35 @@ pub(super) fn formatted_fragments_for_range(
   range: &Range<usize>,
   rendered_text: &str,
 ) -> Vec<FormattedFragment> {
-  fragments_for_range(paragraph, range, rendered_text)
-    .into_iter()
-    .map(|fragment| FormattedFragment {
-      format: run_format(document, p_format.clone(), fragment.styles),
-      fragment,
-    })
-    .collect()
+  let mut byte_offset = 0;
+  let rendered_len = rendered_text.len();
+  let mut fragments = Vec::with_capacity(paragraph.runs.len());
+  for run in &paragraph.runs {
+    let run_start = byte_offset;
+    let run_end = byte_offset + run.len;
+    byte_offset = run_end;
+    let start = run_start.max(range.start);
+    let end = run_end.min(range.end);
+    if start >= end || rendered_len == 0 {
+      continue;
+    }
+    let line_start = ceil_char_boundary(rendered_text, start.saturating_sub(range.start).min(rendered_len));
+    let line_end = ceil_char_boundary(rendered_text, end.saturating_sub(range.start).min(rendered_len));
+    if line_start >= line_end {
+      continue;
+    }
+    let visual = VisualFragment {
+      styles: run.styles,
+      line_range: line_start..line_end,
+      run_range: run_start..run_end,
+      source_start: range.start + line_start,
+    };
+    fragments.push(FormattedFragment {
+      format: run_format(document, p_format.clone(), visual.styles),
+      fragment: visual,
+    });
+  }
+  fragments
 }
 
 pub(super) fn boxed_fragment_padding(
@@ -271,15 +293,42 @@ pub(super) fn boxed_fragment_padding(
 
 #[cfg(target_os = "linux")]
 fn font_metrics_for_format(format: &EffectiveRunFormat, cx: &mut App) -> (Pixels, Pixels) {
+  let key = FontMetricsCacheKey {
+    font_family: format.font_family.clone(),
+    bold: format.bold,
+    italic: format.italic,
+    font_size: format.font_size,
+  };
+  let cache = LINUX_FONT_METRICS_CACHE.get_or_init(|| std::sync::Mutex::new(FxHashMap::default()));
+  if let Some(metrics) = cache.lock().ok().and_then(|cache| cache.get(&key).copied()) {
+    return metrics;
+  }
   let mut run_font = font(format.font_family.clone());
   run_font.weight = if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
   run_font.style = if format.italic { FontStyle::Italic } else { FontStyle::Normal };
   let font_id = cx.text_system().resolve_font(&run_font);
-  (
+  let metrics = (
     cx.text_system().ascent(font_id, format.font_size),
     cx.text_system().descent(font_id, format.font_size),
-  )
+  );
+  if let Ok(mut cache) = cache.lock() {
+    cache.insert(key, metrics);
+  }
+  metrics
 }
+
+#[cfg(target_os = "linux")]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct FontMetricsCacheKey {
+  font_family: SharedString,
+  bold: bool,
+  italic: bool,
+  font_size: Pixels,
+}
+
+#[cfg(target_os = "linux")]
+static LINUX_FONT_METRICS_CACHE: std::sync::OnceLock<std::sync::Mutex<FxHashMap<FontMetricsCacheKey, (Pixels, Pixels)>>> =
+  std::sync::OnceLock::new();
 
 #[derive(Clone)]
 pub(super) struct VisualFragment {

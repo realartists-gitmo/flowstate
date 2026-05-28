@@ -1,3 +1,6 @@
+type ParagraphRangeItemSizes = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
+type FullItemSizes = (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>);
+
 impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self
@@ -154,9 +157,15 @@ impl RichTextEditor {
         }
       }
 
-      let (paragraph_chunk_item_ranges, paragraph_remainder_items) = item_lookup_for_virtual_items(&items[..], paragraph_count);
-      cache.paragraph_chunk_item_ranges = paragraph_chunk_item_ranges;
-      cache.paragraph_remainder_items = paragraph_remainder_items;
+      patch_item_lookup_for_paragraph_range(
+        &mut cache.paragraph_chunk_item_ranges,
+        &mut cache.paragraph_remainder_items,
+        &items[..],
+        replace_start,
+        new_len,
+        range.clone(),
+        item_delta,
+      )?;
       cache.item_count = sizes.len();
       cache.height_revision = self.paragraph_height_cache_revision;
       cache.sizes.clone()
@@ -177,33 +186,30 @@ impl RichTextEditor {
     &mut self,
     range: Range<usize>,
     width: Pixels,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> Option<(Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>)> {
+    _window: &mut Window,
+    _cx: &mut Context<Self>,
+  ) -> Option<ParagraphRangeItemSizes> {
     let mut items = Vec::with_capacity(range.len());
     let mut sizes = Vec::with_capacity(range.len());
     let mut block_item_ranges = Vec::with_capacity(range.len());
     let mut block_heights = Vec::with_capacity(range.len());
 
     for paragraph_ix in range {
-      let paragraph = self.document.paragraphs.get(paragraph_ix)?.clone();
+      let paragraph = self.document.paragraphs.get(paragraph_ix)?;
       if !matches!(self.document.blocks.get(paragraph_ix), Some(Block::Paragraph(_))) {
         return None;
       }
 
       let block_start = items.len();
       let mut block_height = px(0.0);
-      if self.invisibility_mode && !paragraph_is_visible(&paragraph) {
+      if self.invisibility_mode && !paragraph_is_visible(paragraph) {
         block_item_ranges.push(block_start..items.len());
         block_heights.push(px(0.0));
         continue;
       }
 
-      self.ensure_current_chunk_cache_entry(paragraph_ix, width);
       let complete = self
-        .paragraph_chunk_layout_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
+        .valid_chunk_cache_entry(paragraph_ix, width)
         .map(|entry| {
           for (chunk_ix, chunk) in entry.chunks.iter().enumerate() {
             items.push(VirtualItem::ParagraphChunk {
@@ -226,22 +232,6 @@ impl RichTextEditor {
         });
         sizes.push(size(width, estimate));
         block_height += estimate;
-      } else if block_start == items.len() {
-        self.ensure_next_paragraph_chunk(paragraph_ix, width, window, cx);
-        if let Some(chunk) = self
-          .paragraph_chunk_layout_cache
-          .get(paragraph_ix)
-          .and_then(|entry| entry.as_ref())
-          .and_then(|entry| entry.chunks.first())
-        {
-          items.push(VirtualItem::ParagraphChunk {
-            block_ix: paragraph_ix,
-            paragraph_ix,
-            chunk_ix: 0,
-          });
-          sizes.push(size(width, chunk.height));
-          block_height += chunk.height;
-        }
       }
 
       block_item_ranges.push(block_start..items.len());
@@ -264,13 +254,18 @@ impl RichTextEditor {
         && cache.invisibility_mode == self.invisibility_mode
         && cache.height_revision == self.paragraph_height_cache_revision
     });
+    let prep_before = self.layout_prep_metrics;
+    let runtime_before = self.layout_runtime_metrics;
     let start = Instant::now();
     let sizes = self.paragraph_item_sizes(window, cx);
     let elapsed = start.elapsed();
+    let prep_after = self.layout_prep_metrics;
+    let runtime_after = self.layout_runtime_metrics;
     let exact_height_count = self
       .paragraph_chunk_layout_cache
       .iter()
-      .filter_map(|entry| entry.as_ref())
+      .enumerate()
+      .filter_map(|(paragraph_ix, _)| self.valid_chunk_cache_entry(paragraph_ix, width))
       .map(|entry| entry.chunks.len())
       .sum();
     let total_height = sizes
@@ -286,6 +281,23 @@ impl RichTextEditor {
       item_count: sizes.len(),
       exact_height_count,
       total_height,
+      prep_requested: prep_after.requested.saturating_sub(prep_before.requested),
+      prep_completed: prep_after.completed.saturating_sub(prep_before.completed),
+      prep_installed: prep_after.installed.saturating_sub(prep_before.installed),
+      prep_stale: prep_after.stale.saturating_sub(prep_before.stale),
+      prep_batches: prep_after.batches.saturating_sub(prep_before.batches),
+      prep_text_bytes: prep_after.text_bytes.saturating_sub(prep_before.text_bytes),
+      ui_chunk_builds: runtime_after.ui_chunk_builds.saturating_sub(runtime_before.ui_chunk_builds),
+      ui_chunk_build_time: runtime_after
+        .ui_chunk_build_time
+        .checked_sub(runtime_before.ui_chunk_build_time)
+        .unwrap_or_default(),
+      prefetch_budget_overruns: runtime_after
+        .prefetch_budget_overruns
+        .saturating_sub(runtime_before.prefetch_budget_overruns),
+      scroll_budget_overruns: runtime_after
+        .scroll_budget_overruns
+        .saturating_sub(runtime_before.scroll_budget_overruns),
     }
   }
 
@@ -298,7 +310,7 @@ impl RichTextEditor {
     width: Pixels,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) -> (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>) {
+  ) -> FullItemSizes {
     let block_count = self.document.blocks.len();
     let mut items = Vec::with_capacity(block_count);
     let mut sizes = Vec::with_capacity(block_count);
@@ -319,11 +331,8 @@ impl RichTextEditor {
             block_heights.push(px(0.0));
             continue;
           }
-          self.ensure_current_chunk_cache_entry(current_paragraph_ix, width);
           let complete = self
-            .paragraph_chunk_layout_cache
-            .get(current_paragraph_ix)
-            .and_then(|entry| entry.as_ref())
+            .valid_chunk_cache_entry(current_paragraph_ix, width)
             .map(|entry| {
               for (chunk_ix, chunk) in entry.chunks.iter().enumerate() {
                 items.push(VirtualItem::ParagraphChunk {
@@ -346,23 +355,6 @@ impl RichTextEditor {
             });
             sizes.push(size(width, estimate));
             block_height += estimate;
-          } else if block_start == items.len() {
-            // A complete empty paragraph still needs one exact row.
-            self.ensure_next_paragraph_chunk(current_paragraph_ix, width, window, cx);
-            if let Some(chunk) = self
-              .paragraph_chunk_layout_cache
-              .get(current_paragraph_ix)
-              .and_then(|entry| entry.as_ref())
-              .and_then(|entry| entry.chunks.first())
-            {
-              items.push(VirtualItem::ParagraphChunk {
-                block_ix,
-                paragraph_ix: current_paragraph_ix,
-                chunk_ix: 0,
-              });
-              sizes.push(size(width, chunk.height));
-              block_height += chunk.height;
-            }
           }
         },
         Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
