@@ -43,14 +43,17 @@ pub struct Document {
   pub theme: DocumentTheme,
 }
 
+#[hotpath::measure]
 pub fn paragraphs_mut(document: &mut Document) -> &mut Vec<Paragraph> {
   Arc::make_mut(&mut document.paragraphs)
 }
 
+#[hotpath::measure]
 pub fn paragraph_blocks_from_paragraphs(paragraphs: &[Paragraph]) -> Vec<Block> {
   paragraphs.iter().cloned().map(Block::Paragraph).collect()
 }
 
+#[hotpath::measure]
 pub fn block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -> Option<usize> {
   if document.blocks.len() == document.paragraphs.len()
     && document
@@ -73,6 +76,7 @@ pub fn block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -
   None
 }
 
+#[hotpath::measure]
 pub fn document_position_for_offset(document: &Document, offset: DocumentOffset) -> Option<DocumentPosition> {
   let paragraph = document.paragraphs.get(offset.paragraph)?;
   if offset.byte > paragraph_text_len(paragraph) {
@@ -84,6 +88,7 @@ pub fn document_position_for_offset(document: &Document, offset: DocumentOffset)
   })
 }
 
+#[hotpath::measure]
 pub fn document_offset_for_position(document: &Document, position: &DocumentPosition) -> Option<DocumentOffset> {
   match position {
     DocumentPosition::Text { block_ix, byte } => {
@@ -127,6 +132,7 @@ pub fn document_offset_for_position(document: &Document, position: &DocumentPosi
   }
 }
 
+#[hotpath::measure]
 pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
     return;
@@ -138,6 +144,7 @@ pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
   }
 }
 
+#[hotpath::measure]
 pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
   let mut paragraph_ix = 0;
   let mut output = Vec::with_capacity(document.blocks.len() + replacements.len());
@@ -186,6 +193,7 @@ pub struct ParagraphOffsetIndex {
   pub tree: Vec<usize>,
 }
 
+#[hotpath::measure_all]
 impl ParagraphOffsetIndex {
   pub fn new(paragraphs: &[Paragraph]) -> Self {
     let mut index = Self {

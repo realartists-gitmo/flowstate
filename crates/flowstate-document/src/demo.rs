@@ -4,6 +4,7 @@ use crop::Rope;
 
 use super::*;
 
+#[hotpath::measure]
 pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) -> Document {
   let text_capacity = paragraphs
     .iter()
@@ -34,6 +35,7 @@ pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>
   document_from_stored_paragraphs(theme, text, stored_paragraphs)
 }
 
+#[hotpath::measure]
 pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentParagraphInput>) -> Document {
   let text_capacity = paragraphs
     .iter()
@@ -64,6 +66,7 @@ pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentPa
   document_from_stored_paragraphs(theme, text, stored_paragraphs)
 }
 
+#[hotpath::measure]
 fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut stored_paragraphs: Vec<Paragraph>) -> Document {
   if stored_paragraphs.is_empty() {
     stored_paragraphs.push(Paragraph {
@@ -85,10 +88,12 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
   }
 }
 
+#[hotpath::measure]
 pub fn blank_document() -> Document {
   document_from_input(DocumentTheme::default(), Vec::new())
 }
 
+#[hotpath::measure]
 pub fn demo_document() -> Document {
   let mut paragraphs = vec![
     InputParagraph {
@@ -324,10 +329,12 @@ pub fn demo_document() -> Document {
   document_from_input(DocumentTheme::default(), paragraphs)
 }
 
+#[hotpath::measure]
 pub fn plain(text: &str) -> InputRun {
   run(text, RunStyles::default())
 }
 
+#[hotpath::measure]
 pub fn run(text: &str, styles: RunStyles) -> InputRun {
   InputRun {
     text: text.to_string(),

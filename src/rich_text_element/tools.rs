@@ -15,6 +15,7 @@ pub enum ArmedInlineTool {
   ClearHighlight,
 }
 
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn armed_inline_tool(&self) -> Option<ArmedInlineTool> {
     self.armed_inline_tool
@@ -231,6 +232,7 @@ impl RichTextEditor {
   }
 }
 
+#[hotpath::measure]
 fn apply_inline_tool_to_caret_styles(editor: &RichTextEditor, tool: ArmedInlineTool, styles: &mut RunStyles) {
   match tool {
     ArmedInlineTool::Semantic(semantic) => {
@@ -267,6 +269,7 @@ fn apply_inline_tool_to_caret_styles(editor: &RichTextEditor, tool: ArmedInlineT
   }
 }
 
+#[hotpath::measure]
 fn apply_inline_tool_to_styles(tool: ArmedInlineTool, styles: &mut RunStyles) {
   match tool {
     ArmedInlineTool::Semantic(semantic) => {

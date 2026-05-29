@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn first_paragraph_with_bottom_at_or_after(paragraphs: &[LaidOutParagraph], y: Pixels) -> usize {
   let mut low = 0;
   let mut high = paragraphs.len();
@@ -12,6 +13,7 @@ pub(super) fn first_paragraph_with_bottom_at_or_after(paragraphs: &[LaidOutParag
   low
 }
 
+#[hotpath::measure]
 pub(super) fn first_paragraph_with_top_after(paragraphs: &[LaidOutParagraph], y: Pixels) -> usize {
   let mut low = 0;
   let mut high = paragraphs.len();
@@ -26,6 +28,7 @@ pub(super) fn first_paragraph_with_top_after(paragraphs: &[LaidOutParagraph], y:
   low
 }
 
+#[hotpath::measure]
 pub(super) fn first_line_with_bottom_at_or_after(lines: &[LaidOutLine], y: Pixels) -> usize {
   let mut low = 0;
   let mut high = lines.len();
@@ -40,6 +43,7 @@ pub(super) fn first_line_with_bottom_at_or_after(lines: &[LaidOutLine], y: Pixel
   low
 }
 
+#[hotpath::measure]
 pub(super) fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, origin: Point<Pixels>) -> Option<Bounds<Pixels>> {
   // Use locate_line so the caret is drawn on the same visual line that
   // Up/Down/Home/End navigate from — in particular the wrap-seam bias
@@ -52,6 +56,7 @@ pub(super) fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, origin:
   Some(Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height)))
 }
 
+#[hotpath::measure]
 pub(super) fn caret_bounds_in_paragraph(paragraph: &LaidOutParagraph, byte: usize, origin: Point<Pixels>) -> Option<Bounds<Pixels>> {
   let line_ix = line_ix_for_byte(paragraph, byte)?;
   let line = paragraph.lines.get(line_ix)?;
@@ -59,6 +64,7 @@ pub(super) fn caret_bounds_in_paragraph(paragraph: &LaidOutParagraph, byte: usiz
   Some(Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height)))
 }
 
+#[hotpath::measure]
 pub(super) fn x_for_byte(line: &LaidOutLine, byte: usize) -> Pixels {
   for segment in &line.segments {
     let segment_end = segment.start_byte + segment.shaped.len();
@@ -72,6 +78,7 @@ pub(super) fn x_for_byte(line: &LaidOutLine, byte: usize) -> Pixels {
   line.width
 }
 
+#[hotpath::measure]
 fn line_ix_for_byte(paragraph: &LaidOutParagraph, byte: usize) -> Option<usize> {
   let mut low = 0;
   let mut high = paragraph.lines.len();
@@ -100,6 +107,7 @@ fn line_ix_for_byte(paragraph: &LaidOutParagraph, byte: usize) -> Option<usize> 
 // soft-wrap seam (== end_byte of line k and start_byte of line k+1), we bias
 // to the next line — matching Word's "caret-at-start-of-next-line"
 // convention. This is exactly the disambiguation called out in the plan.
+#[hotpath::measure]
 pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(usize, usize)> {
   let p_ix = paragraph_layout_index_for_offset(layout, off)?;
   let para = &layout.paragraphs[p_ix];
@@ -129,11 +137,13 @@ pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(
   Some((p_ix, last))
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_layout(layout: &LayoutState, paragraph: usize) -> Option<&LaidOutParagraph> {
   let layout_ix = paragraph_layout_index(layout, paragraph)?;
   layout.paragraphs.get(layout_ix)
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_layout_index_for_offset(layout: &LayoutState, offset: DocumentOffset) -> Option<usize> {
   layout
     .paragraphs
@@ -144,6 +154,7 @@ pub(super) fn paragraph_layout_index_for_offset(layout: &LayoutState, offset: Do
     .or_else(|| paragraph_layout_index(layout, offset.paragraph))
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_layout_index(layout: &LayoutState, paragraph: usize) -> Option<usize> {
   let _ = layout.paragraph_block_ix(paragraph);
   if layout
@@ -173,6 +184,7 @@ pub(super) fn paragraph_layout_index(layout: &LayoutState, paragraph: usize) -> 
 
 // Step to the previous visual line. If we're already on the first line of a
 // paragraph, jump to the last line of the previous paragraph.
+#[hotpath::measure]
 pub(super) fn find_line_above(layout: &LayoutState, p_ix: usize, line_ix: usize) -> Option<(usize, usize)> {
   if line_ix > 0 {
     return Some((p_ix, line_ix - 1));
@@ -185,6 +197,7 @@ pub(super) fn find_line_above(layout: &LayoutState, p_ix: usize, line_ix: usize)
   Some((prev, last))
 }
 
+#[hotpath::measure]
 pub(super) fn find_line_below(layout: &LayoutState, p_ix: usize, line_ix: usize) -> Option<(usize, usize)> {
   if line_ix + 1 < layout.paragraphs[p_ix].lines.len() {
     return Some((p_ix, line_ix + 1));

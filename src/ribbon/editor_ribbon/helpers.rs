@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
   match style {
     HighlightStyle::Spoken => theme.highlight_spoken,
@@ -6,6 +7,7 @@ fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
   }
 }
 
+#[hotpath::measure]
 fn shortcut_for(command_id: CommandId) -> Option<String> {
   default_keys_for(command_id).first().map(|key| {
     Keystroke::parse(key)
@@ -14,6 +16,7 @@ fn shortcut_for(command_id: CommandId) -> Option<String> {
   })
 }
 
+#[hotpath::measure]
 fn show_shortcut(options: ModernRibbonOptions) -> bool {
   match options.shortcut_visibility {
     ShortcutVisibility::Always => true,
@@ -22,6 +25,7 @@ fn show_shortcut(options: ModernRibbonOptions) -> bool {
   }
 }
 
+#[hotpath::measure]
 fn command_tooltip(command: &RibbonCommand) -> String {
   match &command.shortcut {
     Some(shortcut) => format!("{} ({})", command.label, shortcut),
@@ -29,6 +33,7 @@ fn command_tooltip(command: &RibbonCommand) -> String {
   }
 }
 
+#[hotpath::measure]
 fn keycap(shortcut: String, cx: &mut Context<EditorRibbon>) -> AnyElement {
   div()
     .flex_none()
@@ -46,6 +51,7 @@ fn keycap(shortcut: String, cx: &mut Context<EditorRibbon>) -> AnyElement {
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn accent_dot(color: Hsla) -> AnyElement {
   div()
     .flex_none()
@@ -55,6 +61,7 @@ fn accent_dot(color: Hsla) -> AnyElement {
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn accent_bar(color: Hsla, cx: &mut Context<EditorRibbon>) -> AnyElement {
   div()
     .flex_none()
@@ -65,6 +72,7 @@ fn accent_bar(color: Hsla, cx: &mut Context<EditorRibbon>) -> AnyElement {
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn transparent_accent_bar(cx: &mut Context<EditorRibbon>) -> AnyElement {
   div()
     .flex_none()
@@ -77,6 +85,7 @@ fn transparent_accent_bar(cx: &mut Context<EditorRibbon>) -> AnyElement {
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn highlight_menu_swatch(color: Hsla) -> AnyElement {
   div()
     .flex_none()
@@ -88,6 +97,7 @@ fn highlight_menu_swatch(color: Hsla) -> AnyElement {
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn accent_color(accent: RibbonAccent, cx: &mut Context<EditorRibbon>) -> Hsla {
   match accent {
     RibbonAccent::Blue => cx.theme().blue,
@@ -100,6 +110,7 @@ fn accent_color(accent: RibbonAccent, cx: &mut Context<EditorRibbon>) -> Hsla {
   }
 }
 
+#[hotpath::measure]
 fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
   match command_id {
     RibbonCommandId::Paragraph(style) => 1_000 + style as u64,

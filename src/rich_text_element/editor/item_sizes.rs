@@ -1,6 +1,7 @@
 type ParagraphRangeItemSizes = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
 type FullItemSizes = (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>);
 
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn paragraph_item_sizes(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Rc<Vec<Size<Pixels>>> {
     self
@@ -68,7 +69,8 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Rc<Vec<Size<Pixels>>> {
-    let (items, block_item_ranges, block_heights, sizes) = self.virtual_item_sizes(width, window, cx);
+    let old_cache = self.item_sizes_cache.take();
+    let (items, block_item_ranges, block_heights, sizes) = self.virtual_item_sizes(width, old_cache, window, cx);
     let (paragraph_chunk_item_ranges, paragraph_remainder_items) = item_lookup_for_virtual_items(items.as_ref(), self.document.paragraphs.len());
     self.height_prefix_index.rebuild(sizes.as_ref());
     let item_count = sizes.len();
@@ -308,14 +310,12 @@ impl RichTextEditor {
   fn virtual_item_sizes(
     &mut self,
     width: Pixels,
+    old_cache: Option<ItemSizesCache>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> FullItemSizes {
     let block_count = self.document.blocks.len();
-    let mut items = Vec::with_capacity(block_count);
-    let mut sizes = Vec::with_capacity(block_count);
-    let mut block_item_ranges = Vec::with_capacity(block_count);
-    let mut block_heights = Vec::with_capacity(block_count);
+    let (mut items, mut block_item_ranges, mut block_heights, mut sizes) = reusable_virtual_item_buffers(old_cache, block_count);
     let mut paragraph_ix = 0usize;
 
     for block_ix in 0..block_count {
@@ -384,4 +384,41 @@ impl RichTextEditor {
     (Rc::new(items), block_item_ranges, block_heights, Rc::new(sizes))
   }
 
+}
+
+#[hotpath::measure]
+fn reusable_virtual_item_buffers(
+  old_cache: Option<ItemSizesCache>,
+  block_count: usize,
+) -> ParagraphRangeItemSizes {
+  let Some(cache) = old_cache else {
+    return (
+      Vec::with_capacity(block_count),
+      Vec::with_capacity(block_count),
+      Vec::with_capacity(block_count),
+      Vec::with_capacity(block_count),
+    );
+  };
+
+  let mut items = match Rc::try_unwrap(cache.items) {
+    Ok(items) => items,
+    Err(items) => Vec::with_capacity(items.len().max(block_count)),
+  };
+  let mut sizes = match Rc::try_unwrap(cache.sizes) {
+    Ok(sizes) => sizes,
+    Err(sizes) => Vec::with_capacity(sizes.len().max(block_count)),
+  };
+  let mut block_item_ranges = cache.block_item_ranges;
+  let mut block_heights = cache.block_heights;
+
+  items.clear();
+  sizes.clear();
+  block_item_ranges.clear();
+  block_heights.clear();
+  items.reserve(block_count);
+  sizes.reserve(block_count);
+  block_item_ranges.reserve(block_count);
+  block_heights.reserve(block_count);
+
+  (items, block_item_ranges, block_heights, sizes)
 }

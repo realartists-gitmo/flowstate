@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_left_nav(&mut self, nav_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
     if self.active_flow.is_some() {
@@ -8,10 +9,11 @@ impl Workspace {
     let workspace = cx.entity().downgrade();
     let active_outline_paragraph = self.active_outline_paragraph(cx);
     self.scroll_outline_item_into_view(active_outline_paragraph, cx);
-    let mut outline_guides = Vec::new();
-    if let Some(cache) = &self.outline_cache {
-      collect_visible_outline_guides(&cache.nodes, &self.collapsed_outline_items, &mut outline_guides);
-    }
+    let outline_guides = self
+      .outline_cache
+      .as_ref()
+      .map(|cache| cache.row_guides.clone())
+      .unwrap_or_else(|| Rc::new(Vec::new()));
     v_flex()
       .size_full()
       .h_full()
@@ -347,6 +349,7 @@ struct FlowOutlineDrag {
   source_index: usize,
 }
 
+#[hotpath::measure_all]
 impl Render for FlowOutlineDrag {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     h_flex()
@@ -367,6 +370,7 @@ impl Render for FlowOutlineDrag {
   }
 }
 
+#[hotpath::measure]
 fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
   let anchor = cx.theme().link.mix(cx.theme().foreground, 0.72);
   match depth % 5 {
@@ -378,6 +382,7 @@ fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
   }
 }
 
+#[hotpath::measure]
 fn flow_drop_index(source_index: usize, target_index: usize) -> usize {
   if source_index < target_index {
     target_index.saturating_sub(1)

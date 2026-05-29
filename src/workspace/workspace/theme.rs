@@ -18,6 +18,7 @@ fn apply_app_theme(theme_name: &str, window: Option<&mut Window>, cx: &mut App) 
     .detach();
 }
 
+#[hotpath::measure]
 fn truncate_tab_title(title: &str, max_chars: usize) -> String {
   let mut chars = title.chars();
   let mut short = String::new();
@@ -34,6 +35,7 @@ fn truncate_tab_title(title: &str, max_chars: usize) -> String {
   short
 }
 
+#[hotpath::measure]
 fn untitled_index(title: &str) -> Option<usize> {
   let title = title.strip_suffix(".db8").unwrap_or(title);
   let number = title.strip_prefix("Untitled")?;
@@ -43,6 +45,7 @@ fn untitled_index(title: &str) -> Option<usize> {
   number.parse::<usize>().ok().filter(|index| *index > 0)
 }
 
+#[hotpath::measure]
 fn untitled_flow_index(title: &str) -> Option<usize> {
   let title = title.strip_suffix(".fl0").unwrap_or(title);
   let number = title.strip_prefix("Untitled")?;

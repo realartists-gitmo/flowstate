@@ -5,6 +5,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, v_flex};
 
 use super::{APP_CHROME_BORDER_WIDTH, SIDE_PANEL_COLLAPSED_WIDTH, Workspace};
 
+#[hotpath::measure_all]
 impl Workspace {
   /// Renders the main editor area and the right-side Toolkit panel as one
   /// resizable horizontal split. Keeping this next to `render_toolkit` makes

@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<RunRect> {
   let mut backgrounds = Vec::new();
   let mut borders = Vec::new();
@@ -62,6 +63,7 @@ pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<Run
   backgrounds
 }
 
+#[hotpath::measure]
 fn push_merged_box(boxes: &mut Vec<Bounds<Pixels>>, bounds: Bounds<Pixels>) {
   const EPSILON: f32 = 0.5;
   if let Some(last) = boxes.last_mut() {
@@ -77,6 +79,7 @@ fn push_merged_box(boxes: &mut Vec<Bounds<Pixels>>, bounds: Bounds<Pixels>) {
   boxes.push(bounds);
 }
 
+#[hotpath::measure]
 fn box_rules(bounds: Bounds<Pixels>, thickness: Pixels, color: Hsla) -> [RunRect; 4] {
   [
     RunRect {
@@ -108,6 +111,7 @@ fn box_rules(bounds: Bounds<Pixels>, thickness: Pixels, color: Hsla) -> [RunRect
   ]
 }
 
+#[hotpath::measure]
 pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, thickness: Pixels, color: Hsla) {
   rects.push(RunRect {
     bounds: Bounds::new(bounds.origin, size(bounds.size.width, thickness)),
@@ -137,6 +141,7 @@ pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, t
   });
 }
 
+#[hotpath::measure]
 pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
   let mut underlines = Vec::with_capacity(line.segments.len().saturating_mul(2));
   let baseline = line.baseline_y();
@@ -176,6 +181,7 @@ pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &
   merge_inline_decorations(underlines)
 }
 
+#[hotpath::measure]
 pub(super) fn strikethroughs_for_line(document: &Document, line: &LaidOutLine) -> Vec<Decoration> {
   let baseline = line.baseline_y();
   let mut decorations = Vec::with_capacity(line.segments.len());
@@ -204,6 +210,7 @@ pub(super) struct DecorationSource {
   pub(super) color: Hsla,
 }
 
+#[hotpath::measure_all]
 impl From<DecorationSource> for Decoration {
   fn from(source: DecorationSource) -> Self {
     Self {
@@ -213,6 +220,7 @@ impl From<DecorationSource> for Decoration {
   }
 }
 
+#[hotpath::measure]
 pub(super) fn merge_inline_decorations(decorations: Vec<Decoration>) -> Vec<Decoration> {
   let mut merged: Vec<Decoration> = Vec::with_capacity(decorations.len());
   for decoration in decorations {
@@ -221,6 +229,7 @@ pub(super) fn merge_inline_decorations(decorations: Vec<Decoration>) -> Vec<Deco
   merged
 }
 
+#[hotpath::measure]
 fn push_merged_decoration(decorations: &mut Vec<Decoration>, decoration: Decoration) {
   for existing in decorations.iter_mut().rev() {
     if !same_decoration_band(existing, &decoration) {
@@ -242,6 +251,7 @@ fn push_merged_decoration(decorations: &mut Vec<Decoration>, decoration: Decorat
   decorations.push(decoration);
 }
 
+#[hotpath::measure]
 fn same_decoration_band(a: &Decoration, b: &Decoration) -> bool {
   const EPSILON: f32 = 0.25;
   same_color(a.color, b.color)
@@ -249,10 +259,12 @@ fn same_decoration_band(a: &Decoration, b: &Decoration) -> bool {
     && (f32::from(a.bounds.size.height) - f32::from(b.bounds.size.height)).abs() <= EPSILON
 }
 
+#[hotpath::measure]
 fn same_color(a: Hsla, b: Hsla) -> bool {
   a.h == b.h && a.s == b.s && a.l == b.l && a.a == b.a
 }
 
+#[hotpath::measure]
 pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &Document, cx: &mut App) -> (Pixels, Pixels) {
   // GPUI exposes glyph bounds in font coordinates. For Calibri, the
   // underscore bbox is below the baseline. The origin is the lower
@@ -278,11 +290,13 @@ pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, doc
   (offset, document.theme.underline_rule_thickness)
 }
 
+#[hotpath::measure]
 pub(super) fn double_underline_metrics_for_segment(document: &Document) -> (Pixels, Pixels) {
   (document.theme.double_underline_top_from_baseline, document.theme.underline_rule_thickness)
 }
 
 #[cfg(not(target_os = "linux"))]
+#[hotpath::measure]
 pub(super) fn regular_underscore_bounds(segment: &LaidOutSegment, cx: &mut App) -> Option<Bounds<Pixels>> {
   let mut underline_font = font(segment.format.font_family.clone());
   // Word's underline metric follows the regular face's underscore metrics;

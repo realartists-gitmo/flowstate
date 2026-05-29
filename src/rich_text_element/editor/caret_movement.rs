@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn move_horizontal(&mut self, dir: HDir, extend: bool, window: &mut Window, cx: &mut Context<Self>) {
     if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {

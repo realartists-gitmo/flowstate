@@ -72,6 +72,7 @@ struct PendingEdit {
   old_value: NodeValue,
 }
 
+#[hotpath::measure_all]
 impl FlowEditor {
   pub fn new_with_path(document: FlowDocument, path: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
     let selected_flow_id = document.flow_ids().first().cloned();
@@ -260,6 +261,7 @@ impl FlowEditor {
       .unwrap_or("Policy")
   }
 
+  #[hotpath::measure]
   pub fn set_selected_style(&mut self, style: DebateStyleKey, cx: &mut Context<Self>) {
     if self.selected_style != style {
       self.selected_style = style;
@@ -268,20 +270,24 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn ld_toc_circuit(&self) -> bool {
     self.ld_toc_circuit
   }
 
+  #[hotpath::measure]
   pub fn toggle_ld_toc_circuit(&mut self, cx: &mut Context<Self>) {
     self.ld_toc_circuit = !self.ld_toc_circuit;
     self.switch_speakers = false;
     cx.notify();
   }
 
+  #[hotpath::measure]
   pub fn switch_speakers(&self) -> bool {
     self.switch_speakers
   }
 
+  #[hotpath::measure]
   pub fn toggle_switch_speakers(&mut self, cx: &mut Context<Self>) {
     if self.has_switchable_templates() {
       self.switch_speakers = !self.switch_speakers;
@@ -289,6 +295,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn templates(&self) -> Vec<DebateStyleFlow> {
     let mut templates = debate_style_templates(self.selected_style, self.ld_toc_circuit);
     if self.switch_speakers {
@@ -306,12 +313,14 @@ impl FlowEditor {
     templates
   }
 
+  #[hotpath::measure]
   pub fn has_switchable_templates(&self) -> bool {
     debate_style_templates(self.selected_style, self.ld_toc_circuit)
       .iter()
       .any(|template| template.columns_switch.is_some())
   }
 
+  #[hotpath::measure]
   pub fn select_flow(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
     self.resolve_pending_edit(cx);
     self.selected_flow_id = Some(flow_id.clone());
@@ -323,6 +332,7 @@ impl FlowEditor {
     self.set_focus(Some(focus), window, cx);
   }
 
+  #[hotpath::measure]
   fn set_focus(&mut self, focus_id: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
     if self.focus_id != focus_id {
       self.resolve_pending_edit(cx);
@@ -337,12 +347,14 @@ impl FlowEditor {
     cx.notify();
   }
 
+  #[hotpath::measure]
   fn focus_input(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
     if let Some(input) = self.box_inputs.get(id) {
       input.update(cx, |input, cx| input.focus(window, cx));
     }
   }
 
+  #[hotpath::measure]
   fn perform_command(&mut self, command: CommandResult, before_focus: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
     self.resolve_pending_edit(cx);
     let after_focus = command.focus.clone().or(before_focus.clone());
@@ -360,6 +372,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn add_flow(&mut self, template: DebateStyleFlow, window: &mut Window, cx: &mut Context<Self>) {
     let command = add_new_flow_actions(self.document.flow_ids().len(), &template, self.switch_speakers);
     let new_flow_id = command.focus.clone();
@@ -370,6 +383,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn delete_selected_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(flow_id) = self.selected_flow_id.clone() else {
       return;
@@ -395,6 +409,7 @@ impl FlowEditor {
     self.set_focus(next_flow, window, cx);
   }
 
+  #[hotpath::measure]
   pub fn move_flow_to_index(&mut self, flow_id: NodeId, new_index: usize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(current_index) = self
       .document
@@ -417,6 +432,7 @@ impl FlowEditor {
     self.set_focus(Some(flow_id), window, cx);
   }
 
+  #[hotpath::measure]
   fn add_empty_at_column(&mut self, level: usize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(flow_id) = self.selected_flow_id.clone() else {
       return;
@@ -426,6 +442,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn add_child_to_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self.focus_id.clone() else {
       return;
@@ -433,6 +450,7 @@ impl FlowEditor {
     self.add_child(target_id, window, cx);
   }
 
+  #[hotpath::measure]
   fn add_child(&mut self, target_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
     let Some(node) = self.document.node(&target_id).cloned() else {
       return;
@@ -461,6 +479,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn add_sibling_to_focus(&mut self, direction: usize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -485,6 +504,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn extend_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -526,6 +546,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn delete_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -563,6 +584,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn delete_empty_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -606,6 +628,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn toggle_format_focus(&mut self, format: FormatKind, window: &mut Window, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -626,6 +649,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn toggle_fold_focus(&mut self, cx: &mut Context<Self>) {
     let Some(target_id) = self
       .focus_id
@@ -647,6 +671,7 @@ impl FlowEditor {
     cx.notify();
   }
 
+  #[hotpath::measure]
   pub fn undo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.resolve_pending_edit(cx);
     let Some(owner) = self.selected_flow_id.clone() else {
@@ -658,6 +683,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   pub fn redo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.resolve_pending_edit(cx);
     let Some(owner) = self.selected_flow_id.clone() else {
@@ -669,6 +695,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn begin_or_update_edit(&mut self, id: NodeId, value: NodeValue, cx: &mut Context<Self>) {
     if self.syncing_inputs.contains(&id) {
       return;
@@ -707,6 +734,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn resolve_pending_edit(&mut self, cx: &mut Context<Self>) {
     let Some(pending) = self.pending_edit.take() else {
       return;
@@ -729,6 +757,7 @@ impl FlowEditor {
     cx.notify();
   }
 
+  #[hotpath::measure]
   fn on_title_change(&mut self, flow_id: &str, value: String, cx: &mut Context<Self>) {
     let Some(flow) = self.document.flow(flow_id).cloned() else {
       return;
@@ -738,6 +767,7 @@ impl FlowEditor {
     self.begin_or_update_edit(flow_id.to_string(), NodeValue::Flow(next), cx);
   }
 
+  #[hotpath::measure]
   fn on_box_change(&mut self, box_id: &str, value: String, cx: &mut Context<Self>) {
     let Some(box_node) = self.document.box_node(box_id).cloned() else {
       return;
@@ -747,6 +777,7 @@ impl FlowEditor {
     self.begin_or_update_edit(box_id.to_string(), NodeValue::Box(next), cx);
   }
 
+  #[hotpath::measure]
   fn focus_first_child(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
     let focus = self
       .document
@@ -767,6 +798,7 @@ impl FlowEditor {
     self.set_focus(Some(focus), window, cx);
   }
 
+  #[hotpath::measure]
   fn ensure_box_input(&mut self, box_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
     if let Some(input) = self.box_inputs.get(box_id) {
       return input.clone();
@@ -824,6 +856,7 @@ impl FlowEditor {
     input
   }
 
+  #[hotpath::measure]
   fn sync_input(&mut self, id: &str, input: &Entity<InputState>, value: &str, window: &mut Window, cx: &mut Context<Self>) {
     if input.read(cx).value().as_ref() == value {
       return;
@@ -833,6 +866,7 @@ impl FlowEditor {
     self.syncing_inputs.remove(id);
   }
 
+  #[hotpath::measure]
   fn focused_box_input_is_focused(&self, window: &Window, cx: &App) -> bool {
     self
       .focus_id
@@ -841,6 +875,7 @@ impl FlowEditor {
       .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
   }
 
+  #[hotpath::measure]
   fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     let key = event.keystroke.key.as_str();
     let modifiers = &event.keystroke.modifiers;
@@ -910,6 +945,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn focus_sibling(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(focus_id) = self
       .focus_id
@@ -942,10 +978,12 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn focus_sibling_reverse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.focus_sibling(-1, window, cx);
   }
 
+  #[hotpath::measure]
   fn focus_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(focus_id) = self.focus_id.clone() else {
       return;
@@ -961,6 +999,7 @@ impl FlowEditor {
     self.set_focus(Some(parent_id), window, cx);
   }
 
+  #[hotpath::measure]
   fn focus_first_child_of_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(focus_id) = self.focus_id.clone() else {
       return;
@@ -976,6 +1015,7 @@ impl FlowEditor {
     self.set_focus(Some(child_id), window, cx);
   }
 
+  #[hotpath::measure]
   fn focus_adjacent(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(flow_id) = self.selected_flow_id.clone() else {
       return;
@@ -1001,6 +1041,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn collect_visible_boxes(&self, id: &str, ids: &mut Vec<NodeId>) {
     let Some(node) = self.document.node(id) else {
       return;
@@ -1016,6 +1057,7 @@ impl FlowEditor {
     }
   }
 
+  #[hotpath::measure]
   fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let Some(flow_id) = self.selected_flow_id.clone() else {
       return self.render_empty_flow_state(cx).into_any_element();
@@ -1032,6 +1074,7 @@ impl FlowEditor {
       .into_any_element()
   }
 
+  #[hotpath::measure]
   fn render_empty_flow_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
     div()
       .flex_1()
@@ -1044,6 +1087,7 @@ impl FlowEditor {
       .child("Choose a debate style and add a flow")
   }
 
+  #[hotpath::measure]
   fn render_flow_board(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let Some(flow) = self.document.flow(&flow_id).cloned() else {
       return self.render_empty_flow_state(cx).into_any_element();
@@ -1103,6 +1147,7 @@ impl FlowEditor {
       .into_any_element()
   }
 
+  #[hotpath::measure]
   fn render_box_tree(&mut self, box_id: NodeId, columns: &[String], window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
     let Some(node) = self.document.node(&box_id).cloned() else {
       return div().into_any_element();
@@ -1149,6 +1194,7 @@ impl FlowEditor {
       .into_any_element()
   }
 
+  #[hotpath::measure]
   fn render_box_cell(
     &mut self,
     box_id: NodeId,
@@ -1216,12 +1262,14 @@ impl FlowEditor {
 
 impl EventEmitter<()> for FlowEditor {}
 
+#[hotpath::measure_all]
 impl Focusable for FlowEditor {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus_handle.clone()
   }
 }
 
+#[hotpath::measure_all]
 impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     div()
@@ -1233,6 +1281,7 @@ impl Render for FlowEditor {
   }
 }
 
+#[hotpath::measure]
 fn sanitize_input_value(value: String) -> String {
   value.replace(['\r', '\n'], " ")
 }
@@ -1246,6 +1295,7 @@ pub struct FlowSideColors {
   pub selected_border: Hsla,
 }
 
+#[hotpath::measure]
 pub fn affirmative_flow_colors(cx: &mut App) -> FlowSideColors {
   FlowSideColors {
     background: cx.theme().primary_hover,
@@ -1256,6 +1306,7 @@ pub fn affirmative_flow_colors(cx: &mut App) -> FlowSideColors {
   }
 }
 
+#[hotpath::measure]
 pub fn flow_column_colors(column: &str, cx: &mut App) -> FlowSideColors {
   let affirmative = affirmative_flow_colors(cx);
   match debate_column_side(column) {
@@ -1271,6 +1322,7 @@ enum DebateColumnSide {
   Unknown,
 }
 
+#[hotpath::measure]
 fn debate_column_side(column: &str) -> DebateColumnSide {
   column
     .split(|ch: char| !ch.is_ascii_alphanumeric())
@@ -1278,6 +1330,7 @@ fn debate_column_side(column: &str) -> DebateColumnSide {
     .unwrap_or(DebateColumnSide::Unknown)
 }
 
+#[hotpath::measure]
 fn debate_column_token_side(token: &str) -> Option<DebateColumnSide> {
   let token = token.trim().to_ascii_uppercase();
   if token.is_empty() {
@@ -1315,6 +1368,7 @@ fn debate_column_token_side(token: &str) -> Option<DebateColumnSide> {
   None
 }
 
+#[hotpath::measure_all]
 impl FlowSideColors {
   fn inverse(self) -> Self {
     Self {
@@ -1327,6 +1381,7 @@ impl FlowSideColors {
   }
 }
 
+#[hotpath::measure]
 fn inverse_color(color: Hsla) -> Hsla {
   let rgb = color.to_rgb();
   Hsla::from(gpui::Rgba {
@@ -1337,10 +1392,12 @@ fn inverse_color(color: Hsla) -> Hsla {
   })
 }
 
+#[hotpath::measure]
 fn flow_box_column_index(level: i32) -> usize {
   level.saturating_sub(1).max(0) as usize
 }
 
+#[hotpath::measure]
 fn stable_element_id(value: &str) -> u64 {
   let mut hasher = DefaultHasher::new();
   value.hash(&mut hasher);
@@ -1352,6 +1409,7 @@ mod tests {
   use super::{DebateColumnSide, debate_column_side, flow_box_column_index};
 
   #[test]
+  #[hotpath::measure]
   fn classifies_affirmative_speech_columns() {
     for column in ["1AC", "2AC", "1AR", "2AR", "AC", "AFF", "Q/2A", "A3", "P1", "PC", "PM", "MG"] {
       assert_eq!(debate_column_side(column), DebateColumnSide::Affirmative, "{column}");
@@ -1359,6 +1417,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn classifies_negative_speech_columns() {
     for column in ["1NC", "2NC/1NR", "1NR", "2NR", "NC", "NFF", "Q/1N", "N3", "O1", "CC", "LO", "MO"] {
       assert_eq!(debate_column_side(column), DebateColumnSide::Negative, "{column}");
@@ -1366,6 +1425,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn maps_flow_box_levels_to_column_indices() {
     assert_eq!(flow_box_column_index(1), 0);
     assert_eq!(flow_box_column_index(2), 1);

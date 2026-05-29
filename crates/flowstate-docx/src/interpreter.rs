@@ -87,22 +87,31 @@ pub struct DocxConversionReport {
   pub unknown_run_styles: Vec<String>,
 }
 
+#[hotpath::measure]
 pub fn convert_docx_to_document(path: impl AsRef<Path>) -> io::Result<(Document, DocxConversionReport)> {
   let cleaned = clean_docx_path(path)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
+#[hotpath::measure]
 pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(Document, DocxConversionReport)> {
   let cleaned = super::cleaner::clean_docx_bytes(bytes)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
+#[hotpath::measure]
 pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Document, DocxConversionReport)> {
-  let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error)?;
-  let direct_properties = match cleaned.main_document_xml.as_deref() {
+  let CleanedDocx {
+    bytes,
+    main_document_xml,
+    report: clean_report,
+  } = cleaned;
+  let docx = RDocxDocument::from_bytes(&bytes).map_err(rdocx_error)?;
+  let direct_properties = match main_document_xml.as_deref() {
     Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml)?,
-    None => direct_properties_by_paragraph_package(&cleaned.bytes)?,
+    None => direct_properties_by_paragraph_package(&bytes)?,
   };
+  drop(main_document_xml);
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
@@ -249,7 +258,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
   let paragraphs_imported = paragraphs.len();
   let document = document_from_paragraphs(DocumentTheme::default(), paragraphs);
   let report = DocxConversionReport {
-    clean: cleaned.report,
+    clean: clean_report,
     recognition_rules: RECOGNITION_RULES,
     paragraphs_imported,
     runs_imported,
@@ -295,12 +304,14 @@ struct EffectiveParagraphProperties<'a> {
   resolved: &'a CT_PPr,
 }
 
+#[hotpath::measure_all]
 impl ParagraphProperties for EffectiveParagraphProperties<'_> {
   fn outline_lvl(&self) -> Option<u32> {
     self.direct_outline_lvl.or(self.resolved.outline_lvl)
   }
 }
 
+#[hotpath::measure]
 fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
   let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).map_err(rdocx_opc_error)?;
   let doc_part_name = package
@@ -312,6 +323,7 @@ fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<Direct
   direct_properties_by_paragraph_xml(doc_xml)
 }
 
+#[hotpath::measure]
 fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
   let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error)?;
   Ok(
@@ -354,6 +366,7 @@ struct StyleResolver {
   run_semantics_by_id: FxHashMap<String, Option<RunSemanticStyle>>,
 }
 
+#[hotpath::measure_all]
 impl StyleResolver {
   fn new(docx: &RDocxDocument) -> Self {
     let mut names_by_id = FxHashMap::default();
@@ -430,6 +443,7 @@ impl StyleResolver {
   }
 }
 
+#[hotpath::measure]
 fn recognize_paragraph_style(
   style_id: Option<&str>,
   paragraph_properties: &impl ParagraphProperties,
@@ -468,16 +482,19 @@ trait ParagraphProperties {
   fn outline_lvl(&self) -> Option<u32>;
 }
 
+#[hotpath::measure_all]
 impl ParagraphProperties for rdocx_oxml::properties::CT_PPr {
   fn outline_lvl(&self) -> Option<u32> {
     self.outline_lvl
   }
 }
 
+#[hotpath::measure]
 fn recognize_run_semantic(style_id: &str, styles: &StyleResolver) -> Option<RunSemanticStyle> {
   styles.run_semantic(style_id)
 }
 
+#[hotpath::measure]
 fn run_semantic_from_canonical_name(name: &str) -> Option<RunSemanticStyle> {
   match canonical_run_style_name(name) {
     Some("Style13ptBold") => Some(RunSemanticStyle::Cite),
@@ -487,6 +504,7 @@ fn run_semantic_from_canonical_name(name: &str) -> Option<RunSemanticStyle> {
   }
 }
 
+#[hotpath::measure]
 fn recognize_run_styles_for_context(
   run: &RunFact,
   run_ix: usize,
@@ -520,6 +538,7 @@ fn recognize_run_styles_for_context(
   }
 }
 
+#[hotpath::measure]
 fn recognize_run_semantic_for_context(
   run: &RunFact,
   run_ix: usize,
@@ -586,6 +605,7 @@ fn recognize_run_semantic_for_context(
   semantic
 }
 
+#[hotpath::measure]
 fn entirely_bold_paragraph_overrides(runs: &[RunFact]) -> Option<Vec<bool>> {
   let text_run_indices = runs
     .iter()
@@ -651,6 +671,7 @@ fn entirely_bold_paragraph_overrides(runs: &[RunFact]) -> Option<Vec<bool>> {
   Some(cite)
 }
 
+#[hotpath::measure]
 fn count_trimmed_chars(text: &str, mut count: usize, mut leading: bool, mut pending_whitespace: usize) -> (usize, bool, usize) {
   for ch in text.chars() {
     if ch.is_whitespace() {
@@ -666,6 +687,7 @@ fn count_trimmed_chars(text: &str, mut count: usize, mut leading: bool, mut pend
   (count, leading, pending_whitespace)
 }
 
+#[hotpath::measure]
 fn most_common_half_point_size(runs: &[RunFact], indices: &[usize]) -> Option<f64> {
   let mut counts: FxHashMap<i32, usize> = FxHashMap::default();
   for ix in indices {
@@ -682,6 +704,7 @@ fn most_common_half_point_size(runs: &[RunFact], indices: &[usize]) -> Option<f6
     .map(|(half_points, _)| half_points as f64 / 2.0)
 }
 
+#[hotpath::measure]
 fn canonical_paragraph_style_name(name: &str) -> Option<&'static str> {
   match normalized_style_token(name).as_str() {
     "normal" => Some("Normal"),
@@ -695,6 +718,7 @@ fn canonical_paragraph_style_name(name: &str) -> Option<&'static str> {
   }
 }
 
+#[hotpath::measure]
 fn paragraph_style_from_canonical_name(name: &str) -> Option<ParagraphStyle> {
   match canonical_paragraph_style_name(name) {
     Some("Heading1") => Some(ParagraphStyle::Pocket),
@@ -708,6 +732,7 @@ fn paragraph_style_from_canonical_name(name: &str) -> Option<ParagraphStyle> {
   }
 }
 
+#[hotpath::measure]
 fn paragraph_style_from_character_heading_runs(runs: &[RunFact], styles: &StyleResolver) -> Option<ParagraphStyle> {
   let mut inferred = None;
   let mut saw_text = false;
@@ -725,6 +750,7 @@ fn paragraph_style_from_character_heading_runs(runs: &[RunFact], styles: &StyleR
   saw_text.then_some(inferred).flatten()
 }
 
+#[hotpath::measure]
 fn paragraph_style_from_character_heading_name(name: &str) -> Option<ParagraphStyle> {
   match normalized_style_token(name).as_str() {
     "heading1char" | "pocketchar" => Some(ParagraphStyle::Pocket),
@@ -735,6 +761,7 @@ fn paragraph_style_from_character_heading_name(name: &str) -> Option<ParagraphSt
   }
 }
 
+#[hotpath::measure]
 fn canonical_run_style_name(name: &str) -> Option<&'static str> {
   match normalized_style_token(name).as_str() {
     "style13ptbold" | "cite" | "oldcite" => Some("Style13ptBold"),
@@ -746,6 +773,7 @@ fn canonical_run_style_name(name: &str) -> Option<&'static str> {
   }
 }
 
+#[hotpath::measure]
 fn normalized_style_token(name: &str) -> String {
   name
     .chars()
@@ -754,10 +782,12 @@ fn normalized_style_token(name: &str) -> String {
     .collect()
 }
 
+#[hotpath::measure]
 fn underline_is_on(underline: &Option<ST_Underline>) -> bool {
   matches!(underline, Some(value) if *value != ST_Underline::None)
 }
 
+#[hotpath::measure]
 fn push_unique_with_seen(values: &mut Vec<String>, seen: &mut FxHashSet<String>, value: &str) {
   if !seen.contains(value) {
     let value = value.to_string();
@@ -766,14 +796,17 @@ fn push_unique_with_seen(values: &mut Vec<String>, seen: &mut FxHashSet<String>,
   }
 }
 
+#[hotpath::measure]
 fn rdocx_error(error: rdocx::Error) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+#[hotpath::measure]
 fn rdocx_opc_error(error: rdocx_opc::OpcError) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, error)
 }
 
+#[hotpath::measure]
 fn rdocx_oxml_error(error: rdocx_oxml::error::OxmlError) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, error)
 }
@@ -787,12 +820,14 @@ mod tests {
     outline_lvl: Option<u32>,
   }
 
-  impl ParagraphProperties for TestParagraphProperties {
+    #[hotpath::measure_all]
+impl ParagraphProperties for TestParagraphProperties {
     fn outline_lvl(&self) -> Option<u32> {
       self.outline_lvl
     }
   }
 
+  #[hotpath::measure]
   fn style_resolver() -> StyleResolver {
     StyleResolver {
       names_by_id: FxHashMap::from_iter([
@@ -816,6 +851,7 @@ mod tests {
     }
   }
 
+  #[hotpath::measure]
   fn run(style_id: Option<&str>, text: &str) -> RunFact {
     RunFact {
       text: text.to_string(),
@@ -833,6 +869,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn block_character_style_reconstructs_block_paragraph() {
     let styles = style_resolver();
     let runs = [run(Some("Heading3Char"), "Plan text")];
@@ -844,6 +881,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn direct_outline_level_and_formatting_reconstruct_block_paragraph() {
     let styles = style_resolver();
     let mut target_run = run(None, "2NC---AT: US Draw-In");
@@ -876,6 +914,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn character_heading_used_as_structure_does_not_become_emphasis() {
     let styles = style_resolver();
     let run = run(Some("Heading3Char"), "Plan text");
@@ -896,6 +935,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn ordinary_emphasis_is_rejected_in_heading_paragraphs() {
     let styles = style_resolver();
     let run = run(Some("Emphasis"), "important");
@@ -916,6 +956,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn block_paragraph_rejects_direct_run_formatting() {
     let styles = style_resolver();
     let mut run = run(Some("Emphasis"), "important");
@@ -943,6 +984,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn tag_paragraph_only_preserves_direct_underline_and_highlight() {
     let styles = style_resolver();
     let mut run = run(Some("Emphasis"), "important");
@@ -970,6 +1012,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn normal_paragraph_preserves_direct_highlight() {
     let styles = style_resolver();
     let mut run = run(None, "spoken text");

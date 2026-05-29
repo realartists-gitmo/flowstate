@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl ModernStylesRibbon {
   fn render(
     editor: Entity<RichTextEditor>,

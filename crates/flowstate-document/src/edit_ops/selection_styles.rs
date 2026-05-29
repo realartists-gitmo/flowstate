@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub fn selection_run_styles(document: &Document, range: Range<DocumentOffset>) -> Vec<RunStyles> {
   let mut styles = Vec::new();
   for paragraph_ix in range.start.paragraph..=range.end.paragraph {
@@ -21,16 +22,19 @@ pub fn selection_run_styles(document: &Document, range: Range<DocumentOffset>) -
   styles
 }
 
+#[hotpath::measure]
 pub fn selection_prefers_direct_underline(document: &Document, range: Range<DocumentOffset>) -> bool {
   (range.start.paragraph..=range.end.paragraph)
     .any(|paragraph_ix| matches!(document.paragraphs[paragraph_ix].style, ParagraphStyle::Tag | ParagraphStyle::Analytic))
 }
 
+#[hotpath::measure]
 pub fn selection_all_run_styles(document: &Document, range: Range<DocumentOffset>, predicate: impl Fn(RunStyles) -> bool) -> bool {
   let styles = selection_run_styles(document, range);
   !styles.is_empty() && styles.into_iter().all(predicate)
 }
 
+#[hotpath::measure]
 pub fn selection_all_underline_kind(document: &Document, range: Range<DocumentOffset>, direct: bool) -> bool {
   selection_all_run_styles(document, range, |styles| {
     if direct {
@@ -41,6 +45,7 @@ pub fn selection_all_underline_kind(document: &Document, range: Range<DocumentOf
   })
 }
 
+#[hotpath::measure]
 pub fn selection_contains_whole_paragraph(document: &Document, range: Range<DocumentOffset>) -> bool {
   (range.start.paragraph..=range.end.paragraph).any(|paragraph_ix| {
     let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
@@ -53,6 +58,7 @@ pub fn selection_contains_whole_paragraph(document: &Document, range: Range<Docu
   })
 }
 
+#[hotpath::measure]
 pub fn clear_whole_paragraph_formatting(document: &mut Document, paragraph_ix: usize) {
   let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
     return;

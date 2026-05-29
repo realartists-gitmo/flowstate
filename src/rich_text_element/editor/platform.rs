@@ -1,4 +1,5 @@
 #[cfg(target_os = "windows")]
+#[hotpath::measure]
 fn windows_apply_capslock(text: &str) -> String {
   // GPUI 0.2.2's Windows key_char generation does not include Caps Lock in
   // the ToUnicode keyboard state. For normal letter input, Caps Lock inverts

@@ -53,6 +53,7 @@ pub enum FormatKind {
   Crossed,
 }
 
+#[hotpath::measure_all]
 impl FlowDocument {
   pub fn apply_action(&mut self, action: Action) -> Action {
     match action {
@@ -146,6 +147,7 @@ impl FlowDocument {
   }
 }
 
+#[hotpath::measure]
 pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, placeholder: Option<String>) -> Action {
   Action::Add {
     parent,
@@ -163,6 +165,7 @@ pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, plac
   }
 }
 
+#[hotpath::measure]
 pub fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) -> Action {
   Action::Add {
     parent,
@@ -180,10 +183,12 @@ pub fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) 
   }
 }
 
+#[hotpath::measure]
 pub fn new_update_action(id: NodeId, new_value: NodeValue) -> Action {
   Action::Update { id, new_value }
 }
 
+#[hotpath::measure]
 pub fn add_new_box_actions(document: &FlowDocument, parent: NodeId, index: usize, placeholder: Option<String>) -> Option<CommandResult> {
   let flow_id = document.parent_flow_id(&parent)?;
   let action = new_box_action(parent, flow_id.clone(), index, placeholder);
@@ -198,6 +203,7 @@ pub fn add_new_box_actions(document: &FlowDocument, parent: NodeId, index: usize
   })
 }
 
+#[hotpath::measure]
 pub fn add_new_extension_actions(document: &FlowDocument, parent: NodeId) -> Option<CommandResult> {
   let flow_id = document.parent_flow_id(&parent)?;
   let extension_id = new_box_id();
@@ -213,6 +219,7 @@ pub fn add_new_extension_actions(document: &FlowDocument, parent: NodeId) -> Opt
   })
 }
 
+#[hotpath::measure]
 pub fn add_new_flow_actions(index: usize, style: &DebateStyleFlow, switch_speakers: bool) -> CommandResult {
   let starter_boxes = style.starter_boxes.as_deref();
   let columns = if switch_speakers {
@@ -255,6 +262,7 @@ pub fn add_new_flow_actions(index: usize, style: &DebateStyleFlow, switch_speake
   }
 }
 
+#[hotpath::measure]
 pub fn toggle_box_format_actions(document: &FlowDocument, id: NodeId, format: FormatKind) -> Option<CommandResult> {
   let mut box_node = document.box_node(&id)?.clone();
   match format {
@@ -269,6 +277,7 @@ pub fn toggle_box_format_actions(document: &FlowDocument, id: NodeId, format: Fo
   })
 }
 
+#[hotpath::measure]
 pub fn move_node_actions(document: &FlowDocument, id: NodeId, new_index: usize) -> Option<CommandResult> {
   let owner = match document.node(&id)?.value {
     NodeValue::Flow(_) => ROOT_ID.to_string(),
@@ -282,6 +291,7 @@ pub fn move_node_actions(document: &FlowDocument, id: NodeId, new_index: usize) 
   })
 }
 
+#[hotpath::measure]
 pub fn delete_node_actions(document: &FlowDocument, id: NodeId) -> Option<CommandResult> {
   let owner = match document.node(&id)?.value {
     NodeValue::Flow(_) => ROOT_ID.to_string(),
@@ -297,6 +307,7 @@ pub fn delete_node_actions(document: &FlowDocument, id: NodeId) -> Option<Comman
   })
 }
 
+#[hotpath::measure]
 fn collect_delete_actions(document: &FlowDocument, id: &str, actions: &mut ActionBundle) -> Option<()> {
   let node = document.node(id)?;
   for child in node.children.iter().rev() {
@@ -306,6 +317,7 @@ fn collect_delete_actions(document: &FlowDocument, id: &str, actions: &mut Actio
   Some(())
 }
 
+#[hotpath::measure]
 pub fn add_new_empty_actions(document: &FlowDocument, flow_id: NodeId, level: usize) -> Option<CommandResult> {
   document.flow(&flow_id)?;
   let mut actions = Vec::with_capacity(level + 1);
@@ -348,6 +360,7 @@ mod tests {
   use crate::styles::{DebateStyleKey, debate_style_templates};
 
   #[test]
+  #[hotpath::measure]
   fn add_update_delete_and_undo_round_trip() {
     let mut document = FlowDocument::new();
     let template = debate_style_templates(DebateStyleKey::Policy, false).remove(0);
@@ -380,6 +393,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn move_flow_actions_reorders_root_children_and_undoes() {
     let mut document = FlowDocument::new();
     let template = debate_style_templates(DebateStyleKey::Policy, false).remove(0);

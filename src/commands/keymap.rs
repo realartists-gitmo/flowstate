@@ -23,6 +23,7 @@ pub struct Keymap {
   pub entries: Vec<KeymapEntry>,
 }
 
+#[hotpath::measure_all]
 impl Keymap {
   pub fn defaults() -> Self {
     Self {
@@ -49,6 +50,7 @@ pub struct KeymapEntry {
 }
 
 /// Register the built-in default keymap.
+#[hotpath::measure]
 pub fn register_default_keybindings(cx: &mut App) {
   register_keymap(cx, &Keymap::defaults());
 }
@@ -58,6 +60,7 @@ pub fn register_default_keybindings(cx: &mut App) {
 /// Unknown-to-GPUI command IDs are ignored here. That allows the command
 /// catalog to contain app-level commands before those commands have GPUI action
 /// types, while still letting editor commands be registered from the same data.
+#[hotpath::measure]
 pub fn register_keymap(cx: &mut App, keymap: &Keymap) {
   let bindings = keymap
     .entries
@@ -66,6 +69,7 @@ pub fn register_keymap(cx: &mut App, keymap: &Keymap) {
   cx.bind_keys(bindings);
 }
 
+#[hotpath::measure]
 fn keybinding_for_entry(entry: &KeymapEntry) -> Option<KeyBinding> {
   let context = entry
     .context
@@ -85,6 +89,7 @@ fn keybinding_for_entry(entry: &KeymapEntry) -> Option<KeyBinding> {
   .ok()
 }
 
+#[hotpath::measure]
 fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
   let action: Box<dyn Action> = match command {
     CommandId::MoveLeft => Box::new(MoveLeft),

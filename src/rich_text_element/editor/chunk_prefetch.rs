@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn schedule_chunk_prefetch(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {
     if self.disposed {

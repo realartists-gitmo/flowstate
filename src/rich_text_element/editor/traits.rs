@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Drop for RichTextEditor {
   fn drop(&mut self) {
     self.clear_document_equation_caches();
@@ -5,12 +6,14 @@ impl Drop for RichTextEditor {
   }
 }
 
+#[hotpath::measure_all]
 impl Focusable for RichTextEditor {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus_handle.clone()
   }
 }
 
+#[hotpath::measure_all]
 impl Render for RichTextEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.ensure_focus_subscriptions(window, cx);

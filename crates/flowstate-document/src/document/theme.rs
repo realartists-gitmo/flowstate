@@ -100,6 +100,7 @@ pub enum ThemeUnderline {
   Double,
 }
 
+#[hotpath::measure_all]
 impl Default for DocumentTheme {
   fn default() -> Self {
     Self {

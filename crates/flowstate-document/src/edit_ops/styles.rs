@@ -2,6 +2,7 @@ use std::{ops::Range, sync::Arc};
 
 use super::*;
 
+#[hotpath::measure]
 pub fn apply_style_to_paragraph_range(document: &mut Document, paragraph_ix: usize, range: Range<usize>, style: RunStyle) {
   if range.start >= range.end {
     return;
@@ -51,6 +52,7 @@ pub fn apply_style_to_paragraph_range(document: &mut Document, paragraph_ix: usi
   }
 }
 
+#[hotpath::measure]
 pub fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
   let mut merged: Vec<TextRun> = Vec::with_capacity(runs.len());
   for run in runs {

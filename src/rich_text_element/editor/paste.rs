@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_plain_text_paste_at_caret(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     if !self.selection.is_caret() || self.selected_block.is_some() || text.is_empty() || text.contains('\r') || text.contains('\n') {

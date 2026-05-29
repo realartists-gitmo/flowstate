@@ -1,10 +1,12 @@
 
 #[test]
+#[hotpath::measure]
 fn smart_word_selection_is_enabled_by_default() {
   assert!(RichTextEditorConfig::default().smart_word_selection);
 }
 
 #[test]
+#[hotpath::measure]
 fn smart_mouse_selection_snaps_across_words_but_not_inside_one_word() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -59,6 +61,7 @@ fn smart_mouse_selection_snaps_across_words_but_not_inside_one_word() {
 }
 
 #[test]
+#[hotpath::measure]
 fn exact_mouse_selection_override_avoids_word_snapping() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -88,6 +91,7 @@ fn exact_mouse_selection_override_avoids_word_snapping() {
 }
 
 #[test]
+#[hotpath::measure]
 fn mouse_selection_can_disable_smart_word_snapping() {
   let document = document_from_input(
     DocumentTheme::default(),

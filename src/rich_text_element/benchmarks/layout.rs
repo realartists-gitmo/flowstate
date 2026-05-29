@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn benchmark_layout_paths(
   document: &Document,
   widths: &[f32],
@@ -83,6 +84,7 @@ fn benchmark_layout_paths(
   rows
 }
 
+#[hotpath::measure]
 fn benchmark_sample_paragraph_layouts(
   document: &Document,
   stats: &DocumentStats,
@@ -150,6 +152,7 @@ fn benchmark_sample_paragraph_layouts(
   rows
 }
 
+#[hotpath::measure]
 fn repeated(iterations: usize, mut run: impl FnMut()) -> DurationStats {
   let mut timings = Vec::with_capacity(iterations.max(1));
   for _ in 0..iterations.max(1) {
@@ -160,6 +163,7 @@ fn repeated(iterations: usize, mut run: impl FnMut()) -> DurationStats {
   DurationStats::from_samples(&timings)
 }
 
+#[hotpath::measure]
 fn estimate_error(document: &Document, layout: &LayoutState, width: Pixels) -> (f32, f32) {
   let mut total = 0.0f32;
   let mut max = 0.0f32;
@@ -179,6 +183,7 @@ fn estimate_error(document: &Document, layout: &LayoutState, width: Pixels) -> (
   if count == 0 { (0.0, 0.0) } else { (total / count as f32, max) }
 }
 
+#[hotpath::measure]
 fn summarize_layout(document: &Document, layout: &LayoutState) -> LayoutSummary {
   let mut summary = LayoutSummary {
     layout_height: px_to_f32(layout.size.height),

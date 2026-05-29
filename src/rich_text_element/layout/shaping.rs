@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn measure_line_width(
   document: &Document,
   paragraph: &Paragraph,
@@ -28,7 +29,16 @@ pub(super) fn measure_line_width(
   if let Some(width) = shape_cache.line_widths.get(&measure_key) {
     return *width;
   }
-  let fragments = formatted_fragments_for_range(document, p_format, paragraph, &rendered_range, rendered_text);
+  let mut fragments = std::mem::take(&mut shape_cache.fragment_scratch);
+  formatted_fragments_for_range_into(
+    document,
+    p_format,
+    paragraph,
+    &rendered_range,
+    rendered_text,
+    &mut fragments,
+    &mut shape_cache.run_formats,
+  );
   for (fragment_ix, fragment) in fragments.iter().enumerate() {
     let text = &rendered_text[fragment.fragment.line_range.clone()];
     if text.is_empty() {
@@ -53,9 +63,12 @@ pub(super) fn measure_line_width(
     width += box_pad_right;
   }
   shape_cache.line_widths.insert(measure_key, width);
+  fragments.clear();
+  shape_cache.fragment_scratch = fragments;
   width
 }
 
+#[hotpath::measure]
 pub(super) fn shape_line(
   document: &Document,
   paragraph: &Paragraph,
@@ -66,7 +79,16 @@ pub(super) fn shape_line(
   window: &mut Window,
   cx: &mut App,
 ) -> LaidOutLine {
-  let fragments = formatted_fragments_for_range(document, &p_format, paragraph, &source_range, line_text);
+  let mut fragments = std::mem::take(&mut shape_cache.fragment_scratch);
+  formatted_fragments_for_range_into(
+    document,
+    &p_format,
+    paragraph,
+    &source_range,
+    line_text,
+    &mut fragments,
+    &mut shape_cache.run_formats,
+  );
   let mut x = px(0.0);
   let mut segments = Vec::with_capacity(fragments.len().max(1));
   let mut ascent = px(0.0);
@@ -77,8 +99,8 @@ pub(super) fn shape_line(
     if text.is_empty() {
       continue;
     }
-    let format = fragment.format.clone();
-    let shaped = shape_fragment_cached(window, text, &format, fragment.fragment.source_start, fragment.fragment.styles, shape_cache);
+    let format = &fragment.format;
+    let shaped = shape_fragment_cached(window, text, format, fragment.fragment.source_start, fragment.fragment.styles, shape_cache);
     let width = shaped.width;
     let (box_pad_left, box_pad_right) = boxed_fragment_padding(&fragments, fragment_ix, document.theme.box_padding_left, document.theme.box_padding_right);
     let segment_ascent = shaped.ascent;
@@ -102,7 +124,7 @@ pub(super) fn shape_line(
   }
 
   if segments.is_empty() {
-    let format = run_format(document, p_format.clone(), RunStyles::default());
+    let format = run_format(document, &p_format, RunStyles::default());
     let shaped = shape_fragment(window, "", &format);
     #[cfg(target_os = "linux")]
     let (segment_ascent, segment_descent) = {
@@ -156,6 +178,8 @@ pub(super) fn shape_line(
   line.rects = rects_for_line(document, &line);
   line.underlines = underlines_for_line(document, &line, cx);
   line.strikethroughs = strikethroughs_for_line(document, &line);
+  fragments.clear();
+  shape_cache.fragment_scratch = fragments;
   line
 }
 
@@ -163,6 +187,8 @@ pub(super) fn shape_line(
 pub(super) struct FragmentShapeCache {
   shapes: FxHashMap<FragmentShapeCacheKey, ShapedLine>,
   line_widths: FxHashMap<LineMeasureCacheKey, Pixels>,
+  fragment_scratch: Vec<FormattedFragment>,
+  run_formats: FxHashMap<RunStyles, EffectiveRunFormat>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -178,6 +204,7 @@ struct LineMeasureCacheKey {
   end: usize,
 }
 
+#[hotpath::measure]
 pub(super) fn shape_fragment_cached(
   window: &mut Window,
   text: &str,
@@ -199,6 +226,7 @@ pub(super) fn shape_fragment_cached(
   shaped
 }
 
+#[hotpath::measure]
 pub(super) fn shape_fragment(window: &mut Window, text: &str, format: &EffectiveRunFormat) -> ShapedLine {
   let mut run_font = font(format.font_family.clone());
   run_font.weight = if format.bold { FontWeight::BOLD } else { FontWeight::NORMAL };
@@ -222,6 +250,8 @@ pub(super) struct FormattedFragment {
   pub(super) format: EffectiveRunFormat,
 }
 
+#[cfg(test)]
+#[hotpath::measure]
 pub(super) fn formatted_fragments_for_range(
   document: &Document,
   p_format: &EffectiveParagraphFormat,
@@ -229,9 +259,35 @@ pub(super) fn formatted_fragments_for_range(
   range: &Range<usize>,
   rendered_text: &str,
 ) -> Vec<FormattedFragment> {
+  let mut fragments = Vec::with_capacity(paragraph.runs.len());
+  let mut run_formats = FxHashMap::default();
+  formatted_fragments_for_range_into(
+    document,
+    p_format,
+    paragraph,
+    range,
+    rendered_text,
+    &mut fragments,
+    &mut run_formats,
+  );
+  fragments
+}
+
+#[hotpath::measure]
+pub(super) fn formatted_fragments_for_range_into(
+  document: &Document,
+  p_format: &EffectiveParagraphFormat,
+  paragraph: &Paragraph,
+  range: &Range<usize>,
+  rendered_text: &str,
+  fragments: &mut Vec<FormattedFragment>,
+  run_formats: &mut FxHashMap<RunStyles, EffectiveRunFormat>,
+) {
+  fragments.clear();
+  run_formats.clear();
   let mut byte_offset = 0;
   let rendered_len = rendered_text.len();
-  let mut fragments = Vec::with_capacity(paragraph.runs.len());
+  fragments.reserve(paragraph.runs.len());
   for run in &paragraph.runs {
     let run_start = byte_offset;
     let run_end = byte_offset + run.len;
@@ -252,14 +308,18 @@ pub(super) fn formatted_fragments_for_range(
       run_range: run_start..run_end,
       source_start: range.start + line_start,
     };
+    let format = run_formats
+      .entry(visual.styles)
+      .or_insert_with(|| run_format(document, p_format, visual.styles))
+      .clone();
     fragments.push(FormattedFragment {
-      format: run_format(document, p_format.clone(), visual.styles),
+      format,
       fragment: visual,
     });
   }
-  fragments
 }
 
+#[hotpath::measure]
 pub(super) fn boxed_fragment_padding(
   fragments: &[FormattedFragment],
   fragment_ix: usize,
@@ -292,6 +352,7 @@ pub(super) fn boxed_fragment_padding(
 }
 
 #[cfg(target_os = "linux")]
+#[hotpath::measure]
 fn font_metrics_for_format(format: &EffectiveRunFormat, cx: &mut App) -> (Pixels, Pixels) {
   let key = FontMetricsCacheKey {
     font_family: format.font_family.clone(),

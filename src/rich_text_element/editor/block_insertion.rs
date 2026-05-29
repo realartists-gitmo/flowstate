@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
     if !fragment.blocks.is_empty() {

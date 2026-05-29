@@ -10,6 +10,7 @@ pub use interpreter::{
 
 use flowstate_document::write_db8;
 
+#[hotpath::measure]
 pub fn convert_docx_to_db8(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<DocxConversionReport> {
   let (document, report) = convert_docx_to_document(input)?;
   write_db8(output, &document)?;

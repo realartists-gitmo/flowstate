@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
     self.save_active(window, cx);

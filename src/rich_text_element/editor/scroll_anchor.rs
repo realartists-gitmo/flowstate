@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn capture_scroll_anchor(&mut self) -> Option<ScrollAnchorSnapshot> {
     if let Some(anchor) = self.capture_locked_scroll_anchor() {
@@ -153,7 +154,8 @@ impl RichTextEditor {
         VirtualItem::ParagraphRemainder { paragraph_ix, .. } => cache
           .paragraph_remainder_items
           .get(*paragraph_ix)
-          .and_then(|item| *item)
+          .copied()
+          .and_then(decode_remainder_item_ix)
           .map(|item_ix| (item_ix, anchor.delta())),
         VirtualItem::StructuralBlock { block_ix } | VirtualItem::HiddenBlock { block_ix } => cache
           .block_item_ranges
@@ -189,7 +191,8 @@ impl RichTextEditor {
           if let Some(item_ix) = cache
             .paragraph_remainder_items
             .get(*paragraph_ix)
-            .and_then(|item| *item)
+            .copied()
+            .and_then(decode_remainder_item_ix)
           {
             return Some((item_ix, (*delta - consumed).max(px(0.0))));
           }
@@ -206,7 +209,8 @@ impl RichTextEditor {
         cache
           .paragraph_remainder_items
           .get(*paragraph_ix)
-          .and_then(|item| *item)
+          .copied()
+          .and_then(decode_remainder_item_ix)
           .map(|item_ix| (item_ix, *delta))
       },
     }

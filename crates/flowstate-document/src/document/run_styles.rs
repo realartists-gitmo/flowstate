@@ -30,6 +30,7 @@ pub enum RunStyle {
   HighlightAlternative,
 }
 
+#[hotpath::measure_all]
 impl From<RunStyle> for RunStyles {
   fn from(style: RunStyle) -> Self {
     let mut styles = RunStyles::default();
@@ -38,6 +39,7 @@ impl From<RunStyle> for RunStyles {
   }
 }
 
+#[hotpath::measure_all]
 impl RunStyles {
   pub fn apply(&mut self, style: RunStyle) {
     match style {

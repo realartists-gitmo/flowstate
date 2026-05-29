@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn begin_visible_layout(&mut self, range: Range<usize>) -> u64 {
     if self.initial_layout_hidden
@@ -21,11 +22,8 @@ impl RichTextEditor {
   }
 
   fn evict_offscreen_paragraph_layouts_for_visible_items(&mut self, item_range: Range<usize>) {
-    if RETAIN_OFFSCREEN_PARAGRAPH_LAYOUT_CACHE {
-      return;
-    }
     let paragraph_count = self.document.paragraphs.len();
-    if paragraph_count == 0 || self.paragraph_chunk_layout_cache.is_empty() {
+    if paragraph_count == 0 {
       return;
     }
 
@@ -34,12 +32,41 @@ impl RichTextEditor {
       return;
     }
     let active = self.active_height_range();
-    let keep_start = visible.start.min(active.start).saturating_sub(2);
-    let keep_end = visible
-      .end
-      .max(active.end)
-      .saturating_add(2)
-      .min(paragraph_count);
+    let required_ranges = ParagraphCacheRetainRanges {
+      visible: expand_paragraph_range(visible.clone(), paragraph_count, 2),
+      active: expand_paragraph_range(active.clone(), paragraph_count, 2),
+    };
+    if self.layout_cache_retain_ranges.covers(&required_ranges) && self.prep_cache_retain_ranges.covers(&required_ranges) {
+      return;
+    }
+
+    // Retain viewport and caret neighborhoods independently. Bridging them
+    // into one range can pin nearly the whole cache while scrolling far from
+    // the active paragraph.
+    let layout_keep_ranges = ParagraphCacheRetainRanges {
+      visible: expand_paragraph_range(
+        visible.clone(),
+        paragraph_count,
+        OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS,
+      ),
+      active: expand_paragraph_range(
+        active.clone(),
+        paragraph_count,
+        OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS,
+      ),
+    };
+    let prep_keep_ranges = ParagraphCacheRetainRanges {
+      visible: expand_paragraph_range(
+        visible,
+        paragraph_count,
+        OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS,
+      ),
+      active: expand_paragraph_range(
+        active,
+        paragraph_count,
+        OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS,
+      ),
+    };
 
     self
       .paragraph_chunk_layout_cache
@@ -47,17 +74,27 @@ impl RichTextEditor {
     self
       .paragraph_shaping_cache
       .resize_with(paragraph_count, || None);
-    for (paragraph_ix, entry) in self.paragraph_chunk_layout_cache.iter_mut().enumerate() {
-      if paragraph_ix < keep_start || paragraph_ix >= keep_end {
+    self.paragraph_prep_cache.resize_with(paragraph_count, ParagraphPrepSlot::default);
+
+    for paragraph_ix in 0..paragraph_count {
+      if !layout_keep_ranges.contains(paragraph_ix) {
+        let entry = &mut self.paragraph_chunk_layout_cache[paragraph_ix];
         *entry = None;
         if let Some(shape_cache) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
           *shape_cache = None;
         }
       }
+      if !prep_keep_ranges.contains(paragraph_ix)
+        && let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix)
+      {
+        slot.clear();
+      }
     }
     self
       .chunk_prefetch_queue
-      .retain(|paragraph_ix| *paragraph_ix >= keep_start && *paragraph_ix < keep_end);
+      .retain(|paragraph_ix| layout_keep_ranges.contains(*paragraph_ix));
+    self.layout_cache_retain_ranges = layout_keep_ranges;
+    self.prep_cache_retain_ranges = prep_keep_ranges;
   }
 
   pub(super) fn store_visible_paragraph_chunk_layout(

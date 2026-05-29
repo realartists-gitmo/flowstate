@@ -23,6 +23,7 @@ pub(super) struct LayoutState {
   pub(super) snap_underline_rules_to_pixels: bool,
 }
 
+#[hotpath::measure_all]
 impl LayoutState {
   pub(super) fn block_count(&self) -> usize {
     self.blocks.len()
@@ -140,7 +141,13 @@ pub(super) struct ParagraphHeightCacheEntry {
   pub(super) height: Pixels,
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_cache_key(_document: &Document, paragraph: &Paragraph) -> ParagraphCacheKey {
+  paragraph_cache_key_for_paragraph(paragraph)
+}
+
+#[hotpath::measure]
+pub(super) fn paragraph_cache_key_for_paragraph(paragraph: &Paragraph) -> ParagraphCacheKey {
   let mut hasher = FxHasher::default();
   paragraph.style.hash(&mut hasher);
   paragraph.version.hash(&mut hasher);
@@ -149,6 +156,7 @@ pub(super) fn paragraph_cache_key(_document: &Document, paragraph: &Paragraph) -
   }
 }
 
+#[hotpath::measure_all]
 impl LaidOutParagraph {
   pub(super) fn shift_y(&mut self, new_top: Pixels) {
     let delta = new_top - self.top;
@@ -200,6 +208,7 @@ pub(super) struct LaidOutLine {
   pub(super) strikethroughs: Vec<Decoration>,
 }
 
+#[hotpath::measure_all]
 impl LaidOutLine {
   pub(super) fn baseline_y(&self) -> Pixels {
     ((self.line_height - self.ascent - self.descent) / 2.0) + self.ascent
@@ -285,6 +294,7 @@ pub(super) enum UnderlineKind {
   Double,
 }
 
+#[hotpath::measure_all]
 impl From<ThemeUnderline> for UnderlineKind {
   fn from(value: ThemeUnderline) -> Self {
     match value {

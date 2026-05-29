@@ -4,6 +4,7 @@ struct LoadedDocumentForOpen {
   title: Option<String>,
 }
 
+#[hotpath::measure]
 fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOpen> {
   if path
     .extension()

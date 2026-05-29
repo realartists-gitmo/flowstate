@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn layout_table_block(
   document: &Document,
   block_ix: usize,
@@ -58,6 +59,7 @@ fn layout_table_block(
   }
 }
 
+#[hotpath::measure]
 fn table_row_height(document: &Document, row: &TableRow, column_widths: &[Pixels], window: &mut Window, cx: &mut App) -> Pixels {
   let mut column_ix = 0;
   row
@@ -72,6 +74,7 @@ fn table_row_height(document: &Document, row: &TableRow, column_widths: &[Pixels
     .fold(px(28.0), Pixels::max)
 }
 
+#[hotpath::measure]
 fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_count: usize) -> Vec<Pixels> {
   let mut fixed_total = px(0.0);
   let mut fraction_total = 0u32;
@@ -104,6 +107,7 @@ fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_
     .collect()
 }
 
+#[hotpath::measure]
 fn spanned_column_width(column_widths: &[Pixels], column_ix: usize, span: usize) -> Pixels {
   let end = column_ix.saturating_add(span).min(column_widths.len());
   let width = column_widths
@@ -115,6 +119,7 @@ fn spanned_column_width(column_widths: &[Pixels], column_ix: usize, span: usize)
   width.max(px(1.0))
 }
 
+#[hotpath::measure]
 fn table_cell_height(document: &Document, cell: &TableCell, width: Pixels, window: &mut Window, cx: &mut App) -> Pixels {
   let padding = table_cell_padding();
   let content_width = (width - padding * 2.0).max(px(1.0));
@@ -137,6 +142,7 @@ fn table_cell_height(document: &Document, cell: &TableCell, width: Pixels, windo
   (y + padding).max(px(28.0))
 }
 
+#[hotpath::measure]
 fn layout_table_cell_blocks(
   document: &Document,
   cell: &TableCell,
@@ -165,6 +171,7 @@ fn layout_table_cell_blocks(
   blocks
 }
 
+#[hotpath::measure]
 fn layout_table_cell_paragraph(
   document: &Document,
   cell_paragraph: &TableCellParagraph,
@@ -203,6 +210,7 @@ fn layout_table_cell_paragraph(
   }
 }
 
+#[hotpath::measure]
 pub(super) fn table_cell_padding() -> Pixels {
   px(5.0)
 }

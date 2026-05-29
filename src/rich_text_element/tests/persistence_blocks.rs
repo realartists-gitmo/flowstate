@@ -1,5 +1,6 @@
 
 #[test]
+#[hotpath::measure]
 fn single_paragraph_edits_keep_following_derived_byte_ranges_current() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -23,6 +24,7 @@ fn single_paragraph_edits_keep_following_derived_byte_ranges_current() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_round_trip_preserves_text_structure_and_styles() {
   let document = demo_document();
   let dir = std::env::temp_dir();
@@ -49,6 +51,7 @@ fn db8_round_trip_preserves_text_structure_and_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn split_and_merge_preserve_empty_styled_paragraphs() {
   let spoken = RunStyles::default().with(RunStyle::HighlightSpoken);
   let mut document = document_from_input(
@@ -86,6 +89,7 @@ fn split_and_merge_preserve_empty_styled_paragraphs() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_round_trip_preserves_empty_styled_paragraphs() {
   let document = document_from_input(
     DocumentTheme::default(),
@@ -112,6 +116,7 @@ fn db8_round_trip_preserves_empty_styled_paragraphs() {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_v4_round_trip_preserves_mixed_block_order_and_assets() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -173,6 +178,7 @@ fn db8_v4_round_trip_preserves_mixed_block_order_and_assets() {
 }
 
 #[test]
+#[hotpath::measure]
 fn image_fit_width_layout_uses_asset_aspect_ratio() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -206,6 +212,7 @@ fn image_fit_width_layout_uses_asset_aspect_ratio() {
 }
 
 #[test]
+#[hotpath::measure]
 fn paragraph_sync_preserves_non_text_blocks_when_paragraphs_are_removed() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -263,6 +270,7 @@ fn paragraph_sync_preserves_non_text_blocks_when_paragraphs_are_removed() {
 }
 
 #[test]
+#[hotpath::measure]
 fn deleting_empty_paragraph_above_image_keeps_image_before_next_paragraph() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -310,6 +318,7 @@ fn deleting_empty_paragraph_above_image_keeps_image_before_next_paragraph() {
   assert!(matches!(document.blocks[2], Block::Paragraph(_)));
 }
 
+#[hotpath::measure]
 fn test_png_2x1() -> Vec<u8> {
   vec![
     137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 2, 0, 0, 0, 1, 8, 6, 0, 0, 0, 244, 34, 127, 138, 0, 0, 0, 12, 73, 68,
@@ -318,6 +327,7 @@ fn test_png_2x1() -> Vec<u8> {
 }
 
 #[test]
+#[hotpath::measure]
 fn db8_v4_round_trip_preserves_table_cell_paragraph_and_run_styles() {
   let emphasized = RunStyles::default()
     .with(RunStyle::Emphasis)

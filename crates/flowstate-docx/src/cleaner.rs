@@ -46,14 +46,17 @@ pub struct DocxCleanStats {
   pub hyperlinks_flattened: usize,
 }
 
+#[hotpath::measure]
 pub fn clean_docx_path(path: impl AsRef<Path>) -> std::io::Result<CleanedDocx> {
   clean_docx_vec(fs::read(path)?)
 }
 
+#[hotpath::measure]
 pub fn clean_docx_bytes(bytes: &[u8]) -> std::io::Result<CleanedDocx> {
   clean_docx_vec(bytes.to_vec())
 }
 
+#[hotpath::measure]
 fn clean_docx_vec(bytes: Vec<u8>) -> std::io::Result<CleanedDocx> {
   let (bytes, main_document_xml, stats) = normalize_docx_formatting_values(bytes)?;
   Ok(CleanedDocx {
@@ -66,6 +69,7 @@ fn clean_docx_vec(bytes: Vec<u8>) -> std::io::Result<CleanedDocx> {
   })
 }
 
+#[hotpath::measure]
 fn normalize_docx_formatting_values(bytes: Vec<u8>) -> std::io::Result<(Vec<u8>, Option<Vec<u8>>, DocxCleanStats)> {
   let mut package = match OpcPackage::from_reader(Cursor::new(bytes.as_slice())) {
     Ok(package) => package,
@@ -104,12 +108,14 @@ fn normalize_docx_formatting_values(bytes: Vec<u8>) -> std::io::Result<(Vec<u8>,
   Ok((output.into_inner(), main_document_xml, stats))
 }
 
+#[hotpath::measure]
 fn part_might_contain_word_xml(part_name: &str, part: &[u8]) -> bool {
   part_name.starts_with("/word/")
     && part_name.ends_with(".xml")
     && (part.starts_with(b"<?xml") || contains_bytes(part, b"<w:") || contains_bytes(part, b"<u "))
 }
 
+#[hotpath::measure]
 fn normalize_formatting_values_in_xml(xml: &str) -> (Option<String>, DocxCleanStats) {
   let mut normalized = None::<String>;
   let mut cursor = 0usize;
@@ -140,6 +146,7 @@ fn normalize_formatting_values_in_xml(xml: &str) -> (Option<String>, DocxCleanSt
   (normalized, stats)
 }
 
+#[hotpath::measure]
 fn normalize_formatting_tag(tag: &str) -> (Option<String>, DocxCleanStats) {
   let Some(name) = tag_local_name(tag) else {
     return (None, DocxCleanStats::default());
@@ -209,6 +216,7 @@ fn normalize_formatting_tag(tag: &str) -> (Option<String>, DocxCleanStats) {
   (normalized, stats)
 }
 
+#[hotpath::measure]
 fn tag_local_name(tag: &str) -> Option<&str> {
   if tag.starts_with("</") || tag.starts_with("<?") || tag.starts_with("<!") {
     return None;
@@ -221,6 +229,7 @@ fn tag_local_name(tag: &str) -> Option<&str> {
   (!name.is_empty()).then_some(name)
 }
 
+#[hotpath::measure]
 fn normalize_attr(
   original_tag: &str,
   normalized_tag: &mut Option<String>,
@@ -246,6 +255,7 @@ fn normalize_attr(
   *count += 1;
 }
 
+#[hotpath::measure]
 fn attr_value_range(tag: &str, target_attr_name: &str) -> Option<(usize, usize)> {
   let mut cursor = 0usize;
   while let Some(relative_val) = tag[cursor..].find(target_attr_name) {
@@ -286,11 +296,13 @@ fn attr_value_range(tag: &str, target_attr_name: &str) -> Option<(usize, usize)>
   None
 }
 
+#[hotpath::measure]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
   !needle.is_empty() && haystack.windows(needle.len()).any(|window| window == needle)
 }
 
 impl DocxCleanStats {
+  #[hotpath::measure]
   fn has_changes(self) -> bool {
     self.underline_values_normalized
       + self.highlight_values_normalized
@@ -302,6 +314,7 @@ impl DocxCleanStats {
       > 0
   }
 
+  #[hotpath::measure]
   fn merge(&mut self, other: Self) {
     self.underline_values_normalized += other.underline_values_normalized;
     self.highlight_values_normalized += other.highlight_values_normalized;
@@ -313,14 +326,17 @@ impl DocxCleanStats {
   }
 }
 
+#[hotpath::measure]
 fn supported_style_type(value: &str) -> bool {
   matches!(value, "paragraph" | "character" | "table" | "numbering")
 }
 
+#[hotpath::measure]
 fn supported_justification_value(value: &str) -> bool {
   matches!(value, "start" | "left" | "end" | "right" | "center" | "both" | "justify" | "distribute")
 }
 
+#[hotpath::measure]
 fn supported_underline_value(value: &str) -> bool {
   matches!(
     value,
@@ -328,6 +344,7 @@ fn supported_underline_value(value: &str) -> bool {
   )
 }
 
+#[hotpath::measure]
 fn supported_highlight_value(value: &str) -> bool {
   matches!(
     value,
@@ -351,6 +368,7 @@ fn supported_highlight_value(value: &str) -> bool {
   )
 }
 
+#[hotpath::measure]
 fn supported_border_value(value: &str) -> bool {
   matches!(
     value,
@@ -379,18 +397,22 @@ fn supported_border_value(value: &str) -> bool {
   )
 }
 
+#[hotpath::measure]
 fn supported_tab_alignment_value(value: &str) -> bool {
   matches!(value, "left" | "start" | "center" | "right" | "end" | "decimal" | "bar" | "clear" | "num")
 }
 
+#[hotpath::measure]
 fn supported_tab_leader_value(value: &str) -> bool {
   matches!(value, "none" | "dot" | "hyphen" | "underscore" | "heavy" | "middleDot")
 }
 
+#[hotpath::measure]
 fn supported_section_type_value(value: &str) -> bool {
   matches!(value, "nextPage" | "continuous" | "evenPage" | "oddPage" | "nextColumn")
 }
 
+#[hotpath::measure]
 fn supported_page_orientation_value(value: &str) -> bool {
   matches!(value, "portrait" | "landscape")
 }
@@ -400,6 +422,7 @@ mod tests {
   use super::*;
 
   #[test]
+  #[hotpath::measure]
   fn unsupported_underline_values_normalize_to_single() {
     let xml = r#"<w:rPr><w:u w:val="dashHeavy"/><w:u w:val='wavyDouble'/><w:u w:val="none"/></w:rPr>"#;
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);
@@ -412,6 +435,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn supported_underline_values_are_preserved() {
     let xml = r#"<w:rPr><w:u w:val="dash"/><w:u w:val="wave"/></w:rPr>"#;
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);
@@ -421,6 +445,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn unsupported_parser_enum_values_are_normalized() {
     let xml = r#"<w:style w:type="weird"><w:jc w:val="thaiDistribute"/><w:highlight w:val="pink"/><w:top w:val="dashSmallGap"/><w:tab w:val="list" w:leader="equals"/><w:type w:val="other"/><w:pgSz w:orient="sideways"/></w:style>"#;
     let (normalized, stats) = normalize_formatting_values_in_xml(xml);

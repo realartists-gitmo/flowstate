@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn benchmark_index_paths(document: &Document, iterations: usize) -> Vec<OperationRow> {
   let mut rows = Vec::new();
   rows.push(operation_row("paragraph_byte_range all", iterations, || {
@@ -59,6 +60,7 @@ fn benchmark_index_paths(document: &Document, iterations: usize) -> Vec<Operatio
   rows
 }
 
+#[hotpath::measure]
 fn benchmark_edit_paths(document: &Document, stats: &DocumentStats, iterations: usize) -> Vec<OperationRow> {
   let mut rows = Vec::new();
   let largest = stats
@@ -154,6 +156,7 @@ fn benchmark_edit_paths(document: &Document, stats: &DocumentStats, iterations: 
   rows
 }
 
+#[hotpath::measure]
 fn operation_row(name: &str, iterations: usize, mut run: impl FnMut() -> usize) -> OperationRow {
   let mut timings = Vec::with_capacity(iterations);
   let mut failures = 0usize;

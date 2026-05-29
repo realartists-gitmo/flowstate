@@ -2,14 +2,17 @@ use unicode_segmentation::GraphemeCursor;
 
 use super::*;
 
+#[hotpath::measure]
 fn is_word_char(ch: char) -> bool {
   ch.is_alphanumeric() || ch == '_'
 }
 
+#[hotpath::measure]
 fn debate_word_char_at(text: &str, byte: usize) -> Option<char> {
   text.get(byte..)?.chars().next()
 }
 
+#[hotpath::measure]
 fn is_debate_connector(text: &str, byte: usize) -> bool {
   let Some(ch) = debate_word_char_at(text, byte) else {
     return false;
@@ -22,10 +25,12 @@ fn is_debate_connector(text: &str, byte: usize) -> bool {
   prev.is_some_and(is_word_char) && next.is_some_and(is_word_char)
 }
 
+#[hotpath::measure]
 pub(super) fn is_debate_word_byte(text: &str, byte: usize) -> bool {
   debate_word_char_at(text, byte).is_some_and(is_word_char) || is_debate_connector(text, byte)
 }
 
+#[hotpath::measure]
 pub(super) fn previous_char_boundary(text: &str, byte: usize) -> usize {
   text[..byte]
     .char_indices()
@@ -34,6 +39,7 @@ pub(super) fn previous_char_boundary(text: &str, byte: usize) -> usize {
     .unwrap_or(0)
 }
 
+#[hotpath::measure]
 pub(super) fn next_char_boundary(text: &str, byte: usize) -> usize {
   let Some(ch) = debate_word_char_at(text, byte) else {
     return text.len();
@@ -41,6 +47,7 @@ pub(super) fn next_char_boundary(text: &str, byte: usize) -> usize {
   byte + ch.len_utf8()
 }
 
+#[hotpath::measure]
 fn previous_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte > 0 {
@@ -60,10 +67,12 @@ fn previous_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+#[hotpath::measure]
 pub(super) fn previous_debate_word_boundary_in_paragraph_text(text: &str, byte: usize) -> usize {
   previous_debate_word_boundary(text, byte)
 }
 
+#[hotpath::measure]
 fn next_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte < text.len() && !is_debate_word_byte(text, byte) {
@@ -75,10 +84,12 @@ fn next_debate_word_boundary(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+#[hotpath::measure]
 pub(super) fn next_debate_word_boundary_in_paragraph_text(text: &str, byte: usize) -> usize {
   next_debate_word_boundary(text, byte)
 }
 
+#[hotpath::measure]
 pub(super) fn previous_debate_word_boundary_in_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
   if document.paragraphs.is_empty() {
     return DocumentOffset::default();
@@ -119,6 +130,7 @@ pub(super) fn previous_debate_word_boundary_in_document(document: &Document, off
   }
 }
 
+#[hotpath::measure]
 pub(super) fn next_debate_word_boundary_in_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
   if document.paragraphs.is_empty() {
     return DocumentOffset::default();
@@ -153,6 +165,7 @@ pub(super) fn next_debate_word_boundary_in_document(document: &Document, offset:
   }
 }
 
+#[hotpath::measure]
 pub(super) fn selection_for_word_at(document: &Document, offset: DocumentOffset) -> EditorSelection {
   let Some(paragraph) = document.paragraphs.get(offset.paragraph) else {
     return EditorSelection {
@@ -170,6 +183,7 @@ pub(super) fn selection_for_word_at(document: &Document, offset: DocumentOffset)
   }
 }
 
+#[hotpath::measure]
 pub(super) fn selection_for_paragraph_at(document: &Document, paragraph: usize) -> EditorSelection {
   let paragraph = paragraph.min(document.paragraphs.len().saturating_sub(1));
   EditorSelection {
@@ -181,6 +195,7 @@ pub(super) fn selection_for_paragraph_at(document: &Document, paragraph: usize) 
   }
 }
 
+#[hotpath::measure]
 pub(super) fn expand_drag_selection(
   document: &Document,
   anchor: DocumentOffset,
@@ -234,6 +249,7 @@ pub(super) fn expand_drag_selection(
 
 // Grapheme-cluster-aware step backwards. Handles combining marks and
 // compound emoji correctly, so one keystroke deletes one visible character.
+#[hotpath::measure]
 pub(super) fn prev_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
   if byte == 0 {
     return 0;
@@ -248,6 +264,7 @@ pub(super) fn prev_grapheme_boundary_in_paragraph(document: &Document, paragraph
   prev_grapheme_boundary(&text, byte)
 }
 
+#[hotpath::measure]
 pub(super) fn next_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
   let paragraph = &document.paragraphs[paragraph_ix];
   let len = paragraph_text_len(paragraph);
@@ -261,6 +278,7 @@ pub(super) fn next_grapheme_boundary_in_paragraph(document: &Document, paragraph
   next_grapheme_boundary(&text, byte)
 }
 
+#[hotpath::measure]
 fn paragraph_byte_at(document: &Document, paragraph_ix: usize, byte: usize) -> Option<u8> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   (byte < paragraph_text_len(paragraph)).then(|| {
@@ -270,11 +288,13 @@ fn paragraph_byte_at(document: &Document, paragraph_ix: usize, byte: usize) -> O
   })
 }
 
+#[hotpath::measure]
 fn prev_grapheme_boundary(s: &str, byte: usize) -> usize {
   let mut cursor = GraphemeCursor::new(byte, s.len(), true);
   cursor.prev_boundary(s, 0).ok().flatten().unwrap_or(0)
 }
 
+#[hotpath::measure]
 fn next_grapheme_boundary(s: &str, byte: usize) -> usize {
   let mut cursor = GraphemeCursor::new(byte, s.len(), true);
   cursor.next_boundary(s, 0).ok().flatten().unwrap_or(s.len())

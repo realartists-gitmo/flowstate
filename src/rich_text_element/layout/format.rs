@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> EffectiveParagraphFormat {
   let theme = &document.theme;
   let normal = EffectiveParagraphFormat {
@@ -87,11 +88,12 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
   }
 }
 
-pub(super) fn run_format(document: &Document, paragraph: EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
+#[hotpath::measure]
+pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
   let theme = &document.theme;
   let mut format = EffectiveRunFormat {
     font_size: paragraph.font_size,
-    font_family: paragraph.font_family,
+    font_family: paragraph.font_family.clone(),
     bold: paragraph.bold,
     italic: paragraph.italic,
     color: paragraph.color,

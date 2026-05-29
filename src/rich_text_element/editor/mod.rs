@@ -29,9 +29,8 @@ const SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS: u64 = 8;
 const SCROLL_FOREGROUND_MAX_CHUNK_LINES: usize = 96;
 const SCROLLBAR_DRAG_MAX_FPS: usize = 60;
 const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(150);
-// Diagnostic switch: keep cheap height/item-size caches, but do not retain
-// expensive shaped paragraph LayoutState caches for offscreen rows.
-const RETAIN_OFFSCREEN_PARAGRAPH_LAYOUT_CACHE: bool = true;
+const OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS: usize = 24;
+const OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS: usize = 160;
 
 actions!(
   rich_text_editor,
@@ -125,6 +124,7 @@ pub struct EditorSelection {
   pub head: DocumentOffset,
 }
 
+#[hotpath::measure_all]
 impl EditorSelection {
   fn caret() -> Self {
     let zero = DocumentOffset::default();
@@ -193,6 +193,7 @@ pub(super) enum EditOperation {
   },
 }
 
+#[hotpath::measure_all]
 impl EditOperation {
   pub(super) fn undo(&self, document: &mut Document) {
     match self {
@@ -291,6 +292,7 @@ pub enum SelectionState<T> {
   Mixed,
 }
 
+#[hotpath::measure_all]
 impl<T> SelectionState<T> {
   pub fn is_mixed(&self) -> bool {
     matches!(self, Self::Mixed)
@@ -302,12 +304,14 @@ struct SelectionStateBuilder<T> {
   state: SelectionState<T>,
 }
 
+#[hotpath::measure_all]
 impl<T> Default for SelectionStateBuilder<T> {
   fn default() -> Self {
     Self { state: SelectionState::None }
   }
 }
 
+#[hotpath::measure_all]
 impl<T: core::marker::Copy + Eq> SelectionStateBuilder<T> {
   fn push(&mut self, value: T) {
     match self.state {
@@ -326,10 +330,12 @@ impl<T: core::marker::Copy + Eq> SelectionStateBuilder<T> {
   }
 }
 
+#[hotpath::measure]
 fn offset_in_range(offset: DocumentOffset, range: Range<DocumentOffset>) -> bool {
   range.start <= offset && offset <= range.end
 }
 
+#[hotpath::measure]
 fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
   let ax: f32 = a.x.into();
   let ay: f32 = a.y.into();
@@ -340,10 +346,12 @@ fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
   dx * dx + dy * dy
 }
 
+#[hotpath::measure]
 fn is_single_grapheme_text_insert(text: &str) -> bool {
   !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK) && text.graphemes(true).take(2).count() == 1
 }
 
+#[hotpath::measure]
 pub(super) fn adjust_drop_after_source_delete(drop: DocumentOffset, source: Range<DocumentOffset>) -> DocumentOffset {
   if drop <= source.start {
     return drop;
@@ -391,6 +399,7 @@ pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
 }
 
+#[hotpath::measure_all]
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
     Self { smart_word_selection: true }
@@ -424,6 +433,7 @@ struct ParagraphPrepSlot {
   invisible: Option<Arc<ParagraphPrep>>,
 }
 
+#[hotpath::measure_all]
 impl ParagraphPrepSlot {
   fn get(&self, invisibility_mode: bool) -> Option<&Arc<ParagraphPrep>> {
     if invisibility_mode {
@@ -450,6 +460,50 @@ impl ParagraphPrepSlot {
 struct ParagraphShapingCacheEntry {
   key: ParagraphLayoutWorkKey,
   fragment_shapes: FragmentShapeCache,
+}
+
+#[derive(Clone)]
+struct ParagraphCacheRetainRanges {
+  visible: Range<usize>,
+  active: Range<usize>,
+}
+
+impl Default for ParagraphCacheRetainRanges {
+  fn default() -> Self {
+    Self {
+      visible: 0..0,
+      active: 0..0,
+    }
+  }
+}
+
+impl ParagraphCacheRetainRanges {
+  fn contains(&self, paragraph_ix: usize) -> bool {
+    self.visible.contains(&paragraph_ix) || self.active.contains(&paragraph_ix)
+  }
+
+  fn covers(&self, required: &Self) -> bool {
+    self.contains_range(&required.visible) && self.contains_range(&required.active)
+  }
+
+  fn contains_range(&self, range: &Range<usize>) -> bool {
+    range.is_empty() || range_within(&self.visible, range) || range_within(&self.active, range)
+  }
+}
+
+fn range_within(outer: &Range<usize>, inner: &Range<usize>) -> bool {
+  outer.start <= inner.start && outer.end >= inner.end
+}
+
+#[derive(Clone, Copy, PartialEq)]
+struct ParagraphEstimateHeightCacheEntry {
+  key: ParagraphCacheKey,
+  width: Pixels,
+  invisibility_mode: bool,
+  edit_generation: u64,
+  layout_generation: u64,
+  height: Pixels,
+  source_len: usize,
 }
 
 #[derive(Clone)]
@@ -525,6 +579,7 @@ enum ImageResizeHandle {
   BottomRight,
 }
 
+#[hotpath::measure_all]
 impl ImageResizeHandle {
   fn horizontal_sign(self) -> f32 {
     match self {
@@ -618,6 +673,7 @@ enum RecoveryWriteDecision {
   Idle,
 }
 
+#[hotpath::measure_all]
 impl ScrollAnchorSnapshot {
   fn delta(&self) -> Pixels {
     match self {
@@ -640,6 +696,7 @@ impl ScrollAnchorSnapshot {
   }
 }
 
+#[hotpath::measure_all]
 impl HeightPrefixIndex {
   fn rebuild(&mut self, sizes: &[Size<Pixels>]) {
     self.heights.clear();
@@ -764,6 +821,7 @@ pub struct RichTextEditor {
   paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
   paragraph_prep_cache: Vec<ParagraphPrepSlot>,
   paragraph_shaping_cache: Vec<Option<ParagraphShapingCacheEntry>>,
+  paragraph_estimate_height_cache: Vec<Option<ParagraphEstimateHeightCacheEntry>>,
   pending_layout_prep_task: Option<Task<()>>,
   pending_layout_prep_request: Option<LayoutPrepRequest>,
   layout_generation: u64,
@@ -788,6 +846,8 @@ pub struct RichTextEditor {
   visible_layout_generation: u64,
   visible_layout_range: Range<usize>,
   visible_chunk_anchors: Vec<VisibleChunkAnchor>,
+  layout_cache_retain_ranges: ParagraphCacheRetainRanges,
+  prep_cache_retain_ranges: ParagraphCacheRetainRanges,
   invisibility_mode: bool,
   // Remembered horizontal pixel position for vertical caret motion. When the
   // user presses Up/Down repeatedly we want the caret to track a consistent

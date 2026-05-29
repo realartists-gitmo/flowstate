@@ -1,5 +1,7 @@
 use std::sync::Arc;
 
+use crop::Rope;
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ParagraphPrepKey {
   pub(super) paragraph_key: ParagraphCacheKey,
@@ -28,12 +30,18 @@ pub(super) struct ParagraphPrep {
 }
 
 pub(super) struct ParagraphPrepBatchRequest {
-  pub(super) document: Document,
+  pub(super) text: Rope,
   pub(super) edit_generation: u64,
   pub(super) invisibility_mode: bool,
-  pub(super) paragraphs: Vec<usize>,
+  pub(super) requested: usize,
+  pub(super) paragraphs: Vec<ParagraphPrepSource>,
   pub(super) max_paragraphs: usize,
   pub(super) max_text_bytes: usize,
+}
+
+pub(super) struct ParagraphPrepSource {
+  paragraph_ix: usize,
+  paragraph: Paragraph,
 }
 
 pub(super) struct ParagraphPrepBatchResult {
@@ -46,6 +54,7 @@ pub(super) struct ParagraphPrepBatchResult {
   pub(super) preps: Vec<ParagraphPrep>,
 }
 
+#[hotpath::measure]
 pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> ParagraphPrepBatchResult {
   let mut preps = Vec::new();
   let mut text_bytes = 0usize;
@@ -55,11 +64,12 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
     .min(request.paragraphs.len())
     .max(usize::from(!request.paragraphs.is_empty()));
 
-  for (request_ix, paragraph_ix) in request.paragraphs.iter().copied().take(limit).enumerate() {
+  for (request_ix, source) in request.paragraphs.iter().take(limit).enumerate() {
     processed_requests = request_ix + 1;
-    let Some(prep) = build_paragraph_prep(
-      &request.document,
-      paragraph_ix,
+    let Some(prep) = build_paragraph_prep_from_parts(
+      &request.text,
+      source.paragraph_ix,
+      &source.paragraph,
       request.edit_generation,
       request.invisibility_mode,
     ) else {
@@ -74,14 +84,14 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
   let deferred_paragraphs = request
     .paragraphs
     .iter()
-    .copied()
     .skip(processed_requests)
+    .map(|source| source.paragraph_ix)
     .collect::<Vec<_>>();
 
   ParagraphPrepBatchResult {
     edit_generation: request.edit_generation,
     invisibility_mode: request.invisibility_mode,
-    requested: request.paragraphs.len(),
+    requested: request.requested,
     completed: preps.len(),
     text_bytes,
     deferred_paragraphs,
@@ -89,52 +99,54 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
   }
 }
 
-pub(super) fn build_paragraph_prep(
+#[hotpath::measure]
+pub(super) fn paragraph_prep_batch_request(
   document: &Document,
+  edit_generation: u64,
+  invisibility_mode: bool,
+  paragraphs: Vec<usize>,
+  max_paragraphs: usize,
+  max_text_bytes: usize,
+) -> ParagraphPrepBatchRequest {
+  let requested = paragraphs.len();
+  let paragraphs = paragraphs
+    .into_iter()
+    .filter_map(|paragraph_ix| {
+      document
+        .paragraphs
+        .get(paragraph_ix)
+        .cloned()
+        .map(|paragraph| ParagraphPrepSource { paragraph_ix, paragraph })
+    })
+    .collect();
+  ParagraphPrepBatchRequest {
+    text: document.text.clone(),
+    edit_generation,
+    invisibility_mode,
+    requested,
+    paragraphs,
+    max_paragraphs,
+    max_text_bytes,
+  }
+}
+
+#[hotpath::measure]
+fn build_paragraph_prep_from_parts(
+  text: &Rope,
   paragraph_ix: usize,
+  paragraph: &Paragraph,
   edit_generation: u64,
   invisibility_mode: bool,
 ) -> Option<ParagraphPrep> {
-  let paragraph = document.paragraphs.get(paragraph_ix)?;
   let source_len = paragraph_text_len(paragraph);
   let key = ParagraphPrepKey {
-    paragraph_key: paragraph_cache_key(document, paragraph),
+    paragraph_key: paragraph_cache_key_for_paragraph(paragraph),
     invisibility_mode,
     edit_generation,
   };
 
   if invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
-    let source = paragraph_text(document, paragraph_ix);
-    let mut byte = 0usize;
-    let mut text = String::new();
-    let mut runs = Vec::new();
-
-    for run in &paragraph.runs {
-      let start = byte;
-      let end = start + run.len;
-      byte = end;
-      if !run_is_visible(run.styles) {
-        continue;
-      }
-      let piece = source.get(start..end).unwrap_or("");
-      if piece.is_empty() {
-        continue;
-      }
-      if !text.is_empty() {
-        text.push(' ');
-        runs.push(TextRun {
-          len: 1,
-          styles: RunStyles::default(),
-        });
-      }
-      text.push_str(piece);
-      runs.push(TextRun {
-        len: piece.len(),
-        styles: run.styles,
-      });
-    }
-
-    if text.is_empty() {
+    let Some((text, runs)) = projected_visible_paragraph_text_and_runs_from_text(text, paragraph) else {
       return Some(ParagraphPrep {
         key,
         paragraph_ix,
@@ -146,7 +158,7 @@ pub(super) fn build_paragraph_prep(
         wrap_break_ends: Arc::from(Vec::<usize>::new().into_boxed_slice()),
         visible: true,
       });
-    }
+    };
 
     let wrap_break_ends = wrap_break_ends(&text);
     return Some(ParagraphPrep {
@@ -176,7 +188,7 @@ pub(super) fn build_paragraph_prep(
     });
   }
 
-  let text = paragraph_text(document, paragraph_ix);
+  let text = paragraph_text_from_rope(text, paragraph.byte_range.clone());
   let wrap_break_ends = wrap_break_ends(&text);
   Some(ParagraphPrep {
     key,
@@ -191,10 +203,90 @@ pub(super) fn build_paragraph_prep(
   })
 }
 
+#[hotpath::measure]
+pub(super) fn build_paragraph_prep(
+  document: &Document,
+  paragraph_ix: usize,
+  edit_generation: u64,
+  invisibility_mode: bool,
+) -> Option<ParagraphPrep> {
+  let paragraph = document.paragraphs.get(paragraph_ix)?;
+  build_paragraph_prep_from_parts(
+    &document.text,
+    paragraph_ix,
+    paragraph,
+    edit_generation,
+    invisibility_mode,
+  )
+}
+
+#[hotpath::measure]
+fn paragraph_text_from_rope(text: &Rope, range: Range<usize>) -> String {
+  let mut output = String::with_capacity(range.end.saturating_sub(range.start));
+  for chunk in text.byte_slice(range).chunks() {
+    output.push_str(chunk);
+  }
+  output
+}
+
+#[hotpath::measure]
+fn projected_visible_paragraph_text_and_runs_from_text(text: &Rope, paragraph: &Paragraph) -> Option<(String, Vec<TextRun>)> {
+  let paragraph_len = paragraph_text_len(paragraph);
+  let visible_run_count = paragraph.runs.iter().filter(|run| run.len > 0 && run_is_visible(run.styles)).count();
+  if visible_run_count == 0 {
+    return None;
+  }
+  let visible_text_len = paragraph
+    .runs
+    .iter()
+    .filter(|run| run_is_visible(run.styles))
+    .map(|run| run.len)
+    .sum::<usize>();
+  let mut output = String::with_capacity(visible_text_len.saturating_add(visible_run_count.saturating_sub(1)));
+  let mut runs = Vec::with_capacity(visible_run_count.saturating_mul(2).saturating_sub(1));
+  let mut byte = 0usize;
+
+  for run in &paragraph.runs {
+    let start = byte;
+    let end = start + run.len;
+    byte = end;
+    if start >= end || end > paragraph_len || !run_is_visible(run.styles) {
+      continue;
+    }
+    if !output.is_empty() {
+      output.push(' ');
+      runs.push(TextRun {
+        len: 1,
+        styles: RunStyles::default(),
+      });
+    }
+    let piece_start = output.len();
+    push_rope_text_slice(text, paragraph.byte_range.start + start..paragraph.byte_range.start + end, &mut output);
+    let piece_len = output.len().saturating_sub(piece_start);
+    if piece_len == 0 {
+      continue;
+    }
+    runs.push(TextRun {
+      len: piece_len,
+      styles: run.styles,
+    });
+  }
+
+  (!output.is_empty()).then_some((output, runs))
+}
+
+#[hotpath::measure]
+fn push_rope_text_slice(text: &Rope, range: Range<usize>, output: &mut String) {
+  for chunk in text.byte_slice(range).chunks() {
+    output.push_str(chunk);
+  }
+}
+
 #[cfg(test)]
 mod prep_tests {
   use super::*;
 
+  #[hotpath::measure]
   fn input_run(text: &str, styles: RunStyles) -> InputRun {
     InputRun {
       text: text.to_string(),
@@ -203,6 +295,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn normal_prep_captures_text_runs_and_wrap_breaks() {
     let document = document_from_input(
       DocumentTheme::default(),
@@ -222,6 +315,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn invisibility_prep_projects_visible_runs() {
     let cite = RunStyles {
       semantic: RunSemanticStyle::Cite,
@@ -253,6 +347,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn invisibility_prep_hides_plain_normal_paragraphs() {
     let document = document_from_input(
       DocumentTheme::default(),
@@ -269,6 +364,7 @@ mod prep_tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn prep_batch_defers_work_after_text_byte_limit() {
     let document = document_from_input(
       DocumentTheme::default(),
@@ -288,14 +384,7 @@ mod prep_tests {
       ],
     );
 
-    let result = build_paragraph_prep_batch(ParagraphPrepBatchRequest {
-      document,
-      edit_generation: 9,
-      invisibility_mode: false,
-      paragraphs: vec![0, 1, 2],
-      max_paragraphs: 16,
-      max_text_bytes: 1,
-    });
+    let result = build_paragraph_prep_batch(paragraph_prep_batch_request(&document, 9, false, vec![0, 1, 2], 16, 1));
 
     assert_eq!(result.completed, 1);
     assert_eq!(result.deferred_paragraphs, vec![1, 2]);

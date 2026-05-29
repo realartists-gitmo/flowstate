@@ -60,12 +60,14 @@ pub struct FlowDocument {
   pub nodes: Nodes,
 }
 
+#[hotpath::measure_all]
 impl Default for FlowDocument {
   fn default() -> Self {
     Self::new()
   }
 }
 
+#[hotpath::measure_all]
 impl FlowDocument {
   pub fn new() -> Self {
     let mut nodes = Nodes::default();
@@ -239,22 +241,27 @@ pub enum Direction {
   Down,
 }
 
+#[hotpath::measure]
 pub fn new_node_id() -> NodeId {
   Uuid::new_v4().to_string()
 }
 
+#[hotpath::measure]
 pub fn new_box_id() -> NodeId {
   new_node_id()
 }
 
+#[hotpath::measure]
 pub fn new_flow_id() -> NodeId {
   new_node_id()
 }
 
+#[hotpath::measure]
 pub fn constrain_index(index: usize, len: usize) -> usize {
   index.min(len)
 }
 
+#[hotpath::measure]
 fn is_false(value: &bool) -> bool {
   !*value
 }

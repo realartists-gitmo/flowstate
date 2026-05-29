@@ -14,10 +14,12 @@ use std::time::Instant;
 
 const TIMING_ENV: &str = "DEBATEPROCESSOR_TIMING";
 
+#[hotpath::measure]
 fn timing_enabled() -> bool {
   std::env::var_os(TIMING_ENV).is_some()
 }
 
+#[hotpath::measure]
 pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
   if timing_enabled() {
     eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());

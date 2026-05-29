@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let this = Self {
@@ -669,6 +670,7 @@ enum PanelSaveOutcome {
   Failed(String),
 }
 
+#[hotpath::measure_all]
 impl PanelKind {
   fn is_dirty(&self, cx: &App) -> bool {
     match self {
@@ -756,6 +758,7 @@ impl PanelKind {
   }
 }
 
+#[hotpath::measure]
 async fn prompt_for_panel_save_path(
   window_handle: AnyWindowHandle,
   cx: &mut gpui::AsyncApp,
@@ -771,6 +774,7 @@ async fn prompt_for_panel_save_path(
   }
 }
 
+#[hotpath::measure]
 fn show_save_failed(window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, detail: String) {
   let _ = window_handle.update(cx, |_, window, cx| {
     window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
@@ -789,6 +793,7 @@ enum LoadedWorkspaceDocument {
   },
 }
 
+#[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
   if is_flow_path(&path) {
     return Ok(LoadedWorkspaceDocument::Flow {
@@ -805,6 +810,7 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
     .map_err(|error| error.to_string())
 }
 
+#[hotpath::measure]
 fn is_flow_path(path: &Path) -> bool {
   path
     .extension()

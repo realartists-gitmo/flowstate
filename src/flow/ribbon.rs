@@ -22,6 +22,7 @@ pub struct FlowRibbon {
   _subscriptions: Vec<Subscription>,
 }
 
+#[hotpath::measure_all]
 impl FlowRibbon {
   pub fn new(editor: Entity<FlowEditor>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let style_labels = all_debate_style_templates()
@@ -320,12 +321,14 @@ impl FlowRibbon {
 
 impl EventEmitter<()> for FlowRibbon {}
 
+#[hotpath::measure_all]
 impl Focusable for FlowRibbon {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus_handle.clone()
   }
 }
 
+#[hotpath::measure_all]
 impl Render for FlowRibbon {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.sync_controls(window, cx);
@@ -366,6 +369,7 @@ struct FlowRibbonMetrics {
   inner_padding_x: gpui::Pixels,
 }
 
+#[hotpath::measure_all]
 impl FlowRibbonMetrics {
   fn from_height(height: gpui::Pixels) -> Self {
     let height = px(height.as_f32().clamp(min_flow_ribbon_height().as_f32(), max_flow_ribbon_height().as_f32()));
@@ -385,6 +389,7 @@ impl FlowRibbonMetrics {
   }
 }
 
+#[hotpath::measure]
 fn flow_ribbon_group(label: &'static str, controls: Vec<AnyElement>, metrics: FlowRibbonMetrics, cx: &mut App) -> impl IntoElement {
   v_flex()
     .flex_none()
@@ -409,6 +414,7 @@ fn flow_ribbon_group(label: &'static str, controls: Vec<AnyElement>, metrics: Fl
     )
 }
 
+#[hotpath::measure]
 fn flow_chip(id: impl Into<gpui::ElementId>, metrics: FlowRibbonMetrics, _cx: &mut App) -> Button {
   Button::new(id)
     .xsmall()
@@ -419,6 +425,7 @@ fn flow_chip(id: impl Into<gpui::ElementId>, metrics: FlowRibbonMetrics, _cx: &m
     .rounded(px(6.0))
 }
 
+#[hotpath::measure]
 fn style_key_for_label(label: &SharedString) -> Option<DebateStyleKey> {
   all_debate_style_templates()
     .into_iter()
@@ -426,14 +433,17 @@ fn style_key_for_label(label: &SharedString) -> Option<DebateStyleKey> {
     .map(|template| template.key)
 }
 
+#[hotpath::measure]
 fn default_flow_ribbon_height() -> gpui::Pixels {
   px(112.0)
 }
 
+#[hotpath::measure]
 fn min_flow_ribbon_height() -> gpui::Pixels {
   px(56.0)
 }
 
+#[hotpath::measure]
 fn max_flow_ribbon_height() -> gpui::Pixels {
   px(158.0)
 }

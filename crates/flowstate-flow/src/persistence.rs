@@ -16,6 +16,7 @@ pub struct SaveableFlowDocument {
   pub version: u32,
 }
 
+#[hotpath::measure]
 pub fn get_json(document: &FlowDocument) -> Result<String> {
   let saveable = SaveableFlowDocument {
     nodes: document.nodes.clone(),
@@ -24,6 +25,7 @@ pub fn get_json(document: &FlowDocument) -> Result<String> {
   serde_json::to_string(&saveable).context("failed to serialize .fl0 document")
 }
 
+#[hotpath::measure]
 pub fn load_nodes(data: Value) -> Result<Nodes> {
   let version = data.get("version").and_then(Value::as_u64).unwrap_or(0) as u32;
   if version == CURRENT_SAVE_VERSION {
@@ -36,6 +38,7 @@ pub fn load_nodes(data: Value) -> Result<Nodes> {
   bail!("unsupported .fl0 save version {version}");
 }
 
+#[hotpath::measure]
 pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
   let path = path.as_ref();
   let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -44,10 +47,12 @@ pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
   Ok(FlowDocument::from_nodes(nodes))
 }
 
+#[hotpath::measure]
 pub fn load_flow_document_or_new(path: impl AsRef<Path>) -> FlowDocument {
   load_flow_document(path).unwrap_or_else(|_| FlowDocument::new())
 }
 
+#[hotpath::measure]
 pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> Result<()> {
   let path = path.as_ref();
   if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
@@ -83,6 +88,7 @@ struct OldBox {
   crossed: bool,
 }
 
+#[hotpath::measure]
 fn upgrade_0_1(saved: Value) -> Result<SaveableFlowDocument> {
   let old_flows: Vec<OldFlow> = serde_json::from_value(saved).context("invalid legacy debate-flow document")?;
   let mut document = FlowDocument::new();
@@ -109,6 +115,7 @@ fn upgrade_0_1(saved: Value) -> Result<SaveableFlowDocument> {
   })
 }
 
+#[hotpath::measure]
 fn upgrade_0_1_add_boxes_rec(document: &mut FlowDocument, flow_id: NodeId, parent_id: NodeId, old_box: OldBox, index: usize) {
   let id = new_box_id();
   let add = Action::Add {
@@ -132,6 +139,7 @@ fn upgrade_0_1_add_boxes_rec(document: &mut FlowDocument, flow_id: NodeId, paren
 }
 
 #[allow(dead_code)]
+#[hotpath::measure]
 fn _new_empty_box(parent_id: NodeId, flow_id: NodeId, index: usize) -> Action {
   new_box_action(parent_id, flow_id, index, None)
 }
@@ -141,6 +149,7 @@ mod tests {
   use super::*;
 
   #[test]
+  #[hotpath::measure]
   fn loads_current_save_shape() {
     let document = FlowDocument::new();
     let json = get_json(&document).unwrap();
@@ -150,6 +159,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn upgrades_legacy_flow_array() {
     let legacy = serde_json::json!([
       {

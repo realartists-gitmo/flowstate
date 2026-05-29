@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn toggle_underline_kind(&mut self, explicit_direct: Option<bool>, cx: &mut Context<Self>) {
     if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {

@@ -1,6 +1,7 @@
-fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) -> (Vec<Range<usize>>, Vec<Option<usize>>) {
+#[hotpath::measure]
+fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) -> (Vec<Range<usize>>, Vec<u32>) {
   let mut paragraph_chunk_item_ranges = vec![0..0; paragraph_count];
-  let mut paragraph_remainder_items = vec![None; paragraph_count];
+  let mut paragraph_remainder_items = vec![NO_REMAINDER_ITEM; paragraph_count];
 
   for (item_ix, item) in items.iter().enumerate() {
     match item {
@@ -17,7 +18,7 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
       },
       VirtualItem::ParagraphRemainder { paragraph_ix, .. } => {
         if let Some(slot) = paragraph_remainder_items.get_mut(*paragraph_ix) {
-          *slot = Some(item_ix);
+          *slot = encode_remainder_item_ix(item_ix);
         }
       },
       VirtualItem::HiddenBlock { .. } | VirtualItem::StructuralBlock { .. } => {},
@@ -27,9 +28,10 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
   (paragraph_chunk_item_ranges, paragraph_remainder_items)
 }
 
+#[hotpath::measure]
 fn patch_item_lookup_for_paragraph_range(
   paragraph_chunk_item_ranges: &mut [Range<usize>],
-  paragraph_remainder_items: &mut [Option<usize>],
+  paragraph_remainder_items: &mut [u32],
   items: &[VirtualItem],
   replace_start: usize,
   new_len: usize,
@@ -41,7 +43,7 @@ fn patch_item_lookup_for_paragraph_range(
       *chunk_range = 0..0;
     }
     if let Some(remainder_item) = paragraph_remainder_items.get_mut(paragraph_ix) {
-      *remainder_item = None;
+      *remainder_item = NO_REMAINDER_ITEM;
     }
   }
 
@@ -61,7 +63,7 @@ fn patch_item_lookup_for_paragraph_range(
       },
       VirtualItem::ParagraphRemainder { paragraph_ix, .. } if range.contains(paragraph_ix) => {
         if let Some(remainder_item) = paragraph_remainder_items.get_mut(*paragraph_ix) {
-          *remainder_item = Some(item_ix);
+          *remainder_item = encode_remainder_item_ix(item_ix);
         }
       },
       _ => {},
@@ -75,14 +77,17 @@ fn patch_item_lookup_for_paragraph_range(
         chunk_range.end = chunk_range.end.checked_add_signed(item_delta)?;
       }
     }
-    for remainder_item in paragraph_remainder_items.iter_mut().skip(range.end).flatten() {
-      *remainder_item = remainder_item.checked_add_signed(item_delta)?;
+    for remainder_item in paragraph_remainder_items.iter_mut().skip(range.end) {
+      if let Some(item_ix) = decode_remainder_item_ix(*remainder_item) {
+        *remainder_item = encode_remainder_item_ix(item_ix.checked_add_signed(item_delta)?);
+      }
     }
   }
 
   Some(())
 }
 
+#[hotpath::measure]
 fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: usize) -> Range<usize> {
   if paragraph_count == 0 {
     return 0..0;
@@ -96,6 +101,7 @@ fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: 
   start..end
 }
 
+#[hotpath::measure]
 fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_byte: usize, end_byte: usize, ratio: f32) -> usize {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
     return 0;
@@ -110,6 +116,7 @@ fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_by
   floor_char_boundary(&text, target.min(text.len()))
 }
 
+#[hotpath::measure]
 fn detach_document_for_background_write(document: &Document) -> Document {
   Document {
     text: document.text.clone(),
@@ -121,6 +128,7 @@ fn detach_document_for_background_write(document: &Document) -> Document {
   }
 }
 
+#[hotpath::measure]
 fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte > 0 && !text.is_char_boundary(byte) {

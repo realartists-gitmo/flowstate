@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     if !is_single_grapheme_text_insert(text) || !self.selection.is_caret() || self.selected_block.is_some() {

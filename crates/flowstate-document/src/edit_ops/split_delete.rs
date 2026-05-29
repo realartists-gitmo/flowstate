@@ -1,7 +1,9 @@
+#[hotpath::measure]
 pub fn bump_paragraph_version(paragraph: &mut Paragraph) {
   paragraph.version = paragraph.version.wrapping_add(1);
 }
 
+#[hotpath::measure]
 pub fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRun>) {
   let mut left = Vec::new();
   let mut right = Vec::new();
@@ -34,6 +36,7 @@ pub fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRu
   (merge_adjacent_runs(left), merge_adjacent_runs(right))
 }
 
+#[hotpath::measure]
 pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: usize) {
   let paragraph = document.paragraphs[paragraph_ix].clone();
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
@@ -62,6 +65,7 @@ pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: us
   rebuild_document_offset_index(document);
 }
 
+#[hotpath::measure]
 pub fn delete_cross_paragraph_range(document: &mut Document, range: Range<DocumentOffset>) {
   if range.start.paragraph >= range.end.paragraph {
     delete_range_in_paragraph(document, range.start.paragraph, range.start.byte..range.end.byte);

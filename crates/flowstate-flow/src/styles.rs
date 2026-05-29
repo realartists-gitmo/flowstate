@@ -43,6 +43,7 @@ pub struct DebateStyle {
   pub prep_time_ms: Option<u32>,
 }
 
+#[hotpath::measure]
 pub fn all_debate_style_templates() -> Vec<DebateStyleTemplate> {
   vec![
     DebateStyleTemplate { key: DebateStyleKey::Policy, label: "Policy" },
@@ -59,6 +60,7 @@ pub fn all_debate_style_templates() -> Vec<DebateStyleTemplate> {
   ]
 }
 
+#[hotpath::measure]
 pub fn debate_style_label(key: DebateStyleKey) -> &'static str {
   all_debate_style_templates()
     .into_iter()
@@ -67,6 +69,7 @@ pub fn debate_style_label(key: DebateStyleKey) -> &'static str {
     .unwrap_or("Policy")
 }
 
+#[hotpath::measure]
 pub fn debate_style_templates(key: DebateStyleKey, ld_toc_circuit: bool) -> Vec<DebateStyleFlow> {
   let style = debate_style(key);
   if key == DebateStyleKey::LincolnDouglas && ld_toc_circuit {
@@ -76,6 +79,7 @@ pub fn debate_style_templates(key: DebateStyleKey, ld_toc_circuit: bool) -> Vec<
   }
 }
 
+#[hotpath::measure]
 pub fn debate_style(key: DebateStyleKey) -> DebateStyle {
   match key {
     DebateStyleKey::Policy => DebateStyle {
@@ -308,6 +312,7 @@ pub fn debate_style(key: DebateStyleKey) -> DebateStyle {
   }
 }
 
+#[hotpath::measure]
 fn flow(name: &str, columns: &[&str], invert: bool) -> DebateStyleFlow {
   DebateStyleFlow {
     name: name.to_string(),
@@ -318,6 +323,7 @@ fn flow(name: &str, columns: &[&str], invert: bool) -> DebateStyleFlow {
   }
 }
 
+#[hotpath::measure]
 fn flow_switch(name: &str, columns: &[&str], columns_switch: &[&str], invert: bool) -> DebateStyleFlow {
   DebateStyleFlow {
     name: name.to_string(),
@@ -328,6 +334,7 @@ fn flow_switch(name: &str, columns: &[&str], columns_switch: &[&str], invert: bo
   }
 }
 
+#[hotpath::measure]
 fn flow_starter(name: &str, columns: &[&str], invert: bool, starter_boxes: &[&str]) -> DebateStyleFlow {
   DebateStyleFlow {
     name: name.to_string(),
@@ -338,10 +345,12 @@ fn flow_starter(name: &str, columns: &[&str], invert: bool, starter_boxes: &[&st
   }
 }
 
+#[hotpath::measure]
 fn strings(values: &[&str]) -> Vec<String> {
   values.iter().map(|value| (*value).to_string()).collect()
 }
 
+#[hotpath::measure]
 fn speeches(values: &[(&str, u32, bool)]) -> Vec<TimerSpeech> {
   values
     .iter()

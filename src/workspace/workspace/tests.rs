@@ -3,6 +3,7 @@ mod tests {
   use super::*;
   use crate::rich_text_element::{DocumentParagraphInput, DocumentRunInput, RunStyles, document_from_paragraphs};
 
+  #[hotpath::measure]
   fn paragraph(style: ParagraphStyle, text: &str) -> DocumentParagraphInput {
     DocumentParagraphInput {
       style,
@@ -14,6 +15,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn outline_label_normalizes_whitespace_without_full_join() {
     let document = document_from_paragraphs(
       DocumentTheme::default(),
@@ -24,6 +26,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn active_visible_outline_uses_latest_visible_heading_before_caret() {
     let document = document_from_paragraphs(
       DocumentTheme::default(),
@@ -47,6 +50,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn outline_signature_ignores_non_outline_text_edits() {
     let before = document_from_paragraphs(
       DocumentTheme::default(),
@@ -64,6 +68,7 @@ mod tests {
   }
 
   #[test]
+  #[hotpath::measure]
   fn outline_signature_tracks_outline_labels_and_paragraph_count() {
     let before = document_from_paragraphs(
       DocumentTheme::default(),

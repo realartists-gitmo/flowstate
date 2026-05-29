@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn scroll_to_paragraph(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     if paragraph_ix < self.document.paragraphs.len() {

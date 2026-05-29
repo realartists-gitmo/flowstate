@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let object_height = (row_size.height - document.theme.paragraph_after).max(px(1.0));
   let object_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
@@ -14,6 +15,7 @@ fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: 
     .border_color(if selected { rgb(0x0969da) } else { rgb(0xffffff) })
 }
 
+#[hotpath::measure]
 fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let available_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_asset_intrinsic_size(asset);
@@ -44,6 +46,7 @@ fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetReco
     .border_color(if selected { rgb(0x0969da) } else { rgb(0xffffff) })
 }
 
+#[hotpath::measure]
 fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
   if size.width == 0 || size.height == 0 {
@@ -52,6 +55,7 @@ fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
   Some((px(size.width as f32), px(size.height as f32)))
 }
 
+#[hotpath::measure]
 fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
   let bytes = fs::read(path).ok()?;
   let format = image_format_for_path(path)?;
@@ -73,6 +77,7 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
   ))
 }
 
+#[hotpath::measure]
 fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
   let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
   let mut hasher = DefaultHasher::new();
@@ -89,6 +94,7 @@ fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
   )
 }
 
+#[hotpath::measure]
 fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
   match path
     .extension()?

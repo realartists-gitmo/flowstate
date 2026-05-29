@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn layout_paragraph_at(
   document: &Document,
   paragraph_ix: usize,
@@ -87,6 +88,7 @@ pub(super) struct ParagraphChunkBuildResult {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 pub(super) fn build_paragraph_chunk_layout_with_visibility(
   document: &Document,
   paragraph_ix: usize,
@@ -166,6 +168,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn layout_paragraph_chunk_at(
   document: &Document,
   layout_paragraph_ix: usize,
@@ -199,6 +202,7 @@ fn layout_paragraph_chunk_at(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn layout_prepared_paragraph_chunk_at(
   document: &Document,
   paragraph: &Paragraph,
@@ -323,6 +327,7 @@ fn layout_prepared_paragraph_chunk_at(
   })
 }
 
+#[hotpath::measure]
 fn clamp_to_char_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte > 0 && !text.is_char_boundary(byte) {
@@ -331,6 +336,7 @@ fn clamp_to_char_boundary(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+#[hotpath::measure]
 fn ceil_char_boundary(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte < text.len() && !text.is_char_boundary(byte) {
@@ -339,6 +345,7 @@ fn ceil_char_boundary(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+#[hotpath::measure]
 fn push_chunk_box_rules(
   rects: &mut Vec<RunRect>,
   bounds: Bounds<Pixels>,

@@ -1,5 +1,6 @@
 pub struct LegacyStylesRibbon;
 
+#[hotpath::measure_all]
 impl LegacyStylesRibbon {
   fn render(
     editor: Entity<RichTextEditor>,
@@ -148,6 +149,7 @@ impl LegacyStylesRibbon {
   }
 }
 
+#[hotpath::measure]
 fn legacy_ribbon_group(label: &'static str, controls: impl IntoElement, cx: &mut Context<EditorRibbon>) -> impl IntoElement {
   div()
     .h_full()

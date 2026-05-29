@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_document_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     let active_index = self.active_document_index(cx).unwrap_or(0);

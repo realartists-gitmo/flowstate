@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Workspace {
   fn render_top_bar(&mut self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();

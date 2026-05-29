@@ -6,6 +6,7 @@ pub(super) struct MouseSelectionOptions {
   pub exact: bool,
 }
 
+#[hotpath::measure]
 pub(super) fn expand_mouse_selection(
   document: &Document,
   anchor: DocumentOffset,
@@ -25,6 +26,7 @@ pub(super) fn expand_mouse_selection(
   smart_word_selection(document, anchor, head)
 }
 
+#[hotpath::measure]
 fn smart_word_selection(document: &Document, anchor: DocumentOffset, head: DocumentOffset) -> EditorSelection {
   if head < anchor {
     EditorSelection {
@@ -39,6 +41,7 @@ fn smart_word_selection(document: &Document, anchor: DocumentOffset, head: Docum
   }
 }
 
+#[hotpath::measure]
 fn smart_word_selection_start(document: &Document, offset: DocumentOffset) -> DocumentOffset {
   let Some(text) = paragraph_text_for_offset(document, offset) else {
     return DocumentOffset::default();
@@ -56,6 +59,7 @@ fn smart_word_selection_start(document: &Document, offset: DocumentOffset) -> Do
   }
 }
 
+#[hotpath::measure]
 fn smart_word_selection_end(document: &Document, offset: DocumentOffset) -> DocumentOffset {
   let Some(text) = paragraph_text_for_offset(document, offset) else {
     return DocumentOffset::default();
@@ -73,6 +77,7 @@ fn smart_word_selection_end(document: &Document, offset: DocumentOffset) -> Docu
   }
 }
 
+#[hotpath::measure]
 fn paragraph_text_for_offset(document: &Document, offset: DocumentOffset) -> Option<String> {
   if document.paragraphs.is_empty() {
     return None;
@@ -81,6 +86,7 @@ fn paragraph_text_for_offset(document: &Document, offset: DocumentOffset) -> Opt
   Some(paragraph_text(document, paragraph))
 }
 
+#[hotpath::measure]
 fn next_word_start_at_or_after(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte < text.len() {
@@ -92,6 +98,7 @@ fn next_word_start_at_or_after(text: &str, mut byte: usize) -> usize {
   text.len()
 }
 
+#[hotpath::measure]
 fn previous_word_end_at_or_before(text: &str, mut byte: usize) -> usize {
   byte = byte.min(text.len());
   while byte > 0 {
@@ -104,6 +111,7 @@ fn previous_word_end_at_or_before(text: &str, mut byte: usize) -> usize {
   0
 }
 
+#[hotpath::measure]
 pub(super) fn offset_is_in_same_word_as(document: &Document, anchor: DocumentOffset, offset: DocumentOffset) -> bool {
   if anchor.paragraph != offset.paragraph || document.paragraphs.is_empty() {
     return false;
@@ -117,6 +125,7 @@ pub(super) fn offset_is_in_same_word_as(document: &Document, anchor: DocumentOff
   word_start < word_end && (word_start..=word_end).contains(&offset_byte)
 }
 
+#[hotpath::measure]
 fn same_word_fragment(document: &Document, anchor: DocumentOffset, head: DocumentOffset) -> bool {
   if anchor.paragraph != head.paragraph || anchor == head {
     return false;
@@ -136,6 +145,7 @@ fn same_word_fragment(document: &Document, anchor: DocumentOffset, head: Documen
   all_word_bytes(&text, start, end) && start > word_start && end < word_end
 }
 
+#[hotpath::measure]
 fn all_word_bytes(text: &str, start: usize, end: usize) -> bool {
   let mut byte = start;
   while byte < end {

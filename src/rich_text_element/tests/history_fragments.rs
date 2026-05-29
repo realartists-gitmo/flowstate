@@ -1,5 +1,6 @@
 
 #[test]
+#[hotpath::measure]
 fn history_operation_round_trip_for_text_and_paragraph_split() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -27,6 +28,7 @@ fn history_operation_round_trip_for_text_and_paragraph_split() {
 }
 
 #[test]
+#[hotpath::measure]
 fn rich_fragment_insert_bulk_preserves_multiline_paste_shape() {
   let cite = RunStyles::default().with(RunStyle::Cite);
   let emphasis = RunStyles::default().with(RunStyle::Emphasis);
@@ -77,6 +79,7 @@ fn rich_fragment_insert_bulk_preserves_multiline_paste_shape() {
 }
 
 #[test]
+#[hotpath::measure]
 fn insert_rich_fragment_history_operation_round_trips_without_paragraph_snapshots() {
   let emphasis = RunStyles::default().with(RunStyle::Emphasis);
   let mut document = document_from_input(

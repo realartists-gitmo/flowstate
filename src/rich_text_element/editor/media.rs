@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn set_selected_image_alignment(&mut self, alignment: BlockAlignment, cx: &mut Context<Self>) {
     let Some(BlockSelection::Image(block_ix)) = self.selected_block else {

@@ -1,9 +1,11 @@
+#[hotpath::measure]
 fn default_table_row(columns: usize) -> TableRow {
   TableRow {
     cells: (0..columns).map(|_| default_table_cell()).collect(),
   }
 }
 
+#[hotpath::measure]
 fn default_table_cell() -> TableCell {
   TableCell {
     blocks: vec![TableCellBlock::Paragraph(default_table_cell_paragraph())],
@@ -12,6 +14,7 @@ fn default_table_cell() -> TableCell {
   }
 }
 
+#[hotpath::measure]
 fn table_column_count(table: &TableBlock) -> usize {
   table
     .rows
@@ -28,6 +31,7 @@ fn table_column_count(table: &TableBlock) -> usize {
     .max(table.column_widths.len())
 }
 
+#[hotpath::measure]
 fn fixed_table_column_widths_from_layout(table: &TableBlock, layout: &LaidOutTable) -> Vec<u32> {
   let column_count = table_column_count(table).max(1);
   let mut widths = vec![120; column_count];
@@ -63,6 +67,7 @@ fn fixed_table_column_widths_from_layout(table: &TableBlock, layout: &LaidOutTab
   widths
 }
 
+#[hotpath::measure]
 fn default_table_cell_paragraph() -> TableCellParagraph {
   TableCellParagraph {
     paragraph: Paragraph {
@@ -75,6 +80,7 @@ fn default_table_cell_paragraph() -> TableCellParagraph {
   }
 }
 
+#[hotpath::measure]
 pub(super) fn table_cell_paragraph_block_ix(cell: &TableCell, preferred: usize) -> Option<usize> {
   if matches!(cell.blocks.get(preferred), Some(TableCellBlock::Paragraph(_))) {
     return Some(preferred);
@@ -85,6 +91,7 @@ pub(super) fn table_cell_paragraph_block_ix(cell: &TableCell, preferred: usize) 
     .position(|block| matches!(block, TableCellBlock::Paragraph(_)))
 }
 
+#[hotpath::measure]
 fn previous_table_cell_paragraph_block_ix(cell: &TableCell, current_ix: usize) -> Option<usize> {
   cell
     .blocks
@@ -93,6 +100,7 @@ fn previous_table_cell_paragraph_block_ix(cell: &TableCell, current_ix: usize) -
     .rposition(|block| matches!(block, TableCellBlock::Paragraph(_)))
 }
 
+#[hotpath::measure]
 fn next_table_cell_paragraph_block_ix(cell: &TableCell, current_ix: usize) -> Option<usize> {
   cell
     .blocks
@@ -102,6 +110,7 @@ fn next_table_cell_paragraph_block_ix(cell: &TableCell, current_ix: usize) -> Op
     .find_map(|(ix, block)| matches!(block, TableCellBlock::Paragraph(_)).then_some(ix))
 }
 
+#[hotpath::measure]
 pub(super) fn split_table_cell_paragraph_at(cell: &mut TableCell, paragraph_block_ix: usize, byte: usize) -> Option<usize> {
   let paragraph_ix = table_cell_paragraph_block_ix(cell, paragraph_block_ix).unwrap_or_else(|| {
     cell
@@ -137,6 +146,7 @@ pub(super) fn split_table_cell_paragraph_at(cell: &mut TableCell, paragraph_bloc
   Some(paragraph_ix + 1)
 }
 
+#[hotpath::measure]
 pub(super) fn insert_table_cell_paragraphs_at(
   cell: &mut TableCell,
   paragraph_block_ix: usize,
@@ -202,6 +212,7 @@ pub(super) fn insert_table_cell_paragraphs_at(
   Some((caret_block_ix, caret_byte))
 }
 
+#[hotpath::measure]
 pub(super) fn merge_table_cell_paragraph_with_previous(cell: &mut TableCell, paragraph_block_ix: usize) -> Option<(usize, usize)> {
   let current_ix = table_cell_paragraph_block_ix(cell, paragraph_block_ix)?;
   let previous_ix = previous_table_cell_paragraph_block_ix(cell, current_ix)?;
@@ -221,6 +232,7 @@ pub(super) fn merge_table_cell_paragraph_with_previous(cell: &mut TableCell, par
   Some((previous_ix, caret))
 }
 
+#[hotpath::measure]
 fn merge_table_cell_paragraph_with_next(cell: &mut TableCell, paragraph_block_ix: usize) -> Option<(usize, usize)> {
   let current_ix = table_cell_paragraph_block_ix(cell, paragraph_block_ix)?;
   let next_ix = next_table_cell_paragraph_block_ix(cell, current_ix)?;
@@ -240,6 +252,7 @@ fn merge_table_cell_paragraph_with_next(cell: &mut TableCell, paragraph_block_ix
   Some((current_ix, caret))
 }
 
+#[hotpath::measure]
 fn table_cell_styles_at(cell_paragraph: &TableCellParagraph, byte: usize) -> RunStyles {
   let (run_ix, _) = run_containing(&cell_paragraph.paragraph, byte.min(cell_paragraph.text.len()));
   cell_paragraph
@@ -250,6 +263,7 @@ fn table_cell_styles_at(cell_paragraph: &TableCellParagraph, byte: usize) -> Run
     .unwrap_or_default()
 }
 
+#[hotpath::measure]
 fn insert_text_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph, byte: usize, text: &str, styles: RunStyles) {
   if text.is_empty() {
     return;
@@ -268,6 +282,7 @@ fn insert_text_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph, 
   cell_paragraph.paragraph.version = cell_paragraph.paragraph.version.wrapping_add(1);
 }
 
+#[hotpath::measure]
 fn delete_range_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph, range: Range<usize>) {
   let start = range.start.min(cell_paragraph.text.len());
   let end = range.end.min(cell_paragraph.text.len()).max(start);
@@ -303,6 +318,7 @@ fn delete_range_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph,
   cell_paragraph.paragraph.version = cell_paragraph.paragraph.version.wrapping_add(1);
 }
 
+#[hotpath::measure]
 fn table_cell_range_all_run_styles(cell_paragraph: &TableCellParagraph, range: Range<usize>, predicate: impl Fn(RunStyles) -> bool) -> bool {
   if range.start >= range.end {
     return false;
@@ -324,6 +340,7 @@ fn table_cell_range_all_run_styles(cell_paragraph: &TableCellParagraph, range: R
   saw_run
 }
 
+#[hotpath::measure]
 pub(super) fn mutate_table_cell_runs_in_range(
   cell_paragraph: &mut TableCellParagraph,
   range: Range<usize>,

@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn select_block(&mut self, selection: BlockSelection, cx: &mut Context<Self>) {
     let block_ix = match selection {

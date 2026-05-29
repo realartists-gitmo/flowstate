@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn run_benchmark_suite(options: &BenchmarkOptions, window: &mut Window, cx: &mut Context<BenchmarkRunner>) -> String {
   let mut report = String::new();
   let started = SystemTime::now()
@@ -114,6 +115,7 @@ fn run_benchmark_suite(options: &BenchmarkOptions, window: &mut Window, cx: &mut
   report
 }
 
+#[hotpath::measure]
 fn benchmark_document(
   loaded: &LoadedDocument,
   stats: &DocumentStats,

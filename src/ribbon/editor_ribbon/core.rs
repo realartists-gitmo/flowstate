@@ -48,6 +48,7 @@ pub struct ModernRibbonOptions {
   pub shortcut_visibility: ShortcutVisibility,
 }
 
+#[hotpath::measure_all]
 impl Default for ModernRibbonOptions {
   fn default() -> Self {
     Self {
@@ -71,6 +72,7 @@ pub struct EditorRibbon {
 /// Compatibility name for code that wants to talk in settings terms.
 pub type StylesRibbon = EditorRibbon;
 
+#[hotpath::measure_all]
 impl EditorRibbon {
   pub fn new(editor: Entity<RichTextEditor>) -> Self {
     Self::new_with_mode(editor, RibbonMode::default())

@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn modern_group(
   has_divider: bool,
   group: &RibbonCommandGroup,
@@ -59,6 +60,7 @@ fn modern_group(
     .into_any_element()
 }
 
+#[hotpath::measure]
 fn chip_rows_for_height(
   height: gpui::Pixels,
   chip_height: gpui::Pixels,
@@ -82,6 +84,7 @@ fn chip_rows_for_height(
   1
 }
 
+#[hotpath::measure]
 fn command_columns(commands: &[RibbonCommand], max_rows: usize) -> Vec<Vec<&RibbonCommand>> {
   let rows = max_rows.max(1);
   commands
@@ -90,6 +93,7 @@ fn command_columns(commands: &[RibbonCommand], max_rows: usize) -> Vec<Vec<&Ribb
     .collect()
 }
 
+#[hotpath::measure]
 fn group_row_width(
   group: &RibbonCommandGroup,
   metrics: RibbonLayoutMetrics,
@@ -112,6 +116,7 @@ fn group_row_width(
   px(commands_width + gap_width)
 }
 
+#[hotpath::measure]
 fn balanced_group_width(
   group: &RibbonCommandGroup,
   metrics: RibbonLayoutMetrics,
@@ -130,6 +135,7 @@ fn balanced_group_width(
   group_row_width(group, metrics, rows, window, cx)
 }
 
+#[hotpath::measure]
 fn command_chip_width(
   command: &RibbonCommand,
   metrics: RibbonLayoutMetrics,
@@ -163,6 +169,7 @@ fn command_chip_width(
   px(label_width.max(icon_width) + shortcut_width + accent_width + chrome_width)
 }
 
+#[hotpath::measure]
 fn measure_ribbon_text(text: &str, font_size: gpui::Pixels, window: &mut Window, _cx: &mut App) -> gpui::Pixels {
   if text.is_empty() {
     return px(0.0);
@@ -175,6 +182,7 @@ fn measure_ribbon_text(text: &str, font_size: gpui::Pixels, window: &mut Window,
     .width
 }
 
+#[hotpath::measure]
 fn modern_command_chip(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,

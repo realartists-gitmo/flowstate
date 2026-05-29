@@ -4,6 +4,7 @@ use gpui::{App, Background, Bounds, Pixels, Point, ScrollHandle, Window, black, 
 
 use super::*;
 
+#[hotpath::measure]
 pub(super) fn paint_layout(
   layout: &LayoutState,
   bounds: Bounds<Pixels>,
@@ -97,6 +98,7 @@ pub(super) fn paint_layout(
   });
 }
 
+#[hotpath::measure]
 pub(super) fn paint_structural_block(
   block: &LaidOutBlock,
   selected_block: Option<BlockSelection>,
@@ -115,6 +117,7 @@ pub(super) fn paint_structural_block(
   }
 }
 
+#[hotpath::measure]
 fn paint_object_block(
   object: &LaidOutObjectBlock,
   _label: &str,
@@ -146,6 +149,7 @@ fn paint_object_block(
   ));
 }
 
+#[hotpath::measure]
 fn paint_table_block(
   table: &LaidOutTable,
   selected_block: Option<BlockSelection>,
@@ -218,6 +222,7 @@ fn paint_table_block(
   paint_table_grid_rules(table, table_selected, origin, window);
 }
 
+#[hotpath::measure]
 fn paint_table_paragraph_backgrounds(paragraph: &LaidOutParagraph, origin: Point<Pixels>, content_mask: Bounds<Pixels>, window: &mut Window) {
   if !paragraph_intersects_mask(paragraph, origin, content_mask) {
     return;
@@ -237,6 +242,7 @@ fn paint_table_paragraph_backgrounds(paragraph: &LaidOutParagraph, origin: Point
   }
 }
 
+#[hotpath::measure]
 fn paint_table_grid_rules(table: &LaidOutTable, selected: bool, origin: Point<Pixels>, window: &mut Window) {
   let color = if selected { rgb(0x0969da) } else { rgb(0x808080) };
   let background = Background::from(color);
@@ -281,6 +287,7 @@ fn paint_table_grid_rules(table: &LaidOutTable, selected: bool, origin: Point<Pi
   }
 }
 
+#[hotpath::measure]
 fn paint_table_text_selection(
   paragraph: &LaidOutParagraph,
   anchor: usize,
@@ -312,6 +319,7 @@ fn paint_table_text_selection(
   }
 }
 
+#[hotpath::measure]
 fn paint_table_paragraph(paragraph: &LaidOutParagraph, origin: Point<Pixels>, content_mask: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
   for line in &paragraph.lines {
     if line_intersects_mask(line, origin, content_mask) {
@@ -337,6 +345,7 @@ fn paint_table_paragraph(paragraph: &LaidOutParagraph, origin: Point<Pixels>, co
   }
 }
 
+#[hotpath::measure]
 pub(super) fn visible_paragraph_range(layout: &LayoutState, origin: Point<Pixels>, mask: Bounds<Pixels>) -> Range<usize> {
   if layout.paragraphs.is_empty() {
     return 0..0;
@@ -351,6 +360,7 @@ pub(super) fn visible_paragraph_range(layout: &LayoutState, origin: Point<Pixels
   let end = first_paragraph_with_top_after(&layout.paragraphs, bottom);
   start..end.max(start)
 }
+#[hotpath::measure]
 pub(super) fn scroll_rect_into_view(scroll_handle: &ScrollHandle, rect: Bounds<Pixels>, margin: Pixels) {
   let viewport = scroll_handle.bounds();
   if viewport.size.height <= px(0.0) {
@@ -370,6 +380,7 @@ pub(super) fn scroll_rect_into_view(scroll_handle: &ScrollHandle, rect: Bounds<P
   scroll_handle.set_offset(clamp_scroll_offset(scroll_handle, offset));
 }
 
+#[hotpath::measure]
 pub(super) fn scroll_by(scroll_handle: &ScrollHandle, delta_y: Pixels) -> bool {
   if delta_y == px(0.0) {
     return false;
@@ -385,6 +396,7 @@ pub(super) fn scroll_by(scroll_handle: &ScrollHandle, delta_y: Pixels) -> bool {
   true
 }
 
+#[hotpath::measure]
 pub(super) fn clamp_scroll_offset(scroll_handle: &ScrollHandle, mut offset: Point<Pixels>) -> Point<Pixels> {
   let max = scroll_handle.max_offset();
   offset.x = offset.x.min(px(0.0)).max(-max.width);
@@ -392,6 +404,7 @@ pub(super) fn clamp_scroll_offset(scroll_handle: &ScrollHandle, mut offset: Poin
   offset
 }
 
+#[hotpath::measure]
 pub(super) fn drag_autoscroll_step(viewport: Bounds<Pixels>, position: Point<Pixels>) -> Pixels {
   if viewport.size.height <= px(0.0) {
     return px(0.0);
@@ -412,20 +425,24 @@ pub(super) fn drag_autoscroll_step(viewport: Bounds<Pixels>, position: Point<Pix
   }
 }
 
+#[hotpath::measure]
 pub(super) fn paragraph_intersects_mask(paragraph: &LaidOutParagraph, origin: Point<Pixels>, mask: Bounds<Pixels>) -> bool {
   vertical_range_intersects(origin.y + paragraph.top, origin.y + paragraph.bottom, mask)
 }
 
+#[hotpath::measure]
 pub(super) fn line_intersects_mask(line: &LaidOutLine, origin: Point<Pixels>, mask: Bounds<Pixels>) -> bool {
   vertical_range_intersects(origin.y + line.origin.y, origin.y + line.origin.y + line.line_height, mask)
 }
 
+#[hotpath::measure]
 pub(super) fn vertical_range_intersects(top: Pixels, bottom: Pixels, mask: Bounds<Pixels>) -> bool {
   let mask_top = mask.origin.y;
   let mask_bottom = mask.origin.y + mask.size.height;
   bottom >= mask_top && top <= mask_bottom
 }
 
+#[hotpath::measure]
 pub(super) fn snap_horizontal_rule_to_device_pixels(mut bounds: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
   let scale = window.scale_factor();
   bounds.origin.y = snap_pixel_to_device_grid(bounds.origin.y, scale);
@@ -433,6 +450,7 @@ pub(super) fn snap_horizontal_rule_to_device_pixels(mut bounds: Bounds<Pixels>, 
   bounds
 }
 
+#[hotpath::measure]
 pub(super) fn snap_rule_bounds(bounds: Bounds<Pixels>, snap: RuleSnap, window: &Window) -> Bounds<Pixels> {
   match snap {
     RuleSnap::None => bounds,
@@ -441,6 +459,7 @@ pub(super) fn snap_rule_bounds(bounds: Bounds<Pixels>, snap: RuleSnap, window: &
   }
 }
 
+#[hotpath::measure]
 pub(super) fn snap_vertical_rule_to_device_pixels(mut bounds: Bounds<Pixels>, window: &Window) -> Bounds<Pixels> {
   let scale = window.scale_factor();
   bounds.origin.x = snap_pixel_to_device_grid(bounds.origin.x, scale);
@@ -448,16 +467,19 @@ pub(super) fn snap_vertical_rule_to_device_pixels(mut bounds: Bounds<Pixels>, wi
   bounds
 }
 
+#[hotpath::measure]
 pub(super) fn snap_pixel_to_device_grid(value: Pixels, scale: f32) -> Pixels {
   let value: f32 = value.into();
   px((value * scale).round() / scale)
 }
 
+#[hotpath::measure]
 pub(super) fn snap_rule_thickness_to_device_grid(value: Pixels, scale: f32) -> Pixels {
   let value: f32 = value.into();
   px(((value * scale).round().max(1.0)) / scale)
 }
 
+#[hotpath::measure]
 pub(super) fn paint_selection(
   layout: &LayoutState,
   selection: &EditorSelection,
@@ -506,6 +528,7 @@ pub(super) fn paint_selection(
   }
 }
 
+#[hotpath::measure]
 pub(super) fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, content_mask: Bounds<Pixels>, window: &mut Window, cx: &mut App) {
   let _ = cx;
   let baseline = line.baseline_y();
@@ -541,6 +564,7 @@ trait ShiftBounds {
   fn shift(self, by: Point<Pixels>) -> Self;
 }
 
+#[hotpath::measure_all]
 impl ShiftBounds for Bounds<Pixels> {
   fn shift(self, by: Point<Pixels>) -> Self {
     Bounds::new(self.origin + by, self.size)

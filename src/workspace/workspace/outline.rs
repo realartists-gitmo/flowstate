@@ -1,22 +1,29 @@
 #[derive(Clone)]
 struct OutlineCache {
   document_id: Uuid,
+  edit_generation: u64,
   signature: OutlineSignature,
+  signature_scratch: Vec<OutlineEntry>,
   visible_revision: u64,
   nodes: Rc<Vec<OutlineNode>>,
   visible_paragraphs: Vec<usize>,
+  row_guides: Rc<Vec<OutlineRowGuides>>,
   tree_items: Vec<TreeItem>,
 }
 
+#[hotpath::measure_all]
 impl OutlineCache {
-  fn new(document_id: Uuid, signature: OutlineSignature) -> Self {
+  fn new(document_id: Uuid, edit_generation: u64, signature: OutlineSignature) -> Self {
     let nodes = outline_nodes_from_entries(&signature.entries);
     Self {
       document_id,
+      edit_generation,
       signature,
+      signature_scratch: Vec::new(),
       visible_revision: u64::MAX,
       nodes: Rc::new(nodes),
       visible_paragraphs: Vec::new(),
+      row_guides: Rc::new(Vec::new()),
       tree_items: Vec::new(),
     }
   }
@@ -24,12 +31,30 @@ impl OutlineCache {
   fn rebuild_visible(&mut self, revision: u64, collapsed_items: &HashSet<usize>) {
     self.visible_paragraphs.clear();
     collect_visible_outline_paragraphs(&self.nodes, collapsed_items, &mut self.visible_paragraphs);
+    let mut row_guides = Vec::with_capacity(self.visible_paragraphs.len());
+    collect_visible_outline_guides(&self.nodes, collapsed_items, &mut row_guides);
+    self.row_guides = Rc::new(row_guides);
     self.tree_items = self
       .nodes
       .iter()
       .map(|node| outline_node_to_tree_item(node, collapsed_items))
       .collect();
     self.visible_revision = revision;
+  }
+
+  fn update_signature(&mut self, document: &Document, edit_generation: u64) -> bool {
+    let paragraph_count = outline_signature_entries_into(document, &mut self.signature_scratch);
+    let unchanged = self.signature.paragraph_count == paragraph_count && self.signature.entries == self.signature_scratch;
+    self.signature.paragraph_count = paragraph_count;
+    std::mem::swap(&mut self.signature.entries, &mut self.signature_scratch);
+    self.edit_generation = edit_generation;
+    if unchanged {
+      return false;
+    }
+
+    self.nodes = Rc::new(outline_nodes_from_entries(&self.signature.entries));
+    self.visible_revision = u64::MAX;
+    true
   }
 }
 
@@ -60,6 +85,7 @@ struct OutlineRowGuides {
   extends_from_toggle: bool,
 }
 
+#[hotpath::measure]
 fn insert_outline_node(nodes: &mut Vec<OutlineNode>, level: usize, node: OutlineNode) {
   if level == 0 {
     nodes.push(node);
@@ -77,6 +103,7 @@ fn insert_outline_node(nodes: &mut Vec<OutlineNode>, level: usize, node: Outline
   }
 }
 
+#[hotpath::measure]
 fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize>) -> TreeItem {
   let paragraph_ix = node.paragraph_ix;
   TreeItem::new(outline_item_id(paragraph_ix), node.text.clone())
@@ -91,11 +118,13 @@ fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize
 }
 
 #[cfg(test)]
+#[hotpath::measure]
 fn outline_nodes(document: &Document) -> Vec<OutlineNode> {
   let signature = outline_signature(document);
   outline_nodes_from_entries(&signature.entries)
 }
 
+#[hotpath::measure]
 fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
   let mut roots = Vec::<OutlineNode>::new();
   for entry in entries {
@@ -113,25 +142,37 @@ fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
   roots
 }
 
+#[hotpath::measure]
 fn outline_signature(document: &Document) -> OutlineSignature {
   let mut entries = Vec::new();
+  let paragraph_count = outline_signature_entries_into(document, &mut entries);
+  OutlineSignature { paragraph_count, entries }
+}
+
+#[hotpath::measure]
+fn outline_signature_entries_into(document: &Document, entries: &mut Vec<OutlineEntry>) -> usize {
+  let mut entry_ix = 0usize;
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let Some(level) = outline_level(paragraph.style) else {
       continue;
     };
-    entries.push(OutlineEntry {
-      paragraph_ix,
-      level,
-      text: outline_paragraph_label(document, paragraph_ix),
-    });
+    if let Some(entry) = entries.get_mut(entry_ix) {
+      entry.paragraph_ix = paragraph_ix;
+      entry.level = level;
+      outline_paragraph_label_into(document, paragraph_ix, &mut entry.text);
+    } else {
+      let mut text = String::with_capacity(80);
+      outline_paragraph_label_into(document, paragraph_ix, &mut text);
+      entries.push(OutlineEntry { paragraph_ix, level, text });
+    }
+    entry_ix += 1;
   }
+  entries.truncate(entry_ix);
 
-  OutlineSignature {
-    paragraph_count: document.paragraphs.len(),
-    entries,
-  }
+  document.paragraphs.len()
 }
 
+#[hotpath::measure]
 fn collect_visible_outline_paragraphs(nodes: &[OutlineNode], collapsed_items: &HashSet<usize>, output: &mut Vec<usize>) {
   for node in nodes {
     output.push(node.paragraph_ix);
@@ -167,6 +208,7 @@ fn collect_visible_outline_guides_with_ancestors(
   }
 }
 
+#[hotpath::measure]
 fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], caret_paragraph: usize) -> Option<usize> {
   let mut low = 0usize;
   let mut high = visible_paragraphs.len();
@@ -183,6 +225,7 @@ fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], c
     .and_then(|ix| visible_paragraphs.get(ix).copied())
 }
 
+#[hotpath::measure]
 fn outline_level(style: ParagraphStyle) -> Option<usize> {
   match style {
     ParagraphStyle::Pocket => Some(0),
@@ -193,19 +236,30 @@ fn outline_level(style: ParagraphStyle) -> Option<usize> {
   }
 }
 
+#[hotpath::measure]
 fn outline_item_id(paragraph_ix: usize) -> String {
   format!("paragraph:{paragraph_ix}")
 }
 
+#[hotpath::measure]
 fn outline_paragraph_ix(id: &str) -> Option<usize> {
   id.strip_prefix("paragraph:")?.parse().ok()
 }
 
+#[cfg(test)]
+#[hotpath::measure]
 fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
+  let mut label = String::with_capacity(80);
+  outline_paragraph_label_into(document, paragraph_ix, &mut label);
+  label
+}
+
+#[hotpath::measure]
+fn outline_paragraph_label_into(document: &Document, paragraph_ix: usize, label: &mut String) {
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   const MAX_BYTES: usize = 80;
   const TRUNCATED_BYTES: usize = MAX_BYTES - 3;
-  let mut label = String::new();
+  label.clear();
   let mut pending_space = false;
   let mut truncated = false;
 
@@ -230,15 +284,13 @@ fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
   }
 
   if label.is_empty() {
-    "(empty)".to_string()
+    label.push_str("(empty)");
   } else if truncated {
     label.push_str("...");
-    label
-  } else {
-    label
   }
 }
 
+#[hotpath::measure]
 fn outline_label_width(nav_width: Pixels, depth: usize) -> Pixels {
   // Mirrors the outline row layout: nav padding, row indentation, disclosure
   // slot, row gap, and right padding are fixed, so the remaining width is the
@@ -247,6 +299,7 @@ fn outline_label_width(nav_width: Pixels, depth: usize) -> Pixels {
   (nav_width - px(56.0) - px(12.0) * depth).max(px(32.0))
 }
 
+#[hotpath::measure]
 fn outline_label_text_width(label_width: Pixels, window: &Window) -> Pixels {
   // The measured blue label rect includes `.px_1()` padding on both sides.
   // Truncation must target the inner text box, with a small paint tolerance so
@@ -254,6 +307,7 @@ fn outline_label_text_width(label_width: Pixels, window: &Window) -> Pixels {
   (label_width - window.rem_size() * 0.5 - px(2.0)).max(px(1.0))
 }
 
+#[hotpath::measure]
 fn truncate_outline_label(label: &str, width: Pixels, window: &mut Window, cx: &mut App) -> SharedString {
   let text_style = window.text_style();
   // Keep this in sync with the outline row's `.text_xs()` style. GPUI's text

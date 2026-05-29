@@ -22,6 +22,7 @@ pub struct FlowPanel {
   active: bool,
 }
 
+#[hotpath::measure_all]
 impl FlowPanel {
   pub fn new_with_title(
     title: Option<String>,
@@ -82,6 +83,7 @@ impl FlowPanel {
   }
 }
 
+#[hotpath::measure]
 fn title_for_path(path: Option<&PathBuf>) -> SharedString {
   path
     .and_then(|path| path.file_name())
@@ -92,25 +94,30 @@ fn title_for_path(path: Option<&PathBuf>) -> SharedString {
 
 impl EventEmitter<PanelEvent> for FlowPanel {}
 
+#[hotpath::measure_all]
 impl Focusable for FlowPanel {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus_handle.clone()
   }
 }
 
+#[hotpath::measure_all]
 impl Panel for FlowPanel {
   fn panel_name(&self) -> &'static str {
     "FlowPanel"
   }
 
+  #[hotpath::measure]
   fn tab_name(&self, cx: &App) -> Option<SharedString> {
     Some(self.display_title(cx))
   }
 
+  #[hotpath::measure]
   fn title(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.display_title(cx).clone()
   }
 
+  #[hotpath::measure]
   fn title_suffix(&mut self, _: &mut Window, _cx: &mut Context<Self>) -> Option<impl IntoElement> {
     let workspace = self.workspace.clone();
     let panel_id = self.id;
@@ -126,14 +133,17 @@ impl Panel for FlowPanel {
     )
   }
 
+  #[hotpath::measure]
   fn closable(&self, _: &App) -> bool {
     false
   }
 
+  #[hotpath::measure]
   fn zoomable(&self, _: &App) -> Option<PanelControl> {
     Some(PanelControl::Both)
   }
 
+  #[hotpath::measure]
   fn set_active(&mut self, active: bool, _: &mut Window, cx: &mut Context<Self>) {
     self.active = active;
     if active {
@@ -145,6 +155,7 @@ impl Panel for FlowPanel {
     }
   }
 
+  #[hotpath::measure]
   fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let panel_id = self.id;
     let _ = self.workspace.update(cx, |workspace, cx| {
@@ -152,6 +163,7 @@ impl Panel for FlowPanel {
     });
   }
 
+  #[hotpath::measure]
   fn dump(&self, _: &App) -> PanelState {
     PanelState {
       panel_name: self.panel_name().to_string(),
@@ -164,11 +176,13 @@ impl Panel for FlowPanel {
     }
   }
 
+  #[hotpath::measure]
   fn inner_padding(&self, _: &App) -> bool {
     false
   }
 }
 
+#[hotpath::measure_all]
 impl Render for FlowPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     div()

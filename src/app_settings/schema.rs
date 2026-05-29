@@ -24,6 +24,7 @@ pub struct EditorSettings {
   pub autosave: bool,
 }
 
+#[hotpath::measure_all]
 impl Default for EditorSettings {
   fn default() -> Self {
     Self {
@@ -144,6 +145,7 @@ pub enum ThemeUnderlineSetting {
   Double,
 }
 
+#[hotpath::measure_all]
 impl Default for DocumentThemeSettings {
   fn default() -> Self {
     Self::from(&DocumentTheme::default())

@@ -1,3 +1,4 @@
+#[hotpath::measure]
 pub(super) fn wrap_lines(
   document: &Document,
   paragraph: &Paragraph,
@@ -57,6 +58,7 @@ pub(super) fn wrap_lines(
   )
 }
 
+#[hotpath::measure]
 fn wrap_lines_limited(
   document: &Document,
   paragraph: &Paragraph,
@@ -138,6 +140,7 @@ fn wrap_lines_limited(
   (lines, segment_start.min(text.len()), segment_start >= text.len())
 }
 
+#[hotpath::measure]
 fn wrap_text_segment_limited(
   document: &Document,
   paragraph: &Paragraph,
@@ -305,6 +308,7 @@ fn wrap_text_segment_limited(
   (lines, segment.end, true)
 }
 
+#[hotpath::measure]
 fn push_wrapped_soft_segment(
   lines: &mut Vec<LaidOutLine>,
   document: &Document,
@@ -334,6 +338,7 @@ fn push_wrapped_soft_segment(
   }
 }
 
+#[hotpath::measure]
 fn wrap_text_segment(
   document: &Document,
   paragraph: &Paragraph,
@@ -479,6 +484,7 @@ fn wrap_text_segment(
   lines
 }
 
+#[hotpath::measure]
 fn first_break_after(break_ends: &[usize], byte: usize) -> usize {
   let mut low = 0usize;
   let mut high = break_ends.len();
@@ -494,6 +500,7 @@ fn first_break_after(break_ends: &[usize], byte: usize) -> usize {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[hotpath::measure]
 fn first_break_over_width(
   document: &Document,
   paragraph: &Paragraph,
@@ -563,6 +570,7 @@ fn first_break_over_width(
   (low < range.end).then_some(low)
 }
 
+#[hotpath::measure]
 pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
   let mut breaks = Vec::with_capacity((text.len() / 8).min(4096));
   for (byte_ix, ch) in text.char_indices() {
@@ -573,10 +581,12 @@ pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
   breaks
 }
 
+#[hotpath::measure]
 pub(super) fn is_wrap_break(ch: char) -> bool {
   ch.is_whitespace() || matches!(ch, '-' | '/' | ',' | ';' | ':')
 }
 
+#[hotpath::measure]
 pub(super) fn skip_leading_whitespace(text: &str, mut byte: usize) -> usize {
   while byte < text.len() && text[byte..].chars().next().is_some_and(char::is_whitespace) {
     byte += text[byte..].chars().next().unwrap().len_utf8();
@@ -584,6 +594,7 @@ pub(super) fn skip_leading_whitespace(text: &str, mut byte: usize) -> usize {
   byte
 }
 
+#[hotpath::measure]
 pub(super) fn first_overflow_line_end(
   document: &Document,
   paragraph: &Paragraph,
@@ -627,6 +638,7 @@ pub(super) fn first_overflow_line_end(
   if is_wrap_break(ch) || byte_ix == start { end } else { byte_ix }
 }
 
+#[hotpath::measure]
 fn nth_char_boundary_after(text: &str, start: usize, n: usize) -> Option<usize> {
   if n == 0 {
     return text[start..].chars().next().map(|ch| start + ch.len_utf8());
@@ -637,6 +649,7 @@ fn nth_char_boundary_after(text: &str, start: usize, n: usize) -> Option<usize> 
     .map(|(relative_byte, ch)| start + relative_byte + ch.len_utf8())
 }
 
+#[hotpath::measure]
 fn nth_char_after(text: &str, start: usize, n: usize) -> Option<(usize, usize, char)> {
   text[start..]
     .char_indices()

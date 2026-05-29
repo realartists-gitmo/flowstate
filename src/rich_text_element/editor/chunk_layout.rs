@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn valid_chunk_cache_entry(&self, paragraph_ix: usize, width: Pixels) -> Option<&ParagraphChunkLayoutCacheEntry> {
     let paragraph = self.document.paragraphs.get(paragraph_ix)?;

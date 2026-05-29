@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
     let keys = self.document.blocks.iter().filter_map(|block| match block {
@@ -62,6 +63,7 @@ impl RichTextEditor {
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
       paragraph_prep_cache: vec![ParagraphPrepSlot::default(); paragraph_count],
       paragraph_shaping_cache: (0..paragraph_count).map(|_| None).collect(),
+      paragraph_estimate_height_cache: vec![None; paragraph_count],
       pending_layout_prep_task: None,
       pending_layout_prep_request: None,
       layout_generation: 0,
@@ -86,6 +88,8 @@ impl RichTextEditor {
       visible_layout_generation: 0,
       visible_layout_range: 0..0,
       visible_chunk_anchors: Vec::new(),
+      layout_cache_retain_ranges: ParagraphCacheRetainRanges::default(),
+      prep_cache_retain_ranges: ParagraphCacheRetainRanges::default(),
       invisibility_mode: false,
       goal_x: None,
     }
@@ -151,6 +155,7 @@ impl RichTextEditor {
     self.paragraph_chunk_layout_cache = Vec::new();
     self.paragraph_prep_cache = Vec::new();
     self.paragraph_shaping_cache = Vec::new();
+    self.paragraph_estimate_height_cache = Vec::new();
     self.pending_layout_prep_task = None;
     self.pending_layout_prep_request = None;
     self.layout_generation = self.layout_generation.wrapping_add(1);
@@ -175,6 +180,8 @@ impl RichTextEditor {
     self.visible_layout_generation = self.visible_layout_generation.wrapping_add(1);
     self.visible_layout_range = 0..0;
     self.visible_chunk_anchors = Vec::new();
+    self.layout_cache_retain_ranges = ParagraphCacheRetainRanges::default();
+    self.prep_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.goal_x = None;
   }
 

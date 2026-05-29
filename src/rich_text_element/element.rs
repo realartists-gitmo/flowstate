@@ -12,6 +12,7 @@ pub struct RichTextDocumentElement {
   pub(super) layout: WordElementLayout,
 }
 
+#[hotpath::measure_all]
 impl RichTextDocumentElement {
   pub fn new(document: Document) -> Self {
     Self {
@@ -21,6 +22,7 @@ impl RichTextDocumentElement {
   }
 }
 
+#[hotpath::measure_all]
 impl IntoElement for RichTextDocumentElement {
   type Element = Self;
 
@@ -49,6 +51,7 @@ pub(super) struct VirtualBlockElement {
 #[derive(Clone)]
 pub(super) struct EmptyVirtualItemElement;
 
+#[hotpath::measure_all]
 impl IntoElement for VirtualParagraphChunkElement {
   type Element = Self;
 
@@ -57,6 +60,7 @@ impl IntoElement for VirtualParagraphChunkElement {
   }
 }
 
+#[hotpath::measure_all]
 impl IntoElement for VirtualBlockElement {
   type Element = Self;
 
@@ -65,6 +69,7 @@ impl IntoElement for VirtualBlockElement {
   }
 }
 
+#[hotpath::measure_all]
 impl IntoElement for EmptyVirtualItemElement {
   type Element = Self;
 
@@ -82,6 +87,7 @@ struct WordElementLayoutState {
   bounds: Option<Bounds<Pixels>>,
 }
 
+#[hotpath::measure_all]
 impl WordElementLayout {
   fn set_layout(&self, layout: Rc<LayoutState>) {
     self.0.borrow_mut().layout = Some(layout);
@@ -101,6 +107,7 @@ impl WordElementLayout {
   }
 }
 
+#[hotpath::measure_all]
 impl Element for RichTextDocumentElement {
   type RequestLayoutState = ();
   type PrepaintState = ();
@@ -151,6 +158,7 @@ impl Element for RichTextDocumentElement {
   }
 }
 
+#[hotpath::measure_all]
 impl Element for VirtualParagraphChunkElement {
   type RequestLayoutState = ();
   type PrepaintState = ();
@@ -269,6 +277,7 @@ impl Element for VirtualParagraphChunkElement {
   }
 }
 
+#[hotpath::measure_all]
 impl Element for VirtualBlockElement {
   type RequestLayoutState = ();
   type PrepaintState = ();
@@ -367,6 +376,7 @@ impl Element for VirtualBlockElement {
   }
 }
 
+#[hotpath::measure_all]
 impl Element for EmptyVirtualItemElement {
   type RequestLayoutState = ();
   type PrepaintState = ();
@@ -418,18 +428,22 @@ impl Element for EmptyVirtualItemElement {
 
 const STRUCTURAL_BLOCK_ELEMENT_ID_TAG: u64 = 1 << 63;
 
+#[hotpath::measure]
 fn paragraph_chunk_element_id(paragraph_ix: usize, chunk_ix: usize) -> ElementId {
   ElementId::Integer(packed_element_pair(paragraph_ix, chunk_ix) & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG)
 }
 
+#[hotpath::measure]
 fn structural_block_element_id(block_ix: usize) -> ElementId {
   ElementId::Integer(STRUCTURAL_BLOCK_ELEMENT_ID_TAG | (block_ix as u64 & !STRUCTURAL_BLOCK_ELEMENT_ID_TAG))
 }
 
+#[hotpath::measure]
 fn packed_element_pair(first: usize, second: usize) -> u64 {
   ((first as u64 & 0x7fff_ffff) << 32) ^ (second as u64 & 0xffff_ffff)
 }
 
+#[hotpath::measure]
 pub(super) fn request_word_layout(document: Document, layout_cell: WordElementLayout, window: &mut Window) -> (LayoutId, ()) {
   let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, cx| {
     let width = known

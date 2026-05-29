@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   let current_theme = Theme::global(cx).theme_name().to_string();
@@ -88,6 +89,7 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
+#[hotpath::measure]
 fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -134,6 +136,7 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
     )
 }
 
+#[hotpath::measure]
 fn file_menu_item(
   workspace: WeakEntity<Workspace>,
   label: &'static str,
@@ -147,6 +150,7 @@ fn file_menu_item(
     })
 }
 
+#[hotpath::measure]
 fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -192,6 +196,7 @@ fn insert_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> imp
     )
 }
 
+#[hotpath::measure]
 fn insert_image_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
@@ -200,6 +205,7 @@ fn insert_image_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   });
 }
 
+#[hotpath::measure]
 fn insert_default_table_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
@@ -208,6 +214,7 @@ fn insert_default_table_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut
   });
 }
 
+#[hotpath::measure]
 fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &mut App) {
   let _ = workspace.update(cx, |workspace, cx| {
     if let Some(editor) = workspace.active_editor.clone() {
@@ -216,6 +223,7 @@ fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &
   });
 }
 
+#[hotpath::measure]
 fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
@@ -247,6 +255,7 @@ fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
+#[hotpath::measure]
 fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_open: bool, toolkit_open: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()

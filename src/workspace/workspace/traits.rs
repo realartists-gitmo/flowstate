@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl Render for Workspace {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     div()

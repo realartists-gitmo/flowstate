@@ -6,6 +6,7 @@ use std::{
 };
 
 #[test]
+#[hotpath::measure]
 fn paragraph_edit_helpers_preserve_text_and_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Emphasis);
   let mut document = document_from_input(
@@ -32,6 +33,7 @@ fn paragraph_edit_helpers_preserve_text_and_styles() {
 }
 
 #[test]
+#[hotpath::measure]
 fn document_rope_edits_keep_utf8_byte_offsets() {
   let mut document = document_from_input(
     DocumentTheme::default(),
@@ -50,6 +52,7 @@ fn document_rope_edits_keep_utf8_byte_offsets() {
 }
 
 #[test]
+#[hotpath::measure]
 fn layout_fragments_preserve_text_when_run_boundary_splits_utf8_character() {
   let text = "state\u{2019}s overconfidence";
   let split_inside_apostrophe = "state".len() + 1;

@@ -1,6 +1,7 @@
 const LAYOUT_PREP_MAX_PARAGRAPHS_PER_BATCH: usize = 96;
 const LAYOUT_PREP_MAX_TEXT_BYTES_PER_BATCH: usize = 512 * 1024;
 
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn resize_layout_aux_caches(&mut self) {
     let paragraph_count = self.document.paragraphs.len();
@@ -8,6 +9,9 @@ impl RichTextEditor {
     self
       .paragraph_shaping_cache
       .resize_with(paragraph_count, || None);
+    self
+      .paragraph_estimate_height_cache
+      .resize(paragraph_count, None);
   }
 
   fn valid_paragraph_prep(&self, paragraph_ix: usize) -> Option<Arc<ParagraphPrep>> {
@@ -105,14 +109,14 @@ impl RichTextEditor {
       });
     }
     let width = request.width;
-    let batch = ParagraphPrepBatchRequest {
-      document: detach_document_for_background_write(&self.document),
-      edit_generation: request.edit_generation,
-      invisibility_mode: request.invisibility_mode,
-      paragraphs: request.paragraphs,
-      max_paragraphs: LAYOUT_PREP_MAX_PARAGRAPHS_PER_BATCH,
-      max_text_bytes: LAYOUT_PREP_MAX_TEXT_BYTES_PER_BATCH,
-    };
+    let batch = paragraph_prep_batch_request(
+      &self.document,
+      request.edit_generation,
+      request.invisibility_mode,
+      request.paragraphs,
+      LAYOUT_PREP_MAX_PARAGRAPHS_PER_BATCH,
+      LAYOUT_PREP_MAX_TEXT_BYTES_PER_BATCH,
+    );
     self.pending_layout_prep_task = Some(
       cx.spawn(async move |editor, cx| {
         let timing = Instant::now();
@@ -214,6 +218,8 @@ impl RichTextEditor {
     self.layout_generation = self.layout_generation.wrapping_add(1);
     self.paragraph_shaping_cache.clear();
     self.paragraph_shaping_cache.resize_with(self.document.paragraphs.len(), || None);
+    self.layout_cache_retain_ranges = ParagraphCacheRetainRanges::default();
+    self.prep_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.pending_chunk_prefetch = false;
     self.chunk_prefetch_queue.clear();
   }

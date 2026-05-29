@@ -1,3 +1,4 @@
+#[hotpath::measure_all]
 impl RichTextEditor {
   fn materialize_visible_remainders_for_scroll(
     &mut self,

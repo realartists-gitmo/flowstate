@@ -1,3 +1,4 @@
+#[hotpath::measure]
 fn write_operation_table(out: &mut String, title: &str, rows: &[OperationRow]) {
   let _ = writeln!(out, "### {title}");
   let _ = writeln!(out);
@@ -18,6 +19,7 @@ fn write_operation_table(out: &mut String, title: &str, rows: &[OperationRow]) {
   let _ = writeln!(out);
 }
 
+#[hotpath::measure]
 fn write_layout_table(out: &mut String, rows: &[LayoutBenchRow]) {
   let _ = writeln!(out, "### Layout, Paint, And Virtual List Benchmarks");
   let _ = writeln!(out);
@@ -109,6 +111,7 @@ fn write_layout_table(out: &mut String, rows: &[LayoutBenchRow]) {
   let _ = writeln!(out);
 }
 
+#[hotpath::measure]
 fn write_paragraph_layout_table(out: &mut String, rows: &[ParagraphLayoutRow]) {
   let _ = writeln!(out, "### Sample Paragraph Layout Benchmarks");
   let _ = writeln!(out);
