@@ -42,6 +42,7 @@ pub(super) struct ParagraphPrepBatchRequest {
 pub(super) struct ParagraphPrepSource {
   paragraph_ix: usize,
   paragraph: Paragraph,
+  byte_range: Range<usize>,
 }
 
 pub(super) struct ParagraphPrepBatchResult {
@@ -70,6 +71,7 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
       &request.text,
       source.paragraph_ix,
       &source.paragraph,
+      source.byte_range.clone(),
       request.edit_generation,
       request.invisibility_mode,
     ) else {
@@ -116,7 +118,11 @@ pub(super) fn paragraph_prep_batch_request(
         .paragraphs
         .get(paragraph_ix)
         .cloned()
-        .map(|paragraph| ParagraphPrepSource { paragraph_ix, paragraph })
+        .map(|paragraph| ParagraphPrepSource {
+          paragraph_ix,
+          byte_range: paragraph_byte_range(document, paragraph_ix),
+          paragraph,
+        })
     })
     .collect();
   ParagraphPrepBatchRequest {
@@ -135,6 +141,7 @@ fn build_paragraph_prep_from_parts(
   text: &Rope,
   paragraph_ix: usize,
   paragraph: &Paragraph,
+  paragraph_byte_range: Range<usize>,
   edit_generation: u64,
   invisibility_mode: bool,
 ) -> Option<ParagraphPrep> {
@@ -146,7 +153,7 @@ fn build_paragraph_prep_from_parts(
   };
 
   if invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
-    let Some((text, runs)) = projected_visible_paragraph_text_and_runs_from_text(text, paragraph) else {
+    let Some((text, runs)) = projected_visible_paragraph_text_and_runs_from_text(text, paragraph, paragraph_byte_range.clone()) else {
       return Some(ParagraphPrep {
         key,
         paragraph_ix,
@@ -188,7 +195,7 @@ fn build_paragraph_prep_from_parts(
     });
   }
 
-  let text = paragraph_text_from_rope(text, paragraph.byte_range.clone());
+  let text = paragraph_text_from_rope(text, paragraph_byte_range);
   let wrap_break_ends = wrap_break_ends(&text);
   Some(ParagraphPrep {
     key,
@@ -211,10 +218,12 @@ pub(super) fn build_paragraph_prep(
   invisibility_mode: bool,
 ) -> Option<ParagraphPrep> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
+  let paragraph_byte_range = paragraph_byte_range(document, paragraph_ix);
   build_paragraph_prep_from_parts(
     &document.text,
     paragraph_ix,
     paragraph,
+    paragraph_byte_range,
     edit_generation,
     invisibility_mode,
   )
@@ -230,7 +239,11 @@ fn paragraph_text_from_rope(text: &Rope, range: Range<usize>) -> String {
 }
 
 #[hotpath::measure]
-fn projected_visible_paragraph_text_and_runs_from_text(text: &Rope, paragraph: &Paragraph) -> Option<(String, Vec<TextRun>)> {
+fn projected_visible_paragraph_text_and_runs_from_text(
+  text: &Rope,
+  paragraph: &Paragraph,
+  paragraph_byte_range: Range<usize>,
+) -> Option<(String, Vec<TextRun>)> {
   let paragraph_len = paragraph_text_len(paragraph);
   let visible_run_count = paragraph.runs.iter().filter(|run| run.len > 0 && run_is_visible(run.styles)).count();
   if visible_run_count == 0 {
@@ -261,7 +274,7 @@ fn projected_visible_paragraph_text_and_runs_from_text(text: &Rope, paragraph: &
       });
     }
     let piece_start = output.len();
-    push_rope_text_slice(text, paragraph.byte_range.start + start..paragraph.byte_range.start + end, &mut output);
+    push_rope_text_slice(text, paragraph_byte_range.start + start..paragraph_byte_range.start + end, &mut output);
     let piece_len = output.len().saturating_sub(piece_start);
     if piece_len == 0 {
       continue;
@@ -388,5 +401,28 @@ mod prep_tests {
 
     assert_eq!(result.completed, 1);
     assert_eq!(result.deferred_paragraphs, vec![1, 2]);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn prep_uses_offset_index_range_instead_of_stale_paragraph_field() {
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![input_run("alpha", RunStyles::default())],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![input_run("Kepe et al. ‘23", RunStyles::default())],
+        },
+      ],
+    );
+    paragraphs_mut(&mut document)[1].byte_range = 6..19;
+
+    let prep = build_paragraph_prep(&document, 1, 1, false).expect("paragraph prep");
+
+    assert_eq!(prep.paragraph_text.as_ref(), "Kepe et al. ‘23");
   }
 }

@@ -28,7 +28,8 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
   let mut blocks = Vec::with_capacity(block_count.min(4096));
   let mut paragraphs = Vec::new();
   for _ in 0..block_count {
-    let block = read_block_record(&mut cursor)?;
+    let mut block = read_block_record(&mut cursor)?;
+    normalize_block_text_runs(&mut block, &text)?;
     if let Block::Paragraph(paragraph) = &block {
       paragraphs.push(paragraph.clone());
     }
@@ -63,6 +64,101 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
     )
   });
   Ok(document)
+}
+
+#[hotpath::measure]
+fn normalize_block_text_runs(block: &mut Block, document_text: &str) -> io::Result<()> {
+  match block {
+    Block::Paragraph(paragraph) => normalize_paragraph_text_runs(paragraph, document_text),
+    Block::Image(_) => Ok(()),
+    Block::Equation(_) => Ok(()),
+    Block::Table(table) => normalize_table_text_runs(table),
+  }
+}
+
+#[hotpath::measure]
+fn normalize_table_text_runs(table: &mut TableBlock) -> io::Result<()> {
+  for row in &mut table.rows {
+    for cell in &mut row.cells {
+      for block in &mut cell.blocks {
+        match block {
+          TableCellBlock::Paragraph(paragraph) => normalize_runs_for_text(&mut paragraph.paragraph.runs, &paragraph.text)?,
+          TableCellBlock::Table(table) => normalize_table_text_runs(table)?,
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+#[hotpath::measure]
+fn normalize_paragraph_text_runs(paragraph: &mut Paragraph, document_text: &str) -> io::Result<()> {
+  if paragraph.byte_range.start > paragraph.byte_range.end
+    || paragraph.byte_range.end > document_text.len()
+    || !document_text.is_char_boundary(paragraph.byte_range.start)
+    || !document_text.is_char_boundary(paragraph.byte_range.end)
+  {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "paragraph byte range is invalid"));
+  }
+  normalize_runs_for_text(&mut paragraph.runs, &document_text[paragraph.byte_range.clone()])
+}
+
+#[hotpath::measure]
+fn normalize_runs_for_text(runs: &mut Vec<TextRun>, text: &str) -> io::Result<()> {
+  let run_len = runs.iter().map(|run| run.len).sum::<usize>();
+  if run_len == text.len() && run_boundaries_are_char_boundaries(runs, text) {
+    return Ok(());
+  }
+
+  if run_len == text.chars().count() {
+    let byte_offsets = char_count_boundaries_to_byte_offsets(runs, text)?;
+    for (run, range) in runs.iter_mut().zip(byte_offsets.windows(2)) {
+      run.len = range[1] - range[0];
+    }
+    *runs = merge_adjacent_runs(std::mem::take(runs));
+    return Ok(());
+  }
+
+  if runs.len() == 1 {
+    runs[0].len = text.len();
+    return Ok(());
+  }
+
+  Err(io::Error::new(
+    io::ErrorKind::InvalidData,
+    "paragraph run lengths do not match text bytes or characters",
+  ))
+}
+
+#[hotpath::measure]
+fn run_boundaries_are_char_boundaries(runs: &[TextRun], text: &str) -> bool {
+  let mut byte = 0usize;
+  for run in runs {
+    byte = byte.saturating_add(run.len);
+    if byte < text.len() && !text.is_char_boundary(byte) {
+      return false;
+    }
+  }
+  byte == text.len()
+}
+
+#[hotpath::measure]
+fn char_count_boundaries_to_byte_offsets(runs: &[TextRun], text: &str) -> io::Result<Vec<usize>> {
+  let mut offsets = Vec::with_capacity(runs.len() + 1);
+  offsets.push(0);
+  let mut char_count = 0usize;
+  for run in runs {
+    char_count = char_count.saturating_add(run.len);
+    if char_count == text.chars().count() {
+      offsets.push(text.len());
+      continue;
+    }
+    let Some((byte, _)) = text.char_indices().nth(char_count) else {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "run character offset is outside paragraph text"));
+    };
+    offsets.push(byte);
+  }
+  Ok(offsets)
 }
 
 #[hotpath::measure]
@@ -387,4 +483,44 @@ pub fn recovery_path_for_document(path: &Path) -> PathBuf {
     .unwrap_or_else(|| "untitled.db8.recovery".to_string());
   recovery_path.set_file_name(file_name);
   recovery_path
+}
+
+#[cfg(test)]
+mod records_tests {
+  use super::*;
+
+  #[test]
+  fn normalizes_legacy_character_count_run_lengths() {
+    let mut runs = vec![TextRun {
+      len: "Kepe et al. ‘23".chars().count(),
+      styles: RunStyles::default(),
+    }];
+
+    normalize_runs_for_text(&mut runs, "Kepe et al. ‘23").expect("normalize runs");
+
+    assert_eq!(runs[0].len, "Kepe et al. ‘23".len());
+  }
+
+  #[test]
+  fn normalizes_legacy_character_count_run_boundaries() {
+    let cite = RunStyles {
+      semantic: RunSemanticStyle::Cite,
+      ..RunStyles::default()
+    };
+    let mut runs = vec![
+      TextRun {
+        len: "Kepe et al. ".chars().count(),
+        styles: RunStyles::default(),
+      },
+      TextRun {
+        len: "‘23".chars().count(),
+        styles: cite,
+      },
+    ];
+
+    normalize_runs_for_text(&mut runs, "Kepe et al. ‘23").expect("normalize runs");
+
+    assert_eq!(runs[0].len, "Kepe et al. ".len());
+    assert_eq!(runs[1].len, "‘23".len());
+  }
 }

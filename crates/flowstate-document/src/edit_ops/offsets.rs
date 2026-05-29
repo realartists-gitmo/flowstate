@@ -39,6 +39,14 @@ pub fn refresh_paragraph_ranges(document: &mut Document) {
 }
 
 #[hotpath::measure]
+fn refresh_paragraph_ranges_from(document: &mut Document, start_paragraph: usize) {
+  let paragraph_count = document.paragraphs.len();
+  for paragraph_ix in start_paragraph.min(paragraph_count)..paragraph_count {
+    refresh_paragraph_range(document, paragraph_ix);
+  }
+}
+
+#[hotpath::measure]
 pub fn rebuild_document_offset_index(document: &mut Document) {
   document.offset_index.rebuild(&document.paragraphs);
   refresh_paragraph_ranges(document);
@@ -49,15 +57,18 @@ pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragr
   if paragraph_ix >= document.paragraphs.len() {
     return;
   }
-  let start = document.offset_index.paragraph_start(paragraph_ix);
   document
     .offset_index
     .update_paragraph_width(paragraph_ix, &document.paragraphs);
-  {
-    let paragraphs = paragraphs_mut(document);
-    paragraphs[paragraph_ix].byte_range = start..start + paragraph_runs_len(&paragraphs[paragraph_ix]);
-  }
-  update_paragraph_block(document, paragraph_ix);
+  refresh_paragraph_ranges_from(document, paragraph_ix);
+  let paragraph_count = document.paragraphs.len();
+  let replacements = document.paragraphs[paragraph_ix..].to_vec();
+  replace_paragraph_blocks(
+    document,
+    paragraph_ix,
+    paragraph_count.saturating_sub(paragraph_ix),
+    &replacements,
+  );
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within
@@ -80,6 +91,39 @@ pub fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
   } else {
     let last = paragraph.runs.len() - 1;
     (last, paragraph.runs[last].len)
+  }
+}
+
+#[cfg(test)]
+mod offsets_tests {
+  use super::*;
+
+  #[test]
+  fn insert_text_refreshes_following_paragraph_ranges_and_blocks() {
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "alpha".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "Kepe et al. ‘23".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+      ],
+    );
+
+    insert_text_at(&mut document, 0, "alpha".len(), " beta", RunStyles::default());
+
+    assert_eq!(document.paragraphs[1].byte_range, "alpha beta\n".len().."alpha beta\nKepe et al. ‘23".len());
+    assert!(matches!(&document.blocks[1], Block::Paragraph(paragraph) if paragraph.byte_range == document.paragraphs[1].byte_range));
   }
 }
 
