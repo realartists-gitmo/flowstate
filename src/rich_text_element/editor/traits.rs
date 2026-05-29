@@ -35,7 +35,7 @@ impl Render for RichTextEditor {
       .size_full()
       .id("rich-text-editor")
       .relative()
-      .bg(rgb(0xffffff))
+      .bg(self.document.theme.document_background_color)
       .track_focus(&self.focus_handle(cx))
       .key_context("RichTextEditor")
       .cursor(CursorStyle::IBeam)

@@ -7,17 +7,67 @@ fn style_number_item(
   get: fn(&DocumentTheme) -> f64,
   set: fn(&mut DocumentTheme, f64),
 ) -> SettingItem {
-  let read_workspace = workspace.clone();
-  let write_workspace = workspace;
-  SettingItem::new(
-    title,
-    SettingField::number_input(
-      NumberFieldOptions { min, max, step },
-      move |cx| active_theme_value(cx, &read_workspace, get).unwrap_or_default(),
-      move |value, cx| update_active_document_theme(cx, &write_workspace, move |theme| set(theme, value)),
-    ),
-  )
-  .layout(Axis::Horizontal)
+  SettingItem::render(move |_, window, cx| {
+    let key = title.to_ascii_lowercase().replace([' ', '(', ')'], "-");
+    let value = active_theme_value(cx, &workspace, get).unwrap_or_default();
+    let state = window.use_keyed_state(SharedString::from(format!("style-number-{key}")), cx, {
+      let workspace = workspace.clone();
+      move |window, cx| {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(format!("{value:.2}")));
+        let _subscriptions = vec![
+          cx.subscribe_in(&input, window, move |_, input, event: &NumberInputEvent, window, cx| {
+            let NumberInputEvent::Step(action) = event;
+            input.update(cx, |input, cx| {
+              if let Ok(value) = input.value().parse::<f64>() {
+                let next = match action {
+                  StepAction::Increment => value + step,
+                  StepAction::Decrement => value - step,
+                }
+                .clamp(min, max);
+                input.set_value(SharedString::from(format!("{next:.2}")), window, cx);
+              }
+            });
+          }),
+          cx.subscribe_in(&input, window, {
+            let workspace = workspace.clone();
+            move |state: &mut StyleNumberInputState, input, event: &InputEvent, window, cx| {
+              if let InputEvent::Change = event {
+                input.update(cx, |input, cx| {
+                  if let Ok(value) = input.value().parse::<f64>() {
+                    let value = value.clamp(min, max);
+                    if value == state.initial_value {
+                      return;
+                    }
+                    update_active_document_theme(cx, &workspace, move |theme| set(theme, value));
+                    state.initial_value = value;
+                    if input.value().parse::<f64>().ok() != Some(value) {
+                      input.set_value(SharedString::from(format!("{value:.2}")), window, cx);
+                    }
+                  }
+                });
+              }
+            }
+          }),
+        ];
+
+        StyleNumberInputState {
+          input,
+          initial_value: value,
+          _subscriptions,
+        }
+      }
+    });
+    let input = state.read(cx).input.clone();
+
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_3()
+      .child(div().w_40().text_sm().child(title))
+      .child(div().w(px(180.0)).ml_auto().child(NumberInput::new(&input).w_full()))
+      .into_any_element()
+  })
 }
 
 fn font_family_item(workspace: WeakEntity<Workspace>) -> SettingItem {
@@ -68,13 +118,15 @@ fn render_font_family_row(workspace: WeakEntity<Workspace>, window: &mut Window,
     .items_center()
     .justify_between()
     .gap_3()
-    .child(div().text_sm().child("Font family"))
+    .child(div().w_40().text_sm().child("Font family"))
     .child(
-      Select::new(&select)
-        .placeholder("Font family")
-        .search_placeholder("Search fonts")
-        .menu_width(px(360.0))
-        .w_96(),
+      div().w(px(180.0)).ml_auto().child(
+        Select::new(&select)
+          .placeholder("Font family")
+          .search_placeholder("Search fonts")
+          .menu_width(px(180.0))
+          .w_full(),
+      ),
     )
     .into_any_element()
 }
@@ -102,147 +154,130 @@ fn style_face_item(
   get: fn(&DocumentTheme) -> (bool, bool, ThemeUnderline),
   set: fn(&mut DocumentTheme, bool, bool, ThemeUnderline),
 ) -> SettingItem {
-  style_compact_item(workspace, label, |_| 0.0, |_, _| {}, None, get, set)
-}
+  SettingItem::render(move |_, _, cx| {
+    let key = label.to_ascii_lowercase().replace(' ', "-");
+    let (bold, italic, underline) = active_theme_value(cx, &workspace, get).unwrap_or_default();
 
-fn style_compact_item(
-  workspace: WeakEntity<Workspace>,
-  label: &'static str,
-  size_get: fn(&DocumentTheme) -> f64,
-  size_set: fn(&mut DocumentTheme, f64),
-  color_access: Option<(fn(&DocumentTheme) -> Hsla, fn(&mut DocumentTheme, Hsla))>,
-  get: fn(&DocumentTheme) -> (bool, bool, ThemeUnderline),
-  set: fn(&mut DocumentTheme, bool, bool, ThemeUnderline),
-) -> SettingItem {
-  SettingItem::render(move |_, window, cx| {
-    render_style_compact_row(workspace.clone(), label, size_get, size_set, color_access, get, set, window, cx)
+    h_flex()
+      .w_full()
+      .items_center()
+      .gap_3()
+      .child(div().w_40().text_sm().child(label))
+      .child(
+        Button::new(SharedString::from(format!("style-bold-{key}")))
+          .label("B")
+          .small()
+          .outline()
+          .selected(bold)
+          .on_click({
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              update_active_document_theme(cx, &workspace, move |theme| {
+                let (_, italic, underline) = get(theme);
+                set(theme, !bold, italic, underline);
+              });
+            }
+          }),
+      )
+      .child(
+        Button::new(SharedString::from(format!("style-italic-{key}")))
+          .label("I")
+          .small()
+          .outline()
+          .selected(italic)
+          .on_click({
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              update_active_document_theme(cx, &workspace, move |theme| {
+                let (bold, _, underline) = get(theme);
+                set(theme, bold, !italic, underline);
+              });
+            }
+          }),
+      )
+      .child(
+        Button::new(SharedString::from(format!("style-underline-{key}")))
+          .label(match underline {
+            ThemeUnderline::None => "U: None",
+            ThemeUnderline::Single => "U: Single",
+            ThemeUnderline::Double => "U: Double",
+          })
+          .small()
+          .outline()
+          .on_click({
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              update_active_document_theme(cx, &workspace, move |theme| {
+                let (bold, italic, underline) = get(theme);
+                let next = match underline {
+                  ThemeUnderline::None => ThemeUnderline::Single,
+                  ThemeUnderline::Single => ThemeUnderline::Double,
+                  ThemeUnderline::Double => ThemeUnderline::None,
+                };
+                set(theme, bold, italic, next);
+              });
+            }
+          }),
+      )
+      .into_any_element()
   })
 }
 
-fn render_style_compact_row(
+fn style_bold_italic_item(
   workspace: WeakEntity<Workspace>,
   label: &'static str,
-  size_get: fn(&DocumentTheme) -> f64,
-  size_set: fn(&mut DocumentTheme, f64),
-  color_access: Option<(fn(&DocumentTheme) -> Hsla, fn(&mut DocumentTheme, Hsla))>,
-  get: fn(&DocumentTheme) -> (bool, bool, ThemeUnderline),
-  set: fn(&mut DocumentTheme, bool, bool, ThemeUnderline),
-  window: &mut Window,
-  cx: &mut App,
-) -> AnyElement {
-  let key = label.to_ascii_lowercase().replace(' ', "-");
-  let size_state = window.use_keyed_state(SharedString::from(format!("style-size-{key}")), cx, |window, cx| {
-    let value = active_theme_value(cx, &workspace, size_get).unwrap_or_default();
-    cx.new(|cx| InputState::new(window, cx).default_value(format!("{value:.2}")))
-  });
-  let color_picker_state = window.use_keyed_state(SharedString::from(format!("style-picker-{key}")), cx, |window, cx| {
-    let value = color_access
-      .and_then(|(get, _)| active_theme_value(cx, &workspace, get))
-      .unwrap_or_else(black);
-    ColorPickerState::new(window, cx).default_value(value)
-  });
-  let size_state = size_state.read(cx).clone();
-  let color_picker_state = color_picker_state.clone();
-  let (bold, italic, underline) = active_theme_value(cx, &workspace, get).unwrap_or_default();
+  get: fn(&DocumentTheme) -> (bool, bool),
+  set: fn(&mut DocumentTheme, bool, bool),
+) -> SettingItem {
+  SettingItem::render(move |_, _, cx| {
+    let key = label.to_ascii_lowercase().replace(' ', "-");
+    let (bold, italic) = active_theme_value(cx, &workspace, get).unwrap_or_default();
 
-  h_flex()
-    .w_full()
-    .items_center()
-    .gap_2()
-    .child(div().w_32().text_sm().child(label))
-    .child(NumberInput::new(&size_state).w_24())
-    .when_some(color_access, |this, (_, color_set)| {
-      this
-        .child(
-          ColorPicker::new(&color_picker_state)
-            .small()
-            .anchor(Corner::TopRight),
-        )
-        .child(
-          Button::new(SharedString::from(format!("style-apply-color-{key}")))
-            .icon(IconName::Check)
-            .small()
-            .ghost()
-            .tooltip("Apply color")
-            .on_click({
-              let workspace = workspace.clone();
-              move |_, _, cx| {
-                if let Some(color) = color_picker_state.read(cx).value() {
-                  update_active_document_theme(cx, &workspace, move |theme| color_set(theme, color));
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_3()
+      .child(div().w_40().text_sm().child(label))
+      .child(
+        h_flex()
+          .ml_auto()
+          .gap_3()
+          .child(
+            Button::new(SharedString::from(format!("style-bold-{key}")))
+              .label("B")
+              .small()
+              .outline()
+              .selected(bold)
+              .on_click({
+                let workspace = workspace.clone();
+                move |_, _, cx| {
+                  update_active_document_theme(cx, &workspace, move |theme| {
+                    let (_, italic) = get(theme);
+                    set(theme, !bold, italic);
+                  });
                 }
-              }
-            }),
-        )
-    })
-    .child(
-      Button::new(SharedString::from(format!("style-bold-{key}")))
-        .label("B")
-        .small()
-        .outline()
-        .selected(bold)
-        .on_click({
-          let workspace = workspace.clone();
-          move |_, _, cx| {
-            update_active_document_theme(cx, &workspace, move |theme| {
-              let (_, italic, underline) = get(theme);
-              set(theme, !bold, italic, underline);
-            });
-          }
-        }),
-    )
-    .child(
-      Button::new(SharedString::from(format!("style-italic-{key}")))
-        .label("I")
-        .small()
-        .outline()
-        .selected(italic)
-        .on_click({
-          let workspace = workspace.clone();
-          move |_, _, cx| {
-            update_active_document_theme(cx, &workspace, move |theme| {
-              let (bold, _, underline) = get(theme);
-              set(theme, bold, !italic, underline);
-            });
-          }
-        }),
-    )
-    .child(
-      Button::new(SharedString::from(format!("style-underline-{key}")))
-        .label(match underline {
-          ThemeUnderline::None => "U: None",
-          ThemeUnderline::Single => "U: Single",
-          ThemeUnderline::Double => "U: Double",
-        })
-        .small()
-        .outline()
-        .on_click({
-          let workspace = workspace.clone();
-          move |_, _, cx| {
-            update_active_document_theme(cx, &workspace, move |theme| {
-              let (bold, italic, underline) = get(theme);
-              let next = match underline {
-                ThemeUnderline::None => ThemeUnderline::Single,
-                ThemeUnderline::Single => ThemeUnderline::Double,
-                ThemeUnderline::Double => ThemeUnderline::None,
-              };
-              set(theme, bold, italic, next);
-            });
-          }
-        }),
-    )
-    .child(
-      Button::new(SharedString::from(format!("style-apply-size-{key}")))
-        .icon(IconName::Check)
-        .small()
-        .ghost()
-        .tooltip("Apply size")
-        .on_click(move |_, _, cx| {
-          if let Ok(value) = size_state.read(cx).value().parse::<f64>() {
-            update_active_document_theme(cx, &workspace, move |theme| size_set(theme, value));
-          }
-        }),
-    )
-    .into_any_element()
+              }),
+          )
+          .child(
+            Button::new(SharedString::from(format!("style-italic-{key}")))
+              .label("I")
+              .small()
+              .outline()
+              .selected(italic)
+              .on_click({
+                let workspace = workspace.clone();
+                move |_, _, cx| {
+                  update_active_document_theme(cx, &workspace, move |theme| {
+                    let (bold, _) = get(theme);
+                    set(theme, bold, !italic);
+                  });
+                }
+              }),
+          ),
+      )
+      .into_any_element()
+  })
 }
 
 fn style_color_item(
@@ -383,80 +418,6 @@ fn update_smart_word_selection(cx: &mut App, workspace: &WeakEntity<Workspace>, 
   });
 }
 
-fn render_apply_all_styles(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut App) -> AnyElement {
-  let font_size = window.use_keyed_state("style-apply-all-font-size", cx, |window, cx| {
-    cx.new(|cx| {
-      InputState::new(window, cx)
-        .placeholder("Font size pt")
-        .default_value("")
-    })
-  });
-  let before = window.use_keyed_state("style-apply-all-before", cx, |window, cx| {
-    cx.new(|cx| {
-      InputState::new(window, cx)
-        .placeholder("Before spacing pt")
-        .default_value("")
-    })
-  });
-  let text_color = window.use_keyed_state("style-apply-all-text-color", cx, |window, cx| {
-    cx.new(|cx| {
-      InputState::new(window, cx)
-        .placeholder("Text color")
-        .default_value("")
-    })
-  });
-  let font_size_state = font_size.read(cx).clone();
-  let before_state = before.read(cx).clone();
-  let text_color_state = text_color.read(cx).clone();
-
-  h_flex()
-    .w_full()
-    .gap_2()
-    .items_center()
-    .child(Input::new(&font_size_state).w_32())
-    .child(Input::new(&before_state).w_32())
-    .child(Input::new(&text_color_state).w_32())
-    .child(
-      Button::new("apply-all-document-styles")
-        .label("Apply")
-        .primary()
-        .small()
-        .on_click(move |_, _, cx| {
-          let font_size = optional_f64(&font_size_state.read(cx).value());
-          let before = optional_f64(&before_state.read(cx).value());
-          let text_color = optional_hex_color(&text_color_state.read(cx).value());
-
-          update_active_document_theme(cx, &workspace, move |theme| {
-            if let Some(font_size) = font_size {
-              let size = pt_to_pixels(font_size);
-              theme.body_font_size = size;
-              theme.cite_font_size = size;
-              theme.condensed_font_size = size;
-              theme.ultracondensed_font_size = size;
-              theme.pocket_font_size = size;
-              theme.hat_font_size = size;
-              theme.block_font_size = size;
-              theme.tag_font_size = size;
-              theme.undertag_font_size = size;
-            }
-            if let Some(before) = before {
-              let spacing = pt_to_pixels(before);
-              theme.pocket_before = spacing;
-              theme.hat_before = spacing;
-              theme.block_before = spacing;
-              theme.tag_before = spacing;
-            }
-            if let Some(color) = text_color {
-              theme.default_text_color = color;
-              theme.analytic_color = color;
-              theme.undertag_color = color;
-            }
-          });
-        }),
-    )
-    .into_any_element()
-}
-
 fn pixels_to_pt(value: Pixels) -> f64 {
   value.as_f64() * 72.0 / 96.0
 }
@@ -464,24 +425,3 @@ fn pixels_to_pt(value: Pixels) -> f64 {
 fn pt_to_pixels(value: f64) -> Pixels {
   px((value as f32) * 96.0 / 72.0)
 }
-
-fn parse_hex_color(value: &str) -> Option<Hsla> {
-  let value = value.trim().trim_start_matches('#');
-  if value.len() != 6 {
-    return None;
-  }
-  u32::from_str_radix(value, 16)
-    .ok()
-    .map(|hex| rgb(hex).into())
-}
-
-fn optional_f64(value: &str) -> Option<f64> {
-  let value = value.trim();
-  if value.is_empty() { None } else { value.parse::<f64>().ok() }
-}
-
-fn optional_hex_color(value: &str) -> Option<Hsla> {
-  let value = value.trim();
-  if value.is_empty() { None } else { parse_hex_color(value) }
-}
-

@@ -25,7 +25,8 @@ impl Workspace {
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
     let (active_tab_bg, active_tab_fg) = if let Some(editor) = &self.active_editor {
-      (white(), editor.read(cx).document().theme.default_text_color)
+      let theme = &editor.read(cx).document().theme;
+      (theme.document_background_color, theme.default_text_color)
     } else {
       (cx.theme().background, cx.theme().foreground)
     };

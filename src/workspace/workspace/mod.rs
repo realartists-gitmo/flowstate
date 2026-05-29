@@ -1,19 +1,19 @@
 use std::{cell::Cell, collections::HashSet, path::{Path, PathBuf}, rc::Rc};
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Axis, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement,
+  AnyElement, AnyWindowHandle, App, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement,
   MouseButton, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
-  WeakEntity, Window, WindowDecorations, WindowOptions, black, div, prelude::*, px, rgb, white,
+  WeakEntity, Window, WindowDecorations, WindowOptions, black, div, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants, Toggle, ToggleVariants};
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_component::input::{Input, InputState, NumberInput};
+use gpui_component::input::{InputEvent, InputState, NumberInput, NumberInputEvent, StepAction};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
-use gpui_component::setting::{NumberFieldOptions, SettingField, SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
@@ -62,6 +62,7 @@ pub struct Workspace {
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
+  document_style_section: DocumentStyleSection,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
 }
 
@@ -79,10 +80,47 @@ struct FontFamilySelectState {
   _subscription: Subscription,
 }
 
+struct StyleNumberInputState {
+  input: Entity<InputState>,
+  initial_value: f64,
+  _subscriptions: Vec<Subscription>,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsOverlay {
   Styles,
   Settings,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DocumentStyleSection {
+  Text,
+  Style,
+  Colors,
+  Size,
+  Background,
+}
+
+impl DocumentStyleSection {
+  fn title(self) -> &'static str {
+    match self {
+      Self::Text => "Text",
+      Self::Style => "Style",
+      Self::Colors => "Colors",
+      Self::Size => "Size",
+      Self::Background => "Background",
+    }
+  }
+
+  fn index(self) -> usize {
+    match self {
+      Self::Text => 0,
+      Self::Style => 1,
+      Self::Colors => 2,
+      Self::Size => 3,
+      Self::Background => 4,
+    }
+  }
 }
 
 include!("documents.rs");

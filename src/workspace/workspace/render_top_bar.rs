@@ -14,7 +14,7 @@ impl Workspace {
           .child(flowstate_top_bar_button(cx))
           .child(file_top_bar_button(self.active_document_id.is_some(), cx))
           .child(insert_top_bar_button(cx, self.active_editor.is_some()))
-          .child(styles_top_bar_button(cx))
+          .child(document_top_bar_button(cx))
           .child(view_top_bar_button(cx, !self.outline_collapsed, !self.ribbon_collapsed, !self.toolkit_collapsed))
           .child(settings_top_bar_button(cx))
       )

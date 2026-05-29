@@ -37,6 +37,7 @@ impl Default for EditorSettings {
 pub struct DocumentThemeSettings {
   pub default_font_family: String,
   pub default_text_color: StoredHsla,
+  pub document_background_color: StoredHsla,
   pub pageless_inset_x: f32,
   pub pageless_inset_top: f32,
   pub pageless_inset_bottom: f32,
@@ -146,4 +147,3 @@ impl Default for DocumentThemeSettings {
     Self::from(&DocumentTheme::default())
   }
 }
-

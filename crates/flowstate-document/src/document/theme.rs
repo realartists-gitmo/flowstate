@@ -3,6 +3,7 @@
 pub struct DocumentTheme {
   pub default_font_family: SharedString,
   pub default_text_color: Hsla,
+  pub document_background_color: Hsla,
   pub pageless_inset_x: Pixels,
   pub pageless_inset_top: Pixels,
   pub pageless_inset_bottom: Pixels,
@@ -104,6 +105,7 @@ impl Default for DocumentTheme {
     Self {
       default_font_family: "Carlito".into(),
       default_text_color: black(),
+      document_background_color: rgb(0xffffff).into(),
       // Word page margins are 1in = 96px at 96dpi. Pageless mode should
       // not use full page margins, but a proportional inset keeps content
       // from sitting on the viewport edge.

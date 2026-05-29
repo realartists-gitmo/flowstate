@@ -32,6 +32,7 @@ pub struct Settings {
     size: Size,
     sidebar_width: Pixels,
     sidebar_style: StyleRefinement,
+    selected_page: usize,
 }
 
 impl Settings {
@@ -44,6 +45,7 @@ impl Settings {
             size: Size::default(),
             sidebar_width: px(250.0),
             sidebar_style: StyleRefinement::default(),
+            selected_page: 0,
         }
     }
 
@@ -62,6 +64,12 @@ impl Settings {
     /// Add pages to the settings.
     pub fn pages(mut self, pages: impl IntoIterator<Item = SettingPage>) -> Self {
         self.pages.extend(pages);
+        self
+    }
+
+    /// Set the page selected when this settings view is first opened.
+    pub fn selected_page(mut self, page_ix: usize) -> Self {
+        self.selected_page = page_ix;
         self
     }
 
@@ -239,7 +247,10 @@ impl RenderOnce for Settings {
 
             SettingsState {
                 search_input,
-                selected_index: SelectIndex::default(),
+                selected_index: SelectIndex {
+                    page_ix: self.selected_page,
+                    ..Default::default()
+                },
                 deferred_scroll_group_ix: None,
             }
         });

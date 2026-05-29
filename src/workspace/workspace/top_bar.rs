@@ -51,7 +51,8 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
-fn styles_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
+  let workspace = cx.entity().downgrade();
   div()
     .h_full()
     .flex_none()
@@ -60,18 +61,30 @@ fn styles_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     .justify_center()
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .child(
-      Button::new("top-styles")
-        .label("Styles")
+      Button::new("top-document")
+        .label("Document")
         .xsmall()
         .ghost()
-        .on_click(cx.listener(|workspace, _, _, cx| {
-          workspace.settings_overlay = match workspace.settings_overlay {
-            Some(WorkspaceSettingsOverlay::Styles) => None,
-            _ => Some(WorkspaceSettingsOverlay::Styles),
-          };
-          cx.stop_propagation();
-          cx.notify();
-        })),
+        .dropdown_menu(move |menu, _, _| {
+          [
+            DocumentStyleSection::Text,
+            DocumentStyleSection::Style,
+            DocumentStyleSection::Colors,
+            DocumentStyleSection::Size,
+            DocumentStyleSection::Background,
+          ]
+          .into_iter()
+          .fold(menu, |menu, section| {
+            let workspace = workspace.clone();
+            menu.item(PopupMenuItem::new(section.title()).on_click(move |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| {
+                workspace.document_style_section = section;
+                workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Styles);
+                cx.notify();
+              });
+            }))
+          })
+        }),
     )
 }
 

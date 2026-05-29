@@ -3,6 +3,7 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
     Self {
       default_font_family: theme.default_font_family.to_string(),
       default_text_color: theme.default_text_color.into(),
+      document_background_color: theme.document_background_color.into(),
       pageless_inset_x: theme.pageless_inset_x.as_f32(),
       pageless_inset_top: theme.pageless_inset_top.as_f32(),
       pageless_inset_bottom: theme.pageless_inset_bottom.as_f32(),
@@ -98,6 +99,7 @@ impl From<DocumentThemeSettings> for DocumentTheme {
     Self {
       default_font_family: settings.default_font_family.into(),
       default_text_color: settings.default_text_color.into(),
+      document_background_color: settings.document_background_color.into(),
       pageless_inset_x: px(settings.pageless_inset_x),
       pageless_inset_top: px(settings.pageless_inset_top),
       pageless_inset_bottom: px(settings.pageless_inset_bottom),
@@ -229,4 +231,3 @@ impl From<ThemeUnderlineSetting> for ThemeUnderline {
     }
   }
 }
-
