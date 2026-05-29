@@ -30,11 +30,12 @@ impl Workspace {
             div()
               .text_sm()
               .font_weight(gpui::FontWeight::SEMIBOLD)
+              .text_color(cx.theme().sidebar_primary)
               .child("Outline"),
           )
           .child(
             Button::new("collapse-outline-panel")
-              .icon(IconName::PanelLeftClose)
+              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
               .xsmall()
               .ghost()
               .tooltip("Collapse outline")
@@ -125,6 +126,7 @@ impl Workspace {
                               Icon::default()
                                 .path(icon_path)
                                 .with_size(gpui_component::Size::Small)
+                                .text_color(cx.theme().sidebar_foreground)
                             )
                             .on_click({
                               let workspace = workspace.clone();
@@ -229,11 +231,12 @@ impl Workspace {
             div()
               .text_sm()
               .font_weight(gpui::FontWeight::SEMIBOLD)
+              .text_color(cx.theme().sidebar_primary)
               .child("Flows"),
           )
           .child(
             Button::new("collapse-flow-outline-panel")
-              .icon(IconName::PanelLeftClose)
+              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
               .xsmall()
               .ghost()
               .tooltip("Collapse outline")

@@ -97,7 +97,7 @@ impl Workspace {
       .bg(cx.theme().background)
       .child(
         Button::new("restore-ribbon-panel")
-          .icon(Icon::default().path("icons/panel-top-open.svg"))
+          .icon(Icon::default().path("icons/panel-top-open.svg").text_color(cx.theme().muted_foreground))
           .xsmall()
           .ghost()
           .tooltip("Show ribbon")
@@ -121,7 +121,7 @@ impl Workspace {
       .bg(cx.theme().background)
       .child(
         Button::new(tooltip)
-          .icon(icon)
+          .icon(Icon::new(icon).text_color(cx.theme().sidebar_foreground))
           .xsmall()
           .ghost()
           .tooltip(tooltip)

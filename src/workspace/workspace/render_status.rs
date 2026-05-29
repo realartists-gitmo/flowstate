@@ -96,6 +96,7 @@ impl Workspace {
         div()
           .text_xl()
           .font_weight(gpui::FontWeight::SEMIBOLD)
+          .text_color(cx.theme().foreground)
           .child("No document open"),
       )
       .child(
@@ -103,27 +104,27 @@ impl Workspace {
           .gap_2()
           .child(
             Button::new("empty-new-document")
-              .icon(IconName::Plus)
+              .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary_foreground))
               .label("New Doc")
               .primary()
               .on_click(new_doc),
           )
           .child(
             Button::new("empty-new-flow")
-              .icon(IconName::Plus)
+              .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary_foreground))
               .label("New Flow")
               .primary()
               .on_click(new_flow),
           )
           .child(
             Button::new("empty-open-document")
-              .icon(IconName::FolderOpen)
+              .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().secondary_foreground))
               .label("Open")
               .on_click(open_document),
           )
           .child(
             Button::new("empty-search-document")
-              .icon(IconName::Search)
+              .icon(Icon::new(IconName::Search).text_color(cx.theme().secondary_foreground))
               .label("Search")
               .on_click(open_search),
           ),

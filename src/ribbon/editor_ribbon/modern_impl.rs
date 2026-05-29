@@ -71,4 +71,3 @@ impl ModernStylesRibbon {
       .into_any_element()
   }
 }
-

@@ -75,7 +75,7 @@ impl Workspace {
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .child(
             Button::new("collapse-ribbon-panel")
-              .icon(Icon::default().path("icons/panel-top-close.svg"))
+              .icon(Icon::default().path("icons/panel-top-close.svg").text_color(cx.theme().muted_foreground))
               .xsmall()
               .ghost()
               .tooltip("Collapse ribbon")
