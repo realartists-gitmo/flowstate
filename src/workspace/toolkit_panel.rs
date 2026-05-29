@@ -3,7 +3,7 @@ use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::resizable::{h_resizable, resizable_panel};
 use gpui_component::{ActiveTheme as _, IconName, Sizable, v_flex};
 
-use super::{SIDE_PANEL_COLLAPSED_WIDTH, Workspace};
+use super::{APP_CHROME_BORDER_WIDTH, SIDE_PANEL_COLLAPSED_WIDTH, Workspace};
 
 impl Workspace {
   /// Renders the main editor area and the right-side Toolkit panel as one
@@ -13,12 +13,12 @@ impl Workspace {
     let toolkit_width = if self.toolkit_collapsed {
       SIDE_PANEL_COLLAPSED_WIDTH
     } else {
-      px(300.0)
+      px(40.0)
     };
     let toolkit_range_end = if self.toolkit_collapsed {
       SIDE_PANEL_COLLAPSED_WIDTH
     } else {
-      px(520.0)
+      px(40.0)
     };
 
     h_resizable("workspace-content-resizable")
@@ -39,12 +39,35 @@ impl Workspace {
               .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)
               .into_any_element()
           } else {
-            self.render_toolkit(cx).into_any_element()
+            self.render_toolkit_icon_bar(cx).into_any_element()
           }),
       )
   }
 
-  fn render_toolkit(&self, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_toolkit_icon_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let open_file_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
+
+    v_flex()
+      .size_full()
+      .h_full()
+      .items_center()
+      .gap_1()
+      .py_2()
+      .bg(cx.theme().background)
+      .border_l(APP_CHROME_BORDER_WIDTH)
+      .border_color(cx.theme().border)
+      .child(
+        Button::new("toolkit-global-db8-search")
+          .icon(IconName::Search)
+          .xsmall()
+          .ghost()
+          .tooltip("Find DB8 file")
+          .on_click(open_file_search),
+      )
+  }
+
+  #[allow(dead_code)]
+  fn render_toolkit_expanded(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let open_file_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
     v_flex()
       .size_full()
@@ -52,6 +75,8 @@ impl Workspace {
       .gap_2()
       .p_3()
       .bg(cx.theme().background)
+      .border_l(APP_CHROME_BORDER_WIDTH)
+      .border_color(cx.theme().border)
       .child(
         div()
           .w_full()
