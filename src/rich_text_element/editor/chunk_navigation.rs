@@ -72,34 +72,58 @@ impl RichTextEditor {
     }
   }
 
-  fn paragraph_remainder_estimate(&self, paragraph_ix: usize, width: Pixels) -> Pixels {
-    let estimated_total = self
-      .valid_paragraph_prep(paragraph_ix)
-      .as_deref()
-      .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, width))
-      .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode));
-    let exact_height = self
-      .valid_chunk_cache_entry(paragraph_ix, width)
-      .map(|entry| entry.exact_height)
-      .unwrap_or(px(0.0));
+  fn paragraph_remainder_estimate(&mut self, paragraph_ix: usize, width: Pixels) -> Pixels {
+    let (estimated_total, text_len) = self
+      .paragraph_estimated_total_height(paragraph_ix, width)
+      .unwrap_or((self.document.theme.body_font_size * self.document.theme.line_spacing, 0));
+    let exact_height = self.valid_chunk_cache_entry(paragraph_ix, width).map_or(px(0.0), |entry| entry.exact_height);
     let remaining = (estimated_total - exact_height).max(self.document.theme.body_font_size * self.document.theme.line_spacing);
-    let text_len = self
-      .valid_paragraph_prep(paragraph_ix)
-      .as_deref()
-      .map(|prep| prep.source_len)
-      .or_else(|| {
-        self
-          .document
-          .paragraphs
-          .get(paragraph_ix)
-          .map(paragraph_text_len)
-      })
-      .unwrap_or(0);
     if text_len > 16 * 1024 || estimated_total > self.scroll_handle.bounds().size.height.max(px(700.0)) * 1.5 {
       remaining.max(self.scroll_handle.bounds().size.height.max(px(700.0)) + px(1024.0))
     } else {
       remaining
     }
+  }
+
+  fn paragraph_estimated_total_height(&mut self, paragraph_ix: usize, width: Pixels) -> Option<(Pixels, usize)> {
+    self.resize_layout_aux_caches();
+    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let key = paragraph_cache_key(&self.document, paragraph);
+    let expected = ParagraphEstimateHeightCacheEntry {
+      key,
+      width,
+      invisibility_mode: self.invisibility_mode,
+      edit_generation: self.edit_generation,
+      layout_generation: self.layout_generation,
+      height: px(0.0),
+      source_len: 0,
+    };
+    if let Some(entry) = self.paragraph_estimate_height_cache.get(paragraph_ix).and_then(|entry| *entry)
+      && entry.key == expected.key
+      && entry.width == expected.width
+      && entry.invisibility_mode == expected.invisibility_mode
+      && entry.edit_generation == expected.edit_generation
+      && entry.layout_generation == expected.layout_generation
+    {
+      return Some((entry.height, entry.source_len));
+    }
+
+    let prep = self.valid_paragraph_prep(paragraph_ix);
+    let (height, source_len) = match prep.as_deref() {
+      Some(prep) => (estimate_paragraph_prep_item_height(&self.document, prep, width), prep.source_len),
+      None => (
+        estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode),
+        paragraph_text_len(paragraph),
+      ),
+    };
+    if let Some(slot) = self.paragraph_estimate_height_cache.get_mut(paragraph_ix) {
+      *slot = Some(ParagraphEstimateHeightCacheEntry {
+        height,
+        source_len,
+        ..expected
+      });
+    }
+    Some((height, source_len))
   }
 
   fn ensure_exact_interaction_chunks(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) {

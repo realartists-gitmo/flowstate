@@ -143,6 +143,11 @@ pub(super) struct ParagraphHeightCacheEntry {
 
 #[hotpath::measure]
 pub(super) fn paragraph_cache_key(_document: &Document, paragraph: &Paragraph) -> ParagraphCacheKey {
+  paragraph_cache_key_for_paragraph(paragraph)
+}
+
+#[hotpath::measure]
+pub(super) fn paragraph_cache_key_for_paragraph(paragraph: &Paragraph) -> ParagraphCacheKey {
   let mut hasher = FxHasher::default();
   paragraph.style.hash(&mut hasher);
   paragraph.version.hash(&mut hasher);

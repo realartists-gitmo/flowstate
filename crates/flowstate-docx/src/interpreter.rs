@@ -101,11 +101,17 @@ pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(Document, Doc
 
 #[hotpath::measure]
 pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Document, DocxConversionReport)> {
-  let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error)?;
-  let direct_properties = match cleaned.main_document_xml.as_deref() {
+  let CleanedDocx {
+    bytes,
+    main_document_xml,
+    report: clean_report,
+  } = cleaned;
+  let docx = RDocxDocument::from_bytes(&bytes).map_err(rdocx_error)?;
+  let direct_properties = match main_document_xml.as_deref() {
     Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml)?,
-    None => direct_properties_by_paragraph_package(&cleaned.bytes)?,
+    None => direct_properties_by_paragraph_package(&bytes)?,
   };
+  drop(main_document_xml);
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
@@ -252,7 +258,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
   let paragraphs_imported = paragraphs.len();
   let document = document_from_paragraphs(DocumentTheme::default(), paragraphs);
   let report = DocxConversionReport {
-    clean: cleaned.report,
+    clean: clean_report,
     recognition_rules: RECOGNITION_RULES,
     paragraphs_imported,
     runs_imported,

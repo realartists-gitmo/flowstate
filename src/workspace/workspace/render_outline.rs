@@ -9,10 +9,11 @@ impl Workspace {
     let workspace = cx.entity().downgrade();
     let active_outline_paragraph = self.active_outline_paragraph(cx);
     self.scroll_outline_item_into_view(active_outline_paragraph, cx);
-    let mut outline_guides = Vec::new();
-    if let Some(cache) = &self.outline_cache {
-      collect_visible_outline_guides(&cache.nodes, &self.collapsed_outline_items, &mut outline_guides);
-    }
+    let outline_guides = self
+      .outline_cache
+      .as_ref()
+      .map(|cache| cache.row_guides.clone())
+      .unwrap_or_else(|| Rc::new(Vec::new()));
     v_flex()
       .size_full()
       .h_full()

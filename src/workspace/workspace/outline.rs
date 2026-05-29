@@ -1,23 +1,29 @@
 #[derive(Clone)]
 struct OutlineCache {
   document_id: Uuid,
+  edit_generation: u64,
   signature: OutlineSignature,
+  signature_scratch: Vec<OutlineEntry>,
   visible_revision: u64,
   nodes: Rc<Vec<OutlineNode>>,
   visible_paragraphs: Vec<usize>,
+  row_guides: Rc<Vec<OutlineRowGuides>>,
   tree_items: Vec<TreeItem>,
 }
 
 #[hotpath::measure_all]
 impl OutlineCache {
-  fn new(document_id: Uuid, signature: OutlineSignature) -> Self {
+  fn new(document_id: Uuid, edit_generation: u64, signature: OutlineSignature) -> Self {
     let nodes = outline_nodes_from_entries(&signature.entries);
     Self {
       document_id,
+      edit_generation,
       signature,
+      signature_scratch: Vec::new(),
       visible_revision: u64::MAX,
       nodes: Rc::new(nodes),
       visible_paragraphs: Vec::new(),
+      row_guides: Rc::new(Vec::new()),
       tree_items: Vec::new(),
     }
   }
@@ -25,12 +31,30 @@ impl OutlineCache {
   fn rebuild_visible(&mut self, revision: u64, collapsed_items: &HashSet<usize>) {
     self.visible_paragraphs.clear();
     collect_visible_outline_paragraphs(&self.nodes, collapsed_items, &mut self.visible_paragraphs);
+    let mut row_guides = Vec::with_capacity(self.visible_paragraphs.len());
+    collect_visible_outline_guides(&self.nodes, collapsed_items, &mut row_guides);
+    self.row_guides = Rc::new(row_guides);
     self.tree_items = self
       .nodes
       .iter()
       .map(|node| outline_node_to_tree_item(node, collapsed_items))
       .collect();
     self.visible_revision = revision;
+  }
+
+  fn update_signature(&mut self, document: &Document, edit_generation: u64) -> bool {
+    let paragraph_count = outline_signature_entries_into(document, &mut self.signature_scratch);
+    let unchanged = self.signature.paragraph_count == paragraph_count && self.signature.entries == self.signature_scratch;
+    self.signature.paragraph_count = paragraph_count;
+    std::mem::swap(&mut self.signature.entries, &mut self.signature_scratch);
+    self.edit_generation = edit_generation;
+    if unchanged {
+      return false;
+    }
+
+    self.nodes = Rc::new(outline_nodes_from_entries(&self.signature.entries));
+    self.visible_revision = u64::MAX;
+    true
   }
 }
 
@@ -121,21 +145,31 @@ fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
 #[hotpath::measure]
 fn outline_signature(document: &Document) -> OutlineSignature {
   let mut entries = Vec::new();
+  let paragraph_count = outline_signature_entries_into(document, &mut entries);
+  OutlineSignature { paragraph_count, entries }
+}
+
+#[hotpath::measure]
+fn outline_signature_entries_into(document: &Document, entries: &mut Vec<OutlineEntry>) -> usize {
+  let mut entry_ix = 0usize;
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let Some(level) = outline_level(paragraph.style) else {
       continue;
     };
-    entries.push(OutlineEntry {
-      paragraph_ix,
-      level,
-      text: outline_paragraph_label(document, paragraph_ix),
-    });
+    if let Some(entry) = entries.get_mut(entry_ix) {
+      entry.paragraph_ix = paragraph_ix;
+      entry.level = level;
+      outline_paragraph_label_into(document, paragraph_ix, &mut entry.text);
+    } else {
+      let mut text = String::with_capacity(80);
+      outline_paragraph_label_into(document, paragraph_ix, &mut text);
+      entries.push(OutlineEntry { paragraph_ix, level, text });
+    }
+    entry_ix += 1;
   }
+  entries.truncate(entry_ix);
 
-  OutlineSignature {
-    paragraph_count: document.paragraphs.len(),
-    entries,
-  }
+  document.paragraphs.len()
 }
 
 #[hotpath::measure]
@@ -212,12 +246,20 @@ fn outline_paragraph_ix(id: &str) -> Option<usize> {
   id.strip_prefix("paragraph:")?.parse().ok()
 }
 
+#[cfg(test)]
 #[hotpath::measure]
 fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
+  let mut label = String::with_capacity(80);
+  outline_paragraph_label_into(document, paragraph_ix, &mut label);
+  label
+}
+
+#[hotpath::measure]
+fn outline_paragraph_label_into(document: &Document, paragraph_ix: usize, label: &mut String) {
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   const MAX_BYTES: usize = 80;
   const TRUNCATED_BYTES: usize = MAX_BYTES - 3;
-  let mut label = String::new();
+  label.clear();
   let mut pending_space = false;
   let mut truncated = false;
 
@@ -242,12 +284,9 @@ fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
   }
 
   if label.is_empty() {
-    "(empty)".to_string()
+    label.push_str("(empty)");
   } else if truncated {
     label.push_str("...");
-    label
-  } else {
-    label
   }
 }
 

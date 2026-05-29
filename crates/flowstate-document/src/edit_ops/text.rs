@@ -11,10 +11,30 @@ pub fn paragraph_text_len(paragraph: &Paragraph) -> usize {
 #[hotpath::measure]
 pub fn document_text_slice(document: &Document, range: Range<usize>) -> String {
   let mut text = String::with_capacity(range.end - range.start);
+  push_document_text_slice(document, range, &mut text);
+  text
+}
+
+#[hotpath::measure]
+pub fn push_document_text_slice(document: &Document, range: Range<usize>, text: &mut String) {
   for chunk in document.text.byte_slice(range).chunks() {
     text.push_str(chunk);
   }
-  text
+}
+
+#[hotpath::measure]
+pub fn paragraph_char_count(document: &Document, paragraph_ix: usize, needle: char) -> usize {
+  document_text_slice_char_count(document, paragraph_byte_range(document, paragraph_ix), needle)
+}
+
+#[hotpath::measure]
+pub fn document_text_slice_char_count(document: &Document, range: Range<usize>, needle: char) -> usize {
+  document
+    .text
+    .byte_slice(range)
+    .chunks()
+    .map(|chunk| chunk.matches(needle).count())
+    .sum()
 }
 
 #[hotpath::measure]

@@ -67,22 +67,28 @@ impl Workspace {
         .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
       return;
     };
-    let document = editor.read(cx).document().clone();
-    let signature = outline_signature(&document);
+    let editor = editor.read(cx);
+    let edit_generation = editor.edit_generation();
     if self
       .outline_cache
       .as_ref()
-      .is_some_and(|cache| cache.document_id == active_id && cache.signature == signature && cache.visible_revision == self.outline_revision)
+      .is_some_and(|cache| cache.document_id == active_id && cache.edit_generation == edit_generation && cache.visible_revision == self.outline_revision)
     {
       return;
     }
-
-    let rebuild_structure = self
-      .outline_cache
-      .as_ref()
-      .is_none_or(|cache| cache.document_id != active_id || cache.signature != signature);
-    if rebuild_structure {
-      self.outline_cache = Some(OutlineCache::new(active_id, signature));
+    if let Some(cache) = self.outline_cache.as_mut().filter(|cache| cache.document_id == active_id) {
+      if cache.edit_generation != edit_generation {
+        let structure_changed = cache.update_signature(editor.document(), edit_generation);
+        if !structure_changed && cache.visible_revision == self.outline_revision {
+          return;
+        }
+      }
+    } else {
+      self.outline_cache = Some(OutlineCache::new(
+        active_id,
+        edit_generation,
+        outline_signature(editor.document()),
+      ));
     }
     let Some(cache) = self.outline_cache.as_mut() else {
       return;

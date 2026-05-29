@@ -32,9 +32,7 @@ pub(super) fn estimate_paragraph_item_height_with_visibility(
   let avg_char_width = (p_format.font_size * 0.52).max(px(1.0));
   let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
   let text_len = paragraph_text_len(paragraph);
-  let forced_line_count = paragraph_text(estimate_document, estimate_paragraph_ix)
-    .matches(SOFT_LINE_BREAK)
-    .count();
+  let forced_line_count = paragraph_char_count(estimate_document, estimate_paragraph_ix, SOFT_LINE_BREAK);
   let estimated_lines = (text_len / chars_per_line)
     .saturating_add(1)
     .saturating_add(forced_line_count)
