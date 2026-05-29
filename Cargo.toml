@@ -88,5 +88,5 @@ lto = "fat"
 codegen-units = 1
 rustflags = [
   "-C", "target-cpu=native",
-  "-Z", "tune-cpu=machine",
+  "-Z", "tune-cpu=native",
 ]
