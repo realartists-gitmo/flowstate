@@ -26,6 +26,7 @@ impl Workspace {
   }
 
   fn render_document_tab_bar_prefix(&self, active_index: usize, tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+    let workspace = cx.entity().downgrade();
     h_flex()
       .h_full()
       .items_center()
@@ -33,10 +34,16 @@ impl Workspace {
       .px_1()
       .child(
         icon_button("tab-bar-new-file", AppIcon::NewFile)
-          .tooltip("New file")
-          .on_click(cx.listener(|workspace, _, window, cx| {
-            workspace.new_document(window, cx);
-          })),
+          .tooltip("New")
+          .dropdown_menu(move |menu, _, _| {
+            menu
+              .item(file_menu_item(workspace.clone(), "Doc", false, |workspace, window, cx| {
+                workspace.new_document(window, cx);
+              }))
+              .item(file_menu_item(workspace.clone(), "Flow", false, |workspace, window, cx| {
+                workspace.new_flow(window, cx);
+              }))
+          }),
       )
       .child(
         icon_button("tab-bar-save-file", AppIcon::SaveFile)
@@ -97,7 +104,7 @@ impl Workspace {
           .child(
             Button::new("empty-new-document")
               .icon(IconName::Plus)
-              .label("New")
+              .label("New Doc")
               .primary()
               .on_click(new_doc),
           )
@@ -105,6 +112,7 @@ impl Workspace {
             Button::new("empty-new-flow")
               .icon(IconName::Plus)
               .label("New Flow")
+              .primary()
               .on_click(new_flow),
           )
           .child(

@@ -104,7 +104,7 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
         .ghost()
         .dropdown_menu(move |menu, _, _| {
           menu
-            .item(file_menu_item(workspace.clone(), "New File", false, |workspace, window, cx| {
+            .item(file_menu_item(workspace.clone(), "New Doc", false, |workspace, window, cx| {
               workspace.new_document(window, cx);
             }))
             .item(file_menu_item(workspace.clone(), "New Flow", false, |workspace, window, cx| {
