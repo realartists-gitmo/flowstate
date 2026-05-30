@@ -3,9 +3,9 @@ use std::{
   path::PathBuf,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
-use flowstate::{run_standalone, write_demo_document};
+use flowstate::{docx_conversion::convert_db8_to_docx, run_standalone, write_demo_document};
 
 struct FlowstateAllocator;
 
@@ -37,6 +37,9 @@ static GLOBAL: FlowstateAllocator = FlowstateAllocator;
 #[derive(Parser)]
 #[command(name = "Flowstate", about = "A rich-text editor for debate documents.")]
 struct Cli {
+  #[command(subcommand)]
+  command: Option<CliCommand>,
+
   /// Optional path to the `.db8`, `.docx`, or `.fl0` document to open.
   #[arg(value_name = "PATH")]
   path: Option<PathBuf>,
@@ -47,12 +50,32 @@ struct Cli {
   write_demo_db8: bool,
 }
 
+#[derive(Subcommand)]
+enum CliCommand {
+  /// Convert a DB8 document to DOCX and exit.
+  ExportDocx {
+    /// Input `.db8` document.
+    input: PathBuf,
+    /// Output `.docx` path.
+    output: PathBuf,
+  },
+}
+
 #[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
   let cli = Cli::parse();
 
   if cli.write_demo_db8 {
     write_demo_document().expect("failed to write data/demo.db8");
+    return;
+  }
+
+  if let Some(command) = cli.command {
+    match command {
+      CliCommand::ExportDocx { input, output } => {
+        convert_db8_to_docx(input, output).expect("failed to export DOCX");
+      },
+    }
     return;
   }
 

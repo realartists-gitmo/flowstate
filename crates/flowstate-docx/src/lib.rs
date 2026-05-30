@@ -1,9 +1,11 @@
 mod cleaner;
+mod exporter;
 mod interpreter;
 
 use std::{io, path::Path};
 
 pub use cleaner::{CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, clean_docx_bytes};
+pub use exporter::{convert_db8_to_docx, write_docx};
 pub use interpreter::{
   DocxConversionReport, RecognitionRule, convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_document,
 };

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+docx-rs = "0.4.20"
 flowstate-document = { path = "../flowstate-document" }
 hotpath = "0.16.1"
 rdocx = "0.1.2"
