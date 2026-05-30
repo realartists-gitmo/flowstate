@@ -7,20 +7,21 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, Entity, Hsla, InteractiveElement, IntoElement, MouseButton, PathPromptOptions,
-  Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations,
-  WindowOptions, black, div, prelude::*, px, size,
+  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Hsla, InteractiveElement, IntoElement, KeyBinding,
+  Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
+  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
-use gpui_component::input::{InputEvent, InputState, NumberInput, NumberInputEvent, StepAction};
+use gpui_component::input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction};
 use gpui_component::list::ListItem;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::setting::{SettingGroup, SettingItem, SettingPage, Settings};
+use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
@@ -30,13 +31,14 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_smart_word_selection,
-  save_theme_name,
+  load_autosave, load_document_theme, load_send_custom_directory, load_send_to_document_directory, load_smart_word_selection, load_tub_root,
+  save_autosave, save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
+use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, load_or_create_document, paragraph_byte_range,
+  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, load_or_create_document, paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -99,6 +101,9 @@ pub struct Workspace {
   toolkit_status: SharedString,
   toolkit_search_generation: u64,
   _toolkit_search_subscription: Subscription,
+  zoom_slider: Entity<SliderState>,
+  _zoom_slider_subscription: Subscription,
+  _keybinding_interceptor: Subscription,
 }
 
 #[derive(Clone)]
@@ -225,6 +230,8 @@ include!("render_body.rs");
 include!("render_outline.rs");
 include!("render_documents.rs");
 include!("render_status.rs");
+include!("zoom_status.rs");
+include!("keybindings.rs");
 include!("window.rs");
 include!("outline.rs");
 include!("top_bar.rs");

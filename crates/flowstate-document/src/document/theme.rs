@@ -1,6 +1,7 @@
 
 #[derive(Clone, Debug)]
 pub struct DocumentTheme {
+  pub zoom_factor: f32,
   pub default_font_family: SharedString,
   pub default_text_color: Hsla,
   pub document_background_color: Hsla,
@@ -104,6 +105,7 @@ pub enum ThemeUnderline {
 impl Default for DocumentTheme {
   fn default() -> Self {
     Self {
+      zoom_factor: 1.0,
       default_font_family: "Carlito".into(),
       default_text_color: black(),
       document_background_color: rgb(0xffffff).into(),

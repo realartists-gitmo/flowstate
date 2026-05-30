@@ -10,7 +10,7 @@ use crate::rich_text_element::{
   MoveLineEnd, MoveLineStart, MoveRight, MoveUp, MoveWordLeft, MoveWordRight, PageDown, PageUp, Paste, Redo, Save, SelectAll, SelectDocumentEnd,
   SelectDocumentStart, SelectDown, SelectLeft, SelectLineEnd, SelectLineStart, SelectPageDown, SelectPageUp, SelectRight, SelectUp,
   SelectWordLeft, SelectWordRight, SetHighlightSpoken, SetParagraphAnalytic, SetParagraphBlock, SetParagraphHat, SetParagraphPocket,
-  SetParagraphTag, SetParagraphUndertag, ToggleCite, ToggleEmphasis, ToggleStrikethrough, ToggleUnderline, Undo,
+  SetParagraphTag, SetParagraphUndertag, ToggleCite, ToggleEmphasis, ToggleStrikethrough, ToggleUnderline, Undo, ZoomIn, ZoomOut,
 };
 
 /// A complete keymap that can later be loaded from a structured user file.
@@ -139,6 +139,8 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     CommandId::InsertImage => Box::new(InsertImage),
     CommandId::InsertTable => Box::new(InsertTable),
     CommandId::InsertEquation => Box::new(InsertEquation),
+    CommandId::ZoomIn => Box::new(ZoomIn),
+    CommandId::ZoomOut => Box::new(ZoomOut),
     CommandId::Backspace => Box::new(Backspace),
     CommandId::Delete => Box::new(Delete),
     CommandId::InsertNewline => Box::new(InsertNewline),

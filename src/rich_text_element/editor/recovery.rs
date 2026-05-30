@@ -120,6 +120,12 @@ impl RichTextEditor {
   }
 
   fn refresh_save_status(&mut self) {
+    if self
+      .last_send_db8_generation
+      .is_some_and(|generation| self.saved_generation > generation)
+    {
+      self.last_send_db8_generation = None;
+    }
     self.save_status = if self.has_unsaved_changes() {
       SaveStatus::Dirty
     } else {

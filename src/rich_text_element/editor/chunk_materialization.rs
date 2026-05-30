@@ -137,7 +137,9 @@ impl RichTextEditor {
   }
 
   fn catch_up_chunk_target_lines(&self, remaining: Pixels) -> usize {
-    let line_height = (self.document.theme.body_font_size * self.document.theme.line_spacing * 1.35).max(px(12.0));
+    let line_height =
+      (self.document.theme.body_font_size * self.document.theme.zoom_factor.max(0.01) * self.document.theme.line_spacing * 1.35)
+        .max(px(12.0));
     let approximate_lines = (remaining / line_height).ceil() as usize;
     approximate_lines.clamp(DEFAULT_PARAGRAPH_CHUNK_TARGET_LINES, SCROLL_FOREGROUND_MAX_CHUNK_LINES)
   }

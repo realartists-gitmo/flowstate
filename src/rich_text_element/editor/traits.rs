@@ -93,6 +93,8 @@ impl Render for RichTextEditor {
       .on_action(cx.listener(Self::on_insert_image))
       .on_action(cx.listener(Self::on_insert_table))
       .on_action(cx.listener(Self::on_insert_equation))
+      .on_action(cx.listener(Self::on_zoom_in))
+      .on_action(cx.listener(Self::on_zoom_out))
       .on_action(cx.listener(Self::on_backspace))
       .on_action(cx.listener(Self::on_delete))
       .on_action(cx.listener(Self::on_insert_newline))

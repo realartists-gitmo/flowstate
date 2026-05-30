@@ -1,8 +1,9 @@
 #[hotpath::measure]
 pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> EffectiveParagraphFormat {
   let theme = &document.theme;
+  let zoom = theme.zoom_factor.max(0.01);
   let normal = EffectiveParagraphFormat {
-    font_size: theme.body_font_size,
+    font_size: theme.body_font_size * zoom,
     font_family: theme.default_font_family.clone(),
     bold: theme.normal_bold,
     italic: theme.normal_italic,
@@ -18,7 +19,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
   match style {
     ParagraphStyle::Normal => normal,
     ParagraphStyle::Pocket => EffectiveParagraphFormat {
-      font_size: theme.pocket_font_size,
+      font_size: theme.pocket_font_size * zoom,
       color: theme.pocket_color,
       bold: theme.pocket_bold,
       italic: theme.pocket_italic,
@@ -34,7 +35,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
       ..normal
     },
     ParagraphStyle::Hat => EffectiveParagraphFormat {
-      font_size: theme.hat_font_size,
+      font_size: theme.hat_font_size * zoom,
       color: theme.hat_color,
       bold: theme.hat_bold,
       italic: theme.hat_italic,
@@ -45,7 +46,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
       ..normal
     },
     ParagraphStyle::Block => EffectiveParagraphFormat {
-      font_size: theme.block_font_size,
+      font_size: theme.block_font_size * zoom,
       color: theme.block_color,
       bold: theme.block_bold,
       italic: theme.block_italic,
@@ -56,7 +57,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
       ..normal
     },
     ParagraphStyle::Tag => EffectiveParagraphFormat {
-      font_size: theme.tag_font_size,
+      font_size: theme.tag_font_size * zoom,
       color: theme.tag_color,
       bold: theme.tag_bold,
       italic: theme.tag_italic,
@@ -66,7 +67,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
       ..normal
     },
     ParagraphStyle::Analytic => EffectiveParagraphFormat {
-      font_size: theme.tag_font_size,
+      font_size: theme.tag_font_size * zoom,
       bold: theme.analytic_bold,
       italic: theme.analytic_italic,
       color: theme.analytic_color,
@@ -76,7 +77,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
       ..normal
     },
     ParagraphStyle::Undertag => EffectiveParagraphFormat {
-      font_size: theme.undertag_font_size,
+      font_size: theme.undertag_font_size * zoom,
       font_family: theme.default_font_family.clone(),
       bold: theme.undertag_bold,
       italic: theme.undertag_italic,
@@ -91,6 +92,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
 #[hotpath::measure]
 pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
   let theme = &document.theme;
+  let zoom = theme.zoom_factor.max(0.01);
   let mut format = EffectiveRunFormat {
     font_size: paragraph.font_size,
     font_family: paragraph.font_family.clone(),
@@ -110,14 +112,14 @@ pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphForm
   match styles.semantic {
     RunSemanticStyle::Plain => {},
     RunSemanticStyle::Underline => {
-      format.font_size = theme.body_font_size;
+      format.font_size = theme.body_font_size * zoom;
       format.color = theme.underline_color;
       format.bold = theme.underline_bold;
       format.italic = theme.underline_italic;
       format.underline = theme.underline_underline.into();
     },
     RunSemanticStyle::Cite => {
-      format.font_size = theme.cite_font_size;
+      format.font_size = theme.cite_font_size * zoom;
       format.color = theme.cite_color;
       format.bold = theme.cite_bold;
       format.italic = theme.cite_italic;
@@ -125,7 +127,7 @@ pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphForm
     },
     RunSemanticStyle::Emphasis => {
       format.font_family = theme.default_font_family.clone();
-      format.font_size = theme.cite_font_size;
+      format.font_size = theme.cite_font_size * zoom;
       format.color = theme.emphasis_color;
       format.bold = theme.emphasis_bold;
       format.italic = theme.emphasis_italic;
@@ -133,14 +135,14 @@ pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphForm
       format.border_width = theme.emphasis_border_width;
     },
     RunSemanticStyle::Condensed => {
-      format.font_size = theme.condensed_font_size;
+      format.font_size = theme.condensed_font_size * zoom;
       format.color = theme.condensed_color;
       format.bold = theme.condensed_bold;
       format.italic = theme.condensed_italic;
       format.underline = theme.condensed_underline.into();
     },
     RunSemanticStyle::Ultracondensed => {
-      format.font_size = theme.ultracondensed_font_size;
+      format.font_size = theme.ultracondensed_font_size * zoom;
       format.color = theme.ultracondensed_color;
       format.bold = theme.ultracondensed_bold;
       format.italic = theme.ultracondensed_italic;
@@ -153,4 +155,3 @@ pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphForm
 
   format
 }
-

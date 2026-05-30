@@ -99,6 +99,7 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
 impl From<DocumentThemeSettings> for DocumentTheme {
   fn from(settings: DocumentThemeSettings) -> Self {
     Self {
+      zoom_factor: 1.0,
       default_font_family: settings.default_font_family.into(),
       default_text_color: settings.default_text_color.into(),
       document_background_color: settings.document_background_color.into(),

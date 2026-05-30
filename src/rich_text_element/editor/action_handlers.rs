@@ -147,6 +147,12 @@ impl RichTextEditor {
   fn on_insert_equation(&mut self, _: &InsertEquation, _: &mut Window, cx: &mut Context<Self>) {
     self.insert_equation("x^2 + y^2 = z^2", cx);
   }
+  fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+    self.zoom_in(cx);
+  }
+  fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+    self.zoom_out(cx);
+  }
   fn on_backspace(&mut self, _: &Backspace, _: &mut Window, cx: &mut Context<Self>) {
     self.backspace_command(cx);
   }

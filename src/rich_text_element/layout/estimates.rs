@@ -103,7 +103,7 @@ pub(super) fn estimate_structural_block_item_height(document: &Document, block_i
 
 #[hotpath::measure]
 fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixels) -> Pixels {
-  let line_height = (document.theme.body_font_size * document.theme.line_spacing).max(px(16.0));
+  let line_height = (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * document.theme.line_spacing).max(px(16.0));
   let column_count = table
     .column_widths
     .len()
@@ -146,7 +146,7 @@ fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixe
   }
   let laid_out = layout_table_block_without_text(document, table, width, px(0.0));
   if laid_out.rows.is_empty() {
-    return (document.theme.body_font_size * document.theme.line_spacing).max(px(24.0));
+    return (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * document.theme.line_spacing).max(px(24.0));
   }
   laid_out.bottom - laid_out.top
 }
@@ -200,4 +200,3 @@ fn layout_table_block_without_text(document: &Document, table: &TableBlock, widt
     rows,
   }
 }
-

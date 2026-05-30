@@ -69,6 +69,9 @@ impl DocumentPanel {
   pub fn set_path(&mut self, path: PathBuf, cx: &mut Context<Self>) {
     self.title = title_for_path(Some(&path));
     self.path = Some(path);
+    self.editor.update(cx, |editor, cx| {
+      editor.set_document_display_name(self.title.clone(), cx);
+    });
     cx.notify();
   }
 

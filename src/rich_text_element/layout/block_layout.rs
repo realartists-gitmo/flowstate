@@ -234,8 +234,8 @@ fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) ->
 #[hotpath::measure]
 fn equation_placeholder_height(document: &Document, equation: &EquationBlock) -> Pixels {
   match equation.display {
-    EquationDisplay::Display => (document.theme.body_font_size * 3.7).max(px(72.0)),
-    EquationDisplay::InlineLikeParagraph => (document.theme.body_font_size * 2.75).max(px(56.0)),
+    EquationDisplay::Display => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 3.7).max(px(72.0)),
+    EquationDisplay::InlineLikeParagraph => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 2.75).max(px(56.0)),
   }
 }
 
@@ -282,4 +282,3 @@ pub(super) fn structural_block_height(block: &LaidOutBlock) -> Pixels {
     LaidOutBlock::Table(table) => table.bottom - table.top,
   }
 }
-

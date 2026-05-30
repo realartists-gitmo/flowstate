@@ -62,6 +62,8 @@ pub enum CommandId {
   InsertImage,
   InsertTable,
   InsertEquation,
+  ZoomIn,
+  ZoomOut,
   Backspace,
   Delete,
   InsertNewline,
@@ -93,7 +95,7 @@ impl CommandSpec {
   }
 }
 
-const EDITOR: Option<&str> = Some(RICH_TEXT_CONTEXT);
+const EDITOR: Option<&str> = None;
 const APP: Option<&str> = None;
 
 /// Metadata source for command palette, menus, rebinding UI, toolbar labels,
@@ -162,6 +164,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::InsertImage, "Insert Image", EDITOR, &[]),
   CommandSpec::new(CommandId::InsertTable, "Insert Table", EDITOR, &[]),
   CommandSpec::new(CommandId::InsertEquation, "Insert Equation", EDITOR, &[]),
+  CommandSpec::new(CommandId::ZoomIn, "Zoom In", APP, &["ctrl-+", "ctrl-="]),
+  CommandSpec::new(CommandId::ZoomOut, "Zoom Out", APP, &["ctrl--"]),
   CommandSpec::new(CommandId::Backspace, "Backspace", EDITOR, &["backspace"]),
   CommandSpec::new(CommandId::Delete, "Delete", EDITOR, &["delete"]),
   CommandSpec::new(CommandId::InsertNewline, "Insert Paragraph Break", EDITOR, &["enter"]),

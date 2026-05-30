@@ -1,12 +1,12 @@
 use gpui::{
-    div, prelude::FluentBuilder, App, Context, Corner, Corners, Edges, ElementId,
+    div, prelude::FluentBuilder, App, Context, Corner, Corners, Edges, ElementId, Hsla,
     InteractiveElement as _, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled,
     Window,
 };
 
 use crate::{
     menu::{DropdownMenu, PopupMenu},
-    Disableable, Selectable, Sizable, Size, StyledExt as _,
+    Disableable, Icon, IconName, Selectable, Sizable, Size, StyledExt as _,
 };
 
 use super::{Button, ButtonRounded, ButtonVariant, ButtonVariants};
@@ -28,6 +28,7 @@ pub struct DropdownButton {
     size: Size,
     rounded: ButtonRounded,
     anchor: Corner,
+    dropdown_icon: Option<(IconName, Option<Hsla>)>,
 }
 
 impl DropdownButton {
@@ -47,6 +48,7 @@ impl DropdownButton {
             size: Size::default(),
             rounded: ButtonRounded::default(),
             anchor: Corner::TopRight,
+            dropdown_icon: None,
         }
     }
 
@@ -79,6 +81,12 @@ impl DropdownButton {
     /// Set the rounded style of the button.
     pub fn rounded(mut self, rounded: impl Into<ButtonRounded>) -> Self {
         self.rounded = rounded.into();
+        self
+    }
+
+    /// Replace the dropdown caret with a status icon.
+    pub fn dropdown_icon(mut self, icon: IconName, color: Option<Hsla>) -> Self {
+        self.dropdown_icon = Some((icon, color));
         self
     }
 
@@ -177,8 +185,26 @@ impl RenderOnce for DropdownButton {
                 )
                 .when_some(self.menu, |this, menu| {
                     this.child(
-                        Button::new("popup")
-                            .dropdown_caret(true)
+                        {
+                            let show_default_caret = self.dropdown_icon.is_none();
+                            Button::new("popup")
+                            .when_some(self.dropdown_icon, |this, (icon, color)| {
+                                this.child(
+                                    Icon::new(icon)
+                                        .with_size(match self.size {
+                                            Size::Size(size) => Size::Size(size * 0.75),
+                                            _ => self.size,
+                                        })
+                                        .when_some(color, |this, color| this.text_color(color)),
+                                )
+                            })
+                            .when(show_default_caret, |this| this.dropdown_caret(true))
+                            .when(!show_default_caret, |this| match self.size {
+                                Size::Size(size) => this.size(size),
+                                Size::XSmall => this.size_5(),
+                                Size::Small => this.size_6(),
+                                Size::Medium | Size::Large => this.size_8(),
+                            })
                             .rounded(self.rounded)
                             .border_edges(Edges {
                                 left: rounded,
@@ -198,7 +224,8 @@ impl RenderOnce for DropdownButton {
                             .when(self.outline, |this| this.outline())
                             .with_size(self.size)
                             .with_variant(self.variant)
-                            .dropdown_menu_with_anchor(self.anchor, menu),
+                            .dropdown_menu_with_anchor(self.anchor, menu)
+                        },
                     )
                 })
             })

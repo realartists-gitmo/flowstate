@@ -1,6 +1,39 @@
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let zoom_slider = cx.new(|_| {
+      SliderState::new()
+        .min(25.0)
+        .max(400.0)
+        .step(5.0)
+        .default_value(100.0)
+    });
+    let zoom_slider_subscription = cx.subscribe(&zoom_slider, |workspace, _, event: &SliderEvent, cx| {
+      let SliderEvent::Change(SliderValue::Single(percent)) = event else {
+        return;
+      };
+      if let Some(editor) = workspace.active_editor.clone() {
+        editor.update(cx, |editor, cx| {
+          editor.set_zoom_percent(*percent, cx);
+        });
+      }
+    });
+    let workspace = cx.entity().downgrade();
+    let window_handle = window.window_handle();
+    let keybinding_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+      if window.window_handle() != window_handle {
+        return;
+      }
+      let Some(command) = workspace_command_for_keystroke(&event.keystroke) else {
+        return;
+      };
+      if workspace
+        .update(cx, |workspace, cx| workspace.handle_window_keybinding(command, window, cx))
+        .unwrap_or(false)
+      {
+        cx.stop_propagation();
+      }
+    });
     let toolkit_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tub blocks, tags, and analytics"));
     let _toolkit_search_subscription = cx.subscribe(&toolkit_search_input, |workspace, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
@@ -55,6 +88,9 @@ impl Workspace {
       toolkit_status: "Select a tub to search evidence.".into(),
       toolkit_search_generation: 0,
       _toolkit_search_subscription,
+      zoom_slider,
+      _zoom_slider_subscription: zoom_slider_subscription,
+      _keybinding_interceptor: keybinding_interceptor,
     };
 
     if let Some(root) = load_tub_root() {
@@ -99,6 +135,11 @@ impl Workspace {
           .map(|name| name.to_string_lossy().to_string())
       })
       .or_else(|| Some(self.next_untitled_title(cx)));
+    if let Some(title) = title.clone() {
+      editor.update(cx, |editor, cx| {
+        editor.set_document_display_name(title.into(), cx);
+      });
+    }
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, cx));
     let id = panel.read(cx).id();
     self.editor_subscriptions.push((

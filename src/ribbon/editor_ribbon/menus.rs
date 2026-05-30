@@ -181,6 +181,77 @@ fn modern_condensed_menu(
 }
 
 #[hotpath::measure]
+fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  let send_created = editor.read(cx).send_db8_created_since_last_saved_edit();
+  div()
+    .flex()
+    .flex_col()
+    .flex_none()
+    .gap_0p5()
+    .pl(metrics.group_divider_padding_left)
+    .border_l_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .child(
+      div()
+        .text_size(px(10.0))
+        .font_medium()
+        .text_color(cx.theme().foreground)
+        .child("Export"),
+    )
+    .child(
+      DropdownButton::new("modern-ribbon-send-dropdown")
+        .with_size(Size::Size(chip_height))
+        .compact()
+        .outline()
+        .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
+        .button(
+          Button::new("modern-ribbon-send")
+            .compact()
+            .ghost()
+            .h(chip_height)
+            .px(metrics.chip_padding_x)
+            .tooltip("Send as DB8")
+            .child(
+              div()
+                .flex_none()
+                .text_size(metrics.chip_text_size)
+                .line_height(relative(1.0))
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .child("Send"),
+            )
+            .on_click({
+              let editor = editor.clone();
+              move |_, _, cx| {
+                send_db8_from_ribbon(editor.clone(), cx);
+              }
+            }),
+        )
+        .dropdown_menu(move |menu, _, _| {
+          let editor = editor.clone();
+          menu
+            .min_w(px(120.0))
+            .item(PopupMenuItem::new(".db8").checked(send_created).on_click(move |_, _, cx| {
+              send_db8_from_ribbon(editor.clone(), cx);
+            }))
+        }),
+    )
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn send_db8_from_ribbon(editor: Entity<RichTextEditor>, cx: &mut App) {
+  let task = editor.update(cx, |editor, cx| editor.send_db8(cx));
+  cx.spawn(async move |_| {
+    if let Err(error) = task.await {
+      eprintln!("send export failed: {error}");
+    }
+  })
+  .detach();
+}
+
+#[hotpath::measure]
 fn invisibility_mode_button(
   editor: Entity<RichTextEditor>,
   invisibility_mode: bool,

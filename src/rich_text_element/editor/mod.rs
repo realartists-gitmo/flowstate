@@ -86,6 +86,8 @@ actions!(
     InsertImage,
     InsertTable,
     InsertEquation,
+    ZoomIn,
+    ZoomOut,
     Backspace,
     Delete,
     InsertNewline,
@@ -799,6 +801,7 @@ pub struct RichTextEditor {
   scroll_handle: VirtualListScrollHandle,
   disposed: bool,
   document_path: Option<PathBuf>,
+  document_display_name: Option<SharedString>,
   recovery_path: Option<PathBuf>,
   pub(super) document: Document,
   pub(super) selection: EditorSelection,
@@ -806,6 +809,8 @@ pub struct RichTextEditor {
   edit_generation: u64,
   saved_generation: u64,
   next_edit_generation: u64,
+  last_send_db8_generation: Option<u64>,
+  zoom_percent: f32,
   save_status: SaveStatus,
   undo_stack: Vec<EditRecord>,
   redo_stack: Vec<EditRecord>,
@@ -883,12 +888,15 @@ pub struct RichTextEditor {
 include!("lifecycle.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
+include!("send_export.rs");
+include!("zoom.rs");
 include!("commands.rs");
 include!("paste.rs");
 include!("tables.rs");
 include!("media.rs");
 include!("table_equation_editing.rs");
 include!("formatting.rs");
+include!("shrink_card.rs");
 include!("action_handlers.rs");
 include!("edit_pipeline.rs");
 include!("scroll_anchor.rs");

@@ -136,4 +136,3 @@ impl EditorRibbon {
       || matches!(state.highlight, SelectionState::Uniform(Some(current)) if current == style)
   }
 }
-

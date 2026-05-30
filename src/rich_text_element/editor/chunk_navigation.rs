@@ -75,9 +75,13 @@ impl RichTextEditor {
   fn paragraph_remainder_estimate(&mut self, paragraph_ix: usize, width: Pixels) -> Pixels {
     let (estimated_total, text_len) = self
       .paragraph_estimated_total_height(paragraph_ix, width)
-      .unwrap_or((self.document.theme.body_font_size * self.document.theme.line_spacing, 0));
+      .unwrap_or((
+        self.document.theme.body_font_size * self.document.theme.zoom_factor.max(0.01) * self.document.theme.line_spacing,
+        0,
+      ));
     let exact_height = self.valid_chunk_cache_entry(paragraph_ix, width).map_or(px(0.0), |entry| entry.exact_height);
-    let remaining = (estimated_total - exact_height).max(self.document.theme.body_font_size * self.document.theme.line_spacing);
+    let remaining = (estimated_total - exact_height)
+      .max(self.document.theme.body_font_size * self.document.theme.zoom_factor.max(0.01) * self.document.theme.line_spacing);
     if text_len > 16 * 1024 || estimated_total > self.scroll_handle.bounds().size.height.max(px(700.0)) * 1.5 {
       remaining.max(self.scroll_handle.bounds().size.height.max(px(700.0)) + px(1024.0))
     } else {

@@ -137,6 +137,14 @@ impl RichTextEditor {
   /// disarm it and undo the pending caret style. With selected text this keeps
   /// the existing document-style toggle behavior.
   pub fn toggle_inline_tool(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) {
+    if let ArmedInlineTool::Semantic(semantic @ (RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed)) = tool
+      && self.selection.is_caret()
+      && self.table_cell_selection_range().is_none()
+    {
+      self.apply_semantic_style_to_card_span(semantic, cx);
+      return;
+    }
+
     if self.selection.is_caret() && self.armed_inline_tool == Some(tool) {
       self.armed_inline_tool = None;
       self.apply_inline_tool_to_pending_styles(tool);

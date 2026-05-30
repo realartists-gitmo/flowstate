@@ -480,6 +480,157 @@ fn update_autosave(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: boo
 }
 
 #[hotpath::measure]
+fn send_to_document_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, _, _| {
+    let custom_enabled = !active_send_to_document_directory();
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_4()
+      .child(
+        div()
+          .flex_1()
+          .min_w_0()
+          .child(div().text_sm().child("Custom send doc directory")),
+      )
+      .child(
+        Checkbox::new("workspace-send-to-document-directory")
+          .small()
+          .checked(custom_enabled)
+          .on_click({
+            let workspace = workspace.clone();
+            move |checked, _, cx| {
+              update_send_to_document_directory(cx, &workspace, !*checked);
+            }
+          }),
+      )
+      .into_any_element()
+  })
+}
+
+#[hotpath::measure]
+fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
+  SettingItem::render(move |_, window, cx| {
+    if active_send_to_document_directory() {
+      return div().into_any_element();
+    }
+    let current = load_send_custom_directory()
+      .map(|path| path.to_string_lossy().to_string())
+      .unwrap_or_default();
+    let state = window.use_keyed_state("workspace-send-custom-directory", cx, {
+      let current = current.clone();
+      move |window, cx| {
+        let initial_value = current.clone();
+        let input = cx.new(|cx| {
+          InputState::new(window, cx)
+            .default_value(initial_value)
+            .placeholder("Custom output directory")
+        });
+        let _subscription = cx.subscribe_in(&input, window, move |state: &mut SendDirectoryInputState, input, event: &InputEvent, _, cx| {
+          if let InputEvent::Change = event {
+            let value = input.read(cx).value().trim().to_string();
+            state.current_value = value.clone();
+            let path = (!value.is_empty()).then(|| PathBuf::from(value));
+            cx.background_executor()
+              .spawn(async move {
+                if let Err(error) = save_send_custom_directory(path) {
+                  eprintln!("failed to save send directory setting: {error}");
+                }
+              })
+              .detach();
+          }
+        });
+        SendDirectoryInputState {
+          input,
+          current_value: current,
+          _subscription,
+        }
+      }
+    });
+    let input = state.read(cx).input.clone();
+    let current_value = state.read(cx).current_value.clone();
+    if input.read(cx).value() != current_value.as_str() {
+      input.update(cx, |input, cx| {
+        input.set_value(SharedString::from(current_value), window, cx);
+      });
+    }
+
+    h_flex()
+      .w_full()
+      .items_center()
+      .justify_between()
+      .gap_3()
+      .child(div().w_40().text_sm().child("Send directory"))
+      .child(div().flex_1().min_w(px(220.0)).child(Input::new(&input).w_full()))
+      .child(
+        Button::new("workspace-send-directory-browse")
+          .label("Browse")
+          .small()
+          .outline()
+          .on_click({
+            let state = state.clone();
+            let workspace = workspace.clone();
+            move |_, _, cx| {
+              let paths = cx.prompt_for_paths(PathPromptOptions {
+                files: false,
+                directories: true,
+                multiple: false,
+                prompt: Some("Choose send directory".into()),
+              });
+              cx.spawn({
+                let state = state.clone();
+                let workspace = workspace.clone();
+                async move |cx| {
+                  let Ok(Ok(Some(paths))) = paths.await else {
+                    return;
+                  };
+                  let Some(path) = paths.into_iter().next() else {
+                    return;
+                  };
+                  let value = path.to_string_lossy().to_string();
+                  if let Err(error) = save_send_custom_directory(Some(path)) {
+                    eprintln!("failed to save send directory setting: {error}");
+                  }
+                  let _ = state.update(cx, |state, cx| {
+                    state.current_value = value;
+                    cx.notify();
+                  });
+                  let _ = workspace.update(cx, |_, cx| cx.notify());
+                }
+              })
+              .detach();
+            }
+          }),
+      )
+      .into_any_element()
+  })
+}
+
+struct SendDirectoryInputState {
+  input: Entity<InputState>,
+  current_value: String,
+  _subscription: Subscription,
+}
+
+#[hotpath::measure]
+fn active_send_to_document_directory() -> bool {
+  load_send_to_document_directory()
+}
+
+fn update_send_to_document_directory(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: bool) {
+  cx.background_executor()
+    .spawn(async move {
+      if let Err(error) = save_send_to_document_directory(enabled) {
+        eprintln!("failed to save send directory mode setting: {error}");
+      }
+    })
+    .detach();
+
+  let _ = workspace.update(cx, |_, cx| cx.notify());
+}
+
+#[hotpath::measure]
 fn pixels_to_pt(value: Pixels) -> f64 {
   value.as_f64() * 72.0 / 96.0
 }

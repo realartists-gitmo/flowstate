@@ -132,7 +132,11 @@ impl Workspace {
       )
   }
 
-  fn render_status_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    if let Some(percent) = zoom {
+      self.sync_zoom_slider(percent, window, cx);
+    }
     h_flex()
       .h(px(26.0))
       .w_full()
@@ -141,11 +145,8 @@ impl Workspace {
       .border_t(APP_CHROME_BORDER_WIDTH)
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
-      .child(
-        div()
-          .text_xs()
-          .text_color(cx.theme().muted_foreground)
-          .child("Bottom bar placeholder"),
-      )
+      .child(div().flex_1())
+      .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
+      .child(div().flex_1())
   }
 }
