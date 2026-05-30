@@ -185,6 +185,32 @@ impl Workspace {
             ))
             .item(style_face_item(
               workspace.clone(),
+              "Condensed",
+              |theme| (theme.condensed_bold, theme.condensed_italic, theme.condensed_underline),
+              |theme, bold, italic, underline| {
+                theme.condensed_bold = bold;
+                theme.condensed_italic = italic;
+                theme.condensed_underline = underline;
+              },
+            ))
+            .item(style_face_item(
+              workspace.clone(),
+              "Ultra Condensed",
+              |theme| {
+                (
+                  theme.ultracondensed_bold,
+                  theme.ultracondensed_italic,
+                  theme.ultracondensed_underline,
+                )
+              },
+              |theme, bold, italic, underline| {
+                theme.ultracondensed_bold = bold;
+                theme.ultracondensed_italic = italic;
+                theme.ultracondensed_underline = underline;
+              },
+            ))
+            .item(style_face_item(
+              workspace.clone(),
               "Emphasis",
               |theme| (theme.emphasis_bold, theme.emphasis_italic, theme.emphasis_underline),
               |theme, bold, italic, underline| {
@@ -264,6 +290,18 @@ impl Workspace {
               "Cite",
               |theme| theme.cite_color,
               |theme, value| theme.cite_color = value,
+            ))
+            .item(style_color_item(
+              workspace.clone(),
+              "Condensed",
+              |theme| theme.condensed_color,
+              |theme, value| theme.condensed_color = value,
+            ))
+            .item(style_color_item(
+              workspace.clone(),
+              "Ultra Condensed",
+              |theme| theme.ultracondensed_color,
+              |theme, value| theme.ultracondensed_color = value,
             ))
             .item(style_color_item(
               workspace.clone(),
@@ -376,6 +414,24 @@ impl Workspace {
               0.25,
               |theme| pixels_to_pt(theme.cite_font_size),
               |theme, value| theme.cite_font_size = pt_to_pixels(value),
+            ))
+            .item(style_number_item(
+              workspace.clone(),
+              "Condensed (pt)",
+              1.0,
+              200.0,
+              0.25,
+              |theme| pixels_to_pt(theme.condensed_font_size),
+              |theme, value| theme.condensed_font_size = pt_to_pixels(value),
+            ))
+            .item(style_number_item(
+              workspace.clone(),
+              "Ultra Condensed (pt)",
+              1.0,
+              200.0,
+              0.25,
+              |theme| pixels_to_pt(theme.ultracondensed_font_size),
+              |theme, value| theme.ultracondensed_font_size = pt_to_pixels(value),
             ))
             .item(style_number_item(
               workspace.clone(),
