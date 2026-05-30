@@ -5,7 +5,7 @@ impl Workspace {
       SliderState::new()
         .min(25.0)
         .max(400.0)
-        .step(1.0)
+        .step(5.0)
         .default_value(100.0)
     });
     let zoom_slider_subscription = cx.subscribe(&zoom_slider, |workspace, _, event: &SliderEvent, cx| {
@@ -16,6 +16,22 @@ impl Workspace {
         editor.update(cx, |editor, cx| {
           editor.set_zoom_percent(*percent, cx);
         });
+      }
+    });
+    let workspace = cx.entity().downgrade();
+    let window_handle = window.window_handle();
+    let keybinding_interceptor = cx.intercept_keystrokes(move |event, window, cx| {
+      if window.window_handle() != window_handle {
+        return;
+      }
+      let Some(command) = workspace_command_for_keystroke(&event.keystroke) else {
+        return;
+      };
+      if workspace
+        .update(cx, |workspace, cx| workspace.handle_window_keybinding(command, window, cx))
+        .unwrap_or(false)
+      {
+        cx.stop_propagation();
       }
     });
     let this = Self {
@@ -48,6 +64,7 @@ impl Workspace {
       file_search_overlay: None,
       zoom_slider,
       _zoom_slider_subscription: zoom_slider_subscription,
+      _keybinding_interceptor: keybinding_interceptor,
     };
 
     if let Some(path) = initial_path {

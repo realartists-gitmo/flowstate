@@ -1,5 +1,17 @@
 #[hotpath::measure_all]
 impl Workspace {
+  fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
+    if let Some(editor) = self.active_editor.clone() {
+      editor.update(cx, |editor, cx| editor.zoom_in(cx));
+    }
+  }
+
+  fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
+    if let Some(editor) = self.active_editor.clone() {
+      editor.update(cx, |editor, cx| editor.zoom_out(cx));
+    }
+  }
+
   fn sync_zoom_slider(&mut self, percent: f32, window: &mut Window, cx: &mut Context<Self>) {
     let current = match self.zoom_slider.read(cx).value() {
       SliderValue::Single(value) => value,

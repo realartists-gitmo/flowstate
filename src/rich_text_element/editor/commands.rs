@@ -1,5 +1,84 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
+  pub fn dispatch_window_command(&mut self, command: crate::commands::CommandId, window: &mut Window, cx: &mut Context<Self>) {
+    match command {
+      crate::commands::CommandId::MoveLeft => self.move_left(window, cx),
+      crate::commands::CommandId::MoveRight => self.move_right(window, cx),
+      crate::commands::CommandId::MoveUp => self.move_up(window, cx),
+      crate::commands::CommandId::MoveDown => self.move_down(window, cx),
+      crate::commands::CommandId::MoveLineStart => self.move_line_start(cx),
+      crate::commands::CommandId::MoveLineEnd => self.move_line_end(cx),
+      crate::commands::CommandId::SelectLeft => self.select_left(window, cx),
+      crate::commands::CommandId::SelectRight => self.select_right(window, cx),
+      crate::commands::CommandId::SelectUp => self.select_up(window, cx),
+      crate::commands::CommandId::SelectDown => self.select_down(window, cx),
+      crate::commands::CommandId::SelectLineStart => self.select_line_start(cx),
+      crate::commands::CommandId::SelectLineEnd => self.select_line_end(cx),
+      crate::commands::CommandId::SelectAll => self.select_all(cx),
+      crate::commands::CommandId::MoveWordLeft => self.move_word_left(cx),
+      crate::commands::CommandId::MoveWordRight => self.move_word_right(cx),
+      crate::commands::CommandId::SelectWordLeft => self.select_word_left(cx),
+      crate::commands::CommandId::SelectWordRight => self.select_word_right(cx),
+      crate::commands::CommandId::DeleteWordBackward => self.delete_word_backward_command(cx),
+      crate::commands::CommandId::DeleteWordForward => self.delete_word_forward_command(cx),
+      crate::commands::CommandId::PageUp => self.page_up(cx),
+      crate::commands::CommandId::PageDown => self.page_down(cx),
+      crate::commands::CommandId::SelectPageUp => self.select_page_up(cx),
+      crate::commands::CommandId::SelectPageDown => self.select_page_down(cx),
+      crate::commands::CommandId::MoveDocumentStart => self.move_document_start(cx),
+      crate::commands::CommandId::MoveDocumentEnd => self.move_document_end(cx),
+      crate::commands::CommandId::SelectDocumentStart => self.select_document_start(cx),
+      crate::commands::CommandId::SelectDocumentEnd => self.select_document_end(cx),
+      crate::commands::CommandId::Copy => self.copy(cx),
+      crate::commands::CommandId::Cut => self.cut(cx),
+      crate::commands::CommandId::Paste => self.paste(cx),
+      crate::commands::CommandId::Undo => self.undo(cx),
+      crate::commands::CommandId::Redo => self.redo(cx),
+      crate::commands::CommandId::SetParagraphPocket => self.set_paragraph_style_for_selection(ParagraphStyle::Pocket, cx),
+      crate::commands::CommandId::SetParagraphHat => self.set_paragraph_style_for_selection(ParagraphStyle::Hat, cx),
+      crate::commands::CommandId::SetParagraphBlock => self.set_paragraph_style_for_selection(ParagraphStyle::Block, cx),
+      crate::commands::CommandId::SetParagraphTag => self.set_paragraph_style_for_selection(ParagraphStyle::Tag, cx),
+      crate::commands::CommandId::SetParagraphAnalytic => self.set_paragraph_style_for_selection(ParagraphStyle::Analytic, cx),
+      crate::commands::CommandId::SetParagraphUndertag => self.set_paragraph_style_for_selection(ParagraphStyle::Undertag, cx),
+      crate::commands::CommandId::ToggleCite => self.toggle_cite(cx),
+      crate::commands::CommandId::ToggleUnderline => self.toggle_underline(cx),
+      crate::commands::CommandId::ToggleStrikethrough => self.toggle_strikethrough(cx),
+      crate::commands::CommandId::ToggleEmphasis => self.toggle_emphasis(cx),
+      crate::commands::CommandId::SetHighlightSpoken => self.set_highlight(HighlightStyle::Spoken, cx),
+      crate::commands::CommandId::ApplyHighlightToSelection => self.apply_current_highlight_to_selection(cx),
+      crate::commands::CommandId::ClearFormatting => self.clear_formatting(cx),
+      crate::commands::CommandId::ClearHighlight => self.clear_highlight(cx),
+      crate::commands::CommandId::InsertImage => self.prompt_insert_image(cx),
+      crate::commands::CommandId::InsertTable => self.insert_default_table(2, 2, cx),
+      crate::commands::CommandId::InsertEquation => self.insert_equation("x^2 + y^2 = z^2", cx),
+      crate::commands::CommandId::ZoomIn => self.zoom_in(cx),
+      crate::commands::CommandId::ZoomOut => self.zoom_out(cx),
+      crate::commands::CommandId::Backspace => self.backspace_command(cx),
+      crate::commands::CommandId::Delete => self.delete_forward_command(cx),
+      crate::commands::CommandId::InsertNewline => {
+        if !self.split_selected_table_cell_paragraph(cx) {
+          self.insert_paragraph_break_command(cx);
+        }
+      },
+      crate::commands::CommandId::InsertSoftLineBreak => {
+        if self.insert_text_into_selected_table_cell(SOFT_LINE_BREAK_STR, cx) {
+          return;
+        }
+        if self.insert_text_into_selected_equation(SOFT_LINE_BREAK_STR, cx) {
+          return;
+        }
+        self.insert_text_command(SOFT_LINE_BREAK_STR, cx);
+      },
+      crate::commands::CommandId::Save
+      | crate::commands::CommandId::NewDocument
+      | crate::commands::CommandId::OpenDocument
+      | crate::commands::CommandId::OpenDemoDocument
+      | crate::commands::CommandId::CloseDocument
+      | crate::commands::CommandId::ToggleRibbon
+      | crate::commands::CommandId::ScrollToParagraph => {},
+    }
+  }
+
   pub fn scroll_to_paragraph(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     if paragraph_ix < self.document.paragraphs.len() {
       // Outline navigation should place the insertion caret at the start of
