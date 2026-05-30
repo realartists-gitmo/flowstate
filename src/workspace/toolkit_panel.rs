@@ -755,7 +755,7 @@ impl Workspace {
           )
           .child(
             Button::new("left-nav-swap-mode")
-              .child(Icon::default().path(swap_icon_path).xsmall().text_color(cx.theme().sidebar_primary))
+              .icon(Icon::default().path(swap_icon_path).xsmall().text_color(cx.theme().sidebar_primary))
               .xsmall()
               .ghost()
               .tooltip(swap_tooltip)
