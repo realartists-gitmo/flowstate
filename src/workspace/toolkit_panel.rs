@@ -209,7 +209,7 @@ impl Workspace {
             workspace
               .tub_tree
               .update(cx, |tree, cx| tree.set_items(tree_items, cx));
-            workspace.tub_status = format!("{file_count} tub files indexed").into();
+            workspace.tub_status = "Tub indexed".into();
             workspace.toolkit_status = if workspace.toolkit_search_input.read(cx).value().trim().is_empty() {
               "Search DB8 blocks, tags, and analytics.".into()
             } else {
@@ -380,8 +380,6 @@ impl Workspace {
 
   fn render_toolkit_expanded(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let open_file_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
-    let choose_tub = cx.listener(|workspace, _, window, cx| workspace.prompt_select_tub(window, cx));
-    let refresh_tub = cx.listener(|workspace, _, _, cx| workspace.refresh_tub(cx));
     let result_list = if self.toolkit_hits.is_empty() {
       div()
         .h(px(120.0))
@@ -436,38 +434,17 @@ impl Workspace {
                   .text_color(cx.theme().foreground)
                   .child("Toolkit"),
               ),
-          )
-          .child(
-            h_flex()
-              .items_center()
-              .gap_1()
-              .child(
-                Button::new("toolkit-pick-tub")
-                  .label("Tub")
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Choose tub folder")
-                  .on_click(choose_tub),
-              )
-              .child(
-                Button::new("toolkit-refresh-tub")
-                  .label("Refresh")
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Refresh tub index")
-                  .on_click(refresh_tub),
-              )
-              .child(
-                Button::new("collapse-toolkit-panel")
-                  .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().muted_foreground))
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Collapse toolkit")
-                  .on_click(cx.listener(|workspace, _, _, cx| {
-                    workspace.toggle_toolkit(cx);
-                  })),
-              ),
-          ),
+        )
+        .child(
+          Button::new("collapse-toolkit-panel")
+            .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().muted_foreground))
+            .xsmall()
+            .ghost()
+            .tooltip("Collapse toolkit")
+            .on_click(cx.listener(|workspace, _, _, cx| {
+              workspace.toggle_toolkit(cx);
+            })),
+        ),
       )
       .child(
         v_flex()
@@ -660,14 +637,7 @@ impl Workspace {
   }
 
   pub(super) fn render_tub_nav(&self, nav_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
-    let choose_tub = cx.listener(|workspace, _, window, cx| workspace.prompt_select_tub(window, cx));
-    let refresh_tub = cx.listener(|workspace, _, _, cx| workspace.refresh_tub(cx));
-    let indexed_file_count = self.tub_files.len();
-    let tub_status = if indexed_file_count == 0 {
-      self.tub_status.clone()
-    } else {
-      format!("{} total files", indexed_file_count).into()
-    };
+    let tub_status = self.tub_status.clone();
     let tree_list = if self.tub_tree_entries.is_empty() {
       div()
         .h(px(120.0))
@@ -752,31 +722,6 @@ impl Workspace {
       .text_color(cx.theme().sidebar_foreground)
       .child(self.render_left_nav_header("Tub", cx))
       .child(
-        h_flex()
-          .w_full()
-          .gap_1()
-          .child(
-            Button::new("tub-pick-root")
-              .label("Choose")
-              .xsmall()
-              .on_click(choose_tub),
-          )
-          .child(
-            Button::new("tub-refresh")
-              .label("Refresh")
-              .xsmall()
-              .ghost()
-              .on_click(refresh_tub),
-          ),
-      )
-      .child(
-        div()
-          .text_xs()
-          .text_color(cx.theme().muted_foreground)
-          .truncate()
-          .child(tub_status),
-      )
-      .child(
         div()
           .flex_1()
           .w_full()
@@ -788,38 +733,15 @@ impl Workspace {
   }
 
   pub(super) fn render_left_nav_header(&self, title: &'static str, cx: &mut Context<Self>) -> impl IntoElement {
+    let (swap_icon_path, swap_tooltip, swap_mode) = match self.left_nav_mode {
+      LeftNavMode::Outline => ("icons/archive.svg", "Swap to tub", LeftNavMode::Tub),
+      LeftNavMode::Tub => ("icons/table-of-contents.svg", "Swap to outline", LeftNavMode::Outline),
+    };
     h_flex()
       .w_full()
       .items_center()
       .justify_between()
       .gap_2()
-      .child(
-        h_flex()
-          .items_center()
-          .gap_1()
-          .child(
-            Button::new("left-nav-outline-mode")
-              .label("Outline")
-              .xsmall()
-              .ghost()
-              .selected(self.left_nav_mode == LeftNavMode::Outline)
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.left_nav_mode = LeftNavMode::Outline;
-                cx.notify();
-              })),
-          )
-          .child(
-            Button::new("left-nav-tub-mode")
-              .label("Tub")
-              .xsmall()
-              .ghost()
-              .selected(self.left_nav_mode == LeftNavMode::Tub)
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.left_nav_mode = LeftNavMode::Tub;
-                cx.notify();
-              })),
-          ),
-      )
       .child(
         h_flex()
           .items_center()
@@ -832,15 +754,26 @@ impl Workspace {
               .child(title),
           )
           .child(
-            Button::new("collapse-left-panel")
-              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
+            Button::new("left-nav-swap-mode")
+              .child(Icon::default().path(swap_icon_path).xsmall().text_color(cx.theme().sidebar_primary))
               .xsmall()
               .ghost()
-              .tooltip("Collapse left panel")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_outline(cx);
+              .tooltip(swap_tooltip)
+              .on_click(cx.listener(move |workspace, _, _, cx| {
+                workspace.left_nav_mode = swap_mode;
+                cx.notify();
               })),
           ),
+      )
+      .child(
+        Button::new("collapse-left-panel")
+          .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
+          .xsmall()
+          .ghost()
+          .tooltip("Collapse left panel")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_outline(cx);
+          })),
       )
   }
 
