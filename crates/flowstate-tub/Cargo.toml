@@ -1,17 +1,17 @@
 [package]
 name = "flowstate-tub"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-anyhow = "1.0.102"
-flowstate-document = { version = "0.1.0", path = "../flowstate-document" }
-ignore = "0.4.25"
-notify = "8.2.0"
-rusqlite = { version = "0.40.0", features = ["bundled"] }
-serde = { version = "1.0.228", features = ["derive"] }
-tantivy = "0.26.1"
+anyhow = { workspace = true }
+flowstate-document = { workspace = true }
+ignore = { workspace = true }
+notify = { workspace = true }
+rusqlite = { workspace = true }
+serde = { workspace = true }
+tantivy = { workspace = true }

@@ -1,29 +1,29 @@
 [package]
 name = "flowstate-docx"
-version = "0.1.0"
-edition = "2024"
-publish = false
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 
 [lints]
 workspace = true
 
 [dependencies]
-docx-rs = "0.4.20"
-docxide-pdf = { version = "0.14.0", default-features = false, git = "https://github.com/realartists-gitmo/docxide-pdf" }
-flowstate-document = { path = "../flowstate-document" }
+docx-rs = { workspace = true }
+docxide-pdf = { workspace = true }
+flowstate-document = { workspace = true }
 gpui = { version = "0.2.2", default-features = false }
-hotpath = "0.16.1"
-lopdf = "0.40.0"
-quick-xml = "0.36.2"
-rdocx = "0.1.2"
-rdocx-opc = "0.1.2"
-rdocx-oxml = "0.1.2"
-rustc-hash = "2.1.2"
-zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
-zstd = "0.13.3"
+hotpath = { workspace = true }
+lopdf = { workspace = true }
+quick-xml = { workspace = true }
+rdocx = { workspace = true }
+rdocx-opc = { workspace = true }
+rdocx-oxml = { workspace = true }
+rustc-hash = { workspace = true }
+zip = { workspace = true }
+zstd = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-hotpath-cpu-support = { package = "hotpath", version = "0.16.1", features = ["hotpath-cpu"], optional = true }
+hotpath-cpu-support = { workspace = true, optional = true }
 
 [features]
 hotpath = ["hotpath/hotpath", "flowstate-document/hotpath"]
