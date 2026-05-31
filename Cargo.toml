@@ -203,6 +203,9 @@ struct_excessive_bools = "allow"
 struct_field_names = "allow"
 string_add = "deny"
 string_lit_chars_any = "deny"
+# Modules are assembled via `include!()` concatenation (see edit_ops/persistence),
+# so a file's `#[cfg(test)]` module is necessarily followed by later includes.
+items_after_test_module = "allow"
 tests_outside_test_module = "deny"
 # Serde callback signatures require references even for tiny copy types.
 trivially_copy_pass_by_ref = "allow"

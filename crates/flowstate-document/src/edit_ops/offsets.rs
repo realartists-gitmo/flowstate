@@ -102,6 +102,7 @@ pub fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
 #[cfg(test)]
 mod offsets_tests {
   use super::*;
+  use crate::{DocumentTheme, document_from_input};
 
   #[test]
   fn insert_text_refreshes_following_paragraph_ranges_and_blocks() {

@@ -456,7 +456,7 @@ mod tests {
 
     assert_eq!(stats.underline_values_normalized, 2);
     assert!(normalized.contains(r#"<w:u w:val="single"/>"#));
-    assert!(normalized.contains(r#"<w:u w:val='single'/>"#));
+    assert!(normalized.contains(r"<w:u w:val='single'/>"));
     assert!(normalized.contains(r#"<w:u w:val="none"/>"#));
   }
 
