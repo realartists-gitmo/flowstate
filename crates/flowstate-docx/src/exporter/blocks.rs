@@ -17,8 +17,8 @@ pub(super) fn add_block(docx: Docx, document: &Document, block: &Block, theme: &
   match block {
     Block::Paragraph(paragraph) => docx.add_paragraph(export_document_paragraph(document, paragraph, theme)),
     Block::Table(table) => docx.add_table(export_table(table, theme)),
-    Block::Image(image) => docx.add_paragraph(placeholder_paragraph_for_image(document, image)),
-    Block::Equation(equation) => docx.add_paragraph(placeholder_paragraph_for_equation(equation)),
+    Block::Image(image) => docx.add_paragraph(placeholder_paragraph_for_image(document, image, theme)),
+    Block::Equation(equation) => docx.add_paragraph(placeholder_paragraph_for_equation(equation, theme)),
   }
 }
 
@@ -158,7 +158,7 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme) -> DocxTable {
 }
 
 #[hotpath::measure]
-fn placeholder_paragraph_for_image(document: &Document, image: &ImageBlock) -> DocxParagraph {
+fn placeholder_paragraph_for_image(document: &Document, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
   let mut text = image.alt_text.to_string();
   if text.trim().is_empty()
     && let Some(asset) = document.assets.assets.get(&image.asset_id)
@@ -169,12 +169,12 @@ fn placeholder_paragraph_for_image(document: &Document, image: &ImageBlock) -> D
   if text.trim().is_empty() {
     text = "Image".to_string();
   }
-  DocxParagraph::new().add_run(Run::new().italic().add_text(format!("[{text}]")))
+  DocxParagraph::new().add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(format!("[{text}]")))
 }
 
 #[hotpath::measure]
-fn placeholder_paragraph_for_equation(equation: &EquationBlock) -> DocxParagraph {
+fn placeholder_paragraph_for_equation(equation: &EquationBlock, theme: &DocumentTheme) -> DocxParagraph {
   DocxParagraph::new()
     .align(AlignmentType::Center)
-    .add_run(Run::new().italic().add_text(format!("[Equation: {}]", equation.source)))
+    .add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(format!("[Equation: {}]", equation.source)))
 }

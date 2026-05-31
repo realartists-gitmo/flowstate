@@ -1775,6 +1775,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "docxide-pdf"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31638a7bbfd1de5664f453b45cdf281b3675ad08c02c700ef11b7635e001e413"
+dependencies = [
+ "image",
+ "log",
+ "memmap2",
+ "miniz_oxide",
+ "pdf-writer",
+ "png 0.18.1",
+ "roxmltree 0.21.1",
+ "subsetter",
+ "ttf-parser 0.25.1",
+ "unicode-linebreak",
+ "zip 8.6.0",
+]
+
+[[package]]
 name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2239,6 +2258,7 @@ name = "flowstate-docx"
 version = "0.1.0"
 dependencies = [
  "docx-rs",
+ "docxide-pdf",
  "flowstate-document",
  "gpui",
  "hotpath",
@@ -2319,7 +2339,7 @@ version = "0.5.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbc773e24e02d4ddd8395fd30dc147524273a83e54e0f312d986ea30de5f5646"
 dependencies = [
- "roxmltree",
+ "roxmltree 0.20.0",
 ]
 
 [[package]]
@@ -6018,6 +6038,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6c20b6793b5c2fa6553b250154b78d6d0db37e72700ae35fad9387a46f487c97"
 
 [[package]]
+name = "roxmltree"
+version = "0.21.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f1964b10c76125c36f8afe190065a4bf9a87bf324842c05701330bba9f1cacbb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "rust-embed"
 version = "8.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8058,7 +8087,7 @@ dependencies = [
  "kurbo 0.11.3",
  "log",
  "pico-args",
- "roxmltree",
+ "roxmltree 0.20.0",
  "rustybuzz 0.20.1",
  "simplecss",
  "siphasher",

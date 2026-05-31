@@ -1,6 +1,7 @@
 mod cleaner;
 mod exporter;
 mod interpreter;
+mod pdf;
 
 use std::{io, path::Path};
 
@@ -9,6 +10,7 @@ pub use exporter::{convert_db8_to_docx, write_docx};
 pub use interpreter::{
   DocxConversionReport, RecognitionRule, convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_document,
 };
+pub use pdf::convert_docx_to_pdf;
 
 use flowstate_document::write_db8;
 

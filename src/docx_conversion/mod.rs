@@ -2,7 +2,8 @@ use std::{io, path::Path};
 
 pub use flowstate_docx::{
   CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, DocxConversionReport, RecognitionRule, clean_docx_bytes,
-  convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_db8, convert_docx_to_document, write_docx,
+  convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_db8, convert_docx_to_document, convert_docx_to_pdf,
+  write_docx,
 };
 
 use crate::app_settings::load_document_theme;

@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 docx-rs = "0.4.20"
+docxide-pdf = { version = "0.14.0", default-features = false }
 flowstate-document = { path = "../flowstate-document" }
 gpui = { version = "0.2.2", default-features = false }
 hotpath = "0.16.1"

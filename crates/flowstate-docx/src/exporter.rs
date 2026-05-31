@@ -11,7 +11,7 @@ use std::{
 use docx_rs::Docx;
 use flowstate_document::Document;
 
-use self::{blocks::add_block, package::write_recompressed_docx, styles::add_flowstate_styles};
+use self::{blocks::add_block, formatting::docx_fonts, package::write_recompressed_docx, styles::add_flowstate_styles};
 
 #[hotpath::measure]
 pub fn write_docx(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
@@ -19,7 +19,7 @@ pub fn write_docx(path: impl AsRef<Path>, document: &Document) -> io::Result<()>
   if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
     std::fs::create_dir_all(parent)?;
   }
-  let mut docx = add_flowstate_styles(Docx::new(), &document.theme);
+  let mut docx = add_flowstate_styles(Docx::new().default_fonts(docx_fonts(&document.theme)), &document.theme);
   for block in document.blocks.iter() {
     docx = add_block(docx, document, block, &document.theme);
   }

@@ -5,7 +5,10 @@ use std::{
 
 use clap::{Parser, Subcommand};
 
-use flowstate::{docx_conversion::convert_db8_to_docx, run_standalone, write_demo_document};
+use flowstate::{
+  docx_conversion::{convert_db8_to_docx, convert_docx_to_pdf},
+  run_standalone, write_demo_document,
+};
 
 struct FlowstateAllocator;
 
@@ -59,6 +62,13 @@ enum CliCommand {
     /// Output `.docx` path.
     output: PathBuf,
   },
+  /// Convert a DOCX document to PDF and exit.
+  DocxToPdf {
+    /// Input `.docx` document.
+    input: PathBuf,
+    /// Output `.pdf` path.
+    output: PathBuf,
+  },
 }
 
 #[hotpath::main(allocator = FlowstateAllocator)]
@@ -74,6 +84,9 @@ fn main() {
     match command {
       CliCommand::ExportDocx { input, output } => {
         convert_db8_to_docx(input, output).expect("failed to export DOCX");
+      },
+      CliCommand::DocxToPdf { input, output } => {
+        convert_docx_to_pdf(input, output).expect("failed to export PDF");
       },
     }
     return;
