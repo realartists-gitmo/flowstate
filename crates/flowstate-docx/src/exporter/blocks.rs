@@ -37,7 +37,7 @@ fn export_table_cell_paragraph(paragraph: &TableCellParagraph, theme: &DocumentT
 fn export_paragraph_with_text(paragraph: &Paragraph, text: &str, theme: &DocumentTheme) -> DocxParagraph {
   let mut out = apply_paragraph_style(DocxParagraph::new(), paragraph.style, theme);
   let mut byte = 0usize;
-  for run in paragraph.runs.iter() {
+  for run in &paragraph.runs {
     let start = byte.min(text.len());
     let end = (byte + run.len).min(text.len()).max(start);
     out = add_text_run(out, &text[start..end], run.styles, paragraph.style, theme);

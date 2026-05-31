@@ -73,5 +73,5 @@ fn temp_sibling_path(target: &Path, extension: &str) -> PathBuf {
     .duration_since(UNIX_EPOCH)
     .map(|duration| duration.as_nanos())
     .unwrap_or_default();
-  dir.join(format!(".{stem}.{}.tmp.{extension}", nanos))
+  dir.join(format!(".{stem}.{nanos}.tmp.{extension}"))
 }
