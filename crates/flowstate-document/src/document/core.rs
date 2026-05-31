@@ -210,6 +210,12 @@ pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize,
 
 #[hotpath::measure]
 #[must_use]
+pub fn new_document_id() -> u128 {
+  uuid::Uuid::new_v4().as_u128()
+}
+
+#[hotpath::measure]
+#[must_use]
 pub fn new_paragraph_id() -> ParagraphId {
   ParagraphId(uuid::Uuid::new_v4().as_u128())
 }
@@ -230,6 +236,7 @@ pub fn new_section_id() -> SectionId {
 #[must_use]
 pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> DocumentIds {
   DocumentIds {
+    document_id: new_document_id(),
     paragraph_ids: std::iter::repeat_with(new_paragraph_id).take(paragraph_count).collect(),
     block_ids: std::iter::repeat_with(new_block_id).take(block_count).collect(),
   }
@@ -237,6 +244,10 @@ pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> Doc
 
 #[hotpath::measure]
 pub fn reconcile_document_ids(document: &mut Document) {
+  if document.ids.document_id == 0 {
+    document.ids.document_id = new_document_id();
+  }
+
   while document.ids.paragraph_ids.len() < document.paragraphs.len() {
     document.ids.paragraph_ids.push(new_paragraph_id());
   }

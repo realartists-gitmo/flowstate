@@ -8,6 +8,7 @@ workspace = true
 
 [dependencies]
 crop = "0.4.3"
+flowstate-collab = { version = "0.1.0", path = "../flowstate-collab" }
 gpui = "0.2.2"
 hotpath = "0.16.1"
 rustc-hash = "2.1.2"

@@ -1,0 +1,14 @@
+[package]
+name = "flowstate-collab"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+blake3 = "1.8.5"
+loro = "1.12.0"
+postcard = { version = "1.1.3", features = ["use-std"] }
+serde = { version = "1.0.228", features = ["derive"] }
+uuid = { version = "1.23.2", features = ["serde", "v4"] }
+
+[lints]
+workspace = true

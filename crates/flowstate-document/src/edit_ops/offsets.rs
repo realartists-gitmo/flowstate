@@ -100,8 +100,13 @@ pub fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
 }
 
 #[cfg(test)]
+#[allow(
+  clippy::items_after_test_module,
+  reason = "edit_ops files are include!-assembled; these local tests sit beside the helpers they cover."
+)]
 mod offsets_tests {
   use super::*;
+  use crate::{DocumentTheme, document_from_input};
 
   #[test]
   fn insert_text_refreshes_following_paragraph_ranges_and_blocks() {

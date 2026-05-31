@@ -10,7 +10,7 @@ default-run = "flowstate"
 workspace = true
 
 [workspace]
-members = [".", "crates/flowstate-document", "crates/flowstate-docx", "crates/flowstate-flow", "crates/flowstate-tub"]
+members = [".", "crates/flowstate-collab", "crates/flowstate-document", "crates/flowstate-docx", "crates/flowstate-flow", "crates/flowstate-sync", "crates/flowstate-tub"]
 resolver = "3"
 
 [dependencies]
@@ -39,6 +39,7 @@ flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 hotpath = "0.16.1"
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 toml = "1.1.2"
+flowstate-sync = { version = "0.1.0", path = "crates/flowstate-sync" }
 
 [features]
 hotpath = [

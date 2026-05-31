@@ -15,4 +15,5 @@ pub mod rich_text_element;
 pub mod workspace;
 
 pub use app::{RichTextEditorView, register_rich_text_editor_keybindings, run_standalone, write_demo_document};
+pub use flowstate_sync as sync;
 pub use rich_text_element::*;

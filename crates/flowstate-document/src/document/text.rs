@@ -18,6 +18,7 @@ pub struct SectionId(pub u128);
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DocumentIds {
+  pub document_id: u128,
   pub paragraph_ids: Vec<ParagraphId>,
   pub block_ids: Vec<BlockId>,
 }

@@ -1,54 +1,99 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
+use flowstate_collab::{DocumentId as CollabDocumentId, FormatKind, NativeFileInput, decode_native_file, encode_native_file};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-use crate::actions::{Action, new_box_action};
-use crate::document::{BoxNode, Flow, FlowDocument, NodeId, NodeValue, Nodes, ROOT_ID, new_box_id, new_flow_id};
+use crate::document::{BoxNode, Flow, FlowDocument, Node, NodeId, NodeValue, Nodes};
 
 pub const CURRENT_SAVE_VERSION: u32 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct SaveableFlowDocument {
-  pub nodes: Nodes,
+  pub document_id: u128,
+  pub nodes: Vec<SaveableFlowNode>,
   pub version: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SaveableFlowNode {
+  pub id: NodeId,
+  pub node: SaveableNode,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SaveableNode {
+  pub value: SaveableNodeValue,
+  pub level: i32,
+  pub parent: Option<NodeId>,
+  pub children: Vec<NodeId>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum SaveableNodeValue {
+  Root,
+  Flow {
+    content: String,
+    invert: bool,
+    columns: Vec<String>,
+  },
+  Box {
+    content: String,
+    flow_id: NodeId,
+    placeholder: Option<String>,
+    empty: bool,
+    crossed: bool,
+    bold: bool,
+    is_extension: bool,
+  },
 }
 
 #[hotpath::measure]
 pub fn get_json(document: &FlowDocument) -> Result<String> {
-  let saveable = SaveableFlowDocument {
-    nodes: document.nodes.clone(),
-    version: CURRENT_SAVE_VERSION,
-  };
-  serde_json::to_string(&saveable).context("failed to serialize .fl0 document")
+  let saveable = saveable_flow_document(document);
+  serde_json::to_string(&saveable).context("failed to serialize .fl0 debug projection JSON")
 }
 
 #[hotpath::measure]
-pub fn load_nodes(data: Value) -> Result<Nodes> {
-  let version = data
-    .get("version")
-    .and_then(Value::as_u64)
-    .and_then(|version| u32::try_from(version).ok())
-    .unwrap_or(0);
-  if version == CURRENT_SAVE_VERSION {
-    let saveable: SaveableFlowDocument = serde_json::from_value(data).context("invalid .fl0 document")?;
-    return Ok(saveable.nodes);
+pub fn flow_projection_bytes(document: &FlowDocument) -> Result<Vec<u8>> {
+  let saveable = saveable_flow_document(document);
+  postcard::to_stdvec(&saveable).context("failed to serialize .fl0 projection")
+}
+
+#[hotpath::measure]
+pub fn load_projection(bytes: &[u8]) -> Result<SaveableFlowDocument> {
+  let saveable: SaveableFlowDocument = postcard::from_bytes(bytes).context("invalid .fl0 projection")?;
+  if saveable.version != CURRENT_SAVE_VERSION {
+    anyhow::bail!("unsupported .fl0 projection version {}", saveable.version);
   }
-  if version == 0 {
-    return upgrade_0_1(data).map(|saveable| saveable.nodes);
-  }
-  bail!("unsupported .fl0 save version {version}");
+  Ok(saveable)
+}
+
+#[hotpath::measure]
+pub fn load_nodes_from_projection(bytes: &[u8]) -> Result<Nodes> {
+  nodes_from_saveable(load_projection(bytes)?)
+}
+
+#[hotpath::measure]
+pub fn fl0_bytes(document: &FlowDocument) -> Result<Vec<u8>> {
+  let projection_cache = flow_projection_bytes(document)?;
+  let mut input = NativeFileInput::new(FormatKind::Fl0, projection_cache);
+  input.document_id = CollabDocumentId(uuid::Uuid::from_u128(document.document_id));
+  encode_native_file(input).context("failed to write .fl0 collaboration envelope")
 }
 
 #[hotpath::measure]
 pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
   let path = path.as_ref();
-  let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
-  let value: Value = serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
-  let nodes = load_nodes(value)?;
-  Ok(FlowDocument::from_nodes(nodes))
+  let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+  let decoded = decode_native_file(&bytes, FormatKind::Fl0).with_context(|| format!("invalid .fl0 envelope {}", path.display()))?;
+  let projection = load_projection(&decoded.projection_cache)?;
+  if decoded.manifest.document_id.0.as_u128() != projection.document_id {
+    anyhow::bail!("FL0 document ID mismatch");
+  }
+  let document_id = projection.document_id;
+  Ok(FlowDocument::from_nodes_with_document_id(document_id, nodes_from_saveable(projection)?))
 }
 
 #[hotpath::measure]
@@ -65,138 +110,132 @@ pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> Re
   {
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
   }
-  let text = get_json(document)?;
-  fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct OldFlow {
-  #[serde(default)]
-  content: String,
-  #[serde(default)]
-  columns: Vec<String>,
-  #[serde(default)]
-  invert: bool,
-  #[serde(default)]
-  children: Vec<OldBox>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct OldBox {
-  #[serde(default)]
-  content: String,
-  #[serde(default)]
-  children: Vec<Self>,
-  #[serde(default)]
-  empty: bool,
-  #[serde(default)]
-  placeholder: Option<String>,
-  #[serde(default)]
-  crossed: bool,
+  fs::write(path, fl0_bytes(document)?).with_context(|| format!("failed to write {}", path.display()))
 }
 
 #[hotpath::measure]
-fn upgrade_0_1(saved: Value) -> Result<SaveableFlowDocument> {
-  let old_flows: Vec<OldFlow> = serde_json::from_value(saved).context("invalid legacy debate-flow document")?;
-  let mut document = FlowDocument::new();
-  for (index, old_flow) in old_flows.into_iter().enumerate() {
-    let flow_id = new_flow_id();
-    let add_flow = Action::Add {
-      parent: ROOT_ID.to_owned(),
-      id: flow_id.clone(),
-      index,
-      value: NodeValue::Flow(Flow {
-        content: old_flow.content,
-        invert: old_flow.invert,
-        columns: old_flow.columns,
-      }),
-    };
-    document.apply_action(add_flow);
-    for (box_index, old_box) in old_flow.children.into_iter().enumerate() {
-      upgrade_0_1_add_boxes_rec(&mut document, flow_id.clone(), flow_id.clone(), old_box, box_index);
+fn saveable_flow_document(document: &FlowDocument) -> SaveableFlowDocument {
+  let mut nodes = document
+    .nodes
+    .iter()
+    .map(|(id, node)| SaveableFlowNode {
+      id: id.clone(),
+      node: saveable_node(node),
+    })
+    .collect::<Vec<_>>();
+  nodes.sort_by(|left, right| left.id.cmp(&right.id));
+  SaveableFlowDocument {
+    document_id: document.document_id,
+    nodes,
+    version: CURRENT_SAVE_VERSION,
+  }
+}
+
+#[hotpath::measure]
+fn nodes_from_saveable(saveable: SaveableFlowDocument) -> Result<Nodes> {
+  let mut nodes = Nodes::default();
+  for entry in saveable.nodes {
+    if nodes.insert(entry.id, node_from_saveable(entry.node)).is_some() {
+      anyhow::bail!("duplicate .fl0 node ID in projection");
     }
   }
-  Ok(SaveableFlowDocument {
-    nodes: document.nodes,
-    version: CURRENT_SAVE_VERSION,
-  })
+  Ok(nodes)
 }
 
 #[hotpath::measure]
-fn upgrade_0_1_add_boxes_rec(document: &mut FlowDocument, flow_id: NodeId, parent_id: NodeId, old_box: OldBox, index: usize) {
-  let id = new_box_id();
-  let add = Action::Add {
-    parent: parent_id,
-    id: id.clone(),
-    index,
-    value: NodeValue::Box(BoxNode {
-      content: old_box.content,
-      flow_id: flow_id.clone(),
-      placeholder: old_box.placeholder,
-      empty: old_box.empty,
-      crossed: old_box.crossed,
-      bold: false,
-      is_extension: false,
-    }),
-  };
-  document.apply_action(add);
-  for (child_index, child) in old_box.children.into_iter().enumerate() {
-    upgrade_0_1_add_boxes_rec(document, flow_id.clone(), id.clone(), child, child_index);
+fn saveable_node(node: &Node) -> SaveableNode {
+  SaveableNode {
+    value: saveable_node_value(&node.value),
+    level: node.level,
+    parent: node.parent.clone(),
+    children: node.children.clone(),
   }
 }
 
-#[allow(dead_code, reason = "Legacy save migration helper is retained for older persisted flow documents.")]
 #[hotpath::measure]
-fn _new_empty_box(parent_id: NodeId, flow_id: NodeId, index: usize) -> Action {
-  new_box_action(parent_id, flow_id, index, None)
+fn saveable_node_value(value: &NodeValue) -> SaveableNodeValue {
+  match value {
+    NodeValue::Root => SaveableNodeValue::Root,
+    NodeValue::Flow(flow) => SaveableNodeValue::Flow {
+      content: flow.content.clone(),
+      invert: flow.invert,
+      columns: flow.columns.clone(),
+    },
+    NodeValue::Box(box_node) => SaveableNodeValue::Box {
+      content: box_node.content.clone(),
+      flow_id: box_node.flow_id.clone(),
+      placeholder: box_node.placeholder.clone(),
+      empty: box_node.empty,
+      crossed: box_node.crossed,
+      bold: box_node.bold,
+      is_extension: box_node.is_extension,
+    },
+  }
+}
+
+#[hotpath::measure]
+fn node_from_saveable(node: SaveableNode) -> Node {
+  Node {
+    value: node_value_from_saveable(node.value),
+    level: node.level,
+    parent: node.parent,
+    children: node.children,
+  }
+}
+
+#[hotpath::measure]
+fn node_value_from_saveable(value: SaveableNodeValue) -> NodeValue {
+  match value {
+    SaveableNodeValue::Root => NodeValue::Root,
+    SaveableNodeValue::Flow { content, invert, columns } => NodeValue::Flow(Flow {
+      content,
+      invert,
+      columns,
+    }),
+    SaveableNodeValue::Box {
+      content,
+      flow_id,
+      placeholder,
+      empty,
+      crossed,
+      bold,
+      is_extension,
+    } => NodeValue::Box(BoxNode {
+      content,
+      flow_id,
+      placeholder,
+      empty,
+      crossed,
+      bold,
+      is_extension,
+    }),
+  }
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::document::ROOT_ID;
 
   #[test]
   #[hotpath::measure]
-  fn loads_current_save_shape() {
+  fn projection_round_trips() {
     let document = FlowDocument::new();
-    let json = get_json(&document).unwrap();
-    let value: Value = serde_json::from_str(&json).unwrap();
-    let nodes = load_nodes(value).unwrap();
+    let bytes = flow_projection_bytes(&document).unwrap();
+    let nodes = load_nodes_from_projection(&bytes).unwrap();
     assert!(nodes.contains_key(ROOT_ID));
   }
 
   #[test]
   #[hotpath::measure]
-  fn upgrades_legacy_flow_array() {
-    let legacy = serde_json::json!([
-      {
-        "content": "aff",
-        "level": 0,
-        "columns": ["1AC", "1NC"],
-        "invert": false,
-        "focus": false,
-        "index": 0,
-        "lastFocus": [],
-        "children": [
-          {
-            "content": "advantage",
-            "children": [],
-            "index": 0,
-            "level": 1,
-            "focus": false,
-            "placeholder": "type here",
-            "crossed": true
-          }
-        ],
-        "history": { "index": -1, "data": [], "lastFocus": null },
-        "id": 1
-      }
-    ]);
-    let document = FlowDocument::from_nodes(load_nodes(legacy).unwrap());
-    let flow_id = document.flow_ids()[0].clone();
-    let box_id = document.node(&flow_id).unwrap().children[0].clone();
-    assert_eq!(document.flow(&flow_id).unwrap().content, "aff");
-    assert_eq!(document.box_node(&box_id).unwrap().content, "advantage");
-    assert!(document.box_node(&box_id).unwrap().crossed);
+  fn native_envelope_round_trips() {
+    let document = FlowDocument::new();
+    let bytes = fl0_bytes(&document).unwrap();
+    let path = std::env::temp_dir().join(format!("flowstate-test-{}.fl0", uuid::Uuid::new_v4()));
+    fs::write(&path, bytes).unwrap();
+    let loaded = load_flow_document(&path).unwrap();
+    fs::remove_file(path).unwrap();
+    assert_eq!(loaded.document_id, document.document_id);
+    assert_eq!(loaded.nodes, document.nodes);
   }
 }

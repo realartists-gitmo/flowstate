@@ -1,0 +1,12 @@
+[package]
+name = "flowstate-sync"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.102"
+flowstate-collab = { version = "0.1.0", path = "../flowstate-collab" }
+iroh = "0.98.2"
+
+[lints]
+workspace = true

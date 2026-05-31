@@ -57,6 +57,7 @@ pub struct BoxNode {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FlowDocument {
+  pub document_id: u128,
   pub nodes: Nodes,
 }
 
@@ -81,18 +82,26 @@ impl FlowDocument {
         children: Vec::new(),
       },
     );
-    Self { nodes }
+    Self {
+      document_id: new_document_id(),
+      nodes,
+    }
   }
 
   #[must_use]
-  pub fn from_nodes(mut nodes: Nodes) -> Self {
+  pub fn from_nodes(nodes: Nodes) -> Self {
+    Self::from_nodes_with_document_id(new_document_id(), nodes)
+  }
+
+  #[must_use]
+  pub fn from_nodes_with_document_id(document_id: u128, mut nodes: Nodes) -> Self {
     nodes.entry(ROOT_ID.to_owned()).or_insert_with(|| Node {
       value: NodeValue::Root,
       level: -1,
       parent: None,
       children: Vec::new(),
     });
-    Self { nodes }
+    Self { document_id, nodes }
   }
 
   #[must_use]
@@ -249,6 +258,12 @@ pub enum Direction {
 #[hotpath::measure]
 pub fn new_node_id() -> NodeId {
   Uuid::new_v4().to_string()
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn new_document_id() -> u128 {
+  Uuid::new_v4().as_u128()
 }
 
 #[hotpath::measure]

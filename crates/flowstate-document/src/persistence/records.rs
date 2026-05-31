@@ -36,6 +36,12 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
   )?)?;
   let block_ids = read_block_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCK_IDS, "DB8 block IDs chunk")?)?;
   let sections = read_sections_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_SECTIONS, "DB8 sections chunk")?)?;
+  let document_id = read_document_meta_chunk(required_chunk(
+    cursor.get_ref(),
+    &chunks,
+    CHUNK_DOCUMENT_META,
+    "DB8 document metadata chunk",
+  )?)?;
 
   let offset_index = ParagraphOffsetIndex::new(&paragraphs);
   let mut document = Document {
@@ -43,7 +49,11 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
     paragraphs: Arc::new(paragraphs),
     blocks: Arc::new(blocks),
     assets,
-    ids: DocumentIds { paragraph_ids, block_ids },
+    ids: DocumentIds {
+      document_id,
+      paragraph_ids,
+      block_ids,
+    },
     sections: Arc::new(sections),
     offset_index,
     theme: DocumentTheme::default(),
@@ -157,74 +167,13 @@ fn read_sections_chunk(bytes: &[u8]) -> io::Result<Vec<DocumentSection>> {
 }
 
 #[hotpath::measure]
-fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Document> {
-  let text_len = {
-    let raw = read_u64(&mut cursor)?;
-    usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text length overflows usize"))?
-  };
-  let text_bytes = read_bytes(&mut cursor, text_len, "DB8 text")?;
-  let text = std::str::from_utf8(text_bytes)
-    .map(std::borrow::ToOwned::to_owned)
-    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text is not UTF-8"))?;
-
-  let asset_count = {
-    let raw = read_u64(&mut cursor)?;
-    usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 asset count overflows usize"))?
-  };
-  let mut assets = AssetStore::default();
-  assets.assets.reserve(asset_count);
-  for _ in 0..asset_count {
-    let asset = read_asset_record(&mut cursor)?;
-    assets.assets.insert(asset.id, asset);
+fn read_document_meta_chunk(bytes: &[u8]) -> io::Result<u128> {
+  let mut cursor = Cursor::new(bytes);
+  let document_id = read_u128(&mut cursor)?;
+  if document_id == 0 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 document ID is empty"));
   }
-
-  let block_count = {
-    let raw = read_u64(&mut cursor)?;
-    usize::try_from(raw).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 block count overflows usize"))?
-  };
-  let mut blocks = Vec::with_capacity(block_count.min(4096));
-  let mut paragraphs = Vec::new();
-  for _ in 0..block_count {
-    let mut block = read_block_record(&mut cursor)?;
-    normalize_block_text_runs(&mut block, &text)?;
-    if let Block::Paragraph(paragraph) = &block {
-      paragraphs.push(paragraph.clone());
-    }
-    blocks.push(block);
-  }
-  if paragraphs.is_empty() {
-    paragraphs.push(Paragraph {
-      style: ParagraphStyle::Normal,
-      byte_range: 0..0,
-      runs: Vec::new(),
-      version: 0,
-    });
-    blocks.push(Block::Paragraph(paragraphs[0].clone()));
-  }
-
-  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
-  let mut document = Document {
-    text: Rope::from(text),
-    paragraphs: Arc::new(paragraphs),
-    blocks: Arc::new(blocks),
-    assets,
-    ids: DocumentIds::default(),
-    sections: Arc::new(Vec::new()),
-    offset_index,
-    theme: DocumentTheme::default(),
-  };
-  reconcile_document_ids(&mut document);
-  rebuild_document_sections(&mut document);
-  validate_document(&document)?;
-  log_timing_lazy("db8 read", timing, || {
-    format!(
-      "bytes={} blocks={} paragraphs={}",
-      document.text.byte_len(),
-      document.blocks.len(),
-      document.paragraphs.len()
-    )
-  });
-  Ok(document)
+  Ok(document_id)
 }
 
 #[hotpath::measure]
@@ -694,6 +643,10 @@ pub fn recovery_path_for_document(path: &Path) -> PathBuf {
 }
 
 #[cfg(test)]
+#[allow(
+  clippy::items_after_test_module,
+  reason = "persistence files are include!-assembled; these local tests sit beside the codec helpers they cover."
+)]
 mod records_tests {
   use super::*;
 
