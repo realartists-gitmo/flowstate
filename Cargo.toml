@@ -17,7 +17,7 @@ cosmic-text = { version = "0.14.2", default-features = false, features = ["shape
 crop = "0.4.3"
 dirs = "6.0.0"
 docx-rs = "0.4.20"
-docxide-pdf = { version = "0.14.0", default-features = false, git = "https://github.com/realartists-gitmo/docxide-pdf" }
+docxide-pdf = { version = "0.14.0", default-features = false, git = "https://github.com/realartists-gitmo/docxide-pdf", rev = "2c856bf2aa0641e96b350baf7026f43493964072" }
 fff-search = "0.8.2-nightly.ffb39a8"
 flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
