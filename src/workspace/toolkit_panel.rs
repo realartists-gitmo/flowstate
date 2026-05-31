@@ -6,21 +6,23 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, Hsla, IntoElement, PathPromptOptions, Pixels, SharedString, Timer, Window, div, prelude::*, px, rgb, size};
+use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, ScrollHandle, SharedString, Timer, Window, div, prelude::*, px, size};
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Selectable, Sizable,
+  ActiveTheme as _, Icon, IconName, Selectable, Sizable, VirtualListScrollHandle,
   button::{Button, ButtonVariants},
   h_flex,
   input::Input,
   resizable::{h_resizable, resizable_panel},
-  scroll::ScrollableElement,
+  scroll::Scrollbar,
   tree::{TreeItem, tree},
   v_flex, v_virtual_list,
 };
 
 use crate::{
   app_settings::{flowstate_data_dir, load_document_theme, save_tub_root},
-  rich_text_element::{DocumentTheme, HighlightStyle, InputParagraph, InputRun, ParagraphStyle, RunSemanticStyle, RunStyles, ToolkitTextDrag},
+  rich_text_element::{
+    DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RunStyles, ToolkitTextDrag, document_from_input,
+  },
 };
 
 use super::{
@@ -30,6 +32,9 @@ use super::{
 
 const TOOLKIT_RESULT_LIMIT: usize = 32;
 const TUB_FILE_SEARCH_LIMIT: usize = 200;
+const TOOLKIT_PREVIEW_PARAGRAPH_LIMIT: usize = 8;
+const TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT: usize = 160;
+const TOOLKIT_PREVIEW_ZOOM: f32 = 0.78;
 
 struct TubLoadResult {
   root: PathBuf,
@@ -393,7 +398,8 @@ impl Workspace {
       return;
     };
     if let Some(editor) = self.active_editor.clone() {
-      editor.update(cx, |editor, cx| editor.insert_plain_text_from_toolkit(&hit.insert_text, cx));
+      let paragraphs = toolkit_hit_insert_paragraphs(&hit);
+      editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
       return;
     }
     if let Some(editor) = self.active_flow.clone() {
@@ -405,7 +411,11 @@ impl Workspace {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
-    self.open_document_path(hit.path, window, cx);
+    if let Some(paragraph_ix) = hit.paragraph_start {
+      self.open_document_path_at_paragraph(hit.path, paragraph_ix, window, cx);
+    } else {
+      self.open_document_path(hit.path, window, cx);
+    }
   }
 
   fn open_tub_tree_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
@@ -433,17 +443,20 @@ impl Workspace {
         .into_any_element()
     } else {
       let item_sizes = Rc::new(vec![size(px(1.0), px(270.0)); self.toolkit_hits.len()]);
-      v_virtual_list(cx.entity(), "toolkit-result-list", item_sizes, |workspace, range, _, cx| {
+      let result_scroll_handle = self.toolkit_result_scroll_handle.clone();
+      let preview_scroll_handle = result_scroll_handle.clone();
+      v_virtual_list(cx.entity(), "toolkit-result-list", item_sizes, move |workspace, range, window, cx| {
         range
           .filter_map(|ix| {
             workspace
               .toolkit_hits
               .get(ix)
               .cloned()
-              .map(|hit| workspace.render_toolkit_hit(ix, &hit, cx))
+              .map(|hit| workspace.render_toolkit_hit(ix, &hit, &preview_scroll_handle, window, cx))
           })
           .collect::<Vec<_>>()
       })
+      .track_scroll(&result_scroll_handle)
       .into_any_element()
     };
 
@@ -573,7 +586,14 @@ impl Workspace {
       }))
   }
 
-  fn render_toolkit_hit(&self, ix: usize, hit: &flowstate_tub::SearchHit, cx: &mut Context<Self>) -> gpui::AnyElement {
+  fn render_toolkit_hit(
+    &self,
+    ix: usize,
+    hit: &flowstate_tub::SearchHit,
+    result_scroll_handle: &VirtualListScrollHandle,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> gpui::AnyElement {
     let open = cx.listener(move |workspace, _, window, cx| workspace.open_toolkit_hit(ix, window, cx));
     let insert = cx.listener(move |workspace, _, window, cx| workspace.insert_toolkit_hit(ix, window, cx));
     let title = if hit.title.is_empty() {
@@ -581,111 +601,133 @@ impl Workspace {
     } else {
       hit.title.clone()
     };
+    let preview_text = if hit.insert_text.trim().is_empty() { hit.snippet.as_str() } else { hit.insert_text.as_str() };
+    let paragraphs = toolkit_hit_insert_paragraphs(hit);
     let drag = ToolkitTextDrag {
       title: title.clone(),
       text: hit.insert_text.clone(),
+      paragraphs,
     };
-    let heading_path = if hit.heading_path.is_empty() {
-      hit.display_path.clone()
-    } else {
-      hit.heading_path.join(" / ")
-    };
-    let cite = hit.cite.clone().unwrap_or_default();
-    let preview_text = if hit.insert_text.trim().is_empty() { hit.snippet.as_str() } else { hit.insert_text.as_str() };
-    let document_theme = load_document_theme();
+    let (preview_theme, preview_invisibility_mode) = self
+      .active_editor
+      .as_ref()
+      .map(|editor| {
+        let editor = editor.read(cx);
+        (editor.document_theme(), editor.invisibility_mode())
+      })
+      .unwrap_or_else(|| (load_document_theme(), false));
+    let preview_document = toolkit_preview_document(hit, preview_text, preview_theme);
+    let preview_bg = preview_document.theme.document_background_color;
+    let hover_group = format!("toolkit-hit-hover-{ix}");
+    let overlay_bg = cx.theme().popover.opacity(0.92);
+    let overlay_border = cx.theme().border.opacity(0.64);
+    let card_radius = cx.theme().radius;
+    let preview_radius = card_radius.max(px(1.0)) - px(1.0);
+    let preview_scroll_handle = window
+      .use_keyed_state(
+        SharedString::from(format!("toolkit-preview-scroll-{}-{}", hit.file_id, hit.unit_id)),
+        cx,
+        |_, _| ScrollHandle::new(),
+      )
+      .read(cx)
+      .clone();
+    let preview_scroll_for_chain = preview_scroll_handle.clone();
+    let result_scroll_for_chain = result_scroll_handle.clone();
+    let workspace_for_chain = cx.entity().downgrade();
 
     div()
       .id(("toolkit-hit", ix))
+      .group(hover_group.clone())
       .w_full()
       .h(px(258.0))
-      .rounded(px(6.0))
+      .relative()
+      .rounded(card_radius)
       .border_1()
       .border_color(cx.theme().border)
-      .bg(cx.theme().popover)
+      .bg(preview_bg)
+      .p(px(1.0))
       .overflow_hidden()
+      .block_mouse_except_scroll()
       .on_drag(drag, |drag, _, _, cx| {
         cx.stop_propagation();
         cx.new(|_| drag.clone())
       })
       .child(
-        v_flex()
-          .gap_1()
-          .p_2()
-          .child(
-            h_flex()
-              .items_start()
-              .gap_2()
-              .child(
-                Icon::new(hit_icon(hit.unit_kind))
-                  .xsmall()
-                  .text_color(cx.theme().link),
-              )
-              .child(
-                v_flex()
-                  .flex_1()
-                  .min_w_0()
-                  .gap_0p5()
-                  .child(
-                    div()
-                      .text_sm()
-                      .font_weight(gpui::FontWeight::SEMIBOLD)
-                      .text_color(cx.theme().foreground)
-                      .truncate()
-                      .child(title),
-                  )
-                  .child(
-                    div()
-                      .text_xs()
-                      .truncate()
-                      .text_color(cx.theme().muted_foreground)
-                      .child(heading_path),
-                  ),
-              ),
-          )
-          .when(!cite.is_empty(), |this| {
-            this.child(
-              div()
-                .text_xs()
-                .text_color(cx.theme().info)
-                .truncate()
-                .child(cite),
-            )
+        div()
+          .size_full()
+          .relative()
+          .rounded(preview_radius)
+          .overflow_hidden()
+          .bg(preview_bg)
+          .on_scroll_wheel(move |event, window, cx| {
+            let delta_y = event.delta.pixel_delta(window.line_height()).y;
+            if delta_y == px(0.0) {
+              return;
+            }
+            if scroll_handle_scroll_by(&preview_scroll_for_chain, delta_y) {
+              let _ = workspace_for_chain.update(cx, |_, cx| cx.notify());
+              cx.stop_propagation();
+              return;
+            }
+            if scroll_toolkit_result_list(&result_scroll_for_chain, delta_y) {
+              let _ = workspace_for_chain.update(cx, |_, cx| cx.notify());
+            }
+            cx.stop_propagation();
           })
           .child(
             div()
-              .h(px(154.0))
-              .w_full()
-              .overflow_y_scrollbar()
-              .rounded(px(4.0))
-              .border_1()
-              .border_color(rgb(0xd1d5db))
-              .bg(rgb(0xffffff))
-              .p_3()
-              .text_xs()
-              .line_height(px(16.0))
-              .font_family("Arial")
-              .text_color(rgb(0x111827))
-              .child(render_toolkit_preview_body(hit, preview_text, &document_theme)),
+              .id(("toolkit-preview-scroll-area", ix))
+              .flex()
+              .flex_col()
+              .size_full()
+              .track_scroll(&preview_scroll_handle)
+              .overflow_hidden()
+              .bg(preview_bg)
+              .child(
+                div()
+                  .flex_1()
+                  .bg(preview_bg)
+                  .child(RichTextDocumentElement::new(preview_document).with_invisibility_mode(preview_invisibility_mode)),
+              ),
           )
           .child(
-            h_flex()
-              .items_center()
-              .justify_end()
-              .gap_1()
-              .pt_1()
-              .child(
-                Button::new(("toolkit-open-hit", ix))
-                  .label("Open")
-                  .xsmall()
-                  .ghost()
-                  .on_click(open),
-              )
-              .child(
-                Button::new(("toolkit-insert-hit", ix))
-                  .label("Insert")
-                  .xsmall()
-                  .on_click(insert),
-              ),
+            div()
+              .absolute()
+              .top_0()
+              .left_0()
+              .right_0()
+              .bottom_0()
+              .child(Scrollbar::vertical(&preview_scroll_handle)),
+          ),
+      )
+      .child(
+        h_flex()
+          .absolute()
+          .right_2()
+          .bottom_2()
+          .invisible()
+          .group_hover(hover_group, |this| this.visible().opacity(0.92))
+          .items_center()
+          .gap_1()
+          .rounded(px(4.0))
+          .border_1()
+          .border_color(overlay_border)
+          .bg(overlay_bg)
+          .p_1()
+          .child(
+            Button::new(("toolkit-open-hit", ix))
+              .icon(Icon::new(IconName::ExternalLink).text_color(cx.theme().foreground))
+              .xsmall()
+              .ghost()
+              .tooltip("Open")
+              .on_click(open),
+          )
+          .child(
+            Button::new(("toolkit-insert-hit", ix))
+              .icon(Icon::new(IconName::Plus).text_color(cx.theme().primary_foreground))
+              .xsmall()
+              .tooltip("Insert")
+              .on_click(insert),
           ),
       )
       .into_any_element()
@@ -858,247 +900,102 @@ impl Workspace {
   }
 }
 
-fn toolkit_preview_lines(text: &str) -> Vec<SharedString> {
-  let mut lines = Vec::new();
-  let mut truncated = false;
-  let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
-  for (ix, line) in normalized.lines().enumerate() {
-    if ix >= 160 {
-      truncated = true;
-      break;
-    }
-    let line = line.trim_end();
-    lines.push(if line.is_empty() {
-      SharedString::from(" ")
-    } else {
-      SharedString::from(line.to_string())
-    });
+fn scroll_toolkit_result_list(scroll_handle: &VirtualListScrollHandle, delta_y: Pixels) -> bool {
+  let Some(offset) = scroll_handle_offset_after_delta(scroll_handle.base_handle(), delta_y) else {
+    return false;
+  };
+  scroll_handle.set_offset(offset);
+  true
+}
+
+fn scroll_handle_scroll_by(scroll_handle: &ScrollHandle, delta_y: Pixels) -> bool {
+  let Some(offset) = scroll_handle_offset_after_delta(scroll_handle, delta_y) else {
+    return false;
+  };
+  scroll_handle.set_offset(offset);
+  true
+}
+
+fn scroll_handle_offset_after_delta(scroll_handle: &ScrollHandle, delta_y: Pixels) -> Option<gpui::Point<Pixels>> {
+  if delta_y == px(0.0) {
+    return None;
   }
-  if lines.is_empty() {
-    lines.push(SharedString::from("No preview text"));
-  } else if truncated {
-    lines.push(SharedString::from("..."));
-  }
-  lines
+  let old_offset = scroll_handle.offset();
+  let mut offset = old_offset;
+  offset.y += delta_y;
+  let max_offset = scroll_handle.max_offset();
+  offset.x = offset.x.min(px(0.0)).max(-max_offset.width);
+  offset.y = offset.y.min(px(0.0)).max(-max_offset.height);
+  (offset != old_offset).then_some(offset)
 }
 
-fn render_toolkit_preview_body(hit: &flowstate_tub::SearchHit, fallback_text: &str, theme: &DocumentTheme) -> gpui::AnyElement {
-  if !hit.preview_paragraphs.is_empty() {
-    return v_flex()
-      .w_full()
-      .gap_1()
-      .children(
-        hit
-          .preview_paragraphs
-          .iter()
-          .take(8)
-          .map(|paragraph| render_toolkit_preview_paragraph(paragraph, theme)),
-      )
-      .into_any_element();
-  }
+fn toolkit_preview_document(
+  hit: &flowstate_tub::SearchHit,
+  fallback_text: &str,
+  mut theme: DocumentTheme,
+) -> crate::rich_text_element::Document {
+  theme.zoom_factor *= TOOLKIT_PREVIEW_ZOOM;
+  theme.pageless_inset_x = px(10.0);
+  theme.pageless_inset_top = px(8.0);
+  theme.pageless_inset_bottom = px(12.0);
 
-  v_flex()
-    .w_full()
-    .children(toolkit_preview_lines(fallback_text).into_iter().map(|line| {
-      div()
-        .w_full()
-        .min_h(px(16.0))
-        .whitespace_normal()
-        .child(line)
-    }))
-    .into_any_element()
-}
-
-fn render_toolkit_preview_paragraph(paragraph: &InputParagraph, theme: &DocumentTheme) -> gpui::AnyElement {
-  h_flex()
-    .w_full()
-    .items_baseline()
-    .flex_wrap()
-    .children(
-      paragraph
-        .runs
-        .iter()
-        .flat_map(|run| toolkit_run_fragments(run).into_iter().map(|text| render_toolkit_preview_run(text, paragraph.style, run.styles, theme))),
-    )
-    .into_any_element()
-}
-
-fn toolkit_run_fragments(run: &InputRun) -> Vec<String> {
-  run
-    .text
-    .split_inclusive(' ')
-    .filter(|fragment| !fragment.is_empty())
-    .map(ToOwned::to_owned)
-    .collect()
-}
-
-fn render_toolkit_preview_run(text: String, paragraph_style: ParagraphStyle, styles: RunStyles, theme: &DocumentTheme) -> gpui::AnyElement {
-  let format = toolkit_preview_format(paragraph_style, styles, theme);
-  div()
-    .text_size(format.font_size)
-    .font_family(format.font_family)
-    .font_weight(if format.bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL })
-    .text_color(format.color)
-    .when(format.italic, |this| this.italic())
-    .when(format.underline, |this| this.text_decoration_1())
-    .when(format.strikethrough, |this| this.line_through())
-    .when_some(format.highlight, |this, highlight| this.bg(highlight))
-    .child(text)
-    .into_any_element()
-}
-
-struct ToolkitPreviewFormat {
-  font_family: SharedString,
-  font_size: Pixels,
-  color: Hsla,
-  bold: bool,
-  italic: bool,
-  underline: bool,
-  strikethrough: bool,
-  highlight: Option<Hsla>,
-}
-
-fn toolkit_preview_format(paragraph_style: ParagraphStyle, styles: RunStyles, theme: &DocumentTheme) -> ToolkitPreviewFormat {
-  let mut format = match paragraph_style {
-    ParagraphStyle::Pocket => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.pocket_font_size * 0.78,
-      color: theme.pocket_color,
-      bold: theme.pocket_bold,
-      italic: theme.pocket_italic,
-      underline: toolkit_underline_enabled(theme.pocket_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Hat => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.hat_font_size * 0.78,
-      color: theme.hat_color,
-      bold: theme.hat_bold,
-      italic: theme.hat_italic,
-      underline: toolkit_underline_enabled(theme.hat_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Block => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.block_font_size * 0.78,
-      color: theme.block_color,
-      bold: theme.block_bold,
-      italic: theme.block_italic,
-      underline: toolkit_underline_enabled(theme.block_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Tag => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.tag_font_size * 0.78,
-      color: theme.tag_color,
-      bold: theme.tag_bold,
-      italic: theme.tag_italic,
-      underline: toolkit_underline_enabled(theme.tag_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Analytic => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.tag_font_size * 0.78,
-      color: theme.analytic_color,
-      bold: theme.analytic_bold,
-      italic: theme.analytic_italic,
-      underline: toolkit_underline_enabled(theme.analytic_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Undertag => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.undertag_font_size * 0.78,
-      color: theme.undertag_color,
-      bold: theme.undertag_bold,
-      italic: theme.undertag_italic,
-      underline: toolkit_underline_enabled(theme.undertag_underline),
-      strikethrough: false,
-      highlight: None,
-    },
-    ParagraphStyle::Normal => ToolkitPreviewFormat {
-      font_family: theme.default_font_family.clone(),
-      font_size: theme.body_font_size * 0.78,
-      color: theme.default_text_color,
-      bold: theme.normal_bold,
-      italic: theme.normal_italic,
-      underline: toolkit_underline_enabled(theme.normal_underline),
-      strikethrough: false,
-      highlight: None,
-    },
+  let paragraphs = if hit.preview_paragraphs.is_empty() {
+    toolkit_fallback_paragraphs(fallback_text, Some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT))
+  } else {
+    hit
+      .preview_paragraphs
+      .iter()
+      .take(TOOLKIT_PREVIEW_PARAGRAPH_LIMIT)
+      .cloned()
+      .collect()
   };
 
-  match styles.semantic {
-    RunSemanticStyle::Plain => {},
-    RunSemanticStyle::Cite => {
-      format.font_size = theme.cite_font_size * 0.78;
-      format.color = theme.cite_color;
-      format.bold = theme.cite_bold;
-      format.italic = theme.cite_italic;
-      format.underline = toolkit_underline_enabled(theme.cite_underline);
-    },
-    RunSemanticStyle::Emphasis => {
-      format.font_size = theme.cite_font_size * 0.78;
-      format.color = theme.emphasis_color;
-      format.bold = theme.emphasis_bold;
-      format.italic = theme.emphasis_italic;
-      format.underline = toolkit_underline_enabled(theme.emphasis_underline);
-    },
-    RunSemanticStyle::Underline => {
-      format.font_size = theme.body_font_size * 0.78;
-      format.color = theme.underline_color;
-      format.bold = theme.underline_bold;
-      format.italic = theme.underline_italic;
-      format.underline = toolkit_underline_enabled(theme.underline_underline);
-    },
-    RunSemanticStyle::Condensed => {
-      format.font_size = theme.condensed_font_size * 0.78;
-      format.color = theme.condensed_color;
-      format.bold = theme.condensed_bold;
-      format.italic = theme.condensed_italic;
-      format.underline = toolkit_underline_enabled(theme.condensed_underline);
-    },
-    RunSemanticStyle::Ultracondensed => {
-      format.font_size = theme.ultracondensed_font_size * 0.78;
-      format.color = theme.ultracondensed_color;
-      format.bold = theme.ultracondensed_bold;
-      format.italic = theme.ultracondensed_italic;
-      format.underline = toolkit_underline_enabled(theme.ultracondensed_underline);
-    },
-  }
-
-  if styles.direct_underline {
-    format.underline = true;
-  }
-  format.strikethrough = styles.strikethrough;
-  format.highlight = styles.highlight.map(|highlight| match highlight {
-    HighlightStyle::Spoken => theme.highlight_spoken,
-    HighlightStyle::Insert => theme.highlight_insert,
-    HighlightStyle::Alternative => theme.highlight_alternative,
-  });
-  format
+  document_from_input(theme, paragraphs)
 }
 
-fn toolkit_underline_enabled(underline: crate::rich_text_element::ThemeUnderline) -> bool {
-  !matches!(underline, crate::rich_text_element::ThemeUnderline::None)
+fn toolkit_hit_insert_paragraphs(hit: &flowstate_tub::SearchHit) -> Vec<InputParagraph> {
+  if !hit.preview_paragraphs.is_empty() {
+    return hit.preview_paragraphs.clone();
+  }
+  let text = if hit.insert_text.trim().is_empty() {
+    hit.snippet.as_str()
+  } else {
+    hit.insert_text.as_str()
+  };
+  toolkit_fallback_paragraphs(text, None)
 }
 
-fn hit_icon(kind: flowstate_tub::SearchUnitKind) -> IconName {
-  match kind {
-    flowstate_tub::SearchUnitKind::File => IconName::File,
-    flowstate_tub::SearchUnitKind::Pocket | flowstate_tub::SearchUnitKind::Hat => IconName::FolderOpen,
-    flowstate_tub::SearchUnitKind::BlockSection => IconName::File,
-    flowstate_tub::SearchUnitKind::TagSection => IconName::Search,
-    flowstate_tub::SearchUnitKind::Analytic => IconName::File,
-    flowstate_tub::SearchUnitKind::Card => IconName::File,
-    flowstate_tub::SearchUnitKind::Cite => IconName::File,
-    flowstate_tub::SearchUnitKind::Paragraph => IconName::File,
-    flowstate_tub::SearchUnitKind::FlowNode => IconName::File,
-    flowstate_tub::SearchUnitKind::Document => IconName::File,
+fn toolkit_fallback_paragraphs(text: &str, line_limit: Option<usize>) -> Vec<InputParagraph> {
+  let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+  let mut truncated = false;
+  let mut paragraphs = normalized
+    .lines()
+    .enumerate()
+    .filter_map(|(ix, line)| {
+      if line_limit.is_some_and(|limit| ix >= limit) {
+        truncated = true;
+        return None;
+      }
+      Some(toolkit_preview_fallback_paragraph(line.trim_end()))
+    })
+    .collect::<Vec<_>>();
+
+  if paragraphs.is_empty() {
+    paragraphs.push(toolkit_preview_fallback_paragraph("No preview text"));
+  } else if truncated {
+    paragraphs.push(toolkit_preview_fallback_paragraph("..."));
+  }
+
+  paragraphs
+}
+
+fn toolkit_preview_fallback_paragraph(text: &str) -> InputParagraph {
+  InputParagraph {
+    style: ParagraphStyle::Normal,
+    runs: vec![InputRun {
+      text: if text.is_empty() { " ".to_string() } else { text.to_string() },
+      styles: RunStyles::default(),
+    }],
   }
 }
 

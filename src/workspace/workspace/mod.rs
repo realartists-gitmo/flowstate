@@ -26,7 +26,7 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
   ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar, h_flex,
-  v_flex,
+  VirtualListScrollHandle, v_flex,
 };
 use uuid::Uuid;
 
@@ -103,6 +103,7 @@ pub struct Workspace {
   toolkit_hits: Vec<SearchHit>,
   toolkit_status: SharedString,
   toolkit_search_generation: u64,
+  toolkit_result_scroll_handle: VirtualListScrollHandle,
   _tub_file_search_subscription: Subscription,
   _toolkit_search_subscription: Subscription,
   zoom_slider: Entity<SliderState>,

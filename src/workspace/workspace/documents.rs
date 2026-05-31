@@ -96,6 +96,7 @@ impl Workspace {
       toolkit_hits: Vec::new(),
       toolkit_status: "Select a tub to search evidence.".into(),
       toolkit_search_generation: 0,
+      toolkit_result_scroll_handle: VirtualListScrollHandle::new(),
       _tub_file_search_subscription,
       _toolkit_search_subscription,
       zoom_slider,
@@ -260,6 +261,26 @@ impl Workspace {
   }
 
   pub fn open_document_path(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_document_path_with_target(path, None, window, cx);
+  }
+
+  pub fn open_document_path_at_paragraph(
+    &mut self,
+    path: PathBuf,
+    paragraph_ix: usize,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    self.open_document_path_with_target(path, Some(paragraph_ix), window, cx);
+  }
+
+  fn open_document_path_with_target(
+    &mut self,
+    path: PathBuf,
+    target_paragraph_ix: Option<usize>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
@@ -272,6 +293,12 @@ impl Workspace {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.add_document_panel_with_title(*document, path, title, window, cx);
+              if let Some(paragraph_ix) = target_paragraph_ix {
+                workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
+                cx.on_next_frame(window, move |workspace, window, cx| {
+                  workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
+                });
+              }
             });
           });
         },

@@ -1,5 +1,44 @@
+const RICH_TEXT_CLIPBOARD_FORMAT: &str = "flowstate.rich-text-fragment.v1";
+
 #[hotpath::measure_all]
 impl RichTextEditor {
+  pub fn insert_toolkit_text_at_caret(&mut self, paragraphs: Vec<InputParagraph>, cx: &mut Context<Self>) {
+    let paragraphs = non_empty_input_paragraphs(paragraphs);
+    if paragraphs.is_empty() {
+      return;
+    }
+    let fragment = RichClipboardFragment {
+      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+      paragraphs,
+      blocks: Vec::new(),
+      assets: Vec::new(),
+    };
+    if self.insert_rich_fragment_into_selected_table_cell(&fragment, cx) {
+      return;
+    }
+    if self.insert_rich_fragment_paste_at_caret(&fragment, cx) {
+      return;
+    }
+    self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
+  }
+
+  pub fn insert_toolkit_paragraphs_as_blocks(&mut self, paragraphs: Vec<InputParagraph>, cx: &mut Context<Self>) {
+    let blocks = non_empty_input_paragraphs(paragraphs)
+      .into_iter()
+      .map(InputBlock::Paragraph)
+      .collect::<Vec<_>>();
+    if blocks.is_empty() {
+      return;
+    }
+    let fragment = RichClipboardFragment {
+      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+      paragraphs: Vec::new(),
+      blocks,
+      assets: Vec::new(),
+    };
+    self.insert_block_fragment(fragment, cx);
+  }
+
   fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
     if !fragment.blocks.is_empty() {
       self.insert_block_fragment(fragment, cx);
@@ -305,4 +344,11 @@ impl RichTextEditor {
     self.insert_rich_fragment(fragment, cx);
   }
 
+}
+
+fn non_empty_input_paragraphs(paragraphs: Vec<InputParagraph>) -> Vec<InputParagraph> {
+  paragraphs
+    .into_iter()
+    .filter(|paragraph| !paragraph.runs.is_empty())
+    .collect()
 }

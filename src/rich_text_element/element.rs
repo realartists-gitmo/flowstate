@@ -10,6 +10,7 @@ use super::*;
 pub struct RichTextDocumentElement {
   pub(super) document: Document,
   pub(super) layout: WordElementLayout,
+  pub(super) invisibility_mode: bool,
 }
 
 #[hotpath::measure_all]
@@ -18,7 +19,14 @@ impl RichTextDocumentElement {
     Self {
       document,
       layout: WordElementLayout::default(),
+      invisibility_mode: false,
     }
+  }
+
+  #[must_use]
+  pub fn with_invisibility_mode(mut self, enabled: bool) -> Self {
+    self.invisibility_mode = enabled;
+    self
   }
 }
 
@@ -127,7 +135,12 @@ impl Element for RichTextDocumentElement {
     window: &mut Window,
     _cx: &mut App,
   ) -> (LayoutId, Self::RequestLayoutState) {
-    request_word_layout(self.document.clone(), self.layout.clone(), window)
+    request_word_layout(
+      self.document.clone(),
+      self.layout.clone(),
+      self.invisibility_mode,
+      window,
+    )
   }
 
   fn prepaint(
@@ -444,7 +457,12 @@ fn packed_element_pair(first: usize, second: usize) -> u64 {
 }
 
 #[hotpath::measure]
-pub(super) fn request_word_layout(document: Document, layout_cell: WordElementLayout, window: &mut Window) -> (LayoutId, ()) {
+pub(super) fn request_word_layout(
+  document: Document,
+  layout_cell: WordElementLayout,
+  invisibility_mode: bool,
+  window: &mut Window,
+) -> (LayoutId, ()) {
   let layout_id = window.request_measured_layout(Style::default(), move |known, available, window, cx| {
     let width = known
       .width
@@ -454,7 +472,7 @@ pub(super) fn request_word_layout(document: Document, layout_cell: WordElementLa
       })
       .unwrap_or(px(900.0));
     let previous_layout = layout_cell.layout();
-    let layout = build_layout(&document, width, previous_layout.as_deref(), window, cx);
+    let layout = build_layout_with_visibility(&document, width, previous_layout.as_deref(), invisibility_mode, window, cx);
     let size = layout.size;
     layout_cell.set_layout(Rc::new(layout));
     size

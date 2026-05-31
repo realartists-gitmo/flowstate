@@ -125,6 +125,7 @@ pub(super) enum SelectionGranularity {
 pub struct ToolkitTextDrag {
   pub title: String,
   pub text: String,
+  pub paragraphs: Vec<InputParagraph>,
 }
 
 impl Render for ToolkitTextDrag {

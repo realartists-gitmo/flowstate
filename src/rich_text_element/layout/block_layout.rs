@@ -52,6 +52,86 @@ pub(super) fn build_layout(
 }
 
 #[hotpath::measure]
+pub(super) fn build_layout_with_visibility(
+  document: &Document,
+  width: Pixels,
+  previous_layout: Option<&LayoutState>,
+  invisibility_mode: bool,
+  window: &mut Window,
+  cx: &mut App,
+) -> LayoutState {
+  if !invisibility_mode {
+    return build_layout(document, width, previous_layout, window, cx);
+  }
+
+  let timing = Instant::now();
+  let mut y = document.theme.pageless_inset_top;
+  let mut paragraphs = Vec::with_capacity(document.paragraphs.len());
+  let mut max_width = width;
+  let mut shaped_count = 0;
+  let mut reused_count = 0;
+  let previous_layout = previous_layout.filter(|layout| layout.width == width);
+
+  for paragraph_ix in 0..document.paragraphs.len() {
+    let Some(source_paragraph) = document.paragraphs.get(paragraph_ix) else {
+      continue;
+    };
+    if !paragraph_is_visible(source_paragraph) {
+      paragraphs.push(LaidOutParagraph {
+        index: paragraph_ix,
+        cache_key: paragraph_cache_key(document, source_paragraph),
+        len: 0,
+        byte_range: 0..0,
+        top: y,
+        bottom: y,
+        lines: Vec::new(),
+        borders: Vec::new(),
+      });
+      continue;
+    }
+
+    let projected_document = invisibility_projected_document(document, paragraph_ix);
+    let layout_document = projected_document.as_ref().unwrap_or(document);
+    let layout_paragraph_ix = if projected_document.is_some() { 0 } else { paragraph_ix };
+    let previous_paragraph = previous_layout.and_then(|layout| paragraph_layout(layout, paragraph_ix));
+    let (mut paragraph, next_y, paragraph_max_width, reused) =
+      layout_paragraph_at(layout_document, layout_paragraph_ix, width, y, previous_paragraph, window, cx);
+    paragraph.index = paragraph_ix;
+    if reused {
+      reused_count += 1;
+    } else {
+      shaped_count += 1;
+    }
+    max_width = max_width.max(paragraph_max_width);
+    y = next_y;
+    paragraphs.push(paragraph);
+  }
+
+  let layout = LayoutState {
+    blocks: paragraphs
+      .iter()
+      .cloned()
+      .map(LaidOutBlock::Paragraph)
+      .collect(),
+    paragraph_to_block: (0..paragraphs.len()).collect(),
+    block_to_paragraph: (0..paragraphs.len()).map(Some).collect(),
+    paragraphs,
+    bounds: None,
+    size: size(max_width, y + document.theme.pageless_inset_bottom),
+    width,
+    snap_underline_rules_to_pixels: document.theme.snap_underline_rules_to_pixels,
+  };
+  log_timing_lazy("build visible layout", timing, || {
+    format!(
+      "blocks={} paragraphs={} shaped={shaped_count} reused={reused_count}",
+      layout.block_count(),
+      layout.paragraphs.len()
+    )
+  });
+  layout
+}
+
+#[hotpath::measure]
 pub(super) fn build_single_paragraph_layout_with_visibility(
   document: &Document,
   paragraph_ix: usize,
