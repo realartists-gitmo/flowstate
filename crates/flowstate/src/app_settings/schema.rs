@@ -5,7 +5,7 @@ use gpui_component::PixelsExt;
 use serde::{Deserialize, Serialize};
 
 use crate::ribbon::RibbonMode;
-use crate::rich_text_element::{DocumentTheme, ThemeUnderline};
+use crate::rich_text_element::{DocumentTheme, ThemeUnderline, flowstate_document_theme};
 use dirs::{config_dir, data_dir};
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -159,6 +159,6 @@ pub enum ThemeUnderlineSetting {
 #[hotpath::measure_all]
 impl Default for DocumentThemeSettings {
   fn default() -> Self {
-    Self::from(&DocumentTheme::default())
+    Self::from(&flowstate_document_theme())
   }
 }

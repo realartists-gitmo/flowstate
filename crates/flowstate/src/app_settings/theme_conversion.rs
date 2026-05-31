@@ -189,6 +189,9 @@ impl From<DocumentThemeSettings> for DocumentTheme {
       ultracondensed_bold: settings.ultracondensed_bold,
       ultracondensed_italic: settings.ultracondensed_italic,
       ultracondensed_underline: settings.ultracondensed_underline.into(),
+      custom_paragraph_styles: Default::default(),
+      custom_semantic_styles: Default::default(),
+      custom_highlight_styles: Default::default(),
     }
   }
 }

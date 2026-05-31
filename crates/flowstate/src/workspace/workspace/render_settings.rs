@@ -544,7 +544,7 @@ fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGr
 impl Workspace {
   fn reset_document_style_section(&mut self, cx: &mut Context<Self>) {
     let section = self.document_style_section;
-    let defaults = DocumentTheme::default();
+    let defaults = flowstate_document_theme();
     let mut theme = self
       .active_editor
       .as_ref()
