@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  Document, DocumentSection, RunSemanticStyle, SectionId, SectionKind, document_text_slice, paragraph_byte_range, paragraph_index_for_id,
-  read_db8,
+  Document, DocumentSection, InputParagraph, InputRun, RunSemanticStyle, SectionId, SectionKind, document_text_slice, paragraph_byte_range,
+  paragraph_index_for_id, paragraph_text_len, read_db8,
 };
 use ignore::WalkBuilder;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
@@ -146,6 +146,8 @@ pub struct SearchHit {
   pub cite: Option<String>,
   pub snippet: String,
   pub insert_text: String,
+  #[serde(default)]
+  pub preview_paragraphs: Vec<InputParagraph>,
   pub score: f32,
   pub paragraph_start: Option<usize>,
   pub paragraph_end_exclusive: Option<usize>,
@@ -406,10 +408,13 @@ impl TubIndex {
 
     for (score, address) in top_docs {
       let document = searcher.doc::<TantivyDocument>(address)?;
-      let Some(hit) = hit_from_document(&self.schema, &document, score) else {
+      let Some(mut hit) = hit_from_document(&self.schema, &document, score) else {
         continue;
       };
       if allowed.contains(&hit.unit_kind) {
+        if !filename_only {
+          self.hydrate_hit_preview(&mut hit)?;
+        }
         hits.push(hit);
       }
       if hits.len() >= limit {
@@ -418,6 +423,25 @@ impl TubIndex {
     }
 
     Ok(hits)
+  }
+
+  fn hydrate_hit_preview(&self, hit: &mut SearchHit) -> Result<()> {
+    if !hit.preview_paragraphs.is_empty() {
+      return Ok(());
+    }
+    let Some(start) = hit.paragraph_start else {
+      return Ok(());
+    };
+    let Some(end) = hit.paragraph_end_exclusive else {
+      return Ok(());
+    };
+    if start >= end {
+      return Ok(());
+    }
+
+    let document = read_db8(&hit.path).with_context(|| format!("reading {}", hit.path.display()))?;
+    hit.preview_paragraphs = input_paragraphs_from_document_range(&document, start, end);
+    Ok(())
   }
 
   fn initialize_catalog(&self) -> Result<()> {
@@ -649,6 +673,7 @@ impl From<TubFile> for SearchHit {
       cite: None,
       snippet: String::new(),
       insert_text: String::new(),
+      preview_paragraphs: Vec::new(),
       score: 0.0,
       paragraph_start: None,
       paragraph_end_exclusive: None,
@@ -798,6 +823,7 @@ fn hit_from_document(schema: &TubSchema, document: &TantivyDocument, score: f32)
     cite: non_empty(stored_text(document, schema.cite).unwrap_or_default()),
     snippet: preview_text(&stored_text(document, schema.body).unwrap_or_default(), 360),
     insert_text: stored_text(document, schema.insert_text).unwrap_or_default(),
+    preview_paragraphs: Vec::new(),
     score,
     paragraph_start: stored_text(document, schema.paragraph_start).and_then(|value| value.parse::<usize>().ok()),
     paragraph_end_exclusive: stored_text(document, schema.paragraph_end).and_then(|value| value.parse::<usize>().ok()),
@@ -898,6 +924,39 @@ fn paragraph_range_text(document: &Document, start: usize, end: usize) -> String
     text.push_str(&paragraph_text_trimmed(document, paragraph_ix));
   }
   text.trim().to_owned()
+}
+
+fn input_paragraphs_from_document_range(document: &Document, start: usize, end: usize) -> Vec<InputParagraph> {
+  (start..end.min(document.paragraphs.len()))
+    .map(|paragraph_ix| input_paragraph_from_document_range(document, paragraph_ix, 0..paragraph_text_len(&document.paragraphs[paragraph_ix])))
+    .filter(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
+    .collect()
+}
+
+fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: std::ops::Range<usize>) -> InputParagraph {
+  let paragraph = &document.paragraphs[paragraph_ix];
+  let paragraph_range = paragraph_byte_range(document, paragraph_ix);
+  let start = range.start.min(paragraph_text_len(paragraph));
+  let end = range.end.min(paragraph_text_len(paragraph)).max(start);
+  let mut runs = Vec::new();
+  let mut offset = 0;
+  for run in &paragraph.runs {
+    let run_start = offset;
+    let run_end = offset + run.len;
+    offset = run_end;
+    let clipped_start = run_start.max(start);
+    let clipped_end = run_end.min(end);
+    if clipped_start < clipped_end {
+      runs.push(InputRun {
+        text: document_text_slice(document, paragraph_range.start + clipped_start..paragraph_range.start + clipped_end),
+        styles: run.styles,
+      });
+    }
+  }
+  InputParagraph {
+    style: paragraph.style,
+    runs,
+  }
 }
 
 fn paragraph_text_trimmed(document: &Document, paragraph_ix: usize) -> String {

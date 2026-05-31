@@ -6,7 +6,7 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, SharedString, Timer, Window, div, prelude::*, px, rgb, size};
+use gpui::{App, Context, Hsla, IntoElement, PathPromptOptions, Pixels, SharedString, Timer, Window, div, prelude::*, px, rgb, size};
 use gpui_component::{
   ActiveTheme as _, Icon, IconName, Selectable, Sizable,
   button::{Button, ButtonVariants},
@@ -19,8 +19,8 @@ use gpui_component::{
 };
 
 use crate::{
-  app_settings::{flowstate_data_dir, save_tub_root},
-  rich_text_element::ToolkitTextDrag,
+  app_settings::{flowstate_data_dir, load_document_theme, save_tub_root},
+  rich_text_element::{DocumentTheme, HighlightStyle, InputParagraph, InputRun, ParagraphStyle, RunSemanticStyle, RunStyles, ToolkitTextDrag},
 };
 
 use super::{
@@ -591,12 +591,8 @@ impl Workspace {
       hit.heading_path.join(" / ")
     };
     let cite = hit.cite.clone().unwrap_or_default();
-    let preview_text = if hit.insert_text.trim().is_empty() {
-      hit.snippet.as_str()
-    } else {
-      hit.insert_text.as_str()
-    };
-    let preview_lines = toolkit_preview_lines(preview_text);
+    let preview_text = if hit.insert_text.trim().is_empty() { hit.snippet.as_str() } else { hit.insert_text.as_str() };
+    let document_theme = load_document_theme();
 
     div()
       .id(("toolkit-hit", ix))
@@ -669,13 +665,7 @@ impl Workspace {
               .line_height(px(16.0))
               .font_family("Arial")
               .text_color(rgb(0x111827))
-              .children(preview_lines.into_iter().map(|line| {
-                div()
-                  .w_full()
-                  .min_h(px(16.0))
-                  .whitespace_normal()
-                  .child(line)
-              })),
+              .child(render_toolkit_preview_body(hit, preview_text, &document_theme)),
           )
           .child(
             h_flex()
@@ -890,6 +880,211 @@ fn toolkit_preview_lines(text: &str) -> Vec<SharedString> {
     lines.push(SharedString::from("..."));
   }
   lines
+}
+
+fn render_toolkit_preview_body(hit: &flowstate_tub::SearchHit, fallback_text: &str, theme: &DocumentTheme) -> gpui::AnyElement {
+  if !hit.preview_paragraphs.is_empty() {
+    return v_flex()
+      .w_full()
+      .gap_1()
+      .children(
+        hit
+          .preview_paragraphs
+          .iter()
+          .take(8)
+          .map(|paragraph| render_toolkit_preview_paragraph(paragraph, theme)),
+      )
+      .into_any_element();
+  }
+
+  v_flex()
+    .w_full()
+    .children(toolkit_preview_lines(fallback_text).into_iter().map(|line| {
+      div()
+        .w_full()
+        .min_h(px(16.0))
+        .whitespace_normal()
+        .child(line)
+    }))
+    .into_any_element()
+}
+
+fn render_toolkit_preview_paragraph(paragraph: &InputParagraph, theme: &DocumentTheme) -> gpui::AnyElement {
+  h_flex()
+    .w_full()
+    .items_baseline()
+    .flex_wrap()
+    .children(
+      paragraph
+        .runs
+        .iter()
+        .flat_map(|run| toolkit_run_fragments(run).into_iter().map(|text| render_toolkit_preview_run(text, paragraph.style, run.styles, theme))),
+    )
+    .into_any_element()
+}
+
+fn toolkit_run_fragments(run: &InputRun) -> Vec<String> {
+  run
+    .text
+    .split_inclusive(' ')
+    .filter(|fragment| !fragment.is_empty())
+    .map(ToOwned::to_owned)
+    .collect()
+}
+
+fn render_toolkit_preview_run(text: String, paragraph_style: ParagraphStyle, styles: RunStyles, theme: &DocumentTheme) -> gpui::AnyElement {
+  let format = toolkit_preview_format(paragraph_style, styles, theme);
+  div()
+    .text_size(format.font_size)
+    .font_family(format.font_family)
+    .font_weight(if format.bold { gpui::FontWeight::BOLD } else { gpui::FontWeight::NORMAL })
+    .text_color(format.color)
+    .when(format.italic, |this| this.italic())
+    .when(format.underline, |this| this.text_decoration_1())
+    .when(format.strikethrough, |this| this.line_through())
+    .when_some(format.highlight, |this, highlight| this.bg(highlight))
+    .child(text)
+    .into_any_element()
+}
+
+struct ToolkitPreviewFormat {
+  font_family: SharedString,
+  font_size: Pixels,
+  color: Hsla,
+  bold: bool,
+  italic: bool,
+  underline: bool,
+  strikethrough: bool,
+  highlight: Option<Hsla>,
+}
+
+fn toolkit_preview_format(paragraph_style: ParagraphStyle, styles: RunStyles, theme: &DocumentTheme) -> ToolkitPreviewFormat {
+  let mut format = match paragraph_style {
+    ParagraphStyle::Pocket => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.pocket_font_size * 0.78,
+      color: theme.pocket_color,
+      bold: theme.pocket_bold,
+      italic: theme.pocket_italic,
+      underline: toolkit_underline_enabled(theme.pocket_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Hat => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.hat_font_size * 0.78,
+      color: theme.hat_color,
+      bold: theme.hat_bold,
+      italic: theme.hat_italic,
+      underline: toolkit_underline_enabled(theme.hat_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Block => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.block_font_size * 0.78,
+      color: theme.block_color,
+      bold: theme.block_bold,
+      italic: theme.block_italic,
+      underline: toolkit_underline_enabled(theme.block_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Tag => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.tag_font_size * 0.78,
+      color: theme.tag_color,
+      bold: theme.tag_bold,
+      italic: theme.tag_italic,
+      underline: toolkit_underline_enabled(theme.tag_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Analytic => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.tag_font_size * 0.78,
+      color: theme.analytic_color,
+      bold: theme.analytic_bold,
+      italic: theme.analytic_italic,
+      underline: toolkit_underline_enabled(theme.analytic_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Undertag => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.undertag_font_size * 0.78,
+      color: theme.undertag_color,
+      bold: theme.undertag_bold,
+      italic: theme.undertag_italic,
+      underline: toolkit_underline_enabled(theme.undertag_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+    ParagraphStyle::Normal => ToolkitPreviewFormat {
+      font_family: theme.default_font_family.clone(),
+      font_size: theme.body_font_size * 0.78,
+      color: theme.default_text_color,
+      bold: theme.normal_bold,
+      italic: theme.normal_italic,
+      underline: toolkit_underline_enabled(theme.normal_underline),
+      strikethrough: false,
+      highlight: None,
+    },
+  };
+
+  match styles.semantic {
+    RunSemanticStyle::Plain => {},
+    RunSemanticStyle::Cite => {
+      format.font_size = theme.cite_font_size * 0.78;
+      format.color = theme.cite_color;
+      format.bold = theme.cite_bold;
+      format.italic = theme.cite_italic;
+      format.underline = toolkit_underline_enabled(theme.cite_underline);
+    },
+    RunSemanticStyle::Emphasis => {
+      format.font_size = theme.cite_font_size * 0.78;
+      format.color = theme.emphasis_color;
+      format.bold = theme.emphasis_bold;
+      format.italic = theme.emphasis_italic;
+      format.underline = toolkit_underline_enabled(theme.emphasis_underline);
+    },
+    RunSemanticStyle::Underline => {
+      format.font_size = theme.body_font_size * 0.78;
+      format.color = theme.underline_color;
+      format.bold = theme.underline_bold;
+      format.italic = theme.underline_italic;
+      format.underline = toolkit_underline_enabled(theme.underline_underline);
+    },
+    RunSemanticStyle::Condensed => {
+      format.font_size = theme.condensed_font_size * 0.78;
+      format.color = theme.condensed_color;
+      format.bold = theme.condensed_bold;
+      format.italic = theme.condensed_italic;
+      format.underline = toolkit_underline_enabled(theme.condensed_underline);
+    },
+    RunSemanticStyle::Ultracondensed => {
+      format.font_size = theme.ultracondensed_font_size * 0.78;
+      format.color = theme.ultracondensed_color;
+      format.bold = theme.ultracondensed_bold;
+      format.italic = theme.ultracondensed_italic;
+      format.underline = toolkit_underline_enabled(theme.ultracondensed_underline);
+    },
+  }
+
+  if styles.direct_underline {
+    format.underline = true;
+  }
+  format.strikethrough = styles.strikethrough;
+  format.highlight = styles.highlight.map(|highlight| match highlight {
+    HighlightStyle::Spoken => theme.highlight_spoken,
+    HighlightStyle::Insert => theme.highlight_insert,
+    HighlightStyle::Alternative => theme.highlight_alternative,
+  });
+  format
+}
+
+fn toolkit_underline_enabled(underline: crate::rich_text_element::ThemeUnderline) -> bool {
+  !matches!(underline, crate::rich_text_element::ThemeUnderline::None)
 }
 
 fn hit_icon(kind: flowstate_tub::SearchUnitKind) -> IconName {
