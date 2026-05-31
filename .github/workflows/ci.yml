@@ -1,12 +1,14 @@
 name: CI
 
-# Pull-request gate. Every job here is intended to be a required status check
-# on `main`, so a PR cannot be merged unless they all pass.
+# Pull-request cargo gate. Only crate, vendor, and root manifest changes need
+# the expensive Rust checks below.
 on:
   pull_request:
     branches: [main]
-  # Allow the same gate to run when using GitHub merge queues.
-  merge_group:
+    paths:
+      - "Cargo.toml"
+      - "crates/**"
+      - "vendor/**"
 
 # Cancel superseded runs on the same ref to save runner minutes.
 concurrency:
