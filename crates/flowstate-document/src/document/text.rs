@@ -8,6 +8,41 @@ pub struct Paragraph {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ParagraphId(pub u128);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct BlockId(pub u128);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct SectionId(pub u128);
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DocumentIds {
+  pub paragraph_ids: Vec<ParagraphId>,
+  pub block_ids: Vec<BlockId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub enum SectionKind {
+  Pocket,
+  Hat,
+  BlockSection,
+  TagSection,
+  Analytic,
+  Card,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DocumentSection {
+  pub id: SectionId,
+  pub parent_id: Option<SectionId>,
+  pub kind: SectionKind,
+  pub heading_paragraph: Option<ParagraphId>,
+  pub start_paragraph: ParagraphId,
+  pub end_paragraph_exclusive: Option<ParagraphId>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum ParagraphStyle {
   Pocket,
   Hat,

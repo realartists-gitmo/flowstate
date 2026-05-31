@@ -76,26 +76,36 @@ impl RichTextEditor {
       })
       .collect::<Vec<_>>();
     let old_blocks = self.document.blocks.as_ref().clone();
+    let old_block_ids = self.document.ids.block_ids.clone();
     let mut paragraph_ix = 0;
     let mut output = Vec::with_capacity(old_blocks.len() + inserted_blocks.len());
+    let mut output_block_ids = Vec::with_capacity(old_blocks.len() + inserted_blocks.len());
     for (block_ix, block) in old_blocks.iter().enumerate() {
       if block_ix == insert_ix {
         output.extend(inserted_blocks.iter().cloned());
+        output_block_ids.extend((0..inserted_blocks.len()).map(|_| new_block_id()));
       }
       match block {
         Block::Paragraph(_) => {
           if let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) {
             output.push(Block::Paragraph(paragraph.clone()));
+            output_block_ids.push(old_block_ids.get(block_ix).copied().unwrap_or_else(new_block_id));
           }
           paragraph_ix += 1;
         },
-        Block::Image(_) | Block::Equation(_) | Block::Table(_) => output.push(block.clone()),
+        Block::Image(_) | Block::Equation(_) | Block::Table(_) => {
+          output.push(block.clone());
+          output_block_ids.push(old_block_ids.get(block_ix).copied().unwrap_or_else(new_block_id));
+        },
       }
     }
     if insert_ix >= old_blocks.len() {
       output.extend(inserted_blocks);
+      output_block_ids.extend((0..input_blocks.len()).map(|_| new_block_id()));
     }
     self.document.blocks = Arc::new(output);
+    self.document.ids.block_ids = output_block_ids;
+    rebuild_document_sections(&mut self.document);
     self.selected_block = None;
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
@@ -117,8 +127,13 @@ impl RichTextEditor {
       return;
     }
     let insert_ix = self.prepare_block_insertion_index();
+    let inserted_count = blocks.len();
     Arc::make_mut(&mut self.document.blocks).splice(insert_ix..insert_ix, blocks);
+    for relative_ix in 0..inserted_count {
+      insert_block_id(&mut self.document, insert_ix + relative_ix);
+    }
     self.append_missing_paragraph_blocks();
+    rebuild_document_sections(&mut self.document);
     self.selected_block = None;
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
@@ -144,11 +159,16 @@ impl RichTextEditor {
       let range = self.selection.normalized();
       let object_indices = self.object_block_indices_in_text_range(range);
       if !object_indices.is_empty() {
-        let blocks = Arc::make_mut(&mut self.document.blocks);
-        for block_ix in object_indices.into_iter().rev() {
-          if block_ix < blocks.len() {
-            blocks.remove(block_ix);
+        {
+          let blocks = Arc::make_mut(&mut self.document.blocks);
+          for block_ix in object_indices.iter().copied().rev() {
+            if block_ix < blocks.len() {
+              blocks.remove(block_ix);
+            }
           }
+        }
+        for block_ix in object_indices.into_iter().rev() {
+          remove_block_ids(&mut self.document, block_ix..block_ix + 1);
         }
       }
       self.delete_selection_internal();
@@ -174,10 +194,13 @@ impl RichTextEditor {
     }
     let block_ix = self.block_ix_for_paragraph(paragraph_ix)?;
     let paragraph_count = self.document.paragraphs.len();
-    let blocks = Arc::make_mut(&mut self.document.blocks);
-    if block_ix < blocks.len() {
-      blocks.remove(block_ix);
+    {
+      let blocks = Arc::make_mut(&mut self.document.blocks);
+      if block_ix < blocks.len() {
+        blocks.remove(block_ix);
+      }
     }
+    remove_block_ids(&mut self.document, block_ix..block_ix + 1);
 
     if paragraph_count > 1 {
       let range = paragraph_byte_range(&self.document, paragraph_ix);
@@ -187,7 +210,9 @@ impl RichTextEditor {
         self.document.text.delete(range.start - 1..range.start);
       }
       paragraphs_mut(&mut self.document).remove(paragraph_ix);
+      remove_paragraph_ids(&mut self.document, paragraph_ix..paragraph_ix + 1);
       rebuild_document_offset_index(&mut self.document);
+      rebuild_document_sections(&mut self.document);
       let new_paragraph_ix = paragraph_ix.min(self.document.paragraphs.len().saturating_sub(1));
       self.selection = EditorSelection {
         anchor: DocumentOffset {
@@ -213,10 +238,15 @@ impl RichTextEditor {
     if existing >= self.document.paragraphs.len() {
       return;
     }
-    let blocks = Arc::make_mut(&mut self.document.blocks);
-    for paragraph in self.document.paragraphs.iter().skip(existing) {
-      blocks.push(Block::Paragraph(paragraph.clone()));
+    let inserted_count = self.document.paragraphs.len() - existing;
+    {
+      let blocks = Arc::make_mut(&mut self.document.blocks);
+      for paragraph in self.document.paragraphs.iter().skip(existing) {
+        blocks.push(Block::Paragraph(paragraph.clone()));
+      }
     }
+    self.document.ids.block_ids.extend((0..inserted_count).map(|_| new_block_id()));
+    rebuild_document_sections(&mut self.document);
   }
 
   fn push_replace_document_history(&mut self, before_document: Document, before_selection: EditorSelection, cx: &mut Context<Self>) {

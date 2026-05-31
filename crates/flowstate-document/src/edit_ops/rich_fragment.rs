@@ -79,9 +79,13 @@ fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentO
     let paragraphs = paragraphs_mut(document);
     paragraphs.splice(offset.paragraph..offset.paragraph + 1, replacements);
   }
+  for insert_ix in 1..replacement_count {
+    insert_paragraph_id(document, offset.paragraph + insert_ix);
+  }
   rebuild_document_offset_index(document);
   let block_replacements = document.paragraphs[offset.paragraph..offset.paragraph + replacement_count].to_vec();
   replace_paragraph_blocks(document, offset.paragraph, 1, &block_replacements);
+  rebuild_document_sections(document);
 
   DocumentOffset {
     paragraph: offset.paragraph + last_ix,

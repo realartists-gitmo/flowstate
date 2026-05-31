@@ -94,14 +94,18 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
       .wrapping_add(INVISIBILITY_PROJECTED_VERSION_OFFSET),
   };
   let paragraphs = Arc::new(vec![paragraph.clone()]);
-  Some(Document {
+  let mut projected = Document {
     text: Rope::from(text),
     blocks: Arc::new(vec![Block::Paragraph(paragraph)]),
     paragraphs: paragraphs.clone(),
     assets: document.assets.clone(),
+    ids: document_ids_for_shape(paragraphs.len(), 1),
+    sections: Arc::new(Vec::new()),
     offset_index: ParagraphOffsetIndex::new(&paragraphs),
     theme: document.theme.clone(),
-  })
+  };
+  rebuild_document_sections(&mut projected);
+  Some(projected)
 }
 
 #[hotpath::measure]

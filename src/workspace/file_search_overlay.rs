@@ -23,6 +23,7 @@ pub struct FileSearchOverlay {
   workspace: WeakEntity<Workspace>,
   search_input: Entity<InputState>,
   search: Option<Arc<DocumentFileSearch>>,
+  tub_search: Option<Arc<flowstate_tub::TubIndex>>,
   hits: Vec<FileSearchHit>,
   selected: usize,
   search_generation: u64,
@@ -33,7 +34,12 @@ pub struct FileSearchOverlay {
 
 #[hotpath::measure_all]
 impl FileSearchOverlay {
-  pub fn new(workspace: WeakEntity<Workspace>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+  pub fn new(
+    workspace: WeakEntity<Workspace>,
+    tub_search: Option<Arc<flowstate_tub::TubIndex>>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Self {
     let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, file_name.pdf, or file_name.fl0"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
@@ -45,6 +51,7 @@ impl FileSearchOverlay {
       workspace,
       search_input,
       search: None,
+      tub_search,
       hits: Vec::new(),
       selected: 0,
       search_generation: 0,
@@ -66,6 +73,12 @@ impl FileSearchOverlay {
     self.search = None;
     self.hits.clear();
     cx.notify();
+
+    if self.tub_search.is_some() {
+      self.loading = false;
+      self.refresh_results(cx);
+      return;
+    }
 
     cx.spawn(async move |overlay, cx| {
       let search = cx
@@ -94,6 +107,45 @@ impl FileSearchOverlay {
 
   fn refresh_results(&mut self, cx: &mut Context<Self>) {
     let query = self.query(cx);
+    if let Some(search) = self.tub_search.clone() {
+      self.search_generation = self.search_generation.wrapping_add(1);
+      let generation = self.search_generation;
+      cx.spawn(async move |overlay, cx| {
+        let hits = cx
+          .background_executor()
+          .spawn(async move {
+            search
+              .search_files(&query, RESULT_LIMIT)
+              .map(|hits| {
+                hits
+                  .into_iter()
+                  .map(|hit| FileSearchHit { path: hit.path })
+                  .collect::<Vec<_>>()
+              })
+          })
+          .await;
+        let _ = overlay.update(cx, |overlay, cx| {
+          if overlay.search_generation != generation {
+            return;
+          }
+          match hits {
+            Ok(hits) => {
+              overlay.hits = hits;
+              overlay.selected = 0;
+              overlay.error = None;
+            },
+            Err(error) => {
+              overlay.hits.clear();
+              overlay.selected = 0;
+              overlay.error = Some(format!("Tub file search unavailable: {error}").into());
+            },
+          }
+          cx.notify();
+        });
+      })
+      .detach();
+      return;
+    }
     let Some(search) = self.search.clone() else {
       self.hits.clear();
       self.selected = 0;

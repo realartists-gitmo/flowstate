@@ -36,6 +36,8 @@ pub struct Document {
   pub paragraphs: Arc<Vec<Paragraph>>,
   pub blocks: Arc<Vec<Block>>,
   pub assets: AssetStore,
+  pub ids: DocumentIds,
+  pub sections: Arc<Vec<DocumentSection>>,
   // Auxiliary Fenwick-tree index over per-paragraph byte widths. Kept in sync
   // with `paragraphs` by the edit helpers in `edit_ops`. Not part of the
   // public API.
@@ -146,6 +148,7 @@ pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
 
 #[hotpath::measure]
 pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
+  let block_start = block_ix_for_paragraph(document, start_paragraph).unwrap_or(document.blocks.len());
   let mut paragraph_ix = 0;
   let mut output = Vec::with_capacity(document.blocks.len() + replacements.len());
   let mut inserted_replacements = false;
@@ -181,6 +184,182 @@ pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize,
   }
 
   document.blocks = Arc::new(output);
+  let block_end = (block_start + old_count).min(document.ids.block_ids.len());
+  let replacement_ids = if old_count == replacements.len() {
+    document.ids.block_ids[block_start..block_end].to_vec()
+  } else {
+    let mut ids = Vec::with_capacity(replacements.len());
+    if let Some(first) = document.ids.block_ids.get(block_start).copied() {
+      ids.push(first);
+    }
+    while ids.len() < replacements.len() {
+      ids.push(new_block_id());
+    }
+    ids
+  };
+  document
+    .ids
+    .block_ids
+    .splice(block_start..block_end, replacement_ids);
+  reconcile_document_ids(document);
+  rebuild_document_sections(document);
+}
+
+#[hotpath::measure]
+pub fn new_paragraph_id() -> ParagraphId {
+  ParagraphId(uuid::Uuid::new_v4().as_u128())
+}
+
+#[hotpath::measure]
+pub fn new_block_id() -> BlockId {
+  BlockId(uuid::Uuid::new_v4().as_u128())
+}
+
+#[hotpath::measure]
+pub fn new_section_id() -> SectionId {
+  SectionId(uuid::Uuid::new_v4().as_u128())
+}
+
+#[hotpath::measure]
+pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> DocumentIds {
+  DocumentIds {
+    paragraph_ids: (0..paragraph_count).map(|_| new_paragraph_id()).collect(),
+    block_ids: (0..block_count).map(|_| new_block_id()).collect(),
+  }
+}
+
+#[hotpath::measure]
+pub fn reconcile_document_ids(document: &mut Document) {
+  while document.ids.paragraph_ids.len() < document.paragraphs.len() {
+    document.ids.paragraph_ids.push(new_paragraph_id());
+  }
+  document.ids.paragraph_ids.truncate(document.paragraphs.len());
+
+  while document.ids.block_ids.len() < document.blocks.len() {
+    document.ids.block_ids.push(new_block_id());
+  }
+  document.ids.block_ids.truncate(document.blocks.len());
+}
+
+#[hotpath::measure]
+pub fn paragraph_index_for_id(document: &Document, id: ParagraphId) -> Option<usize> {
+  document
+    .ids
+    .paragraph_ids
+    .iter()
+    .position(|candidate| *candidate == id)
+}
+
+#[hotpath::measure]
+pub fn paragraph_id_at(document: &Document, paragraph_ix: usize) -> Option<ParagraphId> {
+  document.ids.paragraph_ids.get(paragraph_ix).copied()
+}
+
+#[hotpath::measure]
+pub fn block_id_at(document: &Document, block_ix: usize) -> Option<BlockId> {
+  document.ids.block_ids.get(block_ix).copied()
+}
+
+#[hotpath::measure]
+pub fn insert_paragraph_id(document: &mut Document, paragraph_ix: usize) -> ParagraphId {
+  let id = new_paragraph_id();
+  document
+    .ids
+    .paragraph_ids
+    .insert(paragraph_ix.min(document.ids.paragraph_ids.len()), id);
+  id
+}
+
+#[hotpath::measure]
+pub fn insert_block_id(document: &mut Document, block_ix: usize) -> BlockId {
+  let id = new_block_id();
+  document
+    .ids
+    .block_ids
+    .insert(block_ix.min(document.ids.block_ids.len()), id);
+  id
+}
+
+#[hotpath::measure]
+pub fn remove_paragraph_ids(document: &mut Document, range: Range<usize>) {
+  let start = range.start.min(document.ids.paragraph_ids.len());
+  let end = range.end.min(document.ids.paragraph_ids.len());
+  if start < end {
+    document.ids.paragraph_ids.drain(start..end);
+  }
+}
+
+#[hotpath::measure]
+pub fn remove_block_ids(document: &mut Document, range: Range<usize>) {
+  let start = range.start.min(document.ids.block_ids.len());
+  let end = range.end.min(document.ids.block_ids.len());
+  if start < end {
+    document.ids.block_ids.drain(start..end);
+  }
+}
+
+#[hotpath::measure]
+pub fn rebuild_document_sections(document: &mut Document) {
+  reconcile_document_ids(document);
+  let mut sections: Vec<DocumentSection> = Vec::new();
+  let mut stack: Vec<(usize, SectionId)> = Vec::new();
+
+  for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
+    let Some((level, kind)) = section_level_and_kind(paragraph.style) else {
+      continue;
+    };
+    while stack.last().is_some_and(|(ancestor_level, _)| *ancestor_level >= level) {
+      if let Some((_, section_id)) = stack.pop() {
+        for section in sections.iter_mut().filter(|section| section.id == section_id) {
+          section.end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
+        }
+      }
+    }
+    let paragraph_id = paragraph_id_at(document, paragraph_ix).unwrap_or_else(new_paragraph_id);
+    let parent_id = stack.last().map(|(_, id)| *id);
+    let id = section_id_for_heading(paragraph_id, kind);
+    sections.push(DocumentSection {
+      id,
+      parent_id,
+      kind,
+      heading_paragraph: Some(paragraph_id),
+      start_paragraph: paragraph_id,
+      end_paragraph_exclusive: None,
+    });
+    stack.push((level, id));
+  }
+
+  for (_, section_id) in stack {
+    if let Some(section) = sections.iter_mut().find(|section| section.id == section_id) {
+      section.end_paragraph_exclusive = None;
+    }
+  }
+  document.sections = Arc::new(sections);
+}
+
+#[hotpath::measure]
+fn section_level_and_kind(style: ParagraphStyle) -> Option<(usize, SectionKind)> {
+  match style {
+    ParagraphStyle::Pocket => Some((0, SectionKind::Pocket)),
+    ParagraphStyle::Hat => Some((1, SectionKind::Hat)),
+    ParagraphStyle::Block => Some((2, SectionKind::BlockSection)),
+    ParagraphStyle::Tag => Some((3, SectionKind::TagSection)),
+    ParagraphStyle::Analytic => Some((3, SectionKind::Analytic)),
+    ParagraphStyle::Normal | ParagraphStyle::Undertag => None,
+  }
+}
+
+#[hotpath::measure]
+fn section_id_for_heading(paragraph_id: ParagraphId, kind: SectionKind) -> SectionId {
+  let kind_slot = match kind {
+    SectionKind::Pocket => 1u128,
+    SectionKind::Hat => 2,
+    SectionKind::BlockSection => 3,
+    SectionKind::TagSection => 4,
+    SectionKind::Analytic => 5,
+    SectionKind::Card => 6,
+  };
+  SectionId(paragraph_id.0 ^ (kind_slot << 120))
 }
 
 /// Fenwick-tree (binary indexed tree) over the byte widths of each paragraph,

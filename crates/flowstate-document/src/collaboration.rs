@@ -5,12 +5,6 @@ use serde::{Deserialize, Serialize};
 use super::*;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct ParagraphId(pub u128);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct BlockId(pub u128);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TableCellId(pub u128);
 
 #[derive(Clone, Debug, Default)]
@@ -29,8 +23,8 @@ impl DocumentIdentityMap {
   }
 
   pub fn reconcile(&mut self, document: &Document) {
-    resize_ids(&mut self.paragraph_ids, document.paragraphs.len(), ParagraphId);
-    resize_ids(&mut self.block_ids, document.blocks.len(), BlockId);
+    self.paragraph_ids = document.ids.paragraph_ids.clone();
+    self.block_ids = document.ids.block_ids.clone();
     self
       .table_cell_ids
       .resize_with(document.blocks.len(), Vec::new);
@@ -52,12 +46,10 @@ impl DocumentIdentityMap {
   pub fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
     self.paragraph_ids.insert(
       (paragraph_ix + 1).min(self.paragraph_ids.len()),
-      ParagraphId(uuid::Uuid::new_v4().as_u128()),
+      new_paragraph_id(),
     );
     let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
-    self
-      .block_ids
-      .insert(block_insert_ix, BlockId(uuid::Uuid::new_v4().as_u128()));
+    self.block_ids.insert(block_insert_ix, new_block_id());
     self.table_cell_ids.insert(block_insert_ix, Vec::new());
   }
 

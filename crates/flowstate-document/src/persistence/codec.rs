@@ -21,6 +21,11 @@ fn read_u32(cursor: &mut Cursor<&[u8]>) -> io::Result<u32> {
 }
 
 #[hotpath::measure]
+fn write_u32(bytes: &mut Vec<u8>, value: u32) {
+  bytes.extend_from_slice(&value.to_le_bytes());
+}
+
+#[hotpath::measure]
 fn read_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
   let mut bytes = [0; 8];
   cursor.read_exact(&mut bytes)?;
@@ -122,6 +127,31 @@ fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
     5 => Ok(ParagraphStyle::Normal),
     6 => Ok(ParagraphStyle::Undertag),
     _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid paragraph style")),
+  }
+}
+
+#[hotpath::measure]
+fn encode_section_kind(kind: SectionKind) -> u8 {
+  match kind {
+    SectionKind::Pocket => 0,
+    SectionKind::Hat => 1,
+    SectionKind::BlockSection => 2,
+    SectionKind::TagSection => 3,
+    SectionKind::Analytic => 4,
+    SectionKind::Card => 5,
+  }
+}
+
+#[hotpath::measure]
+fn decode_section_kind(value: u8) -> io::Result<SectionKind> {
+  match value {
+    0 => Ok(SectionKind::Pocket),
+    1 => Ok(SectionKind::Hat),
+    2 => Ok(SectionKind::BlockSection),
+    3 => Ok(SectionKind::TagSection),
+    4 => Ok(SectionKind::Analytic),
+    5 => Ok(SectionKind::Card),
+    _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid section kind")),
   }
 }
 

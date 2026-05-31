@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::ribbon::RibbonMode;
 use crate::rich_text_element::{DocumentTheme, ThemeUnderline};
-use dirs::config_dir;
+use dirs::{config_dir, data_dir};
 
 #[derive(Default, Deserialize, Serialize)]
 #[serde(default)]
@@ -14,6 +14,7 @@ pub struct AppSettings {
   pub theme_name: Option<String>,
   pub document_theme: Option<DocumentThemeSettings>,
   pub editor: EditorSettings,
+  pub toolkit: ToolkitSettings,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -24,6 +25,12 @@ pub struct EditorSettings {
   pub autosave: bool,
   pub send_to_document_directory: bool,
   pub send_custom_directory: Option<PathBuf>,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct ToolkitSettings {
+  pub tub_root: Option<PathBuf>,
 }
 
 #[hotpath::measure_all]

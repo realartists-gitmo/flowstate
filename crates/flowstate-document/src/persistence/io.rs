@@ -18,7 +18,15 @@ use super::*;
 // UTF-8 text blob, then per-paragraph run metadata. Keeping the format
 // length-prefixed makes the reader resilient against trailing junk.
 const DB8_MAGIC: &[u8; 4] = b"DB8\0";
-const DB8_VERSION: u32 = 5;
+const DB8_LEGACY_VERSION: u32 = 5;
+const DB8_VERSION: u32 = 6;
+
+const CHUNK_TEXT: u8 = 1;
+const CHUNK_ASSETS: u8 = 2;
+const CHUNK_BLOCKS: u8 = 3;
+const CHUNK_PARAGRAPH_IDS: u8 = 4;
+const CHUNK_BLOCK_IDS: u8 = 5;
+const CHUNK_SECTIONS: u8 = 6;
 
 const BLOCK_PARAGRAPH: u8 = 0;
 const BLOCK_IMAGE: u8 = 1;
@@ -65,10 +73,13 @@ fn read_db8_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<Docum
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid DB8 magic"));
   }
   let version = read_u32(&mut cursor)?;
-  if version != DB8_VERSION {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported DB8 version"));
+  if version == DB8_LEGACY_VERSION {
+    return read_db8_current(cursor, timing);
   }
-  read_db8_current(cursor, timing)
+  if version == DB8_VERSION {
+    return read_db8_vnext(cursor, timing);
+  }
+  Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported DB8 version"))
 }
 
 #[hotpath::measure]
@@ -101,39 +112,73 @@ fn document_for_serialization(document: &Document) -> Document {
   // to serialize instead of trusting cached offsets.
   rebuild_document_offset_index(&mut document);
   document.blocks = Arc::new(serializable_blocks(&document));
+  reconcile_document_ids(&mut document);
+  rebuild_document_sections(&mut document);
   document
 }
 
 #[hotpath::measure]
 fn serialize_db8(document: &Document) -> io::Result<Vec<u8>> {
-  let estimated_asset_bytes = document
-    .assets
-    .assets
-    .values()
-    .map(|asset| asset.bytes.len())
-    .sum::<usize>();
-  let mut bytes = Vec::with_capacity(
-    DB8_MAGIC.len()
-      + std::mem::size_of::<u32>()
-      + document.text.byte_len()
-      + estimated_asset_bytes
-      + document.blocks.len().saturating_mul(32),
-  );
+  let mut chunks = Vec::<(u8, Vec<u8>)>::new();
+  let mut text = Vec::with_capacity(document.text.byte_len());
+  for chunk in document.text.chunks() {
+    text.extend_from_slice(chunk.as_bytes());
+  }
+  chunks.push((CHUNK_TEXT, text));
+
+  let mut assets = Vec::new();
+  write_u64(&mut assets, document.assets.assets.len() as u64);
+  for asset in document.assets.assets.values() {
+    write_asset_record(&mut assets, asset);
+  }
+  chunks.push((CHUNK_ASSETS, assets));
+
+  let mut blocks = Vec::new();
+  write_u64(&mut blocks, document.blocks.len() as u64);
+  for block in document.blocks.iter() {
+    write_block_record(&mut blocks, block);
+  }
+  chunks.push((CHUNK_BLOCKS, blocks));
+
+  let mut paragraph_ids = Vec::new();
+  write_u64(&mut paragraph_ids, document.ids.paragraph_ids.len() as u64);
+  for id in &document.ids.paragraph_ids {
+    write_u128(&mut paragraph_ids, id.0);
+  }
+  chunks.push((CHUNK_PARAGRAPH_IDS, paragraph_ids));
+
+  let mut block_ids = Vec::new();
+  write_u64(&mut block_ids, document.ids.block_ids.len() as u64);
+  for id in &document.ids.block_ids {
+    write_u128(&mut block_ids, id.0);
+  }
+  chunks.push((CHUNK_BLOCK_IDS, block_ids));
+
+  let mut sections = Vec::new();
+  write_u64(&mut sections, document.sections.len() as u64);
+  for section in document.sections.iter() {
+    write_section_record(&mut sections, section);
+  }
+  chunks.push((CHUNK_SECTIONS, sections));
+
+  let table_entry_len = 1 + 1 + 2 + 8 + 8;
+  let header_len = DB8_MAGIC.len() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + chunks.len() * table_entry_len;
+  let payload_len = chunks.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
+  let mut bytes = Vec::with_capacity(header_len + payload_len);
   bytes.extend_from_slice(DB8_MAGIC);
   bytes.extend_from_slice(&DB8_VERSION.to_le_bytes());
-  write_u64(&mut bytes, document.text.byte_len() as u64);
-  for chunk in document.text.chunks() {
-    bytes.extend_from_slice(chunk.as_bytes());
+  write_u32(&mut bytes, chunks.len() as u32);
+  let mut offset = header_len;
+  for (kind, payload) in &chunks {
+    bytes.push(*kind);
+    bytes.push(0);
+    bytes.extend_from_slice(&0u16.to_le_bytes());
+    write_u64(&mut bytes, offset as u64);
+    write_u64(&mut bytes, payload.len() as u64);
+    offset += payload.len();
   }
-
-  write_u64(&mut bytes, document.assets.assets.len() as u64);
-  for asset in document.assets.assets.values() {
-    write_asset_record(&mut bytes, asset);
-  }
-
-  write_u64(&mut bytes, document.blocks.len() as u64);
-  for block in document.blocks.iter() {
-    write_block_record(&mut bytes, block);
+  for (_, payload) in chunks {
+    bytes.extend_from_slice(&payload);
   }
   Ok(bytes)
 }

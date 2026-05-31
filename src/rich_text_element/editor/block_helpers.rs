@@ -22,6 +22,9 @@ fn insert_standalone_paragraphs_into_projection(
     .collect::<Vec<_>>();
   let insert_ix = insert_paragraph_ix.min(entries.len());
   entries.splice(insert_ix..insert_ix, inserted_entries.clone());
+  for relative_ix in 0..inserted.len() {
+    insert_paragraph_id(document, insert_ix + relative_ix);
+  }
 
   let mut text = String::new();
   let mut byte = 0;
@@ -41,6 +44,7 @@ fn insert_standalone_paragraphs_into_projection(
   document.text = Rope::from(text);
   document.paragraphs = Arc::new(paragraphs);
   document.offset_index = ParagraphOffsetIndex::new(&document.paragraphs);
+  rebuild_document_sections(document);
   inserted_paragraphs
 }
 

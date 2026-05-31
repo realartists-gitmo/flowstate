@@ -224,14 +224,19 @@ fn send_document_without_analytic_styles(document: &Document) -> Document {
     paragraphs.push(paragraph);
   }
 
-  Document {
+  let block_count = blocks.len();
+  let mut filtered_document = Document {
     text: Rope::from(text),
     paragraphs: Arc::new(paragraphs.clone()),
     blocks: Arc::new(blocks),
     assets: document.assets.clone(),
+    ids: document_ids_for_shape(paragraphs.len(), block_count),
+    sections: Arc::new(Vec::new()),
     offset_index: ParagraphOffsetIndex::new(&paragraphs),
     theme: document.theme.clone(),
-  }
+  };
+  rebuild_document_sections(&mut filtered_document);
+  filtered_document
 }
 
 #[hotpath::measure]

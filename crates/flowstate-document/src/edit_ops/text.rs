@@ -63,7 +63,11 @@ pub fn apply_document_span_replacement(document: &mut Document, current: &Docume
     .start_paragraph
     .saturating_add(current.paragraphs.len())
     .min(document.paragraphs.len());
+  remove_paragraph_ids(document, current.start_paragraph..paragraph_end);
   paragraphs_mut(document).splice(current.start_paragraph..paragraph_end, replacement.paragraphs.clone());
+  for relative_ix in 0..replacement.paragraphs.len() {
+    insert_paragraph_id(document, current.start_paragraph + relative_ix);
+  }
   replace_paragraph_blocks(
     document,
     current.start_paragraph,
@@ -71,6 +75,7 @@ pub fn apply_document_span_replacement(document: &mut Document, current: &Docume
     &replacement.paragraphs,
   );
   rebuild_document_offset_index(document);
+  rebuild_document_sections(document);
 }
 
 #[hotpath::measure]

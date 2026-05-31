@@ -5,9 +5,9 @@ use std::{
 };
 
 use flowstate_flow::{
-  Action, CommandResult, DebateStyleFlow, DebateStyleKey, FlowDocument, FormatKind, HistoryHolder, Node, NodeId, NodeValue, ROOT_ID,
+  Action, BoxNode, CommandResult, DebateStyleFlow, DebateStyleKey, FlowDocument, FormatKind, HistoryHolder, Node, NodeId, NodeValue, ROOT_ID,
   add_new_box_actions, add_new_empty_actions, add_new_extension_actions, add_new_flow_actions, all_debate_style_templates,
-  debate_style_templates, delete_node_actions, get_json, load_flow_document_or_new, move_node_actions, save_flow_document,
+  debate_style_templates, delete_node_actions, get_json, load_flow_document_or_new, move_node_actions, new_box_id, save_flow_document,
   toggle_box_format_actions,
 };
 use gpui::{
@@ -19,6 +19,8 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, h_flex, v_flex};
 use rustc_hash::{FxHashMap, FxHashSet};
+
+use crate::rich_text_element::ToolkitTextDrag;
 
 const COLUMN_WIDTH: f32 = 172.0;
 
@@ -509,6 +511,60 @@ impl FlowEditor {
     if let Some(command) = add_new_box_actions(&self.document, parent_id, index, None) {
       self.perform_command(command, Some(target_id), window, cx);
     }
+  }
+
+  pub fn insert_toolkit_text(&mut self, title: &str, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    let content = sanitize_input_value(text.trim().to_string());
+    if content.is_empty() {
+      return;
+    }
+    self.resolve_pending_edit(cx);
+    let Some(flow_id) = self.selected_flow_id.clone() else {
+      return;
+    };
+    let parent_id = self
+      .focus_id
+      .as_ref()
+      .filter(|id| self.document.check_box_id(id).is_some())
+      .filter(|id| {
+        let Some(node) = self.document.node(id) else {
+          return false;
+        };
+        let Some(flow) = self.document.flow(&flow_id) else {
+          return false;
+        };
+        node.level + 1 < flow.columns.len() as i32
+      })
+      .cloned()
+      .unwrap_or_else(|| flow_id.clone());
+    let Some(parent) = self.document.node(&parent_id) else {
+      return;
+    };
+    let box_id = new_box_id();
+    let action = Action::Add {
+      parent: parent_id,
+      id: box_id.clone(),
+      index: parent.children.len(),
+      value: NodeValue::Box(BoxNode {
+        content,
+        flow_id: flow_id.clone(),
+        placeholder: (!title.trim().is_empty()).then(|| title.trim().to_string()),
+        empty: false,
+        crossed: false,
+        bold: false,
+        is_extension: false,
+      }),
+    };
+    self.perform_command(
+      CommandResult {
+        actions: vec![action],
+        owner: flow_id,
+        focus: Some(box_id),
+      },
+      self.focus_id.clone(),
+      window,
+      cx,
+    );
   }
 
   #[hotpath::measure]
@@ -1300,6 +1356,10 @@ impl Render for FlowEditor {
       .overflow_hidden()
       .track_focus(&self.focus_handle)
       .on_key_down(cx.listener(Self::on_key_down))
+      .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))
+      .on_drop(cx.listener(|editor, drag: &ToolkitTextDrag, window, cx| {
+        editor.insert_toolkit_text(&drag.title, &drag.text, window, cx);
+      }))
       .child(self.render_main(window, cx))
   }
 }

@@ -3,6 +3,7 @@ use std::{
   collections::{HashMap, HashSet},
   path::{Path, PathBuf},
   rc::Rc,
+  sync::Arc,
 };
 
 use gpui::{
@@ -30,8 +31,8 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_send_custom_directory, load_send_to_document_directory, load_smart_word_selection, save_autosave,
-  save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_send_custom_directory, load_send_to_document_directory, load_smart_word_selection, load_tub_root,
+  save_autosave, save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
@@ -45,6 +46,7 @@ use crate::workspace::file_management::{
 };
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
+use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
@@ -61,6 +63,7 @@ pub struct Workspace {
   ribbon_collapsed: bool,
   outline_collapsed: bool,
   toolkit_collapsed: bool,
+  left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
   body_resizable_state: Entity<ResizableState>,
   content_resizable_state: Entity<ResizableState>,
@@ -80,6 +83,24 @@ pub struct Workspace {
   autosave_document_generations: HashMap<Uuid, u64>,
   autosave_flow_in_flight: HashSet<Uuid>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
+  tub_root: Option<PathBuf>,
+  tub_index: Option<Arc<TubIndex>>,
+  tub_files: Vec<TubFile>,
+  tub_tree: Entity<TreeState>,
+  tub_tree_entries: Vec<TubTreeNode>,
+  tub_expanded_dirs: HashSet<PathBuf>,
+  tub_status: SharedString,
+  tub_watcher: Option<flowstate_tub::TubWatcher>,
+  tub_watch_polling: bool,
+  tub_scan_in_flight: bool,
+  tub_scan_pending: bool,
+  active_tub_path: Option<PathBuf>,
+  toolkit_search_input: Entity<InputState>,
+  toolkit_search_filter: ToolkitSearchFilter,
+  toolkit_hits: Vec<SearchHit>,
+  toolkit_status: SharedString,
+  toolkit_search_generation: u64,
+  _toolkit_search_subscription: Subscription,
   zoom_slider: Entity<SliderState>,
   _zoom_slider_subscription: Subscription,
   _keybinding_interceptor: Subscription,
@@ -114,6 +135,44 @@ enum WorkspaceSettingsOverlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsSection {
   General,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeftNavMode {
+  Outline,
+  Tub,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolkitSearchFilter {
+  All,
+  Blocks,
+  Tags,
+  Analytics,
+}
+
+impl ToolkitSearchFilter {
+  fn label(self) -> &'static str {
+    match self {
+      Self::All => "All",
+      Self::Blocks => "Blocks",
+      Self::Tags => "Tags",
+      Self::Analytics => "Analytics",
+    }
+  }
+
+  fn kinds(self) -> &'static [SearchUnitKind] {
+    match self {
+      Self::All => &[
+        SearchUnitKind::BlockSection,
+        SearchUnitKind::TagSection,
+        SearchUnitKind::Analytic,
+      ],
+      Self::Blocks => &[SearchUnitKind::BlockSection],
+      Self::Tags => &[SearchUnitKind::TagSection],
+      Self::Analytics => &[SearchUnitKind::Analytic],
+    }
+  }
 }
 
 impl WorkspaceSettingsSection {

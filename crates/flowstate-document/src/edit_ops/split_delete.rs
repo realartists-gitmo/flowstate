@@ -55,14 +55,17 @@ pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: us
     version: paragraph.version.wrapping_add(1),
   };
   paragraphs.insert(paragraph_ix + 1, new_paragraph.clone());
+  insert_paragraph_id(document, paragraph_ix + 1);
   if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
     let blocks = Arc::make_mut(&mut document.blocks);
     if let Some(block) = blocks.get_mut(block_ix) {
       *block = Block::Paragraph(document.paragraphs[paragraph_ix].clone());
     }
     blocks.insert(block_ix + 1, Block::Paragraph(new_paragraph));
+    insert_block_id(document, block_ix + 1);
   }
   rebuild_document_offset_index(document);
+  rebuild_document_sections(document);
 }
 
 #[hotpath::measure]
@@ -93,8 +96,11 @@ pub fn delete_cross_paragraph_range(document: &mut Document, range: Range<Docume
   paragraphs[start_ix].byte_range = start_para_range.start..start_para_range.start + paragraph_runs_len(&paragraphs[start_ix]);
   bump_paragraph_version(&mut paragraphs[start_ix]);
   paragraphs.drain(start_ix + 1..=end_ix);
-  replace_paragraph_blocks(document, start_ix, end_ix - start_ix + 1, &[document.paragraphs[start_ix].clone()]);
+  remove_paragraph_ids(document, start_ix + 1..end_ix + 1);
+  let replacement = document.paragraphs[start_ix].clone();
+  replace_paragraph_blocks(document, start_ix, end_ix - start_ix + 1, &[replacement]);
   let _ = delete_len;
   rebuild_document_offset_index(document);
+  rebuild_document_sections(document);
 }
 

@@ -452,4 +452,21 @@ impl RichTextEditor {
     }
   }
 
+  pub fn insert_plain_text_from_toolkit(&mut self, text: &str, cx: &mut Context<Self>) {
+    if text.trim().is_empty() {
+      return;
+    }
+    if self.insert_plain_text_into_selected_table_cell(text, cx) {
+      return;
+    }
+    if self.insert_plain_text_paste_at_caret(text, cx) {
+      return;
+    }
+    self.apply_document_edit(cx, |editor, cx| editor.insert_plain_text_fragment(text, cx));
+  }
+
+  fn on_toolkit_text_drop(&mut self, drag: &ToolkitTextDrag, _: &mut Window, cx: &mut Context<Self>) {
+    self.insert_plain_text_from_toolkit(&drag.text, cx);
+  }
+
 }

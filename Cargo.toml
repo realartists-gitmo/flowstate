@@ -7,7 +7,7 @@ edition = "2024"
 default-run = "flowstate"
 
 [workspace]
-members = [".", "crates/flowstate-document", "crates/flowstate-docx", "crates/flowstate-flow"]
+members = [".", "crates/flowstate-document", "crates/flowstate-docx", "crates/flowstate-flow", "crates/flowstate-tub"]
 resolver = "3"
 
 [dependencies]
@@ -34,6 +34,7 @@ dirs = "6.0.0"
 mimalloc = "0.1.52"
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 hotpath = "0.16.1"
+flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 
 [features]
 hotpath = [
@@ -44,7 +45,7 @@ hotpath = [
 ]
 hotpath-cpu = [
   "hotpath",
-  "hotpath/hotpath-cpu",
+  "dep:hotpath-cpu-support",
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
   "flowstate-flow/hotpath-cpu",
@@ -60,6 +61,9 @@ profiler = ["hotpath", "hotpath-alloc"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { version = "0.6.1", features = ["component"] }
+
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+hotpath-cpu-support = { package = "hotpath", version = "0.16.1", features = ["hotpath-cpu"], optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { version = "0.14.2", default-features = false, features = ["shape-run-cache"] }

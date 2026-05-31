@@ -16,6 +16,7 @@ use gpui::{
   InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
   Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
 };
+use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use rustc_hash::FxHashMap;
@@ -118,6 +119,29 @@ pub(super) enum SelectionGranularity {
   Character,
   Word,
   Paragraph,
+}
+
+#[derive(Clone, Debug)]
+pub struct ToolkitTextDrag {
+  pub title: String,
+  pub text: String,
+}
+
+impl Render for ToolkitTextDrag {
+  fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    div()
+      .id("toolkit-text-drag")
+      .w(px(220.0))
+      .max_w(px(260.0))
+      .rounded(px(6.0))
+      .border_1()
+      .border_color(rgb(0x94a3b8))
+      .bg(rgb(0xffffff))
+      .p_2()
+      .text_xs()
+      .text_color(rgb(0x0f172a))
+      .child(self.title.clone())
+  }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

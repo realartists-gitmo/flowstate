@@ -286,6 +286,7 @@ impl RichTextEditor {
           paragraph.style = *style;
           bump_paragraph_version(paragraph);
           update_paragraph_block(&mut self.document, paragraph_ix);
+          rebuild_document_sections(&mut self.document);
         }
       },
       CanonicalOperation::SetRunStyles { paragraph, range, styles } => {

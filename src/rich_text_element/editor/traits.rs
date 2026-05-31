@@ -107,6 +107,8 @@ impl Render for RichTextEditor {
       .on_mouse_move(cx.listener(Self::on_mouse_move))
       .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+      .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))
+      .on_drop(cx.listener(Self::on_toolkit_text_drop))
       .drag_over::<ExternalPaths>(|style, _, _, _| style)
       .on_drop(cx.listener(Self::on_file_drop))
       .child(

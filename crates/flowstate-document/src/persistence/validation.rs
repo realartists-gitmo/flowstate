@@ -20,6 +20,18 @@ fn validate_document(document: &Document) -> io::Result<()> {
   if document.paragraphs.is_empty() {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 document has no paragraphs"));
   }
+  if document.ids.paragraph_ids.len() != document.paragraphs.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "paragraph ID count does not match paragraph count",
+    ));
+  }
+  if document.ids.block_ids.len() != document.blocks.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "block ID count does not match block count",
+    ));
+  }
   for (ix, paragraph) in document.paragraphs.iter().enumerate() {
     let range = paragraph_byte_range(document, ix);
     if range.start > range.end || range.end > text_len {
@@ -63,8 +75,29 @@ fn validate_document(document: &Document) -> io::Result<()> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "last paragraph does not end at text length"));
   }
   validate_paragraph_block_projection(document)?;
+  validate_sections(document)?;
   for block in document.blocks.iter() {
     validate_block_payload(block, document, 0)?;
+  }
+  Ok(())
+}
+
+#[hotpath::measure]
+fn validate_sections(document: &Document) -> io::Result<()> {
+  for section in document.sections.iter() {
+    if paragraph_index_for_id(document, section.start_paragraph).is_none() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "section start paragraph ID is invalid"));
+    }
+    if let Some(heading) = section.heading_paragraph
+      && paragraph_index_for_id(document, heading).is_none()
+    {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "section heading paragraph ID is invalid"));
+    }
+    if let Some(end) = section.end_paragraph_exclusive
+      && paragraph_index_for_id(document, end).is_none()
+    {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "section end paragraph ID is invalid"));
+    }
   }
   Ok(())
 }

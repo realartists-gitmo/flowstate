@@ -1,4 +1,156 @@
 
+#[derive(Clone, Copy)]
+struct Db8Chunk {
+  kind: u8,
+  offset: usize,
+  len: usize,
+}
+
+#[hotpath::measure]
+fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Document> {
+  let chunk_count = read_u32(&mut cursor)? as usize;
+  let mut chunks = Vec::with_capacity(chunk_count.min(32));
+  for _ in 0..chunk_count {
+    let kind = read_u8(&mut cursor)?;
+    let flags = read_u8(&mut cursor)?;
+    let _reserved = read_u16(&mut cursor)?;
+    if flags != 0 {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported DB8 chunk flags"));
+    }
+    let offset = read_len(&mut cursor, "DB8 chunk offset")?;
+    let len = read_len(&mut cursor, "DB8 chunk length")?;
+    chunks.push(Db8Chunk { kind, offset, len });
+  }
+
+  let text_bytes = required_chunk(cursor.get_ref(), &chunks, CHUNK_TEXT, "DB8 text chunk")?;
+  let text = std::str::from_utf8(text_bytes)
+    .map(|text| text.to_owned())
+    .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text chunk is not UTF-8"))?;
+  let assets = read_assets_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_ASSETS, "DB8 assets chunk")?)?;
+  let (blocks, paragraphs) = read_blocks_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCKS, "DB8 blocks chunk")?, &text)?;
+  let paragraph_ids = read_paragraph_ids_chunk(required_chunk(
+    cursor.get_ref(),
+    &chunks,
+    CHUNK_PARAGRAPH_IDS,
+    "DB8 paragraph IDs chunk",
+  )?)?;
+  let block_ids = read_block_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCK_IDS, "DB8 block IDs chunk")?)?;
+  let sections = read_sections_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_SECTIONS, "DB8 sections chunk")?)?;
+
+  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
+  let mut document = Document {
+    text: Rope::from(text),
+    paragraphs: Arc::new(paragraphs),
+    blocks: Arc::new(blocks),
+    assets,
+    ids: DocumentIds { paragraph_ids, block_ids },
+    sections: Arc::new(sections),
+    offset_index,
+    theme: DocumentTheme::default(),
+  };
+  reconcile_document_ids(&mut document);
+  validate_or_rebuild_sections(&mut document);
+  validate_document(&document)?;
+  log_timing_lazy("db8 vnext read", timing, || {
+    format!(
+      "bytes={} blocks={} paragraphs={} sections={}",
+      document.text.byte_len(),
+      document.blocks.len(),
+      document.paragraphs.len(),
+      document.sections.len()
+    )
+  });
+  Ok(document)
+}
+
+#[hotpath::measure]
+fn required_chunk<'a>(bytes: &'a [u8], chunks: &[Db8Chunk], kind: u8, label: &'static str) -> io::Result<&'a [u8]> {
+  let chunk = chunks
+    .iter()
+    .find(|chunk| chunk.kind == kind)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} is missing")))?;
+  let end = chunk
+    .offset
+    .checked_add(chunk.len)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} range overflows")))?;
+  if end > bytes.len() {
+    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("{label} is truncated")));
+  }
+  Ok(&bytes[chunk.offset..end])
+}
+
+#[hotpath::measure]
+fn read_assets_chunk(bytes: &[u8]) -> io::Result<AssetStore> {
+  let mut cursor = Cursor::new(bytes);
+  let asset_count = read_len(&mut cursor, "DB8 asset count")?;
+  let mut assets = AssetStore::default();
+  assets.assets.reserve(asset_count);
+  for _ in 0..asset_count {
+    let asset = read_asset_record(&mut cursor)?;
+    assets.assets.insert(asset.id, asset);
+  }
+  Ok(assets)
+}
+
+#[hotpath::measure]
+fn read_blocks_chunk(bytes: &[u8], text: &str) -> io::Result<(Vec<Block>, Vec<Paragraph>)> {
+  let mut cursor = Cursor::new(bytes);
+  let block_count = read_len(&mut cursor, "DB8 block count")?;
+  let mut blocks = Vec::with_capacity(block_count.min(4096));
+  let mut paragraphs = Vec::new();
+  for _ in 0..block_count {
+    let mut block = read_block_record(&mut cursor)?;
+    normalize_block_text_runs(&mut block, text)?;
+    if let Block::Paragraph(paragraph) = &block {
+      paragraphs.push(paragraph.clone());
+    }
+    blocks.push(block);
+  }
+  if paragraphs.is_empty() {
+    paragraphs.push(Paragraph {
+      style: ParagraphStyle::Normal,
+      byte_range: 0..0,
+      runs: Vec::new(),
+      version: 0,
+    });
+    blocks.push(Block::Paragraph(paragraphs[0].clone()));
+  }
+  Ok((blocks, paragraphs))
+}
+
+#[hotpath::measure]
+fn read_paragraph_ids_chunk(bytes: &[u8]) -> io::Result<Vec<ParagraphId>> {
+  let mut cursor = Cursor::new(bytes);
+  let count = read_len(&mut cursor, "DB8 paragraph ID count")?;
+  let mut ids = Vec::with_capacity(count);
+  for _ in 0..count {
+    ids.push(ParagraphId(read_u128(&mut cursor)?));
+  }
+  Ok(ids)
+}
+
+#[hotpath::measure]
+fn read_block_ids_chunk(bytes: &[u8]) -> io::Result<Vec<BlockId>> {
+  let mut cursor = Cursor::new(bytes);
+  let count = read_len(&mut cursor, "DB8 block ID count")?;
+  let mut ids = Vec::with_capacity(count);
+  for _ in 0..count {
+    ids.push(BlockId(read_u128(&mut cursor)?));
+  }
+  Ok(ids)
+}
+
+#[hotpath::measure]
+fn read_sections_chunk(bytes: &[u8]) -> io::Result<Vec<DocumentSection>> {
+  let mut cursor = Cursor::new(bytes);
+  let count = read_len(&mut cursor, "DB8 section count")?;
+  let mut sections = Vec::with_capacity(count);
+  for _ in 0..count {
+    sections.push(read_section_record(&mut cursor)?);
+  }
+  Ok(sections)
+}
+
 #[hotpath::measure]
 fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Document> {
   let text_len = {
@@ -46,14 +198,18 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
   }
 
   let offset_index = ParagraphOffsetIndex::new(&paragraphs);
-  let document = Document {
+  let mut document = Document {
     text: Rope::from(text),
     paragraphs: Arc::new(paragraphs),
     blocks: Arc::new(blocks),
     assets,
+    ids: DocumentIds::default(),
+    sections: Arc::new(Vec::new()),
     offset_index,
     theme: DocumentTheme::default(),
   };
+  reconcile_document_ids(&mut document);
+  rebuild_document_sections(&mut document);
   validate_document(&document)?;
   log_timing_lazy("db8 read", timing, || {
     format!(
@@ -64,6 +220,18 @@ fn read_db8_current(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Do
     )
   });
   Ok(document)
+}
+
+#[hotpath::measure]
+fn validate_or_rebuild_sections(document: &mut Document) {
+  if document.sections.is_empty()
+    || document
+      .sections
+      .iter()
+      .any(|section| paragraph_index_for_id(document, section.start_paragraph).is_none())
+  {
+    rebuild_document_sections(document);
+  }
 }
 
 #[hotpath::measure]
@@ -203,6 +371,43 @@ fn write_block_record(bytes: &mut Vec<u8>, block: &Block) {
   bytes.push(kind);
   write_u64(bytes, payload.len() as u64);
   bytes.extend_from_slice(&payload);
+}
+
+#[hotpath::measure]
+fn write_section_record(bytes: &mut Vec<u8>, section: &DocumentSection) {
+  write_u128(bytes, section.id.0);
+  write_u128(bytes, section.parent_id.map(|id| id.0).unwrap_or(0));
+  bytes.push(encode_section_kind(section.kind));
+  bytes.push(u8::from(section.heading_paragraph.is_some()));
+  bytes.push(u8::from(section.end_paragraph_exclusive.is_some()));
+  bytes.push(0);
+  write_u128(bytes, section.heading_paragraph.map(|id| id.0).unwrap_or(0));
+  write_u128(bytes, section.start_paragraph.0);
+  write_u128(bytes, section.end_paragraph_exclusive.map(|id| id.0).unwrap_or(0));
+}
+
+#[hotpath::measure]
+fn read_section_record(cursor: &mut Cursor<&[u8]>) -> io::Result<DocumentSection> {
+  let id = SectionId(read_u128(cursor)?);
+  let parent = read_u128(cursor)?;
+  let kind = decode_section_kind(read_u8(cursor)?)?;
+  let has_heading = read_u8(cursor)? != 0;
+  let has_end = read_u8(cursor)? != 0;
+  let reserved = read_u8(cursor)?;
+  if reserved != 0 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid DB8 section reserved byte"));
+  }
+  let heading = read_u128(cursor)?;
+  let start = read_u128(cursor)?;
+  let end = read_u128(cursor)?;
+  Ok(DocumentSection {
+    id,
+    parent_id: (parent != 0).then_some(SectionId(parent)),
+    kind,
+    heading_paragraph: has_heading.then_some(ParagraphId(heading)),
+    start_paragraph: ParagraphId(start),
+    end_paragraph_exclusive: has_end.then_some(ParagraphId(end)),
+  })
 }
 
 #[hotpath::measure]

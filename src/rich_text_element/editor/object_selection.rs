@@ -435,11 +435,14 @@ impl RichTextEditor {
     let before_selection = self.selection.clone();
     {
       let blocks = Arc::make_mut(&mut self.document.blocks);
-      for block_ix in object_indices.into_iter().rev() {
+      for block_ix in object_indices.iter().copied().rev() {
         if block_ix < blocks.len() {
           blocks.remove(block_ix);
         }
       }
+    }
+    for block_ix in object_indices.into_iter().rev() {
+      remove_block_ids(&mut self.document, block_ix..block_ix + 1);
     }
     self.delete_selection_internal();
     let after_document = self.document.clone();
@@ -485,6 +488,7 @@ impl RichTextEditor {
       return false;
     }
     let block = blocks.remove(block_ix);
+    remove_block_ids(&mut self.document, block_ix..block_ix + 1);
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;

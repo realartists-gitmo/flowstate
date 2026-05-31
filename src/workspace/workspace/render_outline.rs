@@ -1,6 +1,9 @@
 #[hotpath::measure_all]
 impl Workspace {
   fn render_left_nav(&mut self, nav_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+    if self.left_nav_mode == LeftNavMode::Tub {
+      return self.render_tub_nav(nav_width, cx);
+    }
     if self.active_flow.is_some() {
       return self.render_flow_nav(cx);
     }
@@ -21,31 +24,7 @@ impl Workspace {
       .p_2()
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
-      .child(
-        div()
-          .w_full()
-          .flex()
-          .flex_row()
-          .items_center()
-          .justify_between()
-          .child(
-            div()
-              .text_sm()
-              .font_weight(gpui::FontWeight::SEMIBOLD)
-              .text_color(cx.theme().sidebar_primary)
-              .child("Outline"),
-          )
-          .child(
-            Button::new("collapse-outline-panel")
-              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Collapse outline")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_outline(cx);
-              })),
-          ),
-      )
+      .child(self.render_left_nav_header("Outline", cx))
       .child(
         div()
           .flex_1()
@@ -58,151 +37,38 @@ impl Workspace {
             let is_active_outline = paragraph_ix == active_outline_paragraph;
             let depth = entry.depth();
             let guide = outline_guides.get(ix).cloned().unwrap_or_default();
-            let label_width = outline_label_width(nav_width, depth);
-            let label = truncate_outline_label(entry.item().label.as_ref(), outline_label_text_width(label_width, window), window, cx);
             let workspace = workspace.clone();
-            let guide_depths = guide.ancestor_depths;
-            let hierarchy_color = outline_hierarchy_color(depth, cx);
-            ListItem::new(("outline-tree-item", ix))
-              .w_full()
-              .min_w_0()
-              .overflow_hidden()
-              .pl(px(4.0))
-              .pr_1()
-              .py_0()
-              .text_xs()
-              .child(
-                h_flex()
-                  .w_full()
-                  .min_w_0()
-                  .overflow_hidden()
-                  .items_center()
-                  .gap_1()
-                  .children((0..depth).map(|guide_depth| {
-                    let has_guide = guide_depths.contains(&guide_depth);
-                    let guide_color = outline_hierarchy_color(guide_depth, cx);
-                    div()
-                      .relative()
-                      .w(px(12.0))
-                      .h(px(20.0))
-                      .flex_none()
-                      .when(has_guide, |this| {
-                        this.child(
-                          div()
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .left(px(11.5))
-                            .w(px(1.0))
-                            .bg(guide_color.opacity(0.68)),
-                        )
-                      })
-                      .into_any_element()
-                  }))
-                  .when(is_folder, |this| {
-                    let icon_path = if is_expanded { "icons/caret-down.svg" } else { "icons/caret-right.svg" };
-                    this.child(
-                      div()
-                        .relative()
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .flex_none()
-                        .when(guide.extends_from_toggle, |this| {
-                          this.child(
-                            div()
-                              .absolute()
-                              .top(px(16.0))
-                              .bottom_0()
-                              .left(px(11.5))
-                              .w(px(1.0))
-                              .bg(hierarchy_color.opacity(0.68)),
-                          )
-                        })
-                        .child(
-                          Button::new(("outline-toggle", ix))
-                            .xsmall()
-                            .ghost()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .disabled(!is_folder)
-                            .child(
-                              Icon::default()
-                                .path(icon_path)
-                                .with_size(gpui_component::Size::Small)
-                                .text_color(hierarchy_color)
-                            )
-                            .on_click({
-                              let workspace = workspace.clone();
-                              move |_, _, cx| {
-                                cx.stop_propagation();
-                                if let Some(paragraph_ix) = paragraph_ix {
-                                  let _ = workspace.update(cx, |workspace, cx| workspace.toggle_outline_item(paragraph_ix, cx));
-                                }
-                              }
-                            }),
-                        ),
-                    )
-                  })
-                  .when(!is_folder, |this| {
-                    this.child(
-                      div()
-                        .relative()
-                        .w(px(20.0))
-                        .h(px(20.0))
-                        .flex_none()
-                        .when(guide.extends_from_toggle, |this| {
-                          this.child(
-                            div()
-                              .absolute()
-                              .top_0()
-                              .bottom_0()
-                              .left(px(11.5))
-                              .w(px(1.0))
-                              .bg(hierarchy_color.opacity(0.68)),
-                          )
-                        }),
-                    )
-                  })
-                  .child(
-                    div()
-                      .id(("outline-label", ix))
-                      .relative()
-                      .flex_1()
-                      .min_w_0()
-                      .px_1()
-                      .overflow_hidden()
-                      .text_color(if is_active_outline { cx.theme().sidebar_accent_foreground } else { hierarchy_color })
-                      .whitespace_nowrap()
-                      .rounded(cx.theme().radius)
-                      .when(is_active_outline, |this| {
-                        this.child(
-                          div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .right_0()
-                            .bottom_0()
-                            .bg(cx.theme().sidebar_accent)
-                            .border_1()
-                            .border_color(hierarchy_color)
-                            .rounded(cx.theme().radius),
-                        )
-                      })
-                      .when(!is_active_outline, |this| {
-                        this.hover(|style| style.bg(cx.theme().list_hover))
-                      })
-                      .child(label)
-                      .on_mouse_down(MouseButton::Left, |_, _, cx| {
-                        cx.stop_propagation();
-                      })
-                      .on_click(move |_, window, cx| {
-                        if let Some(paragraph_ix) = paragraph_ix {
-                          let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
-                        }
-                      }),
-                  ),
-              )
+            let toggle_action: SidebarTreeAction = Rc::new({
+              let workspace = workspace.clone();
+              move |_: &mut Window, cx: &mut App| {
+                if let Some(paragraph_ix) = paragraph_ix {
+                  let _ = workspace.update(cx, |workspace, cx| workspace.toggle_outline_item(paragraph_ix, cx));
+                }
+              }
+            });
+            let label_action: SidebarTreeAction = Rc::new(move |window: &mut Window, cx: &mut App| {
+              if let Some(paragraph_ix) = paragraph_ix {
+                let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
+              }
+            });
+            render_sidebar_tree_row(SidebarTreeRow {
+              row_id: ("outline-tree-item", ix),
+              toggle_id: ("outline-toggle", ix),
+              label_id: ("outline-label", ix),
+              label: entry.item().label.clone(),
+              nav_width,
+              depth,
+              is_folder,
+              is_expanded,
+              is_active: is_active_outline,
+              guide,
+              icon: None,
+              icon_color: None,
+              toggle_action: Some(toggle_action),
+              label_action,
+              stop_icon_mouse_down: true,
+              stop_label_mouse_down: true,
+            }, window, cx)
           })),
       )
       .into_any_element()
@@ -340,6 +206,199 @@ impl Workspace {
       .into_any_element()
   }
 
+}
+
+type SidebarTreeAction = Rc<dyn Fn(&mut Window, &mut App)>;
+
+struct SidebarTreeRow {
+  row_id: (&'static str, usize),
+  toggle_id: (&'static str, usize),
+  label_id: (&'static str, usize),
+  label: SharedString,
+  nav_width: Pixels,
+  depth: usize,
+  is_folder: bool,
+  is_expanded: bool,
+  is_active: bool,
+  guide: OutlineRowGuides,
+  icon: Option<IconName>,
+  icon_color: Option<Hsla>,
+  toggle_action: Option<SidebarTreeAction>,
+  label_action: SidebarTreeAction,
+  stop_icon_mouse_down: bool,
+  stop_label_mouse_down: bool,
+}
+
+fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut App) -> ListItem {
+  let hierarchy_color = outline_hierarchy_color(row.depth, cx);
+  let guide_depths = row.guide.ancestor_depths;
+  let label_width = outline_label_width(row.nav_width, row.depth);
+  let label = truncate_outline_label(row.label.as_ref(), outline_label_text_width(label_width, window), window, cx);
+  let icon_color = row.icon_color.unwrap_or(hierarchy_color);
+  let icon = row.icon.clone();
+  let has_icon = icon.is_some();
+  let stop_icon_mouse_down = row.stop_icon_mouse_down;
+  let stop_label_mouse_down = row.stop_label_mouse_down;
+  let label_action = row.label_action.clone();
+  let icon_action = if has_icon {
+    if row.is_folder {
+      row.toggle_action.clone()
+    } else {
+      Some(label_action.clone())
+    }
+  } else {
+    None
+  };
+
+  ListItem::new(row.row_id)
+    .w_full()
+    .min_w_0()
+    .overflow_hidden()
+    .pl(px(4.0))
+    .pr_1()
+    .py_0()
+    .text_xs()
+    .child(
+      h_flex()
+        .w_full()
+        .min_w_0()
+        .overflow_hidden()
+        .items_center()
+        .gap_1()
+        .children((0..row.depth).map(|guide_depth| {
+          let has_guide = guide_depths.contains(&guide_depth);
+          let guide_color = outline_hierarchy_color(guide_depth, cx);
+          div()
+            .relative()
+            .w(px(12.0))
+            .h(px(20.0))
+            .flex_none()
+            .when(has_guide, |this| {
+              this.child(
+                div()
+                  .absolute()
+                  .top_0()
+                  .bottom_0()
+                  .left(px(11.5))
+                  .w(px(1.0))
+                  .bg(guide_color.opacity(0.68)),
+              )
+            })
+            .into_any_element()
+        }))
+        .child(
+          div()
+            .relative()
+            .w(px(20.0))
+            .h(px(20.0))
+            .flex_none()
+            .when(row.guide.extends_from_toggle, |this| {
+              this.child(
+                div()
+                  .absolute()
+                  .top(if row.is_folder { px(16.0) } else { px(0.0) })
+                  .bottom_0()
+                  .left(px(11.5))
+                  .w(px(1.0))
+                  .bg(hierarchy_color.opacity(0.68)),
+              )
+            })
+            .when(!has_icon && row.is_folder, |this| {
+              let icon_path = if row.is_expanded {
+                "icons/caret-down.svg"
+              } else {
+                "icons/caret-right.svg"
+              };
+              this.child(
+                Button::new(row.toggle_id)
+                  .xsmall()
+                  .ghost()
+                  .absolute()
+                  .top_0()
+                  .left_0()
+                  .disabled(!row.is_folder)
+                  .child(
+                    Icon::default()
+                      .path(icon_path)
+                      .with_size(gpui_component::Size::Small)
+                      .text_color(hierarchy_color),
+                  )
+                  .on_click({
+                    let toggle_action = row.toggle_action.clone();
+                    move |_, window, cx| {
+                      cx.stop_propagation();
+                      if let Some(action) = &toggle_action {
+                        action(window, cx);
+                      }
+                    }
+                  }),
+              )
+            })
+            .when_some(icon, |this, icon| {
+              this.child(
+                div()
+                  .absolute()
+                  .top_0()
+                  .left_0()
+                  .w(px(20.0))
+                  .h(px(20.0))
+                  .flex()
+                  .items_center()
+                  .justify_center()
+                  .child(Icon::new(icon).xsmall().text_color(icon_color))
+                  .on_mouse_down(MouseButton::Left, {
+                    let icon_action = icon_action.clone();
+                    move |_, window, cx| {
+                      if let Some(action) = &icon_action {
+                        action(window, cx);
+                      }
+                      if stop_icon_mouse_down {
+                        cx.stop_propagation();
+                      }
+                    }
+                  }),
+              )
+            }),
+        )
+        .child(
+          div()
+            .id(row.label_id)
+            .relative()
+            .flex_1()
+            .min_w_0()
+            .px_1()
+            .overflow_hidden()
+            .text_color(if row.is_active { cx.theme().sidebar_accent_foreground } else { hierarchy_color })
+            .whitespace_nowrap()
+            .rounded(cx.theme().radius)
+            .when(row.is_active, |this| {
+              this.child(
+                div()
+                  .absolute()
+                  .top_0()
+                  .left_0()
+                  .right_0()
+                  .bottom_0()
+                  .bg(cx.theme().sidebar_accent)
+                  .border_1()
+                  .border_color(hierarchy_color)
+                  .rounded(cx.theme().radius),
+              )
+            })
+            .when(!row.is_active, |this| this.hover(|style| style.bg(cx.theme().list_hover)))
+            .child(label)
+            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+              if stop_label_mouse_down {
+                cx.stop_propagation();
+              }
+            })
+            .on_click({
+              move |_, window, cx| {
+                label_action(window, cx);
+              }
+            }),
+        ),
+    )
 }
 
 #[derive(Clone)]

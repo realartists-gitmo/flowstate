@@ -129,6 +129,7 @@ impl RichTextEditor {
           mutate_runs_in_range(&mut editor.document, range, |styles| *styles = RunStyles::default());
         }
       }
+      rebuild_document_sections(&mut editor.document);
       editor.pending_styles = None;
       editor.after_formatting_mutation(cx);
     });
@@ -193,6 +194,7 @@ impl RichTextEditor {
           bump_paragraph_version(paragraph);
         }
       }
+      rebuild_document_sections(&mut editor.document);
       editor.after_formatting_mutation(cx);
     });
   }

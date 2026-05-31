@@ -90,14 +90,21 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
   }
   let offset_index = ParagraphOffsetIndex::new(&stored_paragraphs);
   let blocks = paragraph_blocks_from_paragraphs(&stored_paragraphs);
-  Document {
+  let paragraph_count = stored_paragraphs.len();
+  let block_count = blocks.len();
+  let mut document = Document {
     text: Rope::from(text),
     paragraphs: Arc::new(stored_paragraphs),
+    ids: document_ids_for_shape(paragraph_count, block_count),
     blocks: Arc::new(blocks),
     assets: AssetStore::default(),
+    sections: Arc::new(Vec::new()),
     offset_index,
     theme,
-  }
+  };
+  reconcile_document_ids(&mut document);
+  rebuild_document_sections(&mut document);
+  document
 }
 
 #[hotpath::measure]

@@ -123,6 +123,8 @@ fn detach_document_for_background_write(document: &Document) -> Document {
     paragraphs: Arc::new(document.paragraphs.as_ref().clone()),
     blocks: Arc::new(document.blocks.as_ref().clone()),
     assets: document.assets.clone(),
+    ids: document.ids.clone(),
+    sections: Arc::new(document.sections.as_ref().clone()),
     offset_index: document.offset_index.clone(),
     theme: document.theme.clone(),
   }
