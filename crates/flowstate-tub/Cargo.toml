@@ -13,9 +13,5 @@ flowstate-document = { version = "0.1.0", path = "../flowstate-document" }
 ignore = "0.4.25"
 notify = "8.2.0"
 rusqlite = { version = "0.40.0", features = ["bundled"] }
-rustc-hash = "2.1.2"
 serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
 tantivy = "0.26.1"
-tempfile = "3.27.0"
-uuid = { version = "1.23.2", features = ["v4", "serde"] }
