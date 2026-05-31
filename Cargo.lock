@@ -2240,11 +2240,14 @@ version = "0.1.0"
 dependencies = [
  "docx-rs",
  "flowstate-document",
+ "gpui",
  "hotpath",
+ "quick-xml 0.36.2",
  "rdocx",
  "rdocx-opc",
  "rdocx-oxml",
  "rustc-hash 2.1.2",
+ "zip 0.6.6",
 ]
 
 [[package]]
