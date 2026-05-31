@@ -969,10 +969,15 @@ fn file_kind_from_str(extension: &str) -> Option<FileKind> {
 }
 
 fn is_word_temp_lock_file(path: &Path) -> bool {
+  let has_docx_extension = path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"));
+
   path
     .file_name()
     .and_then(|name| name.to_str())
-    .is_some_and(|name| name.starts_with("~$") && path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("docx")))
+    .is_some_and(|name| name.starts_with("~$") && has_docx_extension)
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {
