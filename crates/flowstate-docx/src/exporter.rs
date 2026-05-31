@@ -247,6 +247,9 @@ fn export_paragraph_with_text(paragraph: &Paragraph, text: &str, theme: &Documen
   if paragraph.runs.is_empty() && text.is_empty() {
     out = out.add_run(Run::new());
   }
+  if matches!(paragraph.style, ParagraphStyle::Pocket | ParagraphStyle::Hat) {
+    out = out.add_run(Run::new().add_break(BreakType::Page));
+  }
   out
 }
 

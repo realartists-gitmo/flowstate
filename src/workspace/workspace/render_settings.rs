@@ -102,7 +102,7 @@ impl Workspace {
     vec![
       SettingPage::new("Text")
         .default_open(true)
-        .resettable(false)
+        .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Text))
         .group(
           SettingGroup::new()
             .title("Text")
@@ -129,7 +129,7 @@ impl Workspace {
             )),
         ),
       SettingPage::new("Style")
-        .resettable(false)
+        .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Style))
         .group(
           SettingGroup::new()
             .title("Style")
@@ -251,7 +251,7 @@ impl Workspace {
             )),
         ),
       SettingPage::new("Colors")
-        .resettable(false)
+        .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Colors))
         .group(
           SettingGroup::new()
             .title("Style Colors")
@@ -357,7 +357,7 @@ impl Workspace {
             )),
         ),
       SettingPage::new("Size")
-        .resettable(false)
+        .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Size))
         .group(
           SettingGroup::new()
             .title("Size")
@@ -471,7 +471,7 @@ impl Workspace {
             )),
         ),
       SettingPage::new("Background")
-        .resettable(false)
+        .group(reset_document_style_section_group(workspace.clone(), DocumentStyleSection::Background))
         .group(
           SettingGroup::new()
             .title("Background")
@@ -489,7 +489,7 @@ impl Workspace {
     vec![
       SettingPage::new("General")
         .default_open(true)
-        .resettable(false)
+        .group(reset_workspace_settings_section_group(workspace.clone(), WorkspaceSettingsSection::General))
         .group(
           SettingGroup::new()
             .title("Editing")
@@ -501,4 +501,174 @@ impl Workspace {
     ]
   }
 
+}
+
+#[hotpath::measure]
+fn reset_document_style_section_group(workspace: WeakEntity<Workspace>, section: DocumentStyleSection) -> SettingGroup {
+  reset_section_delegate_group(move |cx| {
+    let _ = workspace.update(cx, |workspace, cx| {
+      workspace.document_style_section = section;
+      workspace.reset_document_style_section(cx);
+    });
+  })
+}
+
+#[hotpath::measure]
+fn reset_workspace_settings_section_group(workspace: WeakEntity<Workspace>, section: WorkspaceSettingsSection) -> SettingGroup {
+  reset_section_delegate_group(move |cx| {
+    let _ = workspace.update(cx, |workspace, cx| {
+      workspace.settings_section = section;
+      workspace.reset_workspace_settings_section(cx);
+    });
+  })
+}
+
+#[hotpath::measure]
+fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGroup {
+  SettingGroup::new().h_0().overflow_hidden().item(
+    SettingItem::new(
+      "",
+      SettingField::input(
+        |_| SharedString::from("changed"),
+        move |_, cx| {
+          reset(cx);
+        },
+      )
+      .default_value(SharedString::from("default"))
+      .hidden(),
+    )
+  )
+}
+
+#[hotpath::measure_all]
+impl Workspace {
+  fn reset_document_style_section(&mut self, cx: &mut Context<Self>) {
+    let section = self.document_style_section;
+    let defaults = DocumentTheme::default();
+    let mut theme = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).document().theme.clone())
+      .unwrap_or_else(load_document_theme);
+
+    match section {
+      DocumentStyleSection::Text => {
+        theme.default_font_family = defaults.default_font_family;
+        theme.body_font_size = defaults.body_font_size;
+        theme.normal_bold = defaults.normal_bold;
+        theme.normal_italic = defaults.normal_italic;
+        theme.normal_underline = defaults.normal_underline;
+      },
+      DocumentStyleSection::Style => {
+        theme.pocket_bold = defaults.pocket_bold;
+        theme.pocket_italic = defaults.pocket_italic;
+        theme.pocket_underline = defaults.pocket_underline;
+        theme.hat_bold = defaults.hat_bold;
+        theme.hat_italic = defaults.hat_italic;
+        theme.hat_underline = defaults.hat_underline;
+        theme.block_bold = defaults.block_bold;
+        theme.block_italic = defaults.block_italic;
+        theme.block_underline = defaults.block_underline;
+        theme.tag_bold = defaults.tag_bold;
+        theme.tag_italic = defaults.tag_italic;
+        theme.tag_underline = defaults.tag_underline;
+        theme.cite_bold = defaults.cite_bold;
+        theme.cite_italic = defaults.cite_italic;
+        theme.cite_underline = defaults.cite_underline;
+        theme.condensed_bold = defaults.condensed_bold;
+        theme.condensed_italic = defaults.condensed_italic;
+        theme.condensed_underline = defaults.condensed_underline;
+        theme.ultracondensed_bold = defaults.ultracondensed_bold;
+        theme.ultracondensed_italic = defaults.ultracondensed_italic;
+        theme.ultracondensed_underline = defaults.ultracondensed_underline;
+        theme.emphasis_bold = defaults.emphasis_bold;
+        theme.emphasis_italic = defaults.emphasis_italic;
+        theme.emphasis_underline = defaults.emphasis_underline;
+        theme.underline_bold = defaults.underline_bold;
+        theme.underline_italic = defaults.underline_italic;
+        theme.underline_underline = defaults.underline_underline;
+        theme.analytic_bold = defaults.analytic_bold;
+        theme.analytic_italic = defaults.analytic_italic;
+        theme.analytic_underline = defaults.analytic_underline;
+        theme.undertag_bold = defaults.undertag_bold;
+        theme.undertag_italic = defaults.undertag_italic;
+        theme.undertag_underline = defaults.undertag_underline;
+      },
+      DocumentStyleSection::Colors => {
+        theme.default_text_color = defaults.default_text_color;
+        theme.pocket_color = defaults.pocket_color;
+        theme.hat_color = defaults.hat_color;
+        theme.block_color = defaults.block_color;
+        theme.tag_color = defaults.tag_color;
+        theme.cite_color = defaults.cite_color;
+        theme.condensed_color = defaults.condensed_color;
+        theme.ultracondensed_color = defaults.ultracondensed_color;
+        theme.emphasis_color = defaults.emphasis_color;
+        theme.underline_color = defaults.underline_color;
+        theme.analytic_color = defaults.analytic_color;
+        theme.undertag_color = defaults.undertag_color;
+        theme.highlight_spoken = defaults.highlight_spoken;
+        theme.highlight_insert = defaults.highlight_insert;
+        theme.highlight_alternative = defaults.highlight_alternative;
+      },
+      DocumentStyleSection::Size => {
+        theme.body_font_size = defaults.body_font_size;
+        theme.pocket_font_size = defaults.pocket_font_size;
+        theme.hat_font_size = defaults.hat_font_size;
+        theme.block_font_size = defaults.block_font_size;
+        theme.tag_font_size = defaults.tag_font_size;
+        theme.cite_font_size = defaults.cite_font_size;
+        theme.condensed_font_size = defaults.condensed_font_size;
+        theme.ultracondensed_font_size = defaults.ultracondensed_font_size;
+        theme.undertag_font_size = defaults.undertag_font_size;
+      },
+      DocumentStyleSection::Background => {
+        theme.document_background_color = defaults.document_background_color;
+      },
+    }
+
+    let theme_for_save = theme.clone();
+    cx.background_executor()
+      .spawn(async move {
+        if let Err(error) = save_document_theme(&theme_for_save) {
+          eprintln!("failed to save document style settings: {error}");
+        }
+      })
+      .detach();
+    self.apply_document_theme_to_open_editors(theme, cx);
+    cx.notify();
+  }
+
+  fn reset_workspace_settings_section(&mut self, cx: &mut Context<Self>) {
+    match self.settings_section {
+      WorkspaceSettingsSection::General => {
+        self.autosave_enabled = false;
+        self.autosave_document_generations.clear();
+        self.autosave_flow_in_flight.clear();
+        for panel in &self.document_panels {
+          let editor = panel.read(cx).editor();
+          editor.update(cx, |editor, cx| {
+            editor.set_smart_word_selection(true, cx);
+          });
+        }
+        cx.background_executor()
+          .spawn(async move {
+            if let Err(error) = save_smart_word_selection(true) {
+              eprintln!("failed to save smart word selection setting: {error}");
+            }
+            if let Err(error) = save_autosave(false) {
+              eprintln!("failed to save autosave setting: {error}");
+            }
+            if let Err(error) = save_send_to_document_directory(true) {
+              eprintln!("failed to save send directory mode setting: {error}");
+            }
+            if let Err(error) = save_send_custom_directory(None) {
+              eprintln!("failed to save send directory setting: {error}");
+            }
+          })
+          .detach();
+        cx.notify();
+      },
+    }
+  }
 }
