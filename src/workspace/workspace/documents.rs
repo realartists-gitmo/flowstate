@@ -258,7 +258,7 @@ impl Workspace {
       files: true,
       directories: false,
       multiple: false,
-      prompt: Some("Open .db8, .docx, or .fl0 document".into()),
+      prompt: Some("Open .db8, .docx, .pdf, or .fl0 document".into()),
     });
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {

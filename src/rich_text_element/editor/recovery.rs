@@ -126,6 +126,12 @@ impl RichTextEditor {
     {
       self.last_send_db8_generation = None;
     }
+    if self
+      .last_format_export_generation
+      .is_some_and(|generation| self.saved_generation > generation)
+    {
+      self.last_format_export_generation = None;
+    }
     self.save_status = if self.has_unsaved_changes() {
       SaveStatus::Dirty
     } else {

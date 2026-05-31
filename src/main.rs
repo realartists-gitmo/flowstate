@@ -6,7 +6,7 @@ use std::{
 use clap::{Parser, Subcommand};
 
 use flowstate::{
-  docx_conversion::{convert_db8_to_docx, convert_docx_to_pdf, embed_db8_file_in_pdf, extract_db8_bytes_from_pdf},
+  docx_conversion::{convert_db8_to_docx, convert_db8_to_pdf, convert_docx_to_pdf, convert_pdf_to_db8},
   run_standalone, write_demo_document,
 };
 
@@ -43,7 +43,7 @@ struct Cli {
   #[command(subcommand)]
   command: Option<CliCommand>,
 
-  /// Optional path to the `.db8`, `.docx`, or `.fl0` document to open.
+  /// Optional path to the `.db8`, `.docx`, `.pdf`, or `.fl0` document to open.
   #[arg(value_name = "PATH")]
   path: Option<PathBuf>,
 
@@ -56,7 +56,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum CliCommand {
   /// Convert a DB8 document to DOCX and exit.
-  ExportDocx {
+  Db8ToDocx {
     /// Input `.db8` document.
     input: PathBuf,
     /// Output `.docx` path.
@@ -96,24 +96,17 @@ fn main() {
 
   if let Some(command) = cli.command {
     match command {
-      CliCommand::ExportDocx { input, output } => {
+      CliCommand::Db8ToDocx { input, output } => {
         convert_db8_to_docx(input, output).expect("failed to export DOCX");
       },
       CliCommand::DocxToPdf { input, output } => {
         convert_docx_to_pdf(input, output).expect("failed to export PDF");
       },
       CliCommand::Db8ToPdf { input, output } => {
-        let docx_path = output.with_extension("docx");
-        let plain_pdf_path = output.with_extension("plain.pdf");
-        convert_db8_to_docx(&input, &docx_path).expect("failed to export intermediate DOCX");
-        convert_docx_to_pdf(&docx_path, &plain_pdf_path).expect("failed to export intermediate PDF");
-        embed_db8_file_in_pdf(&plain_pdf_path, &input, &output).expect("failed to embed DB8 payload in PDF");
+        convert_db8_to_pdf(input, output).expect("failed to export PDF");
       },
       CliCommand::PdfToDb8 { input, output } => {
-        let db8_bytes = extract_db8_bytes_from_pdf(&input)
-          .expect("failed to read Flowstate payload from PDF")
-          .expect("PDF does not contain an embedded Flowstate DB8 payload");
-        std::fs::write(output, db8_bytes).expect("failed to write DB8");
+        convert_pdf_to_db8(input, output).expect("failed to extract DB8");
       },
     }
     return;

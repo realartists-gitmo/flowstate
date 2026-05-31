@@ -48,7 +48,17 @@ pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
 pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
   let timing = Instant::now();
   let bytes = fs::read(path)?;
-  let mut cursor = Cursor::new(bytes.as_slice());
+  read_db8_bytes_with_timing(&bytes, timing)
+}
+
+#[hotpath::measure]
+pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<Document> {
+  read_db8_bytes_with_timing(bytes, Instant::now())
+}
+
+#[hotpath::measure]
+fn read_db8_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<Document> {
+  let mut cursor = Cursor::new(bytes);
   let mut magic = [0; 4];
   cursor.read_exact(&mut magic)?;
   if &magic != DB8_MAGIC {
@@ -74,6 +84,13 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
   validate_document(&document)?;
   let bytes = serialize_db8(&document)?;
   write_bytes_atomic(path, &bytes)
+}
+
+#[hotpath::measure]
+pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
+  let document = document_for_serialization(document);
+  validate_document(&document)?;
+  serialize_db8(&document)
 }
 
 #[hotpath::measure]

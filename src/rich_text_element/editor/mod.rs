@@ -786,6 +786,7 @@ pub struct RichTextEditor {
   saved_generation: u64,
   next_edit_generation: u64,
   last_send_db8_generation: Option<u64>,
+  last_format_export_generation: Option<u64>,
   zoom_percent: f32,
   save_status: SaveStatus,
   undo_stack: Vec<EditRecord>,
