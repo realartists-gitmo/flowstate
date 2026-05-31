@@ -154,6 +154,8 @@ fn build_paragraph_prep_from_parts(
 
   if invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
     let Some((text, runs)) = projected_visible_paragraph_text_and_runs_from_text(text, paragraph, paragraph_byte_range.clone()) else {
+      // A Normal paragraph with no visible (cite/spoken/...) runs has nothing to
+      // project, so it is hidden rather than rendered as a blank visible line.
       return Some(ParagraphPrep {
         key,
         paragraph_ix,
@@ -163,7 +165,7 @@ fn build_paragraph_prep_from_parts(
         layout_version: paragraph.version,
         source_len,
         wrap_break_ends: Arc::from(Vec::<usize>::new().into_boxed_slice()),
-        visible: true,
+        visible: false,
       });
     };
 
