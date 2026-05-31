@@ -35,6 +35,7 @@ mimalloc = "0.1.52"
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 hotpath = "0.16.1"
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
+toml = "1.1.2"
 
 [features]
 hotpath = [

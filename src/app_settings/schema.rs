@@ -8,7 +8,7 @@ use crate::ribbon::RibbonMode;
 use crate::rich_text_element::{DocumentTheme, ThemeUnderline};
 use dirs::{config_dir, data_dir};
 
-#[derive(Default, Deserialize, Serialize)]
+#[derive(Clone, Default, Deserialize, Serialize)]
 #[serde(default)]
 pub struct AppSettings {
   pub theme_name: Option<String>,

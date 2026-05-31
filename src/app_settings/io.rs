@@ -1,9 +1,18 @@
 #[hotpath::measure]
 pub fn load_app_settings() -> AppSettings {
-  let Ok(text) = fs::read_to_string(settings_path()) else {
-    return AppSettings::default();
-  };
-  serde_json::from_str(&text).unwrap_or_default()
+  load_app_settings_from_path(settings_path()).unwrap_or_default()
+}
+
+fn load_app_settings_from_path(path: PathBuf) -> io::Result<AppSettings> {
+  match fs::read_to_string(&path) {
+    Ok(text) => Ok(parse_app_settings(&text).unwrap_or_default()),
+    Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(AppSettings::default()),
+    Err(err) => Err(err),
+  }
+}
+
+fn parse_app_settings(text: &str) -> Option<AppSettings> {
+  toml::from_str(text).ok()
 }
 
 #[hotpath::measure]
@@ -97,10 +106,13 @@ pub fn save_send_custom_directory(path: Option<PathBuf>) -> io::Result<()> {
 
 #[hotpath::measure]
 fn save_app_settings(settings: AppSettings) -> io::Result<()> {
-  let path = settings_path();
+  save_app_settings_to_path(&settings, settings_path())
+}
+
+fn save_app_settings_to_path(settings: &AppSettings, path: PathBuf) -> io::Result<()> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent)?;
   }
-  let text = serde_json::to_string_pretty(&settings)?;
+  let text = toml::to_string_pretty(settings).map_err(io::Error::other)?;
   fs::write(path, text)
 }
