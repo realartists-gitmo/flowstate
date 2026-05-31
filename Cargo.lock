@@ -2292,13 +2292,7 @@ dependencies = [
 name = "flowstate-document"
 version = "0.1.0"
 dependencies = [
- "crop",
- "gpui",
- "hotpath",
- "rustc-hash 2.1.2",
- "serde",
- "tempfile",
- "uuid",
+ "gpui-flowtext",
 ]
 
 [[package]]
@@ -2981,6 +2975,19 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "gpui-flowtext"
+version = "0.1.0"
+dependencies = [
+ "crop",
+ "gpui",
+ "hotpath",
+ "rustc-hash 2.1.2",
+ "serde",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
