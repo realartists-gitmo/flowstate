@@ -1,0 +1,14 @@
+[
+  {
+    "label": "Run",
+    "command": "cargo run --release"
+  },
+  {
+    "label": "Run Profile Build",
+    "command": "cargo run --profile profiler --features profiler"
+  },
+  {
+    "label": "Run Product Build",
+    "command": "cargo run --profile product"
+  }
+]
