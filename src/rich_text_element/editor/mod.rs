@@ -12,9 +12,9 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
-  InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
-  Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
+  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
+  ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
+  Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};

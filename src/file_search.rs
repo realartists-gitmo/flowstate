@@ -4,10 +4,7 @@ use std::{
   sync::Mutex,
 };
 
-use fff_search::{
-  FFFMode, FilePickerOptions, FuzzySearchOptions, PaginationArgs, QueryParser,
-  file_picker::FilePicker,
-};
+use fff_search::{FFFMode, FilePickerOptions, FuzzySearchOptions, PaginationArgs, QueryParser, file_picker::FilePicker};
 
 const SUPPORTED_DOCUMENT_EXTENSIONS: [&str; 4] = ["db8", "docx", "pdf", "fl0"];
 const EXTENSION_CONSTRAINTS: &str = "*.db8 *.docx *.pdf *.fl0";
@@ -166,11 +163,15 @@ fn search_document_files(
     .filter_map(|file| supported_hit_from_fff_file(picker, root, file))
     .collect::<Vec<_>>();
 
-  let existing = hits.iter().map(|hit| hit.path.clone()).collect::<std::collections::HashSet<_>>();
-  let mut supplemental_hits = search_supplemental_document_files(supplemental_files, query, limit.saturating_mul(SEARCH_OVERSAMPLE_FACTOR).max(limit))
-    .into_iter()
-    .filter(|hit| !existing.contains(&hit.path))
-    .collect::<Vec<_>>();
+  let existing = hits
+    .iter()
+    .map(|hit| hit.path.clone())
+    .collect::<std::collections::HashSet<_>>();
+  let mut supplemental_hits =
+    search_supplemental_document_files(supplemental_files, query, limit.saturating_mul(SEARCH_OVERSAMPLE_FACTOR).max(limit))
+      .into_iter()
+      .filter(|hit| !existing.contains(&hit.path))
+      .collect::<Vec<_>>();
   hits.append(&mut supplemental_hits);
   hits.truncate(limit);
   hits
@@ -189,7 +190,9 @@ fn is_visible_supported_document_path(path: &Path, root: &Path) -> bool {
 
 #[hotpath::measure]
 fn collect_supplemental_document_files(root: &Path, fff_document_paths: &[PathBuf]) -> Vec<DocumentFileEntry> {
-  let fff_document_paths = fff_document_paths.iter().collect::<std::collections::HashSet<_>>();
+  let fff_document_paths = fff_document_paths
+    .iter()
+    .collect::<std::collections::HashSet<_>>();
   let mut files = Vec::new();
   collect_visible_document_files(root, root, &fff_document_paths, &mut files);
   let mut files = files
