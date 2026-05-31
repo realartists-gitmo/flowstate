@@ -3,9 +3,12 @@ use std::{
   path::PathBuf,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
-use flowstate::{run_standalone, write_demo_document};
+use flowstate::{
+  docx_conversion::{convert_db8_to_docx, convert_db8_to_pdf, convert_docx_to_pdf, convert_pdf_to_db8},
+  run_standalone, write_demo_document,
+};
 
 struct FlowstateAllocator;
 
@@ -44,7 +47,10 @@ static GLOBAL: FlowstateAllocator = FlowstateAllocator;
 #[derive(Parser)]
 #[command(name = "Flowstate", about = "A rich-text editor for debate documents.")]
 struct Cli {
-  /// Optional path to the `.db8`, `.docx`, or `.fl0` document to open.
+  #[command(subcommand)]
+  command: Option<CliCommand>,
+
+  /// Optional path to the `.db8`, `.docx`, `.pdf`, or `.fl0` document to open.
   #[arg(value_name = "PATH")]
   path: Option<PathBuf>,
 
@@ -54,12 +60,62 @@ struct Cli {
   write_demo_db8: bool,
 }
 
+#[derive(Subcommand)]
+enum CliCommand {
+  /// Convert a DB8 document to DOCX and exit.
+  Db8ToDocx {
+    /// Input `.db8` document.
+    input: PathBuf,
+    /// Output `.docx` path.
+    output: PathBuf,
+  },
+  /// Convert a DOCX document to PDF and exit.
+  DocxToPdf {
+    /// Input `.docx` document.
+    input: PathBuf,
+    /// Output `.pdf` path.
+    output: PathBuf,
+  },
+  /// Convert a DB8 document to PDF, embedding the DB8 for lossless recovery.
+  Db8ToPdf {
+    /// Input `.db8` document.
+    input: PathBuf,
+    /// Output `.pdf` path.
+    output: PathBuf,
+  },
+  /// Extract an embedded Flowstate DB8 payload from a PDF.
+  PdfToDb8 {
+    /// Input `.pdf` document.
+    input: PathBuf,
+    /// Output `.db8` path.
+    output: PathBuf,
+  },
+}
+
 #[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
   let cli = Cli::parse();
 
   if cli.write_demo_db8 {
     write_demo_document().expect("failed to write data/demo.db8");
+    return;
+  }
+
+  if let Some(command) = cli.command {
+    match command {
+      CliCommand::Db8ToDocx { input, output } => {
+        convert_db8_to_docx(input, output).expect("failed to export DOCX");
+      },
+      CliCommand::DocxToPdf { input, output } => {
+        convert_docx_to_pdf(input, output).expect("failed to export PDF");
+      },
+      CliCommand::Db8ToPdf { input, output } => {
+        convert_db8_to_pdf(input, output).expect("failed to export PDF");
+      },
+      CliCommand::PdfToDb8 { input, output } => {
+        convert_pdf_to_db8(input, output).expect("failed to extract DB8");
+      },
+    }
     return;
   }
 

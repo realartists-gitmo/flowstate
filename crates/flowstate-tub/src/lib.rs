@@ -212,9 +212,9 @@ impl TubIndex {
         Ok(entry) => entry,
         Err(_) => continue,
       };
-      if entry
+      if !entry
         .file_type()
-        .is_some_and(|file_type| file_type.is_dir())
+        .is_some_and(|file_type| file_type.is_file())
       {
         continue;
       }

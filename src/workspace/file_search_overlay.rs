@@ -40,7 +40,7 @@ impl FileSearchOverlay {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
-    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, or file_name.fl0"));
+    let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("file_name.db8, file_name.docx, file_name.pdf, or file_name.fl0"));
     let _input_subscription = cx.subscribe(&search_input, |overlay, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         overlay.refresh_results(cx);
@@ -341,9 +341,9 @@ impl Render for FileSearchOverlay {
                   if self.loading {
                     "Indexing documents..."
                   } else if query.trim().is_empty() {
-                    "No .db8, .docx, or .fl0 files indexed"
+                    "No .db8, .docx, .pdf, or .fl0 files indexed"
                   } else {
-                    "No matching .db8, .docx, or .fl0 files"
+                    "No matching .db8, .docx, .pdf, or .fl0 files"
                   }
                   .into()
                 });

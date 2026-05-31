@@ -176,7 +176,7 @@ fn is_supported_document_path(path: &Path) -> bool {
   path
     .extension()
     .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "db8" | "docx" | "fl0"))
+    .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "db8" | "docx" | "pdf" | "fl0"))
 }
 
 #[hotpath::measure]

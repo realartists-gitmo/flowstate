@@ -1,5 +1,9 @@
 use std::{io, path::Path};
 
+use quick_xml::{
+  Reader as XmlReader,
+  events::{BytesStart, Event},
+};
 use rdocx::Document as RDocxDocument;
 use rdocx_opc::OpcPackage;
 use rdocx_oxml::document::CT_Document;
@@ -159,7 +163,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
           underline: direct.underline || underline_is_on(effective.underline.as_ref()),
           strikethrough: direct.strikethrough || effective.strike == Some(true) || effective.dstrike == Some(true),
           highlight: direct.highlight || effective.highlight.is_some() || effective.shading.is_some(),
-          border: false,
+          border: direct.border,
           source_size_pt,
           size_pt: source_size_pt.or_else(|| effective.sz.map(rdocx_oxml::HalfPoint::to_pt)),
           color: run.color().is_some() || direct.color || effective.color.is_some() || effective.color_theme.is_some(),
@@ -299,6 +303,7 @@ struct DirectRunProperties {
   underline: bool,
   strikethrough: bool,
   highlight: bool,
+  border: bool,
   size_pt: Option<f64>,
   color: bool,
 }
@@ -330,17 +335,30 @@ fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<Direct
 #[hotpath::measure]
 fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
   let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error)?;
+  let run_borders_by_paragraph = direct_run_borders_by_paragraph_xml(doc_xml)?;
   Ok(
     document
       .body
       .paragraphs()
-      .map(|paragraph| {
+      .enumerate()
+      .map(|(paragraph_ix, paragraph)| {
+        let paragraph_run_borders = run_borders_by_paragraph
+          .get(paragraph_ix)
+          .map(Vec::as_slice)
+          .unwrap_or_default();
         let runs = paragraph
           .runs
           .iter()
-          .map(|run| {
+          .enumerate()
+          .map(|(run_ix, run)| {
             let Some(properties) = run.properties.as_ref() else {
-              return DirectRunProperties::default();
+              return DirectRunProperties {
+                border: paragraph_run_borders
+                  .get(run_ix)
+                  .copied()
+                  .unwrap_or_default(),
+                ..DirectRunProperties::default()
+              };
             };
             DirectRunProperties {
               bold: properties.bold == Some(true) || properties.bold_cs == Some(true),
@@ -348,7 +366,11 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
               underline: underline_is_on(properties.underline.as_ref()),
               strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
               highlight: properties.highlight.is_some() || properties.shading.is_some(),
-              size_pt: properties.sz.map(rdocx_oxml::HalfPoint::to_pt),
+              border: paragraph_run_borders
+                .get(run_ix)
+                .copied()
+                .unwrap_or_default(),
+              size_pt: properties.sz.map(|size| size.to_pt()),
               color: properties.color.is_some() || properties.color_theme.is_some(),
             }
           })
@@ -363,6 +385,78 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
       })
       .collect(),
   )
+}
+
+#[hotpath::measure]
+fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<bool>>> {
+  let mut reader = XmlReader::from_reader(doc_xml);
+  reader.config_mut().trim_text(false);
+  let mut buf = Vec::new();
+  let mut paragraphs = Vec::new();
+  let mut current_paragraph: Option<Vec<bool>> = None;
+  let mut in_run = false;
+  let mut in_run_properties = false;
+  let mut current_run_border = false;
+
+  loop {
+    match reader.read_event_into(&mut buf) {
+      Ok(Event::Start(event)) if local_name_is(event.name().as_ref(), b"p") => {
+        current_paragraph = Some(Vec::new());
+      },
+      Ok(Event::End(event)) if local_name_is(event.name().as_ref(), b"p") => {
+        if let Some(paragraph) = current_paragraph.take() {
+          paragraphs.push(paragraph);
+        }
+      },
+      Ok(Event::Start(event)) if current_paragraph.is_some() && local_name_is(event.name().as_ref(), b"r") => {
+        in_run = true;
+        current_run_border = false;
+      },
+      Ok(Event::End(event)) if in_run && local_name_is(event.name().as_ref(), b"r") => {
+        if let Some(paragraph) = &mut current_paragraph {
+          paragraph.push(current_run_border);
+        }
+        in_run = false;
+        in_run_properties = false;
+        current_run_border = false;
+      },
+      Ok(Event::Start(event)) if in_run && local_name_is(event.name().as_ref(), b"rPr") => {
+        in_run_properties = true;
+      },
+      Ok(Event::End(event)) if in_run_properties && local_name_is(event.name().as_ref(), b"rPr") => {
+        in_run_properties = false;
+      },
+      Ok(Event::Empty(event)) if in_run_properties && local_name_is(event.name().as_ref(), b"bdr") => {
+        current_run_border |= border_is_on(&event)?;
+      },
+      Ok(Event::Eof) => break,
+      Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
+      _ => {},
+    }
+    buf.clear();
+  }
+
+  Ok(paragraphs)
+}
+
+#[hotpath::measure]
+fn border_is_on(event: &BytesStart<'_>) -> io::Result<bool> {
+  for attr in event.attributes() {
+    let attr = attr.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if local_name_is(attr.key.as_ref(), b"val") {
+      let value = std::str::from_utf8(attr.value.as_ref()).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+      return Ok(!matches!(value, "nil" | "none"));
+    }
+  }
+  Ok(true)
+}
+
+#[hotpath::measure]
+fn local_name_is(name: &[u8], expected: &[u8]) -> bool {
+  name == expected
+    || name
+      .strip_prefix(b"w:")
+      .is_some_and(|local| local == expected)
 }
 
 struct StyleResolver {

@@ -184,6 +184,7 @@ fn modern_condensed_menu(
 fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let chip_height = metrics.chip_height;
   let send_created = editor.read(cx).send_db8_created_since_last_saved_edit();
+  let format_created = editor.read(cx).format_export_created_since_last_saved_edit();
   div()
     .flex()
     .flex_col()
@@ -200,52 +201,133 @@ fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, 
         .child("Export"),
     )
     .child(
-      DropdownButton::new("modern-ribbon-send-dropdown")
-        .with_size(Size::Size(chip_height))
-        .compact()
-        .outline()
-        .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
-        .button(
-          Button::new("modern-ribbon-send")
-            .compact()
-            .ghost()
-            .h(chip_height)
-            .px(metrics.chip_padding_x)
-            .tooltip("Send as DB8")
-            .child(
-              div()
-                .flex_none()
-                .text_size(metrics.chip_text_size)
-                .line_height(relative(1.0))
-                .whitespace_nowrap()
-                .text_ellipsis()
-                .child("Send"),
-            )
-            .on_click({
-              let editor = editor.clone();
-              move |_, _, cx| {
-                send_db8_from_ribbon(editor.clone(), cx);
-              }
-            }),
-        )
-        .dropdown_menu(move |menu, _, _| {
-          let editor = editor.clone();
-          menu
-            .min_w(px(120.0))
-            .item(PopupMenuItem::new(".db8").checked(send_created).on_click(move |_, _, cx| {
-              send_db8_from_ribbon(editor.clone(), cx);
-            }))
-        }),
+      div()
+        .flex()
+        .gap_0p5()
+        .child(format_dropdown(editor.clone(), chip_height, metrics, format_created, cx))
+        .child(send_dropdown(editor, chip_height, metrics, send_created, cx)),
     )
     .into_any_element()
 }
 
 #[hotpath::measure]
-fn send_db8_from_ribbon(editor: Entity<RichTextEditor>, cx: &mut App) {
-  let task = editor.update(cx, |editor, cx| editor.send_db8(cx));
+fn format_dropdown(
+  editor: Entity<RichTextEditor>,
+  chip_height: gpui::Pixels,
+  metrics: RibbonLayoutMetrics,
+  format_created: bool,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  DropdownButton::new("modern-ribbon-format-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .when(format_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
+    .button(
+      export_chip_button("modern-ribbon-format", "Export as DOCX", "Format", chip_height, metrics).on_click({
+        let editor = editor.clone();
+        move |_, _, cx| {
+          export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
+        }
+      }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let docx_editor = editor.clone();
+      let pdf_editor = editor.clone();
+      menu
+        .min_w(px(120.0))
+        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
+          export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+        }))
+        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
+          export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+        }))
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn send_dropdown(
+  editor: Entity<RichTextEditor>,
+  chip_height: gpui::Pixels,
+  metrics: RibbonLayoutMetrics,
+  send_created: bool,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  DropdownButton::new("modern-ribbon-send-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
+    .button(
+      export_chip_button("modern-ribbon-send", "Send as DB8", "Send", chip_height, metrics).on_click({
+        let editor = editor.clone();
+        move |_, _, cx| {
+          send_format_from_ribbon(editor.clone(), DocumentExportFormat::Db8, cx);
+        }
+      }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let db8_editor = editor.clone();
+      let docx_editor = editor.clone();
+      let pdf_editor = editor.clone();
+      menu
+        .min_w(px(120.0))
+        .item(PopupMenuItem::new(".db8").on_click(move |_, _, cx| {
+          send_format_from_ribbon(db8_editor.clone(), DocumentExportFormat::Db8, cx);
+        }))
+        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
+          send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+        }))
+        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
+          send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+        }))
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn export_chip_button(
+  id: &'static str,
+  tooltip: &'static str,
+  label: &'static str,
+  chip_height: gpui::Pixels,
+  metrics: RibbonLayoutMetrics,
+) -> Button {
+  Button::new(id)
+    .compact()
+    .ghost()
+    .h(chip_height)
+    .px(metrics.chip_padding_x)
+    .tooltip(tooltip)
+    .child(
+      div()
+        .flex_none()
+        .text_size(metrics.chip_text_size)
+        .line_height(relative(1.0))
+        .whitespace_nowrap()
+        .text_ellipsis()
+        .child(label),
+    )
+}
+
+#[hotpath::measure]
+fn send_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExportFormat, cx: &mut App) {
+  let task = editor.update(cx, |editor, cx| editor.send_document(format, cx));
   cx.spawn(async move |_| {
     if let Err(error) = task.await {
       eprintln!("send export failed: {error}");
+    }
+  })
+  .detach();
+}
+
+#[hotpath::measure]
+fn export_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExportFormat, cx: &mut App) {
+  let task = editor.update(cx, |editor, cx| editor.export_document_format(format, cx));
+  cx.spawn(async move |_| {
+    if let Err(error) = task.await {
+      eprintln!("format export failed: {error}");
     }
   })
   .detach();
