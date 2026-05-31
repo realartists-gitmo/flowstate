@@ -76,16 +76,6 @@ impl Workspace {
           .gap_1()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .child(
-            Button::new("ribbon-file-search")
-              .icon(Icon::new(IconName::Search).text_color(cx.theme().muted_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Filename search")
-              .on_click(cx.listener(|workspace, _, window, cx| {
-                workspace.open_file_search_overlay(window, cx);
-              })),
-          )
-          .child(
             Button::new("collapse-ribbon-panel")
               .icon(Icon::default().path("icons/panel-top-close.svg").text_color(cx.theme().muted_foreground))
               .xsmall()

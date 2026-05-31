@@ -24,7 +24,7 @@ pub struct TabBar {
     selected_index: Option<usize>,
     active_tab_bg: Option<Hsla>,
     active_tab_fg: Option<Hsla>,
-    variant: TabVariant,
+variant: TabVariant,
     size: Size,
     menu: bool,
     on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,

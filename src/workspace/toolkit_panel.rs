@@ -8,7 +8,7 @@ use std::{
 
 use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px};
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Sizable,
+  ActiveTheme as _, Icon, IconName, Selectable as _, Sizable,
   button::{Button, ButtonVariants},
   h_flex,
   input::Input,
@@ -93,16 +93,11 @@ impl Workspace {
   }
 
   fn render_toolkit_rail_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-    h_flex()
-      .size_full()
-      .min_w_0()
-      .bg(cx.theme().background)
-      .border_l(APP_CHROME_BORDER_WIDTH)
-      .border_color(cx.theme().border)
-      .child(self.render_toolkit_icon_bar(cx))
-      .when(self.active_toolkit_tool == Some(ToolkitTool::Tub), |this| {
-        this.child(self.render_toolkit_expanded(cx))
-      })
+    if self.active_toolkit_tool == Some(ToolkitTool::Tub) {
+      return self.render_toolkit_expanded(cx).into_any_element();
+    }
+
+    self.render_toolkit_icon_bar(cx).into_any_element()
   }
 
   fn render_toolkit_icon_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -116,11 +111,11 @@ impl Workspace {
       .gap_1()
       .py_2()
       .bg(cx.theme().background)
-      .border_r_1()
+      .border_l(APP_CHROME_BORDER_WIDTH)
       .border_color(cx.theme().border)
       .child(
         Button::new("toolkit-global-file-search")
-          .icon(Icon::new(IconName::Search).text_color(cx.theme().link))
+          .icon(Icon::default().path("icons/file-search-corner.svg").text_color(cx.theme().link))
           .xsmall()
           .ghost()
           .tooltip("Search files")
@@ -552,23 +547,47 @@ impl Workspace {
           .h(px(34.0))
           .flex_none()
           .items_center()
-          .justify_between()
           .gap_2()
           .px_2()
           .border_b_1()
           .border_color(cx.theme().border)
           .child(
-            Button::new("collapse-toolkit-panel")
-              .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().sidebar_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Close tub panel")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
-              })),
+            h_flex()
+              .flex_none()
+              .min_w_0()
+              .items_center()
+              .gap_2()
+              .child(
+                Button::new("toolkit-panel-file-search")
+                  .icon(Icon::default().path("icons/file-search-corner.svg").text_color(cx.theme().sidebar_primary))
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Search files")
+                  .on_click(cx.listener(|workspace, _, window, cx| {
+                    workspace.open_file_search_overlay(window, cx);
+                  })),
+              )
+              .child(
+                Button::new("toolkit-tub-tool")
+                  .icon(
+                    Icon::default()
+                      .path("icons/notebook-text.svg")
+                      .text_color(cx.theme().sidebar_primary),
+                  )
+                  .xsmall()
+                  .ghost()
+                  .selected(true)
+                  .tooltip("Close tub panel")
+                  .on_click(cx.listener(|workspace, _, _, cx| {
+                    workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
+                  })),
+              )
           )
+          .child(div().flex_1())
           .child(
             div()
+              .min_w_0()
+              .truncate()
               .text_sm()
               .font_weight(gpui::FontWeight::SEMIBOLD)
               .text_color(cx.theme().sidebar_primary)

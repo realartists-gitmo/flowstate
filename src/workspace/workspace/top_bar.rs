@@ -307,7 +307,7 @@ fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_o
                 }),
             )
             .item(
-              PopupMenuItem::new("Toolkit")
+          PopupMenuItem::new("Toolkit")
                 .checked(toolkit_open)
                 .on_click(move |_, _, cx| {
                   let _ = toolkit_workspace.update(cx, |workspace, cx| workspace.toggle_toolkit(cx));
