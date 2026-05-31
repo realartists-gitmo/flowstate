@@ -132,6 +132,16 @@ impl Workspace {
       )
   }
 
+  fn render_collaboration_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let role = self.collaboration.role.unwrap_or("No role");
+    let label = format!("Collab: {:?} · {role}", self.collaboration.state);
+    div()
+      .px_2()
+      .text_xs()
+      .text_color(cx.theme().muted_foreground)
+      .child(label)
+  }
+
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
     if let Some(percent) = zoom {
@@ -147,6 +157,7 @@ impl Workspace {
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
       .child(div().flex_1())
+      .child(self.render_collaboration_status(cx))
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
       .child(div().flex_1())
   }

@@ -114,6 +114,7 @@ impl FlowRibbon {
     let has_switch = editor.read(cx).has_switchable_templates();
     let switch_speakers = editor.read(cx).switch_speakers();
     let templates = editor.read(cx).templates();
+    let can_write = editor.read(cx).can_write_collaboration();
 
     let mut controls = Vec::<AnyElement>::new();
     controls.push(
@@ -123,7 +124,8 @@ impl FlowRibbon {
           Select::new(&self.style_select)
             .placeholder("Debate style")
             .search_placeholder("Search styles")
-            .w_full(),
+            .w_full()
+            .disabled(!can_write),
         )
         .into_any_element(),
     );
@@ -133,6 +135,7 @@ impl FlowRibbon {
           .label("TOC")
           .xsmall()
           .checked(ld_toc)
+          .disabled(!can_write)
           .on_click({
             let editor = editor.clone();
             move |_, _, cx| {
@@ -148,6 +151,7 @@ impl FlowRibbon {
           .label("Switch")
           .xsmall()
           .checked(switch_speakers)
+          .disabled(!can_write)
           .on_click({
             let editor = editor.clone();
             move |_, _, cx| {
@@ -162,7 +166,8 @@ impl FlowRibbon {
       flow_chip(("flow-ribbon-add-template", ix), metrics, cx)
         .icon(IconName::Plus)
         .label(label)
-        .tooltip("Add flow")
+        .tooltip(if can_write { "Add flow" } else { "Viewers cannot edit flows" })
+        .disabled(!can_write)
         .on_click({
           let editor = editor.clone();
           move |_, window, cx| {
@@ -175,6 +180,7 @@ impl FlowRibbon {
   }
 
   fn render_title_group(&mut self, metrics: FlowRibbonMetrics, cx: &mut Context<Self>) -> impl IntoElement {
+    let state = self.editor.read(cx).command_state();
     flow_ribbon_group(
       "Flow",
       vec![
@@ -185,14 +191,15 @@ impl FlowRibbon {
               .appearance(false)
               .bordered(true)
               .focus_bordered(true)
-              .w_full(),
+              .w_full()
+              .disabled(!state.can_write),
           )
           .into_any_element(),
         flow_chip("flow-ribbon-delete-flow", metrics, cx)
           .icon(IconName::Delete)
           .danger()
           .tooltip("Delete flow")
-          .disabled(!self.editor.read(cx).command_state().has_flow)
+          .disabled(!state.can_write || !state.has_flow)
           .on_click({
             let editor = self.editor.clone();
             move |_, window, cx| {
@@ -235,7 +242,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-add-child", metrics, cx)
           .icon(IconName::ArrowRight)
           .tooltip("Add response")
-          .disabled(!state.has_selected_box)
+          .disabled(!state.can_write || !state.has_selected_box)
           .on_click({
             let editor = editor.clone();
             move |_, window, cx| {
@@ -245,7 +252,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-add-above", metrics, cx)
           .icon(IconName::ArrowUp)
           .tooltip("Add above")
-          .disabled(!state.has_selected_box)
+          .disabled(!state.can_write || !state.has_selected_box)
           .on_click({
             let editor = editor.clone();
             move |_, window, cx| {
@@ -255,7 +262,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-add-below", metrics, cx)
           .icon(IconName::ArrowDown)
           .tooltip("Add below")
-          .disabled(!state.has_selected_box)
+          .disabled(!state.can_write || !state.has_selected_box)
           .on_click({
             let editor = editor.clone();
             move |_, window, cx| {
@@ -265,7 +272,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-extend", metrics, cx)
           .icon(IconName::ArrowRight)
           .tooltip("Extend")
-          .disabled(!state.can_format)
+          .disabled(!state.can_write || !state.can_format)
           .on_click({
             let editor = editor.clone();
             move |_, window, cx| {
@@ -275,7 +282,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-delete-box", metrics, cx)
           .icon(IconName::Delete)
           .tooltip("Delete selected")
-          .disabled(!state.has_selected_box)
+          .disabled(!state.can_write || !state.has_selected_box)
           .on_click(move |_, window, cx| {
             editor.update(cx, |editor, cx| editor.delete_focus(window, cx));
           }),
@@ -297,7 +304,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-bold", metrics, cx)
           .child(Icon::default().path("icons/bold.svg").xsmall())
           .tooltip("Bold")
-          .disabled(!state.can_format)
+          .disabled(!state.can_write || !state.can_format)
           .selected(state.selected_bold)
           .on_click({
             let editor = editor.clone();
@@ -308,7 +315,7 @@ impl FlowRibbon {
         flow_chip("flow-ribbon-cross", metrics, cx)
           .child(Icon::default().path("icons/strikethrough.svg").xsmall())
           .tooltip("Cross out")
-          .disabled(!state.can_format)
+          .disabled(!state.can_write || !state.can_format)
           .selected(state.selected_crossed)
           .on_click({
             let editor = editor.clone();

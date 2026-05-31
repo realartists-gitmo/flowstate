@@ -17,7 +17,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, h_flex, v_flex};
+use gpui_component::{ActiveTheme as _, Disableable, Icon, IconName, Sizable, h_flex, v_flex};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::rich_text_element::ToolkitTextDrag;
@@ -41,6 +41,7 @@ pub struct FlowEditor {
   input_subscriptions: Vec<Subscription>,
   syncing_inputs: FxHashSet<NodeId>,
   pending_edit: Option<PendingEdit>,
+  collaboration_role: Option<CollaborationRole>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -63,6 +64,21 @@ pub struct FlowCommandState {
   pub selected_folded: bool,
   pub can_undo: bool,
   pub can_redo: bool,
+  pub can_write: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollaborationRole {
+  Owner,
+  Editor,
+  Viewer,
+}
+
+impl CollaborationRole {
+  #[must_use]
+  pub const fn can_write(self) -> bool {
+    matches!(self, Self::Owner | Self::Editor)
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -97,6 +113,7 @@ impl FlowEditor {
       input_subscriptions: Vec::new(),
       syncing_inputs: FxHashSet::default(),
       pending_edit: None,
+      collaboration_role: None,
     }
   }
 
@@ -173,6 +190,23 @@ impl FlowEditor {
     self.resolve_pending_edit(cx);
   }
 
+  pub fn collaboration_role(&self) -> Option<CollaborationRole> {
+    self.collaboration_role
+  }
+
+  pub fn set_collaboration_role(&mut self, role: Option<CollaborationRole>, cx: &mut Context<Self>) {
+    if self.collaboration_role == role {
+      return;
+    }
+    self.resolve_pending_edit(cx);
+    self.collaboration_role = role;
+    cx.notify();
+  }
+
+  pub fn can_write_collaboration(&self) -> bool {
+    self.collaboration_role.is_none_or(CollaborationRole::can_write)
+  }
+
   pub fn selected_flow_id(&self) -> Option<&str> {
     self.selected_flow_id.as_deref()
   }
@@ -241,7 +275,9 @@ impl FlowEditor {
       .selected_flow_id
       .clone()
       .unwrap_or_else(|| ROOT_ID.to_string());
+    let can_write = self.can_write_collaboration();
     FlowCommandState {
+      can_write,
       has_flow: self.selected_flow_id.is_some(),
       has_selected_box: selected_box.is_some(),
       can_format,
@@ -251,8 +287,8 @@ impl FlowEditor {
       selected_folded: selected_box
         .as_ref()
         .is_some_and(|id| self.folded.contains(id)),
-      can_undo: self.history.can_undo(&owner),
-      can_redo: self.history.can_redo(&owner),
+      can_undo: can_write && self.history.can_undo(&owner),
+      can_redo: can_write && self.history.can_redo(&owner),
     }
   }
 
@@ -362,7 +398,19 @@ impl FlowEditor {
   }
 
   #[hotpath::measure]
+  fn reject_read_only_mutation(&self, cx: &mut Context<Self>) -> bool {
+    if self.can_write_collaboration() {
+      return false;
+    }
+    cx.notify();
+    true
+  }
+
+  #[hotpath::measure]
   fn perform_command(&mut self, command: CommandResult, before_focus: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
+    if self.reject_read_only_mutation(cx) {
+      return;
+    }
     self.resolve_pending_edit(cx);
     let after_focus = command.focus.clone().or(before_focus.clone());
     let inverse = self.document.apply_action_bundle(command.actions);
@@ -736,6 +784,9 @@ impl FlowEditor {
 
   #[hotpath::measure]
   pub fn undo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.reject_read_only_mutation(cx) {
+      return;
+    }
     self.resolve_pending_edit(cx);
     let Some(owner) = self.selected_flow_id.clone() else {
       return;
@@ -748,6 +799,9 @@ impl FlowEditor {
 
   #[hotpath::measure]
   pub fn redo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.reject_read_only_mutation(cx) {
+      return;
+    }
     self.resolve_pending_edit(cx);
     let Some(owner) = self.selected_flow_id.clone() else {
       return;
@@ -760,7 +814,7 @@ impl FlowEditor {
 
   #[hotpath::measure]
   fn begin_or_update_edit(&mut self, id: NodeId, value: NodeValue, cx: &mut Context<Self>) {
-    if self.syncing_inputs.contains(&id) {
+    if self.syncing_inputs.contains(&id) || self.reject_read_only_mutation(cx) {
       return;
     }
     let Some(old_node) = self.document.node(&id).cloned() else {
@@ -1200,7 +1254,8 @@ impl FlowEditor {
                       .icon(IconName::Plus)
                       .xsmall()
                       .ghost()
-                      .tooltip("Add argument in column")
+                      .tooltip(if self.can_write_collaboration() { "Add argument in column" } else { "Viewers cannot edit flows" })
+                      .disabled(!self.can_write_collaboration())
                       .on_click(cx.listener(move |editor, _, window, cx| {
                         editor.add_empty_at_column(ix, window, cx);
                       })),
@@ -1331,6 +1386,7 @@ impl FlowEditor {
                 .focus_bordered(false)
                 .text_color(if box_node.crossed { weak } else { colors.foreground })
                 .placeholder_color(colors.foreground.opacity(0.62))
+                .disabled(!self.can_write_collaboration())
                 .w_full(),
             ),
           ),

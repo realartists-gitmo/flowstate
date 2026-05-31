@@ -130,6 +130,9 @@ impl RichTextEditor {
     let Some((column_ix, widths, before)) = self.table_column_resize_hit_at(block_ix, position, window, cx) else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     window.focus(&self.focus_handle);
     self.selected_block = Some(BlockSelection::Table(block_ix));
     self.table_column_resize_drag = Some(TableColumnResizeDrag {
@@ -190,6 +193,9 @@ impl RichTextEditor {
   }
 
   fn update_table_column_resize_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(drag) = self.table_column_resize_drag.clone() else {
       return false;
     };
@@ -226,6 +232,13 @@ impl RichTextEditor {
     let Some(drag) = self.table_column_resize_drag.take() else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) {
+        *block = Block::Table(drag.before);
+        self.invalidate_document_layout_caches();
+      }
+      return true;
+    }
     let Some(Block::Table(after)) = self.document.blocks.get(drag.block_ix).cloned() else {
       cx.notify();
       return true;
@@ -423,6 +436,9 @@ impl RichTextEditor {
   }
 
   fn delete_selection_with_document_snapshot(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if self.selection.is_caret() {
       return false;
     }
@@ -467,6 +483,9 @@ impl RichTextEditor {
   }
 
   fn delete_selected_block(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(selection) = self.selected_block.take() else {
       return false;
     };

@@ -11,7 +11,7 @@ mod source;
 
 pub use source::*;
 
-pub const COLLAB_SCHEMA_VERSION: u32 = 1;
+pub const COLLAB_SCHEMA_VERSION: u32 = 2;
 pub const NATIVE_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 pub const DB8_COLLAB_MAGIC: &[u8; 5] = b"DB8C\0";
 pub const FL0_COLLAB_MAGIC: &[u8; 5] = b"FL0C\0";
@@ -171,6 +171,7 @@ pub struct NativeFileInput {
   pub recent_updates: Vec<Vec<u8>>,
   pub asset_manifest: Vec<NativeAssetRecord>,
   pub asset_inline_data: Vec<u8>,
+  pub source_snapshot: Option<Vec<u8>>,
 }
 
 impl NativeFileInput {
@@ -183,6 +184,7 @@ impl NativeFileInput {
       projection_cache,
       recent_updates: Vec::new(),
       asset_manifest: Vec::new(),
+      source_snapshot: None,
       asset_inline_data: Vec::new(),
     }
   }
@@ -345,13 +347,17 @@ pub fn decode_wire_message(bytes: &[u8]) -> CollabResult<WireMessage> {
 pub fn encode_native_file(input: NativeFileInput) -> CollabResult<Vec<u8>> {
   let asset_manifest = postcard::to_stdvec(&input.asset_manifest)?;
   let recent_updates = postcard::to_stdvec(&input.recent_updates)?;
-  let snapshot = source_snapshot(
-    input.format_kind,
-    input.document_id,
-    input.created_by_actor,
-    &input.projection_cache,
-    &asset_manifest,
-  )?;
+  let snapshot = if let Some(snapshot) = input.source_snapshot {
+    snapshot
+  } else {
+    source_snapshot(
+      input.format_kind,
+      input.document_id,
+      input.created_by_actor,
+      &input.projection_cache,
+      &asset_manifest,
+    )?
+  };
   let manifest = NativeManifest {
     document_id: input.document_id,
     format_kind: input.format_kind,
@@ -367,6 +373,7 @@ pub fn encode_native_file(input: NativeFileInput) -> CollabResult<Vec<u8>> {
       "loro-snapshot".to_string(),
       "projection-cache".to_string(),
       "document-level-assets".to_string(),
+      "granular-source-records".to_string(),
       "ephemeral-presence".to_string(),
     ],
   };
@@ -717,6 +724,112 @@ mod tests {
     assert_eq!(right.materialize_projection_cache().unwrap(), b"one");
   }
 
+
+  #[test]
+  fn granular_text_replicas_converge_from_concurrent_updates() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let source = GranularSource {
+      metadata: b"template".to_vec(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraph_order".to_string(),
+        ids: vec!["p1".to_string()],
+      }],
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "ab".to_string(),
+        metadata: b"normal".to_vec(),
+        marks: Vec::new(),
+      }],
+      binaries: Vec::new(),
+    };
+    let left = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &source, b"cache", &[]).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+
+    let left_update = left.insert_granular_text_utf8(Role::Owner, "p1", 1, "L").unwrap();
+    let right_update = right.insert_granular_text_utf8(Role::Editor, "p1", 1, "R").unwrap();
+    left.import_update_checked(Role::Editor, &right_update).unwrap();
+    right.import_update_checked(Role::Owner, &left_update).unwrap();
+
+    let left_source = left.materialize_granular_source().unwrap().unwrap();
+    let right_source = right.materialize_granular_source().unwrap().unwrap();
+    assert_eq!(left_source, right_source);
+    assert_eq!(left.projection_hash().unwrap(), right.projection_hash().unwrap());
+    assert!(left_source.texts[0].text.contains('L'));
+    assert!(left_source.texts[0].text.contains('R'));
+  }
+
+  #[test]
+  fn granular_viewer_text_update_is_rejected_before_mutation() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let source = GranularSource {
+      metadata: Vec::new(),
+      orders: Vec::new(),
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "locked".to_string(),
+        metadata: Vec::new(),
+        marks: Vec::new(),
+      }],
+      binaries: Vec::new(),
+    };
+    let document = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &source, b"cache", &[]).unwrap();
+    assert!(matches!(
+      document.insert_granular_text_utf8(Role::Viewer, "p1", 0, "x"),
+      Err(CollabError::Unauthorized(_))
+    ));
+    assert_eq!(
+      document.materialize_granular_source().unwrap().unwrap().texts[0].text,
+      "locked"
+    );
+  }
+
+  #[test]
+  fn local_actors_get_distinct_loro_peer_ids() {
+    let document_id = DocumentId::new();
+    let left = CollabDocument::from_projection_source(FormatKind::Db8, document_id, ActorId::new(), b"one", &[]).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+    let peer_before = right.peer_id();
+    right.set_local_actor(ActorId::new()).unwrap();
+    assert_ne!(peer_before, right.peer_id());
+  }
+
+  #[test]
+  fn granular_non_ascii_marks_stay_on_utf8_boundaries() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let source = GranularSource {
+      metadata: Vec::new(),
+      orders: Vec::new(),
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "éa".to_string(),
+        metadata: Vec::new(),
+        marks: vec![GranularTextMark {
+          start_utf8: 0,
+          end_utf8: "é".len(),
+          key: "semantic".to_string(),
+          value: GranularValue::I64(1),
+        }],
+      }],
+      binaries: Vec::new(),
+    };
+    let document = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &source, b"cache", &[]).unwrap();
+    let materialized = document.materialize_granular_source().unwrap().unwrap();
+    assert_eq!(materialized.texts[0].text, "éa");
+    assert_eq!(materialized.texts[0].marks[0].start_utf8, 0);
+    assert_eq!(materialized.texts[0].marks[0].end_utf8, "é".len());
+  }
+
+  #[test]
+  fn granular_record_ids_must_be_canonical() {
+    assert!(granular_record_id_to_u128("1").is_err());
+    assert_eq!(
+      granular_record_id_to_u128("00000000000000000000000000000001").unwrap(),
+      1
+    );
+  }
   fn corrupt_projection_cache(mut bytes: Vec<u8>) -> Vec<u8> {
     let chunk_count_offset = DB8_COLLAB_MAGIC.len() + 4 + 1;
     let chunk_count = u32::from_le_bytes(bytes[chunk_count_offset..chunk_count_offset + 4].try_into().unwrap()) as usize;

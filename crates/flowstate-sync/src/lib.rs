@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, HashSet},
+  collections::{BTreeMap, HashMap, HashSet, VecDeque},
   fmt,
   ops::Range,
   sync::{Arc, Mutex},
@@ -97,6 +97,27 @@ impl RolePolicy {
     } else {
       None
     }
+  }
+
+  pub fn set_actor_role(&mut self, actor_id: ActorId, role: Role) {
+    self.editors.remove(&actor_id);
+    self.viewers.remove(&actor_id);
+    match role {
+      Role::Owner => self.owner = actor_id,
+      Role::Editor => {
+        self.editors.insert(actor_id);
+      },
+      Role::Viewer => {
+        self.viewers.insert(actor_id);
+      },
+    }
+  }
+
+  pub fn remove_actor(&mut self, actor_id: ActorId) -> bool {
+    if actor_id == self.owner {
+      return false;
+    }
+    self.editors.remove(&actor_id) || self.viewers.remove(&actor_id)
   }
 
   #[must_use]
@@ -314,6 +335,18 @@ impl InviteRegistry {
         .map_err(|_| anyhow::anyhow!("Flowstate invite registry lock is poisoned"))?
         .remove(capability)
         .is_some(),
+    )
+  }
+
+  pub fn redacted_tickets(&self) -> AnyResult<Vec<RedactedInviteTicket>> {
+    Ok(
+      self
+        .tickets
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate invite registry lock is poisoned"))?
+        .values()
+        .map(InviteTicket::redacted)
+        .collect(),
     )
   }
 
@@ -623,10 +656,16 @@ pub enum SessionState {
 pub enum SessionEvent {
   StateChanged(SessionState),
   PeerAuthorized { actor_id: ActorId, session_id: SessionId, role: Role },
+  PeerLeft { actor_id: ActorId, session_id: SessionId },
+  PeerRoleChanged { actor_id: ActorId, session_id: SessionId, role: Role },
   SnapshotApplied { document_id: DocumentId, hash: [u8; 32] },
   UpdateApplied { document_id: DocumentId, hash: [u8; 32] },
+  UpdateRejected { document_id: DocumentId, actor_id: ActorId, reason: String },
   Presence(PeerPresence),
   AssetReceived { document_id: DocumentId, hash: [u8; 32], byte_len: u64 },
+  AssetTransferFailed { document_id: DocumentId, hash: [u8; 32], reason: String },
+  Reconnecting,
+  FatalError(String),
   Error(String),
 }
 
@@ -635,6 +674,179 @@ pub struct JoinedSnapshot {
   pub authorization: AuthorizeMessage,
   pub document: CollabDocument,
   pub assets_available: Vec<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PeerConnection {
+  pub actor_id: ActorId,
+  pub session_id: SessionId,
+  pub role: Role,
+  pub known_frontier: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OutboundUpdate {
+  pub document_id: DocumentId,
+  pub actor_id: ActorId,
+  pub bytes: Vec<u8>,
+  pub hash: [u8; 32],
+}
+
+#[derive(Clone, Debug)]
+pub struct CollabSession {
+  config: FlowstateSyncConfig,
+  document_state: SessionDocumentState,
+  state: SessionState,
+  local_role: Role,
+  peers: HashMap<SessionId, PeerConnection>,
+  events: VecDeque<SessionEvent>,
+  outbound_updates: VecDeque<OutboundUpdate>,
+  presence_queue: VecDeque<PresenceMessage>,
+}
+
+impl CollabSession {
+  #[must_use]
+  pub fn new(config: FlowstateSyncConfig, local_role: Role, document_state: SessionDocumentState) -> Self {
+    let mut events = VecDeque::new();
+    events.push_back(SessionEvent::StateChanged(SessionState::Idle));
+    Self {
+      config,
+      document_state,
+      state: SessionState::Idle,
+      local_role,
+      peers: HashMap::new(),
+      events,
+      outbound_updates: VecDeque::new(),
+      presence_queue: VecDeque::new(),
+    }
+  }
+
+  #[must_use]
+  pub const fn state(&self) -> SessionState {
+    self.state
+  }
+
+  #[must_use]
+  pub const fn local_role(&self) -> Role {
+    self.local_role
+  }
+
+  #[must_use]
+  pub fn peer_count(&self) -> usize {
+    self.peers.len()
+  }
+
+  pub fn peers(&self) -> impl Iterator<Item = &PeerConnection> {
+    self.peers.values()
+  }
+
+  pub fn set_state(&mut self, state: SessionState) {
+    if self.state != state {
+      self.state = state;
+      self.events.push_back(SessionEvent::StateChanged(state));
+    }
+  }
+
+  pub fn upsert_peer(&mut self, hello: &HelloMessage, role: Role) {
+    let peer = PeerConnection {
+      actor_id: hello.actor_id,
+      session_id: hello.session_id,
+      role,
+      known_frontier: hello.known_frontier.clone(),
+    };
+    let event = if self.peers.insert(peer.session_id, peer.clone()).is_some() {
+      SessionEvent::PeerRoleChanged {
+        actor_id: peer.actor_id,
+        session_id: peer.session_id,
+        role,
+      }
+    } else {
+      SessionEvent::PeerAuthorized {
+        actor_id: peer.actor_id,
+        session_id: peer.session_id,
+        role,
+      }
+    };
+    self.events.push_back(event);
+  }
+
+  pub fn remove_peer(&mut self, session_id: SessionId) {
+    if let Some(peer) = self.peers.remove(&session_id) {
+      self.events.push_back(SessionEvent::PeerLeft {
+        actor_id: peer.actor_id,
+        session_id,
+      });
+    }
+  }
+
+  pub fn queue_local_update(&mut self, bytes: Vec<u8>) {
+    let update = OutboundUpdate {
+      document_id: self.config.document_id,
+      actor_id: self.config.actor_id,
+      hash: blake3_hash(&bytes),
+      bytes,
+    };
+    self.outbound_updates.push_back(update.clone());
+    self.events.push_back(SessionEvent::UpdateApplied {
+      document_id: update.document_id,
+      hash: update.hash,
+    });
+  }
+
+  pub fn apply_remote_update(&mut self, actor_id: ActorId, remote_role: Role, bytes: &[u8]) -> AnyResult<()> {
+    let import_result = {
+      let document = self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
+      document.import_update_checked(remote_role, bytes)
+    };
+    match import_result {
+      Ok(outcome) => {
+        let hash = blake3_hash(bytes);
+        self.outbound_updates.push_back(OutboundUpdate {
+          document_id: self.config.document_id,
+          actor_id,
+          bytes: bytes.to_vec(),
+          hash,
+        });
+        self.events.push_back(SessionEvent::UpdateApplied {
+          document_id: self.config.document_id,
+          hash,
+        });
+        for peer in self.peers.values_mut().filter(|peer| peer.actor_id == actor_id) {
+          peer.known_frontier.clone_from(&outcome.frontier);
+        }
+        Ok(())
+      },
+      Err(error) => {
+        self.events.push_back(SessionEvent::UpdateRejected {
+          document_id: self.config.document_id,
+          actor_id,
+          reason: error.to_string(),
+        });
+        Err(error.into())
+      },
+    }
+  }
+
+  pub fn queue_presence(&mut self, presence: PeerPresence) {
+    self.events.push_back(SessionEvent::Presence(presence.clone()));
+    self.presence_queue.push_back(presence.message(self.config.document_id));
+  }
+
+  pub fn pop_outbound_update(&mut self) -> Option<OutboundUpdate> {
+    self.outbound_updates.pop_front()
+  }
+
+  pub fn pop_presence(&mut self) -> Option<PresenceMessage> {
+    self.presence_queue.pop_front()
+  }
+
+  pub fn drain_events(&mut self) -> Vec<SessionEvent> {
+    self.events.drain(..).collect()
+  }
 }
 
 pub async fn connect_and_receive_snapshot(
@@ -693,9 +905,11 @@ pub async fn connect_and_receive_snapshot(
   }
 
   send.finish().context("failed to finish Flowstate sync stream")?;
+  let document = document.expect("document checked above");
+  document.set_local_actor(config.actor_id)?;
   Ok(JoinedSnapshot {
     authorization,
-    document: document.expect("document checked above"),
+    document,
     assets_available,
   })
 }
@@ -764,8 +978,9 @@ async fn serve_live_stream(
       Err(_) => break,
     };
     match message {
-      WireMessage::Update { document_id, bytes, hash, .. } => {
+      WireMessage::Update { document_id, actor_id, bytes, hash } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure!(actor_id == hello.actor_id, "update actor does not match authorized peer");
         ensure!(blake3_hash(&bytes) == hash, "update hash mismatch");
         let frontier = {
           state
@@ -811,6 +1026,7 @@ async fn serve_live_stream(
         }
       },
       WireMessage::AssetNeed(request) => {
+        ensure!(role_includes(remote_role, Role::Viewer), "peer is not authorized to receive assets");
         ensure!(request.document_id == config.document_id, SyncError::ProtocolMismatch);
         let chunk = state
           .assets
@@ -943,6 +1159,7 @@ fn now_unix_secs() -> u64 {
     .unwrap_or_default()
 }
 
+
 fn accept_error(error: anyhow::Error) -> AcceptError {
   AcceptError::from_err(std::io::Error::other(error.to_string()))
 }
@@ -966,6 +1183,20 @@ mod tests {
   }
 
   #[test]
+  fn role_policy_changes_and_kicks_peers() {
+    let owner = ActorId::new();
+    let peer = ActorId::new();
+    let mut policy = RolePolicy::owner_only(owner);
+    policy.set_actor_role(peer, Role::Editor);
+    assert_eq!(policy.role_for_actor(peer), Some(Role::Editor));
+    policy.set_actor_role(peer, Role::Viewer);
+    assert_eq!(policy.role_for_actor(peer), Some(Role::Viewer));
+    assert!(policy.remove_actor(peer));
+    assert_eq!(policy.role_for_actor(peer), None);
+    assert!(!policy.remove_actor(owner));
+  }
+
+  #[test]
   fn asset_chunks_are_hash_verified() {
     let mut store = AssetStore::default();
     let asset = store.insert_verified(b"abcdef".to_vec());
@@ -979,6 +1210,27 @@ mod tests {
     let mut receiving = AssetStore::default();
     receiving.insert_complete_chunk(chunk, 6).unwrap();
     assert!(receiving.contains(&asset.hash));
+  }
+
+  #[test]
+  fn asset_store_rejects_unknown_and_out_of_bounds_ranges() {
+    let mut store = AssetStore::default();
+    let asset = store.insert_verified(b"abcdef".to_vec());
+    let unknown = AssetNeedMessage {
+      document_id: DocumentId::new(),
+      blake3_hash: [7; 32],
+      offset: 0,
+      len: 1,
+    };
+    assert!(store.chunk(&unknown, DEFAULT_MAX_ASSET_CHUNK_BYTES).is_err());
+
+    let out_of_bounds = AssetNeedMessage {
+      document_id: DocumentId::new(),
+      blake3_hash: asset.hash,
+      offset: 5,
+      len: 2,
+    };
+    assert!(store.chunk(&out_of_bounds, DEFAULT_MAX_ASSET_CHUNK_BYTES).is_err());
   }
 
   #[test]
@@ -1008,6 +1260,52 @@ mod tests {
     assert_eq!(authorization.role, Role::Viewer);
   }
 
+
+  #[test]
+  fn session_tracks_peers_updates_and_presence_events() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let document = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    let mut session = CollabSession::new(config.clone(), Role::Owner, SessionDocumentState::new(document, AssetStore::default()));
+    session.set_state(SessionState::Live);
+    let peer_config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Editor);
+    let hello = peer_config.hello(Vec::new(), Vec::new());
+    session.upsert_peer(&hello, Role::Editor);
+    session.queue_presence(PeerPresence {
+      actor_id: hello.actor_id,
+      session_id: hello.session_id,
+      role: Role::Editor,
+      user_label: "peer".to_string(),
+      cursor: Some("p:0".to_string()),
+      focus: None,
+      viewport_hint: None,
+      last_known_frontier: Vec::new(),
+      monotonic_millis: 7,
+    });
+
+    assert_eq!(session.peer_count(), 1);
+    assert!(session.pop_presence().is_some());
+    let events = session.drain_events();
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::StateChanged(SessionState::Live))));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::PeerAuthorized { role: Role::Editor, .. })));
+    assert!(events.iter().any(|event| matches!(event, SessionEvent::Presence(_))));
+  }
+
+  #[test]
+  fn session_rejects_viewer_update_without_mutation() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let left = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let update = left.replace_projection_source(Role::Owner, b"two", &[]).unwrap();
+    let right = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    let mut session = CollabSession::new(config, Role::Owner, SessionDocumentState::new(right.clone(), AssetStore::default()));
+
+    assert!(session.apply_remote_update(ActorId::new(), Role::Viewer, &update).is_err());
+    assert_eq!(right.materialize_projection_cache().unwrap(), b"one");
+    assert!(session.drain_events().iter().any(|event| matches!(event, SessionEvent::UpdateRejected { .. })));
+  }
   #[tokio::test]
   async fn host_join_receives_snapshot_through_iroh() {
     let document_id = DocumentId::new();

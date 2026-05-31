@@ -61,20 +61,6 @@ pub fn extract_db8_bytes_from_pdf(pdf_path: impl AsRef<Path>) -> io::Result<Opti
 }
 
 #[hotpath::measure]
-pub fn convert_pdf_to_db8(input_pdf: impl AsRef<Path>, output_db8: impl AsRef<Path>) -> io::Result<()> {
-  let db8_bytes = extract_db8_bytes_from_pdf(input_pdf)?
-    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PDF does not contain embedded Flowstate DB8 data"))?;
-  let output_db8 = output_db8.as_ref();
-  if let Some(parent) = output_db8
-    .parent()
-    .filter(|parent| !parent.as_os_str().is_empty())
-  {
-    fs::create_dir_all(parent)?;
-  }
-  fs::write(output_db8, db8_bytes)
-}
-
-#[hotpath::measure]
 fn encode_payload(db8_bytes: &[u8]) -> io::Result<Vec<u8>> {
   let compressed = zstd::bulk::compress(db8_bytes, ZSTD_LEVEL).map_err(io::Error::other)?;
   let mut payload = Vec::with_capacity(PAYLOAD_MAGIC.len() + 4 + 8 + compressed.len());

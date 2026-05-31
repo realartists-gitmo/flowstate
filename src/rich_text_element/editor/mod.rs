@@ -824,6 +824,20 @@ impl HeightPrefixIndex {
   }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollaborationRole {
+  Owner,
+  Editor,
+  Viewer,
+}
+
+impl CollaborationRole {
+  #[must_use]
+  pub const fn can_write(self) -> bool {
+    matches!(self, Self::Owner | Self::Editor)
+  }
+}
+
 pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
@@ -845,6 +859,7 @@ pub struct RichTextEditor {
   undo_stack: Vec<EditRecord>,
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
+  collaboration_role: Option<CollaborationRole>,
   last_collaboration_edit: Option<CollaborationEdit>,
   recovery_write_in_progress: bool,
   recovery_write_pending: bool,

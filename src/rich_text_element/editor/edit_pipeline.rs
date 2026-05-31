@@ -1,6 +1,18 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
+  fn block_local_mutation(&self, cx: &mut Context<Self>) -> bool {
+    if self.can_edit_locally() {
+      false
+    } else {
+      cx.notify();
+      true
+    }
+  }
+
   fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if !is_single_grapheme_text_insert(text) || !self.selection.is_caret() || self.selected_block.is_some() {
       return false;
     }
@@ -73,6 +85,9 @@ impl RichTextEditor {
     capture_range: Option<Range<usize>>,
     edit: impl FnOnce(&mut Self, &mut Context<Self>),
   ) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let timing = Instant::now();
     let before_selection = self.selection.clone();
     let before_paragraph_count = self.document.paragraphs.len();
@@ -153,6 +168,9 @@ impl RichTextEditor {
   }
 
   fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, block_ix: usize, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;

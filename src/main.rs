@@ -83,7 +83,7 @@ enum CliCommand {
     /// Output `.pdf` path.
     output: PathBuf,
   },
-  /// Extract an embedded Flowstate DB8 payload from a PDF.
+  /// Convert a PDF to DB8, recovering embedded Flowstate DB8 data when present.
   PdfToDb8 {
     /// Input `.pdf` document.
     input: PathBuf,
@@ -113,7 +113,7 @@ fn main() {
         convert_db8_to_pdf(input, output).expect("failed to export PDF");
       },
       CliCommand::PdfToDb8 { input, output } => {
-        convert_pdf_to_db8(input, output).expect("failed to extract DB8");
+        convert_pdf_to_db8(input, output).expect("failed to convert PDF to DB8");
       },
     }
     return;

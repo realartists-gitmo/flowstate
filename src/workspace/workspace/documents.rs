@@ -46,6 +46,11 @@ impl Workspace {
         workspace.refresh_toolkit_search(cx);
       }
     });
+    let initial_invite = initial_path
+      .as_ref()
+      .and_then(|path| path.to_str())
+      .filter(|value| value.starts_with(FLOWSTATE_INVITE_PREFIX))
+      .map(str::to_owned);
 
     let mut this = Self {
       document_panels: Vec::new(),
@@ -70,6 +75,7 @@ impl Workspace {
       outline_viewport_paragraph: None,
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
+      collaboration: CollaborationUiState::default(),
       settings_overlay: None,
       document_style_section: DocumentStyleSection::Text,
       settings_section: WorkspaceSettingsSection::General,
@@ -109,7 +115,7 @@ impl Workspace {
       this.load_tub_root(root, cx);
     }
 
-    if let Some(path) = initial_path {
+    if let Some(path) = initial_path.filter(|_| initial_invite.is_none()) {
       // Initial window creation happens before GPUI has produced stable
       // layout bounds for the resizable document area. Documents opened later
       // already run after that first layout pass, so defer startup loading by
@@ -119,8 +125,113 @@ impl Workspace {
       });
     }
 
+    if let Some(invite) = initial_invite {
+      cx.on_next_frame(window, move |workspace, window, cx| {
+        workspace.join_collaboration_from_invite(invite, window, cx);
+      });
+    }
+
     this
   }
+  pub fn start_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.active_document_id.is_none() {
+      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No document open", "Open a DB8 or FL0 file before starting collaboration.");
+      return;
+    }
+    self.collaboration.state = SessionState::Hosting;
+    self.collaboration.role = Some("Owner");
+    self.collaboration.last_error = None;
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Info,
+      "Collaboration hosting prepared",
+      "The local workspace is marked as owner/host. Network invite publishing is not available in this build yet.",
+    );
+    cx.notify();
+  }
+
+  pub fn stop_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.collaboration.state = SessionState::Closed;
+    self.collaboration.role = None;
+    self.collaboration.pending_invite = None;
+    self.collaboration.last_error = None;
+    show_collaboration_prompt(window, cx, PromptLevel::Info, "Collaboration disconnected", "This workspace is no longer in a collaboration session.");
+    cx.notify();
+  }
+
+  fn copy_collaboration_invite(&mut self, role: CollaborationInviteRole, window: &mut Window, cx: &mut Context<Self>) {
+    if self.collaboration.role != Some("Owner") || self.collaboration.state != SessionState::Hosting {
+      show_collaboration_prompt(window, cx, PromptLevel::Warning, "Invite unavailable", "Start collaboration as owner before copying invite links.");
+      return;
+    }
+    let role_name = collaboration_role_label(role);
+    let detail = format!("Cannot create a {role_name} invite because this build has no active Flowstate sync endpoint address yet.");
+    self.collaboration.last_error = Some(detail.clone());
+    show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite unavailable", &detail);
+    cx.notify();
+  }
+
+  pub fn join_collaboration_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(item) = cx.read_from_clipboard() else {
+      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No invite on clipboard", "Copy a flowstate://collab/ invite link before joining.");
+      return;
+    };
+    let Some(invite) = item.text() else {
+      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No invite on clipboard", "The current clipboard item does not contain text.");
+      return;
+    };
+    self.join_collaboration_from_invite(invite.trim().to_string(), window, cx);
+  }
+
+  pub fn join_collaboration_from_invite(&mut self, invite: String, window: &mut Window, cx: &mut Context<Self>) {
+    self.collaboration.state = SessionState::Joining;
+    self.collaboration.pending_invite = Some(invite.clone());
+    match decode_invite_link(&invite) {
+      Ok(ticket) => {
+        self.collaboration.role = Some(collaboration_sync_role_label(ticket.invited_role));
+        self.collaboration.last_error = Some("Network join is not available in this build yet.".to_string());
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Warning,
+          "Invite recognized",
+          "The invite link is valid, but this build cannot open the network collaboration session yet.",
+        );
+      },
+      Err(error) => {
+        let detail = format!("{error:#}");
+        self.collaboration.state = SessionState::Failed;
+        self.collaboration.role = None;
+        self.collaboration.last_error = Some(detail.clone());
+        show_collaboration_prompt(window, cx, PromptLevel::Critical, "Join failed", &detail);
+      },
+    }
+    cx.notify();
+  }
+
+  pub fn reconnect_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.collaboration.pending_invite.is_none() && self.collaboration.role.is_none() {
+      show_collaboration_prompt(window, cx, PromptLevel::Warning, "Reconnect unavailable", "There is no previous collaboration session or invite to reconnect.");
+      return;
+    }
+    self.collaboration.state = SessionState::Reconnecting;
+    self.collaboration.last_error = Some("Network reconnect is not available in this build yet.".to_string());
+    show_collaboration_prompt(window, cx, PromptLevel::Warning, "Reconnect unavailable", "Network reconnect is not available in this build yet.");
+    cx.notify();
+  }
+
+  pub fn show_collaboration_diagnostics(&self, window: &mut Window, cx: &mut Context<Self>) {
+    let role = self.collaboration.role.unwrap_or("None");
+    let pending_invite = if self.collaboration.pending_invite.is_some() { "yes" } else { "no" };
+    let detail = format!(
+      "State: {:?}\nRole: {role}\nPending invite: {pending_invite}\nLast error: {}",
+      self.collaboration.state,
+      self.collaboration.last_error.as_deref().unwrap_or("None"),
+    );
+    show_collaboration_prompt(window, cx, PromptLevel::Info, "Collaboration diagnostics", &detail);
+  }
+
 
   fn create_document_panel(
     &mut self,
@@ -866,6 +977,33 @@ impl PanelKind {
       },
     }
   }
+}
+
+fn collaboration_role_label(role: CollaborationInviteRole) -> &'static str {
+  match role {
+    CollaborationInviteRole::Owner => "Owner",
+    CollaborationInviteRole::Editor => "Editor",
+    CollaborationInviteRole::Viewer => "Viewer",
+  }
+}
+
+fn collaboration_sync_role_label(role: impl std::fmt::Debug) -> &'static str {
+  match format!("{role:?}").as_str() {
+    "Owner" => "Owner",
+    "Editor" => "Editor",
+    "Viewer" => "Viewer",
+    _ => "Unknown",
+  }
+}
+
+fn show_collaboration_prompt(
+  window: &mut Window,
+  cx: &mut Context<Workspace>,
+  level: PromptLevel,
+  message: &'static str,
+  detail: &str,
+) {
+  std::mem::drop(window.prompt(level, message, Some(detail), &[PromptButton::ok("Ok")], cx));
 }
 
 #[hotpath::measure]

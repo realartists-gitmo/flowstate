@@ -150,6 +150,14 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
     | CommandId::ToggleRibbon
+    | CommandId::StartCollaboration
+    | CommandId::StopCollaboration
+    | CommandId::CopyOwnerInvite
+    | CommandId::CopyEditorInvite
+    | CommandId::CopyViewerInvite
+    | CommandId::JoinFromInvite
+    | CommandId::ReconnectCollaboration
+    | CommandId::CollaborationDiagnostics
     | CommandId::ScrollToParagraph => return None,
   };
   Some(action)

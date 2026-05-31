@@ -75,7 +75,15 @@ impl RichTextEditor {
       | crate::commands::CommandId::OpenDemoDocument
       | crate::commands::CommandId::CloseDocument
       | crate::commands::CommandId::ToggleRibbon
-      | crate::commands::CommandId::ScrollToParagraph => {},
+      | crate::commands::CommandId::ScrollToParagraph
+      | crate::commands::CommandId::StartCollaboration
+      | crate::commands::CommandId::StopCollaboration
+      | crate::commands::CommandId::CopyOwnerInvite
+      | crate::commands::CommandId::CopyEditorInvite
+      | crate::commands::CommandId::CopyViewerInvite
+      | crate::commands::CommandId::JoinFromInvite
+      | crate::commands::CommandId::ReconnectCollaboration
+      | crate::commands::CommandId::CollaborationDiagnostics => {},
     }
   }
 
@@ -113,6 +121,9 @@ impl RichTextEditor {
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(record) = self.undo_stack.pop() else {
       return;
     };
@@ -127,6 +138,9 @@ impl RichTextEditor {
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(record) = self.redo_stack.pop() else {
       return;
     };
@@ -354,6 +368,9 @@ impl RichTextEditor {
   }
 
   pub fn cut(&mut self, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     self.copy(cx);
     if self.clear_selected_table_cell(cx) {
       return;
@@ -374,6 +391,9 @@ impl RichTextEditor {
   }
 
   pub fn paste(&mut self, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(item) = cx.read_from_clipboard() else {
       return;
     };
@@ -453,6 +473,9 @@ impl RichTextEditor {
   }
 
   pub fn insert_plain_text_from_toolkit(&mut self, text: &str, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if text.trim().is_empty() {
       return;
     }

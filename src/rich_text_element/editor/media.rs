@@ -86,6 +86,9 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(Block::Image(image)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
@@ -110,6 +113,9 @@ impl RichTextEditor {
   }
 
   fn update_image_resize_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(drag) = self.image_resize_drag.clone() else {
       return false;
     };
@@ -140,6 +146,13 @@ impl RichTextEditor {
     let Some(drag) = self.image_resize_drag.take() else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) {
+        *block = Block::Image(drag.before);
+        self.invalidate_document_layout_caches();
+      }
+      return true;
+    }
     let Some(Block::Image(after)) = self.document.blocks.get(drag.block_ix).cloned() else {
       cx.notify();
       return true;
@@ -199,6 +212,9 @@ impl RichTextEditor {
   }
 
   fn edit_selected_image(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut ImageBlock)) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(Block::Image(image)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
@@ -231,6 +247,9 @@ impl RichTextEditor {
   }
 
   pub fn insert_equation(&mut self, source: impl Into<SharedString>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     self.insert_blocks_after_caret(
       vec![Block::Equation(EquationBlock {
         source: source.into(),
@@ -243,10 +262,16 @@ impl RichTextEditor {
   }
 
   pub fn insert_image_block(&mut self, asset: AssetRecord, alt_text: impl Into<SharedString>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     self.insert_image_assets(vec![(asset, alt_text.into())], cx);
   }
 
   fn insert_image_assets(&mut self, assets: Vec<(AssetRecord, SharedString)>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if assets.is_empty() {
       return;
     }
@@ -270,6 +295,9 @@ impl RichTextEditor {
   }
 
   pub fn prompt_insert_image(&mut self, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let paths = cx.prompt_for_paths(PathPromptOptions {
       files: true,
       directories: false,
@@ -302,6 +330,9 @@ impl RichTextEditor {
   }
 
   fn on_file_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     self.clear_drop_preview();
     let paths = paths.paths().to_vec();
     if paths.is_empty() {
@@ -370,6 +401,9 @@ impl RichTextEditor {
   }
 
   fn insert_clipboard_image(&mut self, image: Image, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     cx.spawn(async move |editor, cx| {
       let (asset, alt_text) = cx
         .background_executor()

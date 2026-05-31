@@ -36,6 +36,7 @@ impl RichTextEditor {
       undo_stack: Vec::new(),
       redo_stack: Vec::new(),
       identity_map,
+      collaboration_role: None,
       last_collaboration_edit: None,
       recovery_write_in_progress: false,
       recovery_write_pending: false,
@@ -135,6 +136,7 @@ impl RichTextEditor {
 
   fn release_transient_memory(&mut self) {
     self.undo_stack = Vec::new();
+    self.collaboration_role = None;
     self.redo_stack = Vec::new();
     self.last_collaboration_edit = None;
     self.recovery_write_in_progress = false;
@@ -196,6 +198,22 @@ impl RichTextEditor {
     self.layout_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.prep_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.goal_x = None;
+  }
+
+  pub fn collaboration_role(&self) -> Option<CollaborationRole> {
+    self.collaboration_role
+  }
+
+  pub fn set_collaboration_role(&mut self, role: Option<CollaborationRole>, cx: &mut Context<Self>) {
+    if self.collaboration_role == role {
+      return;
+    }
+    self.collaboration_role = role;
+    cx.notify();
+  }
+
+  pub fn can_edit_locally(&self) -> bool {
+    self.collaboration_role.is_none_or(CollaborationRole::can_write)
   }
 
   pub fn last_collaboration_edit(&self) -> Option<&CollaborationEdit> {

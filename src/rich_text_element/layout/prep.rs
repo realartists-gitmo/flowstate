@@ -163,7 +163,7 @@ fn build_paragraph_prep_from_parts(
         layout_version: paragraph.version,
         source_len,
         wrap_break_ends: Arc::from(Vec::<usize>::new().into_boxed_slice()),
-        visible: true,
+        visible: false,
       });
     };
 

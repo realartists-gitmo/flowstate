@@ -1,6 +1,9 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_plain_text_paste_at_caret(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if !self.selection.is_caret() || self.selected_block.is_some() || text.is_empty() || text.contains('\r') || text.contains('\n') {
       return false;
     }
@@ -21,6 +24,9 @@ impl RichTextEditor {
   }
 
   fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if !self.selection.is_caret()
       || self.selected_block.is_some()
       || !fragment.blocks.is_empty()
@@ -96,6 +102,9 @@ impl RichTextEditor {
   }
 
   fn insert_plain_text_into_selected_table_cell(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     if normalized.is_empty() {
       return matches!(self.selected_block, Some(BlockSelection::TableCell { .. }));
@@ -122,6 +131,9 @@ impl RichTextEditor {
   }
 
   fn insert_rich_fragment_into_selected_table_cell(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if fragment
       .blocks
       .iter()
@@ -144,6 +156,9 @@ impl RichTextEditor {
   }
 
   fn insert_paragraphs_into_selected_table_cell(&mut self, paragraphs: &[InputParagraph], cx: &mut Context<Self>) -> bool {
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(BlockSelection::TableCell {
       block_ix: _,
       row_ix,
@@ -260,6 +275,9 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       paragraph.text.clear();
       paragraph.paragraph.byte_range = 0..0;

@@ -19,9 +19,11 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
       });
     }
     if extension.eq_ignore_ascii_case("pdf") {
-      let db8_bytes = crate::docx_conversion::extract_db8_bytes_from_pdf(path)?
-        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "PDF does not contain embedded Flowstate DB8 data"))?;
-      let document = flowstate_document::read_db8_bytes(&db8_bytes)?;
+      let document = if let Some(db8_bytes) = crate::docx_conversion::extract_db8_bytes_from_pdf(path)? {
+        flowstate_document::read_db8_bytes(&db8_bytes)?
+      } else {
+        convert_pdf_to_document(path)?.0
+      };
       return Ok(LoadedDocumentForOpen {
         document,
         path: None,

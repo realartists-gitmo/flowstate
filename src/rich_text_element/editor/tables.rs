@@ -1,6 +1,9 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub fn insert_default_table(&mut self, rows: usize, columns: usize, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let rows = rows.clamp(1, 20);
     let columns = columns.clamp(1, 12);
     let table = TableBlock {
@@ -145,6 +148,9 @@ impl RichTextEditor {
   }
 
   fn edit_selected_table(&mut self, cx: &mut Context<Self>, update: impl FnOnce(&mut TableBlock)) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(block_ix) = self.selected_table_block_ix() else {
       return;
     };

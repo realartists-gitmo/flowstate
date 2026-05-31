@@ -1,6 +1,9 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub(super) fn apply_semantic_style_to_card_span(&mut self, semantic: RunSemanticStyle, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if !matches!(semantic, RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed) {
       return;
     }

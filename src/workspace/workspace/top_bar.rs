@@ -143,6 +143,31 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
               workspace.save_active_as(window, cx);
             }))
             .separator()
+            .item(file_menu_item(workspace.clone(), "Start Collaboration", false, |workspace, window, cx| {
+              workspace.start_collaboration(window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Stop / Disconnect", false, |workspace, window, cx| {
+              workspace.stop_collaboration(window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Copy Owner Invite", false, |workspace, window, cx| {
+              workspace.copy_collaboration_invite(CollaborationInviteRole::Owner, window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Copy Editor Invite", false, |workspace, window, cx| {
+              workspace.copy_collaboration_invite(CollaborationInviteRole::Editor, window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Copy Viewer Invite", false, |workspace, window, cx| {
+              workspace.copy_collaboration_invite(CollaborationInviteRole::Viewer, window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Join from Invite", false, |workspace, window, cx| {
+              workspace.join_collaboration_from_clipboard(window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Reconnect", false, |workspace, window, cx| {
+              workspace.reconnect_collaboration(window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Diagnostic Info", false, |workspace, window, cx| {
+              workspace.show_collaboration_diagnostics(window, cx);
+            }))
+            .separator()
             .item(file_menu_item(workspace.clone(), "Close File", !has_document, |workspace, window, cx| {
               workspace.close_active_document(window, cx);
             }))
@@ -239,6 +264,7 @@ fn insert_default_equation_from_top_bar(workspace: &WeakEntity<Workspace>, cx: &
     }
   });
 }
+
 
 #[hotpath::measure]
 fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {

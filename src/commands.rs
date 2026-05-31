@@ -74,6 +74,14 @@ pub enum CommandId {
   CloseDocument,
   ToggleRibbon,
   ScrollToParagraph,
+  StartCollaboration,
+  StopCollaboration,
+  CopyOwnerInvite,
+  CopyEditorInvite,
+  CopyViewerInvite,
+  JoinFromInvite,
+  ReconnectCollaboration,
+  CollaborationDiagnostics,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -176,6 +184,14 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
+  CommandSpec::new(CommandId::StartCollaboration, "Start Collaboration", APP, &[]),
+  CommandSpec::new(CommandId::StopCollaboration, "Stop / Disconnect Collaboration", APP, &[]),
+  CommandSpec::new(CommandId::CopyOwnerInvite, "Copy Owner Invite", APP, &[]),
+  CommandSpec::new(CommandId::CopyEditorInvite, "Copy Editor Invite", APP, &[]),
+  CommandSpec::new(CommandId::CopyViewerInvite, "Copy Viewer Invite", APP, &[]),
+  CommandSpec::new(CommandId::JoinFromInvite, "Join from Invite", APP, &[]),
+  CommandSpec::new(CommandId::ReconnectCollaboration, "Reconnect Collaboration", APP, &[]),
+  CommandSpec::new(CommandId::CollaborationDiagnostics, "Collaboration Diagnostics", APP, &[]),
 ];
 
 #[hotpath::measure]

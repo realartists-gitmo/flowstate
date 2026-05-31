@@ -3,6 +3,9 @@ const RICH_TEXT_CLIPBOARD_FORMAT: &str = "flowstate.rich-text-fragment.v1";
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub fn insert_toolkit_text_at_caret(&mut self, paragraphs: Vec<InputParagraph>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let paragraphs = non_empty_input_paragraphs(paragraphs);
     if paragraphs.is_empty() {
       return;
@@ -23,6 +26,9 @@ impl RichTextEditor {
   }
 
   pub fn insert_toolkit_paragraphs_as_blocks(&mut self, paragraphs: Vec<InputParagraph>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let blocks = non_empty_input_paragraphs(paragraphs)
       .into_iter()
       .map(InputBlock::Paragraph)
@@ -40,6 +46,9 @@ impl RichTextEditor {
   }
 
   fn insert_rich_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if !fragment.blocks.is_empty() {
       self.insert_block_fragment(fragment, cx);
       return;
@@ -56,6 +65,9 @@ impl RichTextEditor {
   }
 
   fn insert_block_fragment(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if fragment.blocks.is_empty() {
       return;
     }
@@ -152,6 +164,9 @@ impl RichTextEditor {
   }
 
   fn insert_blocks_after_caret(&mut self, blocks: Vec<Block>, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if blocks.is_empty() {
       return;
     }
@@ -289,6 +304,9 @@ impl RichTextEditor {
   }
 
   fn push_replace_document_history(&mut self, before_document: Document, before_selection: EditorSelection, cx: &mut Context<Self>) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     if before_document.text == self.document.text
       && before_document.paragraphs == self.document.paragraphs
       && before_document.blocks == self.document.blocks

@@ -7,9 +7,9 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
-  KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
-  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
+  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla,
+  InteractiveElement, IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render,
+  ScrollHandle, SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
@@ -35,7 +35,7 @@ use crate::app_settings::{
   save_autosave, save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
-use crate::docx_conversion::convert_docx_to_document;
+use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
   Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, load_or_create_document, paragraph_byte_range,
@@ -47,6 +47,7 @@ use crate::workspace::file_management::{
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
+use flowstate_sync::{FLOWSTATE_INVITE_PREFIX, SessionState, decode_invite_link};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
@@ -77,6 +78,7 @@ pub struct Workspace {
   outline_viewport_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
+  collaboration: CollaborationUiState,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
@@ -162,6 +164,32 @@ enum ToolkitSearchFilter {
   Analytics,
 }
 
+
+#[derive(Clone)]
+struct CollaborationUiState {
+  state: SessionState,
+  role: Option<&'static str>,
+  pending_invite: Option<String>,
+  last_error: Option<String>,
+}
+
+impl Default for CollaborationUiState {
+  fn default() -> Self {
+    Self {
+      state: SessionState::Idle,
+      role: None,
+      pending_invite: None,
+      last_error: None,
+    }
+  }
+}
+
+#[derive(Clone, Copy)]
+enum CollaborationInviteRole {
+  Owner,
+  Editor,
+  Viewer,
+}
 impl ToolkitSearchFilter {
   fn label(self) -> &'static str {
     match self {

@@ -4,6 +4,9 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if text.is_empty() {
       return true;
     }
@@ -31,6 +34,9 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
       return false;
     };
@@ -79,6 +85,9 @@ impl RichTextEditor {
     let Some(BlockSelection::Equation(block_ix)) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if text.is_empty() {
       return true;
     }
@@ -114,6 +123,9 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let caret = self.table_cell_caret;
     if caret == 0 {
       let mut merged_caret = None;
@@ -168,6 +180,9 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     let Some(text) = self.selected_table_cell_text() else {
       return true;
     };
@@ -213,6 +228,9 @@ impl RichTextEditor {
     let Some(BlockSelection::Equation(block_ix)) = self.selected_block else {
       return false;
     };
+    if self.block_local_mutation(cx) {
+      return true;
+    }
     if self
       .selected_equation_source()
       .map(|source| source.is_empty())
@@ -255,6 +273,9 @@ impl RichTextEditor {
   }
 
   fn edit_selected_equation(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut EquationBlock)) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(Block::Equation(equation)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
@@ -294,6 +315,9 @@ impl RichTextEditor {
     cx: &mut Context<Self>,
     update: impl FnOnce(&mut TableCellParagraph),
   ) {
+    if self.block_local_mutation(cx) {
+      return;
+    }
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
