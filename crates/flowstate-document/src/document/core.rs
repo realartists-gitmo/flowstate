@@ -359,7 +359,7 @@ pub fn rebuild_document_sections(document: &mut Document) {
 }
 
 #[hotpath::measure]
-const fn section_level_and_kind(style: ParagraphStyle) -> Option<(usize, SectionKind)> {
+fn section_level_and_kind(style: ParagraphStyle) -> Option<(usize, SectionKind)> {
   match style {
     ParagraphStyle::Pocket => Some((0, SectionKind::Pocket)),
     ParagraphStyle::Hat => Some((1, SectionKind::Hat)),
@@ -371,7 +371,7 @@ const fn section_level_and_kind(style: ParagraphStyle) -> Option<(usize, Section
 }
 
 #[hotpath::measure]
-const fn section_id_for_heading(paragraph_id: ParagraphId, kind: SectionKind) -> SectionId {
+fn section_id_for_heading(paragraph_id: ParagraphId, kind: SectionKind) -> SectionId {
   let kind_slot = match kind {
     SectionKind::Pocket => 1_u128,
     SectionKind::Hat => 2,

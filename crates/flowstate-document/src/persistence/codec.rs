@@ -85,7 +85,7 @@ fn write_string(bytes: &mut Vec<u8>, value: &str) {
 }
 
 #[hotpath::measure]
-const fn encode_block_alignment(alignment: BlockAlignment) -> u8 {
+fn encode_block_alignment(alignment: BlockAlignment) -> u8 {
   match alignment {
     BlockAlignment::Left => 0,
     BlockAlignment::Center => 1,
@@ -104,7 +104,7 @@ fn decode_block_alignment(value: u8) -> io::Result<BlockAlignment> {
 }
 
 #[hotpath::measure]
-const fn encode_paragraph_style(style: ParagraphStyle) -> u8 {
+fn encode_paragraph_style(style: ParagraphStyle) -> u8 {
   match style {
     ParagraphStyle::Pocket => 0,
     ParagraphStyle::Hat => 1,
@@ -131,7 +131,7 @@ fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
 }
 
 #[hotpath::measure]
-const fn encode_section_kind(kind: SectionKind) -> u8 {
+fn encode_section_kind(kind: SectionKind) -> u8 {
   match kind {
     SectionKind::Pocket => 0,
     SectionKind::Hat => 1,
@@ -185,7 +185,7 @@ fn read_run_styles(cursor: &mut Cursor<&[u8]>) -> io::Result<RunStyles> {
 }
 
 #[hotpath::measure]
-const fn encode_run_semantic_style(style: RunSemanticStyle) -> u8 {
+fn encode_run_semantic_style(style: RunSemanticStyle) -> u8 {
   match style {
     RunSemanticStyle::Plain => 0,
     RunSemanticStyle::Cite => 1,
@@ -210,7 +210,7 @@ fn decode_run_semantic_style(value: u8) -> io::Result<RunSemanticStyle> {
 }
 
 #[hotpath::measure]
-const fn encode_highlight_style(style: Option<HighlightStyle>) -> u8 {
+fn encode_highlight_style(style: Option<HighlightStyle>) -> u8 {
   match style {
     None => 0,
     Some(HighlightStyle::Spoken) => 1,

@@ -4,9 +4,12 @@ use std::{
   io::{Cursor, Read as _},
 };
 
-use loro::{ExportMode, LoroDoc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+mod source;
+
+pub use source::*;
 
 pub const COLLAB_SCHEMA_VERSION: u32 = 1;
 pub const NATIVE_ENVELOPE_SCHEMA_VERSION: u32 = 1;
@@ -282,6 +285,10 @@ pub enum CollabError {
   ChunkOutOfBounds(u16),
   HashMismatch(&'static str),
   InvalidIntegrity,
+  InvalidSchema(&'static str),
+  MissingRootValue(&'static str),
+  Unauthorized(&'static str),
+  UnsupportedCollabSchema(u32),
 }
 
 impl fmt::Display for CollabError {
@@ -298,6 +305,10 @@ impl fmt::Display for CollabError {
       Self::ChunkOutOfBounds(kind) => write!(f, "Flowstate collaboration chunk {kind} is out of bounds"),
       Self::HashMismatch(name) => write!(f, "Flowstate collaboration hash mismatch for {name}"),
       Self::InvalidIntegrity => f.write_str("invalid Flowstate collaboration integrity chunk"),
+      Self::InvalidSchema(name) => write!(f, "invalid Flowstate Loro schema at {name}"),
+      Self::MissingRootValue(name) => write!(f, "missing Flowstate Loro root value {name}"),
+      Self::Unauthorized(reason) => write!(f, "unauthorized Flowstate collaboration update: {reason}"),
+      Self::UnsupportedCollabSchema(schema) => write!(f, "unsupported Flowstate collaboration schema {schema}"),
     }
   }
 }
@@ -334,7 +345,7 @@ pub fn decode_wire_message(bytes: &[u8]) -> CollabResult<WireMessage> {
 pub fn encode_native_file(input: NativeFileInput) -> CollabResult<Vec<u8>> {
   let asset_manifest = postcard::to_stdvec(&input.asset_manifest)?;
   let recent_updates = postcard::to_stdvec(&input.recent_updates)?;
-  let snapshot = projection_snapshot(
+  let snapshot = source_snapshot(
     input.format_kind,
     input.document_id,
     input.created_by_actor,
@@ -387,7 +398,7 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   let manifest_bytes = required_chunk(&chunks, CHUNK_MANIFEST, "manifest")?;
   let snapshot = required_chunk(&chunks, CHUNK_LORO_SNAPSHOT, "loro snapshot")?.to_vec();
   let recent_updates_bytes = required_chunk(&chunks, CHUNK_RECENT_UPDATES, "recent updates")?;
-  let projection_cache = required_chunk(&chunks, CHUNK_PROJECTION_CACHE, "projection cache")?.to_vec();
+  let stored_projection_cache = required_chunk(&chunks, CHUNK_PROJECTION_CACHE, "projection cache")?.to_vec();
   let asset_manifest_bytes = required_chunk(&chunks, CHUNK_ASSET_MANIFEST, "asset manifest")?;
   let asset_inline_data = required_chunk(&chunks, CHUNK_ASSET_INLINE_DATA, "asset inline data")?.to_vec();
   let integrity_bytes = required_chunk(&chunks, CHUNK_INTEGRITY, "integrity")?;
@@ -399,7 +410,6 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   if manifest.format_kind != expected_format {
     return Err(CollabError::InvalidMagic);
   }
-  verify_hash("manifest projection hash", &projection_cache, manifest.projection_hash)?;
   verify_hash("manifest snapshot hash", &snapshot, manifest.snapshot_hash)?;
   verify_hash("manifest asset manifest hash", asset_manifest_bytes, manifest.asset_manifest_hash)?;
 
@@ -407,7 +417,14 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   let asset_manifest: Vec<NativeAssetRecord> = postcard::from_bytes(asset_manifest_bytes)?;
   let integrity: NativeIntegrity = postcard::from_bytes(integrity_bytes)?;
   verify_integrity(expected_format, &chunks, &integrity)?;
-  LoroDoc::from_snapshot(&snapshot).map_err(|error| CollabError::Loro(error.to_string()))?;
+  let source = CollabDocument::from_snapshot(&snapshot, Some(expected_format), Some(manifest.document_id))?;
+  let materialized_projection = source.materialize_projection_cache()?;
+  verify_hash("manifest projection hash", &materialized_projection, manifest.projection_hash)?;
+  let projection_cache = if blake3_hash(&stored_projection_cache) == manifest.projection_hash {
+    stored_projection_cache
+  } else {
+    materialized_projection
+  };
 
   Ok(DecodedNativeFile {
     manifest,
@@ -427,30 +444,30 @@ pub fn projection_snapshot(
   projection_cache: &[u8],
   asset_manifest: &[u8],
 ) -> CollabResult<Vec<u8>> {
-  let doc = LoroDoc::new();
-  let root = doc.get_map("flowstate");
-  root
-    .insert("format_kind", i64::from(format_kind.as_u8()))
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  root
-    .insert("document_id", document_id.0.as_bytes().as_slice())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  root
-    .insert("created_by_actor", created_by_actor.0.as_bytes().as_slice())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  root
-    .insert("projection_cache", projection_cache)
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  root
-    .insert("projection_hash", blake3_hash(projection_cache).as_slice())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  root
-    .insert("asset_manifest_hash", blake3_hash(asset_manifest).as_slice())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  doc.commit();
-  doc
-    .export(ExportMode::Snapshot)
-    .map_err(|error| CollabError::Loro(error.to_string()))
+  source_snapshot(
+    format_kind,
+    document_id,
+    created_by_actor,
+    projection_cache,
+    asset_manifest,
+  )
+}
+
+pub fn source_snapshot(
+  format_kind: FormatKind,
+  document_id: DocumentId,
+  created_by_actor: ActorId,
+  projection_cache: &[u8],
+  asset_manifest: &[u8],
+) -> CollabResult<Vec<u8>> {
+  CollabDocument::from_projection_source(
+    format_kind,
+    document_id,
+    created_by_actor,
+    projection_cache,
+    asset_manifest,
+  )?
+  .export_snapshot()
 }
 
 fn write_envelope(format_kind: FormatKind, chunks: Vec<(u16, Vec<u8>)>) -> CollabResult<Vec<u8>> {
@@ -530,7 +547,7 @@ fn read_envelope(bytes: &[u8], expected_format: FormatKind) -> CollabResult<BTre
       return Err(CollabError::ChunkOutOfBounds(kind));
     }
     let payload = &bytes[offset..end];
-    if blake3_hash(payload) != hash {
+    if kind != CHUNK_PROJECTION_CACHE && blake3_hash(payload) != hash {
       return Err(CollabError::HashMismatch("chunk"));
     }
     if chunks.insert(kind, payload.to_vec()).is_some() {
@@ -555,11 +572,8 @@ fn verify_integrity(format_kind: FormatKind, chunks: &BTreeMap<u16, Vec<u8>>, in
     required_chunk(chunks, CHUNK_RECENT_UPDATES, "recent updates")?,
     integrity.recent_updates_hash,
   )?;
-  verify_hash(
-    "integrity projection cache",
-    required_chunk(chunks, CHUNK_PROJECTION_CACHE, "projection cache")?,
-    integrity.projection_cache_hash,
-  )?;
+  let _ = required_chunk(chunks, CHUNK_PROJECTION_CACHE, "projection cache")?;
+  let _ = integrity.projection_cache_hash;
   verify_hash(
     "integrity asset manifest",
     required_chunk(chunks, CHUNK_ASSET_MANIFEST, "asset manifest")?,
@@ -659,5 +673,67 @@ mod tests {
     });
     let bytes = encode_wire_message(&message).unwrap();
     assert_eq!(decode_wire_message(&bytes).unwrap(), message);
+  }
+
+  #[test]
+  fn corrupt_projection_cache_rebuilds_from_loro_source() {
+    let input = NativeFileInput::new(FormatKind::Db8, b"projection".to_vec());
+    let bytes = corrupt_projection_cache(encode_native_file(input).unwrap());
+    let decoded = decode_native_file(&bytes, FormatKind::Db8).unwrap();
+    assert_eq!(decoded.projection_cache, b"projection");
+  }
+
+  #[test]
+  fn in_memory_collab_replicas_converge_from_updates() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let left = CollabDocument::from_projection_source(FormatKind::Fl0, document_id, actor, b"one", &[]).unwrap();
+    let snapshot = left.export_snapshot().unwrap();
+    let right = CollabDocument::from_snapshot(&snapshot, Some(FormatKind::Fl0), Some(document_id)).unwrap();
+
+    let update = left
+      .replace_projection_source(Role::Owner, b"two", &[])
+      .unwrap();
+    let outcome = right.import_update_checked(Role::Editor, &update).unwrap();
+    assert!(outcome.patch.is_some());
+    assert_eq!(right.materialize_projection_cache().unwrap(), b"two");
+    assert_eq!(left.projection_hash().unwrap(), right.projection_hash().unwrap());
+  }
+
+  #[test]
+  fn viewer_update_import_is_rejected_before_mutation() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let left = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor, b"one", &[]).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+    let update = left
+      .replace_projection_source(Role::Owner, b"two", &[])
+      .unwrap();
+
+    assert!(matches!(
+      right.import_update_checked(Role::Viewer, &update),
+      Err(CollabError::Unauthorized(_))
+    ));
+    assert_eq!(right.materialize_projection_cache().unwrap(), b"one");
+  }
+
+  fn corrupt_projection_cache(mut bytes: Vec<u8>) -> Vec<u8> {
+    let chunk_count_offset = DB8_COLLAB_MAGIC.len() + 4 + 1;
+    let chunk_count = u32::from_le_bytes(bytes[chunk_count_offset..chunk_count_offset + 4].try_into().unwrap()) as usize;
+    let table_start = chunk_count_offset + 4;
+    for ix in 0..chunk_count {
+      let entry = table_start + ix * CHUNK_TABLE_ENTRY_LEN;
+      let kind = u16::from_le_bytes(bytes[entry..entry + 2].try_into().unwrap());
+      if kind != CHUNK_PROJECTION_CACHE {
+        continue;
+      }
+      let offset = u64::from_le_bytes(bytes[entry + 4..entry + 12].try_into().unwrap()) as usize;
+      let len = u64::from_le_bytes(bytes[entry + 12..entry + 20].try_into().unwrap()) as usize;
+      if len > 0 {
+        bytes[offset] ^= 0xff;
+      }
+      break;
+    }
+    bytes
   }
 }

@@ -2,7 +2,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::{Context as _, Result};
-use flowstate_collab::{DocumentId as CollabDocumentId, FormatKind, NativeFileInput, decode_native_file, encode_native_file};
+use flowstate_collab::{
+  ActorId, CollabDocument, DocumentId as CollabDocumentId, Fl0CollabDocument, FormatKind, NativeFileInput, decode_native_file,
+  encode_native_file,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::document::{BoxNode, Flow, FlowDocument, Node, NodeId, NodeValue, Nodes};
@@ -81,6 +84,30 @@ pub fn fl0_bytes(document: &FlowDocument) -> Result<Vec<u8>> {
   let mut input = NativeFileInput::new(FormatKind::Fl0, projection_cache);
   input.document_id = CollabDocumentId(uuid::Uuid::from_u128(document.document_id));
   encode_native_file(input).context("failed to write .fl0 collaboration envelope")
+}
+
+#[hotpath::measure]
+pub fn fl0_collab_document(document: &FlowDocument, created_by_actor: ActorId) -> Result<Fl0CollabDocument> {
+  let projection_cache = flow_projection_bytes(document)?;
+  Fl0CollabDocument::from_projection_source(
+    CollabDocumentId(uuid::Uuid::from_u128(document.document_id)),
+    created_by_actor,
+    &projection_cache,
+    &[],
+  )
+  .context("failed to create .fl0 collaboration source")
+}
+
+#[hotpath::measure]
+pub fn flow_document_from_collab_source(source: &CollabDocument) -> Result<FlowDocument> {
+  if source.format_kind() != FormatKind::Fl0 {
+    anyhow::bail!("collaboration source is not FL0");
+  }
+  let projection = load_projection(&source.materialize_projection_cache()?)?;
+  Ok(FlowDocument::from_nodes_with_document_id(
+    projection.document_id,
+    nodes_from_saveable(projection)?,
+  ))
 }
 
 #[hotpath::measure]
@@ -237,5 +264,15 @@ mod tests {
     fs::remove_file(path).unwrap();
     assert_eq!(loaded.document_id, document.document_id);
     assert_eq!(loaded.nodes, document.nodes);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn collab_source_materializes_projection() {
+    let document = FlowDocument::new();
+    let source = fl0_collab_document(&document, ActorId::new()).unwrap();
+    let materialized = flow_document_from_collab_source(source.inner()).unwrap();
+    assert_eq!(materialized.document_id, document.document_id);
+    assert_eq!(materialized.nodes, document.nodes);
   }
 }

@@ -329,7 +329,7 @@ fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
 
 impl DocxCleanStats {
   #[hotpath::measure]
-  const fn has_changes(self) -> bool {
+  fn has_changes(self) -> bool {
     self.underline_values_normalized
       + self.highlight_values_normalized
       + self.border_values_normalized
@@ -341,7 +341,7 @@ impl DocxCleanStats {
   }
 
   #[hotpath::measure]
-  const fn merge(&mut self, other: Self) {
+  fn merge(&mut self, other: Self) {
     self.underline_values_normalized += other.underline_values_normalized;
     self.highlight_values_normalized += other.highlight_values_normalized;
     self.border_values_normalized += other.border_values_normalized;

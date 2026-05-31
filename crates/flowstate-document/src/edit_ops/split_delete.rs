@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub const fn bump_paragraph_version(paragraph: &mut Paragraph) {
+pub fn bump_paragraph_version(paragraph: &mut Paragraph) {
   paragraph.version = paragraph.version.wrapping_add(1);
 }
 

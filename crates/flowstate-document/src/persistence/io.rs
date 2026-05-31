@@ -11,8 +11,8 @@ use std::{
 
 use crop::Rope;
 use flowstate_collab::{
-  ActorId, DocumentId as CollabDocumentId, FormatKind, NativeAssetRecord, NativeFileInput, blake3_hash, decode_native_file,
-  encode_native_file,
+  ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind, NativeAssetRecord, NativeFileInput, blake3_hash,
+  decode_native_file, encode_native_file,
 };
 use tempfile::NamedTempFile;
 
@@ -116,6 +116,42 @@ pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
 }
 
 #[hotpath::measure]
+pub fn db8_projection_cache_bytes(document: &Document) -> io::Result<Vec<u8>> {
+  let document = document_for_serialization(document);
+  validate_document(&document)?;
+  Ok(serialize_db8_projection(&document))
+}
+
+#[hotpath::measure]
+pub fn read_db8_projection_cache_bytes(bytes: &[u8]) -> io::Result<Document> {
+  read_db8_projection_bytes_with_timing(bytes, Instant::now())
+}
+
+#[hotpath::measure]
+pub fn db8_collab_document(document: &Document, created_by_actor: ActorId) -> io::Result<Db8CollabDocument> {
+  let document = document_for_serialization(document);
+  validate_document(&document)?;
+  let projection_cache = serialize_db8_projection(&document);
+  let asset_manifest = postcard::to_stdvec(&db8_native_asset_records(&document, created_by_actor))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+  Db8CollabDocument::from_projection_source(
+    CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id)),
+    created_by_actor,
+    &projection_cache,
+    &asset_manifest,
+  )
+  .map_err(collab_to_io_error)
+}
+
+#[hotpath::measure]
+pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Document> {
+  if source.format_kind() != FormatKind::Db8 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "collaboration source is not DB8"));
+  }
+  read_db8_projection_cache_bytes(&source.materialize_projection_cache().map_err(collab_to_io_error)?)
+}
+
+#[hotpath::measure]
 fn serialize_db8_native(document: &Document) -> io::Result<Vec<u8>> {
   let projection_cache = serialize_db8_projection(document);
   encode_native_file(native_file_input_for_document(document, projection_cache)).map_err(collab_to_io_error)
@@ -211,6 +247,18 @@ fn serialize_db8_projection(document: &Document) -> Vec<u8> {
 #[hotpath::measure]
 fn native_file_input_for_document(document: &Document, projection_cache: Vec<u8>) -> NativeFileInput {
   let created_by_actor = ActorId::new();
+  let assets = db8_native_asset_records(document, created_by_actor);
+
+  let mut input = NativeFileInput::new(FormatKind::Db8, projection_cache);
+  input.document_id = CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id));
+  input.created_by_actor = created_by_actor;
+  input.asset_inline_data = db8_asset_inline_data(document, &assets);
+  input.asset_manifest = assets;
+  input
+}
+
+#[hotpath::measure]
+fn db8_native_asset_records(document: &Document, created_by_actor: ActorId) -> Vec<NativeAssetRecord> {
   let mut assets = document
     .assets
     .assets
@@ -226,13 +274,7 @@ fn native_file_input_for_document(document: &Document, projection_cache: Vec<u8>
     })
     .collect::<Vec<_>>();
   assets.sort_by_key(|asset| asset.asset_id);
-
-  let mut input = NativeFileInput::new(FormatKind::Db8, projection_cache);
-  input.document_id = CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id));
-  input.created_by_actor = created_by_actor;
-  input.asset_inline_data = db8_asset_inline_data(document, &assets);
-  input.asset_manifest = assets;
-  input
+  assets
 }
 
 #[hotpath::measure]
@@ -334,4 +376,19 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   temp_path
     .persist(path)
     .map_err(|error| error.error)
+}
+
+#[cfg(test)]
+mod collab_source_tests {
+  use super::*;
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_collab_source_materializes_projection() {
+    let document = demo_document();
+    let source = db8_collab_document(&document, ActorId::new()).unwrap();
+    let materialized = document_from_db8_collab_source(source.inner()).unwrap();
+    assert_eq!(materialized.ids.document_id, document.ids.document_id);
+    assert_eq!(materialized.paragraphs.len(), document.paragraphs.len());
+  }
 }

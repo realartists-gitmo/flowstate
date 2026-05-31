@@ -200,7 +200,7 @@ version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eb93bbb63b9c227414f6eb3a0adfddca591a8ce1e9b60661bb08969b87e340b"
 dependencies = [
- "object 0.37.3",
+ "object",
 ]
 
 [[package]]
@@ -2838,6 +2838,7 @@ dependencies = [
  "flowstate-collab",
  "gpui",
  "hotpath",
+ "postcard",
  "rustc-hash 2.1.2",
  "serde",
  "tempfile",
@@ -2882,8 +2883,12 @@ name = "flowstate-sync"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "flowstate-collab",
  "iroh",
+ "postcard",
+ "serde",
+ "tokio",
 ]
 
 [[package]]
@@ -4150,18 +4155,15 @@ dependencies = [
  "arc-swap",
  "cfg-if 1.0.4",
  "crossbeam-channel",
- "flate2",
  "futures-util",
  "hdrhistogram",
  "hotpath-macros",
  "hotpath-meta",
  "libc",
- "object 0.36.7",
  "pin-project-lite",
  "prettytable-rs",
  "quanta",
  "regex",
- "rustc-demangle",
  "serde",
  "serde_json",
  "tiny_http",
@@ -6673,15 +6675,6 @@ dependencies = [
 
 [[package]]
 name = "object"
-version = "0.36.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "62948e14d923ea95ea2c7c86c71013138b66525b86bdc08d2dcc262bdb497b87"
-dependencies = [
- "memchr",
-]
-
-[[package]]
-name = "object"
 version = "0.37.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
@@ -8269,12 +8262,6 @@ dependencies = [
  "serde",
  "serde_derive",
 ]
-
-[[package]]
-name = "rustc-demangle"
-version = "0.1.27"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b50b8869d9fc858ce7266cce0194bd74df58b9d0e3f6df3a9fc8eb470d95c09d"
 
 [[package]]
 name = "rustc-hash"

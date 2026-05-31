@@ -56,7 +56,7 @@ impl History {
   }
 
   #[must_use]
-  pub const fn can_undo(&self) -> bool {
+  pub fn can_undo(&self) -> bool {
     self.index.is_some()
   }
 

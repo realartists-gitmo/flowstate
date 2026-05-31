@@ -19,8 +19,9 @@ pub use document::{
 };
 pub use history::{History, HistoryAction, HistoryHolder};
 pub use persistence::{
-  CURRENT_SAVE_VERSION, SaveableFlowDocument, SaveableFlowNode, SaveableNode, SaveableNodeValue, fl0_bytes, flow_projection_bytes, get_json,
-  load_flow_document, load_flow_document_or_new, load_nodes_from_projection, load_projection, save_flow_document,
+  CURRENT_SAVE_VERSION, SaveableFlowDocument, SaveableFlowNode, SaveableNode, SaveableNodeValue, fl0_bytes, fl0_collab_document,
+  flow_document_from_collab_source, flow_projection_bytes, get_json, load_flow_document, load_flow_document_or_new, load_nodes_from_projection,
+  load_projection, save_flow_document,
 };
 pub use styles::{
   DebateStyle, DebateStyleFlow, DebateStyleKey, DebateStyleTemplate, TimerSpeech, all_debate_style_templates, debate_style, debate_style_label,

@@ -41,7 +41,7 @@ impl From<RunStyle> for RunStyles {
 
 #[hotpath::measure_all]
 impl RunStyles {
-  pub const fn apply(&mut self, style: RunStyle) {
+  pub fn apply(&mut self, style: RunStyle) {
     match style {
       RunStyle::Plain => self.semantic = RunSemanticStyle::Plain,
       RunStyle::Cite => self.semantic = RunSemanticStyle::Cite,
@@ -56,19 +56,19 @@ impl RunStyles {
   }
 
   #[must_use]
-  pub const fn with(mut self, style: RunStyle) -> Self {
+  pub fn with(mut self, style: RunStyle) -> Self {
     self.apply(style);
     self
   }
 
   #[must_use]
-  pub const fn with_direct_underline(mut self) -> Self {
+  pub fn with_direct_underline(mut self) -> Self {
     self.direct_underline = true;
     self
   }
 
   #[must_use]
-  pub const fn with_strikethrough(mut self) -> Self {
+  pub fn with_strikethrough(mut self) -> Self {
     self.strikethrough = true;
     self
   }
