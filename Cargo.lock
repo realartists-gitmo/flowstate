@@ -2981,12 +2981,19 @@ dependencies = [
 name = "gpui-flowtext"
 version = "0.1.0"
 dependencies = [
+ "cosmic-text",
  "crop",
  "gpui",
+ "gpui-component",
  "hotpath",
+ "imagesize",
+ "mathjax_svg",
+ "resvg",
  "rustc-hash 2.1.2",
  "serde",
+ "serde_json",
  "tempfile",
+ "unicode-segmentation",
  "uuid",
 ]
 
