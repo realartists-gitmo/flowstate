@@ -23,7 +23,9 @@ version = 2
 # Limit to workspace deps so a random unmaintained transitive crate does not
 # block merges, while real CVEs/unsound advisories still fail everywhere.
 unmaintained = "workspace"
-yanked = "deny"
+# Yanked crates are not inherently vulnerable and here only appear transitively
+# (e.g. `aes`), so warn rather than block merges.
+yanked = "warn"
 # Add RUSTSEC IDs here to acknowledge/skip a specific advisory, e.g.:
 # ignore = ["RUSTSEC-0000-0000"]
 ignore = []
@@ -49,6 +51,8 @@ allow = [
   "BSL-1.0",
   "OpenSSL",
   "0BSD",
+  "bzip2-1.0.6",
+  "NCSA",
 ]
 exceptions = []
 
@@ -65,7 +69,11 @@ ignore = true
 # transitive GUI/platform tree (mirrors `multiple_crate_versions = "allow"`
 # in the clippy config). Flip to "warn"/"deny" to tighten later.
 multiple-versions = "allow"
+# Deny real `*` version requirements, but allow the workspace's internal
+# `path` dependencies (which carry no version req and would otherwise count
+# as wildcards).
 wildcards = "deny"
+allow-wildcard-paths = true
 deny = []
 skip = []
 skip-tree = []
