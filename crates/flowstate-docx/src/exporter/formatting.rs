@@ -12,7 +12,10 @@ pub(super) fn apply_style_text_format(
   italic: bool,
   underline: ThemeUnderline,
 ) -> Style {
-  style = style.fonts(docx_fonts(theme)).size(half_points(size)).color(color_hex(color));
+  style = style
+    .fonts(docx_fonts(theme))
+    .size(half_points(size))
+    .color(color_hex(color));
   if bold {
     style = style.bold();
   }

@@ -16,7 +16,10 @@ use self::{blocks::add_block, formatting::docx_fonts, package::write_recompresse
 #[hotpath::measure]
 pub fn write_docx(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
   let path = path.as_ref();
-  if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+  if let Some(parent) = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
     std::fs::create_dir_all(parent)?;
   }
   let mut docx = add_flowstate_styles(Docx::new().default_fonts(docx_fonts(&document.theme)), &document.theme);

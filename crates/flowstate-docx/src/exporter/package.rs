@@ -8,8 +8,8 @@ use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
 #[hotpath::measure]
 pub(super) fn write_recompressed_docx(path: &Path, package: Vec<u8>) -> io::Result<()> {
-  let mut archive = ZipArchive::new(Cursor::new(package))
-    .map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
+  let mut archive =
+    ZipArchive::new(Cursor::new(package)).map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
   let file = File::create(path)?;
   let mut writer = ZipWriter::new(file);
   for index in 0..archive.len() {

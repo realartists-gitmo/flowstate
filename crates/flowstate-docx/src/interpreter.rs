@@ -1,6 +1,9 @@
 use std::{io, path::Path};
 
-use quick_xml::{Reader as XmlReader, events::{BytesStart, Event}};
+use quick_xml::{
+  Reader as XmlReader,
+  events::{BytesStart, Event},
+};
 use rdocx::Document as RDocxDocument;
 use rdocx_opc::OpcPackage;
 use rdocx_oxml::document::CT_Document;
@@ -334,7 +337,10 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
       .paragraphs()
       .enumerate()
       .map(|(paragraph_ix, paragraph)| {
-        let paragraph_run_borders = run_borders_by_paragraph.get(paragraph_ix).map(Vec::as_slice).unwrap_or_default();
+        let paragraph_run_borders = run_borders_by_paragraph
+          .get(paragraph_ix)
+          .map(Vec::as_slice)
+          .unwrap_or_default();
         let runs = paragraph
           .runs
           .iter()
@@ -342,7 +348,10 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
           .map(|(run_ix, run)| {
             let Some(properties) = run.properties.as_ref() else {
               return DirectRunProperties {
-                border: paragraph_run_borders.get(run_ix).copied().unwrap_or_default(),
+                border: paragraph_run_borders
+                  .get(run_ix)
+                  .copied()
+                  .unwrap_or_default(),
                 ..DirectRunProperties::default()
               };
             };
@@ -352,7 +361,10 @@ fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectPa
               underline: underline_is_on(&properties.underline),
               strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
               highlight: properties.highlight.is_some() || properties.shading.is_some(),
-              border: paragraph_run_borders.get(run_ix).copied().unwrap_or_default(),
+              border: paragraph_run_borders
+                .get(run_ix)
+                .copied()
+                .unwrap_or_default(),
               size_pt: properties.sz.map(|size| size.to_pt()),
               color: properties.color.is_some() || properties.color_theme.is_some(),
             }
@@ -436,7 +448,10 @@ fn border_is_on(event: &BytesStart<'_>) -> io::Result<bool> {
 
 #[hotpath::measure]
 fn local_name_is(name: &[u8], expected: &[u8]) -> bool {
-  name == expected || name.strip_prefix(b"w:").is_some_and(|local| local == expected)
+  name == expected
+    || name
+      .strip_prefix(b"w:")
+      .is_some_and(|local| local == expected)
 }
 
 struct StyleResolver {

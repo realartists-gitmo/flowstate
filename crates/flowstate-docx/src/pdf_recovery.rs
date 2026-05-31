@@ -1,7 +1,4 @@
-use std::{
-  fs, io,
-  path::Path,
-};
+use std::{fs, io, path::Path};
 
 use lopdf::{Dictionary, Document as PdfDocument, Object, ObjectId, Stream, dictionary};
 
@@ -19,7 +16,11 @@ pub struct FlowstatePdfPayloadInfo {
 }
 
 #[hotpath::measure]
-pub fn embed_db8_file_in_pdf(input_pdf: impl AsRef<Path>, db8_path: impl AsRef<Path>, output_pdf: impl AsRef<Path>) -> io::Result<FlowstatePdfPayloadInfo> {
+pub fn embed_db8_file_in_pdf(
+  input_pdf: impl AsRef<Path>,
+  db8_path: impl AsRef<Path>,
+  output_pdf: impl AsRef<Path>,
+) -> io::Result<FlowstatePdfPayloadInfo> {
   let db8_bytes = fs::read(db8_path)?;
   embed_db8_bytes_in_pdf(input_pdf, &db8_bytes, output_pdf)
 }
@@ -31,7 +32,10 @@ pub fn embed_db8_bytes_in_pdf(
   output_pdf: impl AsRef<Path>,
 ) -> io::Result<FlowstatePdfPayloadInfo> {
   let output_pdf = output_pdf.as_ref();
-  if let Some(parent) = output_pdf.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+  if let Some(parent) = output_pdf
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
     fs::create_dir_all(parent)?;
   }
 
@@ -61,7 +65,10 @@ pub fn convert_pdf_to_db8(input_pdf: impl AsRef<Path>, output_db8: impl AsRef<Pa
   let db8_bytes = extract_db8_bytes_from_pdf(input_pdf)?
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PDF does not contain embedded Flowstate DB8 data"))?;
   let output_db8 = output_db8.as_ref();
-  if let Some(parent) = output_db8.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+  if let Some(parent) = output_db8
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
     fs::create_dir_all(parent)?;
   }
   fs::write(output_db8, db8_bytes)
@@ -86,7 +93,11 @@ fn decode_payload(payload: &[u8]) -> io::Result<Vec<u8>> {
   }
 
   let version_start = PAYLOAD_MAGIC.len();
-  let version = u32::from_be_bytes(payload[version_start..version_start + 4].try_into().expect("version slice has fixed length"));
+  let version = u32::from_be_bytes(
+    payload[version_start..version_start + 4]
+      .try_into()
+      .expect("version slice has fixed length"),
+  );
   if version != PAYLOAD_VERSION {
     return Err(io::Error::new(
       io::ErrorKind::InvalidData,
@@ -95,7 +106,11 @@ fn decode_payload(payload: &[u8]) -> io::Result<Vec<u8>> {
   }
 
   let len_start = version_start + 4;
-  let original_len = u64::from_be_bytes(payload[len_start..len_start + 8].try_into().expect("length slice has fixed length"));
+  let original_len = u64::from_be_bytes(
+    payload[len_start..len_start + 8]
+      .try_into()
+      .expect("length slice has fixed length"),
+  );
   let decompressed = zstd::bulk::decompress(&payload[header_len..], original_len as usize).map_err(io::Error::other)?;
   if decompressed.len() as u64 != original_len {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate PDF payload length mismatch"));
@@ -134,7 +149,11 @@ fn attach_payload(pdf: &mut PdfDocument, payload: Vec<u8>, original_len: u64) ->
 #[hotpath::measure]
 fn upsert_embedded_file_name(pdf: &mut PdfDocument, file_spec_id: ObjectId) -> io::Result<()> {
   let names_id = ensure_catalog_names_dictionary(pdf)?;
-  let names = pdf.get_object_mut(names_id).map_err(pdf_error)?.as_dict_mut().map_err(pdf_error)?;
+  let names = pdf
+    .get_object_mut(names_id)
+    .map_err(pdf_error)?
+    .as_dict_mut()
+    .map_err(pdf_error)?;
   let embedded_files = match names.get_mut(b"EmbeddedFiles") {
     Ok(Object::Dictionary(dict)) => dict,
     _ => {
@@ -180,7 +199,10 @@ fn ensure_catalog_names_dictionary(pdf: &mut PdfDocument) -> io::Result<ObjectId
     _ => Dictionary::new(),
   };
   let names_id = pdf.add_object(existing_names);
-  pdf.catalog_mut().map_err(pdf_error)?.set("Names", Object::Reference(names_id));
+  pdf
+    .catalog_mut()
+    .map_err(pdf_error)?
+    .set("Names", Object::Reference(names_id));
   Ok(names_id)
 }
 
@@ -198,7 +220,10 @@ fn remove_existing_payload_entry(entries: &mut Vec<Object>) {
 
 #[hotpath::measure]
 fn find_payload(pdf: &PdfDocument) -> io::Result<Option<Vec<u8>>> {
-  let Ok(embedded_files) = pdf.catalog().and_then(|catalog| catalog.get_deref(b"Names", pdf)) else {
+  let Ok(embedded_files) = pdf
+    .catalog()
+    .and_then(|catalog| catalog.get_deref(b"Names", pdf))
+  else {
     return Ok(None);
   };
   let Ok(embedded_files) = embedded_files
@@ -225,7 +250,12 @@ fn find_payload(pdf: &PdfDocument) -> io::Result<Option<Vec<u8>>> {
 
 #[hotpath::measure]
 fn payload_from_file_spec(pdf: &PdfDocument, file_spec: &Object) -> io::Result<Vec<u8>> {
-  let file_spec = pdf.dereference(file_spec).map_err(pdf_error)?.1.as_dict().map_err(pdf_error)?;
+  let file_spec = pdf
+    .dereference(file_spec)
+    .map_err(pdf_error)?
+    .1
+    .as_dict()
+    .map_err(pdf_error)?;
   let stream_object = file_spec
     .get_deref(b"EF", pdf)
     .and_then(Object::as_dict)

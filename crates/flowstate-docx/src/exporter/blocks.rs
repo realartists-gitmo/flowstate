@@ -84,7 +84,9 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
   run = match styles.semantic {
     RunSemanticStyle::Plain => run,
     RunSemanticStyle::Cite => run.style("Style13ptBold"),
-    RunSemanticStyle::Emphasis => run.style("Emphasis").text_border(emphasis_text_border(theme)),
+    RunSemanticStyle::Emphasis => run
+      .style("Emphasis")
+      .text_border(emphasis_text_border(theme)),
     RunSemanticStyle::Underline => run.style("StyleUnderline"),
     RunSemanticStyle::Condensed => apply_run_text_format(
       run,
@@ -169,12 +171,20 @@ fn placeholder_paragraph_for_image(document: &Document, image: &ImageBlock, them
   if text.trim().is_empty() {
     text = "Image".to_string();
   }
-  DocxParagraph::new().add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(format!("[{text}]")))
+  DocxParagraph::new().add_run(
+    Run::new()
+      .fonts(docx_fonts(theme))
+      .italic()
+      .add_text(format!("[{text}]")),
+  )
 }
 
 #[hotpath::measure]
 fn placeholder_paragraph_for_equation(equation: &EquationBlock, theme: &DocumentTheme) -> DocxParagraph {
-  DocxParagraph::new()
-    .align(AlignmentType::Center)
-    .add_run(Run::new().fonts(docx_fonts(theme)).italic().add_text(format!("[Equation: {}]", equation.source)))
+  DocxParagraph::new().align(AlignmentType::Center).add_run(
+    Run::new()
+      .fonts(docx_fonts(theme))
+      .italic()
+      .add_text(format!("[Equation: {}]", equation.source)),
+  )
 }

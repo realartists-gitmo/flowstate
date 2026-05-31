@@ -114,14 +114,12 @@ impl FileSearchOverlay {
         let hits = cx
           .background_executor()
           .spawn(async move {
-            search
-              .search_files(&query, RESULT_LIMIT)
-              .map(|hits| {
-                hits
-                  .into_iter()
-                  .map(|hit| FileSearchHit { path: hit.path })
-                  .collect::<Vec<_>>()
-              })
+            search.search_files(&query, RESULT_LIMIT).map(|hits| {
+              hits
+                .into_iter()
+                .map(|hit| FileSearchHit { path: hit.path })
+                .collect::<Vec<_>>()
+            })
           })
           .await;
         let _ = overlay.update(cx, |overlay, cx| {

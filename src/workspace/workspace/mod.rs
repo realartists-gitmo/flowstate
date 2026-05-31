@@ -163,11 +163,7 @@ impl ToolkitSearchFilter {
 
   fn kinds(self) -> &'static [SearchUnitKind] {
     match self {
-      Self::All => &[
-        SearchUnitKind::BlockSection,
-        SearchUnitKind::TagSection,
-        SearchUnitKind::Analytic,
-      ],
+      Self::All => &[SearchUnitKind::BlockSection, SearchUnitKind::TagSection, SearchUnitKind::Analytic],
       Self::Blocks => &[SearchUnitKind::BlockSection],
       Self::Tags => &[SearchUnitKind::TagSection],
       Self::Analytics => &[SearchUnitKind::Analytic],

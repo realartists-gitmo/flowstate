@@ -207,7 +207,10 @@ impl TubIndex {
         Ok(entry) => entry,
         Err(_) => continue,
       };
-      if !entry.file_type().is_some_and(|file_type| file_type.is_file()) {
+      if !entry
+        .file_type()
+        .is_some_and(|file_type| file_type.is_file())
+      {
         continue;
       }
       let path = entry.path();
@@ -343,12 +346,14 @@ impl TubIndex {
 
   pub fn search_files(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
-      return Ok(self
-        .list_files()?
-        .into_iter()
-        .take(limit)
-        .map(SearchHit::from)
-        .collect());
+      return Ok(
+        self
+          .list_files()?
+          .into_iter()
+          .take(limit)
+          .map(SearchHit::from)
+          .collect(),
+      );
     }
     self.search_tantivy(query, &[SearchUnitKind::File], limit, true)
   }
@@ -358,11 +363,7 @@ impl TubIndex {
       return Ok(Vec::new());
     }
     let kinds = if kinds.is_empty() {
-      &[
-        SearchUnitKind::BlockSection,
-        SearchUnitKind::TagSection,
-        SearchUnitKind::Analytic,
-      ][..]
+      &[SearchUnitKind::BlockSection, SearchUnitKind::TagSection, SearchUnitKind::Analytic][..]
     } else {
       kinds
     };
@@ -384,11 +385,7 @@ impl TubIndex {
     let reader = self.index.reader()?;
     let searcher = reader.searcher();
     let fields = if filename_only {
-      vec![
-        self.schema.file_name,
-        self.schema.display_path,
-        self.schema.file_name_exact,
-      ]
+      vec![self.schema.file_name, self.schema.display_path, self.schema.file_name_exact]
     } else {
       vec![
         self.schema.heading,
@@ -800,10 +797,8 @@ fn hit_from_document(schema: &TubSchema, document: &TantivyDocument, score: f32)
     snippet: preview_text(&stored_text(document, schema.body).unwrap_or_default(), 360),
     insert_text: stored_text(document, schema.insert_text).unwrap_or_default(),
     score,
-    paragraph_start: stored_text(document, schema.paragraph_start)
-      .and_then(|value| value.parse::<usize>().ok()),
-    paragraph_end_exclusive: stored_text(document, schema.paragraph_end)
-      .and_then(|value| value.parse::<usize>().ok()),
+    paragraph_start: stored_text(document, schema.paragraph_start).and_then(|value| value.parse::<usize>().ok()),
+    paragraph_end_exclusive: stored_text(document, schema.paragraph_end).and_then(|value| value.parse::<usize>().ok()),
   })
 }
 
@@ -942,7 +937,10 @@ fn preview_text(text: &str, max_chars: usize) -> String {
   if normalized.chars().count() <= max_chars {
     return normalized;
   }
-  let mut preview = normalized.chars().take(max_chars.saturating_sub(1)).collect::<String>();
+  let mut preview = normalized
+    .chars()
+    .take(max_chars.saturating_sub(1))
+    .collect::<String>();
   preview.push_str("...");
   preview
 }
@@ -1023,10 +1021,16 @@ fn build_tree_entries(root: &Path, files: Vec<TubFile>, expanded_dirs: &HashSet<
     for component in relative_parent.components() {
       let next = current.join(component.as_os_str());
       dirs.insert(next.clone());
-      child_dirs.entry(current.clone()).or_default().insert(next.clone());
+      child_dirs
+        .entry(current.clone())
+        .or_default()
+        .insert(next.clone());
       current = next;
     }
-    files_by_parent.entry(relative_parent).or_default().push(file);
+    files_by_parent
+      .entry(relative_parent)
+      .or_default()
+      .push(file);
   }
 
   for files in files_by_parent.values_mut() {

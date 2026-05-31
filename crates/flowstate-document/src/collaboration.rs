@@ -44,10 +44,9 @@ impl DocumentIdentityMap {
   }
 
   pub fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
-    self.paragraph_ids.insert(
-      (paragraph_ix + 1).min(self.paragraph_ids.len()),
-      new_paragraph_id(),
-    );
+    self
+      .paragraph_ids
+      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), new_paragraph_id());
     let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
     self.block_ids.insert(block_insert_ix, new_block_id());
     self.table_cell_ids.insert(block_insert_ix, Vec::new());
