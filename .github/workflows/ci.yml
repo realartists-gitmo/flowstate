@@ -1,0 +1,147 @@
+name: CI
+
+# Pull-request gate. Every job here is intended to be a required status check
+# on `main`, so a PR cannot be merged unless they all pass.
+on:
+  pull_request:
+    branches: [main]
+  # Allow the same gate to run when using GitHub merge queues.
+  merge_group:
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast and keep logs lean.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustfmt config (.rustfmt.toml) uses nightly-only options.
+      - name: Install nightly rustfmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      # Fails the check if anything isn't formatted. The repo's pre-commit hook
+      # runs `cargo fmt` locally, so this should normally pass on the first try.
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  test:
+    name: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GPUI links against Vulkan / Wayland / X11 / fontconfig and friends.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang pkg-config \
+            libfontconfig1-dev libasound2-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libwayland-cursor-dev libwayland-egl-dev \
+            libvulkan-dev \
+            xvfb mesa-vulkan-drivers libgl1-mesa-dri
+
+      # Nightly toolchain is mandatory: the workspace uses
+      # `cargo-features = ["profile-rustflags"]` and `-Z` flags.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          # Keep the cache valid only for this job's purpose.
+          key: test
+
+      # Wrap in xvfb so any test that spins up a gpui::App context has a
+      # display + software Vulkan (lavapipe) to talk to.
+      - name: cargo test
+        run: xvfb-run -a cargo test --workspace --all-features
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang pkg-config \
+            libfontconfig1-dev libasound2-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev libwayland-cursor-dev libwayland-egl-dev \
+            libvulkan-dev
+
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy
+
+      # The workspace already encodes its lint policy in [workspace.lints.clippy];
+      # -D warnings turns any remaining warning into a hard failure.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # Advisories (CVEs), license policy, banned crates and source policy.
+      - name: cargo deny check
+        run: cargo deny check
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # CVE scan against the committed Cargo.lock.
+      - name: cargo audit
+        run: cargo audit --deny warnings
+
+  machete:
+    name: cargo-machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      # Detect dependencies declared but never used.
+      - name: cargo machete
+        run: cargo machete

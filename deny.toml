@@ -1,0 +1,79 @@
+# cargo-deny configuration.
+# Docs: https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally with: cargo deny check
+
+[graph]
+# Evaluate the dependency graph for all targets the workspace builds for.
+all-features = true
+
+# ---------------------------------------------------------------------------
+# Security advisories (RUSTSEC). Vulnerabilities are hard errors.
+# ---------------------------------------------------------------------------
+[advisories]
+version = 2
+# `unmaintained` is a *scope* under advisories v2, not a lint level:
+#   "all"        - flag unmaintained advisories anywhere in the tree
+#   "workspace"  - only when a workspace-declared dependency is affected
+#   "transitive" - only deep/transitive crates
+#   "none"       - skip the unmaintained check entirely
+# Limit to workspace deps so a random unmaintained transitive crate does not
+# block merges, while real CVEs/unsound advisories still fail everywhere.
+unmaintained = "workspace"
+yanked = "deny"
+# Add RUSTSEC IDs here to acknowledge/skip a specific advisory, e.g.:
+# ignore = ["RUSTSEC-0000-0000"]
+ignore = []
+
+# ---------------------------------------------------------------------------
+# License policy. Unlisted licenses are denied under version 2.
+# ---------------------------------------------------------------------------
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Zlib",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "MPL-2.0",
+  "CC0-1.0",
+  "BSL-1.0",
+  "OpenSSL",
+  "0BSD",
+]
+exceptions = []
+
+[licenses.private]
+# The workspace's own crates are `publish = false` and carry no per-crate
+# license metadata (the repo is AGPL-3.0 at the root); skip them here.
+ignore = true
+
+# ---------------------------------------------------------------------------
+# Banned / duplicate crates.
+# ---------------------------------------------------------------------------
+[bans]
+# The workspace intentionally tolerates duplicate versions pulled in by the
+# transitive GUI/platform tree (mirrors `multiple_crate_versions = "allow"`
+# in the clippy config). Flip to "warn"/"deny" to tighten later.
+multiple-versions = "allow"
+wildcards = "deny"
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------------------
+# Source policy: only crates.io and trusted git orgs.
+# ---------------------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[sources.allow-org]
+# `docxide-pdf` is consumed as a git dependency from this org.
+github = ["realartists-gitmo"]
