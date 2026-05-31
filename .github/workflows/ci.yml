@@ -70,8 +70,11 @@ jobs:
 
       # Wrap in xvfb so any test that spins up a gpui::App context has a
       # display + software Vulkan (lavapipe) to talk to.
+      # NOTE: no --all-features. The `hotpath`/`hotpath-cpu-support` rename means
+      # enabling every feature at once fails to resolve; default features are
+      # what the app actually ships with.
       - name: cargo test
-        run: xvfb-run -a cargo test --workspace --all-features
+        run: xvfb-run -a cargo test --workspace
         env:
           LIBGL_ALWAYS_SOFTWARE: "1"
 
@@ -104,8 +107,9 @@ jobs:
 
       # The workspace already encodes its lint policy in [workspace.lints.clippy];
       # -D warnings turns any remaining warning into a hard failure.
+      # No --all-features (see test job note re: hotpath rename conflict).
       - name: cargo clippy
-        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
   deny:
     name: cargo-deny

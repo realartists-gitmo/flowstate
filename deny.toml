@@ -3,9 +3,12 @@
 #
 # Run locally with: cargo deny check
 
-[graph]
-# Evaluate the dependency graph for all targets the workspace builds for.
-all-features = true
+# NOTE: we deliberately do NOT set `all-features = true`. The workspace depends
+# on `hotpath` twice under different names (`hotpath` plus the optional
+# `hotpath-cpu-support`, which is `package = "hotpath"`), so enabling every
+# feature at once makes `cargo metadata` fail with a "depends on crate hotpath
+# multiple times with different names" error. Default features are sufficient
+# for advisory/license/source analysis.
 
 # ---------------------------------------------------------------------------
 # Security advisories (RUSTSEC). Vulnerabilities are hard errors.
