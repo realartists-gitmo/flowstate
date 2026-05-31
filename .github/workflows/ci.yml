@@ -38,10 +38,14 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --all --check
 
-  # Clippy and the test suite share one runner / one target dir so the heavy
-  # dependency tree (gpui et al.) is compiled exactly once: `cargo clippy`
-  # builds all dependencies with the normal compiler (clippy-driver only runs
-  # on the workspace crates), and `cargo test` then reuses those artifacts.
+  # Clippy and the test suite share one runner / one target dir, ordered so the
+  # heavy dependency tree (gpui et al.) is built with codegen exactly once:
+  #   1. `cargo test --no-run` does the full (codegen) build of deps + tests.
+  #   2. `cargo clippy` reuses those dep artifacts and only runs clippy-driver
+  #      over the workspace crates (clippy is check-only, no dep codegen).
+  #   3. `cargo test` just executes the binaries built in step 1.
+  # (Running clippy *first* would compile deps in check mode, then `cargo test`
+  #  would re-build them all from scratch for codegen -- paying twice.)
   build:
     name: build
     runs-on: ubuntu-latest
@@ -74,16 +78,21 @@ jobs:
         with:
           key: build
 
-      # Lint policy lives in [workspace.lints.clippy]; -D warnings makes any
-      # remaining lint fatal. --all-targets also warms the test targets so the
-      # subsequent `cargo test` recompiles as little as possible.
+      # Full codegen build of dependencies + all test binaries, done once.
       # No --all-features: the `hotpath`/`hotpath-cpu-support` rename means
       # enabling every feature at once fails to resolve, and default features
       # are what the app actually ships with.
+      - name: Build test binaries
+        run: cargo test --workspace --no-run
+
+      # Lint policy lives in [workspace.lints.clippy]; -D warnings makes any
+      # remaining lint fatal. Dependencies are already built above, so clippy
+      # only re-processes the workspace crates with clippy-driver.
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
-      # Reuses the dependency artifacts compiled by the clippy step above.
+      # Runs the binaries built in "Build test binaries" (nothing to recompile);
+      # xvfb + software Vulkan cover any test that builds a gpui::App context.
       - name: cargo test
         run: xvfb-run -a cargo test --workspace
         env:
