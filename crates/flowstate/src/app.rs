@@ -306,7 +306,8 @@ impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
 
   fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
     match format {
-      DocumentExportFormat::Db8 => write_db8(output_path, document),
+      DocumentExportFormat::Native => write_db8(output_path, document),
+      DocumentExportFormat::NativeWithExtension(_) => write_db8(output_path, document),
       DocumentExportFormat::Docx => crate::docx_conversion::write_docx(output_path, document),
       DocumentExportFormat::Pdf => crate::docx_conversion::write_pdf(output_path, document),
     }

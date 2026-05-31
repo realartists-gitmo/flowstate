@@ -1,7 +1,8 @@
 use docx_rs::{
   AlignmentType, BorderType, Docx, Paragraph as DocxParagraph, ParagraphBorder, ParagraphBorderPosition, Style, StyleType, TextBorder,
 };
-use flowstate_document::{DocumentTheme, ParagraphStyle};
+use flowstate_document::{CustomParagraphStyle, CustomSemanticStyle, DocumentTheme, ParagraphStyle};
+use gpui::px;
 
 use super::formatting::{apply_style_text_format, border_eighth_points, color_hex, pixels_to_pt};
 
@@ -17,11 +18,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .outline_lvl(0)
         .align(AlignmentType::Center),
       theme,
-      theme.pocket_font_size,
-      theme.pocket_color,
-      theme.pocket_bold,
-      theme.pocket_italic,
-      theme.pocket_underline,
+      paragraph_style(theme, 0).font_size,
+      paragraph_style(theme, 0).color,
+      paragraph_style(theme, 0).bold,
+      paragraph_style(theme, 0).italic,
+      paragraph_style(theme, 0).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Heading2", StyleType::Paragraph)
@@ -32,11 +33,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .outline_lvl(1)
         .align(AlignmentType::Center),
       theme,
-      theme.hat_font_size,
-      theme.hat_color,
-      theme.hat_bold,
-      theme.hat_italic,
-      theme.hat_underline,
+      paragraph_style(theme, 1).font_size,
+      paragraph_style(theme, 1).color,
+      paragraph_style(theme, 1).bold,
+      paragraph_style(theme, 1).italic,
+      paragraph_style(theme, 1).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Heading3", StyleType::Paragraph)
@@ -47,11 +48,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .outline_lvl(2)
         .align(AlignmentType::Center),
       theme,
-      theme.block_font_size,
-      theme.block_color,
-      theme.block_bold,
-      theme.block_italic,
-      theme.block_underline,
+      paragraph_style(theme, 2).font_size,
+      paragraph_style(theme, 2).color,
+      paragraph_style(theme, 2).bold,
+      paragraph_style(theme, 2).italic,
+      paragraph_style(theme, 2).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Heading4", StyleType::Paragraph)
@@ -61,11 +62,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .ui_priority(9)
         .outline_lvl(3),
       theme,
-      theme.tag_font_size,
-      theme.tag_color,
-      theme.tag_bold,
-      theme.tag_italic,
-      theme.tag_underline,
+      paragraph_style(theme, 3).font_size,
+      paragraph_style(theme, 3).color,
+      paragraph_style(theme, 3).bold,
+      paragraph_style(theme, 3).italic,
+      paragraph_style(theme, 3).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Analytic", StyleType::Paragraph)
@@ -73,11 +74,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .based_on("Normal")
         .next("Normal"),
       theme,
-      theme.tag_font_size,
-      theme.analytic_color,
-      theme.analytic_bold,
-      theme.analytic_italic,
-      theme.analytic_underline,
+      paragraph_style(theme, 4).font_size,
+      paragraph_style(theme, 4).color,
+      paragraph_style(theme, 4).bold,
+      paragraph_style(theme, 4).italic,
+      paragraph_style(theme, 4).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Undertag", StyleType::Paragraph)
@@ -85,22 +86,22 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .based_on("Normal")
         .next("Normal"),
       theme,
-      theme.undertag_font_size,
-      theme.undertag_color,
-      theme.undertag_bold,
-      theme.undertag_italic,
-      theme.undertag_underline,
+      paragraph_style(theme, 6).font_size,
+      paragraph_style(theme, 6).color,
+      paragraph_style(theme, 6).bold,
+      paragraph_style(theme, 6).italic,
+      paragraph_style(theme, 6).underline,
     ))
     .add_style(apply_style_text_format(
       Style::new("Style13ptBold", StyleType::Character)
         .name("Style 13 pt Bold")
         .based_on("DefaultParagraphFont"),
       theme,
-      theme.cite_font_size,
-      theme.cite_color,
-      theme.cite_bold,
-      theme.cite_italic,
-      theme.cite_underline,
+      semantic_style(theme, 1).font_size.unwrap_or(theme.body_font_size),
+      semantic_style(theme, 1).color.unwrap_or(theme.default_text_color),
+      semantic_style(theme, 1).bold.unwrap_or(false),
+      semantic_style(theme, 1).italic.unwrap_or(false),
+      semantic_style(theme, 1).underline.unwrap_or_default(),
     ))
     .add_style(
       apply_style_text_format(
@@ -108,11 +109,11 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
           .name("Emphasis")
           .based_on("DefaultParagraphFont"),
         theme,
-        theme.cite_font_size,
-        theme.emphasis_color,
-        theme.emphasis_bold,
-        theme.emphasis_italic,
-        theme.emphasis_underline,
+        semantic_style(theme, 2).font_size.unwrap_or(theme.body_font_size),
+        semantic_style(theme, 2).color.unwrap_or(theme.default_text_color),
+        semantic_style(theme, 2).bold.unwrap_or(false),
+        semantic_style(theme, 2).italic.unwrap_or(false),
+        semantic_style(theme, 2).underline.unwrap_or_default(),
       )
       .text_border(emphasis_text_border(theme)),
     )
@@ -122,22 +123,22 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .based_on("DefaultParagraphFont"),
       theme,
       theme.body_font_size,
-      theme.underline_color,
-      theme.underline_bold,
-      theme.underline_italic,
-      theme.underline_underline,
+      semantic_style(theme, 3).color.unwrap_or(theme.default_text_color),
+      semantic_style(theme, 3).bold.unwrap_or(false),
+      semantic_style(theme, 3).italic.unwrap_or(false),
+      semantic_style(theme, 3).underline.unwrap_or_default(),
     ))
 }
 
 #[hotpath::measure]
 pub(super) fn apply_paragraph_style(paragraph: DocxParagraph, style: ParagraphStyle, theme: &DocumentTheme) -> DocxParagraph {
   match style {
-    ParagraphStyle::Pocket => apply_pocket_border(paragraph.style("Heading1"), theme),
-    ParagraphStyle::Hat => paragraph.style("Heading2"),
-    ParagraphStyle::Block => paragraph.style("Heading3"),
-    ParagraphStyle::Tag => paragraph.style("Heading4"),
-    ParagraphStyle::Analytic => paragraph.style("Analytic"),
-    ParagraphStyle::Undertag => paragraph.style("Undertag"),
+    flowstate_document::PARAGRAPH_POCKET => apply_pocket_border(paragraph.style("Heading1"), theme),
+    flowstate_document::PARAGRAPH_HAT => paragraph.style("Heading2"),
+    flowstate_document::PARAGRAPH_BLOCK => paragraph.style("Heading3"),
+    flowstate_document::PARAGRAPH_TAG => paragraph.style("Heading4"),
+    flowstate_document::PARAGRAPH_ANALYTIC => paragraph.style("Analytic"),
+    flowstate_document::PARAGRAPH_UNDERTAG => paragraph.style("Undertag"),
     ParagraphStyle::Normal | ParagraphStyle::Custom(_) => paragraph.style("Normal"),
   }
 }
@@ -146,7 +147,7 @@ pub(super) fn apply_paragraph_style(paragraph: DocxParagraph, style: ParagraphSt
 pub(super) fn emphasis_text_border(theme: &DocumentTheme) -> TextBorder {
   TextBorder::new()
     .border_type(BorderType::Single)
-    .size(border_eighth_points(theme.emphasis_border_width))
+    .size(border_eighth_points(semantic_style(theme, 2).border_width.unwrap_or(px(0.0))))
     .space(0)
     .color(color_hex(theme.default_text_color))
 }
@@ -172,7 +173,37 @@ fn apply_pocket_border(paragraph: DocxParagraph, theme: &DocumentTheme) -> DocxP
 fn pocket_paragraph_border(position: ParagraphBorderPosition, theme: &DocumentTheme) -> ParagraphBorder {
   ParagraphBorder::new(position)
     .val(BorderType::Single)
-    .size(border_eighth_points(theme.pocket_border_width))
-    .space(pixels_to_pt(theme.pocket_border_space_x).round().max(0.0) as usize)
+    .size(border_eighth_points(
+      paragraph_style(theme, 0)
+        .border
+        .as_ref()
+        .map(|border| border.width)
+        .unwrap_or(px(0.0)),
+    ))
+    .space(
+      pixels_to_pt(
+        paragraph_style(theme, 0)
+          .border
+          .as_ref()
+          .map(|border| border.space_x)
+          .unwrap_or(px(0.0)),
+      )
+      .round()
+      .max(0.0) as usize,
+    )
     .color(color_hex(theme.default_text_color))
+}
+
+fn paragraph_style(theme: &DocumentTheme, slot: u8) -> &CustomParagraphStyle {
+  theme
+    .custom_paragraph_styles
+    .get(&slot)
+    .expect("Flowstate document theme must define paragraph style slot")
+}
+
+fn semantic_style(theme: &DocumentTheme, slot: u8) -> &CustomSemanticStyle {
+  theme
+    .custom_semantic_styles
+    .get(&slot)
+    .expect("Flowstate document theme must define semantic style slot")
 }

@@ -5,7 +5,9 @@ use gpui_component::PixelsExt;
 use serde::{Deserialize, Serialize};
 
 use crate::ribbon::RibbonMode;
-use crate::rich_text_element::{DocumentTheme, ThemeUnderline, flowstate_document_theme};
+use crate::rich_text_element::{
+  CustomParagraphBorder, CustomParagraphStyle, CustomSemanticStyle, DocumentTheme, ThemeUnderline, flowstate_document_theme,
+};
 use dirs::{config_dir, data_dir};
 
 #[derive(Clone, Default, Deserialize, Serialize)]

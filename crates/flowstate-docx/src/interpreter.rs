@@ -13,47 +13,46 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
-  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, HighlightStyle, ParagraphStyle, RunSemanticStyle, RunStyles,
-  document_from_paragraphs,
+  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, ParagraphStyle, RunSemanticStyle, RunStyles, document_from_paragraphs,
 };
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Heading1",
-    db8_style: ParagraphStyle::Pocket,
+    db8_style: flowstate_document::PARAGRAPH_POCKET,
   },
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Heading2",
-    db8_style: ParagraphStyle::Hat,
+    db8_style: flowstate_document::PARAGRAPH_HAT,
   },
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Heading3",
-    db8_style: ParagraphStyle::Block,
+    db8_style: flowstate_document::PARAGRAPH_BLOCK,
   },
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Heading4",
-    db8_style: ParagraphStyle::Tag,
+    db8_style: flowstate_document::PARAGRAPH_TAG,
   },
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Analytic",
-    db8_style: ParagraphStyle::Analytic,
+    db8_style: flowstate_document::PARAGRAPH_ANALYTIC,
   },
   RecognitionRule::ParagraphStyle {
     docx_style_id: "Undertag",
-    db8_style: ParagraphStyle::Undertag,
+    db8_style: flowstate_document::PARAGRAPH_UNDERTAG,
   },
   RecognitionRule::ParagraphFallbackNormal,
   RecognitionRule::RunStyle {
     docx_style_id: "Style13ptBold",
-    db8_semantic: RunSemanticStyle::Cite,
+    db8_semantic: flowstate_document::SEMANTIC_CITE,
   },
   RecognitionRule::RunStyle {
     docx_style_id: "Emphasis",
-    db8_semantic: RunSemanticStyle::Emphasis,
+    db8_semantic: flowstate_document::SEMANTIC_EMPHASIS,
   },
   RecognitionRule::RunStyle {
     docx_style_id: "StyleUnderline",
-    db8_semantic: RunSemanticStyle::Underline,
+    db8_semantic: flowstate_document::SEMANTIC_UNDERLINE,
   },
   RecognitionRule::RunDirectUnderline,
   RecognitionRule::RunStrikethrough,
@@ -181,18 +180,18 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
 
     let is_heading = matches!(
       style,
-      ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block | ParagraphStyle::Tag | ParagraphStyle::Analytic
+      flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK | flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC
     );
-    let structural_run_formatting_allowed = matches!(style, ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag);
-    let direct_highlight_allowed = !matches!(style, ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block);
+    let structural_run_formatting_allowed = matches!(style, flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG);
+    let direct_highlight_allowed = !matches!(style, flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK);
     let suppress_semantic_styles = matches!(
       style,
-      ParagraphStyle::Pocket
-        | ParagraphStyle::Hat
-        | ParagraphStyle::Block
-        | ParagraphStyle::Tag
-        | ParagraphStyle::Analytic
-        | ParagraphStyle::Undertag
+      flowstate_document::PARAGRAPH_POCKET
+        | flowstate_document::PARAGRAPH_HAT
+        | flowstate_document::PARAGRAPH_BLOCK
+        | flowstate_document::PARAGRAPH_TAG
+        | flowstate_document::PARAGRAPH_ANALYTIC
+        | flowstate_document::PARAGRAPH_UNDERTAG
     );
     let mut can_process_citations = false;
     if is_heading {
@@ -205,7 +204,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
       )]
       if after_heading_seeking_text {
         let has_text = run_facts.iter().any(|run| !run.text.trim().is_empty());
-        if has_text && style != ParagraphStyle::Undertag {
+        if has_text && style != flowstate_document::PARAGRAPH_UNDERTAG {
           can_process_citations = true;
           after_heading_seeking_text = false;
         }
@@ -560,20 +559,20 @@ fn recognize_paragraph_style(
   }
 
   if paragraph_properties.outline_lvl() == Some(0) && runs.iter().any(|run| run.bold && run.size_pt == Some(26.0)) {
-    return ParagraphStyle::Pocket;
+    return flowstate_document::PARAGRAPH_POCKET;
   }
   if paragraph_properties.outline_lvl() == Some(1) && runs.iter().any(|run| run.bold && run.size_pt == Some(22.0)) {
-    return ParagraphStyle::Hat;
+    return flowstate_document::PARAGRAPH_HAT;
   }
   if paragraph_properties.outline_lvl() == Some(2)
     && runs
       .iter()
       .any(|run| run.bold && run.underline && run.size_pt == Some(16.0))
   {
-    return ParagraphStyle::Block;
+    return flowstate_document::PARAGRAPH_BLOCK;
   }
   if paragraph_properties.outline_lvl() == Some(3) && runs.iter().any(|run| run.bold && run.color) {
-    return ParagraphStyle::Tag;
+    return flowstate_document::PARAGRAPH_TAG;
   }
 
   ParagraphStyle::Normal
@@ -598,9 +597,9 @@ fn recognize_run_semantic(style_id: &str, styles: &StyleResolver) -> Option<RunS
 #[hotpath::measure]
 fn run_semantic_from_canonical_name(name: &str) -> Option<RunSemanticStyle> {
   match canonical_run_style_name(name) {
-    Some("Style13ptBold") => Some(RunSemanticStyle::Cite),
-    Some("Emphasis") => Some(RunSemanticStyle::Emphasis),
-    Some("StyleUnderline") => Some(RunSemanticStyle::Underline),
+    Some("Style13ptBold") => Some(flowstate_document::SEMANTIC_CITE),
+    Some("Emphasis") => Some(flowstate_document::SEMANTIC_EMPHASIS),
+    Some("StyleUnderline") => Some(flowstate_document::SEMANTIC_UNDERLINE),
     _ => None,
   }
 }
@@ -631,7 +630,7 @@ fn recognize_run_styles_for_context(
     ),
     direct_underline: structural_run_formatting_allowed && run.underline,
     strikethrough: !suppress_semantic_styles && run.strikethrough,
-    highlight: (direct_highlight_allowed && run.highlight).then_some(HighlightStyle::Spoken),
+    highlight: (direct_highlight_allowed && run.highlight).then_some(flowstate_document::HIGHLIGHT_SPOKEN),
   }
 }
 
@@ -651,7 +650,7 @@ fn recognize_run_semantic_for_context(
   }
 
   if run.border {
-    return RunSemanticStyle::Emphasis;
+    return flowstate_document::SEMANTIC_EMPHASIS;
   }
 
   let explicit = run
@@ -659,12 +658,12 @@ fn recognize_run_semantic_for_context(
     .as_deref()
     .and_then(|style_id| recognize_run_semantic(style_id, styles));
 
-  if run.bold_off && explicit == Some(RunSemanticStyle::Cite) {
+  if run.bold_off && explicit == Some(flowstate_document::SEMANTIC_CITE) {
     return RunSemanticStyle::default();
   }
-  if explicit == Some(RunSemanticStyle::Cite) && !can_process_citations && !run.underline {
+  if explicit == Some(flowstate_document::SEMANTIC_CITE) && !can_process_citations && !run.underline {
     return if run.highlight {
-      RunSemanticStyle::Underline
+      flowstate_document::SEMANTIC_UNDERLINE
     } else {
       RunSemanticStyle::default()
     };
@@ -672,23 +671,23 @@ fn recognize_run_semantic_for_context(
   if let Some(overrides) = bold_paragraph_overrides
     && overrides.get(run_ix) == Some(&true)
   {
-    return RunSemanticStyle::Cite;
+    return flowstate_document::SEMANTIC_CITE;
   }
-  if can_process_citations && run.bold && !matches!(explicit, Some(RunSemanticStyle::Underline | RunSemanticStyle::Emphasis)) {
-    return RunSemanticStyle::Cite;
+  if can_process_citations && run.bold && !matches!(explicit, Some(flowstate_document::SEMANTIC_UNDERLINE | flowstate_document::SEMANTIC_EMPHASIS)) {
+    return flowstate_document::SEMANTIC_CITE;
   }
-  if run.underline && !run.bold && !matches!(explicit, Some(RunSemanticStyle::Emphasis | RunSemanticStyle::Cite)) {
-    return RunSemanticStyle::Underline;
+  if run.underline && !run.bold && !matches!(explicit, Some(flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_CITE)) {
+    return flowstate_document::SEMANTIC_UNDERLINE;
   }
   if run.bold && run.underline {
     return if current_section_has_underline {
-      RunSemanticStyle::Emphasis
+      flowstate_document::SEMANTIC_EMPHASIS
     } else {
-      RunSemanticStyle::Underline
+      flowstate_document::SEMANTIC_UNDERLINE
     };
   }
   if run.highlight && explicit.is_none() {
-    return RunSemanticStyle::Underline;
+    return flowstate_document::SEMANTIC_UNDERLINE;
   }
   let semantic = explicit.unwrap_or_default();
   if semantic == RunSemanticStyle::Plain
@@ -697,7 +696,7 @@ fn recognize_run_semantic_for_context(
     && !run.highlight
     && run.source_size_pt.is_some_and(|size| size <= 8.0)
   {
-    return RunSemanticStyle::Condensed;
+    return flowstate_document::SEMANTIC_CONDENSED;
   }
   semantic
 }
@@ -818,12 +817,12 @@ fn canonical_paragraph_style_name(name: &str) -> Option<&'static str> {
 #[hotpath::measure]
 fn paragraph_style_from_canonical_name(name: &str) -> Option<ParagraphStyle> {
   match canonical_paragraph_style_name(name) {
-    Some("Heading1") => Some(ParagraphStyle::Pocket),
-    Some("Heading2") => Some(ParagraphStyle::Hat),
-    Some("Heading3") => Some(ParagraphStyle::Block),
-    Some("Heading4") => Some(ParagraphStyle::Tag),
-    Some("Analytic") => Some(ParagraphStyle::Analytic),
-    Some("Undertag") => Some(ParagraphStyle::Undertag),
+    Some("Heading1") => Some(flowstate_document::PARAGRAPH_POCKET),
+    Some("Heading2") => Some(flowstate_document::PARAGRAPH_HAT),
+    Some("Heading3") => Some(flowstate_document::PARAGRAPH_BLOCK),
+    Some("Heading4") => Some(flowstate_document::PARAGRAPH_TAG),
+    Some("Analytic") => Some(flowstate_document::PARAGRAPH_ANALYTIC),
+    Some("Undertag") => Some(flowstate_document::PARAGRAPH_UNDERTAG),
     _ => None,
   }
 }
@@ -849,10 +848,10 @@ fn paragraph_style_from_character_heading_runs(runs: &[RunFact], styles: &StyleR
 #[hotpath::measure]
 fn paragraph_style_from_character_heading_name(name: &str) -> Option<ParagraphStyle> {
   match normalized_style_token(name).as_str() {
-    "heading1char" | "pocketchar" => Some(ParagraphStyle::Pocket),
-    "heading2char" | "hatchar" => Some(ParagraphStyle::Hat),
-    "heading3char" | "blockchar" => Some(ParagraphStyle::Block),
-    "heading4char" | "tagchar" => Some(ParagraphStyle::Tag),
+    "heading1char" | "pocketchar" => Some(flowstate_document::PARAGRAPH_POCKET),
+    "heading2char" | "hatchar" => Some(flowstate_document::PARAGRAPH_HAT),
+    "heading3char" | "blockchar" => Some(flowstate_document::PARAGRAPH_BLOCK),
+    "heading4char" | "tagchar" => Some(flowstate_document::PARAGRAPH_TAG),
     _ => None,
   }
 }
@@ -931,16 +930,16 @@ mod tests {
         ("Heading3".to_string(), "Heading 3".to_string()),
       ]),
       known_paragraph_style_ids: FxHashSet::from_iter(["Heading3".to_string()]),
-      paragraph_styles_by_id: FxHashMap::from_iter([("Heading3".to_string(), Some(ParagraphStyle::Block))]),
+      paragraph_styles_by_id: FxHashMap::from_iter([("Heading3".to_string(), Some(flowstate_document::PARAGRAPH_BLOCK))]),
       character_heading_styles_by_id: FxHashMap::from_iter([
-        ("Heading3Char".to_string(), Some(ParagraphStyle::Block)),
-        ("BlockChar".to_string(), Some(ParagraphStyle::Block)),
+        ("Heading3Char".to_string(), Some(flowstate_document::PARAGRAPH_BLOCK)),
+        ("BlockChar".to_string(), Some(flowstate_document::PARAGRAPH_BLOCK)),
         ("Emphasis".to_string(), None),
       ]),
       run_semantics_by_id: FxHashMap::from_iter([
-        ("Heading3Char".to_string(), Some(RunSemanticStyle::Emphasis)),
-        ("BlockChar".to_string(), Some(RunSemanticStyle::Emphasis)),
-        ("Emphasis".to_string(), Some(RunSemanticStyle::Emphasis)),
+        ("Heading3Char".to_string(), Some(flowstate_document::SEMANTIC_EMPHASIS)),
+        ("BlockChar".to_string(), Some(flowstate_document::SEMANTIC_EMPHASIS)),
+        ("Emphasis".to_string(), Some(flowstate_document::SEMANTIC_EMPHASIS)),
       ]),
     }
   }
@@ -970,7 +969,7 @@ mod tests {
 
     assert_eq!(
       recognize_paragraph_style(None, &TestParagraphProperties::default(), &runs, &styles),
-      ParagraphStyle::Block
+      flowstate_document::PARAGRAPH_BLOCK
     );
   }
 
@@ -987,10 +986,10 @@ mod tests {
 
     assert_eq!(
       recognize_paragraph_style(None, &paragraph_properties, &runs, &styles),
-      ParagraphStyle::Block
+      flowstate_document::PARAGRAPH_BLOCK
     );
 
-    let run_styles = recognize_run_styles_for_context(&runs[0], 0, None, true, false, false, ParagraphStyle::Block, false, false, &styles);
+    let run_styles = recognize_run_styles_for_context(&runs[0], 0, None, true, false, false, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles);
     assert_eq!(run_styles.semantic, RunSemanticStyle::Plain);
     assert!(!run_styles.direct_underline);
     assert_eq!(run_styles.highlight, None);
@@ -1003,7 +1002,7 @@ mod tests {
     let run = run(Some("Heading3Char"), "Plan text");
 
     assert_eq!(
-      recognize_run_semantic_for_context(&run, 0, None, true, ParagraphStyle::Block, false, false, &styles,),
+      recognize_run_semantic_for_context(&run, 0, None, true, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles,),
       RunSemanticStyle::Plain
     );
   }
@@ -1015,7 +1014,7 @@ mod tests {
     let run = run(Some("Emphasis"), "important");
 
     assert_eq!(
-      recognize_run_semantic_for_context(&run, 0, None, true, ParagraphStyle::Block, false, false, &styles,),
+      recognize_run_semantic_for_context(&run, 0, None, true, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles,),
       RunSemanticStyle::Plain
     );
   }
@@ -1029,7 +1028,7 @@ mod tests {
     run.strikethrough = true;
     run.highlight = true;
 
-    let run_styles = recognize_run_styles_for_context(&run, 0, None, true, false, false, ParagraphStyle::Block, false, false, &styles);
+    let run_styles = recognize_run_styles_for_context(&run, 0, None, true, false, false, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles);
 
     assert_eq!(run_styles.semantic, RunSemanticStyle::Plain);
     assert!(!run_styles.direct_underline);
@@ -1046,12 +1045,12 @@ mod tests {
     run.strikethrough = true;
     run.highlight = true;
 
-    let run_styles = recognize_run_styles_for_context(&run, 0, None, true, true, true, ParagraphStyle::Tag, false, false, &styles);
+    let run_styles = recognize_run_styles_for_context(&run, 0, None, true, true, true, flowstate_document::PARAGRAPH_TAG, false, false, &styles);
 
     assert_eq!(run_styles.semantic, RunSemanticStyle::Plain);
     assert!(run_styles.direct_underline);
     assert!(!run_styles.strikethrough);
-    assert_eq!(run_styles.highlight, Some(HighlightStyle::Spoken));
+    assert_eq!(run_styles.highlight, Some(flowstate_document::HIGHLIGHT_SPOKEN));
   }
 
   #[test]
@@ -1063,6 +1062,6 @@ mod tests {
 
     let run_styles = recognize_run_styles_for_context(&run, 0, None, false, false, true, ParagraphStyle::Normal, false, false, &styles);
 
-    assert_eq!(run_styles.highlight, Some(HighlightStyle::Spoken));
+    assert_eq!(run_styles.highlight, Some(flowstate_document::HIGHLIGHT_SPOKEN));
   }
 }

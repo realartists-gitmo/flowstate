@@ -1,9 +1,10 @@
 #[hotpath::measure]
 fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
   match style {
-    HighlightStyle::Spoken => theme.highlight_spoken,
-    HighlightStyle::Insert => theme.highlight_insert,
-    HighlightStyle::Alternative | HighlightStyle::Custom(_) => theme.highlight_alternative,
+    flowstate_document::HIGHLIGHT_SPOKEN => flowstate_document::custom_highlight_color(theme, 1),
+    flowstate_document::HIGHLIGHT_INSERT => flowstate_document::custom_highlight_color(theme, 2),
+    flowstate_document::HIGHLIGHT_ALTERNATIVE => flowstate_document::custom_highlight_color(theme, 3),
+    HighlightStyle::Custom(slot) => flowstate_document::custom_highlight_color(theme, slot),
   }
 }
 

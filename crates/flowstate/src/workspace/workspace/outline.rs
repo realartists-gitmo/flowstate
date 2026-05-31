@@ -228,11 +228,11 @@ fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], c
 #[hotpath::measure]
 fn outline_level(style: ParagraphStyle) -> Option<usize> {
   match style {
-    ParagraphStyle::Pocket => Some(0),
-    ParagraphStyle::Hat => Some(1),
-    ParagraphStyle::Block => Some(2),
-    ParagraphStyle::Tag | ParagraphStyle::Analytic => Some(3),
-    ParagraphStyle::Normal | ParagraphStyle::Undertag | ParagraphStyle::Custom(_) => None,
+    flowstate_document::PARAGRAPH_POCKET => Some(0),
+    flowstate_document::PARAGRAPH_HAT => Some(1),
+    flowstate_document::PARAGRAPH_BLOCK => Some(2),
+    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC => Some(3),
+    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_UNDERTAG | ParagraphStyle::Custom(_) => None,
   }
 }
 
