@@ -318,9 +318,7 @@ impl AssetSource for AppAssets {
       "icons/archive.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/archive.svg")))),
       "icons/file-search-corner.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/file-search-corner.svg")))),
       "icons/notebook-text.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/notebook-text.svg")))),
-      "icons/table-of-contents.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-        "../assets/icons/table-of-contents.svg"
-      )))),
+      "icons/table-of-contents.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/table-of-contents.svg")))),
       "icons/panel-top-open.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-open.svg")))),
       "icons/panel-top-close.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-close.svg")))),
       "icons/caret-down.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/caret-down.svg")))),

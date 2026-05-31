@@ -135,12 +135,7 @@ impl Element for RichTextDocumentElement {
     window: &mut Window,
     _cx: &mut App,
   ) -> (LayoutId, Self::RequestLayoutState) {
-    request_word_layout(
-      self.document.clone(),
-      self.layout.clone(),
-      self.invisibility_mode,
-      window,
-    )
+    request_word_layout(self.document.clone(), self.layout.clone(), self.invisibility_mode, window)
   }
 
   fn prepaint(
