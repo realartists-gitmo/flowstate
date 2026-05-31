@@ -80,5 +80,9 @@ impl Workspace {
   fn focused_workspace_input_is_focused(&self, window: &Window, cx: &App) -> bool {
     self.toolkit_search_input.read(cx).focus_handle(cx).is_focused(window)
       || self.tub_file_search_input.read(cx).focus_handle(cx).is_focused(window)
+      || self
+        .file_search_overlay
+        .as_ref()
+        .is_some_and(|overlay| overlay.read(cx).focus_handle(cx).is_focused(window))
   }
 }

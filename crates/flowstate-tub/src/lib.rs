@@ -628,7 +628,12 @@ fn is_relevant_db8_watch_event(event: &Event) -> bool {
     EventKind::Any
       | EventKind::Create(_)
       | EventKind::Remove(_)
-      | EventKind::Modify(ModifyKind::Any | ModifyKind::Data(DataChange::Any | DataChange::Size | DataChange::Content) | ModifyKind::Metadata(MetadataKind::WriteTime) | ModifyKind::Name(_))
+      | EventKind::Modify(
+        ModifyKind::Any
+          | ModifyKind::Data(DataChange::Any | DataChange::Size | DataChange::Content)
+          | ModifyKind::Metadata(MetadataKind::WriteTime)
+          | ModifyKind::Name(_)
+      )
   )
 }
 

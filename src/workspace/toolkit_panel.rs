@@ -115,7 +115,11 @@ impl Workspace {
       .border_color(cx.theme().border)
       .child(
         Button::new("toolkit-global-file-search")
-          .icon(Icon::default().path("icons/file-search-corner.svg").text_color(cx.theme().link))
+          .icon(
+            Icon::default()
+              .path("icons/file-search-corner.svg")
+              .text_color(cx.theme().link),
+          )
           .xsmall()
           .ghost()
           .tooltip("Search files")
@@ -248,11 +252,7 @@ impl Workspace {
         .spawn(async move {
           let index = Arc::new(flowstate_tub::TubIndex::open(&root, &data_dir)?);
           let files = index.scan_and_index()?;
-          anyhow::Ok(TubLoadResult {
-            root,
-            index,
-            files,
-          })
+          anyhow::Ok(TubLoadResult { root, index, files })
         })
         .await;
 
@@ -365,10 +365,17 @@ impl Workspace {
   }
 
   pub(super) fn refresh_tub_file_search(&mut self, cx: &mut Context<Self>) {
-    let query = self.tub_file_search_input.read(cx).value().trim().to_string();
+    let query = self
+      .tub_file_search_input
+      .read(cx)
+      .value()
+      .trim()
+      .to_string();
     let Some(root) = self.tub_root.clone() else {
       self.tub_tree_entries.clear();
-      self.tub_tree.update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
+      self
+        .tub_tree
+        .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
       cx.notify();
       return;
     };
@@ -390,7 +397,9 @@ impl Workspace {
     let expanded_dirs = expanded_tub_search_dirs(&root, &files);
     let tree_items = build_tub_tree_items(&root, &files, &expanded_dirs);
     self.tub_tree_entries = tub_tree_entries_for_files(&root, &files, &expanded_dirs);
-    self.tub_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
+    self
+      .tub_tree
+      .update(cx, |tree, cx| tree.set_items(tree_items, cx));
     cx.notify();
   }
 
@@ -556,7 +565,11 @@ impl Workspace {
               .gap_2()
               .child(
                 Button::new("toolkit-panel-file-search")
-                  .icon(Icon::default().path("icons/file-search-corner.svg").text_color(cx.theme().sidebar_primary))
+                  .icon(
+                    Icon::default()
+                      .path("icons/file-search-corner.svg")
+                      .text_color(cx.theme().sidebar_primary),
+                  )
                   .xsmall()
                   .ghost()
                   .tooltip("Search files")
@@ -578,7 +591,7 @@ impl Workspace {
                   .on_click(cx.listener(|workspace, _, _, cx| {
                     workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
                   })),
-              )
+              ),
           )
           .child(div().flex_1())
           .child(
@@ -611,7 +624,7 @@ impl Workspace {
               .suffix(self.render_toolkit_filter_menu(cx))
               .text_color(cx.theme().foreground)
               .placeholder_color(cx.theme().muted_foreground),
-          )
+          ),
       )
       .child(
         v_flex()
@@ -640,27 +653,24 @@ impl Workspace {
       .ghost()
       .tooltip("Search filter")
       .dropdown_menu(move |menu, _, _| {
-        filters.into_iter().fold(menu.min_w(px(140.0)), |menu, filter| {
-          let workspace = workspace.clone();
-          menu.item(
-            PopupMenuItem::new(filter.label())
-              .checked(filter == selected_filter)
-              .on_click(move |_, _, cx| {
-                let _ = workspace.update(cx, |workspace, cx| {
-                  workspace.set_toolkit_filter(filter, cx);
-                });
-              }),
-          )
-        })
+        filters
+          .into_iter()
+          .fold(menu.min_w(px(140.0)), |menu, filter| {
+            let workspace = workspace.clone();
+            menu.item(
+              PopupMenuItem::new(filter.label())
+                .checked(filter == selected_filter)
+                .on_click(move |_, _, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    workspace.set_toolkit_filter(filter, cx);
+                  });
+                }),
+            )
+          })
       })
   }
 
-  fn render_toolkit_hit(
-    &self,
-    ix: usize,
-    hit: &flowstate_tub::SearchHit,
-    cx: &mut Context<Self>,
-  ) -> gpui::AnyElement {
+  fn render_toolkit_hit(&self, ix: usize, hit: &flowstate_tub::SearchHit, cx: &mut Context<Self>) -> gpui::AnyElement {
     let open = cx.listener(move |workspace, _, window, cx| workspace.open_toolkit_hit(ix, window, cx));
     let insert = cx.listener(move |workspace, _, window, cx| workspace.insert_toolkit_hit(ix, window, cx));
     let toggle_expanded = cx.listener(move |workspace, _, _, cx| workspace.toggle_toolkit_hit_expanded(ix, cx));
@@ -669,7 +679,11 @@ impl Workspace {
     } else {
       hit.title.clone()
     };
-    let preview_text = if hit.insert_text.trim().is_empty() { hit.snippet.as_str() } else { hit.insert_text.as_str() };
+    let preview_text = if hit.insert_text.trim().is_empty() {
+      hit.snippet.as_str()
+    } else {
+      hit.insert_text.as_str()
+    };
     let can_expand = toolkit_hit_preview_can_expand(hit, preview_text);
     let expanded = can_expand && self.expanded_toolkit_hits.contains(&toolkit_hit_key(hit));
     let paragraphs = toolkit_hit_insert_paragraphs(hit);
@@ -843,7 +857,12 @@ impl Workspace {
   }
 
   pub(super) fn render_tub_nav(&self, nav_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
-    let file_search_active = !self.tub_file_search_input.read(cx).value().trim().is_empty();
+    let file_search_active = !self
+      .tub_file_search_input
+      .read(cx)
+      .value()
+      .trim()
+      .is_empty();
     let tree_list = if self.tub_tree_entries.is_empty() {
       div()
         .h(px(120.0))
@@ -867,24 +886,21 @@ impl Workspace {
       .text_color(cx.theme().sidebar_foreground)
       .child(self.render_left_nav_header("Tub", cx))
       .child(
-        div()
-          .w_full()
-          .flex_none()
-          .child(
-            Input::new(&self.tub_file_search_input)
-              .xsmall()
-              .w_full()
-              .cleanable(true)
-              .prefix(
-                Icon::new(IconName::Search)
-                  .xsmall()
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .text_color(cx.theme().sidebar_foreground)
-              .placeholder_color(cx.theme().muted_foreground)
-              .bg(cx.theme().sidebar)
-              .border_color(cx.theme().sidebar_border),
-          ),
+        div().w_full().flex_none().child(
+          Input::new(&self.tub_file_search_input)
+            .xsmall()
+            .w_full()
+            .cleanable(true)
+            .prefix(
+              Icon::new(IconName::Search)
+                .xsmall()
+                .text_color(cx.theme().muted_foreground),
+            )
+            .text_color(cx.theme().sidebar_foreground)
+            .placeholder_color(cx.theme().muted_foreground)
+            .bg(cx.theme().sidebar)
+            .border_color(cx.theme().sidebar_border),
+        ),
       )
       .child(
         div()
@@ -960,10 +976,7 @@ fn toolkit_preview_document(
   theme.pageless_inset_bottom = px(12.0);
 
   let paragraphs = if hit.preview_paragraphs.is_empty() {
-    toolkit_fallback_paragraphs(
-      fallback_text,
-      (!expanded).then_some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT),
-    )
+    toolkit_fallback_paragraphs(fallback_text, (!expanded).then_some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT))
   } else if expanded {
     hit.preview_paragraphs.clone()
   } else {
