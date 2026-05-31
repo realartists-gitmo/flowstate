@@ -1777,8 +1777,7 @@ dependencies = [
 [[package]]
 name = "docxide-pdf"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "31638a7bbfd1de5664f453b45cdf281b3675ad08c02c700ef11b7635e001e413"
+source = "git+https://github.com/realartists-gitmo/docxide-pdf#2c856bf2aa0641e96b350baf7026f43493964072"
 dependencies = [
  "image",
  "log",
