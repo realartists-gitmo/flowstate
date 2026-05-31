@@ -8,7 +8,7 @@ use std::{
 
 use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px};
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Selectable as _, Sizable,
+  ActiveTheme as _, Icon, IconName, Sizable,
   button::{Button, ButtonVariants},
   h_flex,
   input::Input,
@@ -284,10 +284,9 @@ impl Workspace {
             workspace.tub_watcher = result.index.start_watcher().ok();
             workspace.tub_index = Some(result.index);
             workspace.tub_files = result.files;
-            let file_count = workspace.tub_files.len();
             workspace.rebuild_tub_tree_cache();
             workspace.refresh_tub_file_search(cx);
-            workspace.tub_status = format!("{file_count} tub files indexed").into();
+            workspace.tub_status = "Tub indexed".into();
             workspace.toolkit_status = if workspace
               .toolkit_search_input
               .read(cx)
@@ -469,18 +468,6 @@ impl Workspace {
     self.refresh_toolkit_search(cx);
   }
 
-  fn render_toolkit_filter_button(&self, filter: ToolkitSearchFilter, cx: &mut Context<Self>) -> impl IntoElement {
-    let selected = self.toolkit_search_filter == filter;
-    Button::new(("toolkit-filter", filter as usize))
-      .label(filter.label())
-      .xsmall()
-      .ghost()
-      .selected(selected)
-      .on_click(cx.listener(move |workspace, _, _, cx| {
-        workspace.set_toolkit_filter(filter, cx);
-      }))
-  }
-
   fn toggle_toolkit_hit_expanded(&mut self, hit_ix: usize, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix) else {
       return;
@@ -571,23 +558,6 @@ impl Workspace {
           .border_b_1()
           .border_color(cx.theme().border)
           .child(
-            h_flex()
-              .items_center()
-              .gap_2()
-              .child(
-                Icon::new(IconName::Search)
-                  .xsmall()
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .child(
-                div()
-                  .text_sm()
-                  .font_weight(gpui::FontWeight::SEMIBOLD)
-                  .text_color(cx.theme().foreground)
-                  .child("Toolkit"),
-              ),
-          )
-          .child(
             Button::new("collapse-toolkit-panel")
               .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().sidebar_foreground))
               .xsmall()
@@ -596,6 +566,13 @@ impl Workspace {
               .on_click(cx.listener(|workspace, _, _, cx| {
                 workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
               })),
+          )
+          .child(
+            div()
+              .text_sm()
+              .font_weight(gpui::FontWeight::SEMIBOLD)
+              .text_color(cx.theme().sidebar_primary)
+              .child("Toolkit"),
           ),
       )
       .child(
@@ -618,47 +595,6 @@ impl Workspace {
               .suffix(self.render_toolkit_filter_menu(cx))
               .text_color(cx.theme().foreground)
               .placeholder_color(cx.theme().muted_foreground),
-          )
-          .child(
-            h_flex().w_full().items_center().gap_1().children([
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::All, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Blocks, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Tags, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Analytics, cx)
-                .into_any_element(),
-            ]),
-          )
-          .child(
-            h_flex()
-              .items_center()
-              .justify_between()
-              .gap_2()
-              .child(
-                div()
-                  .flex_1()
-                  .min_w_0()
-                  .truncate()
-                  .text_xs()
-                  .text_color(cx.theme().muted_foreground)
-                  .child(self.toolkit_status.clone()),
-              )
-              .child(
-                Button::new("toolkit-global-file-search")
-                  .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().link))
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Search files")
-                  .on_click(cx.listener(|workspace, _, window, cx| {
-                    workspace.open_file_search_overlay(window, cx);
-                  })),
-              )
           )
       )
       .child(
