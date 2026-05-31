@@ -56,6 +56,7 @@ impl Workspace {
       ribbon_collapsed: false,
       outline_collapsed: false,
       toolkit_collapsed: false,
+      active_toolkit_tool: None,
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),

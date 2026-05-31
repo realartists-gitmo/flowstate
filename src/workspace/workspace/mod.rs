@@ -63,6 +63,7 @@ pub struct Workspace {
   ribbon_collapsed: bool,
   outline_collapsed: bool,
   toolkit_collapsed: bool,
+  active_toolkit_tool: Option<ToolkitTool>,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
   body_resizable_state: Entity<ResizableState>,
@@ -145,6 +146,11 @@ enum WorkspaceSettingsSection {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LeftNavMode {
   Outline,
+  Tub,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ToolkitTool {
   Tub,
 }
 

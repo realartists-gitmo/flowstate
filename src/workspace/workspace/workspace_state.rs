@@ -38,6 +38,29 @@ impl Workspace {
     };
     self.prepare_active_editor_for_width_delta(delta, cx);
     self.toolkit_collapsed = !self.toolkit_collapsed;
+    if self.toolkit_collapsed {
+      self.active_toolkit_tool = None;
+    }
+    cx.notify();
+  }
+
+  fn toggle_toolkit_tool(&mut self, tool: ToolkitTool, cx: &mut Context<Self>) {
+    if self.toolkit_collapsed {
+      self.toolkit_collapsed = false;
+    }
+
+    let was_expanded = self.active_toolkit_tool.is_some();
+    self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) {
+      None
+    } else {
+      Some(tool)
+    };
+
+    let is_expanded = self.active_toolkit_tool.is_some();
+    if was_expanded != is_expanded {
+      let delta = if is_expanded { px(40.0) - px(380.0) } else { px(380.0) - px(40.0) };
+      self.prepare_active_editor_for_width_delta(delta, cx);
+    }
     cx.notify();
   }
 

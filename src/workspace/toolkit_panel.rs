@@ -28,7 +28,7 @@ use crate::{
 
 use super::{
   APP_CHROME_BORDER_WIDTH, LeftNavMode, OutlineRowGuides, SIDE_PANEL_COLLAPSED_WIDTH, SidebarTreeAction, SidebarTreeRow, ToolkitSearchFilter,
-  Workspace, outline_hierarchy_color, render_sidebar_tree_row,
+  ToolkitTool, Workspace, outline_hierarchy_color, render_sidebar_tree_row,
 };
 
 const TOOLKIT_RESULT_LIMIT: usize = 32;
@@ -50,8 +50,18 @@ impl Workspace {
   /// search results are miniature scrollable windows that can be opened,
   /// inserted, or dragged into the editor.
   pub(super) fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    let toolkit_width = if self.toolkit_collapsed { SIDE_PANEL_COLLAPSED_WIDTH } else { px(380.0) };
-    let toolkit_range_end = if self.toolkit_collapsed { SIDE_PANEL_COLLAPSED_WIDTH } else { px(620.0) };
+    let toolkit_width = if self.toolkit_collapsed {
+      SIDE_PANEL_COLLAPSED_WIDTH
+    } else if self.active_toolkit_tool.is_some() {
+      px(380.0)
+    } else {
+      px(40.0)
+    };
+    let toolkit_range_end = if self.toolkit_collapsed || self.active_toolkit_tool.is_none() {
+      toolkit_width
+    } else {
+      px(620.0)
+    };
 
     h_resizable("workspace-content-resizable")
       .with_state(&self.content_resizable_state)
@@ -77,8 +87,72 @@ impl Workspace {
               .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)
               .into_any_element()
           } else {
-            self.render_toolkit_expanded(cx).into_any_element()
+            self.render_toolkit_rail_area(cx).into_any_element()
           }),
+      )
+  }
+
+  fn render_toolkit_rail_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    h_flex()
+      .size_full()
+      .min_w_0()
+      .bg(cx.theme().background)
+      .border_l(APP_CHROME_BORDER_WIDTH)
+      .border_color(cx.theme().border)
+      .child(self.render_toolkit_icon_bar(cx))
+      .when(self.active_toolkit_tool == Some(ToolkitTool::Tub), |this| {
+        this.child(self.render_toolkit_expanded(cx))
+      })
+  }
+
+  fn render_toolkit_icon_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let tub_selected = self.active_toolkit_tool == Some(ToolkitTool::Tub);
+
+    v_flex()
+      .h_full()
+      .w(px(40.0))
+      .flex_none()
+      .items_center()
+      .gap_1()
+      .py_2()
+      .bg(cx.theme().background)
+      .border_r_1()
+      .border_color(cx.theme().border)
+      .child(
+        Button::new("toolkit-global-file-search")
+          .icon(Icon::new(IconName::Search).text_color(cx.theme().link))
+          .xsmall()
+          .ghost()
+          .tooltip("Search files")
+          .on_click(cx.listener(|workspace, _, window, cx| {
+            workspace.open_file_search_overlay(window, cx);
+          })),
+      )
+      .child(
+        Button::new("toolkit-tub-tool")
+          .icon(
+            Icon::default()
+              .path("icons/notebook-text.svg")
+              .text_color(if tub_selected { cx.theme().link } else { cx.theme().muted_foreground }),
+          )
+          .xsmall()
+          .ghost()
+          .selected(tub_selected)
+          .tooltip("Tub index")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
+          })),
+      )
+      .child(div().flex_1())
+      .child(
+        Button::new("collapse-toolkit-rail")
+          .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().muted_foreground))
+          .xsmall()
+          .ghost()
+          .tooltip("Hide toolkit")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_toolkit(cx);
+          })),
       )
   }
 
@@ -518,9 +592,9 @@ impl Workspace {
               .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().sidebar_foreground))
               .xsmall()
               .ghost()
-              .tooltip("Collapse toolkit")
+              .tooltip("Close tub panel")
               .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_toolkit(cx);
+                workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
               })),
           ),
       )
@@ -751,6 +825,71 @@ impl Workspace {
       .into_any_element()
   }
 
+  fn render_tub_tree(&self, nav_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
+    let workspace = cx.entity().downgrade();
+    let active_tub_path = self.active_tub_path.clone();
+    tree(&self.tub_tree, move |ix, entry, _selected, window, cx| {
+      let path = PathBuf::from(entry.item().id.as_ref());
+      let is_folder = entry.is_folder();
+      let is_expanded = entry.is_expanded();
+      let is_active = !is_folder && active_tub_path.as_ref() == Some(&path);
+      let depth = entry.depth();
+      let guide = OutlineRowGuides {
+        ancestor_depths: (0..depth).collect(),
+        extends_from_toggle: is_folder && is_expanded,
+      };
+      let icon = if is_folder && is_expanded {
+        IconName::FolderOpen
+      } else if is_folder {
+        IconName::FolderClosed
+      } else {
+        IconName::File
+      };
+      let icon_color = outline_hierarchy_color(depth, cx);
+      let workspace_for_toggle = workspace.clone();
+      let toggle_path = path.clone();
+      let toggle_action: SidebarTreeAction = Rc::new(move |_: &mut Window, cx: &mut App| {
+        let path = toggle_path.clone();
+        let _ = workspace_for_toggle.update(cx, |workspace, cx| workspace.remember_tub_dir_toggle(path, cx));
+      });
+      let workspace_for_label = workspace.clone();
+      let label_path = path.clone();
+      let label_action: SidebarTreeAction = Rc::new(move |window: &mut Window, cx: &mut App| {
+        let path = label_path.clone();
+        let _ = workspace_for_label.update(cx, |workspace, cx| {
+          if is_folder {
+            workspace.remember_tub_dir_toggle(path, cx);
+          } else {
+            workspace.open_tub_tree_file(path, window, cx);
+          }
+        });
+      });
+      render_sidebar_tree_row(
+        SidebarTreeRow {
+          row_id: ("tub-tree-item", ix),
+          toggle_id: ("tub-toggle", ix),
+          label_id: ("tub-label", ix),
+          label: entry.item().label.clone(),
+          nav_width,
+          depth,
+          is_folder,
+          is_expanded,
+          is_active,
+          guide,
+          icon: Some(icon),
+          icon_color: Some(icon_color),
+          toggle_action: Some(toggle_action),
+          label_action,
+          stop_icon_mouse_down: !is_folder,
+          stop_label_mouse_down: !is_folder,
+        },
+        window,
+        cx,
+      )
+    })
+    .into_any_element()
+  }
+
   pub(super) fn render_tub_nav(&self, nav_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
     let file_search_active = !self.tub_file_search_input.read(cx).value().trim().is_empty();
     let tree_list = if self.tub_tree_entries.is_empty() {
@@ -764,68 +903,7 @@ impl Workspace {
         .child(if file_search_active { "No matching tub files" } else { "No tub files" })
         .into_any_element()
     } else {
-      let workspace = cx.entity().downgrade();
-      let active_tub_path = self.active_tub_path.clone();
-      tree(&self.tub_tree, move |ix, entry, _selected, window, cx| {
-        let path = PathBuf::from(entry.item().id.as_ref());
-        let is_folder = entry.is_folder();
-        let is_expanded = entry.is_expanded();
-        let is_active = !is_folder && active_tub_path.as_ref() == Some(&path);
-        let depth = entry.depth();
-        let guide = OutlineRowGuides {
-          ancestor_depths: (0..depth).collect(),
-          extends_from_toggle: is_folder && is_expanded,
-        };
-        let icon = if is_folder && is_expanded {
-          IconName::FolderOpen
-        } else if is_folder {
-          IconName::FolderClosed
-        } else {
-          IconName::File
-        };
-        let icon_color = outline_hierarchy_color(depth, cx);
-        let workspace_for_toggle = workspace.clone();
-        let toggle_path = path.clone();
-        let toggle_action: SidebarTreeAction = Rc::new(move |_: &mut Window, cx: &mut App| {
-          let path = toggle_path.clone();
-          let _ = workspace_for_toggle.update(cx, |workspace, cx| workspace.remember_tub_dir_toggle(path, cx));
-        });
-        let workspace_for_label = workspace.clone();
-        let label_path = path.clone();
-        let label_action: SidebarTreeAction = Rc::new(move |window: &mut Window, cx: &mut App| {
-          let path = label_path.clone();
-          let _ = workspace_for_label.update(cx, |workspace, cx| {
-            if is_folder {
-              workspace.remember_tub_dir_toggle(path, cx);
-            } else {
-              workspace.open_tub_tree_file(path, window, cx);
-            }
-          });
-        });
-        render_sidebar_tree_row(
-          SidebarTreeRow {
-            row_id: ("tub-tree-item", ix),
-            toggle_id: ("tub-toggle", ix),
-            label_id: ("tub-label", ix),
-            label: entry.item().label.clone(),
-            nav_width,
-            depth,
-            is_folder,
-            is_expanded,
-            is_active,
-            guide,
-            icon: Some(icon),
-            icon_color: Some(icon_color),
-            toggle_action: Some(toggle_action),
-            label_action,
-            stop_icon_mouse_down: !is_folder,
-            stop_label_mouse_down: !is_folder,
-          },
-          window,
-          cx,
-        )
-      })
-      .into_any_element()
+      self.render_tub_tree(nav_width, cx)
     };
 
     v_flex()

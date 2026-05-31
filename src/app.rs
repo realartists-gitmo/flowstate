@@ -316,6 +316,7 @@ impl AssetSource for AppAssets {
       "icons/strikethrough.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/strikethrough.svg")))),
       "icons/underline.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/underline.svg")))),
       "icons/archive.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/archive.svg")))),
+      "icons/notebook-text.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/notebook-text.svg")))),
       "icons/table-of-contents.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
         "../assets/icons/table-of-contents.svg"
       )))),
@@ -353,6 +354,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/archive.svg".starts_with(path) {
       assets.push("icons/archive.svg".into());
+    }
+    if "icons/notebook-text.svg".starts_with(path) {
+      assets.push("icons/notebook-text.svg".into());
     }
     if "icons/table-of-contents.svg".starts_with(path) {
       assets.push("icons/table-of-contents.svg".into());
