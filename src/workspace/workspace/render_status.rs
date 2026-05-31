@@ -139,6 +139,7 @@ impl Workspace {
     }
     h_flex()
       .h(px(26.0))
+      .flex_none()
       .w_full()
       .items_center()
       .px_2()

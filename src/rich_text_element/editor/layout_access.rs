@@ -441,11 +441,12 @@ impl RichTextEditor {
     {
       item_sizes = cache.sizes.clone();
     }
-    let items = self
+    let base_items = self
       .item_sizes_cache
       .as_ref()
       .map(|cache| cache.items.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
+    let (items, item_sizes) = self.render_items_with_drop_preview(base_items, item_sizes, width, window, cx);
     RenderLayoutSnapshot {
       width,
       item_sizes,

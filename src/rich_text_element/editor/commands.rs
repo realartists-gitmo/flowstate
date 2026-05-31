@@ -466,6 +466,7 @@ impl RichTextEditor {
   }
 
   fn on_toolkit_text_drop(&mut self, drag: &ToolkitTextDrag, _: &mut Window, cx: &mut Context<Self>) {
+    self.clear_drop_preview();
     self.insert_toolkit_paragraphs_as_blocks(drag.paragraphs.clone(), cx);
   }
 

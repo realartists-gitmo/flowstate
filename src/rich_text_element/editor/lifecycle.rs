@@ -52,6 +52,7 @@ impl RichTextEditor {
       last_drag_position: None,
       pending_text_drag: None,
       active_text_drag: None,
+      drop_preview: None,
       image_resize_drag: None,
       table_column_resize_drag: None,
       selected_block: None,
@@ -147,6 +148,7 @@ impl RichTextEditor {
     self.last_drag_position = None;
     self.pending_text_drag = None;
     self.active_text_drag = None;
+    self.drop_preview = None;
     self.image_resize_drag = None;
     self.table_column_resize_drag = None;
     self.selected_block = None;

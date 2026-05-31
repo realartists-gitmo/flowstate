@@ -12,7 +12,7 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
+  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image, ImageFormat,
   InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point,
   Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
 };
@@ -126,22 +126,29 @@ pub struct ToolkitTextDrag {
   pub title: String,
   pub text: String,
   pub paragraphs: Vec<InputParagraph>,
+  pub cursor_offset: Point<Pixels>,
 }
 
 impl Render for ToolkitTextDrag {
   fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
     div()
-      .id("toolkit-text-drag")
-      .w(px(220.0))
-      .max_w(px(260.0))
-      .rounded(px(6.0))
-      .border_1()
-      .border_color(rgb(0x94a3b8))
-      .bg(rgb(0xffffff))
-      .p_2()
-      .text_xs()
-      .text_color(rgb(0x0f172a))
-      .child(self.title.clone())
+      .id("toolkit-text-drag-root")
+      .pl(self.cursor_offset.x + px(8.0))
+      .pt(self.cursor_offset.y + px(10.0))
+      .child(
+        div()
+          .id("toolkit-text-drag")
+          .w(px(220.0))
+          .max_w(px(260.0))
+          .rounded(px(6.0))
+          .border_1()
+          .border_color(rgb(0x94a3b8))
+          .bg(rgb(0xffffff))
+          .p_2()
+          .text_xs()
+          .text_color(rgb(0x0f172a))
+          .child(self.title.clone()),
+      )
   }
 }
 
@@ -687,8 +694,29 @@ struct ScrollAnchorLock {
 struct RenderLayoutSnapshot {
   width: Pixels,
   item_sizes: Rc<Vec<Size<Pixels>>>,
-  items: Rc<Vec<VirtualItem>>,
+  items: RenderVirtualItems,
   hide_initial_layout: bool,
+}
+
+#[derive(Clone)]
+enum RenderVirtualItems {
+  Document(Rc<Vec<VirtualItem>>),
+  WithDropPreview(Rc<Vec<RenderVirtualItem>>),
+}
+
+#[derive(Clone)]
+enum RenderVirtualItem {
+  Document(VirtualItem),
+  DropPreview,
+}
+
+impl RenderVirtualItems {
+  fn get(&self, item_ix: usize) -> Option<RenderVirtualItem> {
+    match self {
+      Self::Document(items) => items.get(item_ix).cloned().map(RenderVirtualItem::Document),
+      Self::WithDropPreview(items) => items.get(item_ix).cloned(),
+    }
+  }
 }
 
 enum RecoveryWriteDecision {
@@ -833,6 +861,7 @@ pub struct RichTextEditor {
   last_drag_position: Option<Point<Pixels>>,
   pending_text_drag: Option<PendingTextDrag>,
   active_text_drag: Option<ActiveTextDrag>,
+  drop_preview: Option<DropPreview>,
   image_resize_drag: Option<ImageResizeDrag>,
   table_column_resize_drag: Option<TableColumnResizeDrag>,
   pub(super) selected_block: Option<BlockSelection>,
@@ -915,6 +944,7 @@ include!("style_mutation.rs");
 include!("caret_movement.rs");
 include!("hit_testing.rs");
 include!("mouse.rs");
+include!("drop_preview.rs");
 include!("traits.rs");
 include!("platform.rs");
 include!("virtual_helpers.rs");

@@ -302,6 +302,7 @@ impl RichTextEditor {
   }
 
   fn on_file_drop(&mut self, paths: &ExternalPaths, window: &mut Window, cx: &mut Context<Self>) {
+    self.clear_drop_preview();
     let paths = paths.paths().to_vec();
     if paths.is_empty() {
       return;

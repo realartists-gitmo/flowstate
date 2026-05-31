@@ -4,6 +4,7 @@ impl RichTextEditor {
     window.focus(&self.focus_handle);
     self.image_resize_drag = None;
     self.table_column_resize_drag = None;
+    self.clear_drop_preview();
     self.clear_block_selection();
     self.last_drag_position = Some(event.position);
     self.goal_x = None;
@@ -109,6 +110,13 @@ impl RichTextEditor {
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
       }
+      let preview_update = self
+        .active_text_drag
+        .as_ref()
+        .map(|drag| self.internal_text_drop_preview_update(&drag.fragment, window, cx));
+      if let Some(preview_update) = preview_update {
+        self.apply_drop_preview_update(preview_update);
+      }
       cx.notify();
       return;
     }
@@ -170,8 +178,10 @@ impl RichTextEditor {
     }
     if let Some(active_drag) = self.active_text_drag.take() {
       let drop = self.hit_test_document_position(event.position, window, cx);
+      self.clear_drop_preview();
       self.move_rich_text_fragment(active_drag, drop, cx);
     } else if self.pending_text_drag.take().is_some() {
+      self.clear_drop_preview();
       let caret = self.hit_test_document_position(event.position, window, cx);
       self.selection = EditorSelection { anchor: caret, head: caret };
       self.scroll_head_into_view();
@@ -188,10 +198,12 @@ impl RichTextEditor {
     self.smart_selection_exact_override = false;
     self.last_drag_position = None;
     self.autoscroll_active = false;
+    self.clear_drop_preview();
   }
 
   fn move_rich_text_fragment(&mut self, drag: ActiveTextDrag, drop: DocumentOffset, cx: &mut Context<Self>) {
     if offset_in_range(drop, drag.source_range.clone()) {
+      self.clear_drop_preview();
       self.selection = EditorSelection {
         anchor: drag.source_range.start,
         head: drag.source_range.end,
@@ -242,6 +254,7 @@ impl RichTextEditor {
     self.redo_stack.clear();
     self.after_text_mutation(cx);
     self.mark_document_changed(after_generation, cx);
+    self.clear_drop_preview();
   }
 
   pub(super) fn reset_caret_blink(&mut self, cx: &mut Context<Self>) {

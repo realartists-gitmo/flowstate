@@ -17,6 +17,9 @@ impl Focusable for RichTextEditor {
 impl Render for RichTextEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.ensure_focus_subscriptions(window, cx);
+    if self.drop_preview.is_some() && !cx.has_active_drag() && self.active_text_drag.is_none() {
+      self.drop_preview = None;
+    }
     if self.image_resize_drag.is_some() {
       let editor = cx.entity();
       window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
@@ -108,24 +111,31 @@ impl Render for RichTextEditor {
       .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))
+      .on_drag_move(cx.listener(Self::on_toolkit_text_drag_move))
       .on_drop(cx.listener(Self::on_toolkit_text_drop))
       .drag_over::<ExternalPaths>(|style, _, _, _| style)
+      .on_drag_move(cx.listener(Self::on_external_paths_drag_move))
       .on_drop(cx.listener(Self::on_file_drop))
       .child(
         v_virtual_list(cx.entity(), "rich-text-virtual-document", item_sizes, move |editor, range, window, cx| {
           let generation = editor.begin_visible_layout(range.clone());
           range
             .map(|item_ix| {
-              let Some(item) = render_items.get(item_ix).cloned() else {
+              let Some(item) = render_items.get(item_ix) else {
                 return EmptyVirtualItemElement.into_any_element();
               };
               match item {
-                VirtualItem::HiddenBlock { .. } => EmptyVirtualItemElement.into_any_element(),
-                VirtualItem::ParagraphChunk {
+                RenderVirtualItem::DropPreview => editor
+                  .drop_preview
+                  .clone()
+                  .map(|preview| render_drop_preview(preview, editor.invisibility_mode, cx).into_any_element())
+                  .unwrap_or_else(|| EmptyVirtualItemElement.into_any_element()),
+                RenderVirtualItem::Document(VirtualItem::HiddenBlock { .. }) => EmptyVirtualItemElement.into_any_element(),
+                RenderVirtualItem::Document(VirtualItem::ParagraphChunk {
                   paragraph_ix,
                   chunk_ix,
                   ..
-                } => VirtualParagraphChunkElement {
+                }) => VirtualParagraphChunkElement {
                   editor: cx.entity(),
                   item_ix,
                   paragraph_ix,
@@ -134,7 +144,7 @@ impl Render for RichTextEditor {
                   layout: WordElementLayout::default(),
                 }
                 .into_any_element(),
-                VirtualItem::ParagraphRemainder { paragraph_ix, .. } => {
+                RenderVirtualItem::Document(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
                   let width = editor.current_layout_width();
                   let chunk_ix = editor.materialize_paragraph_remainder_for_render(paragraph_ix, width, window, cx);
                   if let Some(chunk_ix) = chunk_ix {
@@ -151,7 +161,7 @@ impl Render for RichTextEditor {
                     EmptyVirtualItemElement.into_any_element()
                   }
                 },
-                VirtualItem::StructuralBlock { block_ix } => {
+                RenderVirtualItem::Document(VirtualItem::StructuralBlock { block_ix }) => {
                 let editor_entity = cx.entity();
                 let selection = match editor.document.blocks.get(block_ix) {
                   Some(Block::Image(_)) => Some(BlockSelection::Image(block_ix)),

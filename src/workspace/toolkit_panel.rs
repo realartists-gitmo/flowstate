@@ -6,16 +6,17 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, ScrollHandle, SharedString, Timer, Window, div, prelude::*, px, size};
+use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px};
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Selectable, Sizable, VirtualListScrollHandle,
+  ActiveTheme as _, Icon, IconName, Sizable,
   button::{Button, ButtonVariants},
   h_flex,
   input::Input,
+  menu::{DropdownMenu as _, PopupMenuItem},
   resizable::{h_resizable, resizable_panel},
-  scroll::Scrollbar,
+  scroll::ScrollableElement,
   tree::{TreeItem, tree},
-  v_flex, v_virtual_list,
+  v_flex,
 };
 
 use crate::{
@@ -393,6 +394,17 @@ impl Workspace {
     self.refresh_toolkit_search(cx);
   }
 
+  fn toggle_toolkit_hit_expanded(&mut self, hit_ix: usize, cx: &mut Context<Self>) {
+    let Some(hit) = self.toolkit_hits.get(hit_ix) else {
+      return;
+    };
+    let key = toolkit_hit_key(hit);
+    if !self.expanded_toolkit_hits.insert(key.clone()) {
+      self.expanded_toolkit_hits.remove(&key);
+    }
+    cx.notify();
+  }
+
   fn insert_toolkit_hit(&mut self, hit_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
@@ -430,7 +442,6 @@ impl Workspace {
   }
 
   fn render_toolkit_expanded(&self, cx: &mut Context<Self>) -> impl IntoElement {
-    let open_file_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
     let result_list = if self.toolkit_hits.is_empty() {
       div()
         .h(px(120.0))
@@ -442,27 +453,23 @@ impl Workspace {
         .child(self.toolkit_status.clone())
         .into_any_element()
     } else {
-      let item_sizes = Rc::new(vec![size(px(1.0), px(270.0)); self.toolkit_hits.len()]);
-      let result_scroll_handle = self.toolkit_result_scroll_handle.clone();
-      let preview_scroll_handle = result_scroll_handle.clone();
-      v_virtual_list(cx.entity(), "toolkit-result-list", item_sizes, move |workspace, range, window, cx| {
-        range
-          .filter_map(|ix| {
-            workspace
-              .toolkit_hits
-              .get(ix)
-              .cloned()
-              .map(|hit| workspace.render_toolkit_hit(ix, &hit, &preview_scroll_handle, window, cx))
-          })
-          .collect::<Vec<_>>()
-      })
-      .track_scroll(&result_scroll_handle)
-      .into_any_element()
+      v_flex()
+        .w_full()
+        .gap_3()
+        .children(
+          self
+            .toolkit_hits
+            .iter()
+            .enumerate()
+            .map(|(ix, hit)| self.render_toolkit_hit(ix, hit, cx)),
+        )
+        .into_any_element()
     };
 
     v_flex()
       .size_full()
       .h_full()
+      .min_h_0()
       .bg(cx.theme().background)
       .border_l(APP_CHROME_BORDER_WIDTH)
       .border_color(cx.theme().border)
@@ -477,31 +484,21 @@ impl Workspace {
           .border_b_1()
           .border_color(cx.theme().border)
           .child(
-            h_flex()
-              .items_center()
-              .gap_2()
-              .child(
-                Icon::new(IconName::Search)
-                  .xsmall()
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .child(
-                div()
-                  .text_sm()
-                  .font_weight(gpui::FontWeight::SEMIBOLD)
-                  .text_color(cx.theme().foreground)
-                  .child("Toolkit"),
-              ),
-          )
-          .child(
             Button::new("collapse-toolkit-panel")
-              .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().muted_foreground))
+              .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().sidebar_foreground))
               .xsmall()
               .ghost()
               .tooltip("Collapse toolkit")
               .on_click(cx.listener(|workspace, _, _, cx| {
                 workspace.toggle_toolkit(cx);
               })),
+          )
+          .child(
+            div()
+              .text_sm()
+              .font_weight(gpui::FontWeight::SEMIBOLD)
+              .text_color(cx.theme().sidebar_primary)
+              .child("Toolkit"),
           ),
       )
       .child(
@@ -521,92 +518,76 @@ impl Workspace {
                   .xsmall()
                   .text_color(cx.theme().muted_foreground),
               )
+              .suffix(self.render_toolkit_filter_menu(cx))
               .text_color(cx.theme().foreground)
               .placeholder_color(cx.theme().muted_foreground),
           )
-          .child(
-            h_flex().w_full().items_center().gap_1().children([
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::All, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Blocks, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Tags, cx)
-                .into_any_element(),
-              self
-                .render_toolkit_filter_button(ToolkitSearchFilter::Analytics, cx)
-                .into_any_element(),
-            ]),
-          )
-          .child(
-            h_flex()
-              .items_center()
-              .justify_between()
-              .gap_2()
-              .child(
-                div()
-                  .flex_1()
-                  .min_w_0()
-                  .truncate()
-                  .text_xs()
-                  .text_color(cx.theme().muted_foreground)
-                  .child(self.toolkit_status.clone()),
-              )
-              .child(
-                Button::new("toolkit-global-file-search")
-                  .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().link))
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Filename search")
-                  .on_click(open_file_search),
-              ),
-          ),
       )
       .child(
-        div()
+        v_flex()
           .flex_1()
           .min_h_0()
           .w_full()
-          .overflow_hidden()
+          .overflow_y_scrollbar()
           .p_2()
           .child(result_list),
       )
   }
 
-  fn render_toolkit_filter_button(&self, filter: ToolkitSearchFilter, cx: &mut Context<Self>) -> impl IntoElement {
-    Button::new(("toolkit-filter", filter as usize))
-      .label(filter.label())
+  fn render_toolkit_filter_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let workspace = cx.entity().downgrade();
+    let selected_filter = self.toolkit_search_filter;
+    let filters = [
+      ToolkitSearchFilter::All,
+      ToolkitSearchFilter::Blocks,
+      ToolkitSearchFilter::Tags,
+      ToolkitSearchFilter::Analytics,
+    ];
+
+    Button::new("toolkit-filter-menu")
+      .label(self.toolkit_search_filter.label())
       .xsmall()
       .ghost()
-      .selected(self.toolkit_search_filter == filter)
-      .on_click(cx.listener(move |workspace, _, _, cx| {
-        workspace.set_toolkit_filter(filter, cx);
-      }))
+      .tooltip("Search filter")
+      .dropdown_menu(move |menu, _, _| {
+        filters.into_iter().fold(menu.min_w(px(140.0)), |menu, filter| {
+          let workspace = workspace.clone();
+          menu.item(
+            PopupMenuItem::new(filter.label())
+              .checked(filter == selected_filter)
+              .on_click(move |_, _, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                  workspace.set_toolkit_filter(filter, cx);
+                });
+              }),
+          )
+        })
+      })
   }
 
   fn render_toolkit_hit(
     &self,
     ix: usize,
     hit: &flowstate_tub::SearchHit,
-    result_scroll_handle: &VirtualListScrollHandle,
-    window: &mut Window,
     cx: &mut Context<Self>,
   ) -> gpui::AnyElement {
     let open = cx.listener(move |workspace, _, window, cx| workspace.open_toolkit_hit(ix, window, cx));
     let insert = cx.listener(move |workspace, _, window, cx| workspace.insert_toolkit_hit(ix, window, cx));
+    let toggle_expanded = cx.listener(move |workspace, _, _, cx| workspace.toggle_toolkit_hit_expanded(ix, cx));
     let title = if hit.title.is_empty() {
       hit.file_name.clone()
     } else {
       hit.title.clone()
     };
     let preview_text = if hit.insert_text.trim().is_empty() { hit.snippet.as_str() } else { hit.insert_text.as_str() };
+    let can_expand = toolkit_hit_preview_can_expand(hit, preview_text);
+    let expanded = can_expand && self.expanded_toolkit_hits.contains(&toolkit_hit_key(hit));
     let paragraphs = toolkit_hit_insert_paragraphs(hit);
     let drag = ToolkitTextDrag {
       title: title.clone(),
       text: hit.insert_text.clone(),
       paragraphs,
+      cursor_offset: point(px(0.0), px(0.0)),
     };
     let (preview_theme, preview_invisibility_mode) = self
       .active_editor
@@ -616,30 +597,22 @@ impl Workspace {
         (editor.document_theme(), editor.invisibility_mode())
       })
       .unwrap_or_else(|| (load_document_theme(), false));
-    let preview_document = toolkit_preview_document(hit, preview_text, preview_theme);
+    let preview_document = toolkit_preview_document(hit, preview_text, preview_theme, expanded);
     let preview_bg = preview_document.theme.document_background_color;
     let hover_group = format!("toolkit-hit-hover-{ix}");
     let overlay_bg = cx.theme().popover.opacity(0.92);
     let overlay_border = cx.theme().border.opacity(0.64);
     let card_radius = cx.theme().radius;
     let preview_radius = card_radius.max(px(1.0)) - px(1.0);
-    let preview_scroll_handle = window
-      .use_keyed_state(
-        SharedString::from(format!("toolkit-preview-scroll-{}-{}", hit.file_id, hit.unit_id)),
-        cx,
-        |_, _| ScrollHandle::new(),
-      )
-      .read(cx)
-      .clone();
-    let preview_scroll_for_chain = preview_scroll_handle.clone();
-    let result_scroll_for_chain = result_scroll_handle.clone();
-    let workspace_for_chain = cx.entity().downgrade();
+    let expand_icon = if expanded { IconName::Minimize } else { IconName::Maximize };
+    let expand_tooltip = if expanded { "Collapse preview" } else { "Expand preview" };
+    let capped = can_expand && !expanded;
 
     div()
       .id(("toolkit-hit", ix))
       .group(hover_group.clone())
       .w_full()
-      .h(px(258.0))
+      .when(capped, |this| this.h(px(258.0)))
       .relative()
       .rounded(card_radius)
       .border_1()
@@ -648,56 +621,27 @@ impl Workspace {
       .p(px(1.0))
       .overflow_hidden()
       .block_mouse_except_scroll()
-      .on_drag(drag, |drag, _, _, cx| {
+      .on_drag(drag, |drag, cursor_offset, _, cx| {
         cx.stop_propagation();
-        cx.new(|_| drag.clone())
+        let mut drag = drag.clone();
+        drag.cursor_offset = cursor_offset;
+        cx.new(|_| drag)
       })
       .child(
         div()
-          .size_full()
+          .w_full()
+          .when(capped, |this| this.h_full())
           .relative()
           .rounded(preview_radius)
           .overflow_hidden()
           .bg(preview_bg)
-          .on_scroll_wheel(move |event, window, cx| {
-            let delta_y = event.delta.pixel_delta(window.line_height()).y;
-            if delta_y == px(0.0) {
-              return;
-            }
-            if scroll_handle_scroll_by(&preview_scroll_for_chain, delta_y) {
-              let _ = workspace_for_chain.update(cx, |_, cx| cx.notify());
-              cx.stop_propagation();
-              return;
-            }
-            if scroll_toolkit_result_list(&result_scroll_for_chain, delta_y) {
-              let _ = workspace_for_chain.update(cx, |_, cx| cx.notify());
-            }
-            cx.stop_propagation();
-          })
           .child(
             div()
               .id(("toolkit-preview-scroll-area", ix))
-              .flex()
-              .flex_col()
-              .size_full()
-              .track_scroll(&preview_scroll_handle)
-              .overflow_hidden()
+              .w_full()
+              .when(capped, |this| this.h_full())
               .bg(preview_bg)
-              .child(
-                div()
-                  .flex_1()
-                  .bg(preview_bg)
-                  .child(RichTextDocumentElement::new(preview_document).with_invisibility_mode(preview_invisibility_mode)),
-              ),
-          )
-          .child(
-            div()
-              .absolute()
-              .top_0()
-              .left_0()
-              .right_0()
-              .bottom_0()
-              .child(Scrollbar::vertical(&preview_scroll_handle)),
+              .child(RichTextDocumentElement::new(preview_document).with_invisibility_mode(preview_invisibility_mode)),
           ),
       )
       .child(
@@ -714,6 +658,16 @@ impl Workspace {
           .border_color(overlay_border)
           .bg(overlay_bg)
           .p_1()
+          .when(can_expand, |this| {
+            this.child(
+            Button::new(("toolkit-expand-hit", ix))
+              .icon(Icon::new(expand_icon).text_color(cx.theme().foreground))
+              .xsmall()
+              .ghost()
+              .tooltip(expand_tooltip)
+              .on_click(toggle_expanded),
+            )
+          })
           .child(
             Button::new(("toolkit-open-hit", ix))
               .icon(Icon::new(IconName::ExternalLink).text_color(cx.theme().foreground))
@@ -900,39 +854,11 @@ impl Workspace {
   }
 }
 
-fn scroll_toolkit_result_list(scroll_handle: &VirtualListScrollHandle, delta_y: Pixels) -> bool {
-  let Some(offset) = scroll_handle_offset_after_delta(scroll_handle.base_handle(), delta_y) else {
-    return false;
-  };
-  scroll_handle.set_offset(offset);
-  true
-}
-
-fn scroll_handle_scroll_by(scroll_handle: &ScrollHandle, delta_y: Pixels) -> bool {
-  let Some(offset) = scroll_handle_offset_after_delta(scroll_handle, delta_y) else {
-    return false;
-  };
-  scroll_handle.set_offset(offset);
-  true
-}
-
-fn scroll_handle_offset_after_delta(scroll_handle: &ScrollHandle, delta_y: Pixels) -> Option<gpui::Point<Pixels>> {
-  if delta_y == px(0.0) {
-    return None;
-  }
-  let old_offset = scroll_handle.offset();
-  let mut offset = old_offset;
-  offset.y += delta_y;
-  let max_offset = scroll_handle.max_offset();
-  offset.x = offset.x.min(px(0.0)).max(-max_offset.width);
-  offset.y = offset.y.min(px(0.0)).max(-max_offset.height);
-  (offset != old_offset).then_some(offset)
-}
-
 fn toolkit_preview_document(
   hit: &flowstate_tub::SearchHit,
   fallback_text: &str,
   mut theme: DocumentTheme,
+  expanded: bool,
 ) -> crate::rich_text_element::Document {
   theme.zoom_factor *= TOOLKIT_PREVIEW_ZOOM;
   theme.pageless_inset_x = px(10.0);
@@ -940,7 +866,12 @@ fn toolkit_preview_document(
   theme.pageless_inset_bottom = px(12.0);
 
   let paragraphs = if hit.preview_paragraphs.is_empty() {
-    toolkit_fallback_paragraphs(fallback_text, Some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT))
+    toolkit_fallback_paragraphs(
+      fallback_text,
+      (!expanded).then_some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT),
+    )
+  } else if expanded {
+    hit.preview_paragraphs.clone()
   } else {
     hit
       .preview_paragraphs
@@ -951,6 +882,23 @@ fn toolkit_preview_document(
   };
 
   document_from_input(theme, paragraphs)
+}
+
+fn toolkit_hit_preview_can_expand(hit: &flowstate_tub::SearchHit, fallback_text: &str) -> bool {
+  if !hit.preview_paragraphs.is_empty() {
+    return hit.preview_paragraphs.len() > TOOLKIT_PREVIEW_PARAGRAPH_LIMIT;
+  }
+
+  fallback_text
+    .replace("\r\n", "\n")
+    .replace('\r', "\n")
+    .lines()
+    .count()
+    > TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT
+}
+
+fn toolkit_hit_key(hit: &flowstate_tub::SearchHit) -> String {
+  format!("{}:{}", hit.file_id, hit.unit_id)
 }
 
 fn toolkit_hit_insert_paragraphs(hit: &flowstate_tub::SearchHit) -> Vec<InputParagraph> {
