@@ -280,7 +280,7 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                   .top_0()
                   .bottom_0()
                   .left(px(11.5))
-                  .w(px(1.0))
+                  .w(px(0.5))
                   .bg(guide_color.opacity(0.68)),
               )
             })
@@ -296,10 +296,10 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
               this.child(
                 div()
                   .absolute()
-                  .top(if row.is_folder { px(16.0) } else { px(0.0) })
+                  .top(if row.is_folder { px(18.0) } else { px(0.0) })
                   .bottom_0()
                   .left(px(11.5))
-                  .w(px(1.0))
+                  .w(px(0.5))
                   .bg(hierarchy_color.opacity(0.68)),
               )
             })
@@ -339,7 +339,7 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                 div()
                   .absolute()
                   .top_0()
-                  .left_0()
+                  .left(px(1.5))
                   .w(px(20.0))
                   .h(px(20.0))
                   .flex()

@@ -7,8 +7,8 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Hsla, InteractiveElement, IntoElement, KeyBinding,
-  Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
+  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
+  KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
   WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
@@ -87,8 +87,11 @@ pub struct Workspace {
   tub_index: Option<Arc<TubIndex>>,
   tub_files: Vec<TubFile>,
   tub_tree: Entity<TreeState>,
+  tub_tree_items: Vec<TreeItem>,
   tub_tree_entries: Vec<TubTreeNode>,
   tub_expanded_dirs: HashSet<PathBuf>,
+  tub_file_search_input: Entity<InputState>,
+  tub_file_search_generation: u64,
   tub_status: SharedString,
   tub_watcher: Option<flowstate_tub::TubWatcher>,
   tub_watch_polling: bool,
@@ -100,6 +103,7 @@ pub struct Workspace {
   toolkit_hits: Vec<SearchHit>,
   toolkit_status: SharedString,
   toolkit_search_generation: u64,
+  _tub_file_search_subscription: Subscription,
   _toolkit_search_subscription: Subscription,
   zoom_slider: Entity<SliderState>,
   _zoom_slider_subscription: Subscription,

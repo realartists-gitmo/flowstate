@@ -24,6 +24,9 @@ fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
 #[hotpath::measure_all]
 impl Workspace {
   fn handle_window_keybinding(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    if self.focused_workspace_input_is_focused(window, cx) {
+      return false;
+    }
     match command {
       CommandId::Save => {
         self.save_active(window, cx);
@@ -72,5 +75,10 @@ impl Workspace {
         }
       },
     }
+  }
+
+  fn focused_workspace_input_is_focused(&self, window: &Window, cx: &App) -> bool {
+    self.toolkit_search_input.read(cx).focus_handle(cx).is_focused(window)
+      || self.tub_file_search_input.read(cx).focus_handle(cx).is_focused(window)
   }
 }

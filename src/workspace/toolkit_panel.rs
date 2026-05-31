@@ -1,5 +1,5 @@
 use std::{
-  collections::{BTreeMap, BTreeSet},
+  collections::{BTreeMap, BTreeSet, HashSet},
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
@@ -29,12 +29,12 @@ use super::{
 };
 
 const TOOLKIT_RESULT_LIMIT: usize = 32;
+const TUB_FILE_SEARCH_LIMIT: usize = 200;
 
 struct TubLoadResult {
   root: PathBuf,
   index: Arc<flowstate_tub::TubIndex>,
   files: Vec<flowstate_tub::TubFile>,
-  tree_entries: Vec<flowstate_tub::TubTreeNode>,
 }
 
 #[hotpath::measure_all]
@@ -80,7 +80,9 @@ impl Workspace {
     self.tub_root = Some(root.clone());
     self.tub_index = None;
     self.tub_files.clear();
+    self.tub_tree_items.clear();
     self.tub_tree_entries.clear();
+    self.tub_file_search_generation = self.tub_file_search_generation.wrapping_add(1);
     self.tub_watcher = None;
     self.tub_scan_pending = false;
     self
@@ -128,7 +130,9 @@ impl Workspace {
     self.tub_root = Some(root.clone());
     self.tub_index = None;
     self.tub_files.clear();
+    self.tub_tree_items.clear();
     self.tub_tree_entries.clear();
+    self.tub_file_search_generation = self.tub_file_search_generation.wrapping_add(1);
     self.tub_watcher = None;
     self.tub_scan_pending = false;
     self
@@ -156,7 +160,6 @@ impl Workspace {
       return;
     }
     let data_dir = flowstate_data_dir().join("tub");
-    let expanded_dirs = self.tub_expanded_dirs.clone();
     let requested_root = root.clone();
     self.tub_scan_in_flight = true;
     self.tub_status = format!("Indexing {}", root.display()).into();
@@ -170,12 +173,10 @@ impl Workspace {
         .spawn(async move {
           let index = Arc::new(flowstate_tub::TubIndex::open(&root, &data_dir)?);
           let files = index.scan_and_index()?;
-          let tree_entries = index.tree_entries(&expanded_dirs)?;
           anyhow::Ok(TubLoadResult {
             root,
             index,
             files,
-            tree_entries,
           })
         })
         .await;
@@ -199,19 +200,12 @@ impl Workspace {
             if persist_root {
               let _ = save_tub_root(Some(result.root.clone()));
             }
-            let tree_items = build_tub_tree_items(&result.root, &result.files, &workspace.tub_expanded_dirs);
-            let tree_entries = result
-              .index
-              .tree_entries_for_files(&result.files, &workspace.tub_expanded_dirs)
-              .unwrap_or(result.tree_entries);
             workspace.tub_root = Some(result.root);
             workspace.tub_watcher = result.index.start_watcher().ok();
             workspace.tub_index = Some(result.index);
             workspace.tub_files = result.files;
-            workspace.tub_tree_entries = tree_entries;
-            workspace
-              .tub_tree
-              .update(cx, |tree, cx| tree.set_items(tree_items, cx));
+            workspace.rebuild_tub_tree_cache();
+            workspace.refresh_tub_file_search(cx);
             workspace.tub_status = "Tub indexed".into();
             workspace.toolkit_status = if workspace
               .toolkit_search_input
@@ -234,7 +228,9 @@ impl Workspace {
             workspace.tub_index = None;
             workspace.tub_watcher = None;
             workspace.tub_files.clear();
+            workspace.tub_tree_items.clear();
             workspace.tub_tree_entries.clear();
+            workspace.tub_file_search_generation = workspace.tub_file_search_generation.wrapping_add(1);
             workspace
               .tub_tree
               .update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
@@ -294,6 +290,46 @@ impl Workspace {
       self.tub_expanded_dirs.remove(&path);
     }
     cx.notify();
+  }
+
+  pub(super) fn refresh_tub_file_search(&mut self, cx: &mut Context<Self>) {
+    let query = self.tub_file_search_input.read(cx).value().trim().to_string();
+    let Some(root) = self.tub_root.clone() else {
+      self.tub_tree_entries.clear();
+      self.tub_tree.update(cx, |tree, cx| tree.set_items(Vec::<TreeItem>::new(), cx));
+      cx.notify();
+      return;
+    };
+
+    if query.is_empty() {
+      if self.tub_tree_items.is_empty() && !self.tub_files.is_empty() {
+        self.rebuild_tub_tree_cache();
+      }
+      self.tub_tree_entries = tub_tree_entries_for_files(&root, &self.tub_files, &self.tub_expanded_dirs);
+      self
+        .tub_tree
+        .update(cx, |tree, cx| tree.set_items(self.tub_tree_items.clone(), cx));
+      cx.notify();
+      return;
+    }
+
+    self.tub_file_search_generation = self.tub_file_search_generation.wrapping_add(1);
+    let files = filter_tub_files_by_name(&self.tub_files, &query, TUB_FILE_SEARCH_LIMIT);
+    let expanded_dirs = expanded_tub_search_dirs(&root, &files);
+    let tree_items = build_tub_tree_items(&root, &files, &expanded_dirs);
+    self.tub_tree_entries = tub_tree_entries_for_files(&root, &files, &expanded_dirs);
+    self.tub_tree.update(cx, |tree, cx| tree.set_items(tree_items, cx));
+    cx.notify();
+  }
+
+  fn rebuild_tub_tree_cache(&mut self) {
+    let Some(root) = self.tub_root.as_deref() else {
+      self.tub_tree_items.clear();
+      self.tub_tree_entries.clear();
+      return;
+    };
+    self.tub_tree_items = build_tub_tree_items(root, &self.tub_files, &self.tub_expanded_dirs);
+    self.tub_tree_entries = tub_tree_entries_for_files(root, &self.tub_files, &self.tub_expanded_dirs);
   }
 
   pub(super) fn refresh_toolkit_search(&mut self, cx: &mut Context<Self>) {
@@ -464,8 +500,16 @@ impl Workspace {
           .border_color(cx.theme().border)
           .child(
             Input::new(&self.toolkit_search_input)
+              .xsmall()
               .w_full()
-              .cleanable(true),
+              .cleanable(true)
+              .prefix(
+                Icon::new(IconName::Search)
+                  .xsmall()
+                  .text_color(cx.theme().muted_foreground),
+              )
+              .text_color(cx.theme().foreground)
+              .placeholder_color(cx.theme().muted_foreground),
           )
           .child(
             h_flex().w_full().items_center().gap_1().children([
@@ -658,6 +702,7 @@ impl Workspace {
   }
 
   pub(super) fn render_tub_nav(&self, nav_width: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
+    let file_search_active = !self.tub_file_search_input.read(cx).value().trim().is_empty();
     let tree_list = if self.tub_tree_entries.is_empty() {
       div()
         .h(px(120.0))
@@ -666,7 +711,7 @@ impl Workspace {
         .justify_center()
         .text_sm()
         .text_color(cx.theme().muted_foreground)
-        .child("No tub files")
+        .child(if file_search_active { "No matching tub files" } else { "No tub files" })
         .into_any_element()
     } else {
       let workspace = cx.entity().downgrade();
@@ -688,11 +733,7 @@ impl Workspace {
         } else {
           IconName::File
         };
-        let icon_color = if is_folder {
-          outline_hierarchy_color(depth, cx)
-        } else {
-          cx.theme().muted_foreground
-        };
+        let icon_color = outline_hierarchy_color(depth, cx);
         let workspace_for_toggle = workspace.clone();
         let toggle_path = path.clone();
         let toggle_action: SidebarTreeAction = Rc::new(move |_: &mut Window, cx: &mut App| {
@@ -745,6 +786,26 @@ impl Workspace {
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
       .child(self.render_left_nav_header("Tub", cx))
+      .child(
+        div()
+          .w_full()
+          .flex_none()
+          .child(
+            Input::new(&self.tub_file_search_input)
+              .xsmall()
+              .w_full()
+              .cleanable(true)
+              .prefix(
+                Icon::new(IconName::Search)
+                  .xsmall()
+                  .text_color(cx.theme().muted_foreground),
+              )
+              .text_color(cx.theme().sidebar_foreground)
+              .placeholder_color(cx.theme().muted_foreground)
+              .bg(cx.theme().sidebar)
+              .border_color(cx.theme().sidebar_border),
+          ),
+      )
       .child(
         div()
           .flex_1()
@@ -874,6 +935,89 @@ fn build_tub_tree_items(root: &Path, files: &[flowstate_tub::TubFile], expanded_
   }
 
   build_tub_tree_dir_items(root, Path::new(""), &dirs, &child_dirs, &files_by_parent, expanded_dirs)
+}
+
+fn tub_tree_entries_for_files(
+  root: &Path,
+  files: &[flowstate_tub::TubFile],
+  expanded_dirs: &std::collections::HashSet<PathBuf>,
+) -> Vec<flowstate_tub::TubTreeNode> {
+  build_tub_tree_items(root, files, expanded_dirs)
+    .into_iter()
+    .flat_map(|item| tub_tree_item_entries(item, 0))
+    .collect()
+}
+
+fn tub_tree_item_entries(item: TreeItem, depth: usize) -> Vec<flowstate_tub::TubTreeNode> {
+  let mut entries = Vec::new();
+  let path = PathBuf::from(item.id.as_ref());
+  let is_dir = item.is_folder();
+  let expanded = item.is_expanded();
+  entries.push(flowstate_tub::TubTreeNode {
+    path: path.clone(),
+    display_path: path.to_string_lossy().replace('\\', "/"),
+    name: item.label.to_string(),
+    is_dir,
+    depth,
+    expanded,
+    file_kind: None,
+  });
+  if expanded {
+    for child in item.children {
+      entries.extend(tub_tree_item_entries(child, depth + 1));
+    }
+  }
+  entries
+}
+
+fn expanded_tub_search_dirs(root: &Path, files: &[flowstate_tub::TubFile]) -> HashSet<PathBuf> {
+  let mut expanded = HashSet::new();
+  expanded.insert(root.to_path_buf());
+  for file in files {
+    let mut current = root.to_path_buf();
+    for component in Path::new(&file.parent_display_path).components() {
+      current = current.join(component.as_os_str());
+      expanded.insert(current.clone());
+    }
+  }
+  expanded
+}
+
+fn filter_tub_files_by_name(files: &[flowstate_tub::TubFile], query: &str, limit: usize) -> Vec<flowstate_tub::TubFile> {
+  let query = query.trim().to_ascii_lowercase();
+  if query.is_empty() {
+    return files.iter().take(limit).cloned().collect();
+  }
+
+  let mut ranked = files
+    .iter()
+    .filter_map(|file| {
+      let file_name = file.file_name.to_ascii_lowercase();
+      let display_path = file.display_path.to_ascii_lowercase();
+      let rank = if file_name.starts_with(&query) {
+        0
+      } else if file_name.contains(&query) {
+        1
+      } else if display_path.contains(&query) {
+        2
+      } else {
+        return None;
+      };
+      Some((rank, file.display_path.len(), file))
+    })
+    .collect::<Vec<_>>();
+  ranked.sort_by(|left, right| {
+    left
+      .0
+      .cmp(&right.0)
+      .then_with(|| left.1.cmp(&right.1))
+      .then_with(|| left.2.display_path.cmp(&right.2.display_path))
+  });
+  ranked
+    .into_iter()
+    .take(limit)
+    .map(|(_, _, file)| file.clone())
+    .collect()
 }
 
 fn build_tub_tree_dir_items(

@@ -169,8 +169,25 @@ fn fuzzy_subsequence_score(haystack: &str, needle: &str) -> Option<usize> {
 
 #[hotpath::measure]
 fn is_supported_document_path(path: &Path) -> bool {
+  if is_word_temp_lock_file(path) {
+    return false;
+  }
+
   path
     .extension()
     .and_then(|extension| extension.to_str())
     .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "db8" | "docx" | "fl0"))
+}
+
+#[hotpath::measure]
+fn is_word_temp_lock_file(path: &Path) -> bool {
+  let has_docx_extension = path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"));
+
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name.starts_with("~$") && has_docx_extension)
 }

@@ -951,6 +951,10 @@ fn non_empty(value: String) -> Option<String> {
 }
 
 fn file_kind_from_path(path: &Path) -> Option<FileKind> {
+  if is_word_temp_lock_file(path) {
+    return None;
+  }
+
   let extension = path.extension()?.to_str()?;
   file_kind_from_str(extension)
 }
@@ -962,6 +966,13 @@ fn file_kind_from_str(extension: &str) -> Option<FileKind> {
     "fl0" => Some(FileKind::Fl0),
     _ => None,
   }
+}
+
+fn is_word_temp_lock_file(path: &Path) -> bool {
+  path
+    .file_name()
+    .and_then(|name| name.to_str())
+    .is_some_and(|name| name.starts_with("~$") && path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("docx")))
 }
 
 fn canonicalize_dir(path: &Path) -> Result<PathBuf> {

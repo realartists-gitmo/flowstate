@@ -35,6 +35,12 @@ impl Workspace {
       }
     });
     let toolkit_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tub blocks, tags, and analytics"));
+    let tub_file_search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Search tub"));
+    let _tub_file_search_subscription = cx.subscribe(&tub_file_search_input, |workspace, _, event: &InputEvent, cx| {
+      if let InputEvent::Change = event {
+        workspace.refresh_tub_file_search(cx);
+      }
+    });
     let _toolkit_search_subscription = cx.subscribe(&toolkit_search_input, |workspace, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         workspace.refresh_toolkit_search(cx);
@@ -74,8 +80,11 @@ impl Workspace {
       tub_index: None,
       tub_files: Vec::new(),
       tub_tree: cx.new(|cx| TreeState::new(cx)),
+      tub_tree_items: Vec::new(),
       tub_tree_entries: Vec::new(),
       tub_expanded_dirs: HashSet::new(),
+      tub_file_search_input,
+      tub_file_search_generation: 0,
       tub_status: "No tub selected".into(),
       tub_watcher: None,
       tub_watch_polling: false,
@@ -87,6 +96,7 @@ impl Workspace {
       toolkit_hits: Vec::new(),
       toolkit_status: "Select a tub to search evidence.".into(),
       toolkit_search_generation: 0,
+      _tub_file_search_subscription,
       _toolkit_search_subscription,
       zoom_slider,
       _zoom_slider_subscription: zoom_slider_subscription,
