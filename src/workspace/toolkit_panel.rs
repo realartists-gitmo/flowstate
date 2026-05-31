@@ -337,10 +337,7 @@ impl Workspace {
               workspace.tub_watch_polling = false;
               return false;
             };
-            let has_relevant_event = watcher
-              .drain_events()
-              .into_iter()
-              .any(|event| event.is_ok());
+            let has_relevant_event = watcher.drain_has_db8_change();
             if has_relevant_event {
               if workspace.tub_scan_in_flight {
                 workspace.tub_scan_pending = true;

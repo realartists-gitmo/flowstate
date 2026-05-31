@@ -13,7 +13,10 @@ use flowstate_document::{
   paragraph_index_for_id, paragraph_text_len, read_db8,
 };
 use ignore::WalkBuilder;
-use notify::{RecommendedWatcher, RecursiveMode, Watcher as _};
+use notify::{
+  Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher as _,
+  event::{DataChange, MetadataKind, ModifyKind},
+};
 use rusqlite::{Connection, OptionalExtension as _, params};
 use serde::{Deserialize, Serialize};
 use tantivy::{
@@ -602,9 +605,35 @@ impl TubWatcher {
   }
 
   #[must_use]
+  pub fn drain_has_db8_change(&self) -> bool {
+    self
+      .drain_events()
+      .into_iter()
+      .any(|event| event.is_ok_and(|event| is_relevant_db8_watch_event(&event)))
+  }
+
+  #[must_use]
   pub const fn keepalive(&self) -> &RecommendedWatcher {
     &self.watcher
   }
+}
+
+fn is_relevant_db8_watch_event(event: &Event) -> bool {
+  if !event.paths.iter().any(|path| is_db8_path(path)) {
+    return false;
+  }
+
+  matches!(
+    event.kind,
+    EventKind::Any
+      | EventKind::Create(_)
+      | EventKind::Remove(_)
+      | EventKind::Modify(ModifyKind::Any | ModifyKind::Data(DataChange::Any | DataChange::Size | DataChange::Content) | ModifyKind::Metadata(MetadataKind::WriteTime) | ModifyKind::Name(_))
+  )
+}
+
+fn is_db8_path(path: &Path) -> bool {
+  matches!(file_kind_from_path(path), Some(FileKind::Db8))
 }
 
 #[derive(Clone, Debug)]
