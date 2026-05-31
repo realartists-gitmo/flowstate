@@ -31,7 +31,7 @@ impl LegacyStylesRibbon {
               .map(|spec| {
                 let editor = editor.clone();
                 let style = spec.style;
-                Button::new(("paragraph-style", style as u64))
+                Button::new(("paragraph-style", style.slot()))
                   .label(spec.label)
                   .selected(EditorRibbon::paragraph_selected(style_state, style))
                   .tooltip(spec.label)
@@ -54,7 +54,7 @@ impl LegacyStylesRibbon {
           .children(SEMANTIC_STYLE_SPECS.iter().map(|spec| {
             let editor = editor.clone();
             let style = spec.style;
-            Toggle::new(("semantic-style", style as u64))
+            Toggle::new(("semantic-style", style.slot()))
               .label(spec.label)
               .small()
               .outline()
@@ -103,7 +103,7 @@ impl LegacyStylesRibbon {
           .children(HIGHLIGHT_STYLE_SPECS.iter().map(|spec| {
             let editor = editor.clone();
             let highlight = spec.style;
-            Toggle::new(("highlight-style", highlight as u64))
+            Toggle::new(("highlight-style", highlight.slot()))
               .label(spec.label)
               .small()
               .outline()

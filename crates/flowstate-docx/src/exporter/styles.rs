@@ -138,7 +138,7 @@ pub(super) fn apply_paragraph_style(paragraph: DocxParagraph, style: ParagraphSt
     ParagraphStyle::Tag => paragraph.style("Heading4"),
     ParagraphStyle::Analytic => paragraph.style("Analytic"),
     ParagraphStyle::Undertag => paragraph.style("Undertag"),
-    ParagraphStyle::Normal => paragraph.style("Normal"),
+    ParagraphStyle::Normal | ParagraphStyle::Custom(_) => paragraph.style("Normal"),
   }
 }
 

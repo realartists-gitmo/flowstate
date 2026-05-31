@@ -3,7 +3,7 @@ fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
   match style {
     HighlightStyle::Spoken => theme.highlight_spoken,
     HighlightStyle::Insert => theme.highlight_insert,
-    HighlightStyle::Alternative => theme.highlight_alternative,
+    HighlightStyle::Alternative | HighlightStyle::Custom(_) => theme.highlight_alternative,
   }
 }
 
@@ -113,18 +113,18 @@ fn accent_color(accent: RibbonAccent, cx: &mut Context<EditorRibbon>) -> Hsla {
 #[hotpath::measure]
 fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
   match command_id {
-    RibbonCommandId::Paragraph(style) => 1_000 + style as u64,
-    RibbonCommandId::Semantic(style) => 2_000 + style as u64,
+    RibbonCommandId::Paragraph(style) => 1_000 + style.slot(),
+    RibbonCommandId::Semantic(style) => 2_000 + style.slot(),
     RibbonCommandId::CondensedMenu => 2_900,
     RibbonCommandId::Underline => 3_000,
     RibbonCommandId::Strikethrough => 3_100,
-    RibbonCommandId::Highlight(style) => 4_000 + style as u64,
+    RibbonCommandId::Highlight(style) => 4_000 + style.slot(),
     RibbonCommandId::ClearHighlight => 5_000,
     RibbonCommandId::HighlightMenu => 5_002,
     RibbonCommandId::ToggleHighlightMode(style) => {
       5_100
         + match style {
-          Some(style) => style as u64,
+          Some(style) => style.slot(),
           None => 999,
         }
     },

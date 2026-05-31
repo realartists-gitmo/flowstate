@@ -62,6 +62,7 @@ fn paragraph_command_id(style: ParagraphStyle) -> Option<CommandId> {
     ParagraphStyle::Tag => Some(CommandId::SetParagraphTag),
     ParagraphStyle::Analytic => Some(CommandId::SetParagraphAnalytic),
     ParagraphStyle::Undertag => Some(CommandId::SetParagraphUndertag),
+    ParagraphStyle::Custom(_) => None,
   }
 }
 
@@ -74,6 +75,7 @@ fn semantic_command_id(style: RunSemanticStyle) -> Option<CommandId> {
     RunSemanticStyle::Ultracondensed => None,
     RunSemanticStyle::Underline => Some(CommandId::ToggleUnderline),
     RunSemanticStyle::Plain => Some(CommandId::ClearFormatting),
+    RunSemanticStyle::Custom(_) => None,
   }
 }
 
@@ -87,6 +89,7 @@ fn paragraph_priority(style: ParagraphStyle) -> u8 {
     ParagraphStyle::Tag => 78,
     ParagraphStyle::Analytic => 76,
     ParagraphStyle::Undertag => 72,
+    ParagraphStyle::Custom(_) => 60,
   }
 }
 
@@ -99,6 +102,7 @@ fn semantic_priority(style: RunSemanticStyle) -> u8 {
     RunSemanticStyle::Ultracondensed => 70,
     RunSemanticStyle::Underline => 82,
     RunSemanticStyle::Plain => 0,
+    RunSemanticStyle::Custom(_) => 60,
   }
 }
 
@@ -107,6 +111,7 @@ fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   match style {
     ParagraphStyle::Normal | ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block => OverflowBehavior::KeepVisible,
     ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag => OverflowBehavior::MoveToOverflow,
+    ParagraphStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
 
@@ -116,6 +121,6 @@ fn semantic_overflow_behavior(style: RunSemanticStyle) -> OverflowBehavior {
     RunSemanticStyle::Cite | RunSemanticStyle::Emphasis | RunSemanticStyle::Underline => OverflowBehavior::KeepVisible,
     RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed => OverflowBehavior::MoveToOverflow,
     RunSemanticStyle::Plain => OverflowBehavior::HideInCompact,
+    RunSemanticStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
-

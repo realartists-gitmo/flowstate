@@ -82,7 +82,7 @@ fn add_text_run(
 fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle, theme: &DocumentTheme) -> Run {
   let mut run = run.fonts(docx_fonts(theme));
   run = match styles.semantic {
-    RunSemanticStyle::Plain => run,
+    RunSemanticStyle::Plain | RunSemanticStyle::Custom(_) => run,
     RunSemanticStyle::Cite => run.style("Style13ptBold"),
     RunSemanticStyle::Emphasis => run
       .style("Emphasis")
@@ -125,7 +125,7 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
     run = run.shading(Shading::new().fill(color_hex(match highlight {
       HighlightStyle::Spoken => theme.highlight_spoken,
       HighlightStyle::Insert => theme.highlight_insert,
-      HighlightStyle::Alternative => theme.highlight_alternative,
+      HighlightStyle::Alternative | HighlightStyle::Custom(_) => theme.highlight_alternative,
     })));
   }
   run

@@ -232,7 +232,7 @@ fn outline_level(style: ParagraphStyle) -> Option<usize> {
     ParagraphStyle::Hat => Some(1),
     ParagraphStyle::Block => Some(2),
     ParagraphStyle::Tag | ParagraphStyle::Analytic => Some(3),
-    ParagraphStyle::Normal | ParagraphStyle::Undertag => None,
+    ParagraphStyle::Normal | ParagraphStyle::Undertag | ParagraphStyle::Custom(_) => None,
   }
 }
 
