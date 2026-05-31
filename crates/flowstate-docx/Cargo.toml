@@ -9,12 +9,14 @@ docxide-pdf = { version = "0.14.0", default-features = false, git = "https://git
 flowstate-document = { path = "../flowstate-document" }
 gpui = { version = "0.2.2", default-features = false }
 hotpath = "0.16.1"
+lopdf = "0.40.0"
 quick-xml = "0.36.2"
 rdocx = "0.1.2"
 rdocx-opc = "0.1.2"
 rdocx-oxml = "0.1.2"
 rustc-hash = "2.1.2"
 zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+zstd = "0.13.3"
 
 [features]
 hotpath = ["hotpath/hotpath", "flowstate-document/hotpath"]
