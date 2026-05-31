@@ -110,13 +110,6 @@ impl RichTextEditor {
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
       }
-      let preview_update = self
-        .active_text_drag
-        .as_ref()
-        .map(|drag| self.internal_text_drop_preview_update(&drag.fragment, window, cx));
-      if let Some(preview_update) = preview_update {
-        self.apply_drop_preview_update(preview_update);
-      }
       cx.notify();
       return;
     }
