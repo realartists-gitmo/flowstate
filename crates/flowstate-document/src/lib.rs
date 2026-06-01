@@ -3,6 +3,7 @@ pub use gpui_flowtext::*;
 use std::{io, path::Path};
 
 use gpui::{Pixels, black, px, rgb};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 pub const FLOWSTATE_EXTENSION: &str = "db8";
 
@@ -48,28 +49,42 @@ pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
 }
 
 pub fn flowstate_document_theme() -> DocumentTheme {
-  let mut theme = DocumentTheme::default();
-  theme.default_font_family = "Carlito".into();
-  theme.body_font_size = pt(11.0);
-  theme.line_spacing = 259.0 / 240.0;
-  theme.line_gap_fraction = 0.18;
-  theme.paragraph_after = pt(8.0);
-  theme.inline_border_paint_width = px(0.5);
-  theme.box_padding_left = pt(0.96);
-  theme.box_padding_right = pt(1.01);
-  theme.box_padding_top = pt(1.47);
-  theme.box_padding_bottom = pt(1.09);
-  theme.highlight_pad_x = pt(0.0);
-  theme.highlight_top_extra_fraction = 0.22;
-  theme.highlight_bottom_extra_fraction = 0.092;
-  theme.underline_fallback_top_from_baseline = pt(1.246);
-  theme.underline_rule_thickness = px(1.0);
-  theme.snap_underline_rules_to_pixels = true;
-  theme.double_underline_top_from_baseline = pt(17.79 - 16.5);
-  theme.double_underline_gap = pt(1.20);
-  theme.normal_bold = false;
-  theme.normal_italic = false;
-  theme.normal_underline = ThemeUnderline::None;
+  let mut theme = DocumentTheme {
+    zoom_factor: 1.0,
+    default_font_family: "Carlito".into(),
+    default_text_color: black(),
+    document_background_color: rgb(0x00ff_ffff).into(),
+    pageless_inset_x: px(24.0),
+    pageless_inset_top: px(16.0),
+    pageless_inset_bottom: px(24.0),
+    body_font_size: pt(11.0),
+    line_spacing: 259.0 / 240.0,
+    line_gap_fraction: 0.18,
+    paragraph_after: pt(8.0),
+    inline_border_paint_width: px(0.5),
+    box_padding_left: pt(0.96),
+    box_padding_right: pt(1.01),
+    box_padding_top: pt(1.47),
+    box_padding_bottom: pt(1.09),
+    highlight_pad_x: pt(0.0),
+    highlight_top_extra_fraction: 0.22,
+    highlight_bottom_extra_fraction: 0.092,
+    underline_fallback_top_from_baseline: pt(1.246),
+    underline_rule_thickness: px(1.0),
+    snap_underline_rules_to_pixels: true,
+    double_underline_top_from_baseline: pt(17.79 - 16.5),
+    double_underline_gap: pt(1.20),
+    default_highlight_color: rgb(0x00ff_f59d).into(),
+    normal_bold: false,
+    normal_italic: false,
+    normal_underline: ThemeUnderline::None,
+    custom_paragraph_styles: FxHashMap::default(),
+    custom_semantic_styles: FxHashMap::default(),
+    custom_highlight_styles: FxHashMap::default(),
+    invisibility_visible_paragraph_styles: FxHashSet::default(),
+    invisibility_visible_semantic_styles: FxHashSet::default(),
+    invisibility_visible_highlight_styles: FxHashSet::default(),
+  };
 
   theme.set_custom_paragraph_style(
     0,

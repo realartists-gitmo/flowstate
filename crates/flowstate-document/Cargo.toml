@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 gpui-flowtext = { workspace = true }
 gpui = { version = "0.2.2", default-features = false }
+rustc-hash = { workspace = true }
 
 [features]
 hotpath = ["gpui-flowtext/hotpath"]

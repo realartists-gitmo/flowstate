@@ -38,7 +38,7 @@ hotpath = [
 ]
 hotpath-cpu = [
   "hotpath",
-  "dep:hotpath-cpu-support",
+  "hotpath/hotpath-cpu",
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
   "flowstate-flow/hotpath-cpu",
@@ -54,9 +54,6 @@ profiler = ["hotpath", "hotpath-alloc"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { workspace = true }
-
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-hotpath-cpu-support = { workspace = true, optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }

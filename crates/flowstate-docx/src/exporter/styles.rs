@@ -208,6 +208,7 @@ fn paragraph_style(theme: &DocumentTheme, slot: u8) -> &CustomParagraphStyle {
   theme
     .custom_paragraph_styles
     .get(&slot)
+    .or_else(|| theme.custom_paragraph_styles.get(&0))
     .expect("Flowstate document theme must define paragraph style slot")
 }
 
@@ -215,5 +216,6 @@ fn semantic_style(theme: &DocumentTheme, slot: u8) -> &CustomSemanticStyle {
   theme
     .custom_semantic_styles
     .get(&slot)
+    .or_else(|| theme.custom_semantic_styles.get(&1))
     .expect("Flowstate document theme must define semantic style slot")
 }

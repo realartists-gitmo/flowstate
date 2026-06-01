@@ -15,10 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
 
-[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-hotpath-cpu-support = { workspace = true, optional = true }
-
 [features]
 hotpath = ["hotpath/hotpath"]
-hotpath-cpu = ["hotpath", "dep:hotpath-cpu-support"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]

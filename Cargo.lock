@@ -2263,7 +2263,6 @@ dependencies = [
  "anyhow",
  "clap",
  "cosmic-text",
- "crop",
  "dirs 6.0.0",
  "fff-search",
  "flowstate-document",
@@ -2275,16 +2274,12 @@ dependencies = [
  "gpui-component-assets",
  "gpui-symbols",
  "hotpath",
- "imagesize",
- "mathjax_svg",
  "mimalloc",
- "resvg",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
- "unicode-segmentation",
  "uuid",
 ]
 
@@ -2294,6 +2289,7 @@ version = "0.1.0"
 dependencies = [
  "gpui",
  "gpui-flowtext",
+ "rustc-hash 2.1.2",
 ]
 
 [[package]]

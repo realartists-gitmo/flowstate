@@ -29,7 +29,6 @@ gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
 gpui-symbols = { version = "0.6.1", features = ["component"] }
 hotpath = "0.16.1"
-hotpath-cpu-support = { package = "hotpath", version = "0.16.1", features = ["hotpath-cpu"] }
 ignore = "0.4.25"
 imagesize = "0.13"
 lopdf = "0.40.0"
