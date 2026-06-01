@@ -419,33 +419,21 @@ impl Workspace {
           break;
         }
 
-        let client = run_on_sync_runtime({
-          let invite = invite.clone();
-          async move { connect_live_invite(&invite).await }
-        });
+        let client = cx
+          .background_executor()
+          .spawn({
+            let invite = invite.clone();
+            async move {
+              run_on_sync_runtime(async move {
+                let mut client = connect_live_invite(&invite).await?;
+                client.request_document_assets().await?;
+                Ok(client)
+              })
+            }
+          })
+          .await;
         match client {
           Ok(mut client) => {
-            if let Err(error) = run_on_sync_runtime(client.request_document_assets()) {
-              let _ = window_handle.update(cx, |_, _, cx| {
-                let _ = workspace.update(cx, |workspace, cx| {
-                  workspace.collaboration.state = if target_panel_id.is_some() {
-                    SessionState::Reconnecting
-                  } else {
-                    SessionState::Failed
-                  };
-                  workspace.collaboration.last_error = Some(format!("{error:#}"));
-                  workspace.collaboration_client_updates = None;
-                  cx.notify();
-                });
-              });
-              let _ = run_on_sync_runtime(client.shutdown());
-              if target_panel_id.is_none() {
-                return;
-              }
-              run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
-              reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
-              continue;
-            }
             let (update_tx, mut update_rx) = mpsc::unbounded_channel::<PendingCollaborationUpdate>();
             let authorized_role = client.authorization.role;
             let joined_document_id = client.document.document_id();
@@ -508,46 +496,66 @@ impl Workspace {
               .ok()
               .flatten();
             let Some(collaboration_panel_id) = collaboration_panel_id else {
-              let _ = run_on_sync_runtime(client.shutdown());
+              let _ = cx
+                .background_executor()
+                .spawn(async move { run_on_sync_runtime(client.shutdown()) })
+                .await;
               return;
             };
             target_panel_id = Some(collaboration_panel_id);
             reconnect_delay = std::time::Duration::from_millis(500);
             let mut local_disconnect = false;
             loop {
-              let mut handled_local_update = false;
-              let received = run_on_sync_runtime(async {
-                tokio::select! {
-                  update = client.receive_next_update() => update,
-                  update = update_rx.recv() => {
-                    match update {
-                      Some(update) => {
-                        let result = match update {
-                          PendingCollaborationUpdate::Source { source, application, .. } => client.replace_source_from(&source, application).await,
-                          PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
-                        };
-                        if let Err(error) = result {
-                          let detail = format!("{error:#}");
-                          let _ = window_handle.update(cx, |_, _, cx| {
-                            let _ = workspace.update(cx, |workspace, cx| {
-                              if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
-                                workspace.collaboration.last_error = Some(detail);
-                                cx.notify();
-                              }
-                            });
-                          });
+              let (next_client, next_update_rx, received, handled_local_update, disconnected, update_error) = cx
+                .background_executor()
+                .spawn(async move {
+                  let mut update_error = None;
+                  let mut handled_local_update = false;
+                  let mut disconnected = false;
+                  let received = run_on_sync_runtime(async {
+                    tokio::select! {
+                      update = client.receive_next_update() => update,
+                      update = update_rx.recv() => {
+                        match update {
+                          Some(update) => {
+                            let result = match update {
+                              PendingCollaborationUpdate::Source { source, application, .. } => {
+                                client.replace_source_from(&source, application).await
+                              },
+                              PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
+                            };
+                            if let Err(error) = result {
+                              update_error = Some(format!("{error:#}"));
+                            }
+                            handled_local_update = true;
+                            Ok(None)
+                          },
+                          None => {
+                            disconnected = true;
+                            Ok(None)
+                          },
                         }
-                        handled_local_update = true;
-                        Ok(None)
-                      },
-                      None => {
-                        local_disconnect = true;
-                        Ok(None)
                       },
                     }
-                  },
-                }
-              });
+                  });
+                  (client, update_rx, received, handled_local_update, disconnected, update_error)
+                })
+                .await;
+              client = next_client;
+              update_rx = next_update_rx;
+              if let Some(detail) = update_error {
+                let _ = window_handle.update(cx, |_, _, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
+                      workspace.collaboration.last_error = Some(detail);
+                      cx.notify();
+                    }
+                  });
+                });
+              }
+              if disconnected {
+                local_disconnect = true;
+              }
               if handled_local_update {
                 continue;
               }
@@ -578,7 +586,10 @@ impl Workspace {
                 },
               }
             }
-            let _ = run_on_sync_runtime(client.shutdown());
+            let _ = cx
+              .background_executor()
+              .spawn(async move { run_on_sync_runtime(client.shutdown()) })
+              .await;
             if !local_disconnect {
               let _ = window_handle.update(cx, |_, _, cx| {
                 let _ = workspace.update(cx, |workspace, cx| {
@@ -589,7 +600,7 @@ impl Workspace {
                   cx.notify();
                 });
               });
-              run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
+              cx.background_executor().timer(reconnect_delay).await;
               reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
               continue;
             }
@@ -611,7 +622,7 @@ impl Workspace {
             if target_panel_id.is_none() {
               break;
             }
-            run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
+            cx.background_executor().timer(reconnect_delay).await;
             reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
           },
         }
