@@ -19,7 +19,7 @@ mod tests {
   fn outline_label_normalizes_whitespace_without_full_join() {
     let document = document_from_paragraphs(
       DocumentTheme::default(),
-      vec![paragraph(ParagraphStyle::Pocket, "  alpha\t beta\n\n gamma  ")],
+      vec![paragraph(flowstate_document::PARAGRAPH_POCKET, "  alpha\t beta\n\n gamma  ")],
     );
 
     assert_eq!(outline_paragraph_label(&document, 0), "alpha beta gamma");
@@ -31,11 +31,11 @@ mod tests {
     let document = document_from_paragraphs(
       DocumentTheme::default(),
       vec![
-        paragraph(ParagraphStyle::Pocket, "Root"),
-        paragraph(ParagraphStyle::Hat, "Child"),
+        paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"),
+        paragraph(flowstate_document::PARAGRAPH_HAT, "Child"),
         paragraph(ParagraphStyle::Normal, "Body"),
-        paragraph(ParagraphStyle::Block, "Grandchild"),
-        paragraph(ParagraphStyle::Pocket, "Next"),
+        paragraph(flowstate_document::PARAGRAPH_BLOCK, "Grandchild"),
+        paragraph(flowstate_document::PARAGRAPH_POCKET, "Next"),
       ],
     );
     let nodes = outline_nodes(&document);
@@ -54,12 +54,12 @@ mod tests {
   fn outline_signature_ignores_non_outline_text_edits() {
     let before = document_from_paragraphs(
       DocumentTheme::default(),
-      vec![paragraph(ParagraphStyle::Pocket, "Root"), paragraph(ParagraphStyle::Normal, "Body")],
+      vec![paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"), paragraph(ParagraphStyle::Normal, "Body")],
     );
     let after = document_from_paragraphs(
       DocumentTheme::default(),
       vec![
-        paragraph(ParagraphStyle::Pocket, "Root"),
+        paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"),
         paragraph(ParagraphStyle::Normal, "Body with more plain text"),
       ],
     );
@@ -72,16 +72,16 @@ mod tests {
   fn outline_signature_tracks_outline_labels_and_paragraph_count() {
     let before = document_from_paragraphs(
       DocumentTheme::default(),
-      vec![paragraph(ParagraphStyle::Pocket, "Root"), paragraph(ParagraphStyle::Normal, "Body")],
+      vec![paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"), paragraph(ParagraphStyle::Normal, "Body")],
     );
     let renamed = document_from_paragraphs(
       DocumentTheme::default(),
-      vec![paragraph(ParagraphStyle::Pocket, "Renamed"), paragraph(ParagraphStyle::Normal, "Body")],
+      vec![paragraph(flowstate_document::PARAGRAPH_POCKET, "Renamed"), paragraph(ParagraphStyle::Normal, "Body")],
     );
     let appended = document_from_paragraphs(
       DocumentTheme::default(),
       vec![
-        paragraph(ParagraphStyle::Pocket, "Root"),
+        paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"),
         paragraph(ParagraphStyle::Normal, "Body"),
         paragraph(ParagraphStyle::Normal, "More body"),
       ],

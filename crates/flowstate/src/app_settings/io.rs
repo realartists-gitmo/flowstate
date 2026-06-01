@@ -20,7 +20,7 @@ pub fn load_document_theme() -> DocumentTheme {
   load_app_settings()
     .document_theme
     .map(DocumentTheme::from)
-    .unwrap_or_default()
+    .unwrap_or_else(flowstate_document_theme)
 }
 
 #[hotpath::measure]

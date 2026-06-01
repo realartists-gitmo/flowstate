@@ -1,3 +1,86 @@
+use crate::app_settings::DocumentThemeSettings;
+
+macro_rules! flowstate_face_accessors {
+  ($get:ident, $set:ident, $bold:ident, $italic:ident, $underline:ident) => {
+    fn $get(theme: &DocumentTheme) -> (bool, bool, ThemeUnderline) {
+      let settings = DocumentThemeSettings::from(theme);
+      (settings.$bold, settings.$italic, settings.$underline.into())
+    }
+
+    fn $set(theme: &mut DocumentTheme, bold: bool, italic: bool, underline: ThemeUnderline) {
+      let mut settings = DocumentThemeSettings::from(&*theme);
+      settings.$bold = bold;
+      settings.$italic = italic;
+      settings.$underline = underline.into();
+      *theme = settings.into();
+    }
+  };
+}
+
+macro_rules! flowstate_color_accessors {
+  ($get:ident, $set:ident, $field:ident) => {
+    fn $get(theme: &DocumentTheme) -> Hsla {
+      DocumentThemeSettings::from(theme).$field.into()
+    }
+
+    fn $set(theme: &mut DocumentTheme, value: Hsla) {
+      let mut settings = DocumentThemeSettings::from(&*theme);
+      settings.$field = value.into();
+      *theme = settings.into();
+    }
+  };
+}
+
+macro_rules! flowstate_size_accessors {
+  ($get:ident, $set:ident, $field:ident) => {
+    fn $get(theme: &DocumentTheme) -> f64 {
+      pixels_to_pt(px(DocumentThemeSettings::from(theme).$field))
+    }
+
+    fn $set(theme: &mut DocumentTheme, value: f64) {
+      let mut settings = DocumentThemeSettings::from(&*theme);
+      settings.$field = pt_to_pixels(value).as_f32();
+      *theme = settings.into();
+    }
+  };
+}
+
+flowstate_face_accessors!(get_pocket_face, set_pocket_face, pocket_bold, pocket_italic, pocket_underline);
+flowstate_face_accessors!(get_hat_face, set_hat_face, hat_bold, hat_italic, hat_underline);
+flowstate_face_accessors!(get_block_face, set_block_face, block_bold, block_italic, block_underline);
+flowstate_face_accessors!(get_tag_face, set_tag_face, tag_bold, tag_italic, tag_underline);
+flowstate_face_accessors!(get_cite_face, set_cite_face, cite_bold, cite_italic, cite_underline);
+flowstate_face_accessors!(get_condensed_face, set_condensed_face, condensed_bold, condensed_italic, condensed_underline);
+flowstate_face_accessors!(get_ultracondensed_face, set_ultracondensed_face, ultracondensed_bold, ultracondensed_italic, ultracondensed_underline);
+flowstate_face_accessors!(get_emphasis_face, set_emphasis_face, emphasis_bold, emphasis_italic, emphasis_underline);
+flowstate_face_accessors!(get_underline_face, set_underline_face, underline_bold, underline_italic, underline_underline);
+flowstate_face_accessors!(get_analytic_face, set_analytic_face, analytic_bold, analytic_italic, analytic_underline);
+flowstate_face_accessors!(get_undertag_face, set_undertag_face, undertag_bold, undertag_italic, undertag_underline);
+
+flowstate_color_accessors!(get_pocket_color, set_pocket_color, pocket_color);
+flowstate_color_accessors!(get_hat_color, set_hat_color, hat_color);
+flowstate_color_accessors!(get_block_color, set_block_color, block_color);
+flowstate_color_accessors!(get_tag_color, set_tag_color, tag_color);
+flowstate_color_accessors!(get_cite_color, set_cite_color, cite_color);
+flowstate_color_accessors!(get_condensed_color, set_condensed_color, condensed_color);
+flowstate_color_accessors!(get_ultracondensed_color, set_ultracondensed_color, ultracondensed_color);
+flowstate_color_accessors!(get_emphasis_color, set_emphasis_color, emphasis_color);
+flowstate_color_accessors!(get_underline_color, set_underline_color, underline_color);
+flowstate_color_accessors!(get_analytic_color, set_analytic_color, analytic_color);
+flowstate_color_accessors!(get_undertag_color, set_undertag_color, undertag_color);
+flowstate_color_accessors!(get_highlight_spoken, set_highlight_spoken, highlight_spoken);
+flowstate_color_accessors!(get_highlight_insert, set_highlight_insert, highlight_insert);
+flowstate_color_accessors!(get_highlight_alternative, set_highlight_alternative, highlight_alternative);
+
+flowstate_size_accessors!(get_pocket_size, set_pocket_size, pocket_font_size);
+flowstate_size_accessors!(get_hat_size, set_hat_size, hat_font_size);
+flowstate_size_accessors!(get_block_size, set_block_size, block_font_size);
+flowstate_size_accessors!(get_tag_size, set_tag_size, tag_font_size);
+flowstate_size_accessors!(get_cite_size, set_cite_size, cite_font_size);
+flowstate_size_accessors!(get_condensed_size, set_condensed_size, condensed_font_size);
+flowstate_size_accessors!(get_ultracondensed_size, set_ultracondensed_size, ultracondensed_font_size);
+flowstate_size_accessors!(get_undertag_size, set_undertag_size, undertag_font_size);
+
 #[hotpath::measure_all]
 impl Workspace {
   fn on_save(&mut self, _: &Save, window: &mut Window, cx: &mut Context<Self>) {
@@ -136,118 +219,68 @@ impl Workspace {
             .item(style_face_item(
               workspace.clone(),
               "Pocket",
-              |theme| (theme.pocket_bold, theme.pocket_italic, theme.pocket_underline),
-              |theme, bold, italic, underline| {
-                theme.pocket_bold = bold;
-                theme.pocket_italic = italic;
-                theme.pocket_underline = underline;
-              },
+              get_pocket_face,
+              set_pocket_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Hat",
-              |theme| (theme.hat_bold, theme.hat_italic, theme.hat_underline),
-              |theme, bold, italic, underline| {
-                theme.hat_bold = bold;
-                theme.hat_italic = italic;
-                theme.hat_underline = underline;
-              },
+              get_hat_face,
+              set_hat_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Block",
-              |theme| (theme.block_bold, theme.block_italic, theme.block_underline),
-              |theme, bold, italic, underline| {
-                theme.block_bold = bold;
-                theme.block_italic = italic;
-                theme.block_underline = underline;
-              },
+              get_block_face,
+              set_block_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Tag",
-              |theme| (theme.tag_bold, theme.tag_italic, theme.tag_underline),
-              |theme, bold, italic, underline| {
-                theme.tag_bold = bold;
-                theme.tag_italic = italic;
-                theme.tag_underline = underline;
-              },
+              get_tag_face,
+              set_tag_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Cite",
-              |theme| (theme.cite_bold, theme.cite_italic, theme.cite_underline),
-              |theme, bold, italic, underline| {
-                theme.cite_bold = bold;
-                theme.cite_italic = italic;
-                theme.cite_underline = underline;
-              },
+              get_cite_face,
+              set_cite_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Condensed",
-              |theme| (theme.condensed_bold, theme.condensed_italic, theme.condensed_underline),
-              |theme, bold, italic, underline| {
-                theme.condensed_bold = bold;
-                theme.condensed_italic = italic;
-                theme.condensed_underline = underline;
-              },
+              get_condensed_face,
+              set_condensed_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Ultra Condensed",
-              |theme| {
-                (
-                  theme.ultracondensed_bold,
-                  theme.ultracondensed_italic,
-                  theme.ultracondensed_underline,
-                )
-              },
-              |theme, bold, italic, underline| {
-                theme.ultracondensed_bold = bold;
-                theme.ultracondensed_italic = italic;
-                theme.ultracondensed_underline = underline;
-              },
+              get_ultracondensed_face,
+              set_ultracondensed_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Emphasis",
-              |theme| (theme.emphasis_bold, theme.emphasis_italic, theme.emphasis_underline),
-              |theme, bold, italic, underline| {
-                theme.emphasis_bold = bold;
-                theme.emphasis_italic = italic;
-                theme.emphasis_underline = underline;
-              },
+              get_emphasis_face,
+              set_emphasis_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Underline",
-              |theme| (theme.underline_bold, theme.underline_italic, theme.underline_underline),
-              |theme, bold, italic, underline| {
-                theme.underline_bold = bold;
-                theme.underline_italic = italic;
-                theme.underline_underline = underline;
-              },
+              get_underline_face,
+              set_underline_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Analytic",
-              |theme| (theme.analytic_bold, theme.analytic_italic, theme.analytic_underline),
-              |theme, bold, italic, underline| {
-                theme.analytic_bold = bold;
-                theme.analytic_italic = italic;
-                theme.analytic_underline = underline;
-              },
+              get_analytic_face,
+              set_analytic_face,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Undertag",
-              |theme| (theme.undertag_bold, theme.undertag_italic, theme.undertag_underline),
-              |theme, bold, italic, underline| {
-                theme.undertag_bold = bold;
-                theme.undertag_italic = italic;
-                theme.undertag_underline = underline;
-              },
+              get_undertag_face,
+              set_undertag_face,
             )),
         ),
       SettingPage::new("Colors")
@@ -264,68 +297,68 @@ impl Workspace {
             .item(style_color_item(
               workspace.clone(),
               "Pocket",
-              |theme| theme.pocket_color,
-              |theme, value| theme.pocket_color = value,
+              get_pocket_color,
+              set_pocket_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Hat",
-              |theme| theme.hat_color,
-              |theme, value| theme.hat_color = value,
+              get_hat_color,
+              set_hat_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Block",
-              |theme| theme.block_color,
-              |theme, value| theme.block_color = value,
+              get_block_color,
+              set_block_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Tag",
-              |theme| theme.tag_color,
-              |theme, value| theme.tag_color = value,
+              get_tag_color,
+              set_tag_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Cite",
-              |theme| theme.cite_color,
-              |theme, value| theme.cite_color = value,
+              get_cite_color,
+              set_cite_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Condensed",
-              |theme| theme.condensed_color,
-              |theme, value| theme.condensed_color = value,
+              get_condensed_color,
+              set_condensed_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Ultra Condensed",
-              |theme| theme.ultracondensed_color,
-              |theme, value| theme.ultracondensed_color = value,
+              get_ultracondensed_color,
+              set_ultracondensed_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Emphasis",
-              |theme| theme.emphasis_color,
-              |theme, value| theme.emphasis_color = value,
+              get_emphasis_color,
+              set_emphasis_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Underline",
-              |theme| theme.underline_color,
-              |theme, value| theme.underline_color = value,
+              get_underline_color,
+              set_underline_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Analytic",
-              |theme| theme.analytic_color,
-              |theme, value| theme.analytic_color = value,
+              get_analytic_color,
+              set_analytic_color,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Undertag",
-              |theme| theme.undertag_color,
-              |theme, value| theme.undertag_color = value,
+              get_undertag_color,
+              set_undertag_color,
             )),
         )
         .group(
@@ -334,26 +367,20 @@ impl Workspace {
             .item(style_color_item(
               workspace.clone(),
               "Spoken highlight",
-              |theme| theme.highlight_spoken,
-              |theme, value| {
-                theme.highlight_spoken = value;
-              },
+              get_highlight_spoken,
+              set_highlight_spoken,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Insert highlight",
-              |theme| theme.highlight_insert,
-              |theme, value| {
-                theme.highlight_insert = value;
-              },
+              get_highlight_insert,
+              set_highlight_insert,
             ))
             .item(style_color_item(
               workspace.clone(),
               "Alt highlight",
-              |theme| theme.highlight_alternative,
-              |theme, value| {
-                theme.highlight_alternative = value;
-              },
+              get_highlight_alternative,
+              set_highlight_alternative,
             )),
         ),
       SettingPage::new("Size")
@@ -376,8 +403,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.pocket_font_size),
-              |theme, value| theme.pocket_font_size = pt_to_pixels(value),
+              get_pocket_size,
+              set_pocket_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -385,8 +412,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.hat_font_size),
-              |theme, value| theme.hat_font_size = pt_to_pixels(value),
+              get_hat_size,
+              set_hat_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -394,8 +421,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.block_font_size),
-              |theme, value| theme.block_font_size = pt_to_pixels(value),
+              get_block_size,
+              set_block_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -403,8 +430,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.tag_font_size),
-              |theme, value| theme.tag_font_size = pt_to_pixels(value),
+              get_tag_size,
+              set_tag_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -412,8 +439,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.cite_font_size),
-              |theme, value| theme.cite_font_size = pt_to_pixels(value),
+              get_cite_size,
+              set_cite_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -421,8 +448,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.condensed_font_size),
-              |theme, value| theme.condensed_font_size = pt_to_pixels(value),
+              get_condensed_size,
+              set_condensed_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -430,8 +457,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.ultracondensed_font_size),
-              |theme, value| theme.ultracondensed_font_size = pt_to_pixels(value),
+              get_ultracondensed_size,
+              set_ultracondensed_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -439,8 +466,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.cite_font_size),
-              |theme, value| theme.cite_font_size = pt_to_pixels(value),
+              get_cite_size,
+              set_cite_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -457,8 +484,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.tag_font_size),
-              |theme, value| theme.tag_font_size = pt_to_pixels(value),
+              get_tag_size,
+              set_tag_size,
             ))
             .item(style_number_item(
               workspace.clone(),
@@ -466,8 +493,8 @@ impl Workspace {
               1.0,
               200.0,
               0.25,
-              |theme| pixels_to_pt(theme.undertag_font_size),
-              |theme, value| theme.undertag_font_size = pt_to_pixels(value),
+              get_undertag_size,
+              set_undertag_size,
             )),
         ),
       SettingPage::new("Background")
@@ -544,7 +571,7 @@ fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGr
 impl Workspace {
   fn reset_document_style_section(&mut self, cx: &mut Context<Self>) {
     let section = self.document_style_section;
-    let defaults = DocumentTheme::default();
+    let defaults = flowstate_document_theme();
     let mut theme = self
       .active_editor
       .as_ref()
@@ -560,67 +587,19 @@ impl Workspace {
         theme.normal_underline = defaults.normal_underline;
       },
       DocumentStyleSection::Style => {
-        theme.pocket_bold = defaults.pocket_bold;
-        theme.pocket_italic = defaults.pocket_italic;
-        theme.pocket_underline = defaults.pocket_underline;
-        theme.hat_bold = defaults.hat_bold;
-        theme.hat_italic = defaults.hat_italic;
-        theme.hat_underline = defaults.hat_underline;
-        theme.block_bold = defaults.block_bold;
-        theme.block_italic = defaults.block_italic;
-        theme.block_underline = defaults.block_underline;
-        theme.tag_bold = defaults.tag_bold;
-        theme.tag_italic = defaults.tag_italic;
-        theme.tag_underline = defaults.tag_underline;
-        theme.cite_bold = defaults.cite_bold;
-        theme.cite_italic = defaults.cite_italic;
-        theme.cite_underline = defaults.cite_underline;
-        theme.condensed_bold = defaults.condensed_bold;
-        theme.condensed_italic = defaults.condensed_italic;
-        theme.condensed_underline = defaults.condensed_underline;
-        theme.ultracondensed_bold = defaults.ultracondensed_bold;
-        theme.ultracondensed_italic = defaults.ultracondensed_italic;
-        theme.ultracondensed_underline = defaults.ultracondensed_underline;
-        theme.emphasis_bold = defaults.emphasis_bold;
-        theme.emphasis_italic = defaults.emphasis_italic;
-        theme.emphasis_underline = defaults.emphasis_underline;
-        theme.underline_bold = defaults.underline_bold;
-        theme.underline_italic = defaults.underline_italic;
-        theme.underline_underline = defaults.underline_underline;
-        theme.analytic_bold = defaults.analytic_bold;
-        theme.analytic_italic = defaults.analytic_italic;
-        theme.analytic_underline = defaults.analytic_underline;
-        theme.undertag_bold = defaults.undertag_bold;
-        theme.undertag_italic = defaults.undertag_italic;
-        theme.undertag_underline = defaults.undertag_underline;
+        theme.custom_paragraph_styles = defaults.custom_paragraph_styles;
+        theme.custom_semantic_styles = defaults.custom_semantic_styles;
       },
       DocumentStyleSection::Colors => {
         theme.default_text_color = defaults.default_text_color;
-        theme.pocket_color = defaults.pocket_color;
-        theme.hat_color = defaults.hat_color;
-        theme.block_color = defaults.block_color;
-        theme.tag_color = defaults.tag_color;
-        theme.cite_color = defaults.cite_color;
-        theme.condensed_color = defaults.condensed_color;
-        theme.ultracondensed_color = defaults.ultracondensed_color;
-        theme.emphasis_color = defaults.emphasis_color;
-        theme.underline_color = defaults.underline_color;
-        theme.analytic_color = defaults.analytic_color;
-        theme.undertag_color = defaults.undertag_color;
-        theme.highlight_spoken = defaults.highlight_spoken;
-        theme.highlight_insert = defaults.highlight_insert;
-        theme.highlight_alternative = defaults.highlight_alternative;
+        theme.custom_paragraph_styles = defaults.custom_paragraph_styles;
+        theme.custom_semantic_styles = defaults.custom_semantic_styles;
+        theme.custom_highlight_styles = defaults.custom_highlight_styles;
       },
       DocumentStyleSection::Size => {
         theme.body_font_size = defaults.body_font_size;
-        theme.pocket_font_size = defaults.pocket_font_size;
-        theme.hat_font_size = defaults.hat_font_size;
-        theme.block_font_size = defaults.block_font_size;
-        theme.tag_font_size = defaults.tag_font_size;
-        theme.cite_font_size = defaults.cite_font_size;
-        theme.condensed_font_size = defaults.condensed_font_size;
-        theme.ultracondensed_font_size = defaults.ultracondensed_font_size;
-        theme.undertag_font_size = defaults.undertag_font_size;
+        theme.custom_paragraph_styles = defaults.custom_paragraph_styles;
+        theme.custom_semantic_styles = defaults.custom_semantic_styles;
       },
       DocumentStyleSection::Background => {
         theme.document_background_color = defaults.document_background_color;

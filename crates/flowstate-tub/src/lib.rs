@@ -9,7 +9,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  Document, DocumentSection, InputParagraph, InputRun, RunSemanticStyle, SectionId, SectionKind, document_text_slice, paragraph_byte_range,
+  Document, DocumentSection, InputParagraph, InputRun, SectionId, SectionKind, document_text_slice, paragraph_byte_range,
   paragraph_index_for_id, paragraph_text_len, read_db8,
 };
 use ignore::WalkBuilder;
@@ -101,12 +101,13 @@ impl SearchUnitKind {
 
   const fn from_section(kind: SectionKind) -> Self {
     match kind {
-      SectionKind::Pocket => Self::Pocket,
-      SectionKind::Hat => Self::Hat,
-      SectionKind::BlockSection => Self::BlockSection,
-      SectionKind::TagSection => Self::TagSection,
-      SectionKind::Analytic => Self::Analytic,
-      SectionKind::Card => Self::Card,
+      SectionKind::Custom(0) => Self::Pocket,
+      SectionKind::Custom(1) => Self::Hat,
+      SectionKind::Custom(2) => Self::BlockSection,
+      SectionKind::Custom(3) => Self::TagSection,
+      SectionKind::Custom(4) => Self::Analytic,
+      SectionKind::Custom(5) => Self::Card,
+      SectionKind::Custom(_) => Self::Paragraph,
     }
   }
 }
@@ -1005,7 +1006,7 @@ fn cite_for_range(document: &Document, start: usize, end: usize) -> Option<Strin
     let paragraph_range = paragraph_byte_range(document, paragraph_ix);
     let mut offset = 0_usize;
     for run in &paragraph.runs {
-      if run.styles.semantic == RunSemanticStyle::Cite {
+      if run.styles.semantic == flowstate_document::SEMANTIC_CITE {
         let text = document_text_slice(document, paragraph_range.start + offset..paragraph_range.start + offset + run.len);
         let text = text.trim();
         if !text.is_empty() {

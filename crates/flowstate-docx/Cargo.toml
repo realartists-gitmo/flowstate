@@ -25,5 +25,5 @@ zstd = { workspace = true }
 
 [features]
 hotpath = ["hotpath/hotpath", "flowstate-document/hotpath"]
-hotpath-cpu = ["hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu"]
+hotpath-cpu = ["hotpath", "flowstate-document/hotpath-cpu"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc"]

@@ -1,9 +1,0 @@
-include!("styles.rs");
-include!("text.rs");
-include!("fragments.rs");
-include!("split_delete.rs");
-include!("offsets.rs");
-include!("insert_delete.rs");
-include!("selection_styles.rs");
-include!("rich_fragment.rs");
-include!("mutate.rs");

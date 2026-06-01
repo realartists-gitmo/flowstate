@@ -19,5 +19,5 @@ uuid = { workspace = true }
 
 [features]
 hotpath = ["hotpath/hotpath"]
-hotpath-cpu = ["hotpath/hotpath-cpu"]
+hotpath-cpu = ["hotpath"]
 hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]

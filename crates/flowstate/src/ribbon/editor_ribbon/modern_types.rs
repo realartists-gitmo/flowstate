@@ -80,7 +80,7 @@ struct RibbonLabel {
 impl RibbonLabel {
   fn for_command(command: &RibbonCommand) -> Self {
     let icon_path = match command.id {
-      RibbonCommandId::Semantic(RunSemanticStyle::Emphasis) => Some("icons/bold.svg"),
+      RibbonCommandId::Semantic(flowstate_document::SEMANTIC_EMPHASIS) => Some("icons/bold.svg"),
       RibbonCommandId::Underline => Some("icons/underline.svg"),
       RibbonCommandId::Strikethrough => Some("icons/strikethrough.svg"),
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),

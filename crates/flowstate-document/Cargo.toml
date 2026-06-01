@@ -11,6 +11,7 @@ workspace = true
 crop = { workspace = true }
 flowstate-collab = { workspace = true }
 gpui = { workspace = true }
+gpui-flowtext = { workspace = true }
 hotpath = { workspace = true }
 postcard = { workspace = true }
 rustc-hash = { workspace = true }
@@ -19,6 +20,6 @@ tempfile = { workspace = true }
 uuid = { workspace = true }
 
 [features]
-hotpath = ["hotpath/hotpath"]
-hotpath-cpu = ["hotpath/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
+hotpath = ["hotpath/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]

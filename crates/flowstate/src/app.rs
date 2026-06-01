@@ -1,6 +1,8 @@
 use std::{
   borrow::Cow,
+  io,
   path::{Path, PathBuf},
+  sync::Arc,
 };
 
 use gpui::{
@@ -14,7 +16,9 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 
 use crate::app_settings::load_app_settings;
 use crate::commands::register_default_keybindings;
-use crate::rich_text_element::{Document, RichTextEditor, demo_document, write_db8};
+use crate::rich_text_element::{
+  Document, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter, write_db8,
+};
 use crate::workspace::open_workspace_window;
 
 const PROMPT_CONTEXT: &str = "FlowPrompt";
@@ -286,6 +290,35 @@ pub fn write_demo_document() -> anyhow::Result<()> {
   Ok(())
 }
 
+struct FlowstateDocumentExportAdapter;
+
+impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
+  fn send_output_directory(&self, source_path: Option<&Path>, recovery_path: Option<&Path>) -> Option<PathBuf> {
+    if crate::app_settings::load_send_to_document_directory() {
+      source_path
+        .and_then(Path::parent)
+        .or_else(|| recovery_path.and_then(Path::parent))
+        .map(Path::to_path_buf)
+    } else {
+      crate::app_settings::load_send_custom_directory()
+    }
+  }
+
+  fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
+    match format {
+      DocumentExportFormat::Native => write_db8(output_path, document),
+      DocumentExportFormat::NativeWithExtension(_) => write_db8(output_path, document),
+      DocumentExportFormat::Docx => crate::docx_conversion::write_docx(output_path, document),
+      DocumentExportFormat::Pdf => crate::docx_conversion::write_pdf(output_path, document),
+    }
+  }
+}
+
+#[hotpath::measure]
+fn install_flowtext_adapters() {
+  let _ = set_document_export_adapter(Arc::new(FlowstateDocumentExportAdapter));
+}
+
 /// Run the rich text processor by itself for focused component development.
 #[hotpath::measure]
 pub fn run_standalone(document_path: Option<PathBuf>) {
@@ -297,6 +330,7 @@ pub fn run_standalone(document_path: Option<PathBuf>) {
       apply_saved_theme(cx);
       register_rich_text_editor_keybindings(cx);
       install_prompt_renderer(cx);
+      install_flowtext_adapters();
       open_workspace_window(document_path, cx);
       cx.activate(true);
     });

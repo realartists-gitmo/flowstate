@@ -63,7 +63,7 @@ fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
 fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
   let mut commands = SEMANTIC_STYLE_SPECS
     .iter()
-    .filter(|spec| matches!(spec.style, RunSemanticStyle::Cite | RunSemanticStyle::Emphasis))
+    .filter(|spec| matches!(spec.style, flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS))
     .map(|spec| semantic_command(spec.style, spec.label, "keyed", state, armed_tool))
     .collect::<Vec<_>>();
 
@@ -96,10 +96,10 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
       accent: None,
       selected: matches!(
         armed_tool,
-        Some(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed))
+        Some(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED))
       ) || matches!(
         state.semantic,
-        SelectionState::Uniform(RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed)
+        SelectionState::Uniform(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED)
       ),
       disabled: false,
       overflow_behavior: OverflowBehavior::KeepVisible,

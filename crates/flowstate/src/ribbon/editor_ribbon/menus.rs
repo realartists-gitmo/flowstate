@@ -152,7 +152,7 @@ fn modern_condensed_menu(
           let editor = editor.clone();
           move |_, _, cx| {
             editor.update(cx, |editor, cx| {
-              editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
+              editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
             });
           }
         }),
@@ -167,13 +167,13 @@ fn modern_condensed_menu(
             .checked(checked)
             .on_click(move |_, _, cx| {
               editor_for_condensed.update(cx, |editor, cx| {
-                editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
+                editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
               });
             }),
         )
         .item(PopupMenuItem::new("Ultracondensed").on_click(move |_, _, cx| {
           editor_for_ultra.update(cx, |editor, cx| {
-            editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Ultracondensed), cx);
+            editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_ULTRACONDENSED), cx);
           });
         }))
     })
@@ -183,7 +183,7 @@ fn modern_condensed_menu(
 #[hotpath::measure]
 fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let chip_height = metrics.chip_height;
-  let send_created = editor.read(cx).send_db8_created_since_last_saved_edit();
+  let send_created = editor.read(cx).send_document_created_since_last_saved_edit();
   let format_created = editor.read(cx).format_export_created_since_last_saved_edit();
   div()
     .flex()
@@ -263,7 +263,7 @@ fn send_dropdown(
       export_chip_button("modern-ribbon-send", "Send as DB8", "Send", chip_height, metrics).on_click({
         let editor = editor.clone();
         move |_, _, cx| {
-          send_format_from_ribbon(editor.clone(), DocumentExportFormat::Db8, cx);
+          send_format_from_ribbon(editor.clone(), DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION), cx);
         }
       }),
     )
@@ -274,7 +274,7 @@ fn send_dropdown(
       menu
         .min_w(px(120.0))
         .item(PopupMenuItem::new(".db8").on_click(move |_, _, cx| {
-          send_format_from_ribbon(db8_editor.clone(), DocumentExportFormat::Db8, cx);
+          send_format_from_ribbon(db8_editor.clone(), DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION), cx);
         }))
         .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
           send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
