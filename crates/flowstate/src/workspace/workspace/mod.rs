@@ -6,10 +6,8 @@ use std::{
   sync::Arc,
 };
 
-#[allow(unused_imports)]
-use gpui::Bounds;
-#[allow(unused_imports)]
-use gpui::size;
+#[cfg(target_os = "windows")]
+use gpui::{Bounds, size};
 use gpui::{
   AnyElement, AnyWindowHandle, App, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding,
   Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
