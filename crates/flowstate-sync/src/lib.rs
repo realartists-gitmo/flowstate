@@ -305,15 +305,7 @@ impl InviteRegistry {
     label: Option<String>,
     multi_use: bool,
   ) -> AnyResult<InviteTicket> {
-    let ticket = InviteTicket::new_with_options(
-      endpoint_addr,
-      document_id,
-      format_kind,
-      invited_role,
-      expires_unix_secs,
-      label,
-      multi_use,
-    );
+    let ticket = InviteTicket::new_with_options(endpoint_addr, document_id, format_kind, invited_role, expires_unix_secs, label, multi_use);
     self.insert(ticket.clone())?;
     Ok(ticket)
   }
@@ -380,7 +372,10 @@ impl InviteRegistry {
         reason: Some("invite capability is invalid or revoked".to_string()),
       });
     };
-    if ticket.expires_unix_secs.is_some_and(|expiry| now_unix_secs() > expiry) {
+    if ticket
+      .expires_unix_secs
+      .is_some_and(|expiry| now_unix_secs() > expiry)
+    {
       let _ = self.revoke(&hello.invite_capability);
       return Some(AuthorizeMessage {
         accepted: false,
@@ -558,7 +553,9 @@ impl ProtocolHandler for FlowstateProtocol {
     if authorization.accepted
       && let Some(state) = &self.document_state
     {
-      send_snapshot_and_have(&mut send, state, &self.config).await.map_err(accept_error)?;
+      send_snapshot_and_have(&mut send, state, &self.config)
+        .await
+        .map_err(accept_error)?;
       serve_live_stream(&mut send, &mut recv, &hello, authorization.role, state, &self.config)
         .await
         .map_err(accept_error)?;
@@ -573,7 +570,10 @@ pub fn endpoint_builder() -> iroh::endpoint::Builder {
 }
 
 pub async fn bind_endpoint() -> AnyResult<Endpoint> {
-  endpoint_builder().bind().await.context("failed to bind Flowstate Iroh endpoint")
+  endpoint_builder()
+    .bind()
+    .await
+    .context("failed to bind Flowstate Iroh endpoint")
 }
 
 pub fn router(endpoint: Endpoint, config: FlowstateSyncConfig, role_policy: RolePolicy) -> Router {
@@ -605,10 +605,15 @@ pub async fn connect_and_authorize(endpoint: &Endpoint, invite: &InviteTicket, c
     .connect(invite.endpoint_addr.clone(), FLOWSTATE_ALPN)
     .await
     .context("failed to connect to Flowstate peer")?;
-  let (mut send, mut recv) = connection.open_bi().await.context("failed to open Flowstate handshake stream")?;
+  let (mut send, mut recv) = connection
+    .open_bi()
+    .await
+    .context("failed to open Flowstate handshake stream")?;
   let hello = config.hello(Vec::new(), invite.capability.clone());
   write_wire_message(&mut send, &WireMessage::Hello(hello), config.max_message_bytes).await?;
-  send.finish().context("failed to finish Flowstate hello stream")?;
+  send
+    .finish()
+    .context("failed to finish Flowstate hello stream")?;
   let message = read_wire_message(&mut recv, config.max_message_bytes).await?;
   let WireMessage::Authorize(authorization) = message else {
     bail!(SyncError::UnexpectedMessage("Authorize"));
@@ -655,15 +660,44 @@ pub enum SessionState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SessionEvent {
   StateChanged(SessionState),
-  PeerAuthorized { actor_id: ActorId, session_id: SessionId, role: Role },
-  PeerLeft { actor_id: ActorId, session_id: SessionId },
-  PeerRoleChanged { actor_id: ActorId, session_id: SessionId, role: Role },
-  SnapshotApplied { document_id: DocumentId, hash: [u8; 32] },
-  UpdateApplied { document_id: DocumentId, hash: [u8; 32] },
-  UpdateRejected { document_id: DocumentId, actor_id: ActorId, reason: String },
+  PeerAuthorized {
+    actor_id: ActorId,
+    session_id: SessionId,
+    role: Role,
+  },
+  PeerLeft {
+    actor_id: ActorId,
+    session_id: SessionId,
+  },
+  PeerRoleChanged {
+    actor_id: ActorId,
+    session_id: SessionId,
+    role: Role,
+  },
+  SnapshotApplied {
+    document_id: DocumentId,
+    hash: [u8; 32],
+  },
+  UpdateApplied {
+    document_id: DocumentId,
+    hash: [u8; 32],
+  },
+  UpdateRejected {
+    document_id: DocumentId,
+    actor_id: ActorId,
+    reason: String,
+  },
   Presence(PeerPresence),
-  AssetReceived { document_id: DocumentId, hash: [u8; 32], byte_len: u64 },
-  AssetTransferFailed { document_id: DocumentId, hash: [u8; 32], reason: String },
+  AssetReceived {
+    document_id: DocumentId,
+    hash: [u8; 32],
+    byte_len: u64,
+  },
+  AssetTransferFailed {
+    document_id: DocumentId,
+    hash: [u8; 32],
+    reason: String,
+  },
   Reconnecting,
   FatalError(String),
   Error(String),
@@ -815,7 +849,11 @@ impl CollabSession {
           document_id: self.config.document_id,
           hash,
         });
-        for peer in self.peers.values_mut().filter(|peer| peer.actor_id == actor_id) {
+        for peer in self
+          .peers
+          .values_mut()
+          .filter(|peer| peer.actor_id == actor_id)
+        {
           peer.known_frontier.clone_from(&outcome.frontier);
         }
         Ok(())
@@ -832,8 +870,12 @@ impl CollabSession {
   }
 
   pub fn queue_presence(&mut self, presence: PeerPresence) {
-    self.events.push_back(SessionEvent::Presence(presence.clone()));
-    self.presence_queue.push_back(presence.message(self.config.document_id));
+    self
+      .events
+      .push_back(SessionEvent::Presence(presence.clone()));
+    self
+      .presence_queue
+      .push_back(presence.message(self.config.document_id));
   }
 
   pub fn pop_outbound_update(&mut self) -> Option<OutboundUpdate> {
@@ -858,7 +900,10 @@ pub async fn connect_and_receive_snapshot(
     .connect(invite.endpoint_addr.clone(), FLOWSTATE_ALPN)
     .await
     .context("failed to connect to Flowstate peer")?;
-  let (mut send, mut recv) = connection.open_bi().await.context("failed to open Flowstate sync stream")?;
+  let (mut send, mut recv) = connection
+    .open_bi()
+    .await
+    .context("failed to open Flowstate sync stream")?;
   let hello = config.hello(Vec::new(), invite.capability.clone());
   write_wire_message(&mut send, &WireMessage::Hello(hello), config.max_message_bytes).await?;
 
@@ -883,11 +928,7 @@ pub async fn connect_and_receive_snapshot(
       WireMessage::Snapshot { document_id, bytes, hash } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         ensure!(blake3_hash(&bytes) == hash, "snapshot hash mismatch");
-        document = Some(CollabDocument::from_snapshot(
-          &bytes,
-          Some(config.format_kind),
-          Some(config.document_id),
-        )?);
+        document = Some(CollabDocument::from_snapshot(&bytes, Some(config.format_kind), Some(config.document_id))?);
       },
       WireMessage::Have { document_id, assets, .. } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
@@ -904,7 +945,9 @@ pub async fn connect_and_receive_snapshot(
     }
   }
 
-  send.finish().context("failed to finish Flowstate sync stream")?;
+  send
+    .finish()
+    .context("failed to finish Flowstate sync stream")?;
   let document = document.expect("document checked above");
   document.set_local_actor(config.actor_id)?;
   Ok(JoinedSnapshot {
@@ -978,7 +1021,12 @@ async fn serve_live_stream(
       Err(_) => break,
     };
     match message {
-      WireMessage::Update { document_id, actor_id, bytes, hash } => {
+      WireMessage::Update {
+        document_id,
+        actor_id,
+        bytes,
+        hash,
+      } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         ensure!(actor_id == hello.actor_id, "update actor does not match authorized peer");
         ensure!(blake3_hash(&bytes) == hash, "update hash mismatch");
@@ -1000,7 +1048,11 @@ async fn serve_live_stream(
         )
         .await?;
       },
-      WireMessage::Need { document_id, frontier, snapshot } => {
+      WireMessage::Need {
+        document_id,
+        frontier,
+        snapshot,
+      } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         if snapshot {
           send_snapshot_and_have(send, state, config).await?;
@@ -1130,7 +1182,9 @@ fn bounded_range(offset: u64, len: u64, available: usize, max_chunk_bytes: usize
   let start = usize::try_from(offset).context("asset offset overflows usize")?;
   let requested = usize::try_from(len).context("asset length overflows usize")?;
   let len = requested.min(max_chunk_bytes);
-  let end = start.checked_add(len).context("asset range overflows usize")?;
+  let end = start
+    .checked_add(len)
+    .context("asset range overflows usize")?;
   ensure!(start <= available && end <= available, "asset range is out of bounds");
   Ok(start..end)
 }
@@ -1138,9 +1192,7 @@ fn bounded_range(offset: u64, len: u64, available: usize, max_chunk_bytes: usize
 fn role_includes(granted: Role, requested: Role) -> bool {
   matches!(
     (granted, requested),
-    (Role::Owner, Role::Owner | Role::Editor | Role::Viewer)
-      | (Role::Editor, Role::Editor | Role::Viewer)
-      | (Role::Viewer, Role::Viewer)
+    (Role::Owner, Role::Owner | Role::Editor | Role::Viewer) | (Role::Editor, Role::Editor | Role::Viewer) | (Role::Viewer, Role::Viewer)
   )
 }
 
@@ -1158,7 +1210,6 @@ fn now_unix_secs() -> u64 {
     .map(|duration| duration.as_secs())
     .unwrap_or_default()
 }
-
 
 fn accept_error(error: anyhow::Error) -> AcceptError {
   AcceptError::from_err(std::io::Error::other(error.to_string()))
@@ -1206,7 +1257,9 @@ mod tests {
       offset: 0,
       len: 6,
     };
-    let chunk = store.chunk(&request, DEFAULT_MAX_ASSET_CHUNK_BYTES).unwrap();
+    let chunk = store
+      .chunk(&request, DEFAULT_MAX_ASSET_CHUNK_BYTES)
+      .unwrap();
     let mut receiving = AssetStore::default();
     receiving.insert_complete_chunk(chunk, 6).unwrap();
     assert!(receiving.contains(&asset.hash));
@@ -1222,7 +1275,11 @@ mod tests {
       offset: 0,
       len: 1,
     };
-    assert!(store.chunk(&unknown, DEFAULT_MAX_ASSET_CHUNK_BYTES).is_err());
+    assert!(
+      store
+        .chunk(&unknown, DEFAULT_MAX_ASSET_CHUNK_BYTES)
+        .is_err()
+    );
 
     let out_of_bounds = AssetNeedMessage {
       document_id: DocumentId::new(),
@@ -1230,7 +1287,11 @@ mod tests {
       offset: 5,
       len: 2,
     };
-    assert!(store.chunk(&out_of_bounds, DEFAULT_MAX_ASSET_CHUNK_BYTES).is_err());
+    assert!(
+      store
+        .chunk(&out_of_bounds, DEFAULT_MAX_ASSET_CHUNK_BYTES)
+        .is_err()
+    );
   }
 
   #[test]
@@ -1260,7 +1321,6 @@ mod tests {
     assert_eq!(authorization.role, Role::Viewer);
   }
 
-
   #[test]
   fn session_tracks_peers_updates_and_presence_events() {
     let document_id = DocumentId::new();
@@ -1287,9 +1347,21 @@ mod tests {
     assert_eq!(session.peer_count(), 1);
     assert!(session.pop_presence().is_some());
     let events = session.drain_events();
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::StateChanged(SessionState::Live))));
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::PeerAuthorized { role: Role::Editor, .. })));
-    assert!(events.iter().any(|event| matches!(event, SessionEvent::Presence(_))));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::StateChanged(SessionState::Live)))
+    );
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::PeerAuthorized { role: Role::Editor, .. }))
+    );
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, SessionEvent::Presence(_)))
+    );
   }
 
   #[test]
@@ -1297,14 +1369,25 @@ mod tests {
     let document_id = DocumentId::new();
     let owner = ActorId::new();
     let left = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
-    let update = left.replace_projection_source(Role::Owner, b"two", &[]).unwrap();
+    let update = left
+      .replace_projection_source(Role::Owner, b"two", &[])
+      .unwrap();
     let right = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
     let config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
     let mut session = CollabSession::new(config, Role::Owner, SessionDocumentState::new(right.clone(), AssetStore::default()));
 
-    assert!(session.apply_remote_update(ActorId::new(), Role::Viewer, &update).is_err());
+    assert!(
+      session
+        .apply_remote_update(ActorId::new(), Role::Viewer, &update)
+        .is_err()
+    );
     assert_eq!(right.materialize_projection_cache().unwrap(), b"one");
-    assert!(session.drain_events().iter().any(|event| matches!(event, SessionEvent::UpdateRejected { .. })));
+    assert!(
+      session
+        .drain_events()
+        .iter()
+        .any(|event| matches!(event, SessionEvent::UpdateRejected { .. }))
+    );
   }
   #[tokio::test]
   async fn host_join_receives_snapshot_through_iroh() {

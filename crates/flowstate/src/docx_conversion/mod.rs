@@ -1,11 +1,10 @@
 use std::{io, path::Path};
 
 pub use flowstate_docx::{
-  CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, DocxConversionReport, PdfConversionReport, PdfImportDecision,
-  PdfRecognitionRule, RecognitionRule, analyze_pdf_import, clean_docx_bytes,
-  convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_db8, convert_docx_to_document, convert_docx_to_pdf,
-  convert_pdf_to_db8, convert_pdf_to_document, convert_recognized_pdf_to_db8, embed_db8_file_in_pdf, extract_db8_bytes_from_pdf, write_docx,
-  write_pdf, write_pdf_with_db8_bytes,
+  CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, DocxConversionReport, PdfConversionReport, PdfImportDecision, PdfRecognitionRule,
+  RecognitionRule, analyze_pdf_import, clean_docx_bytes, convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_db8,
+  convert_docx_to_document, convert_docx_to_pdf, convert_pdf_to_db8, convert_pdf_to_document, convert_recognized_pdf_to_db8,
+  embed_db8_file_in_pdf, extract_db8_bytes_from_pdf, write_docx, write_pdf, write_pdf_with_db8_bytes,
 };
 
 use crate::app_settings::load_document_theme;

@@ -1,0 +1,146 @@
+name: CI
+
+# Pull-request cargo gate. Only crate, vendor, and root manifest changes need
+# the expensive Rust checks below.
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "Cargo.toml"
+      - "crates/**"
+      - "vendor/**"
+
+# Cancel superseded runs on the same ref to save runner minutes.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast and keep logs lean.
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  fmt:
+    name: fmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rustfmt config (.rustfmt.toml) uses nightly-only options.
+      - name: Install nightly rustfmt
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: rustfmt
+      # Fails the check if anything isn't formatted. The repo's pre-commit hook
+      # runs `cargo fmt` locally, so this should normally pass on the first try.
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  # Clippy and the test suite share one runner / one target dir, ordered so the
+  # heavy dependency tree (gpui et al.) is built with codegen exactly once:
+  #   1. `cargo test --no-run` does the full (codegen) build of deps + tests.
+  #   2. `cargo clippy` reuses those dep artifacts and only runs clippy-driver
+  #      over the workspace crates (clippy is check-only, no dep codegen).
+  #   3. `cargo test` just executes the binaries built in step 1.
+  # (Running clippy *first* would compile deps in check mode, then `cargo test`
+  #  would re-build them all from scratch for codegen -- paying twice.)
+  build:
+    name: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # GPUI links against Vulkan / Wayland / X11 / fontconfig and friends;
+      # xvfb + a software Vulkan driver cover any test that builds a gpui::App.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake clang pkg-config \
+            libfontconfig1-dev libasound2-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
+            libxkbcommon-dev libxkbcommon-x11-dev \
+            libwayland-dev \
+            libvulkan-dev \
+            xvfb mesa-vulkan-drivers libgl1-mesa-dri
+
+      # Nightly is mandatory: the workspace uses
+      # `cargo-features = ["profile-rustflags"]` and `-Z` flags.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy
+
+      - name: Cache cargo build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: build
+
+      # Full codegen build of dependencies + all test binaries, done once.
+      # No --all-features: the `hotpath`/`hotpath-cpu-support` rename means
+      # enabling every feature at once fails to resolve, and default features
+      # are what the app actually ships with.
+      - name: Build test binaries
+        run: cargo test --workspace --no-run
+
+      # Lint policy lives in [workspace.lints.clippy]; -D warnings makes any
+      # remaining lint fatal. Dependencies are already built above, so clippy
+      # only re-processes the workspace crates with clippy-driver.
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Runs the binaries built in "Build test binaries" (nothing to recompile);
+      # xvfb + software Vulkan cover any test that builds a gpui::App context.
+      - name: cargo test
+        run: xvfb-run -a cargo test --workspace
+        env:
+          LIBGL_ALWAYS_SOFTWARE: "1"
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # cargo-deny runs `cargo metadata`, which needs nightly cargo to parse the
+      # workspace's `cargo-features = ["profile-rustflags"]`.
+      - name: Install nightly toolchain
+        uses: dtolnay/rust-toolchain@nightly
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+      # Advisories (CVEs), license policy, banned crates and source policy.
+      - name: cargo deny check
+        run: cargo deny check
+
+  audit:
+    name: cargo-audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # CVE scan against the committed Cargo.lock. Vulnerabilities fail the job;
+      # unmaintained/yanked advisories are reported as warnings (not fatal), in
+      # line with the deny.toml policy (cargo-deny owns the stricter gating).
+      - name: cargo audit
+        run: cargo audit
+
+  machete:
+    name: cargo-machete
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install cargo-machete
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-machete
+      # Detect dependencies declared but never used.
+      - name: cargo machete
+        run: cargo machete

@@ -30,17 +30,7 @@ fn first_bold_text_after_heading_becomes_cite() {
   let runs = vec![run("Smith 24", 13.0, true, false)];
   let overrides = entirely_bold_paragraph_overrides(&runs).unwrap();
 
-  let styles = recognize_run_styles_for_context(
-    &runs[0],
-    0,
-    Some(&overrides),
-    false,
-    false,
-    true,
-    ParagraphStyle::Normal,
-    true,
-    false,
-  );
+  let styles = recognize_run_styles_for_context(&runs[0], 0, Some(&overrides), false, false, true, ParagraphStyle::Normal, true, false);
 
   assert_eq!(styles.semantic, RunSemanticStyle::Cite);
 }

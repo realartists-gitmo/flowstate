@@ -153,7 +153,9 @@ pub struct GranularSource {
 impl GranularSource {
   #[must_use]
   pub fn canonicalized(mut self) -> Self {
-    self.orders.sort_by(|left, right| left.name.cmp(&right.name));
+    self
+      .orders
+      .sort_by(|left, right| left.name.cmp(&right.name));
     self.texts.sort_by(|left, right| left.id.cmp(&right.id));
     self.binaries.sort_by(|left, right| left.id.cmp(&right.id));
     for text in &mut self.texts {
@@ -165,7 +167,9 @@ impl GranularSource {
   }
 
   fn source_hash(&self) -> CollabResult<[u8; 32]> {
-    postcard::to_stdvec(&self.clone().canonicalized()).map(|bytes| blake3_hash(&bytes)).map_err(Into::into)
+    postcard::to_stdvec(&self.clone().canonicalized())
+      .map(|bytes| blake3_hash(&bytes))
+      .map_err(Into::into)
   }
 }
 
@@ -201,7 +205,15 @@ impl CollabDocument {
     configure_granular_text_styles(&doc);
     configure_peer_id(&doc, created_by_actor)?;
     let role_policy = CollabRolePolicy::owner_only(created_by_actor);
-    initialize_projection_root(&doc, format_kind, document_id, created_by_actor, &role_policy, projection_cache, asset_manifest)?;
+    initialize_projection_root(
+      &doc,
+      format_kind,
+      document_id,
+      created_by_actor,
+      &role_policy,
+      projection_cache,
+      asset_manifest,
+    )?;
     Self::from_doc(doc, Some(format_kind), Some(document_id))
   }
 
@@ -217,7 +229,16 @@ impl CollabDocument {
     configure_granular_text_styles(&doc);
     configure_peer_id(&doc, created_by_actor)?;
     let role_policy = CollabRolePolicy::owner_only(created_by_actor);
-    initialize_granular_root(&doc, format_kind, document_id, created_by_actor, &role_policy, source, projection_cache, asset_manifest)?;
+    initialize_granular_root(
+      &doc,
+      format_kind,
+      document_id,
+      created_by_actor,
+      &role_policy,
+      source,
+      projection_cache,
+      asset_manifest,
+    )?;
     Self::from_doc(doc, Some(format_kind), Some(document_id))
   }
 
@@ -306,12 +327,7 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
-  pub fn replace_projection_source(
-    &self,
-    role: Role,
-    projection_cache: &[u8],
-    asset_manifest: &[u8],
-  ) -> CollabResult<Vec<u8>> {
+  pub fn replace_projection_source(&self, role: Role, projection_cache: &[u8], asset_manifest: &[u8]) -> CollabResult<Vec<u8>> {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
     write_projection_payload(&self.doc, projection_cache, asset_manifest)?;
@@ -373,7 +389,14 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
-  pub fn mark_granular_text_utf8(&self, role: Role, text_id: &str, range: Range<usize>, key: &str, value: GranularValue) -> CollabResult<Vec<u8>> {
+  pub fn mark_granular_text_utf8(
+    &self,
+    role: Role,
+    text_id: &str,
+    range: Range<usize>,
+    key: &str,
+    value: GranularValue,
+  ) -> CollabResult<Vec<u8>> {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
     let text_container = granular_text_container(&self.doc, text_id)?;
@@ -412,9 +435,13 @@ impl CollabDocument {
     let order = orders
       .get_or_create_container(name, LoroMovableList::new())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    order.clear().map_err(|error| CollabError::Loro(error.to_string()))?;
+    order
+      .clear()
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
     for id in ids {
-      order.push(id.as_str()).map_err(|error| CollabError::Loro(error.to_string()))?;
+      order
+        .push(id.as_str())
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
     }
     self.doc.commit();
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
@@ -635,7 +662,11 @@ fn write_projection_payload(doc: &LoroDoc, projection_cache: &[u8], asset_manife
     .map_err(|error| CollabError::Loro(error.to_string()))
 }
 
-fn validate_schema(doc: &LoroDoc, expected_format: Option<FormatKind>, expected_document_id: Option<DocumentId>) -> CollabResult<ValidatedSchema> {
+fn validate_schema(
+  doc: &LoroDoc,
+  expected_format: Option<FormatKind>,
+  expected_document_id: Option<DocumentId>,
+) -> CollabResult<ValidatedSchema> {
   let schema_version = root_i64(doc, KEY_SCHEMA_VERSION)?;
   if schema_version != i64::from(COLLAB_SCHEMA_VERSION) {
     return Err(CollabError::UnsupportedCollabSchema(u32::try_from(schema_version).unwrap_or(u32::MAX)));
@@ -678,9 +709,7 @@ fn validate_schema(doc: &LoroDoc, expected_format: Option<FormatKind>, expected_
 }
 
 fn configure_granular_text_styles(doc: &LoroDoc) {
-  doc.config_default_text_style(Some(StyleConfig {
-    expand: ExpandType::After,
-  }));
+  doc.config_default_text_style(Some(StyleConfig { expand: ExpandType::After }));
 }
 
 fn validate_granular_source(doc: &LoroDoc) -> CollabResult<()> {
@@ -706,20 +735,31 @@ fn write_granular_orders(root: &LoroMap, orders: &[GranularOrderRecord]) -> Coll
   let orders_map = root
     .get_or_create_container(KEY_GRANULAR_ORDERS, LoroMap::new())
     .map_err(|error| CollabError::Loro(error.to_string()))?;
-  let existing = orders_map.keys().map(|key| key.to_string()).collect::<Vec<_>>();
+  let existing = orders_map
+    .keys()
+    .map(|key| key.to_string())
+    .collect::<Vec<_>>();
   for key in existing {
     if let Some(ValueOrContainer::Container(Container::MovableList(order))) = orders_map.get(&key) {
-      order.clear().map_err(|error| CollabError::Loro(error.to_string()))?;
+      order
+        .clear()
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
     }
-    orders_map.delete(&key).map_err(|error| CollabError::Loro(error.to_string()))?;
+    orders_map
+      .delete(&key)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
   }
   for order in orders {
     let list = orders_map
       .get_or_create_container(order.name.as_str(), LoroMovableList::new())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    list.clear().map_err(|error| CollabError::Loro(error.to_string()))?;
+    list
+      .clear()
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
     for id in &order.ids {
-      list.push(id.as_str()).map_err(|error| CollabError::Loro(error.to_string()))?;
+      list
+        .push(id.as_str())
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
     }
   }
   Ok(())
@@ -729,9 +769,14 @@ fn write_granular_texts(root: &LoroMap, texts: &[GranularTextRecord]) -> CollabR
   let text_map = root
     .get_or_create_container(KEY_GRANULAR_TEXTS, LoroMap::new())
     .map_err(|error| CollabError::Loro(error.to_string()))?;
-  let existing = text_map.keys().map(|key| key.to_string()).collect::<Vec<_>>();
+  let existing = text_map
+    .keys()
+    .map(|key| key.to_string())
+    .collect::<Vec<_>>();
   for key in existing {
-    text_map.delete(&key).map_err(|error| CollabError::Loro(error.to_string()))?;
+    text_map
+      .delete(&key)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
   }
   for record in texts {
     let record_map = text_map
@@ -745,10 +790,14 @@ fn write_granular_texts(root: &LoroMap, texts: &[GranularTextRecord]) -> CollabR
       .map_err(|error| CollabError::Loro(error.to_string()))?;
     let current_len = text.to_string().len();
     if current_len > 0 {
-      text.delete_utf8(0, current_len).map_err(|error| CollabError::Loro(error.to_string()))?;
+      text
+        .delete_utf8(0, current_len)
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
     }
     if !record.text.is_empty() {
-      text.insert_utf8(0, &record.text).map_err(|error| CollabError::Loro(error.to_string()))?;
+      text
+        .insert_utf8(0, &record.text)
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
     }
     for mark in &record.marks {
       if mark.start_utf8 < mark.end_utf8 {
@@ -765,9 +814,14 @@ fn write_granular_binaries(root: &LoroMap, binaries: &[GranularBinaryRecord]) ->
   let binary_map = root
     .get_or_create_container(KEY_GRANULAR_BINARIES, LoroMap::new())
     .map_err(|error| CollabError::Loro(error.to_string()))?;
-  let existing = binary_map.keys().map(|key| key.to_string()).collect::<Vec<_>>();
+  let existing = binary_map
+    .keys()
+    .map(|key| key.to_string())
+    .collect::<Vec<_>>();
   for key in existing {
-    binary_map.delete(&key).map_err(|error| CollabError::Loro(error.to_string()))?;
+    binary_map
+      .delete(&key)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
   }
   for record in binaries {
     binary_map
@@ -778,13 +832,15 @@ fn write_granular_binaries(root: &LoroMap, binaries: &[GranularBinaryRecord]) ->
 }
 
 fn read_granular_source(doc: &LoroDoc) -> CollabResult<GranularSource> {
-  Ok(GranularSource {
-    metadata: root_binary(doc, KEY_GRANULAR_METADATA)?,
-    orders: read_granular_orders(doc)?,
-    texts: read_granular_texts(doc)?,
-    binaries: read_granular_binaries(doc)?,
-  }
-  .canonicalized())
+  Ok(
+    GranularSource {
+      metadata: root_binary(doc, KEY_GRANULAR_METADATA)?,
+      orders: read_granular_orders(doc)?,
+      texts: read_granular_texts(doc)?,
+      binaries: read_granular_binaries(doc)?,
+    }
+    .canonicalized(),
+  )
 }
 
 fn read_granular_orders(doc: &LoroDoc) -> CollabResult<Vec<GranularOrderRecord>> {
@@ -925,7 +981,10 @@ fn root_uuid(doc: &LoroDoc, key: &'static str) -> CollabResult<Uuid> {
 
 fn root_hash(doc: &LoroDoc, key: &'static str) -> CollabResult<[u8; 32]> {
   let bytes = root_binary(doc, key)?;
-  bytes.as_slice().try_into().map_err(|_| CollabError::InvalidSchema(key))
+  bytes
+    .as_slice()
+    .try_into()
+    .map_err(|_| CollabError::InvalidSchema(key))
 }
 
 fn root_binary(doc: &LoroDoc, key: &'static str) -> CollabResult<Vec<u8>> {
@@ -983,9 +1042,7 @@ fn configure_peer_id(doc: &LoroDoc, actor_id: ActorId) -> CollabResult<()> {
 fn role_includes(granted: Role, requested: Role) -> bool {
   matches!(
     (granted, requested),
-    (Role::Owner, Role::Owner | Role::Editor | Role::Viewer)
-      | (Role::Editor, Role::Editor | Role::Viewer)
-      | (Role::Viewer, Role::Viewer)
+    (Role::Owner, Role::Owner | Role::Editor | Role::Viewer) | (Role::Editor, Role::Editor | Role::Viewer) | (Role::Viewer, Role::Viewer)
   )
 }
 
@@ -1025,5 +1082,8 @@ pub fn granular_records_by_id<T, F>(records: Vec<T>, mut id: F) -> BTreeMap<Stri
 where
   F: FnMut(&T) -> &str,
 {
-  records.into_iter().map(|record| (id(&record).to_string(), record)).collect()
+  records
+    .into_iter()
+    .map(|record| (id(&record).to_string(), record))
+    .collect()
 }

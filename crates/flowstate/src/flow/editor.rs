@@ -204,7 +204,9 @@ impl FlowEditor {
   }
 
   pub fn can_write_collaboration(&self) -> bool {
-    self.collaboration_role.is_none_or(CollaborationRole::can_write)
+    self
+      .collaboration_role
+      .is_none_or(CollaborationRole::can_write)
   }
 
   pub fn selected_flow_id(&self) -> Option<&str> {
@@ -1254,7 +1256,11 @@ impl FlowEditor {
                       .icon(IconName::Plus)
                       .xsmall()
                       .ghost()
-                      .tooltip(if self.can_write_collaboration() { "Add argument in column" } else { "Viewers cannot edit flows" })
+                      .tooltip(if self.can_write_collaboration() {
+                        "Add argument in column"
+                      } else {
+                        "Viewers cannot edit flows"
+                      })
                       .disabled(!self.can_write_collaboration())
                       .on_click(cx.listener(move |editor, _, window, cx| {
                         editor.add_empty_at_column(ix, window, cx);

@@ -7,9 +7,9 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla,
-  InteractiveElement, IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render,
-  ScrollHandle, SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
+  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
+  KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
+  Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
@@ -46,8 +46,8 @@ use crate::workspace::file_management::{
 };
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
-use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 use flowstate_sync::{FLOWSTATE_INVITE_PREFIX, SessionState, decode_invite_link};
+use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
@@ -163,7 +163,6 @@ enum ToolkitSearchFilter {
   Tags,
   Analytics,
 }
-
 
 #[derive(Clone)]
 struct CollaborationUiState {

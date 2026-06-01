@@ -262,16 +262,39 @@ pub struct AssetChunkMessage {
 pub enum WireMessage {
   Hello(HelloMessage),
   Authorize(AuthorizeMessage),
-  Have { document_id: DocumentId, frontier: Vec<u8>, assets: Vec<[u8; 32]> },
-  Need { document_id: DocumentId, frontier: Vec<u8>, snapshot: bool },
-  Update { document_id: DocumentId, actor_id: ActorId, bytes: Vec<u8>, hash: [u8; 32] },
-  Snapshot { document_id: DocumentId, bytes: Vec<u8>, hash: [u8; 32] },
+  Have {
+    document_id: DocumentId,
+    frontier: Vec<u8>,
+    assets: Vec<[u8; 32]>,
+  },
+  Need {
+    document_id: DocumentId,
+    frontier: Vec<u8>,
+    snapshot: bool,
+  },
+  Update {
+    document_id: DocumentId,
+    actor_id: ActorId,
+    bytes: Vec<u8>,
+    hash: [u8; 32],
+  },
+  Snapshot {
+    document_id: DocumentId,
+    bytes: Vec<u8>,
+    hash: [u8; 32],
+  },
   AssetHave(AssetHaveMessage),
   AssetNeed(AssetNeedMessage),
   AssetChunk(AssetChunkMessage),
   Presence(PresenceMessage),
-  Ack { document_id: DocumentId, frontier: Vec<u8> },
-  Error { document_id: Option<DocumentId>, message: String },
+  Ack {
+    document_id: DocumentId,
+    frontier: Vec<u8>,
+  },
+  Error {
+    document_id: Option<DocumentId>,
+    message: String,
+  },
 }
 
 #[derive(Debug)]
@@ -451,13 +474,7 @@ pub fn projection_snapshot(
   projection_cache: &[u8],
   asset_manifest: &[u8],
 ) -> CollabResult<Vec<u8>> {
-  source_snapshot(
-    format_kind,
-    document_id,
-    created_by_actor,
-    projection_cache,
-    asset_manifest,
-  )
+  source_snapshot(format_kind, document_id, created_by_actor, projection_cache, asset_manifest)
 }
 
 pub fn source_snapshot(
@@ -467,14 +484,7 @@ pub fn source_snapshot(
   projection_cache: &[u8],
   asset_manifest: &[u8],
 ) -> CollabResult<Vec<u8>> {
-  CollabDocument::from_projection_source(
-    format_kind,
-    document_id,
-    created_by_actor,
-    projection_cache,
-    asset_manifest,
-  )?
-  .export_snapshot()
+  CollabDocument::from_projection_source(format_kind, document_id, created_by_actor, projection_cache, asset_manifest)?.export_snapshot()
 }
 
 fn write_envelope(format_kind: FormatKind, chunks: Vec<(u16, Vec<u8>)>) -> CollabResult<Vec<u8>> {
@@ -509,11 +519,7 @@ fn envelope_header_hash(format_kind: FormatKind, chunk_count: usize) -> [u8; 32]
   bytes.extend_from_slice(format_kind.magic());
   bytes.extend_from_slice(&NATIVE_ENVELOPE_SCHEMA_VERSION.to_le_bytes());
   bytes.push(format_kind.as_u8());
-  bytes.extend_from_slice(
-    &u32::try_from(chunk_count)
-      .unwrap_or(u32::MAX)
-      .to_le_bytes(),
-  );
+  bytes.extend_from_slice(&u32::try_from(chunk_count).unwrap_or(u32::MAX).to_le_bytes());
   blake3_hash(&bytes)
 }
 
@@ -549,7 +555,9 @@ fn read_envelope(bytes: &[u8], expected_format: FormatKind) -> CollabResult<BTre
 
   let mut chunks = BTreeMap::new();
   for (kind, offset, len, hash) in table {
-    let end = offset.checked_add(len).ok_or(CollabError::ChunkOutOfBounds(kind))?;
+    let end = offset
+      .checked_add(len)
+      .ok_or(CollabError::ChunkOutOfBounds(kind))?;
     if end > bytes.len() {
       return Err(CollabError::ChunkOutOfBounds(kind));
     }
@@ -568,7 +576,11 @@ fn verify_integrity(format_kind: FormatKind, chunks: &BTreeMap<u16, Vec<u8>>, in
   if envelope_header_hash(format_kind, chunks.len()) != integrity.header_hash {
     return Err(CollabError::HashMismatch("integrity header"));
   }
-  verify_hash("integrity manifest", required_chunk(chunks, CHUNK_MANIFEST, "manifest")?, integrity.manifest_hash)?;
+  verify_hash(
+    "integrity manifest",
+    required_chunk(chunks, CHUNK_MANIFEST, "manifest")?,
+    integrity.manifest_hash,
+  )?;
   verify_hash(
     "integrity snapshot",
     required_chunk(chunks, CHUNK_LORO_SNAPSHOT, "loro snapshot")?,
@@ -657,10 +669,7 @@ mod tests {
   fn rejects_wrong_magic() {
     let input = NativeFileInput::new(FormatKind::Db8, b"projection".to_vec());
     let bytes = encode_native_file(input).unwrap();
-    assert!(matches!(
-      decode_native_file(&bytes, FormatKind::Fl0),
-      Err(CollabError::InvalidMagic)
-    ));
+    assert!(matches!(decode_native_file(&bytes, FormatKind::Fl0), Err(CollabError::InvalidMagic)));
   }
 
   #[test]
@@ -724,7 +733,6 @@ mod tests {
     assert_eq!(right.materialize_projection_cache().unwrap(), b"one");
   }
 
-
   #[test]
   fn granular_text_replicas_converge_from_concurrent_updates() {
     let document_id = DocumentId::new();
@@ -746,10 +754,18 @@ mod tests {
     let left = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &source, b"cache", &[]).unwrap();
     let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
 
-    let left_update = left.insert_granular_text_utf8(Role::Owner, "p1", 1, "L").unwrap();
-    let right_update = right.insert_granular_text_utf8(Role::Editor, "p1", 1, "R").unwrap();
-    left.import_update_checked(Role::Editor, &right_update).unwrap();
-    right.import_update_checked(Role::Owner, &left_update).unwrap();
+    let left_update = left
+      .insert_granular_text_utf8(Role::Owner, "p1", 1, "L")
+      .unwrap();
+    let right_update = right
+      .insert_granular_text_utf8(Role::Editor, "p1", 1, "R")
+      .unwrap();
+    left
+      .import_update_checked(Role::Editor, &right_update)
+      .unwrap();
+    right
+      .import_update_checked(Role::Owner, &left_update)
+      .unwrap();
 
     let left_source = left.materialize_granular_source().unwrap().unwrap();
     let right_source = right.materialize_granular_source().unwrap().unwrap();
@@ -780,7 +796,12 @@ mod tests {
       Err(CollabError::Unauthorized(_))
     ));
     assert_eq!(
-      document.materialize_granular_source().unwrap().unwrap().texts[0].text,
+      document
+        .materialize_granular_source()
+        .unwrap()
+        .unwrap()
+        .texts[0]
+        .text,
       "locked"
     );
   }
@@ -825,14 +846,15 @@ mod tests {
   #[test]
   fn granular_record_ids_must_be_canonical() {
     assert!(granular_record_id_to_u128("1").is_err());
-    assert_eq!(
-      granular_record_id_to_u128("00000000000000000000000000000001").unwrap(),
-      1
-    );
+    assert_eq!(granular_record_id_to_u128("00000000000000000000000000000001").unwrap(), 1);
   }
   fn corrupt_projection_cache(mut bytes: Vec<u8>) -> Vec<u8> {
     let chunk_count_offset = DB8_COLLAB_MAGIC.len() + 4 + 1;
-    let chunk_count = u32::from_le_bytes(bytes[chunk_count_offset..chunk_count_offset + 4].try_into().unwrap()) as usize;
+    let chunk_count = u32::from_le_bytes(
+      bytes[chunk_count_offset..chunk_count_offset + 4]
+        .try_into()
+        .unwrap(),
+    ) as usize;
     let table_start = chunk_count_offset + 4;
     for ix in 0..chunk_count {
       let entry = table_start + ix * CHUNK_TABLE_ENTRY_LEN;

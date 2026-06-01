@@ -153,16 +153,10 @@ pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> Re
 #[hotpath::measure]
 fn fl0_source_snapshot_for_input(document: &FlowDocument, input: &NativeFileInput, projection_cache: &[u8]) -> Result<Vec<u8>> {
   let source = fl0_granular_source(document, projection_cache.to_vec())?;
-  Fl0CollabDocument::from_granular_source(
-    input.document_id,
-    input.created_by_actor,
-    &source,
-    projection_cache,
-    &[],
-  )
-  .context("failed to create .fl0 granular source")?
-  .export_snapshot()
-  .context("failed to export .fl0 granular source snapshot")
+  Fl0CollabDocument::from_granular_source(input.document_id, input.created_by_actor, &source, projection_cache, &[])
+    .context("failed to create .fl0 granular source")?
+    .export_snapshot()
+    .context("failed to export .fl0 granular source snapshot")
 }
 
 #[hotpath::measure]
@@ -228,7 +222,10 @@ fn fl0_nodes_from_granular_binaries(source: &GranularSource) -> Result<Nodes> {
   let mut nodes = Nodes::default();
   for record in &source.binaries {
     let node = postcard::from_bytes::<SaveableNode>(&record.metadata).context("invalid .fl0 granular node metadata")?;
-    if nodes.insert(record.id.clone(), node_from_saveable(node)).is_some() {
+    if nodes
+      .insert(record.id.clone(), node_from_saveable(node))
+      .is_some()
+    {
       anyhow::bail!("duplicate .fl0 granular node ID");
     }
   }
@@ -238,7 +235,9 @@ fn fl0_nodes_from_granular_binaries(source: &GranularSource) -> Result<Nodes> {
 fn apply_fl0_granular_orders(nodes: &mut Nodes, source: &GranularSource) -> Result<()> {
   for order in &source.orders {
     if order.name == FL0_ROOT_FLOW_ORDER {
-      let root = nodes.get_mut(crate::document::ROOT_ID).context("missing .fl0 granular root node")?;
+      let root = nodes
+        .get_mut(crate::document::ROOT_ID)
+        .context("missing .fl0 granular root node")?;
       root.children.clone_from(&order.ids);
       for child in &order.ids {
         nodes
@@ -316,7 +315,10 @@ fn saveable_flow_document(document: &FlowDocument) -> SaveableFlowDocument {
 fn nodes_from_saveable(saveable: SaveableFlowDocument) -> Result<Nodes> {
   let mut nodes = Nodes::default();
   for entry in saveable.nodes {
-    if nodes.insert(entry.id, node_from_saveable(entry.node)).is_some() {
+    if nodes
+      .insert(entry.id, node_from_saveable(entry.node))
+      .is_some()
+    {
       anyhow::bail!("duplicate .fl0 node ID in projection");
     }
   }
@@ -368,11 +370,7 @@ fn node_from_saveable(node: SaveableNode) -> Node {
 fn node_value_from_saveable(value: SaveableNodeValue) -> NodeValue {
   match value {
     SaveableNodeValue::Root => NodeValue::Root,
-    SaveableNodeValue::Flow { content, invert, columns } => NodeValue::Flow(Flow {
-      content,
-      invert,
-      columns,
-    }),
+    SaveableNodeValue::Flow { content, invert, columns } => NodeValue::Flow(Flow { content, invert, columns }),
     SaveableNodeValue::Box {
       content,
       flow_id,
@@ -396,7 +394,7 @@ fn node_value_from_saveable(value: SaveableNodeValue) -> NodeValue {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::document::{new_box_id, new_flow_id, ROOT_ID};
+  use crate::document::{ROOT_ID, new_box_id, new_flow_id};
 
   #[test]
   #[hotpath::measure]
@@ -474,6 +472,12 @@ mod tests {
       .insert_granular_text_utf8(flowstate_collab::Role::Owner, &fl0_content_text_id(&box_id), 0, "SYNC ")
       .unwrap();
     let materialized = flow_document_from_collab_source(source.inner()).unwrap();
-    assert!(materialized.box_node(&box_id).unwrap().content.starts_with("SYNC "));
+    assert!(
+      materialized
+        .box_node(&box_id)
+        .unwrap()
+        .content
+        .starts_with("SYNC ")
+    );
   }
 }

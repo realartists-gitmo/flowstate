@@ -1,73 +1,59 @@
 cargo-features = ["profile-rustflags"]
 
-[package]
-name = "flowstate"
-version = "0.1.0"
-edition = "2024"
-default-run = "flowstate"
-
-[lints]
-workspace = true
-
 [workspace]
-members = [".", "crates/flowstate-collab", "crates/flowstate-document", "crates/flowstate-docx", "crates/flowstate-flow", "crates/flowstate-sync", "crates/flowstate-tub"]
+members = ["crates/*"]
+default-members = ["crates/flowstate"]
 resolver = "3"
 
-[dependencies]
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.dependencies]
 anyhow = "1.0.102"
 clap = { version = "4.5", features = ["derive"] }
+cosmic-text = { version = "0.14.2", default-features = false, features = ["shape-run-cache"] }
+crop = "0.4.3"
+dirs = "6.0.0"
+docx-rs = "0.4.20"
+docxide-pdf = { version = "0.14.0", default-features = false, git = "https://github.com/realartists-gitmo/docxide-pdf", rev = "2c856bf2aa0641e96b350baf7026f43493964072" }
 fff-search = "0.8.2-nightly.ffb39a8"
-flowstate-document = { path = "crates/flowstate-document" }
-flowstate-docx = { path = "crates/flowstate-docx" }
+flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
+flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
+flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
+flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
+flowstate-sync = { version = "0.1.0", path = "crates/flowstate-sync" }
+flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
-crop = "0.4.3"
-imagesize = "0.13"
-mathjax_svg = "3.2.0"
-resvg = "0.45.1"
-rustc-hash = "2"
-unicode-segmentation = "1"
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-uuid = { version = "1.23.1", features = ["serde", "v4"] }
-tempfile = "3"
-dir = "0.1.2"
-dirs = "6.0.0"
-mimalloc = "0.1.52"
-flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
-hotpath = "0.16.1"
-flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
-toml = "1.1.2"
-flowstate-sync = { version = "0.1.0", path = "crates/flowstate-sync" }
-
-[features]
-hotpath = [
-  "hotpath/hotpath",
-  "flowstate-document/hotpath",
-  "flowstate-docx/hotpath",
-  "flowstate-flow/hotpath",
-]
-hotpath-cpu = [
-  "hotpath",
-  "flowstate-document/hotpath-cpu",
-  "flowstate-docx/hotpath-cpu",
-  "flowstate-flow/hotpath-cpu",
-]
-hotpath-alloc = [
-  "hotpath",
-  "hotpath/hotpath-alloc",
-  "flowstate-document/hotpath-alloc",
-  "flowstate-docx/hotpath-alloc",
-  "flowstate-flow/hotpath-alloc",
-]
-profiler = ["hotpath", "hotpath-alloc"]
-
-[target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { version = "0.6.1", features = ["component"] }
-
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
-cosmic-text = { version = "0.14.2", default-features = false, features = ["shape-run-cache"] }
+hotpath = "0.16.1"
+ignore = "0.4.25"
+imagesize = "0.13"
+lopdf = "0.40.0"
+pdf_oxide = "=0.3.32"
+mathjax_svg = "3.2.0"
+mimalloc = "0.1.52"
+notify = "8.2.0"
+postcard = { version = "1.1.3", features = ["use-std"] }
+quick-xml = "0.36.2"
+rdocx = "0.1.2"
+rdocx-opc = "0.1.2"
+rdocx-oxml = "0.1.2"
+resvg = "0.45.1"
+rusqlite = { version = "0.40.0", features = ["bundled"] }
+rustc-hash = "2.1.2"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+tantivy = "0.26.1"
+tempfile = "3"
+toml = "1.1.2"
+unicode-segmentation = "1"
+uuid = { version = "1.23.1", features = ["serde", "v4"] }
+zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
+zstd = "0.13.3"
 
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
@@ -200,6 +186,9 @@ struct_excessive_bools = "allow"
 struct_field_names = "allow"
 string_add = "deny"
 string_lit_chars_any = "deny"
+# Modules are assembled via `include!()` concatenation (see edit_ops/persistence),
+# so a file's `#[cfg(test)]` module is necessarily followed by later includes.
+items_after_test_module = "allow"
 tests_outside_test_module = "deny"
 # Serde callback signatures require references even for tiny copy types.
 trivially_copy_pass_by_ref = "allow"

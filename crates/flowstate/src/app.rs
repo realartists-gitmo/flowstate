@@ -390,7 +390,11 @@ fn init_theme_registry(cx: &mut App) {
 #[hotpath::measure]
 fn vendored_themes_dir() -> PathBuf {
   let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
-  manifest_dir
+  let workspace_dir = manifest_dir
+    .parent()
+    .and_then(Path::parent)
+    .unwrap_or(manifest_dir);
+  workspace_dir
     .join("vendor")
     .join("gpui-component")
     .join("themes")

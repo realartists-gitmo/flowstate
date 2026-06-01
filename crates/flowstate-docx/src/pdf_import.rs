@@ -237,13 +237,21 @@ fn page_runs_from_spans(
       }
 
       let bbox = span.bbox;
-      let underline_from_annotation = annotation_boxes.underline.iter().any(|mark| rects_meaningfully_overlap(&bbox, mark));
+      let underline_from_annotation = annotation_boxes
+        .underline
+        .iter()
+        .any(|mark| rects_meaningfully_overlap(&bbox, mark));
       let strikethrough_from_annotation = annotation_boxes
         .strikethrough
         .iter()
         .any(|mark| rects_meaningfully_overlap(&bbox, mark));
-      let highlight_from_annotation = annotation_boxes.highlight.iter().any(|mark| rects_meaningfully_overlap(&bbox, mark));
-      let underline_from_vector = lines.iter().any(|line| path_is_underline(line, &bbox, span.font_size));
+      let highlight_from_annotation = annotation_boxes
+        .highlight
+        .iter()
+        .any(|mark| rects_meaningfully_overlap(&bbox, mark));
+      let underline_from_vector = lines
+        .iter()
+        .any(|line| path_is_underline(line, &bbox, span.font_size));
       let strikethrough_from_vector = lines
         .iter()
         .any(|line| path_is_strikethrough(line, &bbox, span.font_size));
@@ -358,10 +366,7 @@ fn page_paragraphs_from_lines(lines: Vec<PdfLineFact>, median_font_size: f32) ->
 }
 
 #[hotpath::measure]
-fn document_paragraphs_from_pdf_paragraphs(
-  pdf_paragraphs: Vec<PdfParagraphFact>,
-  stats: &mut PdfImportStats,
-) -> Vec<DocumentParagraphInput> {
+fn document_paragraphs_from_pdf_paragraphs(pdf_paragraphs: Vec<PdfParagraphFact>, stats: &mut PdfImportStats) -> Vec<DocumentParagraphInput> {
   let mut paragraphs = Vec::with_capacity(pdf_paragraphs.len());
   let mut current_section_has_underline = false;
   let mut after_heading_seeking_text = false;
@@ -452,10 +457,7 @@ fn recognize_line_paragraph_style(runs: &[PdfRunFact]) -> (ParagraphStyle, bool)
   let all_italic = !runs.is_empty() && runs.iter().all(|run| run.italic);
   let any_underline = runs.iter().any(|run| run.underline);
   let any_color = runs.iter().any(|run| color_is_non_black(run.color));
-  let max_size = runs
-    .iter()
-    .map(|run| run.font_size)
-    .fold(0.0_f32, f32::max);
+  let max_size = runs.iter().map(|run| run.font_size).fold(0.0_f32, f32::max);
 
   if has_bold && max_size >= 24.0 {
     return (ParagraphStyle::Pocket, true);
@@ -472,7 +474,13 @@ fn recognize_line_paragraph_style(runs: &[PdfRunFact]) -> (ParagraphStyle, bool)
   if has_bold && any_color && text_len <= 180 {
     return (ParagraphStyle::Analytic, false);
   }
-  if has_bold && max_size >= 12.5 && text_len <= 120 && runs.iter().all(|run| run.bold || run.text.trim().is_empty()) {
+  if has_bold
+    && max_size >= 12.5
+    && text_len <= 120
+    && runs
+      .iter()
+      .all(|run| run.bold || run.text.trim().is_empty())
+  {
     return (ParagraphStyle::Tag, false);
   }
 
@@ -828,10 +836,7 @@ fn median_font_size(runs: &[PdfRunFact]) -> Option<f32> {
 
 #[hotpath::measure]
 fn line_center_y(line: &[PdfRunFact]) -> f32 {
-  let total = line
-    .iter()
-    .map(|run| rect_center_y(&run.bbox))
-    .sum::<f32>();
+  let total = line.iter().map(|run| rect_center_y(&run.bbox)).sum::<f32>();
   total / line.len().max(1) as f32
 }
 
@@ -905,7 +910,8 @@ fn confidence(stats: &PdfImportStats) -> f32 {
   let high_confidence = (stats.high_confidence_structural_hits as f32 * 0.22).min(0.44);
   let semantic = (stats.semantic_hits as f32 * 0.02).min(0.16);
   let annotations = ((stats.annotation_highlights + stats.annotation_underlines + stats.annotation_strikethroughs) as f32 * 0.04).min(0.12);
-  let vectors = ((stats.vector_highlights + stats.vector_underlines + stats.vector_strikethroughs + stats.vector_borders) as f32 * 0.02).min(0.10);
+  let vectors =
+    ((stats.vector_highlights + stats.vector_underlines + stats.vector_strikethroughs + stats.vector_borders) as f32 * 0.02).min(0.10);
   (structural + high_confidence + semantic + annotations + vectors).min(1.0)
 }
 
