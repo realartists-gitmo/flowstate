@@ -6,11 +6,14 @@ use std::{
   sync::Arc,
 };
 
+#[allow(unused_imports)]
+use gpui::Bounds;
+#[allow(unused_imports)]
+use gpui::size;
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
-  KeyBinding,
+  AnyElement, AnyWindowHandle, App, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding,
   Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
-  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
+  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px,
 };
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
