@@ -1,5 +1,7 @@
 Rust GPUI WYSIWIG maximally-performance-oriented word processor for competitive debate. You NEVER assume contexts for competitive debate, and you SHOULD always ask.
 
+gpui-flowtext is a crate owned by us. It is separate for compatibility reasons, but changes you make to it will be upstreamed to the crate source if viable.
+
 You SHOULD prefer gpui-component solutions to ground-up gpui solutions when a component is applicable. When no component is applicable or sufficient, you SHOULD either interact with the gpui-component vendor to fix it, or implement ground-up gpui only if the former fails. For the record: gpui-component is vendored on this project.
 
 You SHOULD consider if there is a pre-existing crate to handle something. The 'search' tool is useful here. For deeper investigations into whether an unearthed crate meets your needs, deploy a Librarian subagent. If there are multiple options, you SHOULD ask while outlining pros and cons. You SHOULD use CLI cargo commands to handle crates and NEVER do it manually.

@@ -1,16 +1,17 @@
 use std::{
   cell::Cell,
-  collections::{HashMap, HashSet},
+  collections::{HashMap, HashSet, VecDeque},
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Bounds, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement,
-  KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString,
-  Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
+  AnyElement, AnyWindowHandle, App, Bounds, ClipboardItem, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
+  IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle,
+  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
+use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
@@ -23,6 +24,7 @@ use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::setting::{SettingField, SettingGroup, SettingItem, SettingPage, Settings};
 use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::tab::{Tab, TabBar};
+use gpui_component::tooltip::Tooltip;
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
   ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar, h_flex,
@@ -36,10 +38,10 @@ use crate::app_settings::{
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
-use crate::flow::{FlowEditor, FlowPanel};
+use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
-  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme,
-  load_or_create_document, paragraph_byte_range,
+  CollaborationRole as Db8CollaborationRole, Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut,
+  db8_collab_document_with_id, document_from_db8_collab_source, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -47,8 +49,15 @@ use crate::workspace::file_management::{
 };
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
-use flowstate_sync::{FLOWSTATE_INVITE_PREFIX, SessionState, decode_invite_link};
+use flowstate_collab::{
+  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, UpdateApplication, WireMessage, decode_native_file,
+};
+use flowstate_sync::{
+  AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, LiveUpdate, LiveUpdateKind, Role, SessionDocumentState, SessionEvent, SessionId,
+  SessionState, connect_live_invite, decode_invite_link,
+};
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
+use tokio::sync::{broadcast, mpsc};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
@@ -79,6 +88,12 @@ pub struct Workspace {
   outline_viewport_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
+  collaboration_host: Option<HostedCollaboration>,
+  collaboration_last_published_hash: Option<[u8; 32]>,
+  collaboration_client_updates: Option<mpsc::UnboundedSender<PendingCollaborationUpdate>>,
+  collaboration_pending_updates: VecDeque<PendingCollaborationUpdate>,
+  collaboration_runtime_id: u64,
+  collaboration_delta_updates_since_checkpoint: usize,
   collaboration: CollaborationUiState,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
   document_style_section: DocumentStyleSection,
@@ -169,8 +184,30 @@ enum ToolkitSearchFilter {
 struct CollaborationUiState {
   state: SessionState,
   role: Option<&'static str>,
+  panel_id: Option<Uuid>,
+  document_id: Option<flowstate_collab::DocumentId>,
+  format_kind: Option<FormatKind>,
   pending_invite: Option<String>,
   last_error: Option<String>,
+  peers: HashMap<SessionId, CollaborationPeerInfo>,
+}
+
+#[derive(Clone)]
+struct CollaborationPeerInfo {
+  actor_id: ActorId,
+  role: Role,
+  user_label: Option<String>,
+  cursor: Option<String>,
+  focus: Option<String>,
+  viewport_hint: Option<String>,
+  last_seen_millis: Option<u64>,
+}
+
+#[derive(Clone)]
+struct CollaborationPeerMenuItem {
+  session_id: SessionId,
+  label: String,
+  role: Role,
 }
 
 impl Default for CollaborationUiState {
@@ -178,8 +215,12 @@ impl Default for CollaborationUiState {
     Self {
       state: SessionState::Idle,
       role: None,
+      panel_id: None,
+      document_id: None,
+      format_kind: None,
       pending_invite: None,
       last_error: None,
+      peers: HashMap::new(),
     }
   }
 }

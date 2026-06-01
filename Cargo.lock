@@ -2764,6 +2764,7 @@ dependencies = [
  "cosmic-text",
  "dirs 6.0.0",
  "fff-search",
+ "flowstate-collab",
  "flowstate-document",
  "flowstate-docx",
  "flowstate-flow",
@@ -2775,10 +2776,12 @@ dependencies = [
  "gpui-symbols",
  "hotpath",
  "mimalloc",
+ "postcard",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
  "tempfile",
+ "tokio",
  "toml 1.1.2+spec-1.1.0",
  "uuid",
 ]
@@ -3554,16 +3557,16 @@ dependencies = [
 [[package]]
 name = "gpui-flowtext"
 version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a4f073bd0461a22fd77c98544d113af2d7de33bafb4183868673a6acb11e0120"
 dependencies = [
  "cosmic-text",
  "crop",
+ "flowstate-collab",
  "gpui",
  "gpui-component",
  "hotpath",
  "imagesize",
  "mathjax_svg",
+ "postcard",
  "resvg",
  "rustc-hash 2.1.2",
  "serde",
@@ -4839,7 +4842,7 @@ checksum = "3640c1c38b8e4e43584d8df18be5fc6b0aa314ce6ebf51b53313d4306cca8e46"
 dependencies = [
  "hermit-abi",
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

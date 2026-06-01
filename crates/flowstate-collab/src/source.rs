@@ -19,6 +19,7 @@ const KEY_SOURCE_MODEL: &str = "source_model";
 const KEY_SOURCE_PAYLOAD: &str = "source_payload";
 const KEY_SOURCE_PAYLOAD_HASH: &str = "source_payload_hash";
 const KEY_PROJECTION_HASH: &str = "projection_hash";
+const KEY_ASSET_MANIFEST: &str = "asset_manifest";
 const KEY_ASSET_MANIFEST_HASH: &str = "asset_manifest_hash";
 const KEY_GRANULAR_METADATA: &str = "granular_metadata";
 const KEY_GRANULAR_ORDERS: &str = "granular_orders";
@@ -290,6 +291,10 @@ impl CollabDocument {
     root_binary(&self.doc, KEY_SOURCE_PAYLOAD)
   }
 
+  pub fn asset_manifest_bytes(&self) -> CollabResult<Vec<u8>> {
+    root_binary(&self.doc, KEY_ASSET_MANIFEST)
+  }
+
   pub fn materialize_granular_source(&self) -> CollabResult<Option<GranularSource>> {
     if !self.is_granular() {
       return Ok(None);
@@ -348,9 +353,14 @@ impl CollabDocument {
   ) -> CollabResult<Vec<u8>> {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
+    let current_source = self.materialize_granular_source()?;
     write_source_model(&self.doc, SourceModel::GranularRecords)?;
     write_projection_payload(&self.doc, projection_cache, asset_manifest)?;
-    write_granular_source(&self.doc, source)?;
+    if let Some(current_source) = current_source {
+      merge_granular_source(&self.doc, &current_source, source)?;
+    } else {
+      write_granular_source(&self.doc, source)?;
+    }
     self.doc.commit();
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
     self
@@ -455,8 +465,7 @@ impl CollabDocument {
     require_writer(remote_role)?;
 
     let before_hash = self.projection_hash()?;
-    let before_snapshot = self.export_snapshot()?;
-    let candidate = LoroDoc::from_snapshot(&before_snapshot).map_err(|error| CollabError::Loro(error.to_string()))?;
+    let candidate = self.doc.clone();
     candidate
       .import(update)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -658,6 +667,9 @@ fn write_projection_payload(doc: &LoroDoc, projection_cache: &[u8], asset_manife
     .insert(KEY_PROJECTION_HASH, projection_hash.as_slice())
     .map_err(|error| CollabError::Loro(error.to_string()))?;
   root
+    .insert(KEY_ASSET_MANIFEST, asset_manifest)
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  root
     .insert(KEY_ASSET_MANIFEST_HASH, blake3_hash(asset_manifest).as_slice())
     .map_err(|error| CollabError::Loro(error.to_string()))
 }
@@ -689,13 +701,17 @@ fn validate_schema(
     return Err(CollabError::HashMismatch("Loro projection cache"));
   }
   let _ = root_hash(doc, KEY_PROJECTION_HASH)?;
+  let asset_manifest = root_binary(doc, KEY_ASSET_MANIFEST)?;
+  let asset_manifest_hash = root_hash(doc, KEY_ASSET_MANIFEST_HASH)?;
+  if blake3_hash(&asset_manifest) != asset_manifest_hash {
+    return Err(CollabError::HashMismatch("Loro asset manifest"));
+  }
 
   let role_policy: CollabRolePolicy = postcard::from_bytes(&root_binary(doc, KEY_ROLE_POLICY)?)?;
   if role_policy.role_for_actor(role_policy.owner) != Some(Role::Owner) {
     return Err(CollabError::InvalidSchema("Flowstate Loro role policy has no owner"));
   }
   let _ = root_binary(doc, KEY_CREATED_BY_ACTOR)?;
-  let _ = root_hash(doc, KEY_ASSET_MANIFEST_HASH)?;
 
   if matches!(source_model, SourceModel::GranularRecords) {
     validate_granular_source(doc)?;
@@ -731,6 +747,18 @@ fn write_granular_source(doc: &LoroDoc, source: &GranularSource) -> CollabResult
   write_granular_binaries(&root, &source.binaries)
 }
 
+fn merge_granular_source(doc: &LoroDoc, current: &GranularSource, target: &GranularSource) -> CollabResult<()> {
+  let current = current.clone().canonicalized();
+  let target = target.clone().canonicalized();
+  let root = doc.get_map(ROOT_MAP);
+  root
+    .insert(KEY_GRANULAR_METADATA, target.metadata)
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  merge_granular_orders(&root, &current.orders, &target.orders)?;
+  merge_granular_texts(&root, &current.texts, &target.texts)?;
+  merge_granular_binaries(&root, &current.binaries, &target.binaries)
+}
+
 fn write_granular_orders(root: &LoroMap, orders: &[GranularOrderRecord]) -> CollabResult<()> {
   let orders_map = root
     .get_or_create_container(KEY_GRANULAR_ORDERS, LoroMap::new())
@@ -752,6 +780,43 @@ fn write_granular_orders(root: &LoroMap, orders: &[GranularOrderRecord]) -> Coll
   for order in orders {
     let list = orders_map
       .get_or_create_container(order.name.as_str(), LoroMovableList::new())
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    list
+      .clear()
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    for id in &order.ids {
+      list
+        .push(id.as_str())
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
+    }
+  }
+  Ok(())
+}
+
+fn merge_granular_orders(root: &LoroMap, current: &[GranularOrderRecord], target: &[GranularOrderRecord]) -> CollabResult<()> {
+  let current_by_id = granular_records_by_id(current.to_vec(), |record| record.name.as_str());
+  let target_by_id = granular_records_by_id(target.to_vec(), |record| record.name.as_str());
+  let orders_map = root
+    .get_or_create_container(KEY_GRANULAR_ORDERS, LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  for name in current_by_id.keys() {
+    if !target_by_id.contains_key(name) {
+      if let Some(ValueOrContainer::Container(Container::MovableList(order))) = orders_map.get(name) {
+        order
+          .clear()
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      }
+      orders_map
+        .delete(name)
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
+    }
+  }
+  for (name, order) in target_by_id {
+    if current_by_id.get(&name) == Some(&order) {
+      continue;
+    }
+    let list = orders_map
+      .get_or_create_container(name.as_str(), LoroMovableList::new())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
     list
       .clear()
@@ -810,6 +875,59 @@ fn write_granular_texts(root: &LoroMap, texts: &[GranularTextRecord]) -> CollabR
   Ok(())
 }
 
+fn merge_granular_texts(root: &LoroMap, current: &[GranularTextRecord], target: &[GranularTextRecord]) -> CollabResult<()> {
+  let current_by_id = granular_records_by_id(current.to_vec(), |record| record.id.as_str());
+  let target_by_id = granular_records_by_id(target.to_vec(), |record| record.id.as_str());
+  let text_map = root
+    .get_or_create_container(KEY_GRANULAR_TEXTS, LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  for id in current_by_id.keys() {
+    if !target_by_id.contains_key(id) {
+      text_map
+        .delete(id)
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
+    }
+  }
+  for (id, record) in target_by_id {
+    if current_by_id.get(&id) == Some(&record) {
+      continue;
+    }
+    write_granular_text_record(&text_map, &record)?;
+  }
+  Ok(())
+}
+
+fn write_granular_text_record(text_map: &LoroMap, record: &GranularTextRecord) -> CollabResult<()> {
+  let record_map = text_map
+    .get_or_create_container(record.id.as_str(), LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  record_map
+    .insert(KEY_RECORD_METADATA, record.metadata.as_slice())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  let text = record_map
+    .get_or_create_container(KEY_RECORD_TEXT, LoroText::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  let current_len = text.to_string().len();
+  if current_len > 0 {
+    text
+      .delete_utf8(0, current_len)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  if !record.text.is_empty() {
+    text
+      .insert_utf8(0, &record.text)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  for mark in &record.marks {
+    if mark.start_utf8 < mark.end_utf8 {
+      text
+        .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.clone().into_loro())
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
+    }
+  }
+  Ok(())
+}
+
 fn write_granular_binaries(root: &LoroMap, binaries: &[GranularBinaryRecord]) -> CollabResult<()> {
   let binary_map = root
     .get_or_create_container(KEY_GRANULAR_BINARIES, LoroMap::new())
@@ -826,6 +944,30 @@ fn write_granular_binaries(root: &LoroMap, binaries: &[GranularBinaryRecord]) ->
   for record in binaries {
     binary_map
       .insert(record.id.as_str(), record.metadata.as_slice())
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  Ok(())
+}
+
+fn merge_granular_binaries(root: &LoroMap, current: &[GranularBinaryRecord], target: &[GranularBinaryRecord]) -> CollabResult<()> {
+  let current_by_id = granular_records_by_id(current.to_vec(), |record| record.id.as_str());
+  let target_by_id = granular_records_by_id(target.to_vec(), |record| record.id.as_str());
+  let binary_map = root
+    .get_or_create_container(KEY_GRANULAR_BINARIES, LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  for id in current_by_id.keys() {
+    if !target_by_id.contains_key(id) {
+      binary_map
+        .delete(id)
+        .map_err(|error| CollabError::Loro(error.to_string()))?;
+    }
+  }
+  for (id, record) in target_by_id {
+    if current_by_id.get(&id) == Some(&record) {
+      continue;
+    }
+    binary_map
+      .insert(id.as_str(), record.metadata.as_slice())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
   }
   Ok(())

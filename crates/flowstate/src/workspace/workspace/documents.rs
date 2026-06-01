@@ -1,5 +1,8 @@
 #[hotpath::measure_all]
 impl Workspace {
+  const MAX_PENDING_COLLABORATION_UPDATES: usize = 128;
+  const COLLABORATION_CHECKPOINT_DELTA_INTERVAL: usize = 64;
+
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
     let zoom_slider = cx.new(|_| {
       SliderState::new()
@@ -75,6 +78,12 @@ impl Workspace {
       outline_viewport_paragraph: None,
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
+      collaboration_host: None,
+      collaboration_last_published_hash: None,
+      collaboration_client_updates: None,
+      collaboration_pending_updates: VecDeque::new(),
+      collaboration_runtime_id: 0,
+      collaboration_delta_updates_since_checkpoint: 0,
       collaboration: CollaborationUiState::default(),
       settings_overlay: None,
       document_style_section: DocumentStyleSection::Text,
@@ -134,104 +143,721 @@ impl Workspace {
     this
   }
   pub fn start_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    if self.active_document_id.is_none() {
-      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No document open", "Open a DB8 or FL0 file before starting collaboration.");
+    let Some(host_snapshot) = self.active_collaboration_host_snapshot(cx) else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "No document open",
+        "Open a DB8 or FL0 file before starting collaboration.",
+      );
       return;
-    }
+    };
+    self.start_collaboration_from_snapshot(host_snapshot, window, cx);
+  }
+
+  fn start_collaboration_from_snapshot(&mut self, host_snapshot: CollaborationHostSnapshot, window: &mut Window, cx: &mut Context<Self>) {
+    self.close_collaboration_runtime(cx);
+    let panel_id = host_snapshot.panel_id();
+    let document_id = host_snapshot.document_id();
+    let format_kind = host_snapshot.format_kind();
+    let window_handle = window.window_handle();
+    let runtime_id = self.collaboration_runtime_id;
     self.collaboration.state = SessionState::Hosting;
     self.collaboration.role = Some("Owner");
+    self.collaboration.panel_id = Some(panel_id);
+    self.collaboration.document_id = Some(document_id);
+    self.collaboration.format_kind = Some(format_kind);
+    self.collaboration.pending_invite = None;
     self.collaboration.last_error = None;
+    self.collaboration.peers.clear();
+    self.collaboration_last_published_hash = None;
+    self.collaboration_client_updates = None;
+    let build_host_input = cx
+      .background_executor()
+      .spawn(async move { host_snapshot.into_host_input() });
+    std::mem::drop(cx.spawn(async move |workspace, cx| {
+      let result = match build_host_input.await {
+        Some(host_input) => HostedCollaboration::start(host_input.document, host_input.assets, Role::Owner)
+          .await
+          .map(|host| (host, host_input.source_hash)),
+        None => Err(anyhow::anyhow!("failed to build collaboration source from the active document")),
+      };
+      let is_current_runtime = workspace
+        .update(cx, |workspace, _| workspace.collaboration_runtime_id == runtime_id)
+        .unwrap_or(false);
+      if !is_current_runtime {
+        if let Ok((host, _)) = result {
+          let _ = host.shutdown().await;
+        }
+        return;
+      }
+      let _ = workspace.update(cx, |workspace, cx| {
+        match result {
+          Ok((host, source_hash)) => {
+            workspace.collaboration_last_published_hash = source_hash.or_else(|| host.document_hash().ok());
+            workspace.apply_collaboration_role_to_panel(panel_id, Role::Owner, cx);
+            workspace.spawn_host_update_loop(panel_id, host.document_state(), host.subscribe_live_updates(), window_handle, cx);
+            workspace.collaboration_host = Some(host);
+            workspace.collaboration.state = SessionState::Live;
+            workspace.collaboration.role = Some("Owner");
+            workspace.collaboration.panel_id = Some(panel_id);
+            workspace.collaboration.document_id = Some(document_id);
+            workspace.collaboration.format_kind = Some(format_kind);
+            workspace.collaboration.last_error = None;
+            workspace.collaboration.peers.clear();
+            workspace.drain_pending_updates_to_host();
+          },
+          Err(error) => {
+            workspace.collaboration_host = None;
+            workspace.collaboration.state = SessionState::Failed;
+            workspace.collaboration.last_error = Some(format!("{error:#}"));
+            workspace.collaboration.peers.clear();
+          },
+        }
+        cx.notify();
+      });
+    }));
     show_collaboration_prompt(
       window,
       cx,
       PromptLevel::Info,
-      "Collaboration hosting prepared",
-      "The local workspace is marked as owner/host. Network invite publishing is not available in this build yet.",
+      "Preparing collaboration",
+      "Flowstate is preparing this document and binding a sync endpoint.",
     );
     cx.notify();
   }
 
   pub fn stop_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.close_collaboration_runtime(cx);
     self.collaboration.state = SessionState::Closed;
     self.collaboration.role = None;
     self.collaboration.pending_invite = None;
     self.collaboration.last_error = None;
-    show_collaboration_prompt(window, cx, PromptLevel::Info, "Collaboration disconnected", "This workspace is no longer in a collaboration session.");
+    self.collaboration.peers.clear();
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Info,
+      "Collaboration disconnected",
+      "This workspace is no longer in a collaboration session.",
+    );
     cx.notify();
   }
 
   fn copy_collaboration_invite(&mut self, role: CollaborationInviteRole, window: &mut Window, cx: &mut Context<Self>) {
-    if self.collaboration.role != Some("Owner") || self.collaboration.state != SessionState::Hosting {
-      show_collaboration_prompt(window, cx, PromptLevel::Warning, "Invite unavailable", "Start collaboration as owner before copying invite links.");
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Invite unavailable",
+        "Start collaboration as owner before copying invite links.",
+      );
       return;
-    }
+    };
     let role_name = collaboration_role_label(role);
-    let detail = format!("Cannot create a {role_name} invite because this build has no active Flowstate sync endpoint address yet.");
-    self.collaboration.last_error = Some(detail.clone());
-    show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite unavailable", &detail);
+    match host.issue_invite_link(collaboration_sync_role(role), Some(role_name.to_string()), true) {
+      Ok(invite) => {
+        cx.write_to_clipboard(ClipboardItem::new_string(invite));
+        self.collaboration.last_error = None;
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Info,
+          "Invite copied",
+          &format!("{role_name} invite copied to clipboard."),
+        );
+      },
+      Err(error) => {
+        let detail = format!("{error:#}");
+        self.collaboration.last_error = Some(detail.clone());
+        show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite unavailable", &detail);
+      },
+    }
+    cx.notify();
+  }
+
+  pub fn revoke_collaboration_invites(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Owner session required",
+        "Start collaboration as owner before revoking invite links.",
+      );
+      return;
+    };
+    match host.revoke_all_invites() {
+      Ok(count) => {
+        self.collaboration.last_error = None;
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Info,
+          "Invites revoked",
+          &format!("Revoked {count} active collaboration invite(s). Connected peers remain in the session."),
+        );
+      },
+      Err(error) => {
+        let detail = format!("{error:#}");
+        self.collaboration.last_error = Some(detail.clone());
+        show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite revoke failed", &detail);
+      },
+    }
     cx.notify();
   }
 
   pub fn join_collaboration_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(item) = cx.read_from_clipboard() else {
-      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No invite on clipboard", "Copy a flowstate://collab/ invite link before joining.");
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "No invite on clipboard",
+        "Copy a flowstate://collab/ invite link before joining.",
+      );
       return;
     };
     let Some(invite) = item.text() else {
-      show_collaboration_prompt(window, cx, PromptLevel::Warning, "No invite on clipboard", "The current clipboard item does not contain text.");
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "No invite on clipboard",
+        "The current clipboard item does not contain text.",
+      );
       return;
     };
     self.join_collaboration_from_invite(invite.trim().to_string(), window, cx);
   }
 
   pub fn join_collaboration_from_invite(&mut self, invite: String, window: &mut Window, cx: &mut Context<Self>) {
+    self.spawn_join_collaboration_runtime(invite, None, window, cx);
+  }
+
+  fn spawn_join_collaboration_runtime(&mut self, invite: String, target_panel_id: Option<Uuid>, window: &mut Window, cx: &mut Context<Self>) {
     self.collaboration.state = SessionState::Joining;
     self.collaboration.pending_invite = Some(invite.clone());
-    match decode_invite_link(&invite) {
-      Ok(ticket) => {
-        self.collaboration.role = Some(collaboration_sync_role_label(ticket.invited_role));
-        self.collaboration.last_error = Some("Network join is not available in this build yet.".to_string());
-        show_collaboration_prompt(
-          window,
-          cx,
-          PromptLevel::Warning,
-          "Invite recognized",
-          "The invite link is valid, but this build cannot open the network collaboration session yet.",
-        );
-      },
+    let ticket = match decode_invite_link(&invite) {
+      Ok(ticket) => ticket,
       Err(error) => {
         let detail = format!("{error:#}");
         self.collaboration.state = SessionState::Failed;
         self.collaboration.role = None;
         self.collaboration.last_error = Some(detail.clone());
         show_collaboration_prompt(window, cx, PromptLevel::Critical, "Join failed", &detail);
+        cx.notify();
+        return;
+      },
+    };
+    if target_panel_id.is_some() {
+      self.close_collaboration_runtime_preserving_pending(cx);
+    } else {
+      self.close_collaboration_runtime(cx);
+    }
+    self.collaboration.state = if target_panel_id.is_some() {
+      SessionState::Reconnecting
+    } else {
+      SessionState::Joining
+    };
+    self.collaboration.pending_invite = Some(invite.clone());
+    self.collaboration.role = Some(collaboration_sync_role_label(ticket.invited_role));
+    self.collaboration.panel_id = target_panel_id;
+    self.collaboration.document_id = Some(ticket.document_id);
+    self.collaboration.format_kind = Some(ticket.format_kind);
+    self.collaboration.peers.clear();
+    let runtime_id = self.collaboration_runtime_id;
+    let window_handle = window.window_handle();
+    std::mem::drop(cx.spawn(async move |workspace, cx| {
+      let mut target_panel_id = target_panel_id;
+      let mut reconnect_delay = std::time::Duration::from_millis(500);
+      loop {
+        let should_continue = window_handle
+          .update(cx, |_, _, cx| {
+            workspace
+              .update(cx, |workspace, _| {
+                workspace.collaboration_runtime_id == runtime_id
+                  && workspace.collaboration.pending_invite.as_deref() == Some(invite.as_str())
+                  && target_panel_id
+                    .is_none_or(|panel_id| workspace.collaboration.panel_id.is_none() || workspace.collaboration.panel_id == Some(panel_id))
+              })
+              .unwrap_or(false)
+          })
+          .unwrap_or(false);
+        if !should_continue {
+          break;
+        }
+
+        let client = connect_live_invite(&invite).await;
+        match client {
+          Ok(mut client) => {
+            if let Err(error) = client.request_document_assets().await {
+              let _ = window_handle.update(cx, |_, _, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                  workspace.collaboration.state = if target_panel_id.is_some() {
+                    SessionState::Reconnecting
+                  } else {
+                    SessionState::Failed
+                  };
+                  workspace.collaboration.last_error = Some(format!("{error:#}"));
+                  workspace.collaboration_client_updates = None;
+                  cx.notify();
+                });
+              });
+              let _ = client.shutdown().await;
+              if target_panel_id.is_none() {
+                return;
+              }
+              tokio::time::sleep(reconnect_delay).await;
+              reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
+              continue;
+            }
+            let (update_tx, mut update_rx) = mpsc::unbounded_channel::<PendingCollaborationUpdate>();
+            let authorized_role = client.authorization.role;
+            let joined_document_id = client.document.document_id();
+            let joined_format_kind = client.document.format_kind();
+            let joined_hash = client.document.projection_hash().ok();
+            let initial = collab_document_to_workspace_document(client.document.clone());
+            let collaboration_panel_id = window_handle
+              .update(cx, |_, window, cx| {
+                workspace
+                  .update(cx, |workspace, cx| {
+                    let had_pending_updates = !workspace.collaboration_pending_updates.is_empty();
+                    let panel_id = if let Some(panel_id) = target_panel_id {
+                      if workspace.collaboration.panel_id != Some(panel_id) {
+                        return None;
+                      }
+                      if !had_pending_updates
+                        && let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, client.document.clone(), None, cx)
+                      {
+                        workspace.collaboration.state = SessionState::Failed;
+                        workspace.collaboration.last_error = Some(format!("{error:#}"));
+                        cx.notify();
+                        return None;
+                      }
+                      panel_id
+                    } else {
+                      match initial {
+                        Ok(JoinedWorkspaceDocument::Document(document)) => {
+                          let panel =
+                            workspace.add_document_panel_with_title(*document, None, Some("Collaboration.db8".to_string()), window, cx);
+                          panel.read(cx).id()
+                        },
+                        Ok(JoinedWorkspaceDocument::Flow(document)) => {
+                          let panel = workspace.add_flow_panel(document, None, window, cx);
+                          panel.read(cx).id()
+                        },
+                        Err(error) => {
+                          workspace.collaboration.state = SessionState::Failed;
+                          workspace.collaboration.last_error = Some(format!("{error:#}"));
+                          cx.notify();
+                          return None;
+                        },
+                      }
+                    };
+                    workspace.apply_collaboration_role_to_panel(panel_id, authorized_role, cx);
+                    workspace.collaboration_client_updates = Some(update_tx.clone());
+                    workspace.collaboration.state = SessionState::Live;
+                    workspace.collaboration.panel_id = Some(panel_id);
+                    workspace.collaboration.document_id = Some(joined_document_id);
+                    workspace.collaboration.format_kind = Some(joined_format_kind);
+                    workspace.collaboration_last_published_hash = joined_hash;
+                    workspace.collaboration.last_error = None;
+                    workspace.collaboration.peers.clear();
+                    workspace.drain_pending_updates_to_sender(&update_tx);
+                    cx.notify();
+                    Some(panel_id)
+                  })
+                  .ok()
+                  .flatten()
+              })
+              .ok()
+              .flatten();
+            let Some(collaboration_panel_id) = collaboration_panel_id else {
+              let _ = client.shutdown().await;
+              return;
+            };
+            target_panel_id = Some(collaboration_panel_id);
+            reconnect_delay = std::time::Duration::from_millis(500);
+            let mut local_disconnect = false;
+            loop {
+              let received = tokio::select! {
+                update = client.receive_next_update() => update,
+                update = update_rx.recv() => {
+                  match update {
+                    Some(update) => {
+                      let result = match update {
+                        PendingCollaborationUpdate::Source { source, application, .. } => client.replace_source_from(&source, application).await,
+                        PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
+                      };
+                      if let Err(error) = result {
+                        let detail = format!("{error:#}");
+                        let _ = window_handle.update(cx, |_, _, cx| {
+                          let _ = workspace.update(cx, |workspace, cx| {
+                            if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
+                              workspace.collaboration.last_error = Some(detail);
+                              cx.notify();
+                            }
+                          });
+                        });
+                      }
+                      continue;
+                    },
+                    None => {
+                      local_disconnect = true;
+                      break;
+                    },
+                  }
+                },
+              };
+              let Ok(Some(event)) = received else {
+                break;
+              };
+              match event {
+                SessionEvent::SnapshotApplied { .. } | SessionEvent::UpdateApplied { .. } => {
+                  let application = client.last_application.clone();
+                  let source = client.document.clone();
+                  let _ = window_handle.update(cx, |_, _, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                      if let Err(error) = workspace.apply_collaboration_source_to_panel(collaboration_panel_id, source, application, cx) {
+                        workspace.collaboration.last_error = Some(format!("{error:#}"));
+                      } else {
+                        workspace.collaboration.last_error = None;
+                      }
+                      cx.notify();
+                    });
+                  });
+                },
+                event => {
+                  let _ = window_handle.update(cx, |_, _, cx| {
+                    let _ = workspace.update(cx, |workspace, cx| {
+                      workspace.apply_collaboration_session_event(collaboration_panel_id, event, cx);
+                    });
+                  });
+                },
+              }
+            }
+            let _ = client.shutdown().await;
+            if !local_disconnect {
+              let _ = window_handle.update(cx, |_, _, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                  if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
+                    workspace.collaboration.state = SessionState::Reconnecting;
+                    workspace.collaboration.last_error = Some("Collaboration stream closed.".to_string());
+                    workspace.collaboration_client_updates = None;
+                    workspace.collaboration.peers.clear();
+                    cx.notify();
+                  }
+                });
+              });
+              tokio::time::sleep(reconnect_delay).await;
+              reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
+              continue;
+            }
+            break;
+          },
+          Err(error) => {
+            let _ = window_handle.update(cx, |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| {
+                workspace.collaboration.state = if target_panel_id.is_some() {
+                  SessionState::Reconnecting
+                } else {
+                  SessionState::Failed
+                };
+                workspace.collaboration.last_error = Some(format!("{error:#}"));
+                workspace.collaboration_client_updates = None;
+                cx.notify();
+              });
+            });
+            if target_panel_id.is_none() {
+              break;
+            }
+            tokio::time::sleep(reconnect_delay).await;
+            reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
+          },
+        }
+      }
+    }));
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Info,
+      if target_panel_id.is_some() {
+        "Reconnecting collaboration"
+      } else {
+        "Joining collaboration"
+      },
+      "Flowstate is connecting to the host and requesting the source snapshot.",
+    );
+    cx.notify();
+  }
+
+  pub fn reconnect_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if let Some(invite) = self.collaboration.pending_invite.clone() {
+      let target_panel_id = self.collaboration.panel_id;
+      self.collaboration.state = SessionState::Reconnecting;
+      self.collaboration.last_error = None;
+      self.spawn_join_collaboration_runtime(invite, target_panel_id, window, cx);
+      return;
+    }
+    if self.collaboration.role == Some("Owner")
+      && let Some(panel_id) = self.collaboration.panel_id
+      && let Some(host_snapshot) = self.collaboration_host_snapshot_for_panel(panel_id, cx)
+    {
+      self.close_collaboration_runtime(cx);
+      self.set_active_collaboration_panel(panel_id, cx);
+      self.collaboration.state = SessionState::Reconnecting;
+      self.collaboration.last_error = None;
+      self.start_collaboration_from_snapshot(host_snapshot, window, cx);
+      return;
+    }
+    if self.collaboration.role.is_none() {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Reconnect unavailable",
+        "There is no previous collaboration session or invite to reconnect.",
+      );
+      return;
+    }
+    self.collaboration.last_error = Some("No reconnect path is available for this collaboration state.".to_string());
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Warning,
+      "Reconnect unavailable",
+      "No reconnect path is available for this collaboration state.",
+    );
+    cx.notify();
+  }
+
+  pub fn promote_collaboration_peers_to_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.set_collaboration_peers_role(Role::Editor, window, cx);
+  }
+
+  pub fn downgrade_collaboration_peers_to_viewer(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.set_collaboration_peers_role(Role::Viewer, window, cx);
+  }
+
+  pub fn set_collaboration_peer_role(&mut self, session_id: SessionId, role: Role, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Owner session required",
+        "Start or reconnect as owner before changing peer roles.",
+      );
+      return;
+    };
+    let peer_label = self
+      .collaboration
+      .peers
+      .get(&session_id)
+      .map(collaboration_peer_display_name)
+      .unwrap_or_else(|| format!("Peer {}", collaboration_short_uuid(session_id.0)));
+    match host.set_peer_role(session_id, role) {
+      Ok(true) => {
+        if let Some(peer) = self.collaboration.peers.get_mut(&session_id) {
+          peer.role = role;
+        }
+        self.collaboration.last_error = None;
+        let role_label = collaboration_sync_role_label(role);
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Info,
+          "Peer role updated",
+          &format!("{peer_label} is now a {role_label}."),
+        );
+      },
+      Ok(false) => {
+        self.collaboration.last_error = Some(format!("{peer_label} is not connected."));
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Warning,
+          "Peer not connected",
+          &format!("{peer_label} is not connected."),
+        );
+      },
+      Err(error) => {
+        let detail = format!("{error:#}");
+        self.collaboration.last_error = Some(detail.clone());
+        show_collaboration_prompt(window, cx, PromptLevel::Warning, "Peer role update failed", &detail);
       },
     }
     cx.notify();
   }
 
-  pub fn reconnect_collaboration(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    if self.collaboration.pending_invite.is_none() && self.collaboration.role.is_none() {
-      show_collaboration_prompt(window, cx, PromptLevel::Warning, "Reconnect unavailable", "There is no previous collaboration session or invite to reconnect.");
+  fn set_collaboration_peers_role(&mut self, role: Role, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Owner session required",
+        "Start or reconnect as owner before changing peer roles.",
+      );
+      return;
+    };
+    let peer_ids = self.collaboration.peers.keys().copied().collect::<Vec<_>>();
+    if peer_ids.is_empty() {
+      show_collaboration_prompt(window, cx, PromptLevel::Info, "No peers connected", "There are no live peers to update.");
       return;
     }
-    self.collaboration.state = SessionState::Reconnecting;
-    self.collaboration.last_error = Some("Network reconnect is not available in this build yet.".to_string());
-    show_collaboration_prompt(window, cx, PromptLevel::Warning, "Reconnect unavailable", "Network reconnect is not available in this build yet.");
+    let mut changed = 0usize;
+    let mut last_error = None;
+    for session_id in peer_ids {
+      match host.set_peer_role(session_id, role) {
+        Ok(true) => changed += 1,
+        Ok(false) => {},
+        Err(error) => last_error = Some(format!("{error:#}")),
+      }
+    }
+    self.collaboration.last_error = last_error;
+    let role_label = collaboration_sync_role_label(role);
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Info,
+      "Peer roles updated",
+      &format!("Updated {changed} live peer(s) to {role_label}."),
+    );
+    cx.notify();
+  }
+
+  pub fn kick_collaboration_peer(&mut self, session_id: SessionId, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Owner session required",
+        "Start or reconnect as owner before removing peers.",
+      );
+      return;
+    };
+    let peer_label = self
+      .collaboration
+      .peers
+      .get(&session_id)
+      .map(collaboration_peer_display_name)
+      .unwrap_or_else(|| format!("Peer {}", collaboration_short_uuid(session_id.0)));
+    match host.kick_peer(session_id) {
+      Ok(true) => {
+        self.collaboration.peers.remove(&session_id);
+        self.collaboration.last_error = None;
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Info,
+          "Peer removed",
+          &format!("Removed {peer_label} from this collaboration session."),
+        );
+      },
+      Ok(false) => {
+        self.collaboration.last_error = Some(format!("{peer_label} is not connected."));
+        show_collaboration_prompt(
+          window,
+          cx,
+          PromptLevel::Warning,
+          "Peer not connected",
+          &format!("{peer_label} is not connected."),
+        );
+      },
+      Err(error) => {
+        let detail = format!("{error:#}");
+        self.collaboration.last_error = Some(detail.clone());
+        show_collaboration_prompt(window, cx, PromptLevel::Warning, "Peer removal failed", &detail);
+      },
+    }
+    cx.notify();
+  }
+
+  pub fn kick_collaboration_peers(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      show_collaboration_prompt(
+        window,
+        cx,
+        PromptLevel::Warning,
+        "Owner session required",
+        "Start or reconnect as owner before removing peers.",
+      );
+      return;
+    };
+    let peer_ids = self.collaboration.peers.keys().copied().collect::<Vec<_>>();
+    if peer_ids.is_empty() {
+      show_collaboration_prompt(window, cx, PromptLevel::Info, "No peers connected", "There are no live peers to remove.");
+      return;
+    }
+    let mut kicked = 0usize;
+    let mut last_error = None;
+    for session_id in peer_ids {
+      match host.kick_peer(session_id) {
+        Ok(true) => kicked += 1,
+        Ok(false) => {},
+        Err(error) => last_error = Some(format!("{error:#}")),
+      }
+    }
+    self.collaboration.last_error = last_error;
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Info,
+      "Peers removed",
+      &format!("Removed {kicked} live peer(s) from this collaboration session."),
+    );
     cx.notify();
   }
 
   pub fn show_collaboration_diagnostics(&self, window: &mut Window, cx: &mut Context<Self>) {
     let role = self.collaboration.role.unwrap_or("None");
     let pending_invite = if self.collaboration.pending_invite.is_some() { "yes" } else { "no" };
+    let panel = self
+      .collaboration
+      .panel_id
+      .map(|id| id.to_string())
+      .unwrap_or_else(|| "none".to_string());
+    let document = self
+      .collaboration
+      .document_id
+      .map(|id| id.0.to_string())
+      .unwrap_or_else(|| "none".to_string());
+    let peer_count = self.collaboration.peers.len();
+    let pending_updates = self.collaboration_pending_updates.len();
+    let peer_details = if self.collaboration.peers.is_empty() {
+      "none".to_string()
+    } else {
+      self
+        .collaboration
+        .peers
+        .iter()
+        .take(8)
+        .map(|(session_id, peer)| {
+          let cursor = peer.cursor.as_deref().unwrap_or("none");
+          let focus = peer.focus.as_deref().unwrap_or("none");
+          format!(
+            "{} [{}] session={} cursor={cursor} focus={focus}",
+            collaboration_peer_display_name(peer),
+            collaboration_sync_role_label(peer.role),
+            collaboration_short_uuid(session_id.0),
+          )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
     let detail = format!(
-      "State: {:?}\nRole: {role}\nPending invite: {pending_invite}\nLast error: {}",
+      "State: {:?}\nRole: {role}\nPeers: {peer_count}\nQueued local updates: {pending_updates}\nPeer details:\n{peer_details}\nPanel: {panel}\nDocument: {document}\nFormat: {:?}\nPending invite: {pending_invite}\nLast error: {}",
       self.collaboration.state,
+      self.collaboration.format_kind,
       self.collaboration.last_error.as_deref().unwrap_or("None"),
     );
     show_collaboration_prompt(window, cx, PromptLevel::Info, "Collaboration diagnostics", &detail);
   }
-
 
   fn create_document_panel(
     &mut self,
@@ -274,6 +900,7 @@ impl Workspace {
           cx.notify();
         }
         workspace.maybe_autosave_document(id, editor.clone(), cx);
+        workspace.publish_db8_collaboration_edit(id, editor.clone(), cx);
       }),
     ));
     self.active_document_id = Some(id);
@@ -302,6 +929,14 @@ impl Workspace {
   }
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
+    if self.collaboration.panel_id == Some(panel_id) {
+      self.close_collaboration_runtime(cx);
+      self.collaboration.state = SessionState::Closed;
+      self.collaboration.role = None;
+      self.collaboration.pending_invite = None;
+      self.collaboration.last_error = None;
+      self.collaboration.peers.clear();
+    }
     let closing_active_document = self.active_document_id == Some(panel_id);
     if let Some(panel) = self
       .document_panels
@@ -322,7 +957,9 @@ impl Workspace {
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
-    self.flow_panels.retain(|panel| panel.read(cx).id() != panel_id);
+    self
+      .flow_panels
+      .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     if closing_active_document {
       if let Some(panel) = self.document_panels.last() {
@@ -376,23 +1013,11 @@ impl Workspace {
     self.open_document_path_with_target(path, None, window, cx);
   }
 
-  pub fn open_document_path_at_paragraph(
-    &mut self,
-    path: PathBuf,
-    paragraph_ix: usize,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  pub fn open_document_path_at_paragraph(&mut self, path: PathBuf, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     self.open_document_path_with_target(path, Some(paragraph_ix), window, cx);
   }
 
-  fn open_document_path_with_target(
-    &mut self,
-    path: PathBuf,
-    target_paragraph_ix: Option<usize>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn open_document_path_with_target(&mut self, path: PathBuf, target_paragraph_ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
@@ -468,9 +1093,10 @@ impl Workspace {
     title: Option<String>,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) {
-    self.create_document_panel(document, path, title, window, cx);
+  ) -> Entity<DocumentPanel> {
+    let panel = self.create_document_panel(document, path, title, window, cx);
     cx.notify();
+    panel
   }
 
   fn create_flow_panel(
@@ -493,6 +1119,7 @@ impl Workspace {
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
+        workspace.publish_fl0_collaboration_edit(id, editor.clone(), cx);
       }),
     ));
     self.active_document_id = Some(id);
@@ -511,9 +1138,10 @@ impl Workspace {
     path: Option<PathBuf>,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) {
-    self.create_flow_panel(document, path, window, cx);
+  ) -> Entity<FlowPanel> {
+    let panel = self.create_flow_panel(document, path, window, cx);
     cx.notify();
+    panel
   }
 
   pub fn close_document_panel(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
@@ -718,11 +1346,7 @@ impl Workspace {
 
     let (has_path, has_unsaved_changes, generation) = {
       let editor = editor.read(cx);
-      (
-        editor.document_path().is_some(),
-        editor.has_unsaved_changes(),
-        editor.edit_generation(),
-      )
+      (editor.document_path().is_some(), editor.has_unsaved_changes(), editor.edit_generation())
     };
     if !has_path || !has_unsaved_changes {
       return;
@@ -730,7 +1354,9 @@ impl Workspace {
     if self.autosave_document_generations.get(&panel_id) == Some(&generation) {
       return;
     }
-    self.autosave_document_generations.insert(panel_id, generation);
+    self
+      .autosave_document_generations
+      .insert(panel_id, generation);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
     cx.spawn(async move |workspace, cx| {
       if let Err(error) = save_task.await {
@@ -870,7 +1496,6 @@ impl Workspace {
     })
     .detach();
   }
-
 }
 
 #[derive(Clone)]
@@ -979,6 +1604,742 @@ impl PanelKind {
   }
 }
 
+impl Workspace {
+  fn close_collaboration_runtime(&mut self, cx: &mut Context<Self>) {
+    self.close_collaboration_runtime_inner(cx, false);
+  }
+
+  fn close_collaboration_runtime_preserving_pending(&mut self, cx: &mut Context<Self>) {
+    self.close_collaboration_runtime_inner(cx, true);
+  }
+
+  fn close_collaboration_runtime_inner(&mut self, cx: &mut Context<Self>, preserve_pending_updates: bool) {
+    self.collaboration_runtime_id = self.collaboration_runtime_id.wrapping_add(1);
+    if let Some(panel_id) = self.collaboration.panel_id {
+      self.clear_collaboration_role_for_panel(panel_id, cx);
+    }
+    if let Some(host) = self.collaboration_host.take() {
+      std::mem::drop(cx.spawn(async move |_, _| {
+        let _ = host.shutdown().await;
+      }));
+    }
+    self.collaboration_client_updates = None;
+    self.collaboration_last_published_hash = None;
+    self.collaboration_delta_updates_since_checkpoint = 0;
+    if !preserve_pending_updates {
+      self.collaboration_pending_updates.clear();
+    }
+    self.collaboration.panel_id = None;
+    self.collaboration.document_id = None;
+    self.collaboration.format_kind = None;
+    self.collaboration.peers.clear();
+  }
+
+  fn document_editor_for_panel(&self, panel_id: Uuid, cx: &App) -> Option<Entity<RichTextEditor>> {
+    self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .map(|panel| panel.read(cx).editor())
+  }
+
+  fn flow_editor_for_panel(&self, panel_id: Uuid, cx: &App) -> Option<Entity<FlowEditor>> {
+    self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .map(|panel| panel.read(cx).editor())
+  }
+
+  fn apply_collaboration_role_to_panel(&mut self, panel_id: Uuid, role: Role, cx: &mut Context<Self>) {
+    let db8_role = match role {
+      Role::Owner => Db8CollaborationRole::Owner,
+      Role::Editor => Db8CollaborationRole::Editor,
+      Role::Viewer => Db8CollaborationRole::Viewer,
+    };
+    if let Some(editor) = self.document_editor_for_panel(panel_id, cx) {
+      editor.update(cx, |editor, cx| editor.set_collaboration_role(Some(db8_role), cx));
+      return;
+    }
+    let flow_role = match role {
+      Role::Owner => FlowCollaborationRole::Owner,
+      Role::Editor => FlowCollaborationRole::Editor,
+      Role::Viewer => FlowCollaborationRole::Viewer,
+    };
+    if let Some(editor) = self.flow_editor_for_panel(panel_id, cx) {
+      editor.update(cx, |editor, cx| editor.set_collaboration_role(Some(flow_role), cx));
+    }
+  }
+
+  fn clear_collaboration_role_for_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    if let Some(editor) = self.document_editor_for_panel(panel_id, cx) {
+      editor.update(cx, |editor, cx| editor.set_collaboration_role(None, cx));
+      return;
+    }
+    if let Some(editor) = self.flow_editor_for_panel(panel_id, cx) {
+      editor.update(cx, |editor, cx| editor.set_collaboration_role(None, cx));
+    }
+  }
+
+  fn set_active_collaboration_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    if let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    {
+      self.active_document_id = Some(panel_id);
+      self.active_editor = Some(panel.read(cx).editor());
+      self.active_flow = None;
+      self.refresh_outline_tree(cx);
+      cx.notify();
+      return;
+    }
+    if let Some(panel) = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    {
+      self.active_document_id = Some(panel_id);
+      self.active_editor = None;
+      self.active_flow = Some(panel.read(cx).editor());
+      self.outline_cache = None;
+      self.outline_viewport_paragraph = None;
+      self.outline_scrolled_paragraph = None;
+      cx.notify();
+    }
+  }
+
+  fn spawn_host_update_loop(
+    &mut self,
+    panel_id: Uuid,
+    document_state: SessionDocumentState,
+    mut updates: broadcast::Receiver<LiveUpdate>,
+    window_handle: AnyWindowHandle,
+    cx: &mut Context<Self>,
+  ) {
+    std::mem::drop(cx.spawn(async move |workspace, cx| {
+      loop {
+        let update = match updates.recv().await {
+          Ok(update) => update,
+          Err(broadcast::error::RecvError::Lagged(_)) => continue,
+          Err(broadcast::error::RecvError::Closed) => break,
+        };
+        match update.kind {
+          LiveUpdateKind::Event(event) => {
+            let _ = window_handle.update(cx, |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| {
+                workspace.apply_collaboration_session_event(panel_id, event, cx);
+              });
+            });
+          },
+          LiveUpdateKind::Wire(WireMessage::Update { application, .. }) if update.source_session_id.is_some() => {
+            let source = match document_state.document.lock() {
+              Ok(document) => document.clone(),
+              Err(_) => {
+                let _ = window_handle.update(cx, |_, _, cx| {
+                  let _ = workspace.update(cx, |workspace, cx| {
+                    if workspace.collaboration.panel_id == Some(panel_id) {
+                      workspace.collaboration.state = SessionState::Failed;
+                      workspace.collaboration.last_error = Some("Flowstate document state lock is poisoned".to_string());
+                      cx.notify();
+                    }
+                  });
+                });
+                break;
+              },
+            };
+            let _ = window_handle.update(cx, |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| {
+                if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, source, application, cx) {
+                  workspace.collaboration.last_error = Some(format!("{error:#}"));
+                } else {
+                  workspace.collaboration.last_error = None;
+                }
+                cx.notify();
+              });
+            });
+          },
+          LiveUpdateKind::Wire(_) => {},
+        }
+      }
+    }));
+  }
+
+  fn apply_collaboration_session_event(&mut self, panel_id: Uuid, event: SessionEvent, cx: &mut Context<Self>) {
+    if self.collaboration.panel_id != Some(panel_id) {
+      return;
+    }
+    match event {
+      SessionEvent::PeerAuthorized { actor_id, session_id, role } | SessionEvent::PeerRoleChanged { actor_id, session_id, role } => {
+        self
+          .collaboration
+          .peers
+          .entry(session_id)
+          .and_modify(|peer| {
+            peer.actor_id = actor_id;
+            peer.role = role;
+          })
+          .or_insert(CollaborationPeerInfo {
+            actor_id,
+            role,
+            user_label: None,
+            cursor: None,
+            focus: None,
+            viewport_hint: None,
+            last_seen_millis: None,
+          });
+      },
+      SessionEvent::PeerLeft { session_id, .. } => {
+        self.collaboration.peers.remove(&session_id);
+      },
+      SessionEvent::StateChanged(state) => {
+        self.collaboration.state = state;
+      },
+      SessionEvent::UpdateRejected { reason, .. }
+      | SessionEvent::AssetTransferFailed { reason, .. }
+      | SessionEvent::FatalError(reason)
+      | SessionEvent::Error(reason) => {
+        self.collaboration.last_error = Some(reason);
+      },
+      SessionEvent::Presence(presence) => {
+        self
+          .collaboration
+          .peers
+          .entry(presence.session_id)
+          .and_modify(|peer| {
+            peer.actor_id = presence.actor_id;
+            peer.role = presence.role;
+            peer.user_label = if presence.user_label.is_empty() {
+              None
+            } else {
+              Some(presence.user_label.clone())
+            };
+            peer.cursor = presence.cursor.clone();
+            peer.focus = presence.focus.clone();
+            peer.viewport_hint = presence.viewport_hint.clone();
+            peer.last_seen_millis = Some(presence.monotonic_millis);
+          })
+          .or_insert(CollaborationPeerInfo {
+            actor_id: presence.actor_id,
+            role: presence.role,
+            user_label: if presence.user_label.is_empty() {
+              None
+            } else {
+              Some(presence.user_label)
+            },
+            cursor: presence.cursor,
+            focus: presence.focus,
+            viewport_hint: presence.viewport_hint,
+            last_seen_millis: Some(presence.monotonic_millis),
+          });
+      },
+      SessionEvent::SnapshotApplied { .. }
+      | SessionEvent::UpdateApplied { .. }
+      | SessionEvent::AssetReceived { .. }
+      | SessionEvent::Reconnecting => {},
+    }
+    cx.notify();
+  }
+
+  fn apply_collaboration_source_to_panel(
+    &mut self,
+    panel_id: Uuid,
+    source: CollabDocument,
+    application: Option<UpdateApplication>,
+    cx: &mut Context<Self>,
+  ) -> anyhow::Result<()> {
+    if self.collaboration.panel_id != Some(panel_id) {
+      return Ok(());
+    }
+    if self
+      .collaboration
+      .document_id
+      .is_some_and(|document_id| document_id != source.document_id())
+    {
+      anyhow::bail!("remote collaboration update targets a different document");
+    }
+    if self
+      .collaboration
+      .format_kind
+      .is_some_and(|format_kind| format_kind != source.format_kind())
+    {
+      anyhow::bail!("remote collaboration update targets a different format");
+    }
+    self.collaboration_last_published_hash = source.projection_hash().ok();
+    match source.format_kind() {
+      FormatKind::Db8 => {
+        let Some(editor) = self.document_editor_for_panel(panel_id, cx) else {
+          anyhow::bail!("collaboration DB8 panel is no longer open");
+        };
+        if let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
+          && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
+        {
+          editor.update(cx, |editor, cx| editor.apply_remote_operations(&operations, cx));
+          return Ok(());
+        }
+        let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
+          anyhow::bail!("remote DB8 update materialized as a different document kind");
+        };
+        editor.update(cx, |editor, cx| {
+          editor.replace_document_from_collaboration(*document, cx);
+        });
+      },
+      FormatKind::Fl0 => {
+        let Some(editor) = self.flow_editor_for_panel(panel_id, cx) else {
+          anyhow::bail!("collaboration FL0 panel is no longer open");
+        };
+        if let Some(UpdateApplication::Fl0ActionBundle(bytes)) = application.as_ref()
+          && let Ok(actions) = postcard::from_bytes::<Vec<flowstate_flow::Action>>(bytes)
+        {
+          editor.update(cx, |editor, cx| editor.apply_remote_actions_from_collaboration(&actions, cx));
+          return Ok(());
+        }
+        let JoinedWorkspaceDocument::Flow(document) = collab_document_to_workspace_document(source)? else {
+          anyhow::bail!("remote FL0 update materialized as a different document kind");
+        };
+        editor.update(cx, |editor, cx| {
+          editor.replace_document_from_collaboration(document, cx);
+        });
+      },
+    }
+    Ok(())
+  }
+
+  fn publish_db8_collaboration_edit(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    if self.collaboration_host.is_none() && self.collaboration_client_updates.is_none() && !self.can_queue_collaboration_update(panel_id) {
+      return;
+    }
+    if self.collaboration.panel_id != Some(panel_id) {
+      return;
+    }
+    let application = editor
+      .read(cx)
+      .last_collaboration_operation_bytes()
+      .map(UpdateApplication::Db8CanonicalOperations);
+    if let Some(application) = application
+      && self.publish_collaboration_application_update(application, "DB8")
+    {
+      self.schedule_db8_collaboration_checkpoint(panel_id, editor, cx);
+      return;
+    }
+    let document = editor.read(cx).document().clone();
+    let document_id = self
+      .collaboration
+      .document_id
+      .unwrap_or(CollabDocumentId(panel_id));
+    let source = db8_collaboration_source(&document, document_id).map(|(source, _)| source);
+    self.publish_collaboration_source(source, "DB8", None);
+    self.collaboration_delta_updates_since_checkpoint = 0;
+  }
+
+  fn schedule_db8_collaboration_checkpoint(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    self.collaboration_delta_updates_since_checkpoint = self
+      .collaboration_delta_updates_since_checkpoint
+      .saturating_add(1);
+    if self.collaboration_delta_updates_since_checkpoint < Self::COLLABORATION_CHECKPOINT_DELTA_INTERVAL {
+      return;
+    }
+    self.collaboration_delta_updates_since_checkpoint = 0;
+    let Some(document_id) = self.collaboration.document_id else {
+      return;
+    };
+    let runtime_id = self.collaboration_runtime_id;
+    let document = editor.read(cx).document().clone();
+    let build_source = cx
+      .background_executor()
+      .spawn(async move { db8_collaboration_source(&document, document_id).map(|(source, _)| source) });
+    std::mem::drop(cx.spawn(async move |workspace, cx| {
+      let source = build_source.await;
+      workspace.update(cx, |workspace, cx| {
+        if workspace.collaboration_runtime_id != runtime_id || workspace.collaboration.panel_id != Some(panel_id) {
+          return;
+        }
+        workspace.publish_collaboration_source(source, "DB8 checkpoint", None);
+        cx.notify();
+      })
+    }));
+  }
+
+  fn publish_fl0_collaboration_edit(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
+    if self.collaboration_host.is_none() && self.collaboration_client_updates.is_none() && !self.can_queue_collaboration_update(panel_id) {
+      return;
+    }
+    if self.collaboration.panel_id != Some(panel_id) {
+      return;
+    }
+    let application = editor
+      .read(cx)
+      .last_collaboration_actions()
+      .and_then(|actions| postcard::to_stdvec(actions).ok())
+      .map(UpdateApplication::Fl0ActionBundle);
+    if let Some(application) = application
+      && self.publish_collaboration_application_update(application, "FL0")
+    {
+      self.schedule_fl0_collaboration_checkpoint(panel_id, editor, cx);
+      return;
+    }
+    let document = editor.read(cx).document().clone();
+    let source = flowstate_flow::fl0_bytes(&document)
+      .ok()
+      .and_then(|bytes| collaboration_document_from_native_bytes(bytes, FormatKind::Fl0));
+    self.publish_collaboration_source(source, "FL0", None);
+  }
+
+  fn schedule_fl0_collaboration_checkpoint(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
+    self.collaboration_delta_updates_since_checkpoint = self
+      .collaboration_delta_updates_since_checkpoint
+      .saturating_add(1);
+    if self.collaboration_delta_updates_since_checkpoint < Self::COLLABORATION_CHECKPOINT_DELTA_INTERVAL {
+      return;
+    }
+    self.collaboration_delta_updates_since_checkpoint = 0;
+    let runtime_id = self.collaboration_runtime_id;
+    let document = editor.read(cx).document().clone();
+    let build_source = cx.background_executor().spawn(async move {
+      flowstate_flow::fl0_bytes(&document)
+        .ok()
+        .and_then(|bytes| collaboration_document_from_native_bytes(bytes, FormatKind::Fl0))
+    });
+    std::mem::drop(cx.spawn(async move |workspace, cx| {
+      let source = build_source.await;
+      workspace.update(cx, |workspace, cx| {
+        if workspace.collaboration_runtime_id != runtime_id || workspace.collaboration.panel_id != Some(panel_id) {
+          return;
+        }
+        workspace.publish_collaboration_source(source, "FL0 checkpoint", None);
+        cx.notify();
+      })
+    }));
+  }
+
+  fn publish_collaboration_application_update(&mut self, application: UpdateApplication, label: &str) -> bool {
+    if let Some(sender) = &self.collaboration_client_updates {
+      if let Err(error) = sender.send(PendingCollaborationUpdate::Application { application }) {
+        self.collaboration_client_updates = None;
+        let update = error.0;
+        let dropped_oldest =
+          push_bounded_pending_collaboration_update(&mut self.collaboration_pending_updates, update, Self::MAX_PENDING_COLLABORATION_UPDATES);
+        if dropped_oldest {
+          self.collaboration.last_error.replace(format!(
+            "{label} collaboration update queue is full; dropped the oldest pending application update."
+          ));
+        }
+      }
+      return true;
+    }
+    if let Some(host) = self.collaboration_host.as_ref() {
+      if let Err(error) = host.publish_application_update(application) {
+        self.collaboration.last_error = Some(format!("{error:#}"));
+      }
+      return true;
+    }
+    if self.can_queue_collaboration_update_for_active_panel() {
+      let dropped_oldest = push_bounded_pending_collaboration_update(
+        &mut self.collaboration_pending_updates,
+        PendingCollaborationUpdate::Application { application },
+        Self::MAX_PENDING_COLLABORATION_UPDATES,
+      );
+      if dropped_oldest {
+        self.collaboration.last_error.replace(format!(
+          "{label} collaboration update queue is full; dropped the oldest pending application update."
+        ));
+      }
+      return true;
+    }
+    false
+  }
+  fn publish_collaboration_source(&mut self, source: Option<CollabDocument>, label: &str, application: Option<UpdateApplication>) {
+    let Some(source) = source else {
+      self
+        .collaboration
+        .last_error
+        .replace(format!("Failed to build {label} collaboration source from edited document."));
+      return;
+    };
+    if Some(source.document_id()) != self.collaboration.document_id || Some(source.format_kind()) != self.collaboration.format_kind {
+      self.collaboration.last_error = Some(format!("{label} edit does not belong to the active collaboration document."));
+      return;
+    }
+    let hash = source.projection_hash().ok();
+    if hash.is_some() && hash == self.collaboration_last_published_hash {
+      return;
+    }
+    if let Some(sender) = &self.collaboration_client_updates {
+      if let Err(error) = sender.send(PendingCollaborationUpdate::Source { source, application, hash }) {
+        let update = error.0;
+        self.collaboration_client_updates = None;
+        match update {
+          PendingCollaborationUpdate::Source { source, hash, .. } => self.queue_pending_collaboration_update(source, label, hash),
+          update @ PendingCollaborationUpdate::Application { .. } => {
+            let dropped_oldest = push_bounded_pending_collaboration_update(
+              &mut self.collaboration_pending_updates,
+              update,
+              Self::MAX_PENDING_COLLABORATION_UPDATES,
+            );
+            if dropped_oldest {
+              self.collaboration.last_error.replace(format!(
+                "{label} collaboration update queue is full; dropped the oldest pending application update."
+              ));
+            }
+          },
+        }
+      } else {
+        self.collaboration_last_published_hash = hash;
+        self.collaboration_delta_updates_since_checkpoint = 0;
+      }
+      return;
+    }
+    if let Some(host) = self.collaboration_host.as_ref() {
+      if let Err(error) = host.publish_update_from_source(&source, application) {
+        self.collaboration.last_error = Some(format!("{error:#}"));
+      } else {
+        self.collaboration_last_published_hash = hash;
+        self.collaboration_delta_updates_since_checkpoint = 0;
+      }
+      return;
+    }
+    if self.can_queue_collaboration_update_for_active_panel() {
+      self.queue_pending_collaboration_update(source, label, hash);
+    }
+  }
+
+  fn can_queue_collaboration_update(&self, panel_id: Uuid) -> bool {
+    self.collaboration.panel_id == Some(panel_id) && self.can_queue_collaboration_update_for_active_panel()
+  }
+
+  fn can_queue_collaboration_update_for_active_panel(&self) -> bool {
+    matches!(self.collaboration.state, SessionState::Hosting | SessionState::Reconnecting)
+      && self.collaboration.role.is_some_and(|role| role != "Viewer")
+  }
+
+  fn queue_pending_collaboration_update(&mut self, source: CollabDocument, label: &str, hash: Option<[u8; 32]>) {
+    let dropped_oldest = push_bounded_pending_collaboration_update(
+      &mut self.collaboration_pending_updates,
+      PendingCollaborationUpdate::Source {
+        source,
+        application: None,
+        hash,
+      },
+      Self::MAX_PENDING_COLLABORATION_UPDATES,
+    );
+    if dropped_oldest {
+      self.collaboration.last_error.replace(format!(
+        "{label} collaboration update queue is full; dropped the oldest pending source replacement."
+      ));
+    }
+    self.collaboration_last_published_hash = hash;
+  }
+
+  fn drain_pending_updates_to_sender(&mut self, sender: &mpsc::UnboundedSender<PendingCollaborationUpdate>) -> usize {
+    let mut drained = 0;
+    while let Some(update) = self.collaboration_pending_updates.pop_front() {
+      let hash = update.hash();
+      if let Err(error) = sender.send(update) {
+        self.collaboration_pending_updates.push_front(error.0);
+        self
+          .collaboration
+          .last_error
+          .replace("Failed to replay queued collaboration updates after reconnect.".to_string());
+        break;
+      }
+      self.collaboration_last_published_hash = hash;
+      drained += 1;
+    }
+    drained
+  }
+
+  fn drain_pending_updates_to_host(&mut self) -> usize {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      return 0;
+    };
+    let mut drained = 0;
+    while let Some(update) = self.collaboration_pending_updates.pop_front() {
+      let hash = update.hash();
+      let result = match &update {
+        PendingCollaborationUpdate::Source { source, application, .. } => host.publish_update_from_source(source, application.clone()),
+        PendingCollaborationUpdate::Application { application } => host.publish_application_update(application.clone()),
+      };
+      if let Err(error) = result {
+        self.collaboration_pending_updates.push_front(update);
+        self.collaboration.last_error = Some(format!("{error:#}"));
+        break;
+      }
+      self.collaboration_last_published_hash = hash;
+      drained += 1;
+    }
+    drained
+  }
+}
+
+struct CollaborationHostInput {
+  document: CollabDocument,
+  assets: AssetStore,
+  source_hash: Option<[u8; 32]>,
+}
+
+enum CollaborationHostSnapshot {
+  Db8 {
+    panel_id: Uuid,
+    document: Box<Document>,
+  },
+  Fl0 {
+    panel_id: Uuid,
+    document: flowstate_flow::FlowDocument,
+  },
+}
+
+impl CollaborationHostSnapshot {
+  const fn panel_id(&self) -> Uuid {
+    match self {
+      Self::Db8 { panel_id, .. } | Self::Fl0 { panel_id, .. } => *panel_id,
+    }
+  }
+
+  const fn document_id(&self) -> CollabDocumentId {
+    CollabDocumentId(self.panel_id())
+  }
+
+  const fn format_kind(&self) -> FormatKind {
+    match self {
+      Self::Db8 { .. } => FormatKind::Db8,
+      Self::Fl0 { .. } => FormatKind::Fl0,
+    }
+  }
+
+  fn into_host_input(self) -> Option<CollaborationHostInput> {
+    match self {
+      Self::Db8 { panel_id, document } => {
+        let (document, assets) = db8_collaboration_source(&document, CollabDocumentId(panel_id))?;
+        Some(CollaborationHostInput {
+          source_hash: document.projection_hash().ok(),
+          assets,
+          document,
+        })
+      },
+      Self::Fl0 { panel_id: _, document } => {
+        collaboration_document_from_native_bytes(flowstate_flow::fl0_bytes(&document).ok()?, FormatKind::Fl0).map(|document| {
+          CollaborationHostInput {
+            source_hash: document.projection_hash().ok(),
+            assets: AssetStore::default(),
+            document,
+          }
+        })
+      },
+    }
+  }
+}
+
+enum JoinedWorkspaceDocument {
+  Document(Box<Document>),
+  Flow(flowstate_flow::FlowDocument),
+}
+
+impl Workspace {
+  fn active_collaboration_host_snapshot(&self, cx: &App) -> Option<CollaborationHostSnapshot> {
+    let panel_id = self.active_document_id?;
+    if let Some(editor) = self.active_editor.as_ref() {
+      return Some(CollaborationHostSnapshot::Db8 {
+        panel_id,
+        document: Box::new(editor.read(cx).document().clone()),
+      });
+    }
+    let editor = self.active_flow.as_ref()?;
+    Some(CollaborationHostSnapshot::Fl0 {
+      panel_id,
+      document: editor.read(cx).document().clone(),
+    })
+  }
+
+  fn collaboration_host_snapshot_for_panel(&self, panel_id: Uuid, cx: &App) -> Option<CollaborationHostSnapshot> {
+    if let Some(editor) = self.document_editor_for_panel(panel_id, cx) {
+      return Some(CollaborationHostSnapshot::Db8 {
+        panel_id,
+        document: Box::new(editor.read(cx).document().clone()),
+      });
+    }
+    let editor = self.flow_editor_for_panel(panel_id, cx)?;
+    Some(CollaborationHostSnapshot::Fl0 {
+      panel_id,
+      document: editor.read(cx).document().clone(),
+    })
+  }
+}
+
+enum PendingCollaborationUpdate {
+  Source {
+    source: CollabDocument,
+    application: Option<UpdateApplication>,
+    hash: Option<[u8; 32]>,
+  },
+  Application {
+    application: UpdateApplication,
+  },
+}
+
+impl PendingCollaborationUpdate {
+  const fn hash(&self) -> Option<[u8; 32]> {
+    match self {
+      Self::Source { hash, .. } => *hash,
+      Self::Application { .. } => None,
+    }
+  }
+}
+
+fn push_bounded_pending_collaboration_update(
+  queue: &mut VecDeque<PendingCollaborationUpdate>,
+  update: PendingCollaborationUpdate,
+  max_len: usize,
+) -> bool {
+  if max_len == 0 {
+    queue.clear();
+    return true;
+  }
+  let dropped_oldest = queue.len() >= max_len;
+  if dropped_oldest {
+    queue.pop_front();
+  }
+  queue.push_back(update);
+  dropped_oldest
+}
+
+fn collaboration_document_from_native_bytes(bytes: Vec<u8>, format_kind: FormatKind) -> Option<CollabDocument> {
+  let decoded = decode_native_file(&bytes, format_kind).ok()?;
+  CollabDocument::from_snapshot(&decoded.snapshot, Some(format_kind), Some(decoded.manifest.document_id)).ok()
+}
+
+fn db8_collaboration_source(document: &Document, document_id: CollabDocumentId) -> Option<(CollabDocument, AssetStore)> {
+  let created_by_actor = ActorId::new();
+  let source = db8_collab_document_with_id(document, document_id, created_by_actor)
+    .ok()?
+    .into_inner();
+  Some((source, db8_asset_store(document)))
+}
+
+fn db8_asset_store(document: &Document) -> AssetStore {
+  let mut store = AssetStore::default();
+  for asset in document.assets.assets.values() {
+    store.insert_verified(asset.bytes.as_ref().clone());
+  }
+  store
+}
+
+fn collab_document_to_workspace_document(document: CollabDocument) -> anyhow::Result<JoinedWorkspaceDocument> {
+  match document.format_kind() {
+    FormatKind::Db8 => Ok(JoinedWorkspaceDocument::Document(Box::new(document_from_db8_collab_source(&document)?))),
+    FormatKind::Fl0 => Ok(JoinedWorkspaceDocument::Flow(flowstate_flow::flow_document_from_collab_source(
+      &document,
+    )?)),
+  }
+}
+
+fn collaboration_sync_role(role: CollaborationInviteRole) -> Role {
+  match role {
+    CollaborationInviteRole::Owner => Role::Owner,
+    CollaborationInviteRole::Editor => Role::Editor,
+    CollaborationInviteRole::Viewer => Role::Viewer,
+  }
+}
+
 fn collaboration_role_label(role: CollaborationInviteRole) -> &'static str {
   match role {
     CollaborationInviteRole::Owner => "Owner",
@@ -996,13 +2357,20 @@ fn collaboration_sync_role_label(role: impl std::fmt::Debug) -> &'static str {
   }
 }
 
-fn show_collaboration_prompt(
-  window: &mut Window,
-  cx: &mut Context<Workspace>,
-  level: PromptLevel,
-  message: &'static str,
-  detail: &str,
-) {
+fn collaboration_peer_display_name(peer: &CollaborationPeerInfo) -> String {
+  peer
+    .user_label
+    .as_deref()
+    .filter(|label| !label.trim().is_empty())
+    .map(|label| label.trim().to_string())
+    .unwrap_or_else(|| format!("Peer {}", collaboration_short_uuid(peer.actor_id.0)))
+}
+
+fn collaboration_short_uuid(id: Uuid) -> String {
+  id.to_string().chars().take(8).collect()
+}
+
+fn show_collaboration_prompt(window: &mut Window, cx: &mut Context<Workspace>, level: PromptLevel, message: &'static str, detail: &str) {
   std::mem::drop(window.prompt(level, message, Some(detail), &[PromptButton::ok("Ok")], cx));
 }
 

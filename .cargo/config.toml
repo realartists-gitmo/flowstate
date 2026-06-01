@@ -4,3 +4,6 @@ linker = "rust-lld.exe"
 [alias]
 survey = "run --profile profiler --features profiler"
 product = "run --profile product"
+
+[patch.crates-io]
+gpui-flowtext = { path = "crates/gpui-flowtext" }

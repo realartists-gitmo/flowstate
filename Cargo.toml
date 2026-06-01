@@ -58,6 +58,7 @@ zstd = "0.13.3"
 
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
+gpui-flowtext = { path = "crates/gpui-flowtext" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }

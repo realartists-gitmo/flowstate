@@ -8,9 +8,10 @@ use std::{
 
 use anyhow::{Context as _, Result as AnyResult, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+pub use flowstate_collab::{ActorId, DocumentId, FormatKind, Role, SessionId};
 use flowstate_collab::{
-  ActorId, AssetChunkMessage, AssetHaveMessage, AssetNeedMessage, AuthorizeMessage, COLLAB_SCHEMA_VERSION, CollabDocument, DocumentId,
-  FLOWSTATE_ALPN, FormatKind, HelloMessage, PresenceMessage, Role, SessionId, WireMessage, blake3_hash, decode_wire_message,
+  AssetChunkMessage, AssetHaveMessage, AssetNeedMessage, AuthorizeMessage, COLLAB_SCHEMA_VERSION, CollabDocument, FLOWSTATE_ALPN, HelloMessage,
+  NativeAssetRecord, PeerEventKind, PeerEventMessage, PresenceMessage, UpdateApplication, WireMessage, blake3_hash, decode_wire_message,
   encode_wire_message,
 };
 use iroh::{
@@ -18,9 +19,16 @@ use iroh::{
   endpoint::{Connection, RecvStream, SendStream, presets},
   protocol::{AcceptError, ProtocolHandler, Router},
 };
+use tokio::sync::broadcast;
 
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = DEFAULT_MAX_MESSAGE_BYTES;
+pub const DEFAULT_MAX_UPDATE_BYTES: usize = DEFAULT_MAX_MESSAGE_BYTES;
 pub const DEFAULT_MAX_ASSET_CHUNK_BYTES: usize = 1024 * 1024;
+pub const DEFAULT_MAX_PEER_COUNT: usize = 64;
+pub const DEFAULT_MAX_PRESENCE_MESSAGES_PER_MINUTE: usize = 600;
+pub const DEFAULT_MAX_ASSET_REQUESTS_PER_MINUTE: usize = 120;
+const RATE_LIMIT_WINDOW_MILLIS: u64 = 60_000;
 pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 1;
 pub const FLOWSTATE_INVITE_PREFIX: &str = "flowstate://collab/";
 
@@ -33,7 +41,12 @@ pub struct FlowstateSyncConfig {
   pub session_id: SessionId,
   pub role_request: Role,
   pub max_message_bytes: usize,
+  pub max_snapshot_bytes: usize,
+  pub max_update_bytes: usize,
   pub max_asset_chunk_bytes: usize,
+  pub max_peer_count: usize,
+  pub max_presence_messages_per_minute: usize,
+  pub max_asset_requests_per_minute: usize,
 }
 
 impl FlowstateSyncConfig {
@@ -47,7 +60,12 @@ impl FlowstateSyncConfig {
       session_id: SessionId::new(),
       role_request,
       max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
+      max_snapshot_bytes: DEFAULT_MAX_SNAPSHOT_BYTES,
+      max_update_bytes: DEFAULT_MAX_UPDATE_BYTES,
       max_asset_chunk_bytes: DEFAULT_MAX_ASSET_CHUNK_BYTES,
+      max_peer_count: DEFAULT_MAX_PEER_COUNT,
+      max_presence_messages_per_minute: DEFAULT_MAX_PRESENCE_MESSAGES_PER_MINUTE,
+      max_asset_requests_per_minute: DEFAULT_MAX_ASSET_REQUESTS_PER_MINUTE,
     }
   }
 
@@ -330,6 +348,19 @@ impl InviteRegistry {
     )
   }
 
+  pub fn revoke_all(&self) -> AnyResult<usize> {
+    let revoked = {
+      let mut tickets = self
+        .tickets
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate invite registry lock is poisoned"))?;
+      let revoked = tickets.len();
+      tickets.clear();
+      revoked
+    };
+    Ok(revoked)
+  }
+
   pub fn redacted_tickets(&self) -> AnyResult<Vec<RedactedInviteTicket>> {
     Ok(
       self
@@ -436,6 +467,14 @@ impl AssetStore {
     self.assets.contains_key(hash)
   }
 
+  #[must_use]
+  pub fn get_verified(&self, hash: &[u8; 32]) -> Option<VerifiedAsset> {
+    self.assets.get(hash).map(|bytes| VerifiedAsset {
+      hash: *hash,
+      bytes: bytes.clone(),
+    })
+  }
+
   pub fn chunk(&self, request: &AssetNeedMessage, max_chunk_bytes: usize) -> AnyResult<AssetChunkMessage> {
     let bytes = self
       .assets
@@ -480,6 +519,7 @@ impl PeerPresence {
   pub fn message(&self, document_id: DocumentId) -> PresenceMessage {
     PresenceMessage {
       document_id,
+      actor_id: self.actor_id,
       session_id: self.session_id,
       user_label: self.user_label.clone(),
       role: self.role,
@@ -511,12 +551,178 @@ impl fmt::Display for SyncError {
   }
 }
 
+#[derive(Clone, Debug)]
+pub struct LiveUpdate {
+  pub source_session_id: Option<SessionId>,
+  pub kind: LiveUpdateKind,
+}
+
+#[derive(Clone, Debug)]
+pub enum LiveUpdateKind {
+  Wire(WireMessage),
+  Event(SessionEvent),
+}
+
+impl LiveUpdate {
+  #[must_use]
+  pub fn wire(source_session_id: Option<SessionId>, message: WireMessage) -> Self {
+    Self {
+      source_session_id,
+      kind: LiveUpdateKind::Wire(message),
+    }
+  }
+
+  #[must_use]
+  pub fn event(source_session_id: Option<SessionId>, event: SessionEvent) -> Self {
+    Self {
+      source_session_id,
+      kind: LiveUpdateKind::Event(event),
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct LivePeer {
+  pub actor_id: ActorId,
+  pub session_id: SessionId,
+  pub role: Role,
+}
+
+#[derive(Clone, Debug)]
+struct RateWindow {
+  max_events: usize,
+  window_millis: u64,
+  events: VecDeque<u64>,
+}
+
+impl RateWindow {
+  fn new(max_events: usize, window_millis: u64) -> Self {
+    Self {
+      max_events,
+      window_millis,
+      events: VecDeque::new(),
+    }
+  }
+
+  fn check(&mut self, now_millis: u64) -> bool {
+    let window_start = now_millis.saturating_sub(self.window_millis);
+    while self
+      .events
+      .front()
+      .is_some_and(|event| *event <= window_start)
+    {
+      self.events.pop_front();
+    }
+    if self.events.len() >= self.max_events {
+      return false;
+    }
+    self.events.push_back(now_millis);
+    true
+  }
+}
+
+#[derive(Clone, Debug)]
+pub struct LiveUpdateHub {
+  sender: broadcast::Sender<LiveUpdate>,
+  peers: Arc<Mutex<HashMap<SessionId, LivePeer>>>,
+}
+
+impl Default for LiveUpdateHub {
+  fn default() -> Self {
+    Self::new(1024)
+  }
+}
+
+impl LiveUpdateHub {
+  #[must_use]
+  pub fn new(capacity: usize) -> Self {
+    let (sender, _) = broadcast::channel(capacity.max(1));
+    Self {
+      sender,
+      peers: Arc::new(Mutex::new(HashMap::new())),
+    }
+  }
+
+  pub fn subscribe(&self) -> broadcast::Receiver<LiveUpdate> {
+    self.sender.subscribe()
+  }
+
+  pub fn upsert_peer(&self, peer: LivePeer) -> AnyResult<()> {
+    self
+      .peers
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?
+      .insert(peer.session_id, peer);
+    Ok(())
+  }
+
+  #[allow(
+    clippy::significant_drop_tightening,
+    reason = "the mutex guard must stay live while mutating and copying the selected peer"
+  )]
+  pub fn update_peer_role(&self, session_id: SessionId, role: Role) -> AnyResult<Option<LivePeer>> {
+    let peer = {
+      let mut peers = self
+        .peers
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?;
+      let Some(peer) = peers.get_mut(&session_id) else {
+        return Ok(None);
+      };
+      peer.role = role;
+      *peer
+    };
+    Ok(Some(peer))
+  }
+
+  pub fn remove_peer(&self, session_id: SessionId) -> AnyResult<Option<LivePeer>> {
+    Ok(
+      self
+        .peers
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?
+        .remove(&session_id),
+    )
+  }
+
+  pub fn peers(&self) -> AnyResult<Vec<LivePeer>> {
+    Ok(
+      self
+        .peers
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?
+        .values()
+        .copied()
+        .collect(),
+    )
+  }
+
+  pub fn peer_count(&self) -> AnyResult<usize> {
+    Ok(
+      self
+        .peers
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?
+        .len(),
+    )
+  }
+
+  pub fn publish(&self, update: LiveUpdate) -> AnyResult<()> {
+    match self.sender.send(update) {
+      Ok(_) => Ok(()),
+      Err(_) if self.sender.receiver_count() == 0 => Ok(()),
+      Err(error) => Err(error).context("failed to publish Flowstate live update"),
+    }
+  }
+}
+
 impl std::error::Error for SyncError {}
 
 #[derive(Clone, Debug)]
 pub struct FlowstateProtocol {
   pub config: FlowstateSyncConfig,
   pub role_policy: RolePolicy,
+  pub live_updates: Option<LiveUpdateHub>,
   pub invite_registry: InviteRegistry,
   pub document_state: Option<SessionDocumentState>,
 }
@@ -534,7 +740,7 @@ impl ProtocolHandler for FlowstateProtocol {
     let WireMessage::Hello(hello) = message else {
       return Err(AcceptError::from_err(SyncError::UnexpectedMessage("Hello")));
     };
-    let authorization = if validate_hello(&hello, &self.config).is_ok() {
+    let mut authorization = if validate_hello(&hello, &self.config).is_ok() {
       self
         .invite_registry
         .authorize(&hello)
@@ -546,6 +752,16 @@ impl ProtocolHandler for FlowstateProtocol {
         reason: Some("protocol, schema, document, or format mismatch".to_string()),
       }
     };
+    if authorization.accepted
+      && let Some(hub) = &self.live_updates
+      && hub.peer_count().map_err(accept_error)? >= self.config.max_peer_count
+    {
+      authorization = AuthorizeMessage {
+        accepted: false,
+        role: authorization.role,
+        reason: Some("peer limit reached".to_string()),
+      };
+    }
     write_wire_message(&mut send, &WireMessage::Authorize(authorization.clone()), self.config.max_message_bytes)
       .await
       .map_err(accept_error)?;
@@ -553,12 +769,58 @@ impl ProtocolHandler for FlowstateProtocol {
     if authorization.accepted
       && let Some(state) = &self.document_state
     {
-      send_snapshot_and_have(&mut send, state, &self.config)
+      let live_rx = self.live_updates.as_ref().map(LiveUpdateHub::subscribe);
+      if let Some(hub) = &self.live_updates {
+        hub
+          .upsert_peer(LivePeer {
+            actor_id: hello.actor_id,
+            session_id: hello.session_id,
+            role: authorization.role,
+          })
+          .map_err(accept_error)?;
+        hub
+          .publish(LiveUpdate::event(
+            Some(hello.session_id),
+            SessionEvent::PeerAuthorized {
+              actor_id: hello.actor_id,
+              session_id: hello.session_id,
+              role: authorization.role,
+            },
+          ))
+          .map_err(accept_error)?;
+      }
+      let stream_result = async {
+        send_snapshot_and_have(&mut send, state, &self.config).await?;
+        if let Some(hub) = &self.live_updates {
+          send_peer_roster(&mut send, hub, hello.session_id, self.config.document_id, self.config.max_message_bytes).await?;
+        }
+        serve_live_stream(
+          &mut send,
+          &mut recv,
+          &hello,
+          authorization.role,
+          state,
+          &self.config,
+          live_rx,
+          self.live_updates.as_ref(),
+        )
         .await
-        .map_err(accept_error)?;
-      serve_live_stream(&mut send, &mut recv, &hello, authorization.role, state, &self.config)
-        .await
-        .map_err(accept_error)?;
+      }
+      .await;
+      if let Some(hub) = &self.live_updates
+        && let Some(peer) = hub.remove_peer(hello.session_id).map_err(accept_error)?
+      {
+        hub
+          .publish(LiveUpdate::event(
+            Some(hello.session_id),
+            SessionEvent::PeerLeft {
+              actor_id: peer.actor_id,
+              session_id: peer.session_id,
+            },
+          ))
+          .map_err(accept_error)?;
+      }
+      stream_result.map_err(accept_error)?;
     }
     send.finish()?;
     Ok(())
@@ -587,17 +849,257 @@ pub fn router_with_invites(
   invite_registry: InviteRegistry,
   document_state: Option<SessionDocumentState>,
 ) -> Router {
+  router_with_live_updates(endpoint, config, role_policy, invite_registry, document_state, None)
+}
+
+pub fn router_with_live_updates(
+  endpoint: Endpoint,
+  config: FlowstateSyncConfig,
+  role_policy: RolePolicy,
+  invite_registry: InviteRegistry,
+  document_state: Option<SessionDocumentState>,
+  live_updates: Option<LiveUpdateHub>,
+) -> Router {
   iroh::protocol::Router::builder(endpoint)
     .accept(
       FLOWSTATE_ALPN,
       FlowstateProtocol {
         config,
         role_policy,
+        live_updates,
         invite_registry,
         document_state,
       },
     )
     .spawn()
+}
+
+pub struct HostedCollaboration {
+  router: Router,
+  registry: InviteRegistry,
+  config: FlowstateSyncConfig,
+  document_state: SessionDocumentState,
+  live_updates: LiveUpdateHub,
+}
+
+impl HostedCollaboration {
+  pub async fn start(document: CollabDocument, assets: AssetStore, local_role: Role) -> AnyResult<Self> {
+    let config = FlowstateSyncConfig::new(document.document_id(), document.format_kind(), local_role);
+    Self::start_with_config(document, assets, config).await
+  }
+
+  pub async fn start_with_config(document: CollabDocument, assets: AssetStore, config: FlowstateSyncConfig) -> AnyResult<Self> {
+    ensure!(
+      document.document_id() == config.document_id,
+      "host document id does not match sync config"
+    );
+    ensure!(
+      document.format_kind() == config.format_kind,
+      "host document format does not match sync config"
+    );
+    let endpoint = bind_endpoint().await?;
+    let registry = InviteRegistry::new();
+    let state = SessionDocumentState::new(document, assets);
+    let live_updates = LiveUpdateHub::default();
+    let router = router_with_live_updates(
+      endpoint,
+      config.clone(),
+      RolePolicy::owner_only(config.actor_id),
+      registry.clone(),
+      Some(state.clone()),
+      Some(live_updates.clone()),
+    );
+    router.endpoint().online().await;
+    Ok(Self {
+      router,
+      registry,
+      config,
+      document_state: state,
+      live_updates,
+    })
+  }
+
+  #[must_use]
+  pub const fn document_id(&self) -> DocumentId {
+    self.config.document_id
+  }
+
+  #[must_use]
+  pub const fn format_kind(&self) -> FormatKind {
+    self.config.format_kind
+  }
+
+  pub fn issue_invite_link(&self, invited_role: Role, label: Option<String>, multi_use: bool) -> AnyResult<String> {
+    let ticket = self.registry.issue(
+      self.router.endpoint().addr(),
+      self.config.document_id,
+      self.config.format_kind,
+      invited_role,
+      None,
+      label,
+      multi_use,
+    )?;
+    encode_invite_link(&ticket)
+  }
+
+  pub fn revoke_invite_link(&self, link: &str) -> AnyResult<bool> {
+    let ticket = decode_invite_link(link)?;
+    self.registry.revoke(&ticket.capability)
+  }
+
+  pub fn revoke_all_invites(&self) -> AnyResult<usize> {
+    self.registry.revoke_all()
+  }
+
+  pub fn document_hash(&self) -> AnyResult<[u8; 32]> {
+    self
+      .document_state
+      .document
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+      .projection_hash()
+      .map_err(Into::into)
+  }
+
+  #[must_use]
+  pub fn document_state(&self) -> SessionDocumentState {
+    self.document_state.clone()
+  }
+
+  pub fn subscribe_live_updates(&self) -> broadcast::Receiver<LiveUpdate> {
+    self.live_updates.subscribe()
+  }
+
+  pub fn peers(&self) -> AnyResult<Vec<LivePeer>> {
+    self.live_updates.peers()
+  }
+
+  pub fn set_peer_role(&self, session_id: SessionId, role: Role) -> AnyResult<bool> {
+    ensure!(role != Role::Owner, "live peer ownership transfer is not supported");
+    let Some(peer) = self.live_updates.update_peer_role(session_id, role)? else {
+      return Ok(false);
+    };
+    self.live_updates.publish(LiveUpdate::event(
+      None,
+      SessionEvent::PeerRoleChanged {
+        actor_id: peer.actor_id,
+        session_id: peer.session_id,
+        role: peer.role,
+      },
+    ))?;
+    Ok(true)
+  }
+
+  pub fn kick_peer(&self, session_id: SessionId) -> AnyResult<bool> {
+    let Some(peer) = self.live_updates.remove_peer(session_id)? else {
+      return Ok(false);
+    };
+    self.live_updates.publish(LiveUpdate::event(
+      None,
+      SessionEvent::PeerLeft {
+        actor_id: peer.actor_id,
+        session_id: peer.session_id,
+      },
+    ))?;
+    Ok(true)
+  }
+
+  pub fn apply_local_update(&self, bytes: Vec<u8>) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
+    ensure_update_size(&bytes, self.config.max_update_bytes)?;
+    let frontier = {
+      self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+        .import_update_checked(self.config.role_request, &bytes)?
+        .frontier
+    };
+    self.live_updates.publish(LiveUpdate::wire(
+      None,
+      WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        hash: blake3_hash(&bytes),
+        bytes,
+        application: None,
+      },
+    ))?;
+    self.live_updates.publish(LiveUpdate::wire(
+      None,
+      WireMessage::Ack {
+        document_id: self.config.document_id,
+        frontier,
+      },
+    ))
+  }
+
+  pub fn publish_application_update(&self, application: UpdateApplication) -> AnyResult<()> {
+    ensure!(
+      self.config.role_request.can_write(),
+      "local role is not allowed to publish application updates"
+    );
+    self.publish_update(Vec::new(), Some(application))
+  }
+
+  pub fn replace_source_from(&self, source: &CollabDocument) -> AnyResult<()> {
+    self.publish_update_from_source(source, None)
+  }
+
+  pub fn publish_update_from_source(&self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
+    ensure!(source.document_id() == self.config.document_id, "replacement source document mismatch");
+    ensure!(source.format_kind() == self.config.format_kind, "replacement source format mismatch");
+    let projection_cache = source.materialize_projection_cache()?;
+    let asset_manifest = source.asset_manifest_bytes()?;
+    let update = if let Ok(Some(granular_source)) = source.materialize_granular_source() {
+      self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+        .replace_granular_source(self.config.role_request, &granular_source, &projection_cache, &asset_manifest)?
+    } else {
+      self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+        .replace_projection_source(self.config.role_request, &projection_cache, &asset_manifest)?
+    };
+    self.publish_update(update, application)
+  }
+
+  pub fn publish_update(&self, update: Vec<u8>, application: Option<UpdateApplication>) -> AnyResult<()> {
+    ensure_update_size(&update, self.config.max_update_bytes)?;
+    self.live_updates.publish(LiveUpdate::wire(
+      None,
+      WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        hash: blake3_hash(&update),
+        bytes: update,
+        application,
+      },
+    ))
+  }
+  pub async fn shutdown(self) -> AnyResult<()> {
+    self
+      .router
+      .shutdown()
+      .await
+      .context("failed to shut down Flowstate collaboration host")
+  }
+}
+
+pub async fn join_invite_snapshot(link: &str) -> AnyResult<JoinedSnapshot> {
+  let ticket = decode_invite_link(link)?;
+  let endpoint = bind_endpoint().await?;
+  let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role);
+  let result = connect_and_receive_snapshot(&endpoint, &ticket, &config).await;
+  endpoint.close().await;
+  result
 }
 
 pub async fn connect_and_authorize(endpoint: &Endpoint, invite: &InviteTicket, config: &FlowstateSyncConfig) -> AnyResult<AuthorizeMessage> {
@@ -839,16 +1341,18 @@ impl CollabSession {
     match import_result {
       Ok(outcome) => {
         let hash = blake3_hash(bytes);
-        self.outbound_updates.push_back(OutboundUpdate {
-          document_id: self.config.document_id,
-          actor_id,
-          bytes: bytes.to_vec(),
-          hash,
-        });
-        self.events.push_back(SessionEvent::UpdateApplied {
-          document_id: self.config.document_id,
-          hash,
-        });
+        if outcome.patch.is_some() {
+          self.outbound_updates.push_back(OutboundUpdate {
+            document_id: self.config.document_id,
+            actor_id,
+            bytes: bytes.to_vec(),
+            hash,
+          });
+          self.events.push_back(SessionEvent::UpdateApplied {
+            document_id: self.config.document_id,
+            hash,
+          });
+        }
         for peer in self
           .peers
           .values_mut()
@@ -927,6 +1431,7 @@ pub async fn connect_and_receive_snapshot(
     match read_wire_message(&mut recv, config.max_message_bytes).await? {
       WireMessage::Snapshot { document_id, bytes, hash } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure_snapshot_size(&bytes, config.max_snapshot_bytes)?;
         ensure!(blake3_hash(&bytes) == hash, "snapshot hash mismatch");
         document = Some(CollabDocument::from_snapshot(&bytes, Some(config.format_kind), Some(config.document_id))?);
       },
@@ -939,6 +1444,9 @@ pub async fn connect_and_receive_snapshot(
         ensure!(message.document_id == config.document_id, SyncError::ProtocolMismatch);
         assets_available = message.assets;
         saw_have = true;
+      },
+      WireMessage::PeerEvent(message) => {
+        ensure!(message.document_id == config.document_id, SyncError::ProtocolMismatch);
       },
       WireMessage::Error { message, .. } => bail!(message),
       _ => bail!(SyncError::UnexpectedMessage("Snapshot")),
@@ -957,6 +1465,382 @@ pub async fn connect_and_receive_snapshot(
   })
 }
 
+pub struct LiveCollaborationClient {
+  endpoint: Endpoint,
+  send: SendStream,
+  pub last_application: Option<UpdateApplication>,
+  recv: RecvStream,
+  pub authorization: AuthorizeMessage,
+  pub document: CollabDocument,
+  pub assets_available: Vec<[u8; 32]>,
+  pub assets: AssetStore,
+  pending_events: VecDeque<(SessionEvent, Option<UpdateApplication>)>,
+  config: FlowstateSyncConfig,
+}
+
+enum LiveClientMessage {
+  Event(SessionEvent, Option<UpdateApplication>),
+  AssetChunk(AssetChunkMessage),
+  Continue,
+}
+
+impl LiveCollaborationClient {
+  pub async fn publish_update(&mut self, bytes: Vec<u8>) -> AnyResult<()> {
+    ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
+    ensure_update_size(&bytes, self.config.max_update_bytes)?;
+    let hash = blake3_hash(&bytes);
+    self
+      .document
+      .import_update_checked(self.authorization.role, &bytes)?;
+    write_wire_message(
+      &mut self.send,
+      &WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        bytes,
+        hash,
+        application: None,
+      },
+      self.config.max_message_bytes,
+    )
+    .await
+  }
+
+  pub async fn publish_application_update(&mut self, application: UpdateApplication) -> AnyResult<()> {
+    ensure!(
+      self.authorization.role.can_write(),
+      "local role is not allowed to publish application updates"
+    );
+    let bytes = Vec::new();
+    write_wire_message(
+      &mut self.send,
+      &WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        hash: blake3_hash(&bytes),
+        bytes,
+        application: Some(application),
+      },
+      self.config.max_message_bytes,
+    )
+    .await
+  }
+  pub async fn replace_source_from(&mut self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
+    ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
+    ensure!(source.document_id() == self.config.document_id, "replacement source document mismatch");
+    ensure!(source.format_kind() == self.config.format_kind, "replacement source format mismatch");
+    let projection_cache = source.materialize_projection_cache()?;
+    let asset_manifest = source.asset_manifest_bytes()?;
+    let update = if let Ok(Some(granular_source)) = source.materialize_granular_source() {
+      self
+        .document
+        .replace_granular_source(self.authorization.role, &granular_source, &projection_cache, &asset_manifest)?
+    } else {
+      self
+        .document
+        .replace_projection_source(self.authorization.role, &projection_cache, &asset_manifest)?
+    };
+    ensure_update_size(&update, self.config.max_update_bytes)?;
+    write_wire_message(
+      &mut self.send,
+      &WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        hash: blake3_hash(&update),
+        bytes: update,
+        application,
+      },
+      self.config.max_message_bytes,
+    )
+    .await
+  }
+
+  pub async fn publish_presence(
+    &mut self,
+    user_label: impl Into<String>,
+    cursor: Option<String>,
+    focus: Option<String>,
+    viewport_hint: Option<String>,
+  ) -> AnyResult<()> {
+    let presence = PeerPresence {
+      actor_id: self.config.actor_id,
+      session_id: self.config.session_id,
+      role: self.authorization.role,
+      user_label: user_label.into(),
+      cursor,
+      focus,
+      viewport_hint,
+      last_known_frontier: self.document.frontier()?,
+      monotonic_millis: now_unix_millis(),
+    };
+    write_wire_message(
+      &mut self.send,
+      &WireMessage::Presence(presence.message(self.config.document_id)),
+      self.config.max_message_bytes,
+    )
+    .await
+  }
+
+  pub async fn receive_next_update(&mut self) -> AnyResult<Option<SessionEvent>> {
+    if let Some((event, application)) = self.pending_events.pop_front() {
+      self.last_application = application;
+      return Ok(Some(event));
+    }
+    loop {
+      let message = match read_wire_message(&mut self.recv, self.config.max_message_bytes).await {
+        Ok(message) => message,
+        Err(_) => return Ok(None),
+      };
+      match self.handle_live_message(message).await? {
+        LiveClientMessage::Event(event, application) => {
+          self.last_application = application;
+          return Ok(Some(event));
+        },
+        LiveClientMessage::AssetChunk(_) | LiveClientMessage::Continue => {},
+      }
+    }
+  }
+
+  async fn handle_live_message(&mut self, message: WireMessage) -> AnyResult<LiveClientMessage> {
+    match message {
+      WireMessage::Update {
+        document_id,
+        application,
+        actor_id: _,
+        bytes,
+        hash,
+      } => {
+        ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        ensure_update_size(&bytes, self.config.max_update_bytes)?;
+        ensure!(blake3_hash(&bytes) == hash, "update hash mismatch");
+        if bytes.is_empty() && application.is_some() {
+          let frontier = self.document.frontier()?;
+          write_wire_message(&mut self.send, &WireMessage::Ack { document_id, frontier }, self.config.max_message_bytes).await?;
+          return Ok(LiveClientMessage::Event(SessionEvent::UpdateApplied { document_id, hash }, application));
+        }
+        let outcome = self.document.import_update_checked(Role::Editor, &bytes)?;
+        write_wire_message(
+          &mut self.send,
+          &WireMessage::Ack {
+            document_id,
+            frontier: outcome.frontier,
+          },
+          self.config.max_message_bytes,
+        )
+        .await?;
+        if outcome.patch.is_none() {
+          return Ok(LiveClientMessage::Event(SessionEvent::UpdateApplied { document_id, hash }, None));
+        }
+        Ok(LiveClientMessage::Event(SessionEvent::UpdateApplied { document_id, hash }, application))
+      },
+      WireMessage::Snapshot { document_id, bytes, hash } => {
+        ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        ensure_snapshot_size(&bytes, self.config.max_snapshot_bytes)?;
+        ensure!(blake3_hash(&bytes) == hash, "snapshot hash mismatch");
+        self.document = CollabDocument::from_snapshot(&bytes, Some(self.config.format_kind), Some(self.config.document_id))?;
+        self.document.set_local_actor(self.config.actor_id)?;
+        Ok(LiveClientMessage::Event(SessionEvent::SnapshotApplied { document_id, hash }, None))
+      },
+      WireMessage::Have { assets, .. } | WireMessage::AssetHave(AssetHaveMessage { assets, .. }) => {
+        self.assets_available = assets;
+        Ok(LiveClientMessage::Continue)
+      },
+      WireMessage::AssetChunk(chunk) => {
+        ensure!(chunk.document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        Ok(LiveClientMessage::AssetChunk(chunk))
+      },
+      WireMessage::PeerEvent(message) => {
+        ensure!(message.document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        let event = match message.kind {
+          PeerEventKind::Authorized => SessionEvent::PeerAuthorized {
+            actor_id: message.actor_id,
+            session_id: message.session_id,
+            role: message
+              .role
+              .context("peer authorized event is missing role")?,
+          },
+          PeerEventKind::RoleChanged => SessionEvent::PeerRoleChanged {
+            actor_id: message.actor_id,
+            session_id: message.session_id,
+            role: message
+              .role
+              .context("peer role-changed event is missing role")?,
+          },
+          PeerEventKind::Left => SessionEvent::PeerLeft {
+            actor_id: message.actor_id,
+            session_id: message.session_id,
+          },
+        };
+        if let SessionEvent::PeerRoleChanged { session_id, role, .. } = event
+          && session_id == self.config.session_id
+        {
+          self.authorization.role = role;
+        }
+        Ok(LiveClientMessage::Event(event, None))
+      },
+      WireMessage::Presence(message) => {
+        ensure!(message.document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        Ok(LiveClientMessage::Event(
+          SessionEvent::Presence(PeerPresence {
+            actor_id: message.actor_id,
+            session_id: message.session_id,
+            role: message.role,
+            user_label: message.user_label,
+            cursor: message.cursor,
+            focus: message.focus,
+            viewport_hint: message.viewport_hint,
+            last_known_frontier: message.last_known_frontier,
+            monotonic_millis: message.monotonic_millis,
+          }),
+          None,
+        ))
+      },
+      WireMessage::Ack { .. } => Ok(LiveClientMessage::Continue),
+      WireMessage::Error { message, .. } => bail!(message),
+      WireMessage::Hello(_) | WireMessage::Authorize(_) | WireMessage::Need { .. } | WireMessage::AssetNeed(_) => {
+        Ok(LiveClientMessage::Continue)
+      },
+    }
+  }
+
+  pub async fn request_asset(&mut self, hash: [u8; 32], expected_len: u64) -> AnyResult<VerifiedAsset> {
+    if let Some(asset) = self.assets.get_verified(&hash) {
+      return Ok(asset);
+    }
+    ensure!(self.assets_available.contains(&hash), "asset is not advertised by the collaboration host");
+    let expected_len_usize = usize::try_from(expected_len).context("asset length overflows usize")?;
+    let mut bytes = Vec::with_capacity(expected_len_usize);
+    while bytes.len() < expected_len_usize {
+      write_wire_message(
+        &mut self.send,
+        &asset_need(
+          self.config.document_id,
+          hash,
+          bytes.len() as u64,
+          (expected_len_usize - bytes.len()) as u64,
+        ),
+        self.config.max_message_bytes,
+      )
+      .await?;
+      loop {
+        let message = read_wire_message(&mut self.recv, self.config.max_message_bytes).await?;
+        match self.handle_live_message(message).await? {
+          LiveClientMessage::AssetChunk(chunk) => {
+            ensure!(chunk.blake3_hash == hash, "asset chunk hash mismatch");
+            let chunk_offset = usize::try_from(chunk.offset).context("asset chunk offset overflows usize")?;
+            ensure!(chunk_offset == bytes.len(), "asset chunk offset mismatch");
+            ensure!(!chunk.bytes.is_empty(), "asset chunk is empty");
+            bytes.extend_from_slice(&chunk.bytes);
+            break;
+          },
+          LiveClientMessage::Event(event, application) => self.pending_events.push_back((event, application)),
+          LiveClientMessage::Continue => {},
+        }
+      }
+    }
+    ensure!(bytes.len() == expected_len_usize, "asset length mismatch");
+    ensure!(blake3_hash(&bytes) == hash, "asset hash mismatch");
+    Ok(self.assets.insert_verified(bytes))
+  }
+
+  pub async fn request_assets(&mut self, assets: impl IntoIterator<Item = ([u8; 32], u64)>) -> AnyResult<Vec<VerifiedAsset>> {
+    let mut verified = Vec::new();
+    for (hash, byte_len) in assets {
+      verified.push(self.request_asset(hash, byte_len).await?);
+    }
+    Ok(verified)
+  }
+
+  pub async fn request_document_assets(&mut self) -> AnyResult<Vec<VerifiedAsset>> {
+    let manifest_bytes = self.document.asset_manifest_bytes()?;
+    if manifest_bytes.is_empty() {
+      return Ok(Vec::new());
+    }
+    let manifest: Vec<NativeAssetRecord> = postcard::from_bytes(&manifest_bytes).context("failed to decode Flowstate asset manifest")?;
+    self
+      .request_assets(
+        manifest
+          .into_iter()
+          .map(|asset| (asset.blake3_hash, asset.byte_len)),
+      )
+      .await
+  }
+
+  pub async fn shutdown(mut self) -> AnyResult<()> {
+    self
+      .send
+      .finish()
+      .context("failed to finish Flowstate live stream")?;
+    self.endpoint.close().await;
+    Ok(())
+  }
+}
+
+pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClient> {
+  let ticket = decode_invite_link(link)?;
+  let endpoint = bind_endpoint().await?;
+  let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role);
+  let connection = endpoint
+    .connect(ticket.endpoint_addr.clone(), FLOWSTATE_ALPN)
+    .await
+    .context("failed to connect to Flowstate peer")?;
+  let (mut send, mut recv) = connection
+    .open_bi()
+    .await
+    .context("failed to open Flowstate live stream")?;
+  let hello = config.hello(Vec::new(), ticket.capability.clone());
+  write_wire_message(&mut send, &WireMessage::Hello(hello), config.max_message_bytes).await?;
+  let message = read_wire_message(&mut recv, config.max_message_bytes).await?;
+  let WireMessage::Authorize(authorization) = message else {
+    bail!(SyncError::UnexpectedMessage("Authorize"));
+  };
+  if !authorization.accepted {
+    bail!(SyncError::Unauthorized(
+      authorization
+        .reason
+        .clone()
+        .unwrap_or_else(|| "peer rejected session".to_string())
+    ));
+  }
+  let mut document = None;
+  let mut assets_available = Vec::new();
+  let mut saw_have = false;
+  while document.is_none() || !saw_have {
+    match read_wire_message(&mut recv, config.max_message_bytes).await? {
+      WireMessage::Snapshot { document_id, bytes, hash } => {
+        ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure_snapshot_size(&bytes, config.max_snapshot_bytes)?;
+        ensure!(blake3_hash(&bytes) == hash, "snapshot hash mismatch");
+        document = Some(CollabDocument::from_snapshot(&bytes, Some(config.format_kind), Some(config.document_id))?);
+      },
+      WireMessage::Have { document_id, assets, .. } | WireMessage::AssetHave(AssetHaveMessage { document_id, assets }) => {
+        ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        assets_available = assets;
+        saw_have = true;
+      },
+      WireMessage::PeerEvent(message) => {
+        ensure!(message.document_id == config.document_id, SyncError::ProtocolMismatch);
+      },
+      WireMessage::Error { message, .. } => bail!(message),
+      _ => bail!(SyncError::UnexpectedMessage("Snapshot")),
+    }
+  }
+  let document = document.expect("document checked above");
+  document.set_local_actor(config.actor_id)?;
+  Ok(LiveCollaborationClient {
+    endpoint,
+    send,
+    last_application: None,
+    recv,
+    authorization,
+    document,
+    assets_available,
+    assets: AssetStore::default(),
+    pending_events: VecDeque::new(),
+    config,
+  })
+}
+
 pub async fn write_wire_message(send: &mut SendStream, message: &WireMessage, max_message_bytes: usize) -> AnyResult<()> {
   write_frame(send, &encode_wire_message(message)?, max_message_bytes).await
 }
@@ -966,13 +1850,14 @@ pub async fn read_wire_message(recv: &mut RecvStream, max_message_bytes: usize) 
 }
 
 async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentState, config: &FlowstateSyncConfig) -> AnyResult<()> {
-  let snapshot = {
-    state
+  let (snapshot, frontier) = {
+    let document = state
       .document
       .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .export_snapshot()?
+      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
+    (document.export_snapshot()?, document.frontier()?)
   };
+  ensure_snapshot_size(&snapshot, config.max_snapshot_bytes)?;
   write_wire_message(
     send,
     &WireMessage::Snapshot {
@@ -983,18 +1868,7 @@ async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentSt
     config.max_message_bytes,
   )
   .await?;
-  let assets = state
-    .assets
-    .lock()
-    .map_err(|_| anyhow::anyhow!("Flowstate asset state lock is poisoned"))?
-    .hashes();
-  let frontier = {
-    state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .frontier()?
-  };
+  let assets = advertised_asset_hashes(state)?;
   write_wire_message(
     send,
     &WireMessage::Have {
@@ -1007,6 +1881,68 @@ async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentSt
   .await
 }
 
+fn document_asset_manifest_records(state: &SessionDocumentState) -> AnyResult<Vec<NativeAssetRecord>> {
+  let manifest_bytes = state
+    .document
+    .lock()
+    .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+    .asset_manifest_bytes()?;
+  if manifest_bytes.is_empty() {
+    return Ok(Vec::new());
+  }
+  postcard::from_bytes(&manifest_bytes).context("failed to decode Flowstate asset manifest")
+}
+
+fn advertised_asset_hashes(state: &SessionDocumentState) -> AnyResult<Vec<[u8; 32]>> {
+  let manifest = match document_asset_manifest_records(state) {
+    Ok(manifest) => manifest,
+    Err(_) => return Ok(Vec::new()),
+  };
+  if manifest.is_empty() {
+    return Ok(Vec::new());
+  }
+  let available = state
+    .assets
+    .lock()
+    .map_err(|_| anyhow::anyhow!("Flowstate asset state lock is poisoned"))?
+    .hashes()
+    .into_iter()
+    .collect::<HashSet<_>>();
+  let mut advertised = Vec::new();
+  let mut seen = HashSet::new();
+  for asset in manifest {
+    if available.contains(&asset.blake3_hash) && seen.insert(asset.blake3_hash) {
+      advertised.push(asset.blake3_hash);
+    }
+  }
+  Ok(advertised)
+}
+
+fn ensure_asset_referenced(state: &SessionDocumentState, hash: [u8; 32]) -> AnyResult<()> {
+  ensure!(
+    document_asset_manifest_records(state)?
+      .into_iter()
+      .any(|asset| asset.blake3_hash == hash),
+    "requested asset is not referenced by document manifest"
+  );
+  Ok(())
+}
+
+async fn send_peer_roster(
+  send: &mut SendStream,
+  hub: &LiveUpdateHub,
+  current_session_id: SessionId,
+  document_id: DocumentId,
+  max_message_bytes: usize,
+) -> AnyResult<()> {
+  for peer in hub.peers()? {
+    if peer.session_id != current_session_id {
+      write_wire_message(send, &peer_authorized_message(document_id, peer), max_message_bytes).await?;
+    }
+  }
+  Ok(())
+}
+
 async fn serve_live_stream(
   send: &mut SendStream,
   recv: &mut RecvStream,
@@ -1014,11 +1950,61 @@ async fn serve_live_stream(
   remote_role: Role,
   state: &SessionDocumentState,
   config: &FlowstateSyncConfig,
+  mut live_rx: Option<broadcast::Receiver<LiveUpdate>>,
+  live_updates: Option<&LiveUpdateHub>,
 ) -> AnyResult<()> {
+  let mut remote_role = remote_role;
+  let mut presence_rate = RateWindow::new(config.max_presence_messages_per_minute, RATE_LIMIT_WINDOW_MILLIS);
+  let mut asset_request_rate = RateWindow::new(config.max_asset_requests_per_minute, RATE_LIMIT_WINDOW_MILLIS);
   loop {
-    let message = match read_wire_message(recv, config.max_message_bytes).await {
-      Ok(message) => message,
-      Err(_) => break,
+    let message = if let Some(rx) = live_rx.as_mut() {
+      tokio::select! {
+        message = read_wire_message(recv, config.max_message_bytes) => match message {
+          Ok(message) => message,
+          Err(_) => break,
+        },
+        update = rx.recv() => match update {
+          Ok(update) => {
+            if let LiveUpdateKind::Event(event) = &update.kind {
+              match event {
+                SessionEvent::PeerLeft { session_id, .. } if *session_id == hello.session_id => {
+                  write_wire_message(
+                    send,
+                    &WireMessage::Error {
+                      document_id: Some(config.document_id),
+                      message: "peer was removed from the collaboration session".to_string(),
+                    },
+                    config.max_message_bytes,
+                  )
+                  .await?;
+                  break;
+                },
+                SessionEvent::PeerRoleChanged { session_id, role, .. } if *session_id == hello.session_id => {
+                  remote_role = *role;
+                },
+                _ => {},
+              }
+            }
+            if let Some(message) = live_update_wire_message(config.document_id, hello.session_id, update) {
+              write_wire_message(send, &message, config.max_message_bytes).await?;
+            }
+            continue;
+          },
+          Err(broadcast::error::RecvError::Lagged(_)) => {
+            send_snapshot_and_have(send, state, config).await?;
+            continue;
+          },
+          Err(broadcast::error::RecvError::Closed) => {
+            live_rx = None;
+            continue;
+          },
+        },
+      }
+    } else {
+      match read_wire_message(recv, config.max_message_bytes).await {
+        Ok(message) => message,
+        Err(_) => break,
+      }
     };
     match message {
       WireMessage::Update {
@@ -1026,23 +2012,63 @@ async fn serve_live_stream(
         actor_id,
         bytes,
         hash,
+        application,
       } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         ensure!(actor_id == hello.actor_id, "update actor does not match authorized peer");
+        ensure_update_size(&bytes, config.max_update_bytes)?;
         ensure!(blake3_hash(&bytes) == hash, "update hash mismatch");
-        let frontier = {
+        if bytes.is_empty() && application.is_some() {
+          let frontier = state
+            .document
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+            .frontier()?;
+          if let Some(hub) = live_updates {
+            let message = WireMessage::Update {
+              document_id,
+              actor_id,
+              hash,
+              bytes,
+              application,
+            };
+            hub.publish(LiveUpdate::wire(Some(hello.session_id), message))?;
+          }
+          write_wire_message(
+            send,
+            &WireMessage::Ack {
+              document_id: config.document_id,
+              frontier,
+            },
+            config.max_message_bytes,
+          )
+          .await?;
+          continue;
+        }
+        let outcome = {
           state
             .document
             .lock()
             .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
             .import_update_checked(remote_role, &bytes)?
-            .frontier
         };
+        if outcome.patch.is_some()
+          && let Some(hub) = live_updates
+        {
+          let message = WireMessage::Update {
+            document_id,
+            actor_id,
+            hash,
+            bytes,
+            application,
+          };
+          hub.publish(LiveUpdate::wire(Some(hello.session_id), message))?;
+        }
         write_wire_message(
           send,
           &WireMessage::Ack {
             document_id: config.document_id,
-            frontier,
+            frontier: outcome.frontier,
           },
           config.max_message_bytes,
         )
@@ -1063,23 +2089,30 @@ async fn serve_live_stream(
             .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
             .export_update_since_frontier(&frontier)?;
           if !update.is_empty() {
-            write_wire_message(
-              send,
-              &WireMessage::Update {
-                document_id,
-                actor_id: config.actor_id,
-                hash: blake3_hash(&update),
-                bytes: update,
-              },
-              config.max_message_bytes,
-            )
-            .await?;
+            if update.len() > config.max_update_bytes {
+              send_snapshot_and_have(send, state, config).await?;
+            } else {
+              write_wire_message(
+                send,
+                &WireMessage::Update {
+                  document_id,
+                  actor_id: config.actor_id,
+                  hash: blake3_hash(&update),
+                  bytes: update,
+                  application: None,
+                },
+                config.max_message_bytes,
+              )
+              .await?;
+            }
           }
         }
       },
       WireMessage::AssetNeed(request) => {
+        ensure!(asset_request_rate.check(now_unix_millis()), "asset request rate limit exceeded");
         ensure!(role_includes(remote_role, Role::Viewer), "peer is not authorized to receive assets");
         ensure!(request.document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure_asset_referenced(state, request.blake3_hash)?;
         let chunk = state
           .assets
           .lock()
@@ -1087,7 +2120,27 @@ async fn serve_live_stream(
           .chunk(&request, config.max_asset_chunk_bytes)?;
         write_wire_message(send, &WireMessage::AssetChunk(chunk), config.max_message_bytes).await?;
       },
-      WireMessage::Presence(_) => {
+      WireMessage::Presence(mut presence) => {
+        ensure!(presence_rate.check(now_unix_millis()), "presence rate limit exceeded");
+        ensure!(presence.document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure!(presence.actor_id == hello.actor_id, "presence actor does not match authorized peer");
+        ensure!(presence.session_id == hello.session_id, "presence session does not match authorized peer");
+        presence.role = remote_role;
+        let peer_presence = PeerPresence {
+          actor_id: presence.actor_id,
+          session_id: presence.session_id,
+          role: presence.role,
+          user_label: presence.user_label.clone(),
+          cursor: presence.cursor.clone(),
+          focus: presence.focus.clone(),
+          viewport_hint: presence.viewport_hint.clone(),
+          last_known_frontier: presence.last_known_frontier.clone(),
+          monotonic_millis: presence.monotonic_millis,
+        };
+        if let Some(hub) = live_updates {
+          hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::Presence(peer_presence)))?;
+          hub.publish(LiveUpdate::wire(Some(hello.session_id), WireMessage::Presence(presence)))?;
+        }
         let frontier = state
           .document
           .lock()
@@ -1109,11 +2162,63 @@ async fn serve_live_stream(
       | WireMessage::Snapshot { .. }
       | WireMessage::AssetHave(_)
       | WireMessage::AssetChunk(_)
+      | WireMessage::PeerEvent(_)
       | WireMessage::Ack { .. }
       | WireMessage::Error { .. } => {},
     }
   }
   Ok(())
+}
+
+fn live_update_wire_message(document_id: DocumentId, current_session_id: SessionId, update: LiveUpdate) -> Option<WireMessage> {
+  if update.source_session_id == Some(current_session_id) {
+    return None;
+  }
+  match update.kind {
+    LiveUpdateKind::Wire(message) => Some(message),
+    LiveUpdateKind::Event(event) => session_event_wire_message(document_id, event),
+  }
+}
+
+fn session_event_wire_message(document_id: DocumentId, event: SessionEvent) -> Option<WireMessage> {
+  match event {
+    SessionEvent::PeerAuthorized { actor_id, session_id, role } => Some(peer_event_message(
+      document_id,
+      actor_id,
+      session_id,
+      Some(role),
+      PeerEventKind::Authorized,
+    )),
+    SessionEvent::PeerRoleChanged { actor_id, session_id, role } => Some(peer_event_message(
+      document_id,
+      actor_id,
+      session_id,
+      Some(role),
+      PeerEventKind::RoleChanged,
+    )),
+    SessionEvent::PeerLeft { actor_id, session_id } => Some(peer_event_message(document_id, actor_id, session_id, None, PeerEventKind::Left)),
+    _ => None,
+  }
+}
+
+fn peer_authorized_message(document_id: DocumentId, peer: LivePeer) -> WireMessage {
+  peer_event_message(document_id, peer.actor_id, peer.session_id, Some(peer.role), PeerEventKind::Authorized)
+}
+
+fn peer_event_message(
+  document_id: DocumentId,
+  actor_id: ActorId,
+  session_id: SessionId,
+  role: Option<Role>,
+  kind: PeerEventKind,
+) -> WireMessage {
+  WireMessage::PeerEvent(PeerEventMessage {
+    document_id,
+    actor_id,
+    session_id,
+    role,
+    kind,
+  })
 }
 
 pub async fn write_frame(send: &mut SendStream, bytes: &[u8], max_message_bytes: usize) -> AnyResult<()> {
@@ -1211,8 +2316,35 @@ fn now_unix_secs() -> u64 {
     .unwrap_or_default()
 }
 
+fn now_unix_millis() -> u64 {
+  SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX))
+    .unwrap_or_default()
+}
+
 fn accept_error(error: anyhow::Error) -> AcceptError {
   AcceptError::from_err(std::io::Error::other(error.to_string()))
+}
+
+fn ensure_snapshot_size(bytes: &[u8], max_snapshot_bytes: usize) -> AnyResult<()> {
+  ensure!(
+    bytes.len() <= max_snapshot_bytes,
+    "Flowstate snapshot length {} exceeds limit {}",
+    bytes.len(),
+    max_snapshot_bytes
+  );
+  Ok(())
+}
+
+fn ensure_update_size(bytes: &[u8], max_update_bytes: usize) -> AnyResult<()> {
+  ensure!(
+    bytes.len() <= max_update_bytes,
+    "Flowstate update length {} exceeds limit {}",
+    bytes.len(),
+    max_update_bytes
+  );
+  Ok(())
 }
 
 #[cfg(test)]
@@ -1295,6 +2427,32 @@ mod tests {
   }
 
   #[test]
+  fn live_update_hub_allows_publish_without_subscribers() {
+    let hub = LiveUpdateHub::new(1);
+    assert!(
+      hub
+        .publish(LiveUpdate::wire(
+          None,
+          WireMessage::Ack {
+            document_id: DocumentId::new(),
+            frontier: Vec::new(),
+          },
+        ))
+        .is_ok()
+    );
+  }
+
+  #[test]
+  fn rate_window_rejects_events_until_window_expires() {
+    let mut window = RateWindow::new(2, 1_000);
+
+    assert!(window.check(1_000));
+    assert!(window.check(1_500));
+    assert!(!window.check(1_999));
+    assert!(window.check(2_001));
+  }
+
+  #[test]
   fn invite_link_round_trips() {
     let endpoint_addr = EndpointAddr::new(iroh::SecretKey::generate().public());
     let ticket = InviteTicket::new(endpoint_addr, DocumentId::new(), FormatKind::Db8, Role::Editor);
@@ -1362,6 +2520,766 @@ mod tests {
         .iter()
         .any(|event| matches!(event, SessionEvent::Presence(_)))
     );
+  }
+
+  #[tokio::test]
+  async fn hosted_collaboration_issues_invite_and_join_receives_snapshot() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", b"asset-manifest").unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let joined = join_invite_snapshot(&invite).await.unwrap();
+
+    assert_eq!(joined.authorization.role, Role::Editor);
+    assert_eq!(joined.document.materialize_projection_cache().unwrap(), b"projection");
+    assert_eq!(joined.document.asset_manifest_bytes().unwrap(), b"asset-manifest");
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn hosted_collaboration_revoke_invite_blocks_new_live_join() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let first = connect_live_invite(&invite).await.unwrap();
+
+    assert!(host.revoke_invite_link(&invite).unwrap());
+    assert!(connect_live_invite(&invite).await.is_err());
+
+    first.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn hosted_collaboration_revoke_all_invites_blocks_new_live_join() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Viewer, Some("viewer".to_string()), true)
+      .unwrap();
+
+    assert_eq!(host.revoke_all_invites().unwrap(), 1);
+    assert!(connect_live_invite(&invite).await.is_err());
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_client_downloads_advertised_asset_in_ranges() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let asset_bytes = (0..DEFAULT_MAX_ASSET_CHUNK_BYTES + 17)
+      .map(|index| (index % 251) as u8)
+      .collect::<Vec<_>>();
+    let mut assets = AssetStore::default();
+    let asset = assets.insert_verified(asset_bytes.clone());
+    let manifest = postcard::to_stdvec(&vec![NativeAssetRecord {
+      asset_id: 7,
+      blake3_hash: asset.hash,
+      byte_len: asset.bytes.len() as u64,
+      mime_type: "image/png".to_string(),
+      original_name: Some("asset.png".to_string()),
+      created_by_actor: owner,
+      inline: true,
+    }])
+    .unwrap();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &manifest).unwrap();
+    let host = HostedCollaboration::start(host_doc, assets, Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+
+    assert!(client.assets_available.contains(&asset.hash));
+    let received = client.request_document_assets().await.unwrap();
+
+    assert_eq!(received.len(), 1);
+    assert_eq!(received[0].hash, asset.hash);
+    assert_eq!(received[0].bytes, asset_bytes);
+    assert!(client.assets.contains(&asset.hash));
+    client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_advertises_and_serves_only_manifest_assets() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let mut assets = AssetStore::default();
+    let referenced = assets.insert_verified(b"referenced asset".to_vec());
+    let unreferenced = assets.insert_verified(b"unreferenced asset".to_vec());
+    let manifest = postcard::to_stdvec(&vec![NativeAssetRecord {
+      asset_id: 11,
+      blake3_hash: referenced.hash,
+      byte_len: referenced.bytes.len() as u64,
+      mime_type: "image/png".to_string(),
+      original_name: Some("referenced.png".to_string()),
+      created_by_actor: owner,
+      inline: true,
+    }])
+    .unwrap();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &manifest).unwrap();
+    let host = HostedCollaboration::start(host_doc, assets, Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+
+    assert!(client.assets_available.contains(&referenced.hash));
+    assert!(!client.assets_available.contains(&unreferenced.hash));
+    assert!(
+      client
+        .request_asset(unreferenced.hash, unreferenced.bytes.len() as u64)
+        .await
+        .is_err()
+    );
+
+    write_wire_message(
+      &mut client.send,
+      &asset_need(document_id, unreferenced.hash, 0, unreferenced.bytes.len() as u64),
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    assert!(
+      read_wire_message(&mut client.recv, client.config.max_message_bytes)
+        .await
+        .is_err()
+    );
+
+    let _ = client.shutdown().await;
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_rejects_asset_request_rate_limit() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let mut assets = AssetStore::default();
+    let asset = assets.insert_verified(b"rate limited asset".to_vec());
+    let manifest = postcard::to_stdvec(&vec![NativeAssetRecord {
+      asset_id: 12,
+      blake3_hash: asset.hash,
+      byte_len: asset.bytes.len() as u64,
+      mime_type: "image/png".to_string(),
+      original_name: Some("rate.png".to_string()),
+      created_by_actor: owner,
+      inline: true,
+    }])
+    .unwrap();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &manifest).unwrap();
+    let mut config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    config.max_asset_requests_per_minute = 1;
+    let host = HostedCollaboration::start_with_config(host_doc, assets, config)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+
+    write_wire_message(
+      &mut client.send,
+      &asset_need(document_id, asset.hash, 0, asset.bytes.len() as u64),
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+      read_wire_message(&mut client.recv, client.config.max_message_bytes)
+        .await
+        .unwrap(),
+      WireMessage::AssetChunk(_)
+    ));
+    write_wire_message(
+      &mut client.send,
+      &asset_need(document_id, asset.hash, 0, asset.bytes.len() as u64),
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    assert!(
+      read_wire_message(&mut client.recv, client.config.max_message_bytes)
+        .await
+        .is_err()
+    );
+
+    let _ = client.shutdown().await;
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_fans_out_peer_update_to_other_joiner() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut left = connect_live_invite(&invite).await.unwrap();
+    let mut right = connect_live_invite(&invite).await.unwrap();
+    let update = left
+      .document
+      .replace_projection_source(Role::Editor, b"two", &[])
+      .unwrap();
+
+    left.publish_update(update).await.unwrap();
+    let event = loop {
+      let event = right.receive_next_update().await.unwrap();
+      if matches!(event, Some(SessionEvent::UpdateApplied { .. })) {
+        break event;
+      }
+    };
+
+    assert!(matches!(event, Some(SessionEvent::UpdateApplied { document_id: id, .. }) if id == document_id));
+    assert_eq!(right.document.materialize_projection_cache().unwrap(), b"two");
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_subscriber_receives_peer_update_for_owner_workspace() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let update = client
+      .document
+      .replace_projection_source(Role::Editor, b"two", &[])
+      .unwrap();
+
+    client.publish_update(update).await.unwrap();
+    let update = loop {
+      let update = host_updates.recv().await.unwrap();
+      if matches!(update.kind, LiveUpdateKind::Wire(WireMessage::Update { .. })) {
+        break update;
+      }
+    };
+
+    assert!(update.source_session_id.is_some());
+    assert!(matches!(update.kind, LiveUpdateKind::Wire(WireMessage::Update { document_id: id, .. }) if id == document_id));
+    assert_eq!(
+      host
+        .document_state()
+        .document
+        .lock()
+        .unwrap()
+        .materialize_projection_cache()
+        .unwrap(),
+      b"two"
+    );
+    client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_subscriber_receives_peer_lifecycle_events() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Viewer, Some("viewer".to_string()), true)
+      .unwrap();
+    let client = connect_live_invite(&invite).await.unwrap();
+    let event = loop {
+      let update = host_updates.recv().await.unwrap();
+      if let LiveUpdateKind::Event(event @ SessionEvent::PeerAuthorized { .. }) = update.kind {
+        break event;
+      }
+    };
+
+    assert!(matches!(event, SessionEvent::PeerAuthorized { role: Role::Viewer, .. }));
+    client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_subscriber_receives_peer_left_after_rejected_update() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Viewer, Some("viewer".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let session_id = client.config.session_id;
+    let actor_id = client.config.actor_id;
+    let update = client
+      .document
+      .replace_projection_source(Role::Editor, b"illegal", &[])
+      .unwrap();
+    let hash = blake3_hash(&update);
+
+    write_wire_message(
+      &mut client.send,
+      &WireMessage::Update {
+        document_id,
+        actor_id,
+        bytes: update,
+        hash,
+        application: None,
+      },
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let update = host_updates.recv().await.unwrap();
+        if let LiveUpdateKind::Event(
+          event @ SessionEvent::PeerLeft {
+            session_id: left_session_id, ..
+          },
+        ) = update.kind
+          && left_session_id == session_id
+        {
+          break event;
+        }
+      }
+    })
+    .await
+    .unwrap();
+
+    assert!(matches!(
+      event,
+      SessionEvent::PeerLeft {
+        session_id: left_session_id,
+        ..
+      } if left_session_id == session_id
+    ));
+    let _ = client.shutdown().await;
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_joiner_receives_peer_roster_and_lifecycle_events() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut first = connect_live_invite(&invite).await.unwrap();
+    let first_session_id = first.config.session_id;
+    let mut second = connect_live_invite(&invite).await.unwrap();
+    let second_session_id = second.config.session_id;
+
+    let first_seen_by_second = tokio::time::timeout(std::time::Duration::from_secs(5), second.receive_next_update())
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      first_seen_by_second,
+      SessionEvent::PeerAuthorized {
+        session_id,
+        role: Role::Editor,
+        ..
+      } if session_id == first_session_id
+    ));
+
+    let second_seen_by_first = tokio::time::timeout(std::time::Duration::from_secs(5), first.receive_next_update())
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      second_seen_by_first,
+      SessionEvent::PeerAuthorized {
+        session_id,
+        role: Role::Editor,
+        ..
+      } if session_id == second_session_id
+    ));
+
+    first.shutdown().await.unwrap();
+    let first_left = tokio::time::timeout(std::time::Duration::from_secs(5), second.receive_next_update())
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      first_left,
+      SessionEvent::PeerLeft {
+        session_id,
+        ..
+      } if session_id == first_session_id
+    ));
+
+    second.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_rejects_join_when_peer_limit_is_reached() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let mut config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    config.max_peer_count = 1;
+    let host = HostedCollaboration::start_with_config(host_doc, AssetStore::default(), config)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let first = connect_live_invite(&invite).await.unwrap();
+    let first_session_id = first.config.session_id;
+    let second = connect_live_invite(&invite).await;
+
+    assert!(second.is_err(), "second join should be rejected by peer limit");
+    first.shutdown().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let update = host_updates.recv().await.unwrap();
+        if let LiveUpdateKind::Event(SessionEvent::PeerLeft { session_id, .. }) = update.kind
+          && session_id == first_session_id
+        {
+          break;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    let third = connect_live_invite(&invite).await.unwrap();
+    third.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_rejects_oversized_peer_update_without_mutation() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let mut config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    config.max_update_bytes = 1;
+    let host = HostedCollaboration::start_with_config(host_doc, AssetStore::default(), config)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let session_id = client.config.session_id;
+    let update = client
+      .document
+      .replace_projection_source(Role::Editor, b"two", &[])
+      .unwrap();
+    assert!(update.len() > 1);
+
+    client.publish_update(update).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let update = host_updates.recv().await.unwrap();
+        if let LiveUpdateKind::Event(SessionEvent::PeerLeft {
+          session_id: left_session_id, ..
+        }) = update.kind
+          && left_session_id == session_id
+        {
+          break;
+        }
+      }
+    })
+    .await
+    .unwrap();
+
+    assert_eq!(
+      host
+        .document_state()
+        .document
+        .lock()
+        .unwrap()
+        .materialize_projection_cache()
+        .unwrap(),
+      b"one"
+    );
+    let _ = client.shutdown().await;
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_rejects_snapshot_when_snapshot_limit_is_exceeded() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"large projection", &[]).unwrap();
+    let mut config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner);
+    config.max_snapshot_bytes = 1;
+    let host = HostedCollaboration::start_with_config(host_doc, AssetStore::default(), config)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+
+    assert!(connect_live_invite(&invite).await.is_err());
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_presence_is_visible_to_host_and_other_joiners() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let mut host_updates = host.subscribe_live_updates();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut left = connect_live_invite(&invite).await.unwrap();
+    let left_session_id = left.config.session_id;
+    let mut right = connect_live_invite(&invite).await.unwrap();
+
+    left
+      .publish_presence(
+        "Left debater",
+        Some("paragraph:3".to_string()),
+        Some("case".to_string()),
+        Some("visible:0-5".to_string()),
+      )
+      .await
+      .unwrap();
+
+    let host_presence = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let update = host_updates.recv().await.unwrap();
+        if let LiveUpdateKind::Event(SessionEvent::Presence(presence)) = update.kind
+          && presence.session_id == left_session_id
+        {
+          break presence;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(host_presence.user_label, "Left debater");
+    assert_eq!(host_presence.cursor.as_deref(), Some("paragraph:3"));
+    assert_eq!(host_presence.focus.as_deref(), Some("case"));
+
+    let joiner_presence = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let event = right.receive_next_update().await.unwrap();
+        if let Some(SessionEvent::Presence(presence)) = event
+          && presence.session_id == left_session_id
+        {
+          break presence;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(joiner_presence.user_label, "Left debater");
+    assert_eq!(joiner_presence.viewport_hint.as_deref(), Some("visible:0-5"));
+
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_role_change_updates_client_permissions() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let session_id = client.config.session_id;
+
+    assert!(host.set_peer_role(session_id, Role::Viewer).unwrap());
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), client.receive_next_update())
+      .await
+      .unwrap()
+      .unwrap()
+      .unwrap();
+    assert!(matches!(
+      event,
+      SessionEvent::PeerRoleChanged {
+        session_id: changed_session_id,
+        role: Role::Viewer,
+        ..
+      } if changed_session_id == session_id
+    ));
+    assert_eq!(client.authorization.role, Role::Viewer);
+    let update = client
+      .document
+      .replace_projection_source(Role::Editor, b"two", &[])
+      .unwrap();
+    assert!(client.publish_update(update).await.is_err());
+
+    let _ = client.shutdown().await;
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_kick_disconnects_target_and_notifies_other_joiners() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut kicked = connect_live_invite(&invite).await.unwrap();
+    let kicked_session_id = kicked.config.session_id;
+    let mut observer = connect_live_invite(&invite).await.unwrap();
+
+    assert!(host.kick_peer(kicked_session_id).unwrap());
+    let kicked_result = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        match kicked.receive_next_update().await {
+          Ok(Some(_)) => {},
+          other => break other,
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(kicked_result, Ok(None) | Err(_)));
+    let observer_event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let event = observer.receive_next_update().await.unwrap();
+        if let Some(SessionEvent::PeerLeft { session_id, .. }) = event
+          && session_id == kicked_session_id
+        {
+          break;
+        }
+      }
+    })
+    .await;
+    assert!(observer_event.is_ok());
+
+    let _ = kicked.shutdown().await;
+    observer.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_joiner_repairs_from_stale_frontier_with_need() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let update = client
+      .document
+      .replace_projection_source(Role::Editor, b"two", &[])
+      .unwrap();
+    host.apply_local_update(update).unwrap();
+
+    write_wire_message(
+      &mut client.send,
+      &WireMessage::Need {
+        document_id,
+        frontier: Vec::new(),
+        snapshot: false,
+      },
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    let event = client.receive_next_update().await.unwrap();
+
+    assert!(matches!(event, Some(SessionEvent::UpdateApplied { document_id: id, .. }) if id == document_id));
+    assert_eq!(client.document.materialize_projection_cache().unwrap(), b"two");
+    client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_snapshot_repair_clears_typed_application_metadata() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut client = connect_live_invite(&invite).await.unwrap();
+    let replacement = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"two", b"asset-manifest").unwrap();
+    host
+      .publish_update_from_source(&replacement, Some(UpdateApplication::Db8CanonicalOperations(vec![1, 2, 3])))
+      .unwrap();
+
+    let event = client.receive_next_update().await.unwrap();
+    assert!(matches!(event, Some(SessionEvent::UpdateApplied { document_id: id, .. }) if id == document_id));
+    assert!(client.last_application.is_some());
+    assert_eq!(client.document.asset_manifest_bytes().unwrap(), b"asset-manifest");
+
+    write_wire_message(
+      &mut client.send,
+      &WireMessage::Need {
+        document_id,
+        frontier: Vec::new(),
+        snapshot: true,
+      },
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    let event = client.receive_next_update().await.unwrap();
+
+    assert!(matches!(event, Some(SessionEvent::SnapshotApplied { document_id: id, .. }) if id == document_id));
+    assert!(client.last_application.is_none());
+    assert_eq!(client.document.materialize_projection_cache().unwrap(), b"two");
+    client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
   }
 
   #[test]

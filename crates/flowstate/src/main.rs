@@ -1,7 +1,6 @@
-use std::{
-  alloc::{GlobalAlloc, Layout},
-  path::PathBuf,
-};
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 

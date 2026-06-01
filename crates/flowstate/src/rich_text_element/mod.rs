@@ -65,6 +65,14 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
     | CommandId::ToggleRibbon
-    | CommandId::ScrollToParagraph => return None,
+    | CommandId::ScrollToParagraph
+    | CommandId::StartCollaboration
+    | CommandId::StopCollaboration
+    | CommandId::CopyOwnerInvite
+    | CommandId::CopyEditorInvite
+    | CommandId::CopyViewerInvite
+    | CommandId::JoinFromInvite
+    | CommandId::ReconnectCollaboration
+    | CommandId::CollaborationDiagnostics => return None,
   })
 }

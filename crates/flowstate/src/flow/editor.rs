@@ -28,6 +28,7 @@ pub struct FlowEditor {
   document: FlowDocument,
   path: Option<PathBuf>,
   dirty: bool,
+  last_collaboration_actions: Option<Vec<Action>>,
   history: HistoryHolder,
   focus_handle: FocusHandle,
   selected_style: DebateStyleKey,
@@ -100,6 +101,7 @@ impl FlowEditor {
       document,
       path,
       dirty: false,
+      last_collaboration_actions: None,
       history: HistoryHolder::new(),
       focus_handle: cx.focus_handle(),
       selected_style: DebateStyleKey::Policy,
@@ -125,6 +127,27 @@ impl FlowEditor {
     Self::new_with_path(load_flow_document_or_new(&path), Some(path), window, cx)
   }
 
+  pub fn document(&self) -> &FlowDocument {
+    &self.document
+  }
+
+  pub fn last_collaboration_actions(&self) -> Option<&[Action]> {
+    self.last_collaboration_actions.as_deref()
+  }
+
+  pub fn replace_document_from_collaboration(&mut self, document: FlowDocument, cx: &mut Context<Self>) {
+    self.document = document;
+    self.dirty = true;
+    self.last_collaboration_actions = None;
+    cx.notify();
+  }
+
+  pub fn apply_remote_actions_from_collaboration(&mut self, actions: &[Action], cx: &mut Context<Self>) {
+    self.document.apply_action_bundle(actions.to_vec());
+    self.last_collaboration_actions = None;
+    self.dirty = true;
+    cx.notify();
+  }
   pub fn document_path(&self) -> Option<&PathBuf> {
     self.path.as_ref()
   }
@@ -415,6 +438,7 @@ impl FlowEditor {
     }
     self.resolve_pending_edit(cx);
     let after_focus = command.focus.clone().or(before_focus.clone());
+    self.last_collaboration_actions = Some(command.actions.clone());
     let inverse = self.document.apply_action_bundle(command.actions);
     self
       .history

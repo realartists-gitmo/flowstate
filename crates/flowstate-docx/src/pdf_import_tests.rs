@@ -21,7 +21,7 @@ fn run(text: &str, font_size: f32, bold: bool, underline: bool) -> PdfRunFact {
 fn bold_underlined_sixteen_point_line_recognizes_block() {
   let runs = [run("2NC---AT: US Draw-In", 16.0, true, true)];
 
-  assert_eq!(recognize_line_paragraph_style(&runs), (ParagraphStyle::Block, true));
+  assert_eq!(recognize_line_paragraph_style(&runs), (PARAGRAPH_BLOCK, true));
 }
 
 #[test]
@@ -32,7 +32,7 @@ fn first_bold_text_after_heading_becomes_cite() {
 
   let styles = recognize_run_styles_for_context(&runs[0], 0, Some(&overrides), false, false, true, ParagraphStyle::Normal, true, false);
 
-  assert_eq!(styles.semantic, RunSemanticStyle::Cite);
+  assert_eq!(styles.semantic, SEMANTIC_CITE);
 }
 
 #[test]

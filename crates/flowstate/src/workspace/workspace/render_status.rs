@@ -1,3 +1,13 @@
+struct CollaborationPeerStatusItem {
+  session_id: SessionId,
+  label: String,
+  role: Role,
+  cursor: Option<String>,
+  focus: Option<String>,
+  viewport_hint: Option<String>,
+  has_presence: bool,
+}
+
 #[hotpath::measure_all]
 impl Workspace {
   fn next_untitled_title(&self, cx: &App) -> String {
@@ -134,12 +144,54 @@ impl Workspace {
 
   fn render_collaboration_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let role = self.collaboration.role.unwrap_or("No role");
-    let label = format!("Collab: {:?} · {role}", self.collaboration.state);
-    div()
+    let queued = self.collaboration_pending_updates.len();
+    let mut peers = self
+      .collaboration
+      .peers
+      .iter()
+      .map(|(session_id, peer)| {
+        CollaborationPeerStatusItem {
+          session_id: *session_id,
+          label: collaboration_peer_display_name(peer),
+          role: peer.role,
+          cursor: peer.cursor.clone(),
+          focus: peer.focus.clone(),
+          viewport_hint: peer.viewport_hint.clone(),
+          has_presence: peer.last_seen_millis.is_some(),
+        }
+      })
+      .collect::<Vec<_>>();
+    peers.sort_by(|left, right| {
+      left
+        .label
+        .cmp(&right.label)
+        .then_with(|| left.session_id.0.cmp(&right.session_id.0))
+    });
+    let visible_peer_count = 4usize;
+    let hidden_peer_count = peers.len().saturating_sub(visible_peer_count);
+
+    h_flex()
+      .min_w_0()
+      .max_w(px(760.0))
+      .items_center()
+      .gap_1()
       .px_2()
       .text_xs()
       .text_color(cx.theme().muted_foreground)
-      .child(label)
+      .child(collaboration_status_chip(format!("{:?}", self.collaboration.state), cx))
+      .child(collaboration_status_chip(role.to_string(), cx))
+      .when(queued > 0, |this| {
+        this.child(collaboration_status_chip(format!("{queued} queued"), cx))
+      })
+      .children(
+        peers
+          .iter()
+          .take(visible_peer_count)
+          .map(|peer| collaboration_peer_status_chip(peer, cx)),
+      )
+      .when(hidden_peer_count > 0, |this| {
+        this.child(collaboration_status_chip(format!("+{hidden_peer_count} peers"), cx))
+      })
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -161,4 +213,97 @@ impl Workspace {
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
       .child(div().flex_1())
   }
+}
+
+fn collaboration_status_chip(label: impl Into<SharedString>, cx: &mut Context<Workspace>) -> AnyElement {
+  div()
+    .h(px(20.0))
+    .flex_none()
+    .flex()
+    .items_center()
+    .rounded(px(4.0))
+    .border_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .bg(cx.theme().secondary.opacity(0.36))
+    .px_1()
+    .text_xs()
+    .text_color(cx.theme().muted_foreground)
+    .child(label.into())
+    .into_any_element()
+}
+
+fn collaboration_peer_status_chip(peer: &CollaborationPeerStatusItem, cx: &mut Context<Workspace>) -> AnyElement {
+  let role_label = collaboration_sync_role_label(peer.role);
+  let tooltip = collaboration_peer_status_tooltip(peer, role_label);
+  let presence_color = if peer.has_presence {
+    cx.theme().green
+  } else {
+    cx.theme().muted_foreground.opacity(0.48)
+  };
+  h_flex()
+    .h(px(22.0))
+    .max_w(px(176.0))
+    .min_w_0()
+    .items_center()
+    .gap_1()
+    .rounded(px(4.0))
+    .border_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .bg(cx.theme().background)
+    .px_1()
+    .map(|mut this| {
+      this
+        .interactivity()
+        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx));
+      this
+    })
+    .child(Avatar::new().name(peer.label.clone()).xsmall())
+    .child(
+      div()
+        .size(px(6.0))
+        .flex_none()
+        .rounded_full()
+        .bg(presence_color),
+    )
+    .child(
+      div()
+        .min_w_0()
+        .max_w(px(92.0))
+        .truncate()
+        .text_color(cx.theme().foreground)
+        .child(peer.label.clone()),
+    )
+    .child(
+      div()
+        .flex_none()
+        .text_color(cx.theme().muted_foreground)
+        .child(role_label),
+    )
+    .into_any_element()
+}
+
+fn collaboration_peer_status_tooltip(peer: &CollaborationPeerStatusItem, role_label: &str) -> String {
+  let mut lines = vec![
+    format!("{} ({role_label})", peer.label),
+    format!("Session {}", collaboration_short_uuid(peer.session_id.0)),
+    if peer.has_presence {
+      "Presence active".to_string()
+    } else {
+      "Presence not published yet".to_string()
+    },
+  ];
+  if let Some(cursor) = peer.cursor.as_deref().filter(|value| !value.trim().is_empty()) {
+    lines.push(format!("Cursor: {}", cursor.trim()));
+  }
+  if let Some(focus) = peer.focus.as_deref().filter(|value| !value.trim().is_empty()) {
+    lines.push(format!("Focus: {}", focus.trim()));
+  }
+  if let Some(viewport_hint) = peer
+    .viewport_hint
+    .as_deref()
+    .filter(|value| !value.trim().is_empty())
+  {
+    lines.push(format!("Viewport: {}", viewport_hint.trim()));
+  }
+  lines.join("\n")
 }

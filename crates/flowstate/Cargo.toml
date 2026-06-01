@@ -16,6 +16,7 @@ fff-search = { workspace = true }
 flowstate-document = { workspace = true }
 flowstate-docx = { workspace = true }
 flowstate-flow = { workspace = true }
+flowstate-collab = { workspace = true }
 flowstate-sync = { workspace = true }
 flowstate-tub = { workspace = true }
 gpui = { workspace = true }
@@ -24,10 +25,12 @@ gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
 mimalloc = { workspace = true }
 rustc-hash = { workspace = true }
+postcard = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
+tokio = { version = "1.52.3", features = ["sync"] }
 uuid = { workspace = true }
 
 [features]

@@ -226,6 +226,7 @@ pub struct AuthorizeMessage {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PresenceMessage {
   pub document_id: DocumentId,
+  pub actor_id: ActorId,
   pub session_id: SessionId,
   pub user_label: String,
   pub role: Role,
@@ -234,6 +235,22 @@ pub struct PresenceMessage {
   pub viewport_hint: Option<String>,
   pub last_known_frontier: Vec<u8>,
   pub monotonic_millis: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PeerEventKind {
+  Authorized,
+  RoleChanged,
+  Left,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct PeerEventMessage {
+  pub document_id: DocumentId,
+  pub actor_id: ActorId,
+  pub session_id: SessionId,
+  pub role: Option<Role>,
+  pub kind: PeerEventKind,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -259,6 +276,12 @@ pub struct AssetChunkMessage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UpdateApplication {
+  Db8CanonicalOperations(Vec<u8>),
+  Fl0ActionBundle(Vec<u8>),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WireMessage {
   Hello(HelloMessage),
   Authorize(AuthorizeMessage),
@@ -277,6 +300,7 @@ pub enum WireMessage {
     actor_id: ActorId,
     bytes: Vec<u8>,
     hash: [u8; 32],
+    application: Option<UpdateApplication>,
   },
   Snapshot {
     document_id: DocumentId,
@@ -287,6 +311,7 @@ pub enum WireMessage {
   AssetNeed(AssetNeedMessage),
   AssetChunk(AssetChunkMessage),
   Presence(PresenceMessage),
+  PeerEvent(PeerEventMessage),
   Ack {
     document_id: DocumentId,
     frontier: Vec<u8>,
@@ -717,6 +742,22 @@ mod tests {
   }
 
   #[test]
+  fn asset_manifest_is_durable_source_data() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let manifest = b"asset-manifest".to_vec();
+    let left = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor, b"one", &manifest).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+
+    assert_eq!(right.asset_manifest_bytes().unwrap(), manifest);
+    let update = left
+      .replace_projection_source(Role::Owner, b"two", b"replacement-manifest")
+      .unwrap();
+    right.import_update_checked(Role::Editor, &update).unwrap();
+    assert_eq!(right.asset_manifest_bytes().unwrap(), b"replacement-manifest");
+  }
+
+  #[test]
   fn viewer_update_import_is_rejected_before_mutation() {
     let document_id = DocumentId::new();
     let actor = ActorId::new();
@@ -773,6 +814,62 @@ mod tests {
     assert_eq!(left.projection_hash().unwrap(), right.projection_hash().unwrap());
     assert!(left_source.texts[0].text.contains('L'));
     assert!(left_source.texts[0].text.contains('R'));
+  }
+
+  #[test]
+  fn concurrent_granular_source_replacements_preserve_independent_text_edits() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let base = GranularSource {
+      metadata: b"cache".to_vec(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraph_order".to_string(),
+        ids: vec![granular_record_id_u128(1), granular_record_id_u128(2)],
+      }],
+      texts: vec![
+        GranularTextRecord {
+          id: granular_record_id_u128(1),
+          text: "A".to_string(),
+          metadata: Vec::new(),
+          marks: Vec::new(),
+        },
+        GranularTextRecord {
+          id: granular_record_id_u128(2),
+          text: "B".to_string(),
+          metadata: Vec::new(),
+          marks: Vec::new(),
+        },
+      ],
+      binaries: Vec::new(),
+    };
+    let left = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &base, b"cache", &[]).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+
+    let mut left_source = base.clone();
+    left_source.texts[0].text = "left A".to_string();
+    let left_update = left
+      .replace_granular_source(Role::Owner, &left_source, b"left cache", &[])
+      .unwrap();
+
+    let mut right_source = base;
+    right_source.texts[1].text = "right B".to_string();
+    let right_update = right
+      .replace_granular_source(Role::Editor, &right_source, b"right cache", &[])
+      .unwrap();
+
+    left
+      .import_update_checked(Role::Editor, &right_update)
+      .unwrap();
+    right
+      .import_update_checked(Role::Owner, &left_update)
+      .unwrap();
+
+    let left_source = left.materialize_granular_source().unwrap().unwrap();
+    let right_source = right.materialize_granular_source().unwrap().unwrap();
+    assert_eq!(left_source, right_source);
+    let by_id = granular_records_by_id(left_source.texts, |record| record.id.as_str());
+    assert_eq!(by_id[&granular_record_id_u128(1)].text, "left A");
+    assert_eq!(by_id[&granular_record_id_u128(2)].text, "right B");
   }
 
   #[test]

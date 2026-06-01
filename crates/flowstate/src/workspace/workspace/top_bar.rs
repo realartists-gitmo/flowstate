@@ -107,8 +107,14 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
 }
 
 #[hotpath::measure]
-fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
+fn file_top_bar_button(
+  has_document: bool,
+  collaboration_peers: Vec<CollaborationPeerMenuItem>,
+  can_manage_collaboration_peers: bool,
+  cx: &mut Context<Workspace>,
+) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
+  let has_collaboration_peers = !collaboration_peers.is_empty();
   div()
     .h_full()
     .flex_none()
@@ -122,7 +128,7 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _, _| {
-          menu
+          let mut menu = menu
             .item(file_menu_item(workspace.clone(), "New Doc", false, |workspace, window, cx| {
               workspace.new_document(window, cx);
             }))
@@ -158,6 +164,9 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
             .item(file_menu_item(workspace.clone(), "Copy Viewer Invite", false, |workspace, window, cx| {
               workspace.copy_collaboration_invite(CollaborationInviteRole::Viewer, window, cx);
             }))
+            .item(file_menu_item(workspace.clone(), "Revoke Invites", false, |workspace, window, cx| {
+              workspace.revoke_collaboration_invites(window, cx);
+            }))
             .item(file_menu_item(workspace.clone(), "Join from Invite", false, |workspace, window, cx| {
               workspace.join_collaboration_from_clipboard(window, cx);
             }))
@@ -167,6 +176,65 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
             .item(file_menu_item(workspace.clone(), "Diagnostic Info", false, |workspace, window, cx| {
               workspace.show_collaboration_diagnostics(window, cx);
             }))
+            .separator()
+            .item(file_menu_item(
+              workspace.clone(),
+              "Make Peers Editors",
+              !can_manage_collaboration_peers || !has_collaboration_peers,
+              |workspace, window, cx| {
+                workspace.promote_collaboration_peers_to_editor(window, cx);
+              },
+            ))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Make Peers Viewers",
+              !can_manage_collaboration_peers || !has_collaboration_peers,
+              |workspace, window, cx| {
+                workspace.downgrade_collaboration_peers_to_viewer(window, cx);
+              },
+            ))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Kick Peers",
+              !can_manage_collaboration_peers || !has_collaboration_peers,
+              |workspace, window, cx| {
+                workspace.kick_collaboration_peers(window, cx);
+              },
+            ));
+
+          for peer in collaboration_peers.iter().cloned() {
+            let editor_label = format!("Make {} Editor", peer.label);
+            let viewer_label = format!("Make {} Viewer", peer.label);
+            let kick_label = format!("Kick {}", peer.label);
+            let session_id = peer.session_id;
+            menu = menu
+              .item(file_menu_item(
+                workspace.clone(),
+                editor_label,
+                !can_manage_collaboration_peers || peer.role == Role::Editor,
+                move |workspace, window, cx| {
+                  workspace.set_collaboration_peer_role(session_id, Role::Editor, window, cx);
+                },
+              ))
+              .item(file_menu_item(
+                workspace.clone(),
+                viewer_label,
+                !can_manage_collaboration_peers || peer.role == Role::Viewer,
+                move |workspace, window, cx| {
+                  workspace.set_collaboration_peer_role(session_id, Role::Viewer, window, cx);
+                },
+              ))
+              .item(file_menu_item(
+                workspace.clone(),
+                kick_label,
+                !can_manage_collaboration_peers,
+                move |workspace, window, cx| {
+                  workspace.kick_collaboration_peer(session_id, window, cx);
+                },
+              ));
+          }
+
+          menu
             .separator()
             .item(file_menu_item(workspace.clone(), "Close File", !has_document, |workspace, window, cx| {
               workspace.close_active_document(window, cx);
@@ -181,7 +249,7 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
 #[hotpath::measure]
 fn file_menu_item(
   workspace: WeakEntity<Workspace>,
-  label: &'static str,
+  label: impl Into<SharedString>,
   disabled: bool,
   action: impl Fn(&mut Workspace, &mut Window, &mut Context<Workspace>) + 'static,
 ) -> PopupMenuItem {

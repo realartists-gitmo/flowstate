@@ -2,6 +2,17 @@
 impl Workspace {
   fn render_top_bar(&mut self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
+    let collaboration_peers = self
+      .collaboration
+      .peers
+      .iter()
+      .map(|(session_id, peer)| CollaborationPeerMenuItem {
+        session_id: *session_id,
+        label: collaboration_peer_display_name(peer),
+        role: peer.role,
+      })
+      .collect::<Vec<_>>();
+    let can_manage_collaboration_peers = self.collaboration_host.is_some();
     TitleBar::new()
       .on_close_window(move |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));
@@ -13,7 +24,12 @@ impl Workspace {
           .items_center()
           .gap_1()
           .child(flowstate_top_bar_button(cx))
-          .child(file_top_bar_button(self.active_document_id.is_some(), cx))
+          .child(file_top_bar_button(
+            self.active_document_id.is_some(),
+            collaboration_peers,
+            can_manage_collaboration_peers,
+            cx,
+          ))
           .child(insert_top_bar_button(cx, self.active_editor.is_some()))
           .child(document_top_bar_button(cx))
           .child(view_top_bar_button(cx, !self.outline_collapsed, !self.ribbon_collapsed, !self.toolkit_collapsed))

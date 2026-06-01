@@ -213,11 +213,17 @@ impl RichTextEditor {
   }
 
   pub fn can_edit_locally(&self) -> bool {
-    self.collaboration_role.is_none_or(CollaborationRole::can_write)
+    self
+      .collaboration_role
+      .is_none_or(CollaborationRole::can_write)
   }
 
   pub fn last_collaboration_edit(&self) -> Option<&CollaborationEdit> {
     self.last_collaboration_edit.as_ref()
+  }
+
+  pub fn take_last_collaboration_edit(&mut self) -> Option<CollaborationEdit> {
+    self.last_collaboration_edit.take()
   }
 
   pub fn paragraph_id(&self, paragraph_ix: usize) -> Option<ParagraphId> {
@@ -236,6 +242,13 @@ impl RichTextEditor {
     for operation in operations {
       self.apply_canonical_operation(operation);
     }
+    self.identity_map.reconcile(&self.document);
+    self.last_collaboration_edit = None;
+    self.after_text_mutation(cx);
+  }
+
+  pub fn replace_document_from_collaboration(&mut self, document: Document, cx: &mut Context<Self>) {
+    self.document = document;
     self.identity_map.reconcile(&self.document);
     self.last_collaboration_edit = None;
     self.after_text_mutation(cx);
@@ -385,5 +398,4 @@ impl RichTextEditor {
   pub fn selection(&self) -> &EditorSelection {
     &self.selection
   }
-
 }

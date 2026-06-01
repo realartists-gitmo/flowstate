@@ -1,8 +1,9 @@
 use std::{cmp::Ordering, io, path::Path};
 
 use flowstate_document::{
-  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, HighlightStyle, ParagraphStyle, RunSemanticStyle, RunStyles,
-  document_from_paragraphs, write_db8,
+  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, HIGHLIGHT_SPOKEN, PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT,
+  PARAGRAPH_POCKET, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE, SEMANTIC_CONDENSED,
+  SEMANTIC_EMPHASIS, SEMANTIC_UNDERLINE, document_from_paragraphs, write_db8,
 };
 use pdf_oxide::{
   Annotation, PdfDocument,
@@ -375,7 +376,7 @@ fn document_paragraphs_from_pdf_paragraphs(pdf_paragraphs: Vec<PdfParagraphFact>
     let style = paragraph.style;
     let is_heading = matches!(
       style,
-      ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block | ParagraphStyle::Tag | ParagraphStyle::Analytic
+      PARAGRAPH_POCKET | PARAGRAPH_HAT | PARAGRAPH_BLOCK | PARAGRAPH_TAG | PARAGRAPH_ANALYTIC
     );
     if style != ParagraphStyle::Normal {
       stats.structural_hits += 1;
@@ -390,7 +391,7 @@ fn document_paragraphs_from_pdf_paragraphs(pdf_paragraphs: Vec<PdfParagraphFact>
       after_heading_seeking_text = true;
     } else if after_heading_seeking_text {
       let has_text = paragraph.runs.iter().any(|run| !run.text.trim().is_empty());
-      if has_text && style != ParagraphStyle::Undertag {
+      if has_text && style != PARAGRAPH_UNDERTAG {
         can_process_citations = true;
         after_heading_seeking_text = false;
       }
@@ -401,15 +402,10 @@ fn document_paragraphs_from_pdf_paragraphs(pdf_paragraphs: Vec<PdfParagraphFact>
 
     let suppress_semantic_styles = matches!(
       style,
-      ParagraphStyle::Pocket
-        | ParagraphStyle::Hat
-        | ParagraphStyle::Block
-        | ParagraphStyle::Tag
-        | ParagraphStyle::Analytic
-        | ParagraphStyle::Undertag
+      PARAGRAPH_POCKET | PARAGRAPH_HAT | PARAGRAPH_BLOCK | PARAGRAPH_TAG | PARAGRAPH_ANALYTIC | PARAGRAPH_UNDERTAG
     );
-    let structural_run_formatting_allowed = matches!(style, ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag);
-    let direct_highlight_allowed = !matches!(style, ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block);
+    let structural_run_formatting_allowed = matches!(style, PARAGRAPH_TAG | PARAGRAPH_ANALYTIC | PARAGRAPH_UNDERTAG);
+    let direct_highlight_allowed = !matches!(style, PARAGRAPH_POCKET | PARAGRAPH_HAT | PARAGRAPH_BLOCK);
     let bold_paragraph_overrides = can_process_citations
       .then(|| entirely_bold_paragraph_overrides(&paragraph.runs))
       .flatten();
@@ -460,19 +456,19 @@ fn recognize_line_paragraph_style(runs: &[PdfRunFact]) -> (ParagraphStyle, bool)
   let max_size = runs.iter().map(|run| run.font_size).fold(0.0_f32, f32::max);
 
   if has_bold && max_size >= 24.0 {
-    return (ParagraphStyle::Pocket, true);
+    return (PARAGRAPH_POCKET, true);
   }
   if has_bold && max_size >= 20.0 {
-    return (ParagraphStyle::Hat, true);
+    return (PARAGRAPH_HAT, true);
   }
   if has_bold && any_underline && max_size >= 15.0 {
-    return (ParagraphStyle::Block, true);
+    return (PARAGRAPH_BLOCK, true);
   }
   if all_italic && any_color && max_size <= 12.5 && text_len <= 180 {
-    return (ParagraphStyle::Undertag, false);
+    return (PARAGRAPH_UNDERTAG, false);
   }
   if has_bold && any_color && text_len <= 180 {
-    return (ParagraphStyle::Analytic, false);
+    return (PARAGRAPH_ANALYTIC, false);
   }
   if has_bold
     && max_size >= 12.5
@@ -481,7 +477,7 @@ fn recognize_line_paragraph_style(runs: &[PdfRunFact]) -> (ParagraphStyle, bool)
       .iter()
       .all(|run| run.bold || run.text.trim().is_empty())
   {
-    return (ParagraphStyle::Tag, false);
+    return (PARAGRAPH_TAG, false);
   }
 
   (ParagraphStyle::Normal, false)
@@ -511,7 +507,7 @@ fn recognize_run_styles_for_context(
     ),
     direct_underline: structural_run_formatting_allowed && run.underline,
     strikethrough: !suppress_semantic_styles && run.strikethrough,
-    highlight: (direct_highlight_allowed && run.highlight).then_some(HighlightStyle::Spoken),
+    highlight: (direct_highlight_allowed && run.highlight).then_some(HIGHLIGHT_SPOKEN),
   }
 }
 
@@ -529,31 +525,31 @@ fn recognize_run_semantic_for_context(
     return RunSemanticStyle::default();
   }
   if run.border {
-    return RunSemanticStyle::Emphasis;
+    return SEMANTIC_EMPHASIS;
   }
   if let Some(overrides) = bold_paragraph_overrides
     && overrides.get(run_ix) == Some(&true)
   {
-    return RunSemanticStyle::Cite;
+    return SEMANTIC_CITE;
   }
   if can_process_citations && run.bold {
-    return RunSemanticStyle::Cite;
+    return SEMANTIC_CITE;
   }
   if run.underline && !run.bold {
-    return RunSemanticStyle::Underline;
+    return SEMANTIC_UNDERLINE;
   }
   if run.bold && run.underline {
     return if current_section_has_underline {
-      RunSemanticStyle::Emphasis
+      SEMANTIC_EMPHASIS
     } else {
-      RunSemanticStyle::Underline
+      SEMANTIC_UNDERLINE
     };
   }
   if run.highlight {
-    return RunSemanticStyle::Underline;
+    return SEMANTIC_UNDERLINE;
   }
   if paragraph_style == ParagraphStyle::Normal && run.font_size <= 8.0 && !run.underline && !run.highlight {
-    return RunSemanticStyle::Condensed;
+    return SEMANTIC_CONDENSED;
   }
   RunSemanticStyle::Plain
 }
