@@ -27,7 +27,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
     },
     RibbonCommandId::CondensedMenu => {
-      editor.toggle_inline_tool(ArmedInlineTool::Semantic(RunSemanticStyle::Condensed), cx);
+      editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
     },
     RibbonCommandId::Underline => {
       editor.toggle_inline_tool(ArmedInlineTool::Underline, cx);
@@ -56,24 +56,26 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
 fn paragraph_command_id(style: ParagraphStyle) -> Option<CommandId> {
   match style {
     ParagraphStyle::Normal => None,
-    ParagraphStyle::Pocket => Some(CommandId::SetParagraphPocket),
-    ParagraphStyle::Hat => Some(CommandId::SetParagraphHat),
-    ParagraphStyle::Block => Some(CommandId::SetParagraphBlock),
-    ParagraphStyle::Tag => Some(CommandId::SetParagraphTag),
-    ParagraphStyle::Analytic => Some(CommandId::SetParagraphAnalytic),
-    ParagraphStyle::Undertag => Some(CommandId::SetParagraphUndertag),
+    flowstate_document::PARAGRAPH_POCKET => Some(CommandId::SetParagraphPocket),
+    flowstate_document::PARAGRAPH_HAT => Some(CommandId::SetParagraphHat),
+    flowstate_document::PARAGRAPH_BLOCK => Some(CommandId::SetParagraphBlock),
+    flowstate_document::PARAGRAPH_TAG => Some(CommandId::SetParagraphTag),
+    flowstate_document::PARAGRAPH_ANALYTIC => Some(CommandId::SetParagraphAnalytic),
+    flowstate_document::PARAGRAPH_UNDERTAG => Some(CommandId::SetParagraphUndertag),
+    ParagraphStyle::Custom(_) => None,
   }
 }
 
 #[hotpath::measure]
 fn semantic_command_id(style: RunSemanticStyle) -> Option<CommandId> {
   match style {
-    RunSemanticStyle::Cite => Some(CommandId::ToggleCite),
-    RunSemanticStyle::Emphasis => Some(CommandId::ToggleEmphasis),
-    RunSemanticStyle::Condensed => None,
-    RunSemanticStyle::Ultracondensed => None,
-    RunSemanticStyle::Underline => Some(CommandId::ToggleUnderline),
+    flowstate_document::SEMANTIC_CITE => Some(CommandId::ToggleCite),
+    flowstate_document::SEMANTIC_EMPHASIS => Some(CommandId::ToggleEmphasis),
+    flowstate_document::SEMANTIC_CONDENSED => None,
+    flowstate_document::SEMANTIC_ULTRACONDENSED => None,
+    flowstate_document::SEMANTIC_UNDERLINE => Some(CommandId::ToggleUnderline),
     RunSemanticStyle::Plain => Some(CommandId::ClearFormatting),
+    RunSemanticStyle::Custom(_) => None,
   }
 }
 
@@ -81,41 +83,44 @@ fn semantic_command_id(style: RunSemanticStyle) -> Option<CommandId> {
 fn paragraph_priority(style: ParagraphStyle) -> u8 {
   match style {
     ParagraphStyle::Normal => 100,
-    ParagraphStyle::Pocket => 96,
-    ParagraphStyle::Hat => 94,
-    ParagraphStyle::Block => 92,
-    ParagraphStyle::Tag => 78,
-    ParagraphStyle::Analytic => 76,
-    ParagraphStyle::Undertag => 72,
+    flowstate_document::PARAGRAPH_POCKET => 96,
+    flowstate_document::PARAGRAPH_HAT => 94,
+    flowstate_document::PARAGRAPH_BLOCK => 92,
+    flowstate_document::PARAGRAPH_TAG => 78,
+    flowstate_document::PARAGRAPH_ANALYTIC => 76,
+    flowstate_document::PARAGRAPH_UNDERTAG => 72,
+    ParagraphStyle::Custom(_) => 60,
   }
 }
 
 #[hotpath::measure]
 fn semantic_priority(style: RunSemanticStyle) -> u8 {
   match style {
-    RunSemanticStyle::Cite => 92,
-    RunSemanticStyle::Emphasis => 90,
-    RunSemanticStyle::Condensed => 76,
-    RunSemanticStyle::Ultracondensed => 70,
-    RunSemanticStyle::Underline => 82,
+    flowstate_document::SEMANTIC_CITE => 92,
+    flowstate_document::SEMANTIC_EMPHASIS => 90,
+    flowstate_document::SEMANTIC_CONDENSED => 76,
+    flowstate_document::SEMANTIC_ULTRACONDENSED => 70,
+    flowstate_document::SEMANTIC_UNDERLINE => 82,
     RunSemanticStyle::Plain => 0,
+    RunSemanticStyle::Custom(_) => 60,
   }
 }
 
 #[hotpath::measure]
 fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   match style {
-    ParagraphStyle::Normal | ParagraphStyle::Pocket | ParagraphStyle::Hat | ParagraphStyle::Block => OverflowBehavior::KeepVisible,
-    ParagraphStyle::Tag | ParagraphStyle::Analytic | ParagraphStyle::Undertag => OverflowBehavior::MoveToOverflow,
+    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK => OverflowBehavior::KeepVisible,
+    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG => OverflowBehavior::MoveToOverflow,
+    ParagraphStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
 
 #[hotpath::measure]
 fn semantic_overflow_behavior(style: RunSemanticStyle) -> OverflowBehavior {
   match style {
-    RunSemanticStyle::Cite | RunSemanticStyle::Emphasis | RunSemanticStyle::Underline => OverflowBehavior::KeepVisible,
-    RunSemanticStyle::Condensed | RunSemanticStyle::Ultracondensed => OverflowBehavior::MoveToOverflow,
+    flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_UNDERLINE => OverflowBehavior::KeepVisible,
+    flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED => OverflowBehavior::MoveToOverflow,
     RunSemanticStyle::Plain => OverflowBehavior::HideInCompact,
+    RunSemanticStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
-

@@ -38,7 +38,8 @@ use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, load_or_create_document, paragraph_byte_range,
+  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme,
+  load_or_create_document, paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{

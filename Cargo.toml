@@ -23,12 +23,12 @@ flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
+gpui-flowtext = "0.1.0"
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"
 gpui-symbols = { version = "0.6.1", features = ["component"] }
 hotpath = "0.16.1"
-hotpath-cpu-support = { package = "hotpath", version = "0.16.1", features = ["hotpath-cpu"] }
 ignore = "0.4.25"
 imagesize = "0.13"
 lopdf = "0.40.0"

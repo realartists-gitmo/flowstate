@@ -68,8 +68,12 @@ impl Workspace {
       CommandId::ScrollToParagraph => false,
       command => {
         if let Some(editor) = self.active_editor.clone() {
-          editor.update(cx, |editor, cx| editor.dispatch_window_command(command, window, cx));
-          true
+          if let Some(command) = crate::rich_text_element::flowstate_command_to_rich_text(command) {
+            editor.update(cx, |editor, cx| editor.dispatch_window_command(command, window, cx));
+            true
+          } else {
+            false
+          }
         } else {
           false
         }

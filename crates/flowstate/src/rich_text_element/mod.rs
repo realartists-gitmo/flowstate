@@ -1,60 +1,70 @@
-// Submodules. Document model, edit helpers, persistence, demo builders, and
-// collaboration IDs live in `flowstate-document`; this module keeps the old
-// `rich_text_element` facade while editor/UI internals stay in the app crate.
-mod benchmarks;
-mod editor;
-mod element;
-mod invisibility;
-mod layout;
-mod paint;
-mod selection;
-mod tools;
-mod word_boundary;
-
-pub use benchmarks::{BenchmarkOptions, BenchmarkRunner};
-pub use editor::*;
-pub use element::RichTextDocumentElement;
 pub use flowstate_document::*;
-pub use tools::ArmedInlineTool;
 
-// Internal imports used by sibling modules via `use super::*;`.
-use editor::SelectionGranularity;
-use element::*;
-use invisibility::*;
-use layout::*;
-use paint::*;
-use selection::*;
-use word_boundary::*;
+use crate::commands::CommandId;
 
-use std::time::Instant;
-
-// Shared timing utility. Setting `DEBATEPROCESSOR_TIMING=1` in the environment
-// turns on per-operation `[timing] ...` lines on stderr; useful for spotting
-// regressions in editing/layout hot paths. Visible to submodules so they can
-// instrument their own work.
-const TIMING_ENV: &str = "DEBATEPROCESSOR_TIMING";
-
-#[hotpath::measure]
-pub(crate) fn timing_enabled() -> bool {
-  std::env::var_os(TIMING_ENV).is_some()
+pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEditorCommand> {
+  Some(match command {
+    CommandId::MoveLeft => RichTextEditorCommand::MoveLeft,
+    CommandId::MoveRight => RichTextEditorCommand::MoveRight,
+    CommandId::MoveUp => RichTextEditorCommand::MoveUp,
+    CommandId::MoveDown => RichTextEditorCommand::MoveDown,
+    CommandId::MoveLineStart => RichTextEditorCommand::MoveLineStart,
+    CommandId::MoveLineEnd => RichTextEditorCommand::MoveLineEnd,
+    CommandId::SelectLeft => RichTextEditorCommand::SelectLeft,
+    CommandId::SelectRight => RichTextEditorCommand::SelectRight,
+    CommandId::SelectUp => RichTextEditorCommand::SelectUp,
+    CommandId::SelectDown => RichTextEditorCommand::SelectDown,
+    CommandId::SelectLineStart => RichTextEditorCommand::SelectLineStart,
+    CommandId::SelectLineEnd => RichTextEditorCommand::SelectLineEnd,
+    CommandId::SelectAll => RichTextEditorCommand::SelectAll,
+    CommandId::MoveWordLeft => RichTextEditorCommand::MoveWordLeft,
+    CommandId::MoveWordRight => RichTextEditorCommand::MoveWordRight,
+    CommandId::SelectWordLeft => RichTextEditorCommand::SelectWordLeft,
+    CommandId::SelectWordRight => RichTextEditorCommand::SelectWordRight,
+    CommandId::DeleteWordBackward => RichTextEditorCommand::DeleteWordBackward,
+    CommandId::DeleteWordForward => RichTextEditorCommand::DeleteWordForward,
+    CommandId::PageUp => RichTextEditorCommand::PageUp,
+    CommandId::PageDown => RichTextEditorCommand::PageDown,
+    CommandId::SelectPageUp => RichTextEditorCommand::SelectPageUp,
+    CommandId::SelectPageDown => RichTextEditorCommand::SelectPageDown,
+    CommandId::MoveDocumentStart => RichTextEditorCommand::MoveDocumentStart,
+    CommandId::MoveDocumentEnd => RichTextEditorCommand::MoveDocumentEnd,
+    CommandId::SelectDocumentStart => RichTextEditorCommand::SelectDocumentStart,
+    CommandId::SelectDocumentEnd => RichTextEditorCommand::SelectDocumentEnd,
+    CommandId::Copy => RichTextEditorCommand::Copy,
+    CommandId::Cut => RichTextEditorCommand::Cut,
+    CommandId::Paste => RichTextEditorCommand::Paste,
+    CommandId::Undo => RichTextEditorCommand::Undo,
+    CommandId::Redo => RichTextEditorCommand::Redo,
+    CommandId::SetParagraphPocket => RichTextEditorCommand::SetParagraphStyle(0),
+    CommandId::SetParagraphHat => RichTextEditorCommand::SetParagraphStyle(1),
+    CommandId::SetParagraphBlock => RichTextEditorCommand::SetParagraphStyle(2),
+    CommandId::SetParagraphTag => RichTextEditorCommand::SetParagraphStyle(3),
+    CommandId::SetParagraphAnalytic => RichTextEditorCommand::SetParagraphStyle(4),
+    CommandId::SetParagraphUndertag => RichTextEditorCommand::SetParagraphStyle(6),
+    CommandId::ToggleCite => RichTextEditorCommand::ToggleSemanticStyle(1),
+    CommandId::ToggleUnderline => RichTextEditorCommand::ToggleUnderline,
+    CommandId::ToggleStrikethrough => RichTextEditorCommand::ToggleStrikethrough,
+    CommandId::ToggleEmphasis => RichTextEditorCommand::ToggleSemanticStyle(2),
+    CommandId::SetHighlightSpoken => RichTextEditorCommand::SetHighlightStyle(1),
+    CommandId::ApplyHighlightToSelection => RichTextEditorCommand::ApplyHighlightToSelection,
+    CommandId::ClearFormatting => RichTextEditorCommand::ClearFormatting,
+    CommandId::ClearHighlight => RichTextEditorCommand::ClearHighlight,
+    CommandId::InsertImage => RichTextEditorCommand::InsertImage,
+    CommandId::InsertTable => RichTextEditorCommand::InsertTable,
+    CommandId::InsertEquation => RichTextEditorCommand::InsertEquation,
+    CommandId::ZoomIn => RichTextEditorCommand::ZoomIn,
+    CommandId::ZoomOut => RichTextEditorCommand::ZoomOut,
+    CommandId::Backspace => RichTextEditorCommand::Backspace,
+    CommandId::Delete => RichTextEditorCommand::Delete,
+    CommandId::InsertNewline => RichTextEditorCommand::InsertNewline,
+    CommandId::InsertSoftLineBreak => RichTextEditorCommand::InsertSoftLineBreak,
+    CommandId::Save
+    | CommandId::NewDocument
+    | CommandId::OpenDocument
+    | CommandId::OpenDemoDocument
+    | CommandId::CloseDocument
+    | CommandId::ToggleRibbon
+    | CommandId::ScrollToParagraph => return None,
+  })
 }
-
-#[hotpath::measure]
-pub(crate) fn log_timing(label: &str, start: Instant, detail: impl AsRef<str>) {
-  if timing_enabled() {
-    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail.as_ref());
-  }
-}
-
-#[hotpath::measure]
-pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
-  if timing_enabled() {
-    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());
-  }
-}
-
-#[cfg(test)]
-use editor::{EditOperation, adjust_drop_after_source_delete};
-
-#[cfg(test)]
-mod tests;

@@ -46,7 +46,7 @@ fn export_paragraph_with_text(paragraph: &Paragraph, text: &str, theme: &Documen
   if paragraph.runs.is_empty() && text.is_empty() {
     out = out.add_run(Run::new());
   }
-  if matches!(paragraph.style, ParagraphStyle::Pocket | ParagraphStyle::Hat) {
+  if matches!(paragraph.style, flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT) {
     out = out.add_run(Run::new().add_break(BreakType::Page));
   }
   out
@@ -82,28 +82,14 @@ fn add_text_run(
 fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle, theme: &DocumentTheme) -> Run {
   let mut run = run.fonts(docx_fonts(theme));
   run = match styles.semantic {
-    RunSemanticStyle::Plain => run,
-    RunSemanticStyle::Cite => run.style("Style13ptBold"),
-    RunSemanticStyle::Emphasis => run
+    flowstate_document::SEMANTIC_CITE => run.style("Style13ptBold"),
+    flowstate_document::SEMANTIC_EMPHASIS => run
       .style("Emphasis")
       .text_border(emphasis_text_border(theme)),
-    RunSemanticStyle::Underline => run.style("StyleUnderline"),
-    RunSemanticStyle::Condensed => apply_run_text_format(
-      run,
-      theme.condensed_font_size,
-      theme.condensed_color,
-      theme.condensed_bold,
-      theme.condensed_italic,
-      theme.condensed_underline,
-    ),
-    RunSemanticStyle::Ultracondensed => apply_run_text_format(
-      run,
-      theme.ultracondensed_font_size,
-      theme.ultracondensed_color,
-      theme.ultracondensed_bold,
-      theme.ultracondensed_italic,
-      theme.ultracondensed_underline,
-    ),
+    flowstate_document::SEMANTIC_UNDERLINE => run.style("StyleUnderline"),
+    flowstate_document::SEMANTIC_CONDENSED => apply_custom_run_text_format(run, theme, 4),
+    flowstate_document::SEMANTIC_ULTRACONDENSED => apply_custom_run_text_format(run, theme, 5),
+    RunSemanticStyle::Plain | RunSemanticStyle::Custom(_) => run,
   };
   if styles.semantic == RunSemanticStyle::Plain && paragraph_style == ParagraphStyle::Normal {
     run = apply_run_text_format(
@@ -122,13 +108,31 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
     run = run.strike();
   }
   if let Some(highlight) = styles.highlight {
-    run = run.shading(Shading::new().fill(color_hex(match highlight {
-      HighlightStyle::Spoken => theme.highlight_spoken,
-      HighlightStyle::Insert => theme.highlight_insert,
-      HighlightStyle::Alternative => theme.highlight_alternative,
-    })));
+    run = run.shading(
+      Shading::new().fill(color_hex(match highlight {
+        HighlightStyle::Custom(slot) => theme
+          .custom_highlight_styles
+          .get(&(slot & 0x7f))
+          .map(|style| style.color)
+          .unwrap_or(theme.default_highlight_color),
+      })),
+    );
   }
   run
+}
+
+fn apply_custom_run_text_format(run: Run, theme: &DocumentTheme, slot: u8) -> Run {
+  let Some(style) = theme.custom_semantic_styles.get(&slot) else {
+    return run;
+  };
+  apply_run_text_format(
+    run,
+    style.font_size.unwrap_or(theme.body_font_size),
+    style.color.unwrap_or(theme.default_text_color),
+    style.bold.unwrap_or(false),
+    style.italic.unwrap_or(false),
+    style.underline.unwrap_or_default(),
+  )
 }
 
 #[hotpath::measure]
