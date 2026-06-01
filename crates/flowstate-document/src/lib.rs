@@ -291,7 +291,8 @@ pub fn custom_paragraph_style(theme: &DocumentTheme, slot: u8) -> CustomParagrap
 }
 
 pub fn set_custom_paragraph_style_value(theme: &mut DocumentTheme, slot: u8, style: CustomParagraphStyle) {
-  theme.set_custom_paragraph_style(slot, style);
+  let normalized = slot & 0x7f;
+  theme.set_custom_paragraph_style(normalized, style);
 }
 
 pub fn custom_semantic_style(theme: &DocumentTheme, slot: u8) -> CustomSemanticStyle {
@@ -309,7 +310,8 @@ pub fn custom_semantic_style(theme: &DocumentTheme, slot: u8) -> CustomSemanticS
 }
 
 pub fn set_custom_semantic_style_value(theme: &mut DocumentTheme, slot: u8, style: CustomSemanticStyle) {
-  theme.set_custom_semantic_style(slot, style);
+  let normalized = slot & 0x7f;
+  theme.set_custom_semantic_style(normalized, style);
 }
 
 pub fn custom_highlight_color(theme: &DocumentTheme, slot: u8) -> gpui::Hsla {
@@ -327,7 +329,8 @@ pub fn custom_highlight_color(theme: &DocumentTheme, slot: u8) -> gpui::Hsla {
 }
 
 pub fn set_custom_highlight_color(theme: &mut DocumentTheme, slot: u8, color: gpui::Hsla) {
-  theme.set_custom_highlight_style(slot, CustomHighlightStyle { color });
+  let normalized = slot & 0x7f;
+  theme.set_custom_highlight_style(normalized, CustomHighlightStyle { color });
 }
 
 fn paragraph_style(
