@@ -11,7 +11,6 @@ use gpui::{
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle,
   SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
-use gpui::{Bounds, size};
 #[cfg(target_os = "windows")]
 use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};

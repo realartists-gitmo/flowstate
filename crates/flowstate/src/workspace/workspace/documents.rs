@@ -419,7 +419,7 @@ impl Workspace {
           break;
         }
 
-        let client = cx
+        let client: anyhow::Result<_> = cx
           .background_executor()
           .spawn({
             let invite = invite.clone();
