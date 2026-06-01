@@ -1,6 +1,7 @@
 use std::{
   collections::{BTreeMap, HashMap, HashSet, VecDeque},
   fmt,
+  future::Future,
   ops::Range,
   sync::{Arc, Mutex},
   time::{SystemTime, UNIX_EPOCH},
@@ -19,6 +20,7 @@ use iroh::{
   endpoint::{Connection, RecvStream, SendStream, presets},
   protocol::{AcceptError, ProtocolHandler, Router},
 };
+use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
 
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
@@ -31,6 +33,21 @@ pub const DEFAULT_MAX_ASSET_REQUESTS_PER_MINUTE: usize = 120;
 const RATE_LIMIT_WINDOW_MILLIS: u64 = 60_000;
 pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 1;
 pub const FLOWSTATE_INVITE_PREFIX: &str = "flowstate://collab/";
+
+static SYNC_RUNTIME: std::sync::LazyLock<Runtime> = std::sync::LazyLock::new(|| {
+  tokio::runtime::Builder::new_multi_thread()
+    .enable_all()
+    .thread_name("flowstate-sync")
+    .build()
+    .expect("failed to initialize Flowstate sync runtime")
+});
+
+pub fn run_on_sync_runtime<F>(future: F) -> F::Output
+where
+  F: Future,
+{
+  SYNC_RUNTIME.block_on(future)
+}
 
 #[derive(Clone, Debug)]
 pub struct FlowstateSyncConfig {
@@ -909,7 +926,6 @@ impl HostedCollaboration {
       Some(state.clone()),
       Some(live_updates.clone()),
     );
-    router.endpoint().online().await;
     Ok(Self {
       router,
       registry,

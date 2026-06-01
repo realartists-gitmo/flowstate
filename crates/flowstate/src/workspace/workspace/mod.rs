@@ -54,7 +54,7 @@ use flowstate_collab::{
 };
 use flowstate_sync::{
   AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, LiveUpdate, LiveUpdateKind, Role, SessionDocumentState, SessionEvent, SessionId,
-  SessionState, connect_live_invite, decode_invite_link,
+  SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,
 };
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 use tokio::sync::{broadcast, mpsc};
@@ -188,6 +188,7 @@ struct CollaborationUiState {
   document_id: Option<flowstate_collab::DocumentId>,
   format_kind: Option<FormatKind>,
   pending_invite: Option<String>,
+  pending_invite_copy_role: Option<CollaborationInviteRole>,
   last_error: Option<String>,
   peers: HashMap<SessionId, CollaborationPeerInfo>,
 }
@@ -219,6 +220,7 @@ impl Default for CollaborationUiState {
       document_id: None,
       format_kind: None,
       pending_invite: None,
+      pending_invite_copy_role: None,
       last_error: None,
       peers: HashMap::new(),
     }

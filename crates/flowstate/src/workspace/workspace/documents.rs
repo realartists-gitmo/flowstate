@@ -173,16 +173,18 @@ impl Workspace {
     self.collaboration.peers.clear();
     self.collaboration_last_published_hash = None;
     self.collaboration_client_updates = None;
-    let build_host_input = cx
-      .background_executor()
-      .spawn(async move { host_snapshot.into_host_input() });
-    std::mem::drop(cx.spawn(async move |workspace, cx| {
-      let result = match build_host_input.await {
-        Some(host_input) => HostedCollaboration::start(host_input.document, host_input.assets, Role::Owner)
+    let start_host = cx.background_executor().spawn(async move {
+      let host_input = host_snapshot
+        .into_host_input()
+        .ok_or_else(|| anyhow::anyhow!("failed to build collaboration source from the active document"))?;
+      run_on_sync_runtime(async move {
+        HostedCollaboration::start(host_input.document, host_input.assets, Role::Owner)
           .await
-          .map(|host| (host, host_input.source_hash)),
-        None => Err(anyhow::anyhow!("failed to build collaboration source from the active document")),
-      };
+          .map(|host| (host, host_input.source_hash))
+      })
+    });
+    cx.spawn(async move |workspace, cx| {
+      let result = start_host.await;
       let is_current_runtime = workspace
         .update(cx, |workspace, _| workspace.collaboration_runtime_id == runtime_id)
         .unwrap_or(false);
@@ -192,32 +194,39 @@ impl Workspace {
         }
         return;
       }
-      let _ = workspace.update(cx, |workspace, cx| {
-        match result {
-          Ok((host, source_hash)) => {
-            workspace.collaboration_last_published_hash = source_hash.or_else(|| host.document_hash().ok());
-            workspace.apply_collaboration_role_to_panel(panel_id, Role::Owner, cx);
-            workspace.spawn_host_update_loop(panel_id, host.document_state(), host.subscribe_live_updates(), window_handle, cx);
-            workspace.collaboration_host = Some(host);
-            workspace.collaboration.state = SessionState::Live;
-            workspace.collaboration.role = Some("Owner");
-            workspace.collaboration.panel_id = Some(panel_id);
-            workspace.collaboration.document_id = Some(document_id);
-            workspace.collaboration.format_kind = Some(format_kind);
-            workspace.collaboration.last_error = None;
-            workspace.collaboration.peers.clear();
-            workspace.drain_pending_updates_to_host();
-          },
-          Err(error) => {
-            workspace.collaboration_host = None;
-            workspace.collaboration.state = SessionState::Failed;
-            workspace.collaboration.last_error = Some(format!("{error:#}"));
-            workspace.collaboration.peers.clear();
-          },
-        }
-        cx.notify();
+      let _ = window_handle.update(cx, |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+          match result {
+            Ok((host, source_hash)) => {
+              workspace.collaboration_last_published_hash = source_hash.or_else(|| host.document_hash().ok());
+              workspace.apply_collaboration_role_to_panel(panel_id, Role::Owner, cx);
+              workspace.spawn_host_update_loop(panel_id, host.document_state(), host.subscribe_live_updates(), window_handle, cx);
+              workspace.collaboration_host = Some(host);
+              workspace.collaboration.state = SessionState::Live;
+              workspace.collaboration.role = Some("Owner");
+              workspace.collaboration.panel_id = Some(panel_id);
+              workspace.collaboration.document_id = Some(document_id);
+              workspace.collaboration.format_kind = Some(format_kind);
+              workspace.collaboration.last_error = None;
+              workspace.collaboration.peers.clear();
+              workspace.drain_pending_updates_to_host();
+              if let Some(role) = workspace.collaboration.pending_invite_copy_role.take() {
+                workspace.issue_collaboration_invite(role, window, cx);
+              }
+            },
+            Err(error) => {
+              workspace.collaboration_host = None;
+              workspace.collaboration.state = SessionState::Failed;
+              workspace.collaboration.last_error = Some(format!("{error:#}"));
+              workspace.collaboration.pending_invite_copy_role = None;
+              workspace.collaboration.peers.clear();
+            },
+          }
+          cx.notify();
+        });
       });
-    }));
+    })
+    .detach();
     show_collaboration_prompt(
       window,
       cx,
@@ -246,14 +255,34 @@ impl Workspace {
   }
 
   fn copy_collaboration_invite(&mut self, role: CollaborationInviteRole, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(host) = self.collaboration_host.as_ref() else {
+    if self.collaboration_host.is_some() {
+      self.issue_collaboration_invite(role, window, cx);
+      return;
+    }
+    if self.collaboration.role == Some("Owner") && matches!(self.collaboration.state, SessionState::Hosting | SessionState::Reconnecting) {
+      self.collaboration.pending_invite_copy_role = Some(role);
       show_collaboration_prompt(
         window,
         cx,
-        PromptLevel::Warning,
-        "Invite unavailable",
-        "Start collaboration as owner before copying invite links.",
+        PromptLevel::Info,
+        "Invite pending",
+        "Flowstate is still preparing the owner session. The invite will be copied when collaboration is live.",
       );
+      cx.notify();
+      return;
+    }
+    show_collaboration_prompt(
+      window,
+      cx,
+      PromptLevel::Warning,
+      "Invite unavailable",
+      "Start collaboration as owner before copying invite links.",
+    );
+  }
+
+  fn issue_collaboration_invite(&mut self, role: CollaborationInviteRole, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(host) = self.collaboration_host.as_ref() else {
+      self.collaboration.pending_invite_copy_role = Some(role);
       return;
     };
     let role_name = collaboration_role_label(role);
@@ -370,7 +399,7 @@ impl Workspace {
     self.collaboration.peers.clear();
     let runtime_id = self.collaboration_runtime_id;
     let window_handle = window.window_handle();
-    std::mem::drop(cx.spawn(async move |workspace, cx| {
+    cx.spawn(async move |workspace, cx| {
       let mut target_panel_id = target_panel_id;
       let mut reconnect_delay = std::time::Duration::from_millis(500);
       loop {
@@ -390,10 +419,13 @@ impl Workspace {
           break;
         }
 
-        let client = connect_live_invite(&invite).await;
+        let client = run_on_sync_runtime({
+          let invite = invite.clone();
+          async move { connect_live_invite(&invite).await }
+        });
         match client {
           Ok(mut client) => {
-            if let Err(error) = client.request_document_assets().await {
+            if let Err(error) = run_on_sync_runtime(client.request_document_assets()) {
               let _ = window_handle.update(cx, |_, _, cx| {
                 let _ = workspace.update(cx, |workspace, cx| {
                   workspace.collaboration.state = if target_panel_id.is_some() {
@@ -406,11 +438,11 @@ impl Workspace {
                   cx.notify();
                 });
               });
-              let _ = client.shutdown().await;
+              let _ = run_on_sync_runtime(client.shutdown());
               if target_panel_id.is_none() {
                 return;
               }
-              tokio::time::sleep(reconnect_delay).await;
+              run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
               reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
               continue;
             }
@@ -476,42 +508,49 @@ impl Workspace {
               .ok()
               .flatten();
             let Some(collaboration_panel_id) = collaboration_panel_id else {
-              let _ = client.shutdown().await;
+              let _ = run_on_sync_runtime(client.shutdown());
               return;
             };
             target_panel_id = Some(collaboration_panel_id);
             reconnect_delay = std::time::Duration::from_millis(500);
             let mut local_disconnect = false;
             loop {
-              let received = tokio::select! {
-                update = client.receive_next_update() => update,
-                update = update_rx.recv() => {
-                  match update {
-                    Some(update) => {
-                      let result = match update {
-                        PendingCollaborationUpdate::Source { source, application, .. } => client.replace_source_from(&source, application).await,
-                        PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
-                      };
-                      if let Err(error) = result {
-                        let detail = format!("{error:#}");
-                        let _ = window_handle.update(cx, |_, _, cx| {
-                          let _ = workspace.update(cx, |workspace, cx| {
-                            if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
-                              workspace.collaboration.last_error = Some(detail);
-                              cx.notify();
-                            }
+              let mut handled_local_update = false;
+              let received = run_on_sync_runtime(async {
+                tokio::select! {
+                  update = client.receive_next_update() => update,
+                  update = update_rx.recv() => {
+                    match update {
+                      Some(update) => {
+                        let result = match update {
+                          PendingCollaborationUpdate::Source { source, application, .. } => client.replace_source_from(&source, application).await,
+                          PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
+                        };
+                        if let Err(error) = result {
+                          let detail = format!("{error:#}");
+                          let _ = window_handle.update(cx, |_, _, cx| {
+                            let _ = workspace.update(cx, |workspace, cx| {
+                              if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
+                                workspace.collaboration.last_error = Some(detail);
+                                cx.notify();
+                              }
+                            });
                           });
-                        });
-                      }
-                      continue;
-                    },
-                    None => {
-                      local_disconnect = true;
-                      break;
-                    },
-                  }
-                },
-              };
+                        }
+                        handled_local_update = true;
+                        Ok(None)
+                      },
+                      None => {
+                        local_disconnect = true;
+                        Ok(None)
+                      },
+                    }
+                  },
+                }
+              });
+              if handled_local_update {
+                continue;
+              }
               let Ok(Some(event)) = received else {
                 break;
               };
@@ -539,20 +578,18 @@ impl Workspace {
                 },
               }
             }
-            let _ = client.shutdown().await;
+            let _ = run_on_sync_runtime(client.shutdown());
             if !local_disconnect {
               let _ = window_handle.update(cx, |_, _, cx| {
                 let _ = workspace.update(cx, |workspace, cx| {
-                  if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
-                    workspace.collaboration.state = SessionState::Reconnecting;
-                    workspace.collaboration.last_error = Some("Collaboration stream closed.".to_string());
-                    workspace.collaboration_client_updates = None;
-                    workspace.collaboration.peers.clear();
-                    cx.notify();
-                  }
+                  workspace.collaboration.state = SessionState::Reconnecting;
+                  workspace.collaboration.last_error = Some("Collaboration stream closed.".to_string());
+                  workspace.collaboration_client_updates = None;
+                  workspace.collaboration.peers.clear();
+                  cx.notify();
                 });
               });
-              tokio::time::sleep(reconnect_delay).await;
+              run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
               reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
               continue;
             }
@@ -574,12 +611,13 @@ impl Workspace {
             if target_panel_id.is_none() {
               break;
             }
-            tokio::time::sleep(reconnect_delay).await;
+            run_on_sync_runtime(tokio::time::sleep(reconnect_delay));
             reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
           },
         }
       }
-    }));
+    })
+    .detach();
     show_collaboration_prompt(
       window,
       cx,
@@ -817,6 +855,12 @@ impl Workspace {
   pub fn show_collaboration_diagnostics(&self, window: &mut Window, cx: &mut Context<Self>) {
     let role = self.collaboration.role.unwrap_or("None");
     let pending_invite = if self.collaboration.pending_invite.is_some() { "yes" } else { "no" };
+    let owner_host = if self.collaboration_host.is_some() { "yes" } else { "no" };
+    let pending_invite_copy = self
+      .collaboration
+      .pending_invite_copy_role
+      .map(collaboration_role_label)
+      .unwrap_or("none");
     let panel = self
       .collaboration
       .panel_id
@@ -851,7 +895,7 @@ impl Workspace {
         .join("\n")
     };
     let detail = format!(
-      "State: {:?}\nRole: {role}\nPeers: {peer_count}\nQueued local updates: {pending_updates}\nPeer details:\n{peer_details}\nPanel: {panel}\nDocument: {document}\nFormat: {:?}\nPending invite: {pending_invite}\nLast error: {}",
+      "State: {:?}\nRole: {role}\nOwner host: {owner_host}\nPeers: {peer_count}\nQueued local updates: {pending_updates}\nPeer details:\n{peer_details}\nPanel: {panel}\nDocument: {document}\nFormat: {:?}\nPending join invite: {pending_invite}\nPending invite copy: {pending_invite_copy}\nLast error: {}",
       self.collaboration.state,
       self.collaboration.format_kind,
       self.collaboration.last_error.as_deref().unwrap_or("None"),
@@ -1619,13 +1663,15 @@ impl Workspace {
       self.clear_collaboration_role_for_panel(panel_id, cx);
     }
     if let Some(host) = self.collaboration_host.take() {
-      std::mem::drop(cx.spawn(async move |_, _| {
+      cx.spawn(async move |_, _| {
         let _ = host.shutdown().await;
-      }));
+      })
+      .detach();
     }
     self.collaboration_client_updates = None;
     self.collaboration_last_published_hash = None;
     self.collaboration_delta_updates_since_checkpoint = 0;
+    self.collaboration.pending_invite_copy_role = None;
     if !preserve_pending_updates {
       self.collaboration_pending_updates.clear();
     }
@@ -1717,7 +1763,7 @@ impl Workspace {
     window_handle: AnyWindowHandle,
     cx: &mut Context<Self>,
   ) {
-    std::mem::drop(cx.spawn(async move |workspace, cx| {
+    cx.spawn(async move |workspace, cx| {
       loop {
         let update = match updates.recv().await {
           Ok(update) => update,
@@ -1762,7 +1808,8 @@ impl Workspace {
           LiveUpdateKind::Wire(_) => {},
         }
       }
-    }));
+    })
+    .detach();
   }
 
   fn apply_collaboration_session_event(&mut self, panel_id: Uuid, event: SessionEvent, cx: &mut Context<Self>) {
@@ -1948,7 +1995,7 @@ impl Workspace {
     let build_source = cx
       .background_executor()
       .spawn(async move { db8_collaboration_source(&document, document_id).map(|(source, _)| source) });
-    std::mem::drop(cx.spawn(async move |workspace, cx| {
+    cx.spawn(async move |workspace, cx| {
       let source = build_source.await;
       workspace.update(cx, |workspace, cx| {
         if workspace.collaboration_runtime_id != runtime_id || workspace.collaboration.panel_id != Some(panel_id) {
@@ -1957,7 +2004,8 @@ impl Workspace {
         workspace.publish_collaboration_source(source, "DB8 checkpoint", None);
         cx.notify();
       })
-    }));
+    })
+    .detach();
   }
 
   fn publish_fl0_collaboration_edit(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
@@ -2000,7 +2048,7 @@ impl Workspace {
         .ok()
         .and_then(|bytes| collaboration_document_from_native_bytes(bytes, FormatKind::Fl0))
     });
-    std::mem::drop(cx.spawn(async move |workspace, cx| {
+    cx.spawn(async move |workspace, cx| {
       let source = build_source.await;
       workspace.update(cx, |workspace, cx| {
         if workspace.collaboration_runtime_id != runtime_id || workspace.collaboration.panel_id != Some(panel_id) {
@@ -2009,7 +2057,8 @@ impl Workspace {
         workspace.publish_collaboration_source(source, "FL0 checkpoint", None);
         cx.notify();
       })
-    }));
+    })
+    .detach();
   }
 
   fn publish_collaboration_application_update(&mut self, application: UpdateApplication, label: &str) -> bool {
