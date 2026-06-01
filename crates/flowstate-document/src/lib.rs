@@ -73,23 +73,60 @@ pub fn flowstate_document_theme() -> DocumentTheme {
 
   theme.set_custom_paragraph_style(
     0,
-    paragraph_style(pt(26.0), black(), true, false, ThemeUnderline::None, CustomParagraphAlign::Center, pt(12.0), px(0.0))
-      .with_border(border_eighth_points(24.0), pt(4.0), pt(1.0))
-      .with_section(0, 0),
+    paragraph_style(
+      pt(26.0),
+      black(),
+      true,
+      false,
+      ThemeUnderline::None,
+      CustomParagraphAlign::Center,
+      pt(12.0),
+      px(0.0),
+    )
+    .with_border(border_eighth_points(24.0), pt(4.0), pt(1.0))
+    .with_section(0, 0),
   );
   theme.set_custom_paragraph_style(
     1,
-    paragraph_style(pt(22.0), black(), true, false, ThemeUnderline::Double, CustomParagraphAlign::Center, pt(2.0), px(0.0))
-      .with_section(1, 1),
+    paragraph_style(
+      pt(22.0),
+      black(),
+      true,
+      false,
+      ThemeUnderline::Double,
+      CustomParagraphAlign::Center,
+      pt(2.0),
+      px(0.0),
+    )
+    .with_section(1, 1),
   );
   theme.set_custom_paragraph_style(
     2,
-    paragraph_style(pt(16.0), black(), true, false, ThemeUnderline::Single, CustomParagraphAlign::Center, pt(2.0), px(0.0))
-      .with_section(2, 2),
+    paragraph_style(
+      pt(16.0),
+      black(),
+      true,
+      false,
+      ThemeUnderline::Single,
+      CustomParagraphAlign::Center,
+      pt(2.0),
+      px(0.0),
+    )
+    .with_section(2, 2),
   );
   theme.set_custom_paragraph_style(
     3,
-    paragraph_style(pt(13.0), black(), true, false, ThemeUnderline::None, CustomParagraphAlign::Left, pt(2.0), px(0.0)).with_section(3, 3),
+    paragraph_style(
+      pt(13.0),
+      black(),
+      true,
+      false,
+      ThemeUnderline::None,
+      CustomParagraphAlign::Left,
+      pt(2.0),
+      px(0.0),
+    )
+    .with_section(3, 3),
   );
   theme.set_custom_paragraph_style(
     4,
@@ -177,9 +214,24 @@ pub fn flowstate_document_theme() -> DocumentTheme {
     },
   );
 
-  theme.set_custom_highlight_style(1, CustomHighlightStyle { color: rgb(0x0000_ff00).into() });
-  theme.set_custom_highlight_style(2, CustomHighlightStyle { color: rgb(0x00d9_d9d9).into() });
-  theme.set_custom_highlight_style(3, CustomHighlightStyle { color: rgb(0x0000_ffff).into() });
+  theme.set_custom_highlight_style(
+    1,
+    CustomHighlightStyle {
+      color: rgb(0x0000_ff00).into(),
+    },
+  );
+  theme.set_custom_highlight_style(
+    2,
+    CustomHighlightStyle {
+      color: rgb(0x00d9_d9d9).into(),
+    },
+  );
+  theme.set_custom_highlight_style(
+    3,
+    CustomHighlightStyle {
+      color: rgb(0x0000_ffff).into(),
+    },
+  );
   for slot in [0, 1, 2, 3, 4, 6] {
     theme.set_invisibility_visible_paragraph_style(slot);
   }
@@ -216,7 +268,10 @@ pub fn custom_paragraph_style(theme: &DocumentTheme, slot: u8) -> CustomParagrap
     .cloned()
     .unwrap_or_else(|| {
       let mut defaults = flowstate_document_theme();
-      defaults.custom_paragraph_styles.remove(&(slot & 0x7f)).unwrap()
+      defaults
+        .custom_paragraph_styles
+        .remove(&(slot & 0x7f))
+        .unwrap()
     })
 }
 
@@ -231,7 +286,10 @@ pub fn custom_semantic_style(theme: &DocumentTheme, slot: u8) -> CustomSemanticS
     .cloned()
     .unwrap_or_else(|| {
       let mut defaults = flowstate_document_theme();
-      defaults.custom_semantic_styles.remove(&(slot & 0x7f)).unwrap_or_default()
+      defaults
+        .custom_semantic_styles
+        .remove(&(slot & 0x7f))
+        .unwrap_or_default()
     })
 }
 

@@ -97,8 +97,12 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .name("Style 13 pt Bold")
         .based_on("DefaultParagraphFont"),
       theme,
-      semantic_style(theme, 1).font_size.unwrap_or(theme.body_font_size),
-      semantic_style(theme, 1).color.unwrap_or(theme.default_text_color),
+      semantic_style(theme, 1)
+        .font_size
+        .unwrap_or(theme.body_font_size),
+      semantic_style(theme, 1)
+        .color
+        .unwrap_or(theme.default_text_color),
       semantic_style(theme, 1).bold.unwrap_or(false),
       semantic_style(theme, 1).italic.unwrap_or(false),
       semantic_style(theme, 1).underline.unwrap_or_default(),
@@ -109,8 +113,12 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
           .name("Emphasis")
           .based_on("DefaultParagraphFont"),
         theme,
-        semantic_style(theme, 2).font_size.unwrap_or(theme.body_font_size),
-        semantic_style(theme, 2).color.unwrap_or(theme.default_text_color),
+        semantic_style(theme, 2)
+          .font_size
+          .unwrap_or(theme.body_font_size),
+        semantic_style(theme, 2)
+          .color
+          .unwrap_or(theme.default_text_color),
         semantic_style(theme, 2).bold.unwrap_or(false),
         semantic_style(theme, 2).italic.unwrap_or(false),
         semantic_style(theme, 2).underline.unwrap_or_default(),
@@ -123,7 +131,9 @@ pub(super) fn add_flowstate_styles(docx: Docx, theme: &DocumentTheme) -> Docx {
         .based_on("DefaultParagraphFont"),
       theme,
       theme.body_font_size,
-      semantic_style(theme, 3).color.unwrap_or(theme.default_text_color),
+      semantic_style(theme, 3)
+        .color
+        .unwrap_or(theme.default_text_color),
       semantic_style(theme, 3).bold.unwrap_or(false),
       semantic_style(theme, 3).italic.unwrap_or(false),
       semantic_style(theme, 3).underline.unwrap_or_default(),

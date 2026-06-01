@@ -180,10 +180,20 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
 
     let is_heading = matches!(
       style,
-      flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK | flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC
+      flowstate_document::PARAGRAPH_POCKET
+        | flowstate_document::PARAGRAPH_HAT
+        | flowstate_document::PARAGRAPH_BLOCK
+        | flowstate_document::PARAGRAPH_TAG
+        | flowstate_document::PARAGRAPH_ANALYTIC
     );
-    let structural_run_formatting_allowed = matches!(style, flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG);
-    let direct_highlight_allowed = !matches!(style, flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK);
+    let structural_run_formatting_allowed = matches!(
+      style,
+      flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG
+    );
+    let direct_highlight_allowed = !matches!(
+      style,
+      flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK
+    );
     let suppress_semantic_styles = matches!(
       style,
       flowstate_document::PARAGRAPH_POCKET
@@ -673,7 +683,13 @@ fn recognize_run_semantic_for_context(
   {
     return flowstate_document::SEMANTIC_CITE;
   }
-  if can_process_citations && run.bold && !matches!(explicit, Some(flowstate_document::SEMANTIC_UNDERLINE | flowstate_document::SEMANTIC_EMPHASIS)) {
+  if can_process_citations
+    && run.bold
+    && !matches!(
+      explicit,
+      Some(flowstate_document::SEMANTIC_UNDERLINE | flowstate_document::SEMANTIC_EMPHASIS)
+    )
+  {
     return flowstate_document::SEMANTIC_CITE;
   }
   if run.underline && !run.bold && !matches!(explicit, Some(flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_CITE)) {
@@ -989,7 +1005,18 @@ mod tests {
       flowstate_document::PARAGRAPH_BLOCK
     );
 
-    let run_styles = recognize_run_styles_for_context(&runs[0], 0, None, true, false, false, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles);
+    let run_styles = recognize_run_styles_for_context(
+      &runs[0],
+      0,
+      None,
+      true,
+      false,
+      false,
+      flowstate_document::PARAGRAPH_BLOCK,
+      false,
+      false,
+      &styles,
+    );
     assert_eq!(run_styles.semantic, RunSemanticStyle::Plain);
     assert!(!run_styles.direct_underline);
     assert_eq!(run_styles.highlight, None);
@@ -1028,7 +1055,18 @@ mod tests {
     run.strikethrough = true;
     run.highlight = true;
 
-    let run_styles = recognize_run_styles_for_context(&run, 0, None, true, false, false, flowstate_document::PARAGRAPH_BLOCK, false, false, &styles);
+    let run_styles = recognize_run_styles_for_context(
+      &run,
+      0,
+      None,
+      true,
+      false,
+      false,
+      flowstate_document::PARAGRAPH_BLOCK,
+      false,
+      false,
+      &styles,
+    );
 
     assert_eq!(run_styles.semantic, RunSemanticStyle::Plain);
     assert!(!run_styles.direct_underline);

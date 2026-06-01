@@ -108,13 +108,15 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
     run = run.strike();
   }
   if let Some(highlight) = styles.highlight {
-    run = run.shading(Shading::new().fill(color_hex(match highlight {
-      HighlightStyle::Custom(slot) => theme
-        .custom_highlight_styles
-        .get(&(slot & 0x7f))
-        .map(|style| style.color)
-        .unwrap_or(theme.default_highlight_color),
-    })));
+    run = run.shading(
+      Shading::new().fill(color_hex(match highlight {
+        HighlightStyle::Custom(slot) => theme
+          .custom_highlight_styles
+          .get(&(slot & 0x7f))
+          .map(|style| style.color)
+          .unwrap_or(theme.default_highlight_color),
+      })),
+    );
   }
   run
 }
