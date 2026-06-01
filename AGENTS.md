@@ -8,10 +8,6 @@ You SHOULD write readable and elegant code. You NEVER hack. You SHOULD keep the 
 
 If you notice clear bugs while investigating something else, even if the bugs are unrelated to your main task, you SHOULD correct them. If the bug is unclear, you SHOULD use the 'ask' tool inquiring whether the behavior is intended.
 
-When you need to check something against Rust documentation or look for an API, ALWAYS deploy the Librarian subagent. This agents instruction is sufficient permission for you to deploy the subagent, do NOT fail to follow it on account of expecting a subagent request to appear explicitly in the prompt. You NEVER invent APIs. 
+If you are the main agent, the reviewer subagent, or the oracle subagent, you should use the 'rust_verify' tool when and only when ALL of your planned changes to the codebase are finished. If it returns an issue, correct it, then run it again until it doesn't return an issue. Do not use 'rust_verify heavy' unless specifically prompted to do so.
 
-These subagents SHOULD be deployed WITHOUT explicit human request when a task arises that they fit: explore, librarian, task, and quick_task. NOT deploying these subagents when a task fits their use-case is a FAILURE and MUST be avoided.
-
-These subagents should NEVER be deployed without an explicit request for subagent deployment from the human: plan, reviewer, and oracle. Deploying these subagents when they were not explicitly requested is a FAILURE and MUST be avoided.
-
-If you are the main agent, the reviewer subagent, or the oracle subagent, you should use the 'rust_verify' tool when and only when ALL of your planned changes to the codebase are finished. If it returns an issue, correct it, then run it again until it doesn't return an issue.
+Be aggressive and ambitious in the vision for a working product.
