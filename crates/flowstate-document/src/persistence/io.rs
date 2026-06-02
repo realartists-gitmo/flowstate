@@ -1,7 +1,8 @@
 use std::{
   fs,
   io::{self, Cursor, Read as _, Write as _},
-  path::Path,
+  ops::Range,
+  path::{Path, PathBuf},
   sync::Arc,
   time::Instant,
 };
@@ -15,10 +16,35 @@ use flowstate_collab::{
 use tempfile::NamedTempFile;
 
 use crate::{
-  AssetId, Block, BlockId, Document, HighlightStyle, Paragraph, ParagraphId, ParagraphStyle, RunSemanticStyle, RunStyles, TextRun,
-  demo_document, document_text_slice, merge_adjacent_runs, paragraph_byte_range, rebuild_document_offset_index, rebuild_document_sections,
-  reconcile_document_ids,
+  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, Document, DocumentIds, DocumentSection, DocumentTheme, EquationBlock,
+  EquationDisplay, EquationSyntax, HIGHLIGHT_ALTERNATIVE, HIGHLIGHT_INSERT, HIGHLIGHT_SPOKEN, HighlightStyle, ImageBlock, ImageSizing,
+  PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT, PARAGRAPH_POCKET, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, Paragraph, ParagraphId,
+  ParagraphOffsetIndex, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE, SEMANTIC_CONDENSED, SEMANTIC_EMPHASIS,
+  SEMANTIC_ULTRACONDENSED, SEMANTIC_UNDERLINE, SectionId, SectionKind, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
+  TableColumnWidth, TableRow, TableStyle, TextRun, demo_document, document_text_slice, merge_adjacent_runs, paragraph_byte_range,
+  paragraph_index_for_id, rebuild_document_offset_index, rebuild_document_sections, reconcile_document_ids,
 };
+
+fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
+  if std::env::var_os("FLOWSTATE_TIMING").is_some() {
+    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());
+  }
+}
+
+fn validate_document(document: &Document) -> io::Result<()> {
+  if document.paragraphs.is_empty() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 document has no paragraphs"));
+  }
+  if document.ids.paragraph_ids.len() != document.paragraphs.len() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 paragraph ID count mismatch"));
+  }
+  if document.ids.block_ids.len() != document.blocks.len() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 block ID count mismatch"));
+  }
+  Ok(())
+}
+include!("codec.rs");
+include!("records.rs");
 
 const DB8_PARAGRAPH_ORDER: &str = "paragraph_order";
 const DB8_BLOCK_ORDER: &str = "block_order";
@@ -604,41 +630,53 @@ fn apply_db8_mark(styles: &mut RunStyles, mark: &GranularTextMark) {
   }
 }
 
-const fn run_semantic_code(style: RunSemanticStyle) -> i64 {
-  match style {
-    RunSemanticStyle::Plain => 0,
-    RunSemanticStyle::Cite => 1,
-    RunSemanticStyle::Emphasis => 2,
-    RunSemanticStyle::Underline => 3,
-    RunSemanticStyle::Condensed => 4,
-    RunSemanticStyle::Ultracondensed => 5,
+fn run_semantic_code(style: RunSemanticStyle) -> i64 {
+  if style == RunSemanticStyle::Plain {
+    0
+  } else if style == SEMANTIC_CITE {
+    1
+  } else if style == SEMANTIC_EMPHASIS {
+    2
+  } else if style == SEMANTIC_UNDERLINE {
+    3
+  } else if style == SEMANTIC_CONDENSED {
+    4
+  } else if style == SEMANTIC_ULTRACONDENSED {
+    5
+  } else if let RunSemanticStyle::Custom(slot) = style {
+    i64::from(slot)
+  } else {
+    0
   }
 }
 
-const fn run_semantic_from_code(value: i64) -> RunSemanticStyle {
+fn run_semantic_from_code(value: i64) -> RunSemanticStyle {
   match value {
-    1 => RunSemanticStyle::Cite,
-    2 => RunSemanticStyle::Emphasis,
-    3 => RunSemanticStyle::Underline,
-    4 => RunSemanticStyle::Condensed,
-    5 => RunSemanticStyle::Ultracondensed,
+    1 => SEMANTIC_CITE,
+    2 => SEMANTIC_EMPHASIS,
+    3 => SEMANTIC_UNDERLINE,
+    4 => SEMANTIC_CONDENSED,
+    5 => SEMANTIC_ULTRACONDENSED,
+    value if (0..=u8::MAX as i64).contains(&value) => RunSemanticStyle::Custom(value as u8),
     _ => RunSemanticStyle::Plain,
   }
 }
 
-const fn highlight_code(style: HighlightStyle) -> i64 {
+fn highlight_code(style: HighlightStyle) -> i64 {
   match style {
-    HighlightStyle::Spoken => 1,
-    HighlightStyle::Insert => 2,
-    HighlightStyle::Alternative => 3,
+    HIGHLIGHT_SPOKEN => 1,
+    HIGHLIGHT_INSERT => 2,
+    HIGHLIGHT_ALTERNATIVE => 3,
+    HighlightStyle::Custom(slot) => i64::from(slot),
   }
 }
 
-const fn highlight_from_code(value: i64) -> Option<HighlightStyle> {
+fn highlight_from_code(value: i64) -> Option<HighlightStyle> {
   match value {
-    1 => Some(HighlightStyle::Spoken),
-    2 => Some(HighlightStyle::Insert),
-    3 => Some(HighlightStyle::Alternative),
+    1 => Some(HIGHLIGHT_SPOKEN),
+    2 => Some(HIGHLIGHT_INSERT),
+    3 => Some(HIGHLIGHT_ALTERNATIVE),
+    value if (0..=u8::MAX as i64).contains(&value) => Some(HighlightStyle::Custom(value as u8)),
     _ => None,
   }
 }

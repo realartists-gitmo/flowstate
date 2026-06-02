@@ -1,4 +1,3 @@
-
 #[derive(Clone, Copy)]
 struct Db8Chunk {
   kind: u8,
@@ -28,12 +27,7 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
     .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "DB8 text chunk is not UTF-8"))?;
   let assets = read_assets_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_ASSETS, "DB8 assets chunk")?)?;
   let (blocks, paragraphs) = read_blocks_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCKS, "DB8 blocks chunk")?, &text)?;
-  let paragraph_ids = read_paragraph_ids_chunk(required_chunk(
-    cursor.get_ref(),
-    &chunks,
-    CHUNK_PARAGRAPH_IDS,
-    "DB8 paragraph IDs chunk",
-  )?)?;
+  let paragraph_ids = read_paragraph_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_PARAGRAPH_IDS, "DB8 paragraph IDs chunk")?)?;
   let block_ids = read_block_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCK_IDS, "DB8 block IDs chunk")?)?;
   let sections = read_sections_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_SECTIONS, "DB8 sections chunk")?)?;
   let document_id = read_document_meta_chunk(required_chunk(
@@ -74,12 +68,7 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
 }
 
 #[hotpath::measure]
-fn required_chunk<'bytes>(
-  bytes: &'bytes [u8],
-  chunks: &[Db8Chunk],
-  kind: u8,
-  label: &'static str,
-) -> io::Result<&'bytes [u8]> {
+fn required_chunk<'bytes>(bytes: &'bytes [u8], chunks: &[Db8Chunk], kind: u8, label: &'static str) -> io::Result<&'bytes [u8]> {
   let chunk = chunks
     .iter()
     .find(|chunk| chunk.kind == kind)
@@ -275,7 +264,10 @@ fn char_count_boundaries_to_byte_offsets(runs: &[TextRun], text: &str) -> io::Re
       continue;
     }
     let Some((byte, _)) = text.char_indices().nth(char_count) else {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "run character offset is outside paragraph text"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "run character offset is outside paragraph text",
+      ));
     };
     offsets.push(byte);
   }
@@ -637,7 +629,8 @@ pub fn recovery_path_for_document(path: &Path) -> PathBuf {
   let mut recovery_path = path.to_path_buf();
   let file_name = path
     .file_name()
-    .and_then(|name| name.to_str()).map_or_else(|| "untitled.db8.recovery".to_owned(), |name| format!("{name}.recovery"));
+    .and_then(|name| name.to_str())
+    .map_or_else(|| "untitled.db8.recovery".to_owned(), |name| format!("{name}.recovery"));
   recovery_path.set_file_name(file_name);
   recovery_path
 }
@@ -665,7 +658,7 @@ mod records_tests {
   #[test]
   fn normalizes_legacy_character_count_run_boundaries() {
     let cite = RunStyles {
-      semantic: RunSemanticStyle::Cite,
+      semantic: SEMANTIC_CITE,
       ..RunStyles::default()
     };
     let mut runs = vec![

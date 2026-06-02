@@ -12,7 +12,6 @@ use gpui::{
   SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px, size,
 };
 #[cfg(target_os = "windows")]
-use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonCustomVariant, ButtonVariants};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};

@@ -594,15 +594,6 @@ impl Workspace {
               .spawn(async move { run_on_sync_runtime(client.shutdown()) })
               .await;
             if !local_disconnect {
-              let _ = window_handle.update(cx, |_, _, cx| {
-                let _ = workspace.update(cx, |workspace, cx| {
-                  workspace.collaboration.state = SessionState::Reconnecting;
-                  workspace.collaboration.last_error = Some("Collaboration stream closed.".to_string());
-                  workspace.collaboration_client_updates = None;
-                  workspace.collaboration.peers.clear();
-                  cx.notify();
-                });
-              });
               cx.background_executor().timer(reconnect_delay).await;
               reconnect_delay = (reconnect_delay * 2).min(std::time::Duration::from_secs(5));
               continue;

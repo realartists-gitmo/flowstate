@@ -1,4 +1,3 @@
-
 #[hotpath::measure]
 fn read_u8(cursor: &mut Cursor<&[u8]>) -> io::Result<u8> {
   let mut bytes = [0; 1];
@@ -105,27 +104,35 @@ fn decode_block_alignment(value: u8) -> io::Result<BlockAlignment> {
 
 #[hotpath::measure]
 fn encode_paragraph_style(style: ParagraphStyle) -> u8 {
-  match style {
-    ParagraphStyle::Pocket => 0,
-    ParagraphStyle::Hat => 1,
-    ParagraphStyle::Block => 2,
-    ParagraphStyle::Tag => 3,
-    ParagraphStyle::Analytic => 4,
-    ParagraphStyle::Normal => 5,
-    ParagraphStyle::Undertag => 6,
+  if style == PARAGRAPH_POCKET {
+    0
+  } else if style == PARAGRAPH_HAT {
+    1
+  } else if style == PARAGRAPH_BLOCK {
+    2
+  } else if style == PARAGRAPH_TAG {
+    3
+  } else if style == PARAGRAPH_ANALYTIC {
+    4
+  } else if style == ParagraphStyle::Normal {
+    5
+  } else if style == PARAGRAPH_UNDERTAG {
+    6
+  } else {
+    5
   }
 }
 
 #[hotpath::measure]
 fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
   match value {
-    0 => Ok(ParagraphStyle::Pocket),
-    1 => Ok(ParagraphStyle::Hat),
-    2 => Ok(ParagraphStyle::Block),
-    3 => Ok(ParagraphStyle::Tag),
-    4 => Ok(ParagraphStyle::Analytic),
+    0 => Ok(PARAGRAPH_POCKET),
+    1 => Ok(PARAGRAPH_HAT),
+    2 => Ok(PARAGRAPH_BLOCK),
+    3 => Ok(PARAGRAPH_TAG),
+    4 => Ok(PARAGRAPH_ANALYTIC),
     5 => Ok(ParagraphStyle::Normal),
-    6 => Ok(ParagraphStyle::Undertag),
+    6 => Ok(PARAGRAPH_UNDERTAG),
     _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid paragraph style")),
   }
 }
@@ -133,26 +140,13 @@ fn decode_paragraph_style(value: u8) -> io::Result<ParagraphStyle> {
 #[hotpath::measure]
 fn encode_section_kind(kind: SectionKind) -> u8 {
   match kind {
-    SectionKind::Pocket => 0,
-    SectionKind::Hat => 1,
-    SectionKind::BlockSection => 2,
-    SectionKind::TagSection => 3,
-    SectionKind::Analytic => 4,
-    SectionKind::Card => 5,
+    SectionKind::Custom(value) => value,
   }
 }
 
 #[hotpath::measure]
 fn decode_section_kind(value: u8) -> io::Result<SectionKind> {
-  match value {
-    0 => Ok(SectionKind::Pocket),
-    1 => Ok(SectionKind::Hat),
-    2 => Ok(SectionKind::BlockSection),
-    3 => Ok(SectionKind::TagSection),
-    4 => Ok(SectionKind::Analytic),
-    5 => Ok(SectionKind::Card),
-    _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid section kind")),
-  }
+  Ok(SectionKind::Custom(value))
 }
 
 #[hotpath::measure]
@@ -186,54 +180,56 @@ fn read_run_styles(cursor: &mut Cursor<&[u8]>) -> io::Result<RunStyles> {
 
 #[hotpath::measure]
 fn encode_run_semantic_style(style: RunSemanticStyle) -> u8 {
-  match style {
-    RunSemanticStyle::Plain => 0,
-    RunSemanticStyle::Cite => 1,
-    RunSemanticStyle::Emphasis => 2,
-    RunSemanticStyle::Underline => 3,
-    RunSemanticStyle::Condensed => 4,
-    RunSemanticStyle::Ultracondensed => 5,
+  if style == RunSemanticStyle::Plain {
+    0
+  } else if style == SEMANTIC_CITE {
+    1
+  } else if style == SEMANTIC_EMPHASIS {
+    2
+  } else if style == SEMANTIC_UNDERLINE {
+    3
+  } else if style == SEMANTIC_CONDENSED {
+    4
+  } else if style == SEMANTIC_ULTRACONDENSED {
+    5
+  } else if let RunSemanticStyle::Custom(slot) = style {
+    slot
+  } else {
+    0
   }
 }
 
 #[hotpath::measure]
 fn decode_run_semantic_style(value: u8) -> io::Result<RunSemanticStyle> {
-  match value {
-    0 => Ok(RunSemanticStyle::Plain),
-    1 => Ok(RunSemanticStyle::Cite),
-    2 => Ok(RunSemanticStyle::Emphasis),
-    3 => Ok(RunSemanticStyle::Underline),
-    4 => Ok(RunSemanticStyle::Condensed),
-    5 => Ok(RunSemanticStyle::Ultracondensed),
-    _ => Err(io::Error::new(io::ErrorKind::InvalidData, "invalid run semantic style")),
-  }
+  Ok(match value {
+    0 => RunSemanticStyle::Plain,
+    1 => SEMANTIC_CITE,
+    2 => SEMANTIC_EMPHASIS,
+    3 => SEMANTIC_UNDERLINE,
+    4 => SEMANTIC_CONDENSED,
+    5 => SEMANTIC_ULTRACONDENSED,
+    slot => RunSemanticStyle::Custom(slot),
+  })
 }
 
 #[hotpath::measure]
 fn encode_highlight_style(style: Option<HighlightStyle>) -> u8 {
   match style {
     None => 0,
-    Some(HighlightStyle::Spoken) => 1,
-    Some(HighlightStyle::Insert) => 2,
-    Some(HighlightStyle::Alternative) => 3,
+    Some(HIGHLIGHT_SPOKEN) => 1,
+    Some(HIGHLIGHT_INSERT) => 2,
+    Some(HIGHLIGHT_ALTERNATIVE) => 3,
+    Some(HighlightStyle::Custom(slot)) => slot,
   }
 }
 
 #[hotpath::measure]
 fn decode_highlight_style(value: u8) -> io::Result<Option<HighlightStyle>> {
-  if value > 31 {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid highlight style slot"));
-  }
   Ok(match value {
     0 => None,
-    1 => Some(HighlightStyle::Spoken),
-    2 => Some(HighlightStyle::Insert),
-    3 => Some(HighlightStyle::Alternative),
-    _ => {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidData,
-        "highlight slot is reserved but has no app style yet",
-      ));
-    },
+    1 => Some(HIGHLIGHT_SPOKEN),
+    2 => Some(HIGHLIGHT_INSERT),
+    3 => Some(HIGHLIGHT_ALTERNATIVE),
+    slot => Some(HighlightStyle::Custom(slot)),
   })
 }
