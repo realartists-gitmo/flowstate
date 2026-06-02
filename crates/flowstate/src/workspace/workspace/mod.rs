@@ -41,8 +41,8 @@ use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
-  CollaborationRole as Db8CollaborationRole, Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut,
-  db8_collab_document_with_id, document_from_db8_collab_source, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
+  CollaborationRole as Db8CollaborationRole, Document, DocumentOffset, DocumentTheme, ExternalCaret, ParagraphStyle, RichTextEditor, Save,
+  ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -53,6 +53,7 @@ use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_collab::{
   ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, UpdateApplication, WireMessage, decode_native_file,
 };
+use flowstate_document::{db8_collab_document_with_id, document_from_db8_collab_source};
 use flowstate_sync::{
   AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, LiveUpdate, LiveUpdateKind, Role, SessionDocumentState, SessionEvent, SessionId,
   SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,

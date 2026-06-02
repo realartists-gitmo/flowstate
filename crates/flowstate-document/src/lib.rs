@@ -1,6 +1,7 @@
 pub use gpui_flowtext::*;
-
 use std::{io, path::Path};
+
+use flowstate_collab::{ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind, NativeAssetRecord, blake3_hash};
 
 use gpui::{Pixels, black, px, rgb};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -44,6 +45,46 @@ pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> 
   write_document(path, document)
 }
 
+pub fn db8_collab_document_with_id(
+  document: &Document,
+  document_id: CollabDocumentId,
+  created_by_actor: ActorId,
+) -> io::Result<Db8CollabDocument> {
+  let projection_cache = db8_bytes(document)?;
+  let asset_manifest = postcard::to_stdvec(&db8_native_asset_records(document, created_by_actor))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+  Db8CollabDocument::from_projection_source(document_id, created_by_actor, &projection_cache, &asset_manifest)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Document> {
+  if source.format_kind() != FormatKind::Db8 {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "collaboration source is not DB8"));
+  }
+  let projection_cache = source
+    .materialize_projection_cache()
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+  read_db8_bytes(&projection_cache)
+}
+
+fn db8_native_asset_records(document: &Document, created_by_actor: ActorId) -> Vec<NativeAssetRecord> {
+  let mut assets = document
+    .assets
+    .assets
+    .values()
+    .map(|asset| NativeAssetRecord {
+      asset_id: asset.id.0,
+      blake3_hash: blake3_hash(asset.bytes.as_ref().as_slice()),
+      byte_len: asset.bytes.len() as u64,
+      mime_type: asset.mime_type.to_string(),
+      original_name: asset.original_name.as_ref().map(ToString::to_string),
+      created_by_actor,
+      inline: true,
+    })
+    .collect::<Vec<_>>();
+  assets.sort_by_key(|asset| asset.asset_id);
+  assets
+}
 pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
   document_bytes(document)
 }

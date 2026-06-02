@@ -1036,6 +1036,7 @@ impl HostedCollaboration {
       None,
       WireMessage::Update {
         document_id: self.config.document_id,
+
         actor_id: self.config.actor_id,
         hash: blake3_hash(&bytes),
         bytes,
@@ -1049,6 +1050,36 @@ impl HostedCollaboration {
         frontier,
       },
     ))
+  }
+
+  pub fn publish_presence(
+    &self,
+    user_label: impl Into<String>,
+    cursor: Option<String>,
+    focus: Option<String>,
+    viewport_hint: Option<String>,
+  ) -> AnyResult<()> {
+    let frontier = self
+      .document_state
+      .document
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+      .frontier()?;
+    let presence = PeerPresence {
+      actor_id: self.config.actor_id,
+      session_id: self.config.session_id,
+      role: self.config.role_request,
+      user_label: user_label.into(),
+      cursor,
+      focus,
+      viewport_hint,
+      last_known_frontier: frontier,
+      monotonic_millis: now_unix_millis(),
+    };
+    self
+      .live_updates
+      .publish(LiveUpdate::event(Some(self.config.session_id), SessionEvent::Presence(presence)))?;
+    Ok(())
   }
 
   pub fn publish_application_update(&self, application: UpdateApplication) -> AnyResult<()> {

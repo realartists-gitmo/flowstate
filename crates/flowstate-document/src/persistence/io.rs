@@ -1,10 +1,7 @@
 use std::{
-  collections::hash_map::DefaultHasher,
   fs,
-  hash::{Hash as _, Hasher as _},
   io::{self, Cursor, Read as _, Write as _},
-  ops::Range,
-  path::{Path, PathBuf},
+  path::Path,
   sync::Arc,
   time::Instant,
 };
@@ -17,7 +14,11 @@ use flowstate_collab::{
 };
 use tempfile::NamedTempFile;
 
-use super::{Document, demo_document, rebuild_document_offset_index, reconcile_document_ids, rebuild_document_sections, Block, paragraph_byte_range, ParagraphOffsetIndex, DocumentIds, DocumentTheme, log_timing_lazy, AssetStore, Paragraph, ParagraphStyle, ParagraphId, BlockId, DocumentSection, paragraph_index_for_id, TableBlock, TableCellBlock, TextRun, merge_adjacent_runs, SectionId, ImageBlock, AssetId, ImageSizing, EquationBlock, EquationSyntax, EquationDisplay, TableColumnWidth, TableCell, TableRow, TableStyle, TableCellParagraph, AssetRecord, document_text_slice, paragraph_runs_len, paragraph_text_len, BlockAlignment, SectionKind, RunStyles, RunSemanticStyle, HighlightStyle};
+use crate::{
+  AssetId, Block, BlockId, Document, HighlightStyle, Paragraph, ParagraphId, ParagraphStyle, RunSemanticStyle, RunStyles, TextRun,
+  demo_document, document_text_slice, merge_adjacent_runs, paragraph_byte_range, rebuild_document_offset_index, rebuild_document_sections,
+  reconcile_document_ids,
+};
 
 const DB8_PARAGRAPH_ORDER: &str = "paragraph_order";
 const DB8_BLOCK_ORDER: &str = "block_order";
@@ -144,19 +145,35 @@ pub fn read_db8_projection_cache_bytes(bytes: &[u8]) -> io::Result<Document> {
 #[hotpath::measure]
 pub fn db8_collab_document(document: &Document, created_by_actor: ActorId) -> io::Result<Db8CollabDocument> {
   let document = document_for_serialization(document);
-  validate_document(&document)?;
-  let projection_cache = serialize_db8_projection(&document);
-  let asset_manifest = postcard::to_stdvec(&db8_native_asset_records(&document, created_by_actor))
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-  let source = db8_granular_source(&document, projection_cache.clone())?;
-  Db8CollabDocument::from_granular_source(
+  db8_collab_document_with_id_from_serialized(
+    &document,
     CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id)),
     created_by_actor,
-    &source,
-    &projection_cache,
-    &asset_manifest,
   )
-  .map_err(collab_to_io_error)
+}
+
+#[hotpath::measure]
+pub fn db8_collab_document_with_id(
+  document: &Document,
+  document_id: CollabDocumentId,
+  created_by_actor: ActorId,
+) -> io::Result<Db8CollabDocument> {
+  let mut document = document_for_serialization(document);
+  document.ids.document_id = document_id.0.as_u128();
+  db8_collab_document_with_id_from_serialized(&document, document_id, created_by_actor)
+}
+
+fn db8_collab_document_with_id_from_serialized(
+  document: &Document,
+  document_id: CollabDocumentId,
+  created_by_actor: ActorId,
+) -> io::Result<Db8CollabDocument> {
+  validate_document(document)?;
+  let projection_cache = serialize_db8_projection(document);
+  let asset_manifest = postcard::to_stdvec(&db8_native_asset_records(document, created_by_actor))
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+  let source = db8_granular_source(document, projection_cache.clone())?;
+  Db8CollabDocument::from_granular_source(document_id, created_by_actor, &source, &projection_cache, &asset_manifest).map_err(collab_to_io_error)
 }
 
 #[hotpath::measure]
@@ -164,10 +181,17 @@ pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Do
   if source.format_kind() != FormatKind::Db8 {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "collaboration source is not DB8"));
   }
-  if let Some(granular) = source.materialize_granular_source().map_err(collab_to_io_error)? {
+  if let Some(granular) = source
+    .materialize_granular_source()
+    .map_err(collab_to_io_error)?
+  {
     return document_from_db8_granular_source(&granular);
   }
-  read_db8_projection_cache_bytes(&source.materialize_projection_cache().map_err(collab_to_io_error)?)
+  read_db8_projection_cache_bytes(
+    &source
+      .materialize_projection_cache()
+      .map_err(collab_to_io_error)?,
+  )
 }
 
 #[hotpath::measure]
@@ -240,16 +264,12 @@ fn serialize_db8_projection(document: &Document) -> Vec<u8> {
   chunks.push((CHUNK_DOCUMENT_META, document_meta));
 
   let table_entry_len = 1 + 1 + 2 + 8 + 8;
-  let header_len =
-    DB8_PROJECTION_MAGIC.len() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + chunks.len() * table_entry_len;
+  let header_len = DB8_PROJECTION_MAGIC.len() + std::mem::size_of::<u32>() + std::mem::size_of::<u32>() + chunks.len() * table_entry_len;
   let payload_len = chunks.iter().map(|(_, bytes)| bytes.len()).sum::<usize>();
   let mut bytes = Vec::with_capacity(header_len + payload_len);
   bytes.extend_from_slice(DB8_PROJECTION_MAGIC);
   bytes.extend_from_slice(&DB8_PROJECTION_VERSION.to_le_bytes());
-  write_u32(
-    &mut bytes,
-    u32::try_from(chunks.len()).expect("DB8 chunk count is fixed and fits in u32"),
-  );
+  write_u32(&mut bytes, u32::try_from(chunks.len()).expect("DB8 chunk count is fixed and fits in u32"));
   let mut offset = header_len;
   for (kind, payload) in &chunks {
     bytes.push(*kind);
@@ -282,15 +302,9 @@ fn native_file_input_for_document(document: &Document, projection_cache: Vec<u8>
 fn db8_source_snapshot_for_input(document: &Document, input: &NativeFileInput, projection_cache: &[u8]) -> io::Result<Vec<u8>> {
   let asset_manifest = postcard::to_stdvec(&input.asset_manifest).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
   let source = db8_granular_source(document, projection_cache.to_vec())?;
-  Db8CollabDocument::from_granular_source(
-    input.document_id,
-    input.created_by_actor,
-    &source,
-    projection_cache,
-    &asset_manifest,
-  )
-  .and_then(|document| document.export_snapshot())
-  .map_err(collab_to_io_error)
+  Db8CollabDocument::from_granular_source(input.document_id, input.created_by_actor, &source, projection_cache, &asset_manifest)
+    .and_then(|document| document.export_snapshot())
+    .map_err(collab_to_io_error)
 }
 
 #[hotpath::measure]
@@ -389,12 +403,15 @@ fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Docu
     };
     let metadata = postcard::from_bytes::<Db8GranularParagraphMetadata>(&record.metadata)
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let mut paragraph = base_paragraphs.get(&paragraph_id).cloned().unwrap_or(Paragraph {
-      style: metadata.style,
-      byte_range: 0..0,
-      runs: Vec::new(),
-      version: 0,
-    });
+    let mut paragraph = base_paragraphs
+      .get(&paragraph_id)
+      .cloned()
+      .unwrap_or(Paragraph {
+        style: metadata.style,
+        byte_range: 0..0,
+        runs: Vec::new(),
+        version: 0,
+      });
     paragraph.style = metadata.style;
     paragraph.runs = if paragraph_runs_len_from_runs(&metadata.runs) == record.text.len() {
       metadata.runs
@@ -421,7 +438,9 @@ fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Docu
 fn db8_paragraph_records(source: &GranularSource) -> io::Result<std::collections::HashMap<ParagraphId, &GranularTextRecord>> {
   let mut records = std::collections::HashMap::with_capacity(source.texts.len());
   for record in &source.texts {
-    let id = granular_record_id_to_u128(&record.id).map(ParagraphId).map_err(collab_to_io_error)?;
+    let id = granular_record_id_to_u128(&record.id)
+      .map(ParagraphId)
+      .map_err(collab_to_io_error)?;
     if records.insert(id, record).is_some() {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "duplicate DB8 granular paragraph record"));
     }
@@ -435,7 +454,9 @@ fn db8_block_records(source: &GranularSource) -> io::Result<std::collections::Ha
     if record.metadata.is_empty() {
       continue;
     }
-    let id = granular_record_id_to_u128(&record.id).map(BlockId).map_err(collab_to_io_error)?;
+    let id = granular_record_id_to_u128(&record.id)
+      .map(BlockId)
+      .map_err(collab_to_io_error)?;
     let mut cursor = Cursor::new(record.metadata.as_slice());
     let block = read_block_record(&mut cursor)?;
     if records.insert(id, block).is_some() {
@@ -460,7 +481,10 @@ fn db8_materialize_blocks(
     match block {
       Block::Paragraph(_) => {
         let Some(paragraph) = paragraph_iter.next() else {
-          return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 granular paragraph block count exceeds paragraphs"));
+          return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "DB8 granular paragraph block count exceeds paragraphs",
+          ));
         };
         blocks.push(Block::Paragraph(paragraph.clone()));
       },
@@ -468,7 +492,10 @@ fn db8_materialize_blocks(
     }
   }
   if paragraph_iter.next().is_some() {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 granular paragraph order exceeds paragraph blocks"));
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "DB8 granular paragraph order exceeds paragraph blocks",
+    ));
   }
   Ok(blocks)
 }
@@ -555,10 +582,7 @@ fn db8_runs_from_marks(text_len: usize, marks: &[GranularTextMark]) -> Vec<TextR
         apply_db8_mark(&mut styles, mark);
       }
     }
-    runs.push(TextRun {
-      len: end - start,
-      styles,
-    });
+    runs.push(TextRun { len: end - start, styles });
   }
   runs = merge_adjacent_runs(runs);
   if runs.is_empty() && text_len > 0 {
@@ -740,9 +764,7 @@ fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
       Err(error) => return Err(error),
     }
   }
-  temp_path
-    .persist(path)
-    .map_err(|error| error.error)
+  temp_path.persist(path).map_err(|error| error.error)
 }
 
 #[cfg(test)]
@@ -780,7 +802,7 @@ mod collab_source_tests {
   #[hotpath::measure]
   fn db8_granular_order_rebuilds_paragraph_projection() {
     let document = crate::document_from_input(
-      DocumentTheme::default(),
+      crate::DocumentTheme::default(),
       vec![
         crate::InputParagraph {
           style: ParagraphStyle::Normal,

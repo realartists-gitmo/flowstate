@@ -523,6 +523,9 @@ impl Workspace {
                                 client.replace_source_from(&source, application).await
                               },
                               PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
+                              PendingCollaborationUpdate::Presence { cursor } => {
+                                client.publish_presence("", cursor, None, None).await
+                              },
                             };
                             if let Err(error) = result {
                               update_error = Some(format!("{error:#}"));
@@ -954,6 +957,7 @@ impl Workspace {
           workspace.outline_viewport_paragraph = viewport_paragraph;
           cx.notify();
         }
+        workspace.publish_db8_presence(id, editor.clone(), cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
         workspace.publish_db8_collaboration_edit(id, editor.clone(), cx);
       }),
@@ -1890,6 +1894,7 @@ impl Workspace {
             viewport_hint: presence.viewport_hint,
             last_seen_millis: Some(presence.monotonic_millis),
           });
+        self.refresh_db8_remote_carets(cx);
       },
       SessionEvent::SnapshotApplied { .. }
       | SessionEvent::UpdateApplied { .. }
@@ -1897,6 +1902,45 @@ impl Workspace {
       | SessionEvent::Reconnecting => {},
     }
     cx.notify();
+  }
+
+  fn publish_db8_presence(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    if self.collaboration.panel_id != Some(panel_id) || self.collaboration.format_kind != Some(FormatKind::Db8) {
+      return;
+    }
+    let cursor = editor.read_with(cx, |editor: &RichTextEditor, _| db8_presence_cursor(editor));
+    if let Some(sender) = &self.collaboration_client_updates {
+      let _ = sender.send(PendingCollaborationUpdate::Presence { cursor });
+      return;
+    }
+    if let Some(host) = self.collaboration_host.as_ref() {
+      let _ = host.publish_presence("", cursor, None, None);
+    }
+  }
+
+  fn refresh_db8_remote_carets(&mut self, cx: &mut Context<Self>) {
+    if self.collaboration.format_kind != Some(FormatKind::Db8) {
+      return;
+    }
+    let Some(panel_id) = self.collaboration.panel_id else {
+      return;
+    };
+    let Some(editor) = self.document_editor_for_panel(panel_id, cx) else {
+      return;
+    };
+    let remote_carets = self
+      .collaboration
+      .peers
+      .iter()
+      .filter_map(|(session_id, peer)| {
+        let offset = parse_db8_presence_cursor(peer.cursor.as_deref()?)?;
+        Some(ExternalCaret {
+          offset,
+          color_rgb: remote_caret_color(session_id),
+        })
+      })
+      .collect();
+    editor.update(cx, |editor, cx| editor.set_external_carets(remote_carets, cx));
   }
 
   fn apply_collaboration_source_to_panel(
@@ -2142,6 +2186,7 @@ impl Workspace {
               ));
             }
           },
+          PendingCollaborationUpdate::Presence { .. } => {},
         }
       } else {
         self.collaboration_last_published_hash = hash;
@@ -2218,6 +2263,7 @@ impl Workspace {
       let result = match &update {
         PendingCollaborationUpdate::Source { source, application, .. } => host.publish_update_from_source(source, application.clone()),
         PendingCollaborationUpdate::Application { application } => host.publish_application_update(application.clone()),
+        PendingCollaborationUpdate::Presence { cursor } => host.publish_presence("", cursor.clone(), None, None),
       };
       if let Err(error) = result {
         self.collaboration_pending_updates.push_front(update);
@@ -2334,13 +2380,16 @@ enum PendingCollaborationUpdate {
   Application {
     application: UpdateApplication,
   },
+  Presence {
+    cursor: Option<String>,
+  },
 }
 
 impl PendingCollaborationUpdate {
   const fn hash(&self) -> Option<[u8; 32]> {
     match self {
       Self::Source { hash, .. } => *hash,
-      Self::Application { .. } => None,
+      Self::Application { .. } | Self::Presence { .. } => None,
     }
   }
 }
@@ -2455,6 +2504,49 @@ fn show_save_failed(window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, det
   let _ = window_handle.update(cx, |_, window, cx| {
     window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
   });
+}
+fn db8_presence_cursor(editor: &RichTextEditor) -> Option<String> {
+  let selection = editor.selection();
+  (selection.anchor == selection.head).then(|| format!("db8:{}:{}", selection.head.paragraph, selection.head.byte))
+}
+
+fn parse_db8_presence_cursor(cursor: &str) -> Option<DocumentOffset> {
+  let mut parts = cursor.split(':');
+  if parts.next()? != "db8" {
+    return None;
+  }
+  let paragraph = parts.next()?.parse().ok()?;
+  let byte = parts.next()?.parse().ok()?;
+  if parts.next().is_some() {
+    return None;
+  }
+  Some(DocumentOffset { paragraph, byte })
+}
+
+fn remote_caret_color(session_id: &SessionId) -> u32 {
+  let bytes = session_id.0.as_bytes();
+  let hue = bytes
+    .iter()
+    .fold(0u32, |acc, byte| acc.wrapping_mul(31).wrapping_add(u32::from(*byte)))
+    % 360;
+  hsl_to_rgb(hue as f32, 0.72, 0.42)
+}
+
+fn hsl_to_rgb(hue: f32, saturation: f32, lightness: f32) -> u32 {
+  let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+  let hue_prime = hue / 60.0;
+  let x = chroma * (1.0 - (hue_prime % 2.0 - 1.0).abs());
+  let (r1, g1, b1) = match hue_prime as u32 {
+    0 => (chroma, x, 0.0),
+    1 => (x, chroma, 0.0),
+    2 => (0.0, chroma, x),
+    3 => (0.0, x, chroma),
+    4 => (x, 0.0, chroma),
+    _ => (chroma, 0.0, x),
+  };
+  let m = lightness - chroma / 2.0;
+  let channel = |value: f32| ((value + m).clamp(0.0, 1.0) * 255.0).round() as u32;
+  (channel(r1) << 16) | (channel(g1) << 8) | channel(b1)
 }
 
 enum LoadedWorkspaceDocument {

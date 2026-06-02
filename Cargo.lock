@@ -3560,7 +3560,6 @@ version = "0.1.0"
 dependencies = [
  "cosmic-text",
  "crop",
- "flowstate-collab",
  "gpui",
  "gpui-component",
  "hotpath",
