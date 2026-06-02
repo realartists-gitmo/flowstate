@@ -82,6 +82,7 @@ pub struct Workspace {
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
+  document_style_picker_revision: u64,
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,

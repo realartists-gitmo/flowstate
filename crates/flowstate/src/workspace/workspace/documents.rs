@@ -72,6 +72,7 @@ impl Workspace {
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
       settings_overlay: None,
+      document_style_picker_revision: 0,
       document_style_section: DocumentStyleSection::Text,
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),

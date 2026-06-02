@@ -381,11 +381,19 @@ fn style_color_item(
 ) -> SettingItem {
   SettingItem::render(move |_, window, cx| {
     let key = title.to_ascii_lowercase().replace(' ', "-");
-    let picker_state = window.use_keyed_state(SharedString::from(format!("style-color-picker-{key}")), cx, |window, cx| {
-      let value = active_theme_value(cx, &workspace, get).unwrap_or_else(black);
-      ColorPickerState::new(window, cx).default_value(value)
-    });
+    let active_value = active_theme_value(cx, &workspace, get).unwrap_or_else(black);
+    let picker_revision = active_style_picker_revision(cx, &workspace);
+    let picker_state = window.use_keyed_state(
+      SharedString::from(format!(
+        "style-color-picker-{key}-{picker_revision}-{:.6}-{:.6}-{:.6}-{:.6}",
+        active_value.h, active_value.s, active_value.l, active_value.a
+      )),
+      cx,
+      |window, cx| ColorPickerState::new(window, cx).default_value(active_value),
+    );
     let picker_state = picker_state.clone();
+    let pending_value = picker_state.read(cx).value();
+    let has_pending_change = pending_value.is_some_and(|value| value != active_value);
     h_flex()
       .w_full()
       .items_center()
@@ -396,21 +404,23 @@ fn style_color_item(
           .small()
           .anchor(Corner::TopRight),
       )
-      .child(
-        Button::new(SharedString::from(format!("style-apply-color-{key}")))
-          .icon(IconName::Check)
-          .small()
-          .ghost()
-          .tooltip("Apply color")
-          .on_click({
-            let workspace = workspace.clone();
-            move |_, _, cx| {
-              if let Some(color) = picker_state.read(cx).value() {
-                update_active_document_theme(cx, &workspace, move |theme| set(theme, color));
+      .when(has_pending_change, |this| {
+        this.child(
+          Button::new(SharedString::from(format!("style-apply-color-{key}")))
+            .icon(IconName::Check)
+            .small()
+            .ghost()
+            .tooltip("Apply color")
+            .on_click({
+              let workspace = workspace.clone();
+              move |_, _, cx| {
+                if let Some(color) = picker_state.read(cx).value() {
+                  update_active_document_theme(cx, &workspace, move |theme| set(theme, color));
+                }
               }
-            }
-          }),
-      )
+            }),
+        )
+      })
       .into_any_element()
   })
 }
@@ -427,6 +437,13 @@ fn active_theme_value<T>(cx: &App, workspace: &WeakEntity<Workspace>, get: fn(&D
 }
 
 #[hotpath::measure]
+fn active_style_picker_revision(cx: &App, workspace: &WeakEntity<Workspace>) -> u64 {
+  workspace
+    .upgrade()
+    .map(|workspace| workspace.read(cx).document_style_picker_revision)
+    .unwrap_or_default()
+}
+
 fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut DocumentTheme)) {
   let _ = workspace.update(cx, |workspace, cx| {
     let mut theme = workspace

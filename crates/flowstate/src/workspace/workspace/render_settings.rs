@@ -668,6 +668,10 @@ impl Workspace {
       },
     }
 
+    if matches!(section, DocumentStyleSection::Colors | DocumentStyleSection::Background) {
+      self.document_style_picker_revision = self.document_style_picker_revision.wrapping_add(1);
+    }
+
     let theme_for_save = theme.clone();
     cx.background_executor()
       .spawn(async move {
