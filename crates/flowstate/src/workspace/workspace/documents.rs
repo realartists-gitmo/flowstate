@@ -96,6 +96,7 @@ impl Workspace {
       toolkit_search_filter: ToolkitSearchFilter::All,
       toolkit_hits: Vec::new(),
       expanded_toolkit_hits: HashSet::new(),
+      toolkit_results_scroll_handle: VirtualListScrollHandle::new(),
       toolkit_status: "Select a tub to search evidence.".into(),
       toolkit_search_generation: 0,
       _tub_file_search_subscription,
@@ -211,7 +212,9 @@ impl Workspace {
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
-    self.flow_panels.retain(|panel| panel.read(cx).id() != panel_id);
+    self
+      .flow_panels
+      .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     if closing_active_document {
       if let Some(panel) = self.document_panels.last() {
@@ -265,23 +268,11 @@ impl Workspace {
     self.open_document_path_with_target(path, None, window, cx);
   }
 
-  pub fn open_document_path_at_paragraph(
-    &mut self,
-    path: PathBuf,
-    paragraph_ix: usize,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  pub fn open_document_path_at_paragraph(&mut self, path: PathBuf, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     self.open_document_path_with_target(path, Some(paragraph_ix), window, cx);
   }
 
-  fn open_document_path_with_target(
-    &mut self,
-    path: PathBuf,
-    target_paragraph_ix: Option<usize>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn open_document_path_with_target(&mut self, path: PathBuf, target_paragraph_ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
@@ -394,13 +385,7 @@ impl Workspace {
     panel
   }
 
-  fn add_flow_panel(
-    &mut self,
-    document: flowstate_flow::FlowDocument,
-    path: Option<PathBuf>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
     self.create_flow_panel(document, path, window, cx);
     cx.notify();
   }
@@ -607,11 +592,7 @@ impl Workspace {
 
     let (has_path, has_unsaved_changes, generation) = {
       let editor = editor.read(cx);
-      (
-        editor.document_path().is_some(),
-        editor.has_unsaved_changes(),
-        editor.edit_generation(),
-      )
+      (editor.document_path().is_some(), editor.has_unsaved_changes(), editor.edit_generation())
     };
     if !has_path || !has_unsaved_changes {
       return;
@@ -619,7 +600,9 @@ impl Workspace {
     if self.autosave_document_generations.get(&panel_id) == Some(&generation) {
       return;
     }
-    self.autosave_document_generations.insert(panel_id, generation);
+    self
+      .autosave_document_generations
+      .insert(panel_id, generation);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
     cx.spawn(async move |workspace, cx| {
       if let Err(error) = save_task.await {
@@ -759,7 +742,6 @@ impl Workspace {
     })
     .detach();
   }
-
 }
 
 #[derive(Clone)]
