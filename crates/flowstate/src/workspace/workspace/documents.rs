@@ -1976,14 +1976,20 @@ impl Workspace {
         if let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
           && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
         {
-          editor.update(cx, |editor, cx| editor.apply_remote_operations(&operations, cx));
+          editor.update(cx, |editor, cx| {
+            editor.clear_collaboration_edit();
+            editor.apply_remote_operations(&operations, cx);
+            editor.clear_collaboration_edit();
+          });
           return Ok(());
         }
         let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
           anyhow::bail!("remote DB8 update materialized as a different document kind");
         };
         editor.update(cx, |editor, cx| {
+          editor.clear_collaboration_edit();
           editor.replace_document_from_collaboration(*document, cx);
+          editor.clear_collaboration_edit();
         });
       },
       FormatKind::Fl0 => {
