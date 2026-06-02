@@ -32,7 +32,10 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
       body_font_size: theme.body_font_size.as_f32(),
       cite_font_size: cite.font_size.unwrap_or(theme.body_font_size).as_f32(),
       condensed_font_size: condensed.font_size.unwrap_or(theme.body_font_size).as_f32(),
-      ultracondensed_font_size: ultracondensed.font_size.unwrap_or(theme.body_font_size).as_f32(),
+      ultracondensed_font_size: ultracondensed
+        .font_size
+        .unwrap_or(theme.body_font_size)
+        .as_f32(),
       pocket_font_size: pocket.font_size.as_f32(),
       hat_font_size: hat.font_size.as_f32(),
       block_font_size: block.font_size.as_f32(),
@@ -45,10 +48,30 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
       hat_before: hat.spacing_before.as_f32(),
       block_before: block.spacing_before.as_f32(),
       tag_before: tag.spacing_before.as_f32(),
-      pocket_border_width: pocket.border.map_or(0.0, |border| border.width.as_f32()),
-      pocket_border_space_x: pocket.border.map_or(0.0, |border| border.space_x.as_f32()),
-      pocket_border_space_y: pocket.border.map_or(0.0, |border| border.space_y.as_f32()),
-      emphasis_border_width: emphasis.border_width.unwrap_or_default().as_f32(),
+      pocket_box_enabled: pocket.border.is_some(),
+      pocket_border_width: pocket.border.map_or(1.0, |border| border.width.as_f32()),
+      pocket_border_space_x: pocket.border.map_or(6.0, |border| border.space_x.as_f32()),
+      pocket_border_space_y: pocket.border.map_or(2.0, |border| border.space_y.as_f32()),
+      hat_box_enabled: hat.border.is_some(),
+      hat_border_width: hat.border.map_or(1.0, |border| border.width.as_f32()),
+      block_box_enabled: block.border.is_some(),
+      block_border_width: block.border.map_or(1.0, |border| border.width.as_f32()),
+      tag_box_enabled: tag.border.is_some(),
+      tag_border_width: tag.border.map_or(1.0, |border| border.width.as_f32()),
+      analytic_box_enabled: analytic.border.is_some(),
+      analytic_border_width: analytic.border.map_or(1.0, |border| border.width.as_f32()),
+      undertag_box_enabled: undertag.border.is_some(),
+      undertag_border_width: undertag.border.map_or(1.0, |border| border.width.as_f32()),
+      cite_box_enabled: cite.border_width.is_some(),
+      cite_border_width: cite.border_width.unwrap_or(px(1.0)).as_f32(),
+      emphasis_box_enabled: emphasis.border_width.is_some(),
+      emphasis_border_width: emphasis.border_width.unwrap_or(px(1.0)).as_f32(),
+      underline_box_enabled: underline.border_width.is_some(),
+      underline_border_width: underline.border_width.unwrap_or(px(1.0)).as_f32(),
+      condensed_box_enabled: condensed.border_width.is_some(),
+      condensed_border_width: condensed.border_width.unwrap_or(px(1.0)).as_f32(),
+      ultracondensed_box_enabled: ultracondensed.border_width.is_some(),
+      ultracondensed_border_width: ultracondensed.border_width.unwrap_or(px(1.0)).as_f32(),
       emphasis_border_paint_width: theme.inline_border_paint_width.as_f32(),
       box_padding_left: theme.box_padding_left.as_f32(),
       box_padding_right: theme.box_padding_right.as_f32(),
@@ -75,7 +98,10 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
       underline_color: underline.color.unwrap_or(theme.default_text_color).into(),
       emphasis_color: emphasis.color.unwrap_or(theme.default_text_color).into(),
       condensed_color: condensed.color.unwrap_or(theme.default_text_color).into(),
-      ultracondensed_color: ultracondensed.color.unwrap_or(theme.default_text_color).into(),
+      ultracondensed_color: ultracondensed
+        .color
+        .unwrap_or(theme.default_text_color)
+        .into(),
       normal_bold: theme.normal_bold,
       normal_italic: theme.normal_italic,
       normal_underline: theme.normal_underline.into(),
@@ -148,18 +174,153 @@ impl From<DocumentThemeSettings> for DocumentTheme {
     theme.normal_italic = settings.normal_italic;
     theme.normal_underline = settings.normal_underline.into();
 
-    update_paragraph_style(&mut theme, 0, settings.pocket_font_size, settings.pocket_color.into(), settings.pocket_bold, settings.pocket_italic, settings.pocket_underline.into(), settings.pocket_before, Some((settings.pocket_border_width, settings.pocket_border_space_x, settings.pocket_border_space_y)));
-    update_paragraph_style(&mut theme, 1, settings.hat_font_size, settings.hat_color.into(), settings.hat_bold, settings.hat_italic, settings.hat_underline.into(), settings.hat_before, None);
-    update_paragraph_style(&mut theme, 2, settings.block_font_size, settings.block_color.into(), settings.block_bold, settings.block_italic, settings.block_underline.into(), settings.block_before, None);
-    update_paragraph_style(&mut theme, 3, settings.tag_font_size, settings.tag_color.into(), settings.tag_bold, settings.tag_italic, settings.tag_underline.into(), settings.tag_before, None);
-    update_paragraph_style(&mut theme, 4, settings.tag_font_size, settings.analytic_color.into(), settings.analytic_bold, settings.analytic_italic, settings.analytic_underline.into(), settings.tag_before, None);
-    update_paragraph_style(&mut theme, 6, settings.undertag_font_size, settings.undertag_color.into(), settings.undertag_bold, settings.undertag_italic, settings.undertag_underline.into(), 0.0, None);
+    update_paragraph_style(
+      &mut theme,
+      0,
+      settings.pocket_font_size,
+      settings.pocket_color.into(),
+      settings.pocket_bold,
+      settings.pocket_italic,
+      settings.pocket_underline.into(),
+      settings.pocket_before,
+      settings.pocket_box_enabled.then_some((
+        settings.pocket_border_width,
+        settings.pocket_border_space_x,
+        settings.pocket_border_space_y,
+      )),
+    );
+    update_paragraph_style(
+      &mut theme,
+      1,
+      settings.hat_font_size,
+      settings.hat_color.into(),
+      settings.hat_bold,
+      settings.hat_italic,
+      settings.hat_underline.into(),
+      settings.hat_before,
+      settings
+        .hat_box_enabled
+        .then_some((settings.hat_border_width, settings.pocket_border_space_x, settings.pocket_border_space_y)),
+    );
+    update_paragraph_style(
+      &mut theme,
+      2,
+      settings.block_font_size,
+      settings.block_color.into(),
+      settings.block_bold,
+      settings.block_italic,
+      settings.block_underline.into(),
+      settings.block_before,
+      settings.block_box_enabled.then_some((
+        settings.block_border_width,
+        settings.pocket_border_space_x,
+        settings.pocket_border_space_y,
+      )),
+    );
+    update_paragraph_style(
+      &mut theme,
+      3,
+      settings.tag_font_size,
+      settings.tag_color.into(),
+      settings.tag_bold,
+      settings.tag_italic,
+      settings.tag_underline.into(),
+      settings.tag_before,
+      settings
+        .tag_box_enabled
+        .then_some((settings.tag_border_width, settings.pocket_border_space_x, settings.pocket_border_space_y)),
+    );
+    update_paragraph_style(
+      &mut theme,
+      4,
+      settings.tag_font_size,
+      settings.analytic_color.into(),
+      settings.analytic_bold,
+      settings.analytic_italic,
+      settings.analytic_underline.into(),
+      settings.tag_before,
+      settings.analytic_box_enabled.then_some((
+        settings.analytic_border_width,
+        settings.pocket_border_space_x,
+        settings.pocket_border_space_y,
+      )),
+    );
+    update_paragraph_style(
+      &mut theme,
+      6,
+      settings.undertag_font_size,
+      settings.undertag_color.into(),
+      settings.undertag_bold,
+      settings.undertag_italic,
+      settings.undertag_underline.into(),
+      0.0,
+      settings.undertag_box_enabled.then_some((
+        settings.undertag_border_width,
+        settings.pocket_border_space_x,
+        settings.pocket_border_space_y,
+      )),
+    );
 
-    update_semantic_style(&mut theme, 1, settings.cite_font_size, settings.cite_color.into(), settings.cite_bold, settings.cite_italic, settings.cite_underline.into(), None);
-    update_semantic_style(&mut theme, 2, settings.cite_font_size, settings.emphasis_color.into(), settings.emphasis_bold, settings.emphasis_italic, settings.emphasis_underline.into(), Some(settings.emphasis_border_width));
-    update_semantic_style(&mut theme, 3, settings.body_font_size, settings.underline_color.into(), settings.underline_bold, settings.underline_italic, settings.underline_underline.into(), None);
-    update_semantic_style(&mut theme, 4, settings.condensed_font_size, settings.condensed_color.into(), settings.condensed_bold, settings.condensed_italic, settings.condensed_underline.into(), None);
-    update_semantic_style(&mut theme, 5, settings.ultracondensed_font_size, settings.ultracondensed_color.into(), settings.ultracondensed_bold, settings.ultracondensed_italic, settings.ultracondensed_underline.into(), None);
+    update_semantic_style(
+      &mut theme,
+      1,
+      settings.cite_font_size,
+      settings.cite_color.into(),
+      settings.cite_bold,
+      settings.cite_italic,
+      settings.cite_underline.into(),
+      settings
+        .cite_box_enabled
+        .then_some(settings.cite_border_width),
+    );
+    update_semantic_style(
+      &mut theme,
+      2,
+      settings.cite_font_size,
+      settings.emphasis_color.into(),
+      settings.emphasis_bold,
+      settings.emphasis_italic,
+      settings.emphasis_underline.into(),
+      settings
+        .emphasis_box_enabled
+        .then_some(settings.emphasis_border_width),
+    );
+    update_semantic_style(
+      &mut theme,
+      3,
+      settings.body_font_size,
+      settings.underline_color.into(),
+      settings.underline_bold,
+      settings.underline_italic,
+      settings.underline_underline.into(),
+      settings
+        .underline_box_enabled
+        .then_some(settings.underline_border_width),
+    );
+    update_semantic_style(
+      &mut theme,
+      4,
+      settings.condensed_font_size,
+      settings.condensed_color.into(),
+      settings.condensed_bold,
+      settings.condensed_italic,
+      settings.condensed_underline.into(),
+      settings
+        .condensed_box_enabled
+        .then_some(settings.condensed_border_width),
+    );
+    update_semantic_style(
+      &mut theme,
+      5,
+      settings.ultracondensed_font_size,
+      settings.ultracondensed_color.into(),
+      settings.ultracondensed_bold,
+      settings.ultracondensed_italic,
+      settings.ultracondensed_underline.into(),
+      settings
+        .ultracondensed_box_enabled
+        .then_some(settings.ultracondensed_border_width),
+    );
 
     flowstate_document::set_custom_highlight_color(&mut theme, 1, settings.highlight_spoken.into());
     flowstate_document::set_custom_highlight_color(&mut theme, 2, settings.highlight_insert.into());
