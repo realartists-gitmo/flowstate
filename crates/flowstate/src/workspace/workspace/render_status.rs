@@ -1,3 +1,6 @@
+use gpui_component::avatar::Avatar;
+
+
 struct CollaborationPeerStatusItem {
   session_id: SessionId,
   label: String,
