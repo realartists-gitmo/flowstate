@@ -78,6 +78,7 @@ pub struct Workspace {
   collapsed_outline_items: HashSet<usize>,
   outline_revision: u64,
   outline_viewport_paragraph: Option<usize>,
+  outline_active_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   settings_overlay: Option<WorkspaceSettingsOverlay>,

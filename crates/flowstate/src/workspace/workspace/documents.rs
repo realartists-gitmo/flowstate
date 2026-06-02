@@ -68,6 +68,7 @@ impl Workspace {
       collapsed_outline_items: HashSet::new(),
       outline_revision: 0,
       outline_viewport_paragraph: None,
+      outline_active_paragraph: None,
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
       settings_overlay: None,
@@ -159,10 +160,7 @@ impl Workspace {
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
-        if workspace.outline_viewport_paragraph != viewport_paragraph {
-          workspace.outline_viewport_paragraph = viewport_paragraph;
-          cx.notify();
-        }
+        workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
       }),
     ));
@@ -177,6 +175,9 @@ impl Workspace {
     self.active_document_id = Some(panel_id);
     self.active_editor = Some(editor);
     self.active_flow = None;
+    self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
+    self.outline_active_paragraph = None;
+    self.outline_scrolled_paragraph = None;
     self.refresh_outline_tree(cx);
     cx.notify();
   }
@@ -187,6 +188,7 @@ impl Workspace {
     self.active_flow = Some(editor);
     self.outline_cache = None;
     self.outline_viewport_paragraph = None;
+    self.outline_active_paragraph = None;
     self.outline_scrolled_paragraph = None;
     cx.notify();
   }
@@ -235,11 +237,13 @@ impl Workspace {
         .active_editor
         .as_ref()
         .and_then(|editor| editor.read(cx).viewport_anchor_paragraph());
+      self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
     }
     if self.active_document_id.is_none() {
       self.outline_cache = None;
       self.outline_viewport_paragraph = None;
+      self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
       self.collapsed_outline_items.clear();
       self
@@ -381,6 +385,7 @@ impl Workspace {
     self.flow_panels.push(panel.clone());
     self.outline_cache = None;
     self.outline_viewport_paragraph = None;
+    self.outline_active_paragraph = None;
     self.outline_scrolled_paragraph = None;
     panel
   }
