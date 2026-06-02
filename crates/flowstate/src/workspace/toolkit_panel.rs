@@ -1046,7 +1046,7 @@ fn toolkit_hit_card_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme
   if expanded {
     estimated.clamp(px(258.0), px(720.0))
   } else {
-    estimated.clamp(px(54.0), px(258.0))
+    estimated.clamp(px(36.0), px(258.0))
   }
 }
 
@@ -1064,7 +1064,7 @@ fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded
     &hit.preview_paragraphs[..limit]
   };
 
-  let mut height = theme.pageless_inset_top + theme.pageless_inset_bottom;
+  let mut height = px(8.0) + px(12.0);
   for paragraph in paragraphs {
     height += toolkit_estimated_paragraph_height(paragraph, theme);
   }
@@ -1073,39 +1073,38 @@ fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded
 
 fn toolkit_estimated_paragraph_height(paragraph: &InputParagraph, theme: &DocumentTheme) -> Pixels {
   let zoom = (theme.zoom_factor * TOOLKIT_PREVIEW_ZOOM).max(0.01);
-  let (base_font_size, spacing_before, spacing_after, border_pad_x, border_pad_y) =
-    match paragraph.style {
-      ParagraphStyle::Normal => (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
-      ParagraphStyle::Custom(slot) => theme.custom_paragraph_styles.get(&slot).map_or(
-        (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
-        |style| {
-          let border = style.border;
-          let border_pad_x = border.map_or(px(0.0), |border| border.width + border.space_x);
-          let border_pad_y = border.map_or(px(0.0), |border| border.width + border.space_y);
-          (
-            style.font_size * zoom,
-            style.spacing_before * zoom,
-            style.spacing_after * zoom,
-            border_pad_x,
-            border_pad_y,
-          )
-        },
-      ),
-    };
+  let (base_font_size, spacing_before, spacing_after, border_pad_x, border_pad_y) = match paragraph.style {
+    ParagraphStyle::Normal => (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
+    ParagraphStyle::Custom(slot) => theme.custom_paragraph_styles.get(&(slot & 0x7f)).map_or(
+      (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
+      |style| {
+        let border = style.border;
+        let border_pad_x = border.map_or(px(0.0), |border| border.width + border.space_x);
+        let border_pad_y = border.map_or(px(0.0), |border| border.width + border.space_y);
+        (
+          style.font_size * zoom,
+          style.spacing_before,
+          style.spacing_after,
+          border_pad_x,
+          border_pad_y,
+        )
+      },
+    ),
+  };
 
   let max_run_font_size = paragraph.runs.iter().fold(base_font_size, |max_size, run| {
     let run_size = match run.styles.semantic {
       RunSemanticStyle::Plain => base_font_size,
       RunSemanticStyle::Custom(slot) => theme
         .custom_semantic_styles
-        .get(&slot)
+        .get(&(slot & 0x7f))
         .and_then(|style| style.font_size)
         .map_or(base_font_size, |font_size| font_size * zoom),
     };
     max_size.max(run_size)
   });
   let line_height = (max_run_font_size + max_run_font_size * theme.line_gap_fraction) * theme.line_spacing;
-  let content_width = (px(320.0) - theme.pageless_inset_x * 2.0 - border_pad_x * 2.0).max(px(1.0));
+  let content_width = (px(344.0) - px(10.0) * 2.0 - border_pad_x * 2.0).max(px(1.0));
   let avg_char_width = (max_run_font_size * 0.50).max(px(1.0));
   let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
   let text_len = paragraph
