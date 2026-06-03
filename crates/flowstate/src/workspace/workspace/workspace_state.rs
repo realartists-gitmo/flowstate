@@ -191,6 +191,7 @@ impl Workspace {
       self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
       self.refresh_outline_tree(cx);
+      self.persist_temporary_workspace_session(cx);
       cx.notify();
       return;
     }
@@ -206,6 +207,7 @@ impl Workspace {
       self.outline_viewport_paragraph = None;
       self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
+      self.persist_temporary_workspace_session(cx);
       cx.notify();
     }
   }

@@ -49,6 +49,10 @@ pub fn load_send_custom_directory() -> Option<PathBuf> {
   load_app_settings().editor.send_custom_directory
 }
 
+pub fn load_recent_documents() -> Vec<PathBuf> {
+  load_app_settings().recent_documents
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 #[hotpath::measure]
@@ -101,6 +105,12 @@ pub fn save_send_to_document_directory(enabled: bool) -> io::Result<()> {
 pub fn save_send_custom_directory(path: Option<PathBuf>) -> io::Result<()> {
   let mut settings = load_app_settings();
   settings.editor.send_custom_directory = path;
+  save_app_settings(settings)
+}
+
+pub fn save_recent_documents(recent_documents: Vec<PathBuf>) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.recent_documents = recent_documents;
   save_app_settings(settings)
 }
 

@@ -87,11 +87,18 @@ impl Workspace {
     let new_flow = cx.listener(|workspace, _, window, cx| workspace.new_flow(window, cx));
     let open_document = cx.listener(|workspace, _, window, cx| workspace.prompt_open_document(window, cx));
     let open_search = cx.listener(|workspace, _, window, cx| workspace.open_file_search_overlay(window, cx));
+    let recent_documents = self
+      .recent_documents
+      .iter()
+      .take(3)
+      .cloned()
+      .collect::<Vec<_>>();
     v_flex()
       .size_full()
       .items_center()
-      .justify_center()
+      .justify_start()
       .gap_3()
+      .pt(px(32.0))
       .bg(cx.theme().background)
       .child(
         div()
@@ -130,10 +137,121 @@ impl Workspace {
               .on_click(open_search),
           ),
       )
+      .when(!recent_documents.is_empty(), |this| {
+        this.child(
+          h_flex()
+            .w_full()
+            .flex_1()
+            .items_start()
+            .gap_4()
+            .px_8()
+            .pb_8()
+            .pt_4()
+            .children(recent_documents.into_iter().enumerate().map(|(ix, path)| {
+              let title = path
+                .file_name()
+                .map(|name| name.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+              let path_text = path.display().to_string();
+              let preview_document = self.recent_document_previews.get(&path).cloned();
+              let preview_unavailable = preview_document.is_none();
+              let hover_group = format!("empty-recent-document-hover-{ix}");
+              let preview_radius = cx.theme().radius.max(px(1.0)) - px(1.0);
+              let open_recent = cx.listener({
+                let path = path.clone();
+                move |workspace, _, window, cx| workspace.open_document_path(path.clone(), window, cx)
+              });
+              v_flex()
+                .id(("empty-recent-document", ix))
+                .h_full()
+                .flex_1()
+                .min_w_0()
+                .gap_2()
+                .child(
+                  div()
+                    .group(hover_group.clone())
+                    .w_full()
+                    .flex_1()
+                    .min_h(px(320.0))
+                    .max_h(px(520.0))
+                    .relative()
+                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(cx.theme().background)
+                    .overflow_hidden()
+                    .when_some(preview_document, |this, document| {
+                      this.child(
+                        div()
+                          .size_full()
+                          .rounded(preview_radius)
+                          .overflow_hidden()
+                          .bg(document.theme.document_background_color)
+                          .child(RichTextDocumentElement::new(document)),
+                      )
+                    })
+                    .when(preview_unavailable, |this| {
+                      this.child(
+                        div()
+                          .size_full()
+                          .flex()
+                          .items_center()
+                          .justify_center()
+                          .text_sm()
+                          .text_color(cx.theme().secondary_foreground)
+                          .child("Preview unavailable"),
+                      )
+                    })
+                    .child(
+                      div()
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .invisible()
+                        .bg(cx.theme().muted.opacity(0.18))
+                        .group_hover(hover_group.clone(), |this| this.visible()),
+                    )
+                    .child(
+                      div()
+                        .id(("empty-recent-document-overlay", ix))
+                        .absolute()
+                        .top_0()
+                        .right_0()
+                        .bottom_0()
+                        .left_0()
+                        .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+                        .on_click(open_recent),
+                    ),
+                )
+                .child(
+                  div()
+                    .min_w_0()
+                    .flex_none()
+                    .text_sm()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .text_color(cx.theme().foreground)
+                    .child(title),
+                )
+                .child(
+                  div()
+                    .min_w_0()
+                    .flex_none()
+                    .text_xs()
+                    .text_color(cx.theme().secondary_foreground)
+                    .child(path_text),
+                )
+            })),
+        )
+      })
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    let zoom = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).zoom_percent());
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
