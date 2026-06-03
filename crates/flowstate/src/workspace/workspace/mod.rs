@@ -1,6 +1,7 @@
 use std::{
   cell::Cell,
   collections::{HashMap, HashSet},
+  fs,
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,

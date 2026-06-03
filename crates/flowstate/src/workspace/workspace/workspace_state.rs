@@ -50,11 +50,7 @@ impl Workspace {
     }
 
     let was_expanded = self.active_toolkit_tool.is_some();
-    self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) {
-      None
-    } else {
-      Some(tool)
-    };
+    self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) { None } else { Some(tool) };
 
     let is_expanded = self.active_toolkit_tool.is_some();
     if was_expanded != is_expanded {
@@ -92,14 +88,16 @@ impl Workspace {
     };
     let editor = editor.read(cx);
     let edit_generation = editor.edit_generation();
-    if self
-      .outline_cache
-      .as_ref()
-      .is_some_and(|cache| cache.document_id == active_id && cache.edit_generation == edit_generation && cache.visible_revision == self.outline_revision)
-    {
+    if self.outline_cache.as_ref().is_some_and(|cache| {
+      cache.document_id == active_id && cache.edit_generation == edit_generation && cache.visible_revision == self.outline_revision
+    }) {
       return;
     }
-    if let Some(cache) = self.outline_cache.as_mut().filter(|cache| cache.document_id == active_id) {
+    if let Some(cache) = self
+      .outline_cache
+      .as_mut()
+      .filter(|cache| cache.document_id == active_id)
+    {
       if cache.edit_generation != edit_generation {
         let structure_changed = cache.update_signature(editor.document(), edit_generation);
         if !structure_changed && cache.visible_revision == self.outline_revision {
@@ -107,11 +105,7 @@ impl Workspace {
         }
       }
     } else {
-      self.outline_cache = Some(OutlineCache::new(
-        active_id,
-        edit_generation,
-        outline_signature(editor.document()),
-      ));
+      self.outline_cache = Some(OutlineCache::new(active_id, edit_generation, outline_signature(editor.document())));
     }
     let Some(cache) = self.outline_cache.as_mut() else {
       return;
@@ -168,21 +162,16 @@ impl Workspace {
         })
       })
       .collect::<Vec<_>>();
-    panels.extend(
-      self
-        .flow_panels
-        .iter()
-        .filter_map(|panel| {
-          let panel_state = panel.read(cx);
-          if !panel_state.is_dirty(cx) {
-            return None;
-          }
-          Some(PanelKind::Flow {
-            panel: panel.clone(),
-            editor: panel_state.editor(),
-          })
-        }),
-    );
+    panels.extend(self.flow_panels.iter().filter_map(|panel| {
+      let panel_state = panel.read(cx);
+      if !panel_state.is_dirty(cx) {
+        return None;
+      }
+      Some(PanelKind::Flow {
+        panel: panel.clone(),
+        editor: panel_state.editor(),
+      })
+    }));
     panels
   }
 
@@ -196,6 +185,7 @@ impl Workspace {
       self.active_editor = Some(panel.read(cx).editor());
       self.active_flow = None;
       self.refresh_outline_tree(cx);
+      self.persist_temporary_workspace_session(cx);
       cx.notify();
       return;
     }
@@ -210,13 +200,17 @@ impl Workspace {
       self.outline_cache = None;
       self.outline_viewport_paragraph = None;
       self.outline_scrolled_paragraph = None;
+      self.persist_temporary_workspace_session(cx);
       cx.notify();
     }
   }
 
   fn active_document_index(&self, cx: &App) -> Option<usize> {
     let active_id = self.active_document_id?;
-    self.document_tabs(cx).iter().position(|tab| tab.id == active_id)
+    self
+      .document_tabs(cx)
+      .iter()
+      .position(|tab| tab.id == active_id)
   }
 
   fn activate_document_at_index(&mut self, index: usize, cx: &mut Context<Self>) {
