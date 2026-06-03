@@ -59,6 +59,9 @@ impl Workspace {
       active_toolkit_tool: None,
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
+      recent_document_preview_generation: 0,
+      temporary_workspace_session_pending: None,
+      temporary_workspace_session_persist_scheduled: false,
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
@@ -326,7 +329,7 @@ impl Workspace {
     .detach();
   }
 
-  fn persist_temporary_workspace_session(&self, cx: &App) {
+  fn persist_temporary_workspace_session(&mut self, cx: &mut Context<Self>) {
     let mut entries = Vec::new();
     let mut active_index = None;
 
@@ -358,16 +361,28 @@ impl Workspace {
       });
     }
 
-    let path = temporary_workspace_session_path();
-    if entries.is_empty() {
-      let _ = fs::remove_file(path);
+    self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession { entries, active_index });
+    if self.temporary_workspace_session_persist_scheduled {
       return;
     }
+    self.temporary_workspace_session_persist_scheduled = true;
 
-    let session = TemporaryWorkspaceSession { entries, active_index };
-    if let Ok(bytes) = serde_json::to_vec(&session) {
-      let _ = fs::write(path, bytes);
-    }
+    cx.spawn(async move |workspace, cx| {
+      cx.background_executor()
+        .timer(Duration::from_millis(150))
+        .await;
+      let session = workspace.update(cx, |workspace, _| {
+        workspace.temporary_workspace_session_persist_scheduled = false;
+        workspace.temporary_workspace_session_pending.take()
+      });
+      let Ok(Some(session)) = session else {
+        return;
+      };
+      cx.background_executor()
+        .spawn(async move { persist_temporary_workspace_session_to_disk(session) })
+        .await;
+    })
+    .detach();
   }
 
   fn restore_temporary_workspace_session(&mut self, session: TemporaryWorkspaceSession, window: &mut Window, cx: &mut Context<Self>) {
@@ -410,22 +425,53 @@ impl Workspace {
     cx.notify();
   }
 
-  fn refresh_recent_document_previews(&mut self, _cx: &mut Context<Self>) {
+  fn refresh_recent_document_previews(&mut self, cx: &mut Context<Self>) {
     self
       .recent_document_previews
       .retain(|path, _| self.recent_documents.iter().any(|recent| recent == path));
 
-    for path in &self.recent_documents {
-      if self.recent_document_previews.contains_key(path) || is_flow_path(path) {
-        continue;
-      }
-      let Ok(mut loaded) = load_document_for_open(path) else {
-        continue;
-      };
-      loaded.document.theme = load_document_theme();
-      self
-        .recent_document_previews
-        .insert(path.clone(), recent_document_preview_document(&loaded.document));
+    let paths = self
+      .recent_documents
+      .iter()
+      .filter(|path| !self.recent_document_previews.contains_key(*path) && !is_flow_path(path))
+      .cloned()
+      .collect::<Vec<_>>();
+    if paths.is_empty() {
+      return;
+    }
+
+    self.recent_document_preview_generation = self.recent_document_preview_generation.wrapping_add(1);
+    let generation = self.recent_document_preview_generation;
+    for path in paths {
+      cx.spawn(async move |workspace, cx| {
+        let preview = cx
+          .background_executor()
+          .spawn({
+            let path = path.clone();
+            async move {
+              let mut loaded = load_document_for_open(&path).ok()?;
+              loaded.document.theme = load_document_theme();
+              Some(recent_document_preview_document(&loaded.document))
+            }
+          })
+          .await;
+
+        let _ = workspace.update(cx, |workspace, cx| {
+          if workspace.recent_document_preview_generation != generation
+            || !workspace
+              .recent_documents
+              .iter()
+              .any(|recent| recent == &path)
+          {
+            return;
+          }
+          if let Some(preview) = preview {
+            workspace.recent_document_previews.insert(path, preview);
+            cx.notify();
+          }
+        });
+      })
+      .detach();
     }
   }
 
@@ -1063,6 +1109,30 @@ fn load_temporary_workspace_session() -> Option<TemporaryWorkspaceSession> {
   fs::read(temporary_workspace_session_path())
     .ok()
     .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+#[hotpath::measure]
+fn persist_temporary_workspace_session_to_disk(session: TemporaryWorkspaceSession) {
+  let path = temporary_workspace_session_path();
+  if session.entries.is_empty() {
+    if let Err(error) = fs::remove_file(&path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      eprintln!("failed to remove temporary workspace session {}: {error}", path.display());
+    }
+    return;
+  }
+
+  match serde_json::to_vec(&session) {
+    Ok(bytes) => {
+      if let Err(error) = fs::write(&path, bytes) {
+        eprintln!("failed to write temporary workspace session {}: {error}", path.display());
+      }
+    },
+    Err(error) => {
+      eprintln!("failed to serialize temporary workspace session: {error}");
+    },
+  }
 }
 
 #[hotpath::measure]

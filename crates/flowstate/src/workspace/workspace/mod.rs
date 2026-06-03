@@ -5,6 +5,7 @@ use std::{
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
+  time::Duration,
 };
 
 use gpui::{
@@ -71,6 +72,9 @@ pub struct Workspace {
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, Document>,
+  recent_document_preview_generation: u64,
+  temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
+  temporary_workspace_session_persist_scheduled: bool,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
   body_resizable_state: Entity<ResizableState>,
