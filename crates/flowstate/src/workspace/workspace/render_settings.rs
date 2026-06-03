@@ -117,6 +117,8 @@ fn set_paragraph_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, widt
       width: pt_to_pixels(width_pt.max(0.0)),
       ..existing
     });
+  } else {
+    style.border = None;
   }
   theme.set_custom_paragraph_style(slot, style);
 }
@@ -129,9 +131,7 @@ fn semantic_boxing(theme: &DocumentTheme, slot: u8) -> (bool, f64) {
 
 fn set_semantic_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, width_pt: f64) {
   let mut style = flowstate_document::custom_semantic_style(theme, slot);
-  if enabled {
-    style.border_width = Some(pt_to_pixels(width_pt.max(0.0)));
-  }
+  style.border_width = enabled.then(|| pt_to_pixels(width_pt.max(0.0)));
   theme.set_custom_semantic_style(slot, style);
 }
 
