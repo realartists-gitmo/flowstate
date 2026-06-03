@@ -1,6 +1,10 @@
 mod keymap;
 
+use gpui::actions;
+
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
+
+actions!(flowstate_workspace, [FindInDocumentAction]);
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 
@@ -72,6 +76,7 @@ pub enum CommandId {
   OpenDocument,
   OpenDemoDocument,
   CloseDocument,
+  FindInDocument,
   ToggleRibbon,
   ScrollToParagraph,
 }
@@ -174,6 +179,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::OpenDocument, "Open Document", APP, &[]),
   CommandSpec::new(CommandId::OpenDemoDocument, "Open Demo Document", APP, &[]),
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
+  CommandSpec::new(CommandId::FindInDocument, "Find in Document", EDITOR, &["cmd-f", "ctrl-f"]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
 ];
