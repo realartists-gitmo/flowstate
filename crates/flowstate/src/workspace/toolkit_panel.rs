@@ -6,7 +6,7 @@ use std::{
   time::Duration,
 };
 
-use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px};
+use gpui::{App, Context, IntoElement, PathPromptOptions, Pixels, Timer, Window, div, point, prelude::*, px, size};
 use gpui_component::{
   ActiveTheme as _, Icon, IconName, Selectable as _, Sizable,
   button::{Button, ButtonVariants},
@@ -14,15 +14,15 @@ use gpui_component::{
   input::Input,
   menu::{DropdownMenu as _, PopupMenuItem},
   resizable::{h_resizable, resizable_panel},
-  scroll::ScrollableElement,
   tree::{TreeItem, tree},
-  v_flex,
+  v_flex, v_virtual_list,
 };
 
 use crate::{
   app_settings::{flowstate_data_dir, load_document_theme, save_tub_root},
   rich_text_element::{
-    DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RunStyles, ToolkitTextDrag, document_from_input,
+    DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RunSemanticStyle, RunStyles, ToolkitTextDrag,
+    document_from_input,
   },
 };
 
@@ -517,6 +517,15 @@ impl Workspace {
   }
 
   fn render_toolkit_expanded(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let (preview_theme, _) = self
+      .active_editor
+      .as_ref()
+      .map(|editor| {
+        let editor = editor.read(cx);
+        (editor.document_theme(), editor.invisibility_mode())
+      })
+      .unwrap_or_else(|| (load_document_theme(), false));
+
     let result_list = if self.toolkit_hits.is_empty() {
       div()
         .h(px(120.0))
@@ -528,17 +537,33 @@ impl Workspace {
         .child(self.toolkit_status.clone())
         .into_any_element()
     } else {
-      v_flex()
-        .w_full()
-        .gap_3()
-        .children(
-          self
-            .toolkit_hits
-            .iter()
-            .enumerate()
-            .map(|(ix, hit)| self.render_toolkit_hit(ix, hit, cx)),
-        )
-        .into_any_element()
+      let item_sizes = Rc::new(
+        self
+          .toolkit_hits
+          .iter()
+          .map(|hit| {
+            let expanded =
+              toolkit_hit_preview_can_expand(hit, toolkit_hit_preview_text(hit)) && self.expanded_toolkit_hits.contains(&toolkit_hit_key(hit));
+            size(px(1.0), toolkit_hit_virtual_height(hit, expanded, &preview_theme))
+          })
+          .collect::<Vec<_>>(),
+      );
+      let preview_theme_for_rows = preview_theme.clone();
+      v_virtual_list(cx.entity(), "toolkit-hit-virtual-list", item_sizes, move |workspace, range, _, cx| {
+        range
+          .filter_map(|ix| {
+            workspace.toolkit_hits.get(ix).map(|hit| {
+              let expanded = toolkit_hit_preview_can_expand(hit, toolkit_hit_preview_text(hit))
+                && workspace
+                  .expanded_toolkit_hits
+                  .contains(&toolkit_hit_key(hit));
+              workspace.render_toolkit_hit(ix, hit, toolkit_hit_card_height(hit, expanded, &preview_theme_for_rows), cx)
+            })
+          })
+          .collect::<Vec<_>>()
+      })
+      .track_scroll(&self.toolkit_results_scroll_handle)
+      .into_any_element()
     };
 
     v_flex()
@@ -631,7 +656,7 @@ impl Workspace {
           .flex_1()
           .min_h_0()
           .w_full()
-          .overflow_y_scrollbar()
+          .overflow_hidden()
           .p_2()
           .child(result_list),
       )
@@ -670,7 +695,7 @@ impl Workspace {
       })
   }
 
-  fn render_toolkit_hit(&self, ix: usize, hit: &flowstate_tub::SearchHit, cx: &mut Context<Self>) -> gpui::AnyElement {
+  fn render_toolkit_hit(&self, ix: usize, hit: &flowstate_tub::SearchHit, card_height: Pixels, cx: &mut Context<Self>) -> gpui::AnyElement {
     let open = cx.listener(move |workspace, _, window, cx| workspace.open_toolkit_hit(ix, window, cx));
     let insert = cx.listener(move |workspace, _, window, cx| workspace.insert_toolkit_hit(ix, window, cx));
     let toggle_expanded = cx.listener(move |workspace, _, _, cx| workspace.toggle_toolkit_hit_expanded(ix, cx));
@@ -679,11 +704,7 @@ impl Workspace {
     } else {
       hit.title.clone()
     };
-    let preview_text = if hit.insert_text.trim().is_empty() {
-      hit.snippet.as_str()
-    } else {
-      hit.insert_text.as_str()
-    };
+    let preview_text = toolkit_hit_preview_text(hit);
     let can_expand = toolkit_hit_preview_can_expand(hit, preview_text);
     let expanded = can_expand && self.expanded_toolkit_hits.contains(&toolkit_hit_key(hit));
     let paragraphs = toolkit_hit_insert_paragraphs(hit);
@@ -710,13 +731,12 @@ impl Workspace {
     let preview_radius = card_radius.max(px(1.0)) - px(1.0);
     let expand_icon = if expanded { IconName::Minimize } else { IconName::Maximize };
     let expand_tooltip = if expanded { "Collapse preview" } else { "Expand preview" };
-    let capped = can_expand && !expanded;
 
     div()
       .id(("toolkit-hit", ix))
       .group(hover_group.clone())
       .w_full()
-      .when(capped, |this| this.h(px(258.0)))
+      .h(card_height)
       .relative()
       .rounded(card_radius)
       .border_1()
@@ -734,7 +754,7 @@ impl Workspace {
       .child(
         div()
           .w_full()
-          .when(capped, |this| this.h_full())
+          .h_full()
           .relative()
           .rounded(preview_radius)
           .overflow_hidden()
@@ -743,7 +763,7 @@ impl Workspace {
             div()
               .id(("toolkit-preview-scroll-area", ix))
               .w_full()
-              .when(capped, |this| this.h_full())
+              .h_full()
               .bg(preview_bg)
               .child(RichTextDocumentElement::new(preview_document).with_invisibility_mode(preview_invisibility_mode)),
           ),
@@ -991,6 +1011,14 @@ fn toolkit_preview_document(
   document_from_input(theme, paragraphs)
 }
 
+fn toolkit_hit_preview_text(hit: &flowstate_tub::SearchHit) -> &str {
+  if hit.insert_text.trim().is_empty() {
+    hit.snippet.as_str()
+  } else {
+    hit.insert_text.as_str()
+  }
+}
+
 fn toolkit_hit_preview_can_expand(hit: &flowstate_tub::SearchHit, fallback_text: &str) -> bool {
   if !hit.preview_paragraphs.is_empty() {
     return hit.preview_paragraphs.len() > TOOLKIT_PREVIEW_PARAGRAPH_LIMIT;
@@ -1002,6 +1030,100 @@ fn toolkit_hit_preview_can_expand(hit: &flowstate_tub::SearchHit, fallback_text:
     .lines()
     .count()
     > TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT
+}
+
+fn toolkit_hit_virtual_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
+  toolkit_hit_card_height(hit, expanded, theme) + px(12.0)
+}
+
+fn toolkit_hit_card_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
+  let can_expand = toolkit_hit_preview_can_expand(hit, toolkit_hit_preview_text(hit));
+  if !expanded && can_expand {
+    return px(258.0);
+  }
+
+  let estimated = toolkit_hit_preview_estimated_height(hit, expanded, theme);
+  if expanded {
+    estimated.clamp(px(258.0), px(720.0))
+  } else {
+    estimated.clamp(px(36.0), px(258.0))
+  }
+}
+
+fn toolkit_hit_preview_estimated_height(hit: &flowstate_tub::SearchHit, expanded: bool, theme: &DocumentTheme) -> Pixels {
+  let preview_paragraphs;
+  let paragraphs = if hit.preview_paragraphs.is_empty() {
+    preview_paragraphs = toolkit_fallback_paragraphs(toolkit_hit_preview_text(hit), (!expanded).then_some(TOOLKIT_PREVIEW_FALLBACK_LINE_LIMIT));
+    preview_paragraphs.as_slice()
+  } else {
+    let limit = if expanded {
+      hit.preview_paragraphs.len()
+    } else {
+      TOOLKIT_PREVIEW_PARAGRAPH_LIMIT.min(hit.preview_paragraphs.len())
+    };
+    &hit.preview_paragraphs[..limit]
+  };
+
+  let mut height = px(8.0) + px(12.0);
+  for paragraph in paragraphs {
+    height += toolkit_estimated_paragraph_height(paragraph, theme);
+  }
+  height
+}
+
+fn toolkit_estimated_paragraph_height(paragraph: &InputParagraph, theme: &DocumentTheme) -> Pixels {
+  let zoom = (theme.zoom_factor * TOOLKIT_PREVIEW_ZOOM).max(0.01);
+  let (base_font_size, spacing_before, spacing_after, border_pad_x, border_pad_y) = match paragraph.style {
+    ParagraphStyle::Normal => (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
+    ParagraphStyle::Custom(slot) => theme.custom_paragraph_styles.get(&(slot & 0x7f)).map_or(
+      (theme.body_font_size * zoom, px(0.0), theme.paragraph_after, px(0.0), px(0.0)),
+      |style| {
+        let border = style.border;
+        let border_pad_x = border.map_or(px(0.0), |border| border.width + border.space_x);
+        let border_pad_y = border.map_or(px(0.0), |border| border.width + border.space_y);
+        (
+          style.font_size * zoom,
+          style.spacing_before,
+          style.spacing_after,
+          border_pad_x,
+          border_pad_y,
+        )
+      },
+    ),
+  };
+
+  let max_run_font_size = paragraph.runs.iter().fold(base_font_size, |max_size, run| {
+    let run_size = match run.styles.semantic {
+      RunSemanticStyle::Plain => base_font_size,
+      RunSemanticStyle::Custom(slot) => theme
+        .custom_semantic_styles
+        .get(&(slot & 0x7f))
+        .and_then(|style| style.font_size)
+        .map_or(base_font_size, |font_size| font_size * zoom),
+    };
+    max_size.max(run_size)
+  });
+  let line_height = (max_run_font_size + max_run_font_size * theme.line_gap_fraction) * theme.line_spacing;
+  let content_width = (px(344.0) - px(10.0) * 2.0 - border_pad_x * 2.0).max(px(1.0));
+  let avg_char_width = (max_run_font_size * 0.50).max(px(1.0));
+  let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
+  let text_len = paragraph
+    .runs
+    .iter()
+    .map(|run| run.text.chars().count())
+    .sum::<usize>()
+    .max(1);
+  let forced_lines = paragraph
+    .runs
+    .iter()
+    .map(|run| run.text.matches('\n').count())
+    .sum::<usize>();
+  let estimated_lines = text_len
+    .div_ceil(chars_per_line)
+    .saturating_add(forced_lines)
+    .max(1);
+
+  spacing_before + border_pad_y + line_height * estimated_lines as f32 + border_pad_y + spacing_after
 }
 
 fn toolkit_hit_key(hit: &flowstate_tub::SearchHit) -> String {

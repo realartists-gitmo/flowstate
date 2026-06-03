@@ -74,10 +74,41 @@ pub struct DocumentThemeSettings {
   pub hat_before: f32,
   pub block_before: f32,
   pub tag_before: f32,
+  #[serde(default = "default_true")]
+  pub pocket_box_enabled: bool,
   pub pocket_border_width: f32,
   pub pocket_border_space_x: f32,
   pub pocket_border_space_y: f32,
+  #[serde(default = "default_true")]
+  pub hat_box_enabled: bool,
+  pub hat_border_width: f32,
+  #[serde(default = "default_true")]
+  pub block_box_enabled: bool,
+  pub block_border_width: f32,
+  #[serde(default = "default_true")]
+  pub tag_box_enabled: bool,
+  pub tag_border_width: f32,
+  #[serde(default = "default_true")]
+  pub analytic_box_enabled: bool,
+  pub analytic_border_width: f32,
+  #[serde(default = "default_true")]
+  pub undertag_box_enabled: bool,
+  pub undertag_border_width: f32,
+  #[serde(default = "default_true")]
+  pub cite_box_enabled: bool,
+  pub cite_border_width: f32,
+  #[serde(default = "default_true")]
+  pub emphasis_box_enabled: bool,
   pub emphasis_border_width: f32,
+  #[serde(default = "default_true")]
+  pub underline_box_enabled: bool,
+  pub underline_border_width: f32,
+  #[serde(default = "default_true")]
+  pub condensed_box_enabled: bool,
+  pub condensed_border_width: f32,
+  #[serde(default = "default_true")]
+  pub ultracondensed_box_enabled: bool,
+  pub ultracondensed_border_width: f32,
   pub emphasis_border_paint_width: f32,
   pub box_padding_left: f32,
   pub box_padding_right: f32,
@@ -141,6 +172,10 @@ pub struct DocumentThemeSettings {
   pub ultracondensed_bold: bool,
   pub ultracondensed_italic: bool,
   pub ultracondensed_underline: ThemeUnderlineSetting,
+}
+
+fn default_true() -> bool {
+  true
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]

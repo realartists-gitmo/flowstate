@@ -66,7 +66,12 @@ fn style_number_item(
       .justify_between()
       .gap_3()
       .child(div().w_40().text_sm().child(title))
-      .child(div().w(px(180.0)).ml_auto().child(NumberInput::new(&input).w_full()))
+      .child(
+        div()
+          .w(px(180.0))
+          .ml_auto()
+          .child(NumberInput::new(&input).w_full()),
+      )
       .into_any_element()
   })
 }
@@ -158,20 +163,87 @@ fn style_face_item(
   label: &'static str,
   get: fn(&DocumentTheme) -> (bool, bool, ThemeUnderline),
   set: fn(&mut DocumentTheme, bool, bool, ThemeUnderline),
+  get_box: fn(&DocumentTheme) -> (bool, f64),
+  set_box: fn(&mut DocumentTheme, bool, f64),
 ) -> SettingItem {
-  SettingItem::render(move |_, _, cx| {
+  SettingItem::render(move |_, window, cx| {
     let key = label.to_ascii_lowercase().replace(' ', "-");
     let (bold, italic, underline) = active_theme_value(cx, &workspace, get).unwrap_or_default();
+    let (box_enabled, box_width) = active_theme_value(cx, &workspace, get_box).unwrap_or((false, 1.0));
+    let input_state = window.use_keyed_state(SharedString::from(format!("style-box-width-{key}")), cx, {
+      let workspace = workspace.clone();
+      move |window, cx| {
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(format!("{box_width:.2}")));
+        let _subscriptions = vec![
+          cx.subscribe_in(&input, window, move |_, input, event: &NumberInputEvent, window, cx| {
+            let NumberInputEvent::Step(action) = event;
+            input.update(cx, |input, cx| {
+              if let Ok(value) = input.value().parse::<f64>() {
+                let next = match action {
+                  StepAction::Increment => value + 0.25,
+                  StepAction::Decrement => value - 0.25,
+                }
+                .clamp(0.0, 20.0);
+                input.set_value(SharedString::from(format!("{next:.2}")), window, cx);
+              }
+            });
+          }),
+          cx.subscribe_in(&input, window, {
+            let workspace = workspace.clone();
+            move |state: &mut StyleNumberInputState, input, event: &InputEvent, window, cx| {
+              if let InputEvent::Change = event {
+                input.update(cx, |input, cx| {
+                  if let Ok(value) = input.value().parse::<f64>() {
+                    let value = value.clamp(0.0, 20.0);
+                    if value == state.initial_value {
+                      return;
+                    }
+                    update_active_document_theme(cx, &workspace, move |theme| {
+                      let (enabled, _) = get_box(theme);
+                      set_box(theme, enabled, value);
+                    });
+                    state.initial_value = value;
+                    if input.value().parse::<f64>().ok() != Some(value) {
+                      input.set_value(SharedString::from(format!("{value:.2}")), window, cx);
+                    }
+                  }
+                });
+              }
+            }
+          }),
+        ];
+        StyleNumberInputState {
+          input,
+          initial_value: box_width,
+          _subscriptions,
+        }
+      }
+    });
+    let input = input_state.update(cx, |state, cx| {
+      let input = state.input.clone();
+      let mut refreshed = false;
+      input.update(cx, |input, cx| {
+        if input.value().parse::<f64>().ok() != Some(box_width) {
+          input.set_value(SharedString::from(format!("{box_width:.2}")), window, cx);
+          refreshed = true;
+        }
+      });
+      if refreshed {
+        state.initial_value = box_width;
+      }
+      input
+    });
 
     h_flex()
       .w_full()
       .items_center()
-      .gap_3()
-      .child(div().w_40().text_sm().child(label))
+      .gap_1()
+      .child(div().w(px(128.0)).text_sm().child(label))
       .child(
         Button::new(SharedString::from(format!("style-bold-{key}")))
           .label("B")
           .small()
+          .w(px(34.0))
           .outline()
           .selected(bold)
           .on_click({
@@ -188,6 +260,7 @@ fn style_face_item(
         Button::new(SharedString::from(format!("style-italic-{key}")))
           .label("I")
           .small()
+          .w(px(34.0))
           .outline()
           .selected(italic)
           .on_click({
@@ -203,11 +276,12 @@ fn style_face_item(
       .child(
         Button::new(SharedString::from(format!("style-underline-{key}")))
           .label(match underline {
-            ThemeUnderline::None => "U: None",
-            ThemeUnderline::Single => "U: Single",
-            ThemeUnderline::Double => "U: Double",
+            ThemeUnderline::None => "U: 0",
+            ThemeUnderline::Single => "U: 1",
+            ThemeUnderline::Double => "U: 2",
           })
           .small()
+          .w(px(58.0))
           .outline()
           .on_click({
             let workspace = workspace.clone();
@@ -224,6 +298,31 @@ fn style_face_item(
             }
           }),
       )
+      .child(div().w(px(2.0)).flex_none())
+      .child(
+        div().w(px(22.0)).child(
+          Checkbox::new(SharedString::from(format!("style-box-enabled-{key}")))
+            .small()
+            .checked(box_enabled)
+            .on_click({
+              let workspace = workspace.clone();
+              move |checked, _, cx| {
+                update_active_document_theme(cx, &workspace, move |theme| {
+                  let (_, width) = get_box(theme);
+                  set_box(theme, *checked, width);
+                });
+              }
+            }),
+        ),
+      )
+      .child(
+        div()
+          .w(px(24.0))
+          .text_xs()
+          .text_color(cx.theme().muted_foreground)
+          .child("Box"),
+      )
+      .child(div().w(px(112.0)).child(NumberInput::new(&input).w_full()))
       .into_any_element()
   })
 }
@@ -295,11 +394,19 @@ fn style_color_item(
 ) -> SettingItem {
   SettingItem::render(move |_, window, cx| {
     let key = title.to_ascii_lowercase().replace(' ', "-");
-    let picker_state = window.use_keyed_state(SharedString::from(format!("style-color-picker-{key}")), cx, |window, cx| {
-      let value = active_theme_value(cx, &workspace, get).unwrap_or_else(black);
-      ColorPickerState::new(window, cx).default_value(value)
-    });
+    let active_value = active_theme_value(cx, &workspace, get).unwrap_or_else(black);
+    let picker_revision = active_style_picker_revision(cx, &workspace);
+    let picker_state = window.use_keyed_state(
+      SharedString::from(format!(
+        "style-color-picker-{key}-{picker_revision}-{:.6}-{:.6}-{:.6}-{:.6}",
+        active_value.h, active_value.s, active_value.l, active_value.a
+      )),
+      cx,
+      |window, cx| ColorPickerState::new(window, cx).default_value(active_value),
+    );
     let picker_state = picker_state.clone();
+    let pending_value = picker_state.read(cx).value();
+    let has_pending_change = pending_value.is_some_and(|value| value != active_value);
     h_flex()
       .w_full()
       .items_center()
@@ -310,21 +417,23 @@ fn style_color_item(
           .small()
           .anchor(Corner::TopRight),
       )
-      .child(
-        Button::new(SharedString::from(format!("style-apply-color-{key}")))
-          .icon(IconName::Check)
-          .small()
-          .ghost()
-          .tooltip("Apply color")
-          .on_click({
-            let workspace = workspace.clone();
-            move |_, _, cx| {
-              if let Some(color) = picker_state.read(cx).value() {
-                update_active_document_theme(cx, &workspace, move |theme| set(theme, color));
+      .when(has_pending_change, |this| {
+        this.child(
+          Button::new(SharedString::from(format!("style-apply-color-{key}")))
+            .icon(IconName::Check)
+            .small()
+            .ghost()
+            .tooltip("Apply color")
+            .on_click({
+              let workspace = workspace.clone();
+              move |_, _, cx| {
+                if let Some(color) = picker_state.read(cx).value() {
+                  update_active_document_theme(cx, &workspace, move |theme| set(theme, color));
+                }
               }
-            }
-          }),
-      )
+            }),
+        )
+      })
       .into_any_element()
   })
 }
@@ -341,6 +450,13 @@ fn active_theme_value<T>(cx: &App, workspace: &WeakEntity<Workspace>, get: fn(&D
 }
 
 #[hotpath::measure]
+fn active_style_picker_revision(cx: &App, workspace: &WeakEntity<Workspace>) -> u64 {
+  workspace
+    .upgrade()
+    .map(|workspace| workspace.read(cx).document_style_picker_revision)
+    .unwrap_or_default()
+}
+
 fn update_active_document_theme(cx: &mut App, workspace: &WeakEntity<Workspace>, update: impl FnOnce(&mut DocumentTheme)) {
   let _ = workspace.update(cx, |workspace, cx| {
     let mut theme = workspace
@@ -527,20 +643,24 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
             .default_value(initial_value)
             .placeholder("Custom output directory")
         });
-        let _subscription = cx.subscribe_in(&input, window, move |state: &mut SendDirectoryInputState, input, event: &InputEvent, _, cx| {
-          if let InputEvent::Change = event {
-            let value = input.read(cx).value().trim().to_string();
-            state.current_value = value.clone();
-            let path = (!value.is_empty()).then(|| PathBuf::from(value));
-            cx.background_executor()
-              .spawn(async move {
-                if let Err(error) = save_send_custom_directory(path) {
-                  eprintln!("failed to save send directory setting: {error}");
-                }
-              })
-              .detach();
-          }
-        });
+        let _subscription = cx.subscribe_in(
+          &input,
+          window,
+          move |state: &mut SendDirectoryInputState, input, event: &InputEvent, _, cx| {
+            if let InputEvent::Change = event {
+              let value = input.read(cx).value().trim().to_string();
+              state.current_value = value.clone();
+              let path = (!value.is_empty()).then(|| PathBuf::from(value));
+              cx.background_executor()
+                .spawn(async move {
+                  if let Err(error) = save_send_custom_directory(path) {
+                    eprintln!("failed to save send directory setting: {error}");
+                  }
+                })
+                .detach();
+            }
+          },
+        );
         SendDirectoryInputState {
           input,
           current_value: current,
@@ -562,7 +682,12 @@ fn send_custom_directory_item(workspace: WeakEntity<Workspace>) -> SettingItem {
       .justify_between()
       .gap_3()
       .child(div().w_40().text_sm().child("Send directory"))
-      .child(div().flex_1().min_w(px(220.0)).child(Input::new(&input).w_full()))
+      .child(
+        div()
+          .flex_1()
+          .min_w(px(220.0))
+          .child(Input::new(&input).w_full()),
+      )
       .child(
         Button::new("workspace-send-directory-browse")
           .label("Browse")

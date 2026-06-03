@@ -117,6 +117,9 @@ impl Workspace {
     self
       .outline_tree
       .update(cx, |tree, cx| tree.set_items(items, cx));
+    if let Some(active_paragraph) = self.outline_active_paragraph_for_viewport(self.outline_viewport_paragraph) {
+      self.outline_active_paragraph = Some(active_paragraph);
+    }
   }
 
   pub fn scroll_active_editor_to_paragraph(&mut self, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
@@ -184,6 +187,9 @@ impl Workspace {
       self.active_document_id = Some(panel_id);
       self.active_editor = Some(panel.read(cx).editor());
       self.active_flow = None;
+      self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
+      self.outline_active_paragraph = None;
+      self.outline_scrolled_paragraph = None;
       self.refresh_outline_tree(cx);
       self.persist_temporary_workspace_session(cx);
       cx.notify();
@@ -199,6 +205,7 @@ impl Workspace {
       self.active_flow = Some(panel.read(cx).editor());
       self.outline_cache = None;
       self.outline_viewport_paragraph = None;
+      self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
       self.persist_temporary_workspace_session(cx);
       cx.notify();
@@ -277,10 +284,8 @@ impl Workspace {
     tabs
   }
 
-  fn active_outline_paragraph(&self, cx: &App) -> Option<usize> {
-    let viewport_paragraph = self.active_editor_viewport_paragraph(cx)?;
-    let cache = self.outline_cache.as_ref()?;
-    active_visible_outline_paragraph_from_visible(&cache.visible_paragraphs, viewport_paragraph)
+  fn active_outline_paragraph(&self, _: &App) -> Option<usize> {
+    self.outline_active_paragraph
   }
 
   fn active_editor_viewport_paragraph(&self, cx: &App) -> Option<usize> {
@@ -292,10 +297,30 @@ impl Workspace {
 
   fn refresh_outline_viewport(&mut self, cx: &mut Context<Self>) {
     let viewport_paragraph = self.active_editor_viewport_paragraph(cx);
+    self.update_outline_viewport_paragraph(viewport_paragraph, cx);
+  }
+
+  fn update_outline_viewport_paragraph(&mut self, viewport_paragraph: Option<usize>, cx: &mut Context<Self>) {
+    let mut changed = false;
     if self.outline_viewport_paragraph != viewport_paragraph {
       self.outline_viewport_paragraph = viewport_paragraph;
+      changed = true;
+    }
+    if let Some(active_paragraph) = self.outline_active_paragraph_for_viewport(viewport_paragraph)
+      && self.outline_active_paragraph != Some(active_paragraph)
+    {
+      self.outline_active_paragraph = Some(active_paragraph);
+      changed = true;
+    }
+    if changed {
       cx.notify();
     }
+  }
+
+  fn outline_active_paragraph_for_viewport(&self, viewport_paragraph: Option<usize>) -> Option<usize> {
+    let viewport_paragraph = viewport_paragraph?;
+    let cache = self.outline_cache.as_ref()?;
+    active_visible_outline_paragraph_from_visible(&cache.visible_paragraphs, viewport_paragraph)
   }
 
   fn scroll_outline_item_into_view(&mut self, paragraph_ix: Option<usize>, cx: &mut Context<Self>) {

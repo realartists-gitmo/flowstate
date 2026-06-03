@@ -29,8 +29,8 @@ use gpui_component::slider::{Slider, SliderEvent, SliderState, SliderValue};
 use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
-  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar, h_flex,
-  v_flex,
+  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
+  VirtualListScrollHandle, h_flex, v_flex,
 };
 use uuid::Uuid;
 
@@ -43,8 +43,9 @@ use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save, ThemeUnderline, ZoomIn,
-  ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
+  CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
+  ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document,
+  paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -86,9 +87,11 @@ pub struct Workspace {
   collapsed_outline_items: HashSet<usize>,
   outline_revision: u64,
   outline_viewport_paragraph: Option<usize>,
+  outline_active_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
+  document_style_picker_revision: u64,
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,
@@ -114,6 +117,7 @@ pub struct Workspace {
   toolkit_search_filter: ToolkitSearchFilter,
   toolkit_hits: Vec<SearchHit>,
   expanded_toolkit_hits: HashSet<String>,
+  toolkit_results_scroll_handle: VirtualListScrollHandle,
   toolkit_status: SharedString,
   toolkit_search_generation: u64,
   _tub_file_search_subscription: Subscription,

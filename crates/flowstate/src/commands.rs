@@ -95,7 +95,7 @@ impl CommandSpec {
   }
 }
 
-const EDITOR: Option<&str> = None;
+const EDITOR: Option<&str> = Some(RICH_TEXT_CONTEXT);
 const APP: Option<&str> = None;
 
 /// Metadata source for command palette, menus, rebinding UI, toolbar labels,
