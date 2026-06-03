@@ -10,6 +10,7 @@ use crate::app_settings::load_ribbon_mode;
 use crate::ribbon::EditorRibbon;
 use crate::rich_text_element::RichTextEditor;
 use crate::workspace::Workspace;
+use crate::workspace::document_search_overlay::DocumentSearchBar;
 use crate::workspace::icons::{AppIcon, icon_button};
 
 pub struct DocumentPanel {
@@ -18,6 +19,7 @@ pub struct DocumentPanel {
   path: Option<PathBuf>,
   editor: Entity<RichTextEditor>,
   ribbon: Entity<EditorRibbon>,
+  search_bar: Entity<DocumentSearchBar>,
   workspace: WeakEntity<Workspace>,
   focus_handle: FocusHandle,
   active: bool,
@@ -30,10 +32,12 @@ impl DocumentPanel {
     path: Option<PathBuf>,
     editor: Entity<RichTextEditor>,
     workspace: WeakEntity<Workspace>,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Self {
     let ribbon_mode = load_ribbon_mode();
     let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
+    let search_bar = cx.new(|cx| DocumentSearchBar::new(window, cx));
     let title = title
       .map(Into::into)
       .unwrap_or_else(|| title_for_path(path.as_ref()));
@@ -44,6 +48,7 @@ impl DocumentPanel {
       path,
       editor,
       ribbon,
+      search_bar,
       workspace,
       focus_handle: cx.focus_handle(),
       active: false,
@@ -189,7 +194,10 @@ impl Render for DocumentPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     div()
       .size_full()
+      .flex()
+      .flex_col()
       .bg(cx.theme().background)
-      .child(self.editor.clone())
+      .child(self.search_bar.clone())
+      .child(div().flex_1().overflow_hidden().child(self.editor.clone()))
   }
 }

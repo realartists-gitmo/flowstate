@@ -141,7 +141,7 @@ impl Workspace {
     mut document: Document,
     path: Option<PathBuf>,
     title: Option<String>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
     // DB8 stores style assignments, not style appearance. The render theme is
@@ -166,7 +166,7 @@ impl Workspace {
         editor.set_document_display_name(title.into(), cx);
       });
     }
-    let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, cx));
+    let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
     self.editor_subscriptions.push((
       id,

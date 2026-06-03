@@ -2310,6 +2310,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui-symbols",
  "hotpath",
+ "memchr",
  "mimalloc",
  "rustc-hash 2.1.2",
  "serde",
