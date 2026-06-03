@@ -90,8 +90,9 @@ impl Workspace {
     v_flex()
       .size_full()
       .items_center()
-      .justify_center()
+      .justify_start()
       .gap_3()
+      .pt(px(32.0))
       .bg(cx.theme().background)
       .child(
         div()
@@ -130,10 +131,14 @@ impl Workspace {
               .on_click(open_search),
           ),
       )
+      .child(div().flex_1())
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    let zoom = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).zoom_percent());
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
