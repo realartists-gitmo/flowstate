@@ -219,7 +219,20 @@ fn style_face_item(
         }
       }
     });
-    let input = input_state.read(cx).input.clone();
+    let input = input_state.update(cx, |state, cx| {
+      let input = state.input.clone();
+      let mut refreshed = false;
+      input.update(cx, |input, cx| {
+        if input.value().parse::<f64>().ok() != Some(box_width) {
+          input.set_value(SharedString::from(format!("{box_width:.2}")), window, cx);
+          refreshed = true;
+        }
+      });
+      if refreshed {
+        state.initial_value = box_width;
+      }
+      input
+    });
 
     h_flex()
       .w_full()

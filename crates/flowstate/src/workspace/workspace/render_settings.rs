@@ -107,17 +107,17 @@ fn paragraph_boxing(theme: &DocumentTheme, slot: u8) -> (bool, f64) {
 
 fn set_paragraph_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, width_pt: f64) {
   let mut style = flowstate_document::custom_paragraph_style(theme, slot);
-  style.border = enabled.then(|| {
+  if enabled {
     let existing = style.border.unwrap_or(CustomParagraphBorder {
       width: px(1.0),
       space_x: px(6.0),
       space_y: px(2.0),
     });
-    CustomParagraphBorder {
+    style.border = Some(CustomParagraphBorder {
       width: pt_to_pixels(width_pt.max(0.0)),
       ..existing
-    }
-  });
+    });
+  }
   theme.set_custom_paragraph_style(slot, style);
 }
 
@@ -129,7 +129,9 @@ fn semantic_boxing(theme: &DocumentTheme, slot: u8) -> (bool, f64) {
 
 fn set_semantic_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, width_pt: f64) {
   let mut style = flowstate_document::custom_semantic_style(theme, slot);
-  style.border_width = enabled.then(|| pt_to_pixels(width_pt.max(0.0)));
+  if enabled {
+    style.border_width = Some(pt_to_pixels(width_pt.max(0.0)));
+  }
   theme.set_custom_semantic_style(slot, style);
 }
 
