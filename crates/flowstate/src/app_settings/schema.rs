@@ -17,6 +17,7 @@ pub struct AppSettings {
   pub document_theme: Option<DocumentThemeSettings>,
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
+  pub recent_documents: Vec<PathBuf>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

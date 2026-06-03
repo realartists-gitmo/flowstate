@@ -33,15 +33,16 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_send_custom_directory, load_send_to_document_directory, load_smart_word_selection, load_tub_root,
-  save_autosave, save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory, load_send_to_document_directory,
+  load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
+  save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  Document, DocumentTheme, ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme,
-  load_or_create_document, paragraph_byte_range,
+  Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save, ThemeUnderline, ZoomIn,
+  ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -67,6 +68,8 @@ pub struct Workspace {
   outline_collapsed: bool,
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
+  recent_documents: Vec<PathBuf>,
+  recent_document_previews: HashMap<PathBuf, Document>,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
   body_resizable_state: Entity<ResizableState>,

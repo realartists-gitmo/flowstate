@@ -57,6 +57,8 @@ impl Workspace {
       outline_collapsed: false,
       toolkit_collapsed: false,
       active_toolkit_tool: None,
+      recent_documents: load_recent_documents(),
+      recent_document_previews: HashMap::new(),
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
@@ -104,6 +106,8 @@ impl Workspace {
       _zoom_slider_subscription: zoom_slider_subscription,
       _keybinding_interceptor: keybinding_interceptor,
     };
+
+    this.refresh_recent_document_previews(cx);
 
     if let Some(root) = load_tub_root() {
       this.load_tub_root(root, cx);
@@ -211,7 +215,9 @@ impl Workspace {
     self
       .document_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
-    self.flow_panels.retain(|panel| panel.read(cx).id() != panel_id);
+    self
+      .flow_panels
+      .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     if closing_active_document {
       if let Some(panel) = self.document_panels.last() {
@@ -265,24 +271,13 @@ impl Workspace {
     self.open_document_path_with_target(path, None, window, cx);
   }
 
-  pub fn open_document_path_at_paragraph(
-    &mut self,
-    path: PathBuf,
-    paragraph_ix: usize,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  pub fn open_document_path_at_paragraph(&mut self, path: PathBuf, paragraph_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
     self.open_document_path_with_target(path, Some(paragraph_ix), window, cx);
   }
 
-  fn open_document_path_with_target(
-    &mut self,
-    path: PathBuf,
-    target_paragraph_ix: Option<usize>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn open_document_path_with_target(&mut self, path: PathBuf, target_paragraph_ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
     let window_handle = window.window_handle();
+    let path_for_recent = path.clone();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
       let loaded = cx
@@ -293,6 +288,7 @@ impl Workspace {
         Ok(LoadedWorkspaceDocument::Document { document, path, title }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              workspace.record_recent_document(path_for_recent.clone(), cx);
               workspace.add_document_panel_with_title(*document, path, title, window, cx);
               if let Some(paragraph_ix) = target_paragraph_ix {
                 workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
@@ -306,6 +302,7 @@ impl Workspace {
         Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              workspace.record_recent_document(path.clone(), cx);
               workspace.add_flow_panel(document, Some(path), window, cx);
             });
           });
@@ -319,6 +316,36 @@ impl Workspace {
       }
     })
     .detach();
+  }
+
+  fn refresh_recent_document_previews(&mut self, _cx: &mut Context<Self>) {
+    self
+      .recent_document_previews
+      .retain(|path, _| self.recent_documents.iter().any(|recent| recent == path));
+
+    for path in &self.recent_documents {
+      if self.recent_document_previews.contains_key(path) || is_flow_path(path) {
+        continue;
+      }
+      let Ok(mut loaded) = load_document_for_open(path) else {
+        continue;
+      };
+      loaded.document.theme = load_document_theme();
+      self
+        .recent_document_previews
+        .insert(path.clone(), recent_document_preview_document(&loaded.document));
+    }
+  }
+
+  fn record_recent_document(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    self.recent_documents.retain(|recent| recent != &path);
+    self.recent_documents.insert(0, path);
+    self.recent_documents.truncate(3);
+    if let Err(error) = save_recent_documents(self.recent_documents.clone()) {
+      eprintln!("failed to save recent documents: {error}");
+    }
+    self.refresh_recent_document_previews(cx);
+    cx.notify();
   }
 
   pub fn prompt_open_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -394,13 +421,7 @@ impl Workspace {
     panel
   }
 
-  fn add_flow_panel(
-    &mut self,
-    document: flowstate_flow::FlowDocument,
-    path: Option<PathBuf>,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) {
+  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
     self.create_flow_panel(document, path, window, cx);
     cx.notify();
   }
@@ -607,11 +628,7 @@ impl Workspace {
 
     let (has_path, has_unsaved_changes, generation) = {
       let editor = editor.read(cx);
-      (
-        editor.document_path().is_some(),
-        editor.has_unsaved_changes(),
-        editor.edit_generation(),
-      )
+      (editor.document_path().is_some(), editor.has_unsaved_changes(), editor.edit_generation())
     };
     if !has_path || !has_unsaved_changes {
       return;
@@ -619,7 +636,9 @@ impl Workspace {
     if self.autosave_document_generations.get(&panel_id) == Some(&generation) {
       return;
     }
-    self.autosave_document_generations.insert(panel_id, generation);
+    self
+      .autosave_document_generations
+      .insert(panel_id, generation);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
     cx.spawn(async move |workspace, cx| {
       if let Err(error) = save_task.await {
@@ -759,7 +778,6 @@ impl Workspace {
     })
     .detach();
   }
-
 }
 
 #[derive(Clone)]
@@ -918,6 +936,63 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
       title: loaded.title,
     })
     .map_err(|error| error.to_string())
+}
+
+#[hotpath::measure]
+fn recent_document_preview_document(document: &Document) -> Document {
+  const MAX_PARAGRAPHS: usize = 12;
+  const MAX_CHARS: usize = 2_200;
+
+  let mut remaining_chars = MAX_CHARS;
+  let mut paragraphs = Vec::new();
+
+  for paragraph in document.paragraphs.iter().take(MAX_PARAGRAPHS) {
+    if remaining_chars == 0 {
+      break;
+    }
+
+    let mut run_start = paragraph.byte_range.start;
+    let mut runs = Vec::new();
+    for run in &paragraph.runs {
+      if remaining_chars == 0 {
+        break;
+      }
+
+      let run_end = run_start + run.len;
+      let text = document_text_slice(document, run_start..run_end);
+      run_start = run_end;
+
+      if text.is_empty() {
+        continue;
+      }
+
+      let mut used_chars = 0usize;
+      let capped_text = text
+        .chars()
+        .take_while(|_| {
+          let keep = used_chars < remaining_chars;
+          if keep {
+            used_chars += 1;
+          }
+          keep
+        })
+        .collect::<String>();
+      remaining_chars -= used_chars;
+      runs.push(InputRun {
+        text: capped_text,
+        styles: run.styles,
+      });
+    }
+
+    if !runs.is_empty() {
+      paragraphs.push(InputParagraph {
+        style: paragraph.style,
+        runs,
+      });
+    }
+  }
+
+  document_from_input(document.theme.clone(), paragraphs)
 }
 
 #[hotpath::measure]
