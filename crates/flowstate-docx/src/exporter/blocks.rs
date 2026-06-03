@@ -9,7 +9,7 @@ use flowstate_document::{
 
 use super::{
   formatting::{apply_run_text_format, color_hex, docx_fonts},
-  styles::{apply_paragraph_style, emphasis_text_border},
+  styles::{apply_paragraph_style, apply_semantic_run_text_border},
 };
 
 #[hotpath::measure]
@@ -82,13 +82,11 @@ fn add_text_run(
 fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle, theme: &DocumentTheme) -> Run {
   let mut run = run.fonts(docx_fonts(theme));
   run = match styles.semantic {
-    flowstate_document::SEMANTIC_CITE => run.style("Style13ptBold"),
-    flowstate_document::SEMANTIC_EMPHASIS => run
-      .style("Emphasis")
-      .text_border(emphasis_text_border(theme)),
-    flowstate_document::SEMANTIC_UNDERLINE => run.style("StyleUnderline"),
-    flowstate_document::SEMANTIC_CONDENSED => apply_custom_run_text_format(run, theme, 4),
-    flowstate_document::SEMANTIC_ULTRACONDENSED => apply_custom_run_text_format(run, theme, 5),
+    flowstate_document::SEMANTIC_CITE => apply_semantic_run_text_border(run.style("Style13ptBold"), theme, 1),
+    flowstate_document::SEMANTIC_EMPHASIS => apply_semantic_run_text_border(run.style("Emphasis"), theme, 2),
+    flowstate_document::SEMANTIC_UNDERLINE => apply_semantic_run_text_border(run.style("StyleUnderline"), theme, 3),
+    flowstate_document::SEMANTIC_CONDENSED => apply_semantic_run_text_border(run.style("Condensed"), theme, 4),
+    flowstate_document::SEMANTIC_ULTRACONDENSED => apply_semantic_run_text_border(run.style("UltraCondensed"), theme, 5),
     RunSemanticStyle::Plain | RunSemanticStyle::Custom(_) => run,
   };
   if styles.semantic == RunSemanticStyle::Plain && paragraph_style == ParagraphStyle::Normal {
@@ -119,20 +117,6 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
     );
   }
   run
-}
-
-fn apply_custom_run_text_format(run: Run, theme: &DocumentTheme, slot: u8) -> Run {
-  let Some(style) = theme.custom_semantic_styles.get(&slot) else {
-    return run;
-  };
-  apply_run_text_format(
-    run,
-    style.font_size.unwrap_or(theme.body_font_size),
-    style.color.unwrap_or(theme.default_text_color),
-    style.bold.unwrap_or(false),
-    style.italic.unwrap_or(false),
-    style.underline.unwrap_or_default(),
-  )
 }
 
 #[hotpath::measure]

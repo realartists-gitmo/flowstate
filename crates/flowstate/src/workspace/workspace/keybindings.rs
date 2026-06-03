@@ -5,17 +5,10 @@ fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
       .default_keys
       .iter()
       .any(|key| {
-        KeyBinding::load(
-          key,
-          Box::new(NoAction),
-          None,
-          false,
-          None,
-          &DummyKeyboardMapper,
-        )
-        .ok()
-        .and_then(|binding| binding.match_keystrokes(std::slice::from_ref(keystroke)))
-        == Some(false)
+        KeyBinding::load(key, Box::new(NoAction), None, false, None, &DummyKeyboardMapper)
+          .ok()
+          .and_then(|binding| binding.match_keystrokes(std::slice::from_ref(keystroke)))
+          == Some(false)
       })
       .then_some(spec.id)
   })
@@ -24,7 +17,7 @@ fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
 #[hotpath::measure_all]
 impl Workspace {
   fn handle_window_keybinding(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) -> bool {
-    if self.focused_workspace_input_is_focused(window, cx) {
+    if self.non_document_keybinding_surface_is_open() || self.focused_workspace_input_is_focused(window, cx) {
       return false;
     }
     match command {
@@ -81,9 +74,21 @@ impl Workspace {
     }
   }
 
+  fn non_document_keybinding_surface_is_open(&self) -> bool {
+    self.settings_overlay.is_some() || self.file_search_overlay.is_some()
+  }
+
   fn focused_workspace_input_is_focused(&self, window: &Window, cx: &App) -> bool {
-    self.toolkit_search_input.read(cx).focus_handle(cx).is_focused(window)
-      || self.tub_file_search_input.read(cx).focus_handle(cx).is_focused(window)
+    self
+      .toolkit_search_input
+      .read(cx)
+      .focus_handle(cx)
+      .is_focused(window)
+      || self
+        .tub_file_search_input
+        .read(cx)
+        .focus_handle(cx)
+        .is_focused(window)
       || self
         .file_search_overlay
         .as_ref()
