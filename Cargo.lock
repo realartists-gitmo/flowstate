@@ -1826,7 +1826,7 @@ dependencies = [
 [[package]]
 name = "docxide-pdf"
 version = "0.14.0"
-source = "git+https://github.com/realartists-gitmo/docxide-pdf?rev=2c856bf2aa0641e96b350baf7026f43493964072#2c856bf2aa0641e96b350baf7026f43493964072"
+source = "git+https://github.com/realartists-gitmo/docxide-pdf?branch=main#3e4989e5d53ada5563a9e2fe591182f4cd655782"
 dependencies = [
  "image",
  "log",
