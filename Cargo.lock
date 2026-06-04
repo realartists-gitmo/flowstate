@@ -2310,6 +2310,7 @@ dependencies = [
  "gpui-component-assets",
  "gpui-symbols",
  "hotpath",
+ "memchr",
  "mimalloc",
  "rustc-hash 2.1.2",
  "serde",
@@ -3004,7 +3005,7 @@ dependencies = [
 [[package]]
 name = "gpui-flowtext"
 version = "0.1.0"
-source = "git+https://github.com/realartists-gitmo/gpui-flowtext?rev=831c39622ecd2734880adae8c78cd1a16738a35d#831c39622ecd2734880adae8c78cd1a16738a35d"
+source = "git+https://github.com/realartists-gitmo/gpui-flowtext?rev=5595dcf5a82fdb9d8b887396014135236c89522a#5595dcf5a82fdb9d8b887396014135236c89522a"
 dependencies = [
  "cosmic-text",
  "crop",

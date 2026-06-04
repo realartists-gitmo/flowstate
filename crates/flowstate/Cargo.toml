@@ -21,6 +21,7 @@ gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
+memchr = "2.8.1"
 mimalloc = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }

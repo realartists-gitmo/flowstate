@@ -2,6 +2,17 @@
 impl Workspace {
   fn render_document_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
     let active_index = self.active_document_index(cx).unwrap_or(0);
+    let active_search_bar = self.active_document_id.and_then(|active_document_id| {
+      self
+        .document_panels
+        .iter()
+        .find(|panel| panel.read(cx).id() == active_document_id)
+        .and_then(|panel| {
+          let panel = panel.read(cx);
+          panel.search_bar_open().then(|| panel.search_bar())
+        })
+    });
+
     v_flex()
       .flex_1()
       .w_full()
@@ -19,22 +30,26 @@ impl Workspace {
           .min_w_0()
           .h_full()
           .overflow_hidden()
-          .when_some(self.active_editor.clone(), |this, editor| this.child(editor))
-          .when_some(self.active_flow.clone(), |this, editor| this.child(editor))
-          .when(self.active_editor.is_none() && self.active_flow.is_none(), |this| this.child(self.render_empty_state(cx))),
+          .flex()
+          .flex_col()
+          .when_some(active_search_bar, |this, search_bar| this.child(search_bar))
+          .when_some(self.active_editor.clone(), |this, editor| {
+            this.child(div().flex_1().overflow_hidden().child(editor))
+          })
+          .when_some(self.active_flow.clone(), |this, editor| {
+            this.child(div().flex_1().overflow_hidden().child(editor))
+          })
+          .when(self.active_editor.is_none() && self.active_flow.is_none(), |this| {
+            this.child(self.render_empty_state(cx))
+          }),
       )
   }
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
-    let (active_tab_bg, active_tab_fg) = if let Some(editor) = &self.active_editor {
-      let theme = &editor.read(cx).document().theme;
-      (theme.document_background_color, theme.default_text_color)
-    } else {
-      (cx.theme().background, cx.theme().foreground)
-    };
+    let (active_tab_bg, active_tab_fg) = (cx.theme().background, cx.theme().foreground);
     TabBar::new("document-tab-bar")
-      .xsmall()
+      .small()
       .track_scroll(&self.tab_bar_scroll_handle)
       .menu(true)
       .prefix(self.render_document_tab_bar_prefix(active_index, tabs.len(), cx))
@@ -75,5 +90,4 @@ impl Workspace {
       }))
       .last_empty_space(div().flex_1().h_full())
   }
-
 }

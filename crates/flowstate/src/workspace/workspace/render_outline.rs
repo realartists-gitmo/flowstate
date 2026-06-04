@@ -17,6 +17,7 @@ impl Workspace {
       .as_ref()
       .map(|cache| cache.row_guides.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
+    let search_match_outline_paragraphs = self.search_match_outline_paragraphs(cx);
     v_flex()
       .size_full()
       .h_full()
@@ -35,6 +36,7 @@ impl Workspace {
             let is_folder = entry.is_folder();
             let is_expanded = entry.is_expanded();
             let is_active_outline = paragraph_ix == active_outline_paragraph;
+            let has_search_match = paragraph_ix.is_some_and(|paragraph_ix| search_match_outline_paragraphs.contains(&paragraph_ix));
             let depth = entry.depth();
             let guide = outline_guides.get(ix).cloned().unwrap_or_default();
             let workspace = workspace.clone();
@@ -51,27 +53,57 @@ impl Workspace {
                 let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
               }
             });
-            render_sidebar_tree_row(SidebarTreeRow {
-              row_id: ("outline-tree-item", ix),
-              toggle_id: ("outline-toggle", ix),
-              label_id: ("outline-label", ix),
-              label: entry.item().label.clone(),
-              nav_width,
-              depth,
-              is_folder,
-              is_expanded,
-              is_active: is_active_outline,
-              guide,
-              icon: None,
-              icon_color: None,
-              toggle_action: Some(toggle_action),
-              label_action,
-              stop_icon_mouse_down: true,
-              stop_label_mouse_down: true,
-            }, window, cx)
+            render_sidebar_tree_row(
+              SidebarTreeRow {
+                row_id: ("outline-tree-item", ix),
+                toggle_id: ("outline-toggle", ix),
+                label_id: ("outline-label", ix),
+                label: entry.item().label.clone(),
+                nav_width,
+                depth,
+                is_folder,
+                is_expanded,
+                is_active: is_active_outline,
+                has_search_match,
+                guide,
+                icon: None,
+                icon_color: None,
+                toggle_action: Some(toggle_action),
+                label_action,
+                stop_icon_mouse_down: true,
+                stop_label_mouse_down: true,
+              },
+              window,
+              cx,
+            )
           })),
       )
       .into_any_element()
+  }
+
+  fn search_match_outline_paragraphs(&self, cx: &App) -> HashSet<usize> {
+    let Some(active_document_id) = self.active_document_id else {
+      return HashSet::new();
+    };
+    let Some(cache) = self.outline_cache.as_ref() else {
+      return HashSet::new();
+    };
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == active_document_id)
+    else {
+      return HashSet::new();
+    };
+
+    let mut outline_paragraphs = HashSet::new();
+    let panel = panel.read(cx);
+    for paragraph_ix in panel.search_match_paragraphs() {
+      if let Some(outline_paragraph) = active_visible_outline_paragraph_from_visible(&cache.visible_paragraphs, paragraph_ix) {
+        outline_paragraphs.insert(outline_paragraph);
+      }
+    }
+    outline_paragraphs
   }
 
   fn render_flow_nav(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -143,9 +175,7 @@ impl Workspace {
                   cx.new(|_| drag.clone())
                 },
               )
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| {
-                this.border_t_2().border_color(cx.theme().drag_border)
-              })
+              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_t_2().border_color(cx.theme().drag_border))
               .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
                 let new_index = flow_drop_index(drag.source_index, target_index);
                 if let Some(editor) = workspace.active_flow.clone() {
@@ -170,17 +200,31 @@ impl Workspace {
                       .min_w_0()
                       .items_center()
                       .gap_2()
-                      .child(div().w(px(3.0)).h(px(20.0)).rounded(px(2.0)).bg(colors.border))
+                      .child(
+                        div()
+                          .w(px(3.0))
+                          .h(px(20.0))
+                          .rounded(px(2.0))
+                          .bg(colors.border),
+                      )
                       .child(
                         div()
                           .flex_1()
                           .min_w_0()
                           .text_xs()
                           .truncate()
-                          .text_color(if selected { cx.theme().sidebar_foreground } else { cx.theme().muted_foreground })
+                          .text_color(if selected {
+                            cx.theme().sidebar_foreground
+                          } else {
+                            cx.theme().muted_foreground
+                          })
                           .child(label),
                       )
-                      .child(Icon::new(IconName::Menu).xsmall().text_color(cx.theme().muted_foreground)),
+                      .child(
+                        Icon::new(IconName::Menu)
+                          .xsmall()
+                          .text_color(cx.theme().muted_foreground),
+                      ),
                   ),
               )
               .into_any_element()
@@ -190,9 +234,7 @@ impl Workspace {
               .id("flow-outline-drop-end")
               .h(px(22.0))
               .rounded(cx.theme().radius)
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| {
-                this.border_1().border_color(cx.theme().drag_border)
-              })
+              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_1().border_color(cx.theme().drag_border))
               .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
                 if len > 0
                   && let Some(editor) = workspace.active_flow.clone()
@@ -205,7 +247,6 @@ impl Workspace {
       )
       .into_any_element()
   }
-
 }
 
 type SidebarTreeAction = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -220,6 +261,7 @@ struct SidebarTreeRow {
   is_folder: bool,
   is_expanded: bool,
   is_active: bool,
+  has_search_match: bool,
   guide: OutlineRowGuides,
   icon: Option<IconName>,
   icon_color: Option<Hsla>,
@@ -240,6 +282,7 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
   let stop_icon_mouse_down = row.stop_icon_mouse_down;
   let stop_label_mouse_down = row.stop_label_mouse_down;
   let label_action = row.label_action.clone();
+  let search_highlight_color = cx.theme().warning.opacity(0.22);
   let icon_action = if has_icon {
     if row.is_folder {
       row.toggle_action.clone()
@@ -368,9 +411,25 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
             .min_w_0()
             .px_1()
             .overflow_hidden()
-            .text_color(if row.is_active { cx.theme().sidebar_accent_foreground } else { hierarchy_color })
+            .text_color(if row.is_active {
+              cx.theme().sidebar_accent_foreground
+            } else {
+              hierarchy_color
+            })
             .whitespace_nowrap()
             .rounded(cx.theme().radius)
+            .when(row.has_search_match, |this| {
+              this.child(
+                div()
+                  .absolute()
+                  .top_0()
+                  .left_0()
+                  .right_0()
+                  .bottom_0()
+                  .bg(search_highlight_color)
+                  .rounded(cx.theme().radius),
+              )
+            })
             .when(row.is_active, |this| {
               this.child(
                 div()
@@ -379,13 +438,19 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                   .left_0()
                   .right_0()
                   .bottom_0()
-                  .bg(cx.theme().sidebar_accent)
+                  .bg(
+                    cx.theme()
+                      .sidebar_accent
+                      .opacity(if row.has_search_match { 0.55 } else { 1.0 }),
+                  )
                   .border_1()
                   .border_color(hierarchy_color)
                   .rounded(cx.theme().radius),
               )
             })
-            .when(!row.is_active, |this| this.hover(|style| style.bg(cx.theme().list_hover)))
+            .when(!row.is_active && !row.has_search_match, |this| {
+              this.hover(|style| style.bg(cx.theme().list_hover))
+            })
             .child(label)
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
               if stop_label_mouse_down {

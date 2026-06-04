@@ -1,3 +1,5 @@
+use crate::commands::FindInDocumentAction;
+
 #[hotpath::measure]
 fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
   COMMAND_SPECS.iter().find_map(|spec| {
@@ -37,6 +39,7 @@ impl Workspace {
         self.close_active_document(window, cx);
         true
       },
+      CommandId::FindInDocument => self.open_active_document_search_bar(window, cx),
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_in(cx));
@@ -74,6 +77,32 @@ impl Workspace {
     }
   }
 
+  fn on_find_in_document(&mut self, _: &FindInDocumentAction, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_active_document_search_bar(window, cx);
+  }
+
+  fn open_active_document_search_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some(active_document_id) = self.active_document_id else {
+      return false;
+    };
+    self.open_document_search_bar(active_document_id, window, cx)
+  }
+
+  pub(super) fn open_document_search_bar(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .cloned()
+    else {
+      return false;
+    };
+
+    panel.update(cx, |panel, cx| panel.open_search_bar(window, cx));
+    cx.notify();
+    true
+  }
+
   fn non_document_keybinding_surface_is_open(&self) -> bool {
     self.settings_overlay.is_some() || self.file_search_overlay.is_some()
   }
@@ -93,5 +122,9 @@ impl Workspace {
         .file_search_overlay
         .as_ref()
         .is_some_and(|overlay| overlay.read(cx).focus_handle(cx).is_focused(window))
+      || self
+        .document_panels
+        .iter()
+        .any(|panel| panel.read(cx).search_bar_focused(window, cx))
   }
 }
