@@ -861,6 +861,7 @@ impl Workspace {
           is_folder,
           is_expanded,
           is_active,
+          has_search_match: false,
           guide,
           icon: Some(icon),
           icon_color: Some(icon_color),

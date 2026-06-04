@@ -100,6 +100,13 @@ impl DocumentPanel {
     self.search_bar_open && self.search_bar.read(cx).input_focused(window, cx)
   }
 
+  pub fn search_match_paragraphs(&self) -> impl Iterator<Item = usize> + '_ {
+    self
+      .search_matches
+      .iter()
+      .map(|range| range.start.paragraph)
+  }
+
   pub fn title_text(&self) -> SharedString {
     self.title.clone()
   }
