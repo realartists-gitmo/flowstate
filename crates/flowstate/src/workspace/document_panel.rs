@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, Subscription, WeakEntity, Window, div,
@@ -12,7 +12,7 @@ use uuid::Uuid;
 use crate::app_settings::load_ribbon_mode;
 use crate::commands::FindInDocumentAction;
 use crate::ribbon::EditorRibbon;
-use crate::rich_text_element::RichTextEditor;
+use crate::rich_text_element::{DocumentOffset, RichTextEditor};
 use crate::workspace::Workspace;
 use crate::workspace::document_search_overlay::{DocumentSearchBar, DocumentSearchBarEvent};
 use crate::workspace::icons::{AppIcon, icon_button};
@@ -29,6 +29,8 @@ pub struct DocumentPanel {
   _search_bar_subscription: Subscription,
   active: bool,
   search_bar_open: bool,
+  search_matches: Vec<Range<DocumentOffset>>,
+  active_search_match: Option<usize>,
 }
 
 #[hotpath::measure_all]
@@ -45,6 +47,9 @@ impl DocumentPanel {
     let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
     let search_bar = cx.new(|cx| DocumentSearchBar::new(window, cx));
     let _search_bar_subscription = cx.subscribe(&search_bar, |panel, _, event: &DocumentSearchBarEvent, cx| match event {
+      DocumentSearchBarEvent::QueryChanged | DocumentSearchBarEvent::CaseSensitivityChanged => panel.refresh_search_matches(cx),
+      DocumentSearchBarEvent::PreviousRequested => panel.select_previous_search_match(cx),
+      DocumentSearchBarEvent::NextRequested => panel.select_next_search_match(cx),
       DocumentSearchBarEvent::CloseRequested => panel.close_search_bar(cx),
     });
     let title = title
@@ -63,6 +68,8 @@ impl DocumentPanel {
       _search_bar_subscription,
       active: false,
       search_bar_open: false,
+      search_matches: Vec::new(),
+      active_search_match: None,
     }
   }
 
@@ -113,7 +120,72 @@ impl DocumentPanel {
 
   pub fn close_search_bar(&mut self, cx: &mut Context<Self>) {
     self.search_bar_open = false;
+    self.search_matches.clear();
+    self.active_search_match = None;
+    self
+      .editor
+      .update(cx, |editor, cx| editor.clear_search_highlights(cx));
+    self.update_search_bar_count(cx);
     cx.notify();
+  }
+
+  fn refresh_search_matches(&mut self, cx: &mut Context<Self>) {
+    let (query, case_sensitive) = {
+      let search_bar = self.search_bar.read(cx);
+      (search_bar.query(cx).trim().to_string(), search_bar.case_sensitive())
+    };
+    if query.is_empty() {
+      self.search_matches.clear();
+      self.active_search_match = None;
+    } else {
+      self.search_matches = self
+        .editor
+        .read(cx)
+        .find_text_with_case(&query, case_sensitive);
+      self.active_search_match = (!self.search_matches.is_empty()).then_some(0);
+    }
+    self.editor.update(cx, |editor, cx| {
+      editor.set_search_highlights(self.search_matches.clone(), self.active_search_match, cx);
+    });
+    self.update_search_bar_count(cx);
+    cx.notify();
+  }
+
+  fn select_previous_search_match(&mut self, cx: &mut Context<Self>) {
+    let count = self.search_matches.len();
+    if count == 0 {
+      self.active_search_match = None;
+    } else {
+      self.active_search_match = Some(
+        self
+          .active_search_match
+          .map_or(count - 1, |ix| ix.checked_sub(1).unwrap_or(count - 1)),
+      );
+    }
+    self.jump_to_active_search_match(cx);
+  }
+
+  fn select_next_search_match(&mut self, cx: &mut Context<Self>) {
+    let count = self.search_matches.len();
+    if count == 0 {
+      self.active_search_match = None;
+    } else {
+      self.active_search_match = Some(self.active_search_match.map_or(0, |ix| (ix + 1) % count));
+    }
+    self.jump_to_active_search_match(cx);
+  }
+
+  fn jump_to_active_search_match(&mut self, cx: &mut Context<Self>) {
+    self.update_search_bar_count(cx);
+    self.editor.update(cx, |editor, cx| {
+      editor.set_active_search_highlight(self.active_search_match, cx);
+    });
+  }
+
+  fn update_search_bar_count(&self, cx: &mut Context<Self>) {
+    self.search_bar.update(cx, |search_bar, cx| {
+      search_bar.set_match_position(self.active_search_match, self.search_matches.len(), cx);
+    });
   }
 
   fn on_find_in_document(&mut self, _: &FindInDocumentAction, window: &mut Window, cx: &mut Context<Self>) {
