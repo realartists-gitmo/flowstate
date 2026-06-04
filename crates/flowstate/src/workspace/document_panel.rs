@@ -47,9 +47,12 @@ impl DocumentPanel {
     let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
     let search_bar = cx.new(|cx| DocumentSearchBar::new(window, cx));
     let _search_bar_subscription = cx.subscribe(&search_bar, |panel, _, event: &DocumentSearchBarEvent, cx| match event {
-      DocumentSearchBarEvent::QueryChanged | DocumentSearchBarEvent::CaseSensitivityChanged => panel.refresh_search_matches(cx),
+      DocumentSearchBarEvent::QueryChanged | DocumentSearchBarEvent::CaseSensitivityChanged | DocumentSearchBarEvent::WholeWordsChanged => {
+        panel.refresh_search_matches(cx);
+      },
       DocumentSearchBarEvent::PreviousRequested => panel.select_previous_search_match(cx),
       DocumentSearchBarEvent::NextRequested => panel.select_next_search_match(cx),
+      DocumentSearchBarEvent::ApplyReplaceRequested => panel.apply_replace(cx),
       DocumentSearchBarEvent::CloseRequested => panel.close_search_bar(cx),
     });
     let title = title
@@ -94,7 +97,7 @@ impl DocumentPanel {
   }
 
   pub fn search_bar_focused(&self, window: &Window, cx: &App) -> bool {
-    self.search_bar_open && self.search_bar.read(cx).focus_handle(cx).is_focused(window)
+    self.search_bar_open && self.search_bar.read(cx).input_focused(window, cx)
   }
 
   pub fn title_text(&self) -> SharedString {
@@ -130,9 +133,13 @@ impl DocumentPanel {
   }
 
   fn refresh_search_matches(&mut self, cx: &mut Context<Self>) {
-    let (query, case_sensitive) = {
+    let (query, case_sensitive, whole_words) = {
       let search_bar = self.search_bar.read(cx);
-      (search_bar.query(cx).trim().to_string(), search_bar.case_sensitive())
+      (
+        search_bar.query(cx).trim().to_string(),
+        search_bar.case_sensitive(),
+        search_bar.whole_words(),
+      )
     };
     if query.is_empty() {
       self.search_matches.clear();
@@ -141,7 +148,7 @@ impl DocumentPanel {
       self.search_matches = self
         .editor
         .read(cx)
-        .find_text_with_case(&query, case_sensitive);
+        .find_text_with_options(&query, case_sensitive, whole_words);
       self.active_search_match = (!self.search_matches.is_empty()).then_some(0);
     }
     self.editor.update(cx, |editor, cx| {
@@ -149,6 +156,23 @@ impl DocumentPanel {
     });
     self.update_search_bar_count(cx);
     cx.notify();
+  }
+
+  fn apply_replace(&mut self, cx: &mut Context<Self>) {
+    // Recompute immediately before replacing. Undo/redo can change the
+    // document without going through the search bar, so cached match offsets
+    // may be stale after a large replace + undo cycle.
+    self.refresh_search_matches(cx);
+    if self.search_matches.is_empty() {
+      return;
+    }
+    let replacement = self.search_bar.read(cx).replacement(cx);
+    let replaced = self
+      .editor
+      .update(cx, |editor, cx| editor.replace_all_search_highlights(&replacement, cx));
+    if replaced > 0 {
+      self.refresh_search_matches(cx);
+    }
   }
 
   fn select_previous_search_match(&mut self, cx: &mut Context<Self>) {

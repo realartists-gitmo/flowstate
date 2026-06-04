@@ -3,8 +3,9 @@ use gpui::{
   prelude::*, px,
 };
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Selectable as _, Sizable as _,
+  ActiveTheme as _, Icon, IconName, Sizable as _,
   button::{Button, ButtonVariants as _},
+  checkbox::Checkbox,
   h_flex,
   input::{Input, InputEvent, InputState},
 };
@@ -13,16 +14,20 @@ use gpui_component::{
 pub enum DocumentSearchBarEvent {
   QueryChanged,
   CaseSensitivityChanged,
+  WholeWordsChanged,
   PreviousRequested,
   NextRequested,
+  ApplyReplaceRequested,
   CloseRequested,
 }
 
 pub struct DocumentSearchBar {
   search_input: Entity<InputState>,
+  replace_input: Entity<InputState>,
   active_match: Option<usize>,
   match_count: usize,
   case_sensitive: bool,
+  whole_words: bool,
   _input_subscription: Subscription,
 }
 
@@ -30,6 +35,7 @@ pub struct DocumentSearchBar {
 impl DocumentSearchBar {
   pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
     let search_input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+    let replace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Replace"));
     let _input_subscription = cx.subscribe(&search_input, |bar, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
         bar.active_match = None;
@@ -40,9 +46,11 @@ impl DocumentSearchBar {
     });
     Self {
       search_input,
+      replace_input,
       active_match: None,
       match_count: 0,
       case_sensitive: false,
+      whole_words: false,
       _input_subscription,
     }
   }
@@ -55,15 +63,50 @@ impl DocumentSearchBar {
     self.search_input.read(cx).value().to_string()
   }
 
+  pub fn replacement(&self, cx: &gpui::App) -> String {
+    self.replace_input.read(cx).value().to_string()
+  }
+
+  pub fn input_focused(&self, window: &Window, cx: &gpui::App) -> bool {
+    self
+      .search_input
+      .read(cx)
+      .focus_handle(cx)
+      .is_focused(window)
+      || self
+        .replace_input
+        .read(cx)
+        .focus_handle(cx)
+        .is_focused(window)
+  }
+
   pub fn case_sensitive(&self) -> bool {
     self.case_sensitive
   }
 
-  fn toggle_case_sensitive(&mut self, cx: &mut Context<Self>) {
-    self.case_sensitive = !self.case_sensitive;
+  pub fn whole_words(&self) -> bool {
+    self.whole_words
+  }
+
+  fn set_case_sensitive(&mut self, case_sensitive: bool, cx: &mut Context<Self>) {
+    if self.case_sensitive == case_sensitive {
+      return;
+    }
+    self.case_sensitive = case_sensitive;
     self.active_match = None;
     self.match_count = 0;
     cx.emit(DocumentSearchBarEvent::CaseSensitivityChanged);
+    cx.notify();
+  }
+
+  fn set_whole_words(&mut self, whole_words: bool, cx: &mut Context<Self>) {
+    if self.whole_words == whole_words {
+      return;
+    }
+    self.whole_words = whole_words;
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::WholeWordsChanged);
     cx.notify();
   }
 
@@ -77,7 +120,7 @@ impl DocumentSearchBar {
     cx.emit(DocumentSearchBarEvent::CloseRequested);
   }
 
-  fn on_key_down(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+  fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     match event.keystroke.key.as_str() {
       "escape" => {
         self.close(cx);
@@ -87,8 +130,21 @@ impl DocumentSearchBar {
         cx.emit(DocumentSearchBarEvent::PreviousRequested);
         cx.stop_propagation();
       },
-      "down" | "enter" => {
+      "down" => {
         cx.emit(DocumentSearchBarEvent::NextRequested);
+        cx.stop_propagation();
+      },
+      "enter" => {
+        if self
+          .replace_input
+          .read(cx)
+          .focus_handle(cx)
+          .is_focused(window)
+        {
+          cx.emit(DocumentSearchBarEvent::ApplyReplaceRequested);
+        } else {
+          cx.emit(DocumentSearchBarEvent::NextRequested);
+        }
         cx.stop_propagation();
       },
       _ => {},
@@ -114,6 +170,8 @@ impl Render for DocumentSearchBar {
       (None, count) => format!("0 of {count}"),
     };
 
+    let search_bar = cx.entity().downgrade();
+
     div()
       .w_full()
       .h(px(26.0))
@@ -127,7 +185,7 @@ impl Render for DocumentSearchBar {
       .child(
         h_flex()
           .w_full()
-          .gap_1()
+          .gap_2()
           .items_center()
           .child(
             Icon::new(IconName::Search)
@@ -137,39 +195,102 @@ impl Render for DocumentSearchBar {
           .child(
             Input::new(&self.search_input)
               .xsmall()
-              .w(px(220.0))
+              .w(px(190.0))
               .cleanable(true),
           )
           .child(
-            Button::new("document-search-case-sensitive")
-              .child("Aa")
-              .xsmall()
-              .ghost()
-              .selected(self.case_sensitive)
-              .tooltip("Match case")
-              .on_click(cx.listener(|bar, _, _, cx| bar.toggle_case_sensitive(cx))),
-          )
-          .child(
             div()
+              .ml_1()
               .text_xs()
               .text_color(cx.theme().muted_foreground)
               .child(count_label),
           )
           .child(
-            Button::new("previous-document-search-match")
-              .icon(IconName::ChevronUp)
-              .xsmall()
-              .ghost()
-              .tooltip("Previous match")
-              .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::PreviousRequested))),
+            h_flex()
+              .ml_1()
+              .gap_0()
+              .items_center()
+              .child(
+                Button::new("previous-document-search-match")
+                  .icon(IconName::ChevronUp)
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Previous match")
+                  .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::PreviousRequested))),
+              )
+              .child(
+                Button::new("next-document-search-match")
+                  .icon(IconName::ChevronDown)
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Next match")
+                  .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::NextRequested))),
+              ),
           )
           .child(
-            Button::new("next-document-search-match")
-              .icon(IconName::ChevronDown)
+            h_flex()
+              .ml_3()
+              .gap_1()
+              .items_center()
+              .child(
+                Icon::default()
+                  .path("icons/letter-case.svg")
+                  .xsmall()
+                  .text_color(cx.theme().muted_foreground),
+              )
+              .child(
+                Checkbox::new("document-search-case-sensitive")
+                  .checked(self.case_sensitive)
+                  .xsmall()
+                  .tab_stop(false)
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |checked, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_case_sensitive(*checked, cx));
+                    }
+                  }),
+              ),
+          )
+          .child(
+            h_flex()
+              .ml_3()
+              .gap_1()
+              .items_center()
+              .child(
+                Icon::default()
+                  .path("icons/text-box-edit.svg")
+                  .xsmall()
+                  .text_color(cx.theme().muted_foreground),
+              )
+              .child(
+                Checkbox::new("document-search-whole-words")
+                  .checked(self.whole_words)
+                  .xsmall()
+                  .tab_stop(false)
+                  .on_click(move |checked, _, cx| {
+                    let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(*checked, cx));
+                  }),
+              ),
+          )
+          .child(
+            div().ml_4().child(
+              Input::new(&self.replace_input)
+                .xsmall()
+                .w(px(190.0))
+                .cleanable(true),
+            ),
+          )
+          .child(
+            Button::new("apply-document-search-replace")
+              .icon(
+                Icon::default()
+                  .path("icons/replace.svg")
+                  .text_color(cx.theme().muted_foreground),
+              )
               .xsmall()
               .ghost()
-              .tooltip("Next match")
-              .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::NextRequested))),
+              .tooltip("Replace all matches")
+              .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::ApplyReplaceRequested))),
           )
           .child(div().flex_1())
           .child(

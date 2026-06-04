@@ -357,6 +357,9 @@ impl AssetSource for AppAssets {
       "icons/panel-top-close.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-close.svg")))),
       "icons/caret-down.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/caret-down.svg")))),
       "icons/caret-right.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/caret-right.svg")))),
+      "icons/letter-case.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/letter-case.svg")))),
+      "icons/text-box-edit.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-box-edit.svg")))),
+      "icons/replace.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -408,6 +411,15 @@ impl AssetSource for AppAssets {
     }
     if "icons/caret-right.svg".starts_with(path) {
       assets.push("icons/caret-right.svg".into());
+    }
+    if "icons/letter-case.svg".starts_with(path) {
+      assets.push("icons/letter-case.svg".into());
+    }
+    if "icons/text-box-edit.svg".starts_with(path) {
+      assets.push("icons/text-box-edit.svg".into());
+    }
+    if "icons/replace.svg".starts_with(path) {
+      assets.push("icons/replace.svg".into());
     }
     Ok(assets)
   }
