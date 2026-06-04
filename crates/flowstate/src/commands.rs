@@ -179,7 +179,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::OpenDocument, "Open Document", APP, &[]),
   CommandSpec::new(CommandId::OpenDemoDocument, "Open Demo Document", APP, &[]),
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
-  CommandSpec::new(CommandId::FindInDocument, "Find in Document", EDITOR, &["cmd-f", "ctrl-f"]),
+  CommandSpec::new(CommandId::FindInDocument, "Find in Document", APP, &["cmd-f", "ctrl-f"]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
 ];

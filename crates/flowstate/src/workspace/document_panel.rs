@@ -128,6 +128,7 @@ impl DocumentPanel {
     self.search_bar.update(cx, |search_bar, cx| {
       search_bar.focus_search(window, cx);
     });
+    self.refresh_search_matches(cx);
     cx.notify();
   }
 
@@ -146,7 +147,7 @@ impl DocumentPanel {
     let (query, case_sensitive, whole_words) = {
       let search_bar = self.search_bar.read(cx);
       (
-        search_bar.query(cx).trim().to_string(),
+        search_bar.query(cx),
         search_bar.case_sensitive(),
         search_bar.whole_words(),
       )

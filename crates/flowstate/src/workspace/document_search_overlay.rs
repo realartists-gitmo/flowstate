@@ -306,7 +306,6 @@ impl Render for DocumentSearchBar {
                 Checkbox::new("document-search-case-sensitive")
                   .checked(self.case_sensitive)
                   .xsmall()
-                  .tab_stop(false)
                   .on_click({
                     let search_bar = search_bar.clone();
                     move |checked, _, cx| {
@@ -330,7 +329,6 @@ impl Render for DocumentSearchBar {
                 Checkbox::new("document-search-whole-words")
                   .checked(self.whole_words)
                   .xsmall()
-                  .tab_stop(false)
                   .on_click({
                     let search_bar = search_bar.clone();
                     move |checked, _, cx| {

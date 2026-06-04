@@ -9,12 +9,12 @@ pub struct DocumentSearchMatch {
 impl DocumentSearchMatch {
   #[must_use]
   pub const fn len(self) -> usize {
-    self.end - self.start
+    self.end.saturating_sub(self.start)
   }
 
   #[must_use]
   pub const fn is_empty(self) -> bool {
-    self.start == self.end
+    self.end <= self.start
   }
 }
 
