@@ -47,14 +47,9 @@ impl Workspace {
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
-    let (active_tab_bg, active_tab_fg) = if let Some(editor) = &self.active_editor {
-      let theme = &editor.read(cx).document().theme;
-      (theme.document_background_color, theme.default_text_color)
-    } else {
-      (cx.theme().background, cx.theme().foreground)
-    };
+    let (active_tab_bg, active_tab_fg) = (cx.theme().background, cx.theme().foreground);
     TabBar::new("document-tab-bar")
-      .xsmall()
+      .small()
       .track_scroll(&self.tab_bar_scroll_handle)
       .menu(true)
       .prefix(self.render_document_tab_bar_prefix(active_index, tabs.len(), cx))
