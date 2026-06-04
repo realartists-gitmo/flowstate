@@ -146,11 +146,7 @@ impl DocumentPanel {
   fn refresh_search_matches(&mut self, cx: &mut Context<Self>) {
     let (query, case_sensitive, whole_words) = {
       let search_bar = self.search_bar.read(cx);
-      (
-        search_bar.query(cx),
-        search_bar.case_sensitive(),
-        search_bar.whole_words(),
-      )
+      (search_bar.query(cx), search_bar.case_sensitive(), search_bar.whole_words())
     };
     if query.is_empty() {
       self.search_matches.clear();
