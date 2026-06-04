@@ -47,7 +47,10 @@ impl DocumentPanel {
     let ribbon = cx.new(|_| EditorRibbon::new_with_mode(editor.clone(), ribbon_mode));
     let search_bar = cx.new(|cx| DocumentSearchBar::new(window, cx));
     let _search_bar_subscription = cx.subscribe(&search_bar, |panel, _, event: &DocumentSearchBarEvent, cx| match event {
-      DocumentSearchBarEvent::QueryChanged | DocumentSearchBarEvent::CaseSensitivityChanged | DocumentSearchBarEvent::WholeWordsChanged => {
+      DocumentSearchBarEvent::QueryChanged
+      | DocumentSearchBarEvent::CaseSensitivityChanged
+      | DocumentSearchBarEvent::WholeWordsChanged
+      | DocumentSearchBarEvent::StyleFilterChanged => {
         panel.refresh_search_matches(cx);
       },
       DocumentSearchBarEvent::PreviousRequested => panel.select_previous_search_match(cx),
@@ -156,6 +159,16 @@ impl DocumentPanel {
         .editor
         .read(cx)
         .find_text_with_options(&query, case_sensitive, whole_words);
+      self.search_matches.retain(|range| {
+        let search_bar = self.search_bar.read(cx);
+        self
+          .editor
+          .read(cx)
+          .document()
+          .paragraphs
+          .get(range.start.paragraph)
+          .is_some_and(|paragraph| search_bar.paragraph_style_enabled(paragraph.style))
+      });
       self.active_search_match = (!self.search_matches.is_empty()).then_some(0);
     }
     self.editor.update(cx, |editor, cx| {

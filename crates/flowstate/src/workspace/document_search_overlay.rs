@@ -8,13 +8,54 @@ use gpui_component::{
   checkbox::Checkbox,
   h_flex,
   input::{Input, InputEvent, InputState},
+  menu::{DropdownMenu as _, PopupMenuItem},
 };
+
+use crate::rich_text_element::ParagraphStyle;
+
+#[derive(Clone, Copy)]
+struct SearchStyleFilter {
+  label: &'static str,
+  style: ParagraphStyle,
+}
+
+const SEARCH_STYLE_FILTERS: &[SearchStyleFilter] = &[
+  SearchStyleFilter {
+    label: "Normal",
+    style: ParagraphStyle::Normal,
+  },
+  SearchStyleFilter {
+    label: "Pocket",
+    style: flowstate_document::PARAGRAPH_POCKET,
+  },
+  SearchStyleFilter {
+    label: "Hat",
+    style: flowstate_document::PARAGRAPH_HAT,
+  },
+  SearchStyleFilter {
+    label: "Block",
+    style: flowstate_document::PARAGRAPH_BLOCK,
+  },
+  SearchStyleFilter {
+    label: "Tag",
+    style: flowstate_document::PARAGRAPH_TAG,
+  },
+  SearchStyleFilter {
+    label: "Analytic",
+    style: flowstate_document::PARAGRAPH_ANALYTIC,
+  },
+  SearchStyleFilter {
+    label: "Undertag",
+    style: flowstate_document::PARAGRAPH_UNDERTAG,
+  },
+];
 
 #[derive(Clone, Copy, Debug)]
 pub enum DocumentSearchBarEvent {
   QueryChanged,
   CaseSensitivityChanged,
   WholeWordsChanged,
+  StyleFilterChanged,
   PreviousRequested,
   NextRequested,
   ApplyReplaceRequested,
@@ -28,6 +69,7 @@ pub struct DocumentSearchBar {
   match_count: usize,
   case_sensitive: bool,
   whole_words: bool,
+  enabled_styles: [bool; SEARCH_STYLE_FILTERS.len()],
   _input_subscription: Subscription,
 }
 
@@ -51,6 +93,7 @@ impl DocumentSearchBar {
       match_count: 0,
       case_sensitive: false,
       whole_words: false,
+      enabled_styles: [true; SEARCH_STYLE_FILTERS.len()],
       _input_subscription,
     }
   }
@@ -88,6 +131,13 @@ impl DocumentSearchBar {
     self.whole_words
   }
 
+  pub fn paragraph_style_enabled(&self, style: ParagraphStyle) -> bool {
+    SEARCH_STYLE_FILTERS
+      .iter()
+      .position(|filter| filter.style == style)
+      .is_none_or(|ix| self.enabled_styles[ix])
+  }
+
   fn set_case_sensitive(&mut self, case_sensitive: bool, cx: &mut Context<Self>) {
     if self.case_sensitive == case_sensitive {
       return;
@@ -107,6 +157,20 @@ impl DocumentSearchBar {
     self.active_match = None;
     self.match_count = 0;
     cx.emit(DocumentSearchBarEvent::WholeWordsChanged);
+    cx.notify();
+  }
+
+  fn toggle_style_filter(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
+    let Some(ix) = SEARCH_STYLE_FILTERS
+      .iter()
+      .position(|filter| filter.style == style)
+    else {
+      return;
+    };
+    self.enabled_styles[ix] = !self.enabled_styles[ix];
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::StyleFilterChanged);
     cx.notify();
   }
 
@@ -267,10 +331,47 @@ impl Render for DocumentSearchBar {
                   .checked(self.whole_words)
                   .xsmall()
                   .tab_stop(false)
-                  .on_click(move |checked, _, cx| {
-                    let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(*checked, cx));
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |checked, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(*checked, cx));
+                    }
                   }),
               ),
+          )
+          .child(
+            div().ml_3().child(
+              Button::new("document-search-style-filter")
+                .child(
+                  h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child("Styles")
+                    .child(Icon::new(IconName::ChevronDown).xsmall()),
+                )
+                .xsmall()
+                .ghost()
+                .tooltip("Paragraph styles to search")
+                .dropdown_menu({
+                  let search_bar = search_bar.clone();
+                  let enabled_styles = self.enabled_styles;
+                  move |menu, _, _| {
+                    SEARCH_STYLE_FILTERS
+                      .iter()
+                      .enumerate()
+                      .fold(menu.min_w(px(140.0)), |menu, (ix, filter)| {
+                        let search_bar = search_bar.clone();
+                        menu.item(
+                          PopupMenuItem::new(filter.label)
+                            .checked(enabled_styles[ix])
+                            .on_click(move |_, _, cx| {
+                              let _ = search_bar.update(cx, |bar, cx| bar.toggle_style_filter(filter.style, cx));
+                            }),
+                        )
+                      })
+                  }
+                }),
+            ),
           )
           .child(
             div().ml_4().child(
