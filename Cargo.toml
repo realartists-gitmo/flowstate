@@ -25,7 +25,7 @@ flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }
-gpui-flowtext = { git = "https://github.com/realartists-gitmo/gpui-flowtext", rev = "16f74ee7fc721d662854f652174ac40b2b66673a" }
+gpui-flowtext = { git = "https://github.com/realartists-gitmo/gpui-flowtext", rev = "5a32d607ddec55f38b311551f148a17d13c96ada" }
 gpui = "0.2.2"
 gpui-component = "0.5.1"
 gpui-component-assets = "0.5.1"

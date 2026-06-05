@@ -16,8 +16,13 @@ impl Workspace {
           .child(file_top_bar_button(self.active_document_id.is_some(), cx))
           .child(insert_top_bar_button(cx, self.active_editor.is_some()))
           .child(document_top_bar_button(cx))
-          .child(view_top_bar_button(cx, !self.outline_collapsed, !self.ribbon_collapsed, !self.toolkit_collapsed))
-          .child(settings_top_bar_button(cx))
+          .child(view_top_bar_button(
+            cx,
+            !self.outline_collapsed,
+            !self.ribbon_collapsed,
+            !self.toolkit_collapsed,
+          ))
+          .child(settings_top_bar_button(cx)),
       )
   }
 
@@ -50,11 +55,19 @@ impl Workspace {
       .bg(cx.theme().background)
       .when_some(active_ribbon, |this, ribbon| {
         if let Some(active_id) = self.active_document_id {
-          if let Some(panel) = self.document_panels.iter().find(|panel| panel.read(cx).id() == active_id) {
+          if let Some(panel) = self
+            .document_panels
+            .iter()
+            .find(|panel| panel.read(cx).id() == active_id)
+          {
             panel.read(cx).ribbon().update(cx, |ribbon, cx| {
               ribbon.set_height(ribbon_height, cx);
             });
-          } else if let Some(panel) = self.flow_panels.iter().find(|panel| panel.read(cx).id() == active_id) {
+          } else if let Some(panel) = self
+            .flow_panels
+            .iter()
+            .find(|panel| panel.read(cx).id() == active_id)
+          {
             panel.read(cx).ribbon().update(cx, |ribbon, cx| {
               ribbon.set_height(ribbon_height, cx);
             });
@@ -84,7 +97,11 @@ impl Workspace {
                 .label(if active_is_speech { "Speech ✓" } else { "Speech" })
                 .xsmall()
                 .ghost()
-                .tooltip(if active_is_speech { "Unset speech document" } else { "Set active document as speech document" })
+                .tooltip(if active_is_speech {
+                  "Unset speech document"
+                } else {
+                  "Set active document as speech document"
+                })
                 .on_click(cx.listener(move |workspace, _, _, cx| {
                   workspace.toggle_speech_document(panel_id, cx);
                 })),
@@ -92,7 +109,11 @@ impl Workspace {
           })
           .child(
             Button::new("ribbon-send-speech")
-              .icon(Icon::default().path("icons/send-to-back.svg").text_color(cx.theme().muted_foreground))
+              .icon(
+                Icon::default()
+                  .path("icons/send-to-back.svg")
+                  .text_color(cx.theme().muted_foreground),
+              )
               .label("Send")
               .xsmall()
               .ghost()
@@ -104,7 +125,11 @@ impl Workspace {
           )
           .child(
             Button::new("collapse-ribbon-panel")
-              .icon(Icon::default().path("icons/panel-top-close.svg").text_color(cx.theme().muted_foreground))
+              .icon(
+                Icon::default()
+                  .path("icons/panel-top-close.svg")
+                  .text_color(cx.theme().muted_foreground),
+              )
               .xsmall()
               .ghost()
               .tooltip("Collapse ribbon")
@@ -114,5 +139,4 @@ impl Workspace {
           ),
       )
   }
-
 }

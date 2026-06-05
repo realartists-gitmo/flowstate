@@ -1,6 +1,5 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px,
-  relative,
+  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px, relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
@@ -116,7 +115,6 @@ impl EditorRibbon {
       cx.notify();
     }
   }
-
 
   fn paragraph_selected(state: &RichTextEditorStyleState, style: ParagraphStyle) -> bool {
     matches!(state.paragraph_style, SelectionState::Uniform(current) if current == style)

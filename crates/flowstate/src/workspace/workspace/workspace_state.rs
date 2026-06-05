@@ -279,6 +279,15 @@ impl Workspace {
     cx.notify();
   }
 
+  fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    if let Some(ix) = self.pinned_document_ids.iter().position(|id| *id == panel_id) {
+      self.pinned_document_ids.remove(ix);
+    } else if self.pinned_document_ids.len() < 10 {
+      self.pinned_document_ids.push(panel_id);
+    }
+    cx.notify();
+  }
+
   fn activate_tab_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
     let pinned = self
       .pinned_document_ids
@@ -304,7 +313,11 @@ impl Workspace {
         Vec::new()
       } else {
         condense_fragment_paragraphs(
-          crate::rich_text_element::selected_rich_fragment(editor.document(), selection.anchor.min(selection.head)..selection.anchor.max(selection.head)).paragraphs,
+          crate::rich_text_element::selected_rich_fragment(
+            editor.document(),
+            selection.anchor.min(selection.head)..selection.anchor.max(selection.head),
+          )
+          .paragraphs,
           ' ',
         )
       }
@@ -461,7 +474,11 @@ impl Workspace {
 fn condense_fragment_paragraphs(paragraphs: Vec<InputParagraph>, separator: char) -> Vec<InputParagraph> {
   let mut runs = Vec::new();
   for paragraph in paragraphs {
-    let mut paragraph_runs = paragraph.runs.into_iter().filter(|run| !run.text.is_empty()).peekable();
+    let mut paragraph_runs = paragraph
+      .runs
+      .into_iter()
+      .filter(|run| !run.text.is_empty())
+      .peekable();
     if paragraph_runs.peek().is_none() {
       continue;
     }
@@ -493,19 +510,29 @@ fn selected_fragment_or_enclosing_section(
   selection: &crate::rich_text_element::EditorSelection,
 ) -> crate::rich_text_element::RichClipboardFragment {
   if selection.anchor != selection.head {
-    return crate::rich_text_element::selected_rich_fragment(document, selection.anchor.min(selection.head)..selection.anchor.max(selection.head));
+    return crate::rich_text_element::selected_rich_fragment(
+      document,
+      selection.anchor.min(selection.head)..selection.anchor.max(selection.head),
+    );
   }
   let caret = selection.head;
-  let (start_paragraph, end_paragraph_exclusive) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4])
-    .unwrap_or((caret.paragraph, caret.paragraph.saturating_add(1).min(document.paragraphs.len())));
+  let (start_paragraph, end_paragraph_exclusive) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4]).unwrap_or((
+    caret.paragraph,
+    caret
+      .paragraph
+      .saturating_add(1)
+      .min(document.paragraphs.len()),
+  ));
   let end_paragraph = end_paragraph_exclusive.saturating_sub(1);
   crate::rich_text_element::selected_rich_fragment(
     document,
-    crate::rich_text_element::DocumentOffset { paragraph: start_paragraph, byte: 0 }
-      ..crate::rich_text_element::DocumentOffset {
-        paragraph: end_paragraph,
-        byte: paragraph_byte_range(document, end_paragraph).len(),
-      },
+    crate::rich_text_element::DocumentOffset {
+      paragraph: start_paragraph,
+      byte: 0,
+    }..crate::rich_text_element::DocumentOffset {
+      paragraph: end_paragraph,
+      byte: paragraph_byte_range(document, end_paragraph).len(),
+    },
   )
 }
 

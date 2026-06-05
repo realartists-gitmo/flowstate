@@ -222,22 +222,33 @@ fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx
 }
 
 fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
-  let text = {
+  let paragraphs = {
     let editor = editor.read(cx);
-    selected_text(editor.document(), editor.selection())
+    let selection = editor.selection();
+    if selection.anchor == selection.head {
+      Vec::new()
+    } else {
+      let range = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
+      uncondense_fragment_paragraphs(flowstate_document::selected_rich_fragment(editor.document(), range).paragraphs)
+    }
   };
-  if text.is_empty() {
+  if paragraphs.is_empty() {
     return;
   }
-  editor.update(cx, |editor, cx| {
-    editor.insert_text_command(&text.replace(CONDENSE_PILCROW_MARKER, "\n"), cx);
-  });
+  editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
 }
 
-fn condense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>, separator: char) -> Vec<flowstate_document::InputParagraph> {
+fn condense_fragment_paragraphs(
+  paragraphs: Vec<flowstate_document::InputParagraph>,
+  separator: char,
+) -> Vec<flowstate_document::InputParagraph> {
   let mut runs = Vec::new();
   for paragraph in paragraphs {
-    let mut paragraph_runs = paragraph.runs.into_iter().filter(|run| !run.text.is_empty()).peekable();
+    let mut paragraph_runs = paragraph
+      .runs
+      .into_iter()
+      .filter(|run| !run.text.is_empty())
+      .peekable();
     if paragraph_runs.peek().is_none() {
       continue;
     }
@@ -264,15 +275,41 @@ fn condense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagra
   ]
 }
 
-fn selected_text(document: &flowstate_document::Document, selection: &flowstate_document::EditorSelection) -> String {
-  if selection.anchor == selection.head {
-    return String::new();
+fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>) -> Vec<flowstate_document::InputParagraph> {
+  let mut output = vec![flowstate_document::InputParagraph {
+    style: flowstate_document::ParagraphStyle::Normal,
+    runs: Vec::new(),
+  }];
+  for paragraph in paragraphs {
+    for run in paragraph.runs {
+      let mut remainder = run.text.as_str();
+      while let Some(marker_ix) = remainder.find(CONDENSE_PILCROW_MARKER) {
+        let before = &remainder[..marker_ix];
+        if !before.is_empty() {
+          output.last_mut().expect("output has current paragraph").runs.push(flowstate_document::InputRun {
+            text: before.to_string(),
+            styles: run.styles,
+          });
+        }
+        output.push(flowstate_document::InputParagraph {
+          style: flowstate_document::ParagraphStyle::Normal,
+          runs: Vec::new(),
+        });
+        remainder = &remainder[marker_ix + CONDENSE_PILCROW_MARKER.len_utf8()..];
+      }
+      if !remainder.is_empty() {
+        output.last_mut().expect("output has current paragraph").runs.push(flowstate_document::InputRun {
+          text: remainder.to_string(),
+          styles: run.styles,
+        });
+      }
+    }
   }
-  let start_offset = selection.anchor.min(selection.head);
-  let end_offset = selection.anchor.max(selection.head);
-  let start = flowstate_document::paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
-  let end = flowstate_document::paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
-  flowstate_document::document_text_slice(document, start..end)
+  output.push(flowstate_document::InputParagraph {
+    style: flowstate_document::ParagraphStyle::Normal,
+    runs: Vec::new(),
+  });
+  output
 }
 
 #[hotpath::measure]

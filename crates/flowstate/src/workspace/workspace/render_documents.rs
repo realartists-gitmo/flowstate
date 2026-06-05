@@ -114,6 +114,10 @@ impl Workspace {
           .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
           .prefix(tab_prefix)
           .suffix(close_button)
+          .on_mouse_down(MouseButton::Right, cx.listener(move |workspace, _, _, cx| {
+            cx.stop_propagation();
+            workspace.toggle_tab_pin(panel_id, cx);
+          }))
       }))
       .last_empty_space(div().flex_1().h_full())
   }
