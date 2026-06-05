@@ -26,7 +26,7 @@ impl Workspace {
     format!("Untitled{index}.fl0")
   }
 
-  fn render_document_tab_bar_prefix(&self, active_index: usize, tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_document_tab_bar_prefix(&self, _active_index: usize, tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
     h_flex()
       .h_full()
@@ -55,16 +55,30 @@ impl Workspace {
       )
       .child(
         icon_button("tab-bar-navigate-left", AppIcon::TabLeft)
-          .tooltip("Navigate tab left")
-          .disabled(active_index == 0)
+          .tooltip("Previous tab")
+          .disabled(tab_count <= 1)
           .on_click(cx.listener(|workspace, _, _, cx| {
             workspace.navigate_active_tab(-1, cx);
           })),
       )
       .child(
+        icon_button("tab-bar-scroll-left", AppIcon::TabLeft)
+          .tooltip("Scroll tab bar left")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.scroll_tab_bar_by(px(-160.0), cx);
+          })),
+      )
+      .child(
+        icon_button("tab-bar-scroll-right", AppIcon::TabRight)
+          .tooltip("Scroll tab bar right")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.scroll_tab_bar_by(px(160.0), cx);
+          })),
+      )
+      .child(
         icon_button("tab-bar-navigate-right", AppIcon::TabRight)
-          .tooltip("Navigate tab right")
-          .disabled(active_index + 1 >= tab_count)
+          .tooltip("Next tab")
+          .disabled(tab_count <= 1)
           .on_click(cx.listener(|workspace, _, _, cx| {
             workspace.navigate_active_tab(1, cx);
           })),
