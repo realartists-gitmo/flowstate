@@ -86,16 +86,12 @@ impl Workspace {
           })
           .when(tab.pinned, |this| {
             this.child(
-              div()
-                .flex_none()
-                .w(px(14.0))
-                .h(px(14.0))
-                .child(
-                  Icon::default()
-                    .path("icons/pin.svg")
-                    .size(px(14.0))
-                    .text_color(cx.theme().warning),
-                ),
+              div().flex_none().w(px(14.0)).h(px(14.0)).child(
+                Icon::default()
+                  .path("icons/pin.svg")
+                  .size(px(14.0))
+                  .text_color(cx.theme().warning),
+              ),
             )
           });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
