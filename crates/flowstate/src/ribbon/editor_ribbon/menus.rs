@@ -224,7 +224,9 @@ fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
   if text.is_empty() {
     return;
   }
-  editor.update(cx, |editor, cx| editor.insert_text_command(&text.replace(CONDENSE_PILCROW_MARKER, "\n"), cx));
+  editor.update(cx, |editor, cx| {
+    editor.insert_text_command(&text.replace(CONDENSE_PILCROW_MARKER, "\n"), cx);
+  });
 }
 
 fn selected_text(document: &flowstate_document::Document, selection: &flowstate_document::EditorSelection) -> String {
