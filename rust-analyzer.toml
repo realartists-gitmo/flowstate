@@ -1,0 +1,2 @@
+[diagnostics]
+disabled = ["unlinked-file", "inactive-code"]

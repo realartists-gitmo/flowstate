@@ -1,6 +1,6 @@
 use std::{
   cell::Cell,
-  collections::{HashMap, HashSet, VecDeque},
+  collections::{BTreeMap, HashMap, HashSet, VecDeque},
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
@@ -50,9 +50,12 @@ use crate::workspace::file_management::{
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_collab::{
-  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, UpdateApplication, WireMessage, decode_native_file,
+  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularSourceMutation, GranularValue, UpdateApplication, WireMessage,
+  decode_native_file,
 };
-use flowstate_document::{db8_collab_document_with_id, document_from_db8_collab_source};
+use flowstate_document::{
+  Db8CollabSourceMutation, Db8GranularValue, db8_collab_document_with_id, document_from_db8_collab_source, ensure_db8_document_id,
+};
 use flowstate_sync::{
   AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, LiveUpdate, LiveUpdateKind, Role, SessionDocumentState, SessionEvent, SessionId,
   SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,
@@ -191,7 +194,47 @@ struct CollaborationUiState {
   pending_invite: Option<String>,
   pending_invite_copy_role: Option<CollaborationInviteRole>,
   last_error: Option<String>,
+  reconnect_reason: Option<String>,
+  reconnect_frontier: Option<Vec<u8>>,
+  reconnect_pending_queue: Vec<String>,
+  reconnect_rejected_update: Option<String>,
   peers: HashMap<SessionId, CollaborationPeerInfo>,
+}
+
+impl Default for CollaborationUiState {
+  fn default() -> Self {
+    Self {
+      state: SessionState::Idle,
+      role: None,
+      panel_id: None,
+      document_id: None,
+      format_kind: None,
+      pending_invite: None,
+      pending_invite_copy_role: None,
+      last_error: None,
+      reconnect_reason: None,
+      reconnect_frontier: None,
+      reconnect_pending_queue: Vec::new(),
+      reconnect_rejected_update: None,
+      peers: HashMap::new(),
+    }
+  }
+}
+
+impl CollaborationUiState {
+  fn set_reconnect_diagnostics(&mut self, reason: impl Into<String>, frontier: Option<Vec<u8>>, pending_queue: Vec<String>) {
+    self.reconnect_reason = Some(reason.into());
+    self.reconnect_frontier = frontier;
+    self.reconnect_pending_queue = pending_queue;
+    self.reconnect_rejected_update = None;
+  }
+
+  fn clear_reconnect_diagnostics(&mut self) {
+    self.reconnect_reason = None;
+    self.reconnect_frontier = None;
+    self.reconnect_pending_queue.clear();
+    self.reconnect_rejected_update = None;
+  }
 }
 
 #[derive(Clone)]
@@ -212,28 +255,43 @@ struct CollaborationPeerMenuItem {
   role: Role,
 }
 
-impl Default for CollaborationUiState {
-  fn default() -> Self {
-    Self {
-      state: SessionState::Idle,
-      role: None,
-      panel_id: None,
-      document_id: None,
-      format_kind: None,
-      pending_invite: None,
-      pending_invite_copy_role: None,
-      last_error: None,
-      peers: HashMap::new(),
-    }
-  }
-}
-
 #[derive(Clone, Copy)]
 enum CollaborationInviteRole {
   Owner,
   Editor,
   Viewer,
 }
+
+fn pending_collaboration_update_summary(queue: &VecDeque<PendingCollaborationUpdate>) -> Vec<String> {
+  queue
+    .iter()
+    .map(|update| update.diagnostic_label().to_string())
+    .collect()
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn pending_update_summary_includes_application_hints() {
+    let mut queue = VecDeque::new();
+    queue.push_back(PendingCollaborationUpdate::GranularMutations {
+      mutations: vec![GranularSourceMutation::InsertText {
+        text_id: "p1".to_string(),
+        byte_offset: 0,
+        text: "x".to_string(),
+      }],
+      application: UpdateApplication::Db8CanonicalOperations(vec![0]),
+    });
+    queue.push_back(PendingCollaborationUpdate::Application {
+      application: UpdateApplication::Db8CanonicalOperations(vec![1, 2, 3]),
+    });
+    let summary = pending_collaboration_update_summary(&queue);
+    assert_eq!(summary, vec!["granular source mutations".to_string(), "application hint".to_string()]);
+  }
+}
+
 impl ToolkitSearchFilter {
   fn label(self) -> &'static str {
     match self {

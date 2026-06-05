@@ -9,3 +9,5 @@ perf.data
 flamegraph
 /crates/gpui-flowtext
 /.ast-bro
+.ast-bro-ignore
+.pi/hooks.json

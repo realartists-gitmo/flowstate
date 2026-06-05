@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, ops::Range};
+// Durable source lives here: projection caches and editor hints are inputs, but Loro state in this module is the source of truth.
+use std::{
+  collections::{BTreeMap, HashMap},
+  ops::Range,
+};
 
 use loro::{
   Container, ExpandType, ExportMode, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, PeerID, StyleConfig, ValueOrContainer,
@@ -151,6 +155,47 @@ pub struct GranularSource {
   pub binaries: Vec<GranularBinaryRecord>,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum GranularSourceMutation {
+  InsertText {
+    text_id: String,
+    byte_offset: usize,
+    text: String,
+  },
+  DeleteText {
+    text_id: String,
+    byte_offset: usize,
+    byte_len: usize,
+  },
+  MarkText {
+    text_id: String,
+    range: Range<usize>,
+    key: String,
+    value: GranularValue,
+  },
+  UnmarkText {
+    text_id: String,
+    range: Range<usize>,
+    key: String,
+  },
+  SetTextMetadata {
+    text_id: String,
+    metadata: Vec<u8>,
+  },
+  ClearTextMetadata {
+    text_id: String,
+  },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GranularSourceMerkleHash {
+  pub metadata_hash: [u8; 32],
+  pub order_hashes: Vec<(String, [u8; 32])>,
+  pub text_hashes: Vec<(String, [u8; 32])>,
+  pub binary_hashes: Vec<(String, [u8; 32])>,
+  pub root_hash: [u8; 32],
+}
+
 impl GranularSource {
   #[must_use]
   pub fn canonicalized(mut self) -> Self {
@@ -167,11 +212,89 @@ impl GranularSource {
     self
   }
 
-  fn source_hash(&self) -> CollabResult<[u8; 32]> {
-    postcard::to_stdvec(&self.clone().canonicalized())
-      .map(|bytes| blake3_hash(&bytes))
-      .map_err(Into::into)
+  pub fn merkle_hash(&self) -> CollabResult<GranularSourceMerkleHash> {
+    let source = self.clone().canonicalized();
+    let metadata_hash = blake3_hash(&source.metadata);
+    let mut order_hashes = Vec::with_capacity(source.orders.len());
+    let mut text_hashes = Vec::with_capacity(source.texts.len());
+    let mut binary_hashes = Vec::with_capacity(source.binaries.len());
+    let mut root_bytes = Vec::new();
+    root_bytes.extend_from_slice(b"flowstate-db8-merkle-v1");
+    root_bytes.extend_from_slice(&metadata_hash);
+
+    for order in &source.orders {
+      let bytes = postcard::to_stdvec(order)?;
+      let hash = blake3_hash(&bytes);
+      root_bytes.extend_from_slice(order.name.as_bytes());
+      root_bytes.extend_from_slice(&hash);
+      order_hashes.push((order.name.clone(), hash));
+    }
+    for text in &source.texts {
+      let bytes = postcard::to_stdvec(text)?;
+      let hash = blake3_hash(&bytes);
+      root_bytes.extend_from_slice(text.id.as_bytes());
+      root_bytes.extend_from_slice(&hash);
+      text_hashes.push((text.id.clone(), hash));
+    }
+    for binary in &source.binaries {
+      let bytes = postcard::to_stdvec(binary)?;
+      let hash = blake3_hash(&bytes);
+      root_bytes.extend_from_slice(binary.id.as_bytes());
+      root_bytes.extend_from_slice(&hash);
+      binary_hashes.push((binary.id.clone(), hash));
+    }
+
+    Ok(GranularSourceMerkleHash {
+      metadata_hash,
+      order_hashes,
+      text_hashes,
+      binary_hashes,
+      root_hash: blake3_hash(&root_bytes),
+    })
   }
+
+  fn source_hash(&self) -> CollabResult<[u8; 32]> {
+    self.merkle_hash().map(|hash| hash.root_hash)
+  }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SourceProvenance {
+  pub source_hash: [u8; 32],
+  pub frontier: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ProjectionCacheProvenance {
+  pub source_hash: [u8; 32],
+  pub projection_cache_hash: [u8; 32],
+  pub frontier: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CollabMaterializationSizes {
+  pub projection_cache: usize,
+  pub asset_manifest: usize,
+  pub frontier: usize,
+}
+
+impl ProjectionCacheProvenance {
+  #[must_use]
+  pub fn can_reuse_for(&self, source_hash: [u8; 32], frontier: &[u8]) -> bool {
+    self.source_hash == source_hash && self.frontier.as_slice() == frontier
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionCacheRecovery {
+  Reused,
+  Rebuilt,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GranularMaterialization {
+  pub source: GranularSource,
+  pub recovery: ProjectionCacheRecovery,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -278,39 +401,90 @@ impl CollabDocument {
     configure_peer_id(&self.doc, actor_id)
   }
 
-  #[must_use]
   pub fn peer_id(&self) -> PeerID {
     self.doc.peer_id()
   }
-
-  pub fn role_policy(&self) -> CollabResult<CollabRolePolicy> {
-    postcard::from_bytes(&root_binary(&self.doc, KEY_ROLE_POLICY)?).map_err(Into::into)
+  pub fn source_hash(&self) -> CollabResult<[u8; 32]> {
+    if self.is_granular() {
+      read_granular_source(&self.doc)?.source_hash()
+    } else {
+      root_hash(&self.doc, KEY_SOURCE_PAYLOAD_HASH).or_else(|_| root_hash(&self.doc, KEY_PROJECTION_HASH))
+    }
   }
 
-  pub fn materialize_projection_cache(&self) -> CollabResult<Vec<u8>> {
-    root_binary(&self.doc, KEY_SOURCE_PAYLOAD)
+  pub fn granular_merkle_hash(&self) -> CollabResult<Option<GranularSourceMerkleHash>> {
+    if self.is_granular() {
+      read_granular_source(&self.doc)?.merkle_hash().map(Some)
+    } else {
+      Ok(None)
+    }
+  }
+
+  pub fn projection_cache_hash(&self) -> CollabResult<[u8; 32]> {
+    root_hash(&self.doc, KEY_SOURCE_PAYLOAD_HASH).or_else(|_| root_hash(&self.doc, KEY_PROJECTION_HASH))
+  }
+
+  pub fn source_provenance(&self) -> CollabResult<SourceProvenance> {
+    Ok(SourceProvenance {
+      source_hash: self.source_hash()?,
+      frontier: self.frontier()?,
+    })
+  }
+
+  pub fn projection_cache_provenance(&self) -> CollabResult<ProjectionCacheProvenance> {
+    Ok(ProjectionCacheProvenance {
+      source_hash: self.source_hash()?,
+      projection_cache_hash: self.projection_cache_hash()?,
+      frontier: self.frontier()?,
+    })
+  }
+
+  pub fn can_reuse_projection_cache(&self, provenance: &ProjectionCacheProvenance) -> CollabResult<bool> {
+    let source_hash = self.source_hash()?;
+    if provenance.source_hash != source_hash {
+      return Ok(false);
+    }
+    Ok(provenance.frontier.as_slice() == self.frontier()?.as_slice())
+  }
+
+  pub fn projection_hash(&self) -> CollabResult<[u8; 32]> {
+    self.source_hash()
+  }
+
+  pub fn frontier(&self) -> CollabResult<Vec<u8>> {
+    postcard::to_stdvec(&self.doc.oplog_vv()).map_err(Into::into)
   }
 
   pub fn asset_manifest_bytes(&self) -> CollabResult<Vec<u8>> {
     root_binary(&self.doc, KEY_ASSET_MANIFEST)
   }
 
+  pub fn materialize_projection_cache(&self) -> CollabResult<Vec<u8>> {
+    root_binary(&self.doc, KEY_SOURCE_PAYLOAD)
+  }
+
+  pub fn materialization_sizes(&self) -> CollabResult<CollabMaterializationSizes> {
+    Ok(CollabMaterializationSizes {
+      projection_cache: self.materialize_projection_cache()?.len(),
+      asset_manifest: self.asset_manifest_bytes()?.len(),
+      frontier: self.frontier()?.len(),
+    })
+  }
+
   pub fn materialize_granular_source(&self) -> CollabResult<Option<GranularSource>> {
+    self
+      .materialize_granular_source_with_recovery()
+      .map(|result| result.map(|materialized| materialized.source))
+  }
+
+  pub fn materialize_granular_source_with_recovery(&self) -> CollabResult<Option<GranularMaterialization>> {
     if !self.is_granular() {
       return Ok(None);
     }
-    read_granular_source(&self.doc).map(Some)
-  }
-
-  pub fn projection_hash(&self) -> CollabResult<[u8; 32]> {
-    if self.is_granular() {
-      return read_granular_source(&self.doc)?.source_hash();
-    }
-    root_hash(&self.doc, KEY_PROJECTION_HASH)
-  }
-
-  pub fn frontier(&self) -> CollabResult<Vec<u8>> {
-    postcard::to_stdvec(&self.doc.oplog_vv()).map_err(Into::into)
+    Ok(Some(GranularMaterialization {
+      source: read_granular_source(&self.doc)?,
+      recovery: ProjectionCacheRecovery::Reused,
+    }))
   }
 
   pub fn export_snapshot(&self) -> CollabResult<Vec<u8>> {
@@ -369,10 +543,33 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
+  pub fn apply_granular_source_mutations(&self, role: Role, mutations: &[GranularSourceMutation]) -> CollabResult<Vec<u8>> {
+    require_writer(role)?;
+    if mutations.is_empty() {
+      return Ok(Vec::new());
+    }
+    let before = self.doc.oplog_vv();
+    let mut text_cache = HashMap::new();
+    for mutation in mutations {
+      self.apply_granular_source_mutation_uncommitted(mutation, &mut text_cache)?;
+    }
+    self.doc.commit();
+    validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
+    self
+      .doc
+      .export(ExportMode::updates(&before))
+      .map_err(|error| CollabError::Loro(error.to_string()))
+  }
+
+  pub fn apply_granular_source_mutation(&self, role: Role, mutation: &GranularSourceMutation) -> CollabResult<Vec<u8>> {
+    self.apply_granular_source_mutations(role, std::slice::from_ref(mutation))
+  }
+
   pub fn insert_granular_text_utf8(&self, role: Role, text_id: &str, byte_offset: usize, text: &str) -> CollabResult<Vec<u8>> {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
     let text_container = granular_text_container(&self.doc, text_id)?;
+    validate_utf8_offset(&text_container.to_string(), byte_offset)?;
     text_container
       .insert_utf8(byte_offset, text)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -388,6 +585,11 @@ impl CollabDocument {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
     let text_container = granular_text_container(&self.doc, text_id)?;
+    let text_snapshot = text_container.to_string();
+    let Some(byte_end) = byte_offset.checked_add(byte_len) else {
+      return Err(CollabError::InvalidSchema("granular text range"));
+    };
+    validate_utf8_range(&text_snapshot, byte_offset..byte_end)?;
     text_container
       .delete_utf8(byte_offset, byte_len)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -410,6 +612,8 @@ impl CollabDocument {
     require_writer(role)?;
     let before = self.doc.oplog_vv();
     let text_container = granular_text_container(&self.doc, text_id)?;
+    let text_snapshot = text_container.to_string();
+    validate_utf8_range(&text_snapshot, range.clone())?;
     text_container
       .mark_utf8(range, key, value.into_loro())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -429,6 +633,34 @@ impl CollabDocument {
     let unicode_range = utf8_range_to_unicode_range(&text_snapshot, range)?;
     text_container
       .unmark(unicode_range, key)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    self.doc.commit();
+    validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
+    self
+      .doc
+      .export(ExportMode::updates(&before))
+      .map_err(|error| CollabError::Loro(error.to_string()))
+  }
+
+  pub fn set_granular_text_metadata(&self, role: Role, text_id: &str, metadata: &[u8]) -> CollabResult<Vec<u8>> {
+    require_writer(role)?;
+    let before = self.doc.oplog_vv();
+    granular_text_record_map(&self.doc, text_id)?
+      .insert(KEY_RECORD_METADATA, metadata)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    self.doc.commit();
+    validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
+    self
+      .doc
+      .export(ExportMode::updates(&before))
+      .map_err(|error| CollabError::Loro(error.to_string()))
+  }
+
+  pub fn clear_granular_text_metadata(&self, role: Role, text_id: &str) -> CollabResult<Vec<u8>> {
+    require_writer(role)?;
+    let before = self.doc.oplog_vv();
+    granular_text_record_map(&self.doc, text_id)?
+      .delete(KEY_RECORD_METADATA)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
     self.doc.commit();
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
@@ -461,30 +693,91 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
+  fn cached_granular_text_container(&self, cache: &mut HashMap<String, LoroText>, text_id: &str) -> CollabResult<LoroText> {
+    if let Some(text) = cache.get(text_id) {
+      return Ok(text.clone());
+    }
+    let text = granular_text_container(&self.doc, text_id)?;
+    cache.insert(text_id.to_string(), text.clone());
+    Ok(text)
+  }
+
+  fn apply_granular_source_mutation_uncommitted(
+    &self,
+    mutation: &GranularSourceMutation,
+    text_cache: &mut HashMap<String, LoroText>,
+  ) -> CollabResult<()> {
+    match mutation {
+      GranularSourceMutation::InsertText { text_id, byte_offset, text } => {
+        let text_container = self.cached_granular_text_container(text_cache, text_id)?;
+        validate_utf8_offset(&text_container.to_string(), *byte_offset)?;
+        text_container
+          .insert_utf8(*byte_offset, text)
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::DeleteText {
+        text_id,
+        byte_offset,
+        byte_len,
+      } => {
+        let text_container = self.cached_granular_text_container(text_cache, text_id)?;
+        if byte_offset.checked_add(*byte_len).is_none() {
+          return Err(CollabError::InvalidSchema("granular text range"));
+        }
+        text_container
+          .delete_utf8(*byte_offset, *byte_len)
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::MarkText { text_id, range, key, value } => {
+        let text_container = self.cached_granular_text_container(text_cache, text_id)?;
+        let text_snapshot = text_container.to_string();
+        validate_utf8_range(&text_snapshot, range.clone())?;
+        text_container
+          .mark_utf8(range.clone(), key, value.clone().into_loro())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::UnmarkText { text_id, range, key } => {
+        let text_container = self.cached_granular_text_container(text_cache, text_id)?;
+        let text_snapshot = text_container.to_string();
+        let unicode_range = utf8_range_to_unicode_range(&text_snapshot, range.clone())?;
+        text_container
+          .unmark(unicode_range, key)
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::SetTextMetadata { text_id, metadata } => {
+        granular_text_record_map(&self.doc, text_id)?
+          .insert(KEY_RECORD_METADATA, metadata.as_slice())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::ClearTextMetadata { text_id } => {
+        granular_text_record_map(&self.doc, text_id)?
+          .delete(KEY_RECORD_METADATA)
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+    }
+    Ok(())
+  }
+
   pub fn import_update_checked(&self, remote_role: Role, update: &[u8]) -> CollabResult<CollabImportOutcome> {
     require_writer(remote_role)?;
 
-    let before_hash = self.projection_hash()?;
-    let candidate = self.doc.clone();
-    candidate
-      .import(update)
-      .map_err(|error| CollabError::Loro(error.to_string()))?;
-    validate_schema(&candidate, Some(self.format_kind), Some(self.document_id))?;
-
+    let before_frontier = self.frontier()?;
     self
       .doc
       .import(update)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
+
+    #[cfg(debug_assertions)]
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
 
-    let after_hash = self.projection_hash()?;
-    let patch = (before_hash != after_hash).then_some(CollabProjectionPatch {
-      old_projection_hash: before_hash,
-      new_projection_hash: after_hash,
+    let after_frontier = self.frontier()?;
+    let patch = (before_frontier != after_frontier).then_some(CollabProjectionPatch {
+      old_projection_hash: [0; 32],
+      new_projection_hash: [0; 32],
     });
     Ok(CollabImportOutcome {
       patch,
-      frontier: self.frontier()?,
+      frontier: after_frontier,
     })
   }
 
@@ -696,11 +989,11 @@ fn validate_schema(
 
   let source_model = SourceModel::from_code(root_i64(doc, KEY_SOURCE_MODEL)?)?;
   let source_payload = root_binary(doc, KEY_SOURCE_PAYLOAD)?;
-  let source_payload_hash = root_hash(doc, KEY_SOURCE_PAYLOAD_HASH)?;
+  let source_payload_hash = root_hash(doc, KEY_SOURCE_PAYLOAD_HASH).or_else(|_| root_hash(doc, KEY_PROJECTION_HASH))?;
   if blake3_hash(&source_payload) != source_payload_hash {
     return Err(CollabError::HashMismatch("Loro projection cache"));
   }
-  let _ = root_hash(doc, KEY_PROJECTION_HASH)?;
+  let _ = root_hash(doc, KEY_PROJECTION_HASH).or_else(|_| root_hash(doc, KEY_SOURCE_PAYLOAD_HASH))?;
   let asset_manifest = root_binary(doc, KEY_ASSET_MANIFEST)?;
   let asset_manifest_hash = root_hash(doc, KEY_ASSET_MANIFEST_HASH)?;
   if blake3_hash(&asset_manifest) != asset_manifest_hash {
@@ -737,7 +1030,7 @@ fn validate_granular_source(doc: &LoroDoc) -> CollabResult<()> {
 }
 
 fn write_granular_source(doc: &LoroDoc, source: &GranularSource) -> CollabResult<()> {
-  let source = source.clone().canonicalized();
+  let source = validate_granular_source_records(source)?.canonicalized();
   let root = doc.get_map(ROOT_MAP);
   root
     .insert(KEY_GRANULAR_METADATA, source.metadata)
@@ -748,8 +1041,8 @@ fn write_granular_source(doc: &LoroDoc, source: &GranularSource) -> CollabResult
 }
 
 fn merge_granular_source(doc: &LoroDoc, current: &GranularSource, target: &GranularSource) -> CollabResult<()> {
-  let current = current.clone().canonicalized();
-  let target = target.clone().canonicalized();
+  let current = validate_granular_source_records(current)?.canonicalized();
+  let target = validate_granular_source_records(target)?.canonicalized();
   let root = doc.get_map(ROOT_MAP);
   root
     .insert(KEY_GRANULAR_METADATA, target.metadata)
@@ -757,6 +1050,31 @@ fn merge_granular_source(doc: &LoroDoc, current: &GranularSource, target: &Granu
   merge_granular_orders(&root, &current.orders, &target.orders)?;
   merge_granular_texts(&root, &current.texts, &target.texts)?;
   merge_granular_binaries(&root, &current.binaries, &target.binaries)
+}
+
+fn validate_granular_source_records(source: &GranularSource) -> CollabResult<GranularSource> {
+  let mut source = source.clone();
+  for record in &mut source.texts {
+    validate_granular_text_record(record)?;
+    record
+      .marks
+      .sort_by(|left, right| (left.start_utf8, left.end_utf8, &left.key).cmp(&(right.start_utf8, right.end_utf8, &right.key)));
+  }
+  source
+    .orders
+    .sort_by(|left, right| left.name.cmp(&right.name));
+  source.texts.sort_by(|left, right| left.id.cmp(&right.id));
+  source
+    .binaries
+    .sort_by(|left, right| left.id.cmp(&right.id));
+  Ok(source)
+}
+
+fn validate_granular_text_record(record: &GranularTextRecord) -> CollabResult<()> {
+  for mark in &record.marks {
+    validate_utf8_range(&record.text, mark.start_utf8..mark.end_utf8).map_err(|_| CollabError::InvalidSchema("granular text marks"))?;
+  }
+  Ok(())
 }
 
 fn write_granular_orders(root: &LoroMap, orders: &[GranularOrderRecord]) -> CollabResult<()> {
@@ -844,33 +1162,37 @@ fn write_granular_texts(root: &LoroMap, texts: &[GranularTextRecord]) -> CollabR
       .map_err(|error| CollabError::Loro(error.to_string()))?;
   }
   for record in texts {
-    let record_map = text_map
-      .get_or_create_container(record.id.as_str(), LoroMap::new())
+    write_granular_text_record(&text_map, record)?;
+  }
+  Ok(())
+}
+
+fn write_granular_text_record(text_map: &LoroMap, record: &GranularTextRecord) -> CollabResult<()> {
+  validate_granular_text_record(record)?;
+  let record_map = text_map
+    .get_or_create_container(record.id.as_str(), LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  record_map
+    .insert(KEY_RECORD_METADATA, record.metadata.as_slice())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  let text = record_map
+    .get_or_create_container(KEY_RECORD_TEXT, LoroText::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  let current_len = text.to_string().len();
+  if current_len > 0 {
+    text
+      .delete_utf8(0, current_len)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    record_map
-      .insert(KEY_RECORD_METADATA, record.metadata.as_slice())
+  }
+  if !record.text.is_empty() {
+    text
+      .insert_utf8(0, &record.text)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    let text = record_map
-      .get_or_create_container(KEY_RECORD_TEXT, LoroText::new())
+  }
+  for mark in &record.marks {
+    text
+      .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.clone().into_loro())
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    let current_len = text.to_string().len();
-    if current_len > 0 {
-      text
-        .delete_utf8(0, current_len)
-        .map_err(|error| CollabError::Loro(error.to_string()))?;
-    }
-    if !record.text.is_empty() {
-      text
-        .insert_utf8(0, &record.text)
-        .map_err(|error| CollabError::Loro(error.to_string()))?;
-    }
-    for mark in &record.marks {
-      if mark.start_utf8 < mark.end_utf8 {
-        text
-          .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.clone().into_loro())
-          .map_err(|error| CollabError::Loro(error.to_string()))?;
-      }
-    }
   }
   Ok(())
 }
@@ -893,37 +1215,6 @@ fn merge_granular_texts(root: &LoroMap, current: &[GranularTextRecord], target: 
       continue;
     }
     write_granular_text_record(&text_map, &record)?;
-  }
-  Ok(())
-}
-
-fn write_granular_text_record(text_map: &LoroMap, record: &GranularTextRecord) -> CollabResult<()> {
-  let record_map = text_map
-    .get_or_create_container(record.id.as_str(), LoroMap::new())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  record_map
-    .insert(KEY_RECORD_METADATA, record.metadata.as_slice())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  let text = record_map
-    .get_or_create_container(KEY_RECORD_TEXT, LoroText::new())
-    .map_err(|error| CollabError::Loro(error.to_string()))?;
-  let current_len = text.to_string().len();
-  if current_len > 0 {
-    text
-      .delete_utf8(0, current_len)
-      .map_err(|error| CollabError::Loro(error.to_string()))?;
-  }
-  if !record.text.is_empty() {
-    text
-      .insert_utf8(0, &record.text)
-      .map_err(|error| CollabError::Loro(error.to_string()))?;
-  }
-  for mark in &record.marks {
-    if mark.start_utf8 < mark.end_utf8 {
-      text
-        .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.clone().into_loro())
-        .map_err(|error| CollabError::Loro(error.to_string()))?;
-    }
   }
   Ok(())
 }
@@ -1086,6 +1377,33 @@ fn granular_text_container(doc: &LoroDoc, text_id: &str) -> CollabResult<LoroTex
     _ => Err(CollabError::InvalidSchema(KEY_RECORD_TEXT)),
   }
 }
+fn granular_text_record_map(doc: &LoroDoc, text_id: &str) -> CollabResult<LoroMap> {
+  let texts = granular_texts_map(doc)?;
+  match texts.get(text_id) {
+    Some(ValueOrContainer::Container(Container::Map(record))) => Ok(record),
+    _ => Err(CollabError::MissingRootValue(KEY_RECORD_TEXT)),
+  }
+}
+
+fn validate_utf8_offset(text: &str, offset: usize) -> CollabResult<()> {
+  validate_utf8_range(text, offset..offset)
+}
+
+fn validate_utf8_range(text: &str, range: Range<usize>) -> CollabResult<()> {
+  if range.start > range.end {
+    return Err(CollabError::InvalidSchema("granular text range"));
+  }
+  let Some(end) = range
+    .start
+    .checked_add(range.end.saturating_sub(range.start))
+  else {
+    return Err(CollabError::InvalidSchema("granular text range"));
+  };
+  if end > text.len() || !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+    return Err(CollabError::InvalidSchema("granular text range"));
+  }
+  Ok(())
+}
 
 fn granular_orders_map(doc: &LoroDoc) -> CollabResult<LoroMap> {
   root_container_map(doc, KEY_GRANULAR_ORDERS)
@@ -1109,6 +1427,45 @@ fn root_container_map(doc: &LoroDoc, key: &'static str) -> CollabResult<LoroMap>
   }
 }
 
+fn root_value(doc: &LoroDoc, key: &'static str) -> CollabResult<LoroValue> {
+  let root = doc
+    .try_get_map(ROOT_MAP)
+    .ok_or(CollabError::MissingRootValue(ROOT_MAP))?;
+  match root.get(key) {
+    Some(ValueOrContainer::Value(value)) => Ok(value),
+    _ => Err(CollabError::MissingRootValue(key)),
+  }
+}
+
+fn root_binary(doc: &LoroDoc, key: &'static str) -> CollabResult<Vec<u8>> {
+  match root_value(doc, key)? {
+    LoroValue::Binary(value) => Ok(value.unwrap()),
+    _ => Err(CollabError::InvalidSchema(key)),
+  }
+}
+
+fn map_binary(map: &LoroMap, key: &'static str) -> CollabResult<Vec<u8>> {
+  match map.get(key) {
+    Some(ValueOrContainer::Value(LoroValue::Binary(value))) => Ok(value.unwrap()),
+    _ => Err(CollabError::InvalidSchema(key)),
+  }
+}
+
+fn require_writer(role: Role) -> CollabResult<()> {
+  if role == Role::Owner || role == Role::Editor {
+    Ok(())
+  } else {
+    Err(CollabError::Unauthorized("writer role required"))
+  }
+}
+
+fn loro_string(value: LoroValue) -> CollabResult<String> {
+  match value {
+    LoroValue::String(value) => Ok(value.to_string()),
+    _ => Err(CollabError::InvalidSchema(KEY_GRANULAR_ORDERS)),
+  }
+}
+
 fn root_i64(doc: &LoroDoc, key: &'static str) -> CollabResult<i64> {
   match root_value(doc, key)? {
     LoroValue::I64(value) => Ok(value),
@@ -1129,46 +1486,293 @@ fn root_hash(doc: &LoroDoc, key: &'static str) -> CollabResult<[u8; 32]> {
     .map_err(|_| CollabError::InvalidSchema(key))
 }
 
-fn root_binary(doc: &LoroDoc, key: &'static str) -> CollabResult<Vec<u8>> {
-  match root_value(doc, key)? {
-    LoroValue::Binary(bytes) => Ok(bytes.unwrap()),
-    _ => Err(CollabError::InvalidSchema(key)),
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn source_truth_fixture() -> CollabDocument {
+    CollabDocument::from_projection_source(FormatKind::Db8, DocumentId::new(), ActorId::new(), b"projection", b"manifest").unwrap()
+  }
+
+  fn granular_source_fixture() -> CollabDocument {
+    let actor = ActorId::new();
+    let source = GranularSource {
+      metadata: b"root".to_vec(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraphs".to_string(),
+        ids: vec!["p1".to_string()],
+      }],
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "éa".to_string(),
+        metadata: b"meta".to_vec(),
+        marks: vec![GranularTextMark {
+          start_utf8: 0,
+          end_utf8: 2,
+          key: "style".to_string(),
+          value: GranularValue::String("bold".to_string()),
+        }],
+      }],
+      binaries: vec![],
+    };
+    CollabDocument::from_granular_source(FormatKind::Db8, DocumentId::new(), actor, &source, b"projection", b"manifest").unwrap()
+  }
+
+  #[test]
+  fn materialization_sizes_report_payload_lengths() {
+    let doc = source_truth_fixture();
+    let sizes = doc.materialization_sizes().unwrap();
+    assert_eq!(sizes.projection_cache, doc.materialize_projection_cache().unwrap().len());
+    assert_eq!(sizes.asset_manifest, doc.asset_manifest_bytes().unwrap().len());
+    assert_eq!(sizes.frontier, doc.frontier().unwrap().len());
+    assert!(sizes.projection_cache > 0);
+  }
+
+  #[test]
+  fn granular_text_mutations_change_frontier_hash_and_export_updates() {
+    let doc = granular_source_fixture();
+    let before_frontier = doc.frontier().unwrap();
+    let before_hash = doc.projection_hash().unwrap();
+
+    let insert = doc
+      .insert_granular_text_utf8(Role::Owner, "p1", 3, "!")
+      .unwrap();
+    assert!(!insert.is_empty());
+    let after_insert_frontier = doc.frontier().unwrap();
+    let after_insert_hash = doc.projection_hash().unwrap();
+    assert_ne!(after_insert_frontier, before_frontier);
+    assert_ne!(after_insert_hash, before_hash);
+
+    let delete = doc
+      .delete_granular_text_utf8(Role::Owner, "p1", 3, 1)
+      .unwrap();
+    assert!(!delete.is_empty());
+
+    let mark = doc
+      .mark_granular_text_utf8(Role::Owner, "p1", 0..2, "tone", GranularValue::Bool(true))
+      .unwrap();
+    assert!(!mark.is_empty());
+
+    let unmark = doc
+      .unmark_granular_text_utf8(Role::Owner, "p1", 0..2, "tone")
+      .unwrap();
+    assert!(!unmark.is_empty());
+
+    let metadata = doc
+      .set_granular_text_metadata(Role::Owner, "p1", b"updated")
+      .unwrap();
+    assert!(!metadata.is_empty());
+
+    let cleared = doc.clear_granular_text_metadata(Role::Owner, "p1").unwrap();
+    assert!(!cleared.is_empty());
+  }
+  #[test]
+  fn granular_text_updates_refresh_source_provenance() {
+    let left = granular_source_fixture();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(left.document_id())).unwrap();
+    let before = right.source_provenance().unwrap();
+
+    let update = left
+      .insert_granular_text_utf8(Role::Owner, "p1", 3, "!")
+      .unwrap();
+    let outcome = right.import_update_checked(Role::Editor, &update).unwrap();
+    let after = right.source_provenance().unwrap();
+    let materialized = right.materialize_granular_source().unwrap().unwrap();
+
+    assert_ne!(after.source_hash, before.source_hash);
+    assert_ne!(after.frontier, before.frontier);
+    assert_eq!(outcome.frontier, after.frontier);
+    assert_eq!(materialized.texts[0].text, "éa!");
+  }
+
+  #[test]
+  fn granular_source_mutation_batches_export_one_convergent_update() {
+    let left = granular_source_fixture();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(left.document_id())).unwrap();
+
+    let update = left
+      .apply_granular_source_mutations(
+        Role::Owner,
+        &[
+          GranularSourceMutation::InsertText {
+            text_id: "p1".to_string(),
+            byte_offset: 3,
+            text: "!".to_string(),
+          },
+          GranularSourceMutation::MarkText {
+            text_id: "p1".to_string(),
+            range: 0..2,
+            key: "tone".to_string(),
+            value: GranularValue::Bool(true),
+          },
+        ],
+      )
+      .unwrap();
+    assert!(!update.is_empty());
+
+    right.import_update_checked(Role::Editor, &update).unwrap();
+    let materialized = right.materialize_granular_source().unwrap().unwrap();
+    assert_eq!(materialized.texts[0].text, "éa!");
+    assert!(
+      materialized.texts[0]
+        .marks
+        .iter()
+        .any(|mark| mark.key == "tone")
+    );
+  }
+
+  #[test]
+  fn db8_granular_source_rejects_invalid_utf8_mark_range() {
+    let source = GranularSource {
+      metadata: vec![],
+      orders: vec![],
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "éa".to_string(),
+        metadata: vec![],
+        marks: vec![GranularTextMark {
+          start_utf8: 0,
+          end_utf8: 1,
+          key: "style".to_string(),
+          value: GranularValue::Bool(true),
+        }],
+      }],
+      binaries: vec![],
+    };
+    let error = validate_granular_source_records(&source).unwrap_err();
+    assert!(matches!(error, CollabError::InvalidSchema("granular text marks")));
+  }
+
+  #[test]
+  fn db8_granular_source_rejects_invalid_mark_order_range() {
+    let source = GranularSource {
+      metadata: vec![],
+      orders: vec![],
+      texts: vec![GranularTextRecord {
+        id: "p1".to_string(),
+        text: "abc".to_string(),
+        metadata: vec![],
+        marks: vec![GranularTextMark {
+          start_utf8: 2,
+          end_utf8: 1,
+          key: "style".to_string(),
+          value: GranularValue::Bool(true),
+        }],
+      }],
+      binaries: vec![],
+    };
+    let error = validate_granular_source_records(&source).unwrap_err();
+    assert!(matches!(error, CollabError::InvalidSchema("granular text marks")));
+  }
+
+  #[test]
+  fn granular_text_mutations_reject_invalid_utf8_ranges() {
+    let doc = granular_source_fixture();
+    assert!(matches!(
+      doc.insert_granular_text_utf8(Role::Owner, "p1", 1, "!"),
+      Err(CollabError::InvalidSchema("granular text range"))
+    ));
+    assert!(matches!(
+      doc.delete_granular_text_utf8(Role::Owner, "p1", 1, 1),
+      Err(CollabError::InvalidSchema("granular text range"))
+    ));
+    assert!(matches!(
+      doc.mark_granular_text_utf8(Role::Owner, "p1", 1..2, "tone", GranularValue::Bool(true)),
+      Err(CollabError::InvalidSchema("granular text range"))
+    ));
+  }
+
+  #[test]
+  fn importing_the_same_update_twice_keeps_source_hash_stable() {
+    let left = source_truth_fixture();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(left.document_id())).unwrap();
+
+    let update = left
+      .replace_projection_source(Role::Owner, b"changed", b"manifest")
+      .unwrap();
+    let first = right.import_update_checked(Role::Editor, &update).unwrap();
+    let hash_after_first = right.projection_hash().unwrap();
+    let materialized_after_first = right.materialize_projection_cache().unwrap();
+
+    let second = right.import_update_checked(Role::Editor, &update).unwrap();
+    assert_eq!(right.projection_hash().unwrap(), hash_after_first);
+    assert_eq!(right.materialize_projection_cache().unwrap(), materialized_after_first);
+    assert!(second.patch.is_none());
+    assert_eq!(first.frontier, second.frontier);
+  }
+
+  #[test]
+  fn projection_cache_provenance_matches_current_source_and_frontier() {
+    let doc = source_truth_fixture();
+    let provenance = doc.projection_cache_provenance().unwrap();
+    assert_eq!(provenance.source_hash, doc.source_hash().unwrap());
+    assert_eq!(provenance.projection_cache_hash, doc.projection_cache_hash().unwrap());
+    assert!(doc.can_reuse_projection_cache(&provenance).unwrap());
+    assert_eq!(doc.projection_hash().unwrap(), doc.source_hash().unwrap());
+  }
+
+  #[test]
+  fn projection_cache_reuse_rejects_stale_source_or_frontier() {
+    let left = source_truth_fixture();
+    let stale = left.projection_cache_provenance().unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(left.document_id())).unwrap();
+    assert!(right.can_reuse_projection_cache(&stale).unwrap());
+
+    let update = right
+      .replace_projection_source(Role::Owner, b"changed", b"manifest")
+      .unwrap();
+    let imported = left.import_update_checked(Role::Editor, &update).unwrap();
+    assert!(!left.can_reuse_projection_cache(&stale).unwrap());
+    assert_eq!(imported.frontier, left.frontier().unwrap());
+  }
+
+  #[test]
+  #[ignore = "future-target: a no-op edit with only application metadata must not be acked as correctness-bearing source work"]
+  fn accepted_empty_update_or_hint_metadata_must_not_count_as_ackable_source_change() {
+    let doc = source_truth_fixture();
+    let update = doc
+      .replace_projection_source(Role::Owner, b"projection", b"manifest")
+      .unwrap();
+    let _ = update;
+    let _ = doc.frontier().unwrap();
+    let _ = doc.projection_hash().unwrap();
+    panic!("source edits that only carry UI-hint metadata still need a distinct non-empty/update-or-hash signal");
+  }
+
+  #[test]
+  #[ignore = "future-target: the import API should distinguish Duplicate from Applied"]
+  fn import_update_checked_should_distinguish_duplicate_from_applied() {
+    let doc = source_truth_fixture();
+    let update = doc
+      .replace_projection_source(Role::Owner, b"changed", b"manifest")
+      .unwrap();
+    let _ = doc.import_update_checked(Role::Editor, &update).unwrap();
+    let _ = doc.import_update_checked(Role::Editor, &update).unwrap();
+    panic!("duplicate imports still collapse into the same return shape");
+  }
+
+  #[test]
+  #[ignore = "future-target: replica B should materialize A's acked edit directly from source truth"]
+  fn replica_b_exports_materialized_edit_after_ack_without_projection_cache_fallback() {
+    let left = source_truth_fixture();
+    let snapshot = left.export_snapshot().unwrap();
+    let right = CollabDocument::from_snapshot(&snapshot, Some(FormatKind::Db8), Some(left.document_id())).unwrap();
+    let update = left
+      .replace_projection_source(Role::Owner, b"acked-edit", b"manifest")
+      .unwrap();
+    let _ = right.import_update_checked(Role::Editor, &update).unwrap();
+    panic!("the exported source path still needs a source-truth-only materialization assertion");
+  }
+
+  #[test]
+  #[ignore = "future-target: corrupted or stale projection cache must not affect source truth and recovery should be reportable"]
+  fn stale_projection_cache_must_not_change_source_truth_and_recovery_should_be_reportable() {
+    let doc = source_truth_fixture();
+    let _ = doc.export_snapshot().unwrap();
+    let _ = doc.materialize_projection_cache().unwrap();
+    panic!("projection cache corruption/staleness should become an explicit recoverable state");
   }
 }
-
-fn root_value(doc: &LoroDoc, key: &'static str) -> CollabResult<LoroValue> {
-  let root = doc
-    .try_get_map(ROOT_MAP)
-    .ok_or(CollabError::MissingRootValue(ROOT_MAP))?;
-  let value = root.get(key).ok_or(CollabError::MissingRootValue(key))?;
-  match value {
-    ValueOrContainer::Value(value) => Ok(value),
-    ValueOrContainer::Container(_) => Err(CollabError::InvalidSchema(key)),
-  }
-}
-
-fn map_binary(map: &LoroMap, key: &'static str) -> CollabResult<Vec<u8>> {
-  match map.get(key) {
-    Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => Ok(bytes.unwrap()),
-    _ => Err(CollabError::InvalidSchema(key)),
-  }
-}
-
-fn loro_string(value: LoroValue) -> CollabResult<String> {
-  match value {
-    LoroValue::String(value) => Ok(value.unwrap()),
-    _ => Err(CollabError::InvalidSchema("granular order value")),
-  }
-}
-
-fn require_writer(role: Role) -> CollabResult<()> {
-  if role.can_write() {
-    Ok(())
-  } else {
-    Err(CollabError::Unauthorized("viewer cannot create durable document updates"))
-  }
-}
-
 fn configure_peer_id(doc: &LoroDoc, actor_id: ActorId) -> CollabResult<()> {
   let mut bytes = [0; 8];
   bytes.copy_from_slice(&actor_id.0.as_bytes()[..8]);

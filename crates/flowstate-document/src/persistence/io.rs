@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   fs,
   io::{self, Cursor, Read as _, Write as _},
   ops::Range,
@@ -16,10 +17,10 @@ use flowstate_collab::{
 use tempfile::NamedTempFile;
 
 use crate::{
-  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, Document, DocumentIds, DocumentSection, DocumentTheme, EquationBlock,
-  EquationDisplay, EquationSyntax, HIGHLIGHT_ALTERNATIVE, HIGHLIGHT_INSERT, HIGHLIGHT_SPOKEN, HighlightStyle, ImageBlock, ImageSizing,
-  PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT, PARAGRAPH_POCKET, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, Paragraph, ParagraphId,
-  ParagraphOffsetIndex, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE, SEMANTIC_CONDENSED, SEMANTIC_EMPHASIS,
+  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, Document, DocumentIds, DocumentSection, DocumentStyleManifest,
+  DocumentTheme, EquationBlock, EquationDisplay, EquationSyntax, HIGHLIGHT_ALTERNATIVE, HIGHLIGHT_INSERT, HIGHLIGHT_SPOKEN, HighlightStyle,
+  ImageBlock, ImageSizing, PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT, PARAGRAPH_POCKET, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, Paragraph,
+  ParagraphId, ParagraphOffsetIndex, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE, SEMANTIC_CONDENSED, SEMANTIC_EMPHASIS,
   SEMANTIC_ULTRACONDENSED, SEMANTIC_UNDERLINE, SectionId, SectionKind, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
   TableColumnWidth, TableRow, TableStyle, TextRun, demo_document, document_text_slice, merge_adjacent_runs, paragraph_byte_range,
   paragraph_index_for_id, rebuild_document_offset_index, rebuild_document_sections, reconcile_document_ids,
@@ -40,6 +41,160 @@ fn validate_document(document: &Document) -> io::Result<()> {
   }
   if document.ids.block_ids.len() != document.blocks.len() {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 block ID count mismatch"));
+  }
+  validate_document_ids(&document.ids)?;
+  validate_document_paragraphs(document)?;
+  validate_document_blocks(document)?;
+  validate_document_sections(document)?;
+  Ok(())
+}
+
+#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+struct Db8GranularSourceMetadata {
+  projection_cache: Vec<u8>,
+  style_manifest: DocumentStyleManifest,
+}
+
+fn validate_document_ids(ids: &DocumentIds) -> io::Result<()> {
+  validate_unique_ids(ids.paragraph_ids.iter().copied(), "DB8 paragraph ID duplicate")?;
+  validate_unique_ids(ids.block_ids.iter().copied(), "DB8 block ID duplicate")?;
+  Ok(())
+}
+fn validate_document_paragraphs(document: &Document) -> io::Result<()> {
+  let text = document.text.to_string();
+  for paragraph in document.paragraphs.iter() {
+    validate_utf8_range_in_text(&text, paragraph.byte_range.clone(), "DB8 paragraph byte range")?;
+    if paragraph_runs_len_from_runs(&paragraph.runs) != paragraph.byte_range.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 paragraph run length mismatch"));
+    }
+  }
+  Ok(())
+}
+
+fn validate_document_blocks(document: &Document) -> io::Result<()> {
+  let mut paragraph_ix = 0;
+  for block in document.blocks.iter() {
+    validate_block(document, block)?;
+    if let Block::Paragraph(paragraph) = block {
+      let Some(expected) = document.paragraphs.get(paragraph_ix) else {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "DB8 granular paragraph block count exceeds paragraphs",
+        ));
+      };
+      if paragraph != expected {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 granular paragraph projection mismatch"));
+      }
+      if paragraph.byte_range != paragraph_byte_range(document, paragraph_ix) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 granular paragraph byte range mismatch"));
+      }
+      paragraph_ix += 1;
+    }
+  }
+  if paragraph_ix != document.paragraphs.len() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "DB8 granular paragraph order exceeds paragraph blocks",
+    ));
+  }
+  Ok(())
+}
+
+fn validate_block(document: &Document, block: &Block) -> io::Result<()> {
+  match block {
+    Block::Paragraph(_) => Ok(()),
+    Block::Image(image) => {
+      if !document.assets.assets.contains_key(&image.asset_id) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 image block references missing asset"));
+      }
+      if let Some(caption) = &image.caption {
+        validate_paragraph_structure(caption)?;
+      }
+      Ok(())
+    },
+    Block::Equation(_) => Ok(()),
+    Block::Table(table) => validate_table_block(table),
+  }
+}
+
+fn validate_paragraph_structure(paragraph: &Paragraph) -> io::Result<()> {
+  if paragraph_runs_len_from_runs(&paragraph.runs) != paragraph.byte_range.len() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 paragraph run length mismatch"));
+  }
+  Ok(())
+}
+
+fn validate_table_block(table: &TableBlock) -> io::Result<()> {
+  for row in &table.rows {
+    for cell in &row.cells {
+      for block in &cell.blocks {
+        match block {
+          TableCellBlock::Paragraph(cell_paragraph) => {
+            validate_utf8_range_in_text(
+              &cell_paragraph.text,
+              cell_paragraph.paragraph.byte_range.clone(),
+              "DB8 table cell paragraph byte range",
+            )?;
+            validate_paragraph_structure(&cell_paragraph.paragraph)?;
+            if cell_paragraph.paragraph.byte_range.len() != cell_paragraph.text.len() {
+              return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 table cell paragraph text mismatch"));
+            }
+          },
+          TableCellBlock::Table(nested) => validate_table_block(nested)?,
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+fn validate_document_sections(document: &Document) -> io::Result<()> {
+  let section_ids = document
+    .sections
+    .iter()
+    .map(|section| section.id)
+    .collect::<HashSet<_>>();
+  let mut seen = HashSet::with_capacity(section_ids.len());
+  for section in document.sections.iter() {
+    if !seen.insert(section.id) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 section ID duplicate"));
+    }
+    validate_section_paragraph_ref(document, section.start_paragraph, "DB8 section start paragraph missing")?;
+    if let Some(heading) = section.heading_paragraph {
+      validate_section_paragraph_ref(document, heading, "DB8 section heading paragraph missing")?;
+    }
+    if let Some(end) = section.end_paragraph_exclusive {
+      validate_section_paragraph_ref(document, end, "DB8 section end paragraph missing")?;
+    }
+    if let Some(parent) = section.parent_id
+      && (parent == section.id || !section_ids.contains(&parent))
+    {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 section parent missing"));
+    }
+  }
+  Ok(())
+}
+
+fn validate_section_paragraph_ref(document: &Document, paragraph_id: ParagraphId, message: &'static str) -> io::Result<()> {
+  if paragraph_index_for_id(document, paragraph_id).is_none() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+  }
+  Ok(())
+}
+
+fn validate_unique_ids<T: Eq + std::hash::Hash>(ids: impl IntoIterator<Item = T>, message: &'static str) -> io::Result<()> {
+  let mut seen = HashSet::new();
+  for id in ids {
+    if !seen.insert(id) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, message));
+    }
+  }
+  Ok(())
+}
+
+fn validate_utf8_range_in_text(text: &str, range: Range<usize>, message: &'static str) -> io::Result<()> {
+  if range.start > range.end || range.end > text.len() || !text.is_char_boundary(range.start) || !text.is_char_boundary(range.end) {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, message));
   }
   Ok(())
 }
@@ -71,7 +226,7 @@ const CHUNK_PARAGRAPH_IDS: u8 = 4;
 const CHUNK_BLOCK_IDS: u8 = 5;
 const CHUNK_SECTIONS: u8 = 6;
 const CHUNK_DOCUMENT_META: u8 = 7;
-
+const CHUNK_STYLE_MANIFEST: u8 = 8;
 const BLOCK_PARAGRAPH: u8 = 0;
 const BLOCK_IMAGE: u8 = 1;
 const BLOCK_EQUATION: u8 = 2;
@@ -80,6 +235,7 @@ const TABLE_CELL_PARAGRAPH: u8 = 0;
 const TABLE_CELL_TABLE: u8 = 1;
 
 #[hotpath::measure]
+#[expect(dead_code, reason = "kept as public persistence API for external callers and tests")]
 pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
   let path = path.as_ref();
   match read_db8(path) {
@@ -157,6 +313,7 @@ pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
 }
 
 #[hotpath::measure]
+#[expect(dead_code, reason = "used by collaboration and projection-cache integrations outside this crate")]
 pub fn db8_projection_cache_bytes(document: &Document) -> io::Result<Vec<u8>> {
   let document = document_for_serialization(document);
   validate_document(&document)?;
@@ -169,6 +326,7 @@ pub fn read_db8_projection_cache_bytes(bytes: &[u8]) -> io::Result<Document> {
 }
 
 #[hotpath::measure]
+#[expect(dead_code, reason = "used by collaboration integrations outside this crate")]
 pub fn db8_collab_document(document: &Document, created_by_actor: ActorId) -> io::Result<Db8CollabDocument> {
   let document = document_for_serialization(document);
   db8_collab_document_with_id_from_serialized(
@@ -202,8 +360,29 @@ fn db8_collab_document_with_id_from_serialized(
   Db8CollabDocument::from_granular_source(document_id, created_by_actor, &source, &projection_cache, &asset_manifest).map_err(collab_to_io_error)
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Db8ProjectionCacheRecovery {
+  Reused,
+  Rebuilt,
+}
+
+#[derive(Debug)]
+struct Db8GranularMaterialization {
+  document: Document,
+  #[allow(
+    dead_code,
+    reason = "recovery is surfaced by collaboration fidelity tests and diagnostic materialization paths"
+  )]
+  recovery: Db8ProjectionCacheRecovery,
+}
+
 #[hotpath::measure]
 pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Document> {
+  Ok(document_from_db8_collab_source_with_recovery(source)?.document)
+}
+
+#[hotpath::measure]
+fn document_from_db8_collab_source_with_recovery(source: &CollabDocument) -> io::Result<Db8GranularMaterialization> {
   if source.format_kind() != FormatKind::Db8 {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "collaboration source is not DB8"));
   }
@@ -211,13 +390,19 @@ pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Do
     .materialize_granular_source()
     .map_err(collab_to_io_error)?
   {
-    return document_from_db8_granular_source(&granular);
+    return Ok(Db8GranularMaterialization {
+      document: document_from_db8_granular_source(&granular)?,
+      recovery: Db8ProjectionCacheRecovery::Reused,
+    });
   }
-  read_db8_projection_cache_bytes(
-    &source
-      .materialize_projection_cache()
-      .map_err(collab_to_io_error)?,
-  )
+  Ok(Db8GranularMaterialization {
+    document: read_db8_projection_cache_bytes(
+      &source
+        .materialize_projection_cache()
+        .map_err(collab_to_io_error)?,
+    )?,
+    recovery: Db8ProjectionCacheRecovery::Rebuilt,
+  })
 }
 
 #[hotpath::measure]
@@ -242,6 +427,10 @@ fn document_for_serialization(document: &Document) -> Document {
 }
 
 #[hotpath::measure]
+fn serialize_db8_style_manifest(document: &Document) -> io::Result<Vec<u8>> {
+  postcard::to_stdvec(&DocumentStyleManifest::from_theme(&document.theme)).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
 fn serialize_db8_projection(document: &Document) -> Vec<u8> {
   let mut chunks = Vec::<(u8, Vec<u8>)>::new();
   let mut text = Vec::with_capacity(document.text.byte_len());
@@ -284,6 +473,10 @@ fn serialize_db8_projection(document: &Document) -> Vec<u8> {
     write_section_record(&mut sections, section);
   }
   chunks.push((CHUNK_SECTIONS, sections));
+  chunks.push((
+    CHUNK_STYLE_MANIFEST,
+    serialize_db8_style_manifest(document).expect("DB8 style manifest serializes"),
+  ));
 
   let mut document_meta = Vec::new();
   write_u128(&mut document_meta, document.ids.document_id);
@@ -380,7 +573,11 @@ fn db8_granular_source(document: &Document, projection_cache: Vec<u8>) -> io::Re
     .collect::<Vec<_>>();
 
   Ok(GranularSource {
-    metadata: projection_cache,
+    metadata: postcard::to_stdvec(&Db8GranularSourceMetadata {
+      projection_cache,
+      style_manifest: DocumentStyleManifest::from_theme(&document.theme),
+    })
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
     orders: vec![
       GranularOrderRecord {
         name: DB8_PARAGRAPH_ORDER.to_string(),
@@ -397,8 +594,22 @@ fn db8_granular_source(document: &Document, projection_cache: Vec<u8>) -> io::Re
 }
 
 #[hotpath::measure]
+fn db8_document_and_manifest(source: &GranularSource) -> io::Result<(Document, Option<DocumentStyleManifest>)> {
+  match postcard::from_bytes::<Db8GranularSourceMetadata>(&source.metadata) {
+    Ok(metadata) => Ok((
+      read_db8_projection_cache_bytes(&metadata.projection_cache)?,
+      Some(metadata.style_manifest),
+    )),
+    Err(_) => Ok((read_db8_projection_cache_bytes(&source.metadata)?, None)),
+  }
+}
+
+#[hotpath::measure]
 fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Document> {
-  let mut document = read_db8_projection_cache_bytes(&source.metadata)?;
+  let (mut document, style_manifest) = db8_document_and_manifest(source)?;
+  if let Some(style_manifest) = style_manifest {
+    style_manifest.apply_to_theme(&mut document.theme);
+  }
   let paragraph_ids = db8_order_u128(source, DB8_PARAGRAPH_ORDER)?
     .unwrap_or_else(|| document.ids.paragraph_ids.iter().map(|id| id.0).collect())
     .into_iter()
@@ -439,8 +650,12 @@ fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Docu
         version: 0,
       });
     paragraph.style = metadata.style;
-    paragraph.runs = if paragraph_runs_len_from_runs(&metadata.runs) == record.text.len() {
-      metadata.runs
+    paragraph.runs = if record.marks.is_empty() {
+      if paragraph_runs_len_from_runs(&metadata.runs) == record.text.len() {
+        metadata.runs
+      } else {
+        db8_runs_from_marks(record.text.len(), &record.marks)
+      }
     } else {
       db8_runs_from_marks(record.text.len(), &record.marks)
     };
@@ -540,6 +755,25 @@ fn db8_order_u128(source: &GranularSource, name: &str) -> io::Result<Option<Vec<
     ids.push(parsed);
   }
   Ok(Some(ids))
+}
+#[allow(dead_code, reason = "staged granular table ordering helper for collaborative table records")]
+fn db8_table_row_order_name(block_id: BlockId) -> String {
+  format!("{DB8_BLOCK_ORDER}/table/{:032x}/rows", block_id.0)
+}
+
+#[allow(dead_code, reason = "staged granular table ordering helper for collaborative table records")]
+fn db8_table_cell_order_name(block_id: BlockId, row_ix: usize) -> String {
+  format!("{DB8_BLOCK_ORDER}/table/{:032x}/rows/{row_ix}/cells", block_id.0)
+}
+
+#[allow(dead_code, reason = "staged granular table ordering helper for collaborative table records")]
+fn db8_table_row_order_ids(table: &TableBlock, block_id: BlockId) -> Vec<u128> {
+  table.row_order_ids(block_id.0)
+}
+
+#[allow(dead_code, reason = "staged granular table ordering helper for collaborative table records")]
+fn db8_table_cell_order_ids(table: &TableBlock, block_id: BlockId, row_ix: usize) -> Vec<u128> {
+  table.cell_order_ids(block_id.0, row_ix)
 }
 
 #[hotpath::measure]
@@ -811,12 +1045,58 @@ mod collab_source_tests {
 
   #[test]
   #[hotpath::measure]
-  fn db8_collab_source_materializes_projection() {
+  fn db8_collab_source_materializes_projection_with_recovery() {
     let document = demo_document();
     let source = db8_collab_document(&document, ActorId::new()).unwrap();
+    let materialized = document_from_db8_collab_source_with_recovery(source.inner()).unwrap();
+    assert_eq!(materialized.document.ids.document_id, document.ids.document_id);
+    assert_eq!(materialized.document.paragraphs.len(), document.paragraphs.len());
+    assert_eq!(materialized.recovery, Db8ProjectionCacheRecovery::Reused);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_collab_source_roundtrips_style_manifest_through_granular_metadata() {
+    let mut document = demo_document();
+    let style = document
+      .theme
+      .custom_paragraph_styles
+      .get(&0)
+      .cloned()
+      .unwrap();
+    document.theme.set_custom_paragraph_style(7, style.clone());
+    let source = db8_collab_document(&document, ActorId::new()).unwrap();
     let materialized = document_from_db8_collab_source(source.inner()).unwrap();
-    assert_eq!(materialized.ids.document_id, document.ids.document_id);
-    assert_eq!(materialized.paragraphs.len(), document.paragraphs.len());
+    let roundtripped = &materialized.theme.custom_paragraph_styles[&7];
+    assert_eq!(roundtripped.font_size, style.font_size);
+    assert_eq!(roundtripped.bold, style.bold);
+    assert_eq!(roundtripped.italic, style.italic);
+    assert_eq!(roundtripped.section_kind, style.section_kind);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_bytes_roundtrip_preserves_style_manifest_chunk() {
+    let document = demo_document();
+    let bytes = db8_bytes(&document).unwrap();
+    let reread = read_db8_bytes(&bytes).unwrap();
+    assert_eq!(db8_bytes(&reread).unwrap(), bytes);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_projection_only_source_reports_rebuild() {
+    let document = demo_document();
+    let actor = ActorId::new();
+    let source = Db8CollabDocument::from_projection_source(
+      CollabDocumentId::new(),
+      actor,
+      &serialize_db8_projection(&document),
+      &postcard::to_stdvec(&db8_native_asset_records(&document, actor)).unwrap(),
+    )
+    .unwrap();
+    let materialized = document_from_db8_collab_source_with_recovery(source.inner()).unwrap();
+    assert_eq!(materialized.recovery, Db8ProjectionCacheRecovery::Rebuilt);
   }
 
   #[test]
@@ -869,5 +1149,201 @@ mod collab_source_tests {
     let materialized = document_from_db8_granular_source(&source).unwrap();
     assert_eq!(document_text_slice(&materialized, paragraph_byte_range(&materialized, 0)), "second");
     assert_eq!(document_text_slice(&materialized, paragraph_byte_range(&materialized, 1)), "first");
+  }
+  #[test]
+  fn db8_validate_document_rejects_missing_section_paragraph_reference() {
+    let mut document = demo_document();
+    document.sections = Arc::new(vec![DocumentSection {
+      id: SectionId(1),
+      parent_id: None,
+      kind: SectionKind::Custom(1),
+      heading_paragraph: Some(ParagraphId(u128::MAX)),
+      start_paragraph: document.ids.paragraph_ids[0],
+      end_paragraph_exclusive: None,
+    }]);
+
+    let error = validate_document(&document).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  fn db8_validate_document_rejects_misaligned_paragraph_blocks() {
+    let mut document = demo_document();
+    let mut blocks = document.blocks.as_ref().clone();
+    if let Some(Block::Paragraph(paragraph)) = blocks.get_mut(0) {
+      paragraph.byte_range = 1..paragraph.byte_range.end;
+    }
+    document.blocks = Arc::new(blocks);
+
+    let error = validate_document(&document).unwrap_err();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_granular_marks_materialize_run_styles_and_override_metadata() {
+    let document = crate::document_from_input(
+      crate::DocumentTheme::default(),
+      vec![crate::InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![crate::InputRun {
+          text: "styled".to_string(),
+          styles: RunStyles {
+            semantic: SEMANTIC_EMPHASIS,
+            direct_underline: true,
+            strikethrough: true,
+            highlight: Some(HIGHLIGHT_INSERT),
+          },
+        }],
+      }],
+    );
+    let document = document_for_serialization(&document);
+    let mut source = db8_granular_source(&document, serialize_db8_projection(&document)).unwrap();
+    {
+      let record = &mut source.texts[0];
+      record.metadata = postcard::to_stdvec(&Db8GranularParagraphMetadata {
+        style: ParagraphStyle::Normal,
+        runs: vec![TextRun {
+          len: record.text.len(),
+          styles: RunStyles::default(),
+        }],
+      })
+      .unwrap();
+    };
+
+    let materialized = document_from_db8_granular_source(&source).unwrap();
+    assert_eq!(
+      materialized.paragraphs[0].runs,
+      vec![TextRun {
+        len: "styled".len(),
+        styles: RunStyles {
+          semantic: SEMANTIC_EMPHASIS,
+          direct_underline: true,
+          strikethrough: true,
+          highlight: Some(HIGHLIGHT_INSERT),
+        },
+      }]
+    );
+
+    {
+      let record = &mut source.texts[0];
+      record.marks.clear();
+      record.metadata = postcard::to_stdvec(&Db8GranularParagraphMetadata {
+        style: ParagraphStyle::Normal,
+        runs: vec![TextRun {
+          len: record.text.len(),
+          styles: RunStyles {
+            semantic: SEMANTIC_CITE,
+            direct_underline: false,
+            strikethrough: false,
+            highlight: None,
+          },
+        }],
+      })
+      .unwrap();
+    };
+
+    let migrated = document_from_db8_granular_source(&source).unwrap();
+    assert_eq!(
+      migrated.paragraphs[0].runs,
+      vec![TextRun {
+        len: "styled".len(),
+        styles: RunStyles {
+          semantic: SEMANTIC_CITE,
+          direct_underline: false,
+          strikethrough: false,
+          highlight: None,
+        },
+      }]
+    );
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_table_record_helpers_are_stable() {
+    let table = TableBlock {
+      rows: vec![
+        TableRow {
+          cells: vec![
+            TableCell {
+              blocks: vec![],
+              row_span: 1,
+              col_span: 1,
+            },
+            TableCell {
+              blocks: vec![],
+              row_span: 1,
+              col_span: 1,
+            },
+          ],
+        },
+        TableRow {
+          cells: vec![TableCell {
+            blocks: vec![],
+            row_span: 1,
+            col_span: 1,
+          }],
+        },
+      ],
+      column_widths: vec![TableColumnWidth::Fraction(1), TableColumnWidth::Fraction(1)],
+      style: TableStyle { header_row: false },
+      version: 0,
+    };
+    let block_id = BlockId(0x1234);
+    assert_eq!(
+      db8_table_row_order_name(block_id),
+      "block_order/table/00000000000000000000000000001234/rows"
+    );
+    assert_eq!(
+      db8_table_cell_order_name(block_id, 1),
+      "block_order/table/00000000000000000000000000001234/rows/1/cells"
+    );
+    assert_eq!(db8_table_row_order_ids(&table, block_id), db8_table_row_order_ids(&table, block_id));
+    assert_eq!(
+      db8_table_cell_order_ids(&table, block_id, 0),
+      db8_table_cell_order_ids(&table, block_id, 0)
+    );
+    assert_ne!(
+      db8_table_row_order_ids(&table, block_id)[0],
+      db8_table_cell_order_ids(&table, block_id, 0)[0]
+    );
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn db8_materialize_blocks_is_deterministic_for_tables() {
+    let table = TableBlock {
+      rows: vec![TableRow {
+        cells: vec![TableCell {
+          blocks: vec![],
+          row_span: 1,
+          col_span: 1,
+        }],
+      }],
+      column_widths: vec![TableColumnWidth::Fraction(1)],
+      style: TableStyle { header_row: false },
+      version: 7,
+    };
+    let document = Document {
+      text: Rope::from(""),
+      paragraphs: Arc::new(Vec::new()),
+      blocks: Arc::new(Vec::new()),
+      assets: AssetStore::default(),
+      ids: DocumentIds {
+        document_id: 1,
+        paragraph_ids: Vec::new(),
+        block_ids: vec![BlockId(1)],
+      },
+      sections: Arc::new(Vec::new()),
+      offset_index: ParagraphOffsetIndex {
+        widths: Vec::new(),
+        tree: Vec::new(),
+      },
+      theme: DocumentTheme::default(),
+    };
+    let mut block_records = std::collections::HashMap::new();
+    block_records.insert(BlockId(1), Block::Table(table.clone()));
+    let materialized = db8_materialize_blocks(&document, &[BlockId(1)], &block_records).unwrap();
+    assert_eq!(materialized, vec![Block::Table(table)]);
   }
 }

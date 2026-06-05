@@ -55,8 +55,5 @@ hotpath-alloc = [
 ]
 profiler = ["hotpath", "hotpath-alloc"]
 
-[target.'cfg(target_os = "macos")'.dependencies]
-gpui-symbols = { workspace = true }
-
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }

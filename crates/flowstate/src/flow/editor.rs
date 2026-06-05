@@ -82,13 +82,27 @@ impl CollaborationRole {
   }
 }
 
-#[derive(Clone, Debug)]
 struct PendingEdit {
   id: NodeId,
   owner: NodeId,
   before_focus: Option<NodeId>,
   after_focus: Option<NodeId>,
   old_value: NodeValue,
+}
+
+#[must_use]
+fn collaboration_publish_actions(actions: Option<&[Action]>, pending_edit: bool) -> Option<&[Action]> {
+  if pending_edit || actions.is_some_and(|actions| !actions.iter().any(Action::affects_source)) {
+    None
+  } else {
+    actions
+  }
+}
+
+impl PendingEdit {
+  fn clear_last_collaboration_actions(editor: &mut FlowEditor) {
+    editor.last_collaboration_actions = None;
+  }
 }
 
 #[hotpath::measure_all]
@@ -132,10 +146,11 @@ impl FlowEditor {
   }
 
   pub fn last_collaboration_actions(&self) -> Option<&[Action]> {
-    self.last_collaboration_actions.as_deref()
+    collaboration_publish_actions(self.last_collaboration_actions.as_deref(), self.pending_edit.is_some())
   }
 
   pub fn replace_document_from_collaboration(&mut self, document: FlowDocument, cx: &mut Context<Self>) {
+    self.pending_edit = None;
     self.document = document;
     self.dirty = true;
     self.last_collaboration_actions = None;
@@ -143,6 +158,7 @@ impl FlowEditor {
   }
 
   pub fn apply_remote_actions_from_collaboration(&mut self, actions: &[Action], cx: &mut Context<Self>) {
+    self.pending_edit = None;
     self.document.apply_action_bundle(actions.to_vec());
     self.last_collaboration_actions = None;
     self.dirty = true;
@@ -873,6 +889,7 @@ impl FlowEditor {
     } else if let Some(pending) = &mut self.pending_edit {
       pending.after_focus = self.focus_id.clone();
     }
+    PendingEdit::clear_last_collaboration_actions(self);
     if let Some(node) = self.document.node_mut(&id) {
       node.value = value;
       self.dirty = true;
@@ -1575,7 +1592,8 @@ fn stable_element_id(value: &str) -> u64 {
 
 #[cfg(test)]
 mod tests {
-  use super::{DebateColumnSide, debate_column_side, flow_box_column_index};
+  use super::{DebateColumnSide, collaboration_publish_actions, debate_column_side, flow_box_column_index};
+  use flowstate_flow::{Action, ROOT_ID};
 
   #[test]
   #[hotpath::measure]
@@ -1591,6 +1609,16 @@ mod tests {
     for column in ["1NC", "2NC/1NR", "1NR", "2NR", "NC", "NFF", "Q/1N", "N3", "O1", "CC", "LO", "MO"] {
       assert_eq!(debate_column_side(column), DebateColumnSide::Negative, "{column}");
     }
+  }
+
+  #[test]
+  fn collaboration_actions_are_suppressed_during_pending_edits() {
+    let actions = vec![Action::Delete { id: ROOT_ID.to_string() }];
+    let identity_actions = vec![Action::Identity];
+    assert!(collaboration_publish_actions(Some(&actions), false).is_some());
+    assert!(collaboration_publish_actions(Some(&actions), true).is_none());
+    assert!(collaboration_publish_actions(Some(&identity_actions), false).is_none());
+    assert!(collaboration_publish_actions(None, true).is_none());
   }
 
   #[test]

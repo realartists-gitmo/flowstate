@@ -62,6 +62,10 @@ impl DocumentPanel {
     self.ribbon.clone()
   }
 
+  pub fn path(&self) -> Option<&PathBuf> {
+    self.path.as_ref()
+  }
+
   pub fn title_text(&self) -> SharedString {
     self.title.clone()
   }

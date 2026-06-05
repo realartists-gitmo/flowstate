@@ -16,7 +16,9 @@ pub enum Action {
     value: NodeValue,
   },
   #[serde(rename = "delete")]
-  Delete { id: NodeId },
+  Delete {
+    id: NodeId,
+  },
   #[serde(rename = "update")]
   Update {
     id: NodeId,
@@ -34,8 +36,14 @@ pub enum Action {
     #[serde(rename = "newNodes")]
     new_nodes: Nodes,
   },
-  #[serde(rename = "identity")]
   Identity,
+}
+
+impl Action {
+  #[must_use]
+  pub const fn affects_source(&self) -> bool {
+    !matches!(self, Self::Identity)
+  }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -387,6 +395,19 @@ mod tests {
 
     history.undo(&flow_id, &mut document);
     assert_eq!(document.box_node(&first_box).unwrap().content, "plan flaw");
+  }
+
+  fn action_bundle_affects_source(actions: &[Action]) -> bool {
+    actions.iter().any(Action::affects_source)
+  }
+
+  #[test]
+  fn action_bundle_source_affects_non_identity_actions() {
+    assert!(!action_bundle_affects_source(&[Action::Identity]));
+    assert!(action_bundle_affects_source(&[Action::Update {
+      id: "x".into(),
+      new_value: NodeValue::Root
+    }]));
   }
 
   #[test]

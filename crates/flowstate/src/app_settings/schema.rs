@@ -142,6 +142,34 @@ pub struct DocumentThemeSettings {
   pub ultracondensed_underline: ThemeUnderlineSetting,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DocumentStyleManifestSettings {
+  pub version: u32,
+  pub paragraph_styles: Vec<DocumentStyleDefinitionSettings<CustomParagraphStyle>>,
+  pub semantic_styles: Vec<DocumentStyleDefinitionSettings<CustomSemanticStyle>>,
+  pub highlight_styles: Vec<DocumentStyleDefinitionSettings<crate::rich_text_element::CustomHighlightStyle>>,
+}
+
+impl Default for DocumentStyleManifestSettings {
+  fn default() -> Self {
+    Self {
+      version: 1,
+      paragraph_styles: Vec::new(),
+      semantic_styles: Vec::new(),
+      highlight_styles: Vec::new(),
+    }
+  }
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+pub struct DocumentStyleDefinitionSettings<T> {
+  pub id: u8,
+  pub name: String,
+  pub label: String,
+  pub style: T,
+}
+
 #[derive(Clone, Copy, Deserialize, Serialize)]
 pub struct StoredHsla {
   h: f32,
@@ -162,5 +190,56 @@ pub enum ThemeUnderlineSetting {
 impl Default for DocumentThemeSettings {
   fn default() -> Self {
     Self::from(&flowstate_document_theme())
+  }
+}
+
+#[cfg(test)]
+mod schema_tests {
+  use super::*;
+
+  #[test]
+  fn style_manifest_settings_roundtrip() {
+    let manifest = DocumentStyleManifestSettings {
+      version: 1,
+      paragraph_styles: vec![DocumentStyleDefinitionSettings {
+        id: 7,
+        name: "paragraph.custom".to_string(),
+        label: "Custom".to_string(),
+        style: CustomParagraphStyle {
+          font_size: px(12.0),
+          font_family: None,
+          color: gpui::black(),
+          bold: true,
+          italic: false,
+          underline: ThemeUnderline::Single,
+          align: Default::default(),
+          spacing_before: px(0.0),
+          spacing_after: px(1.0),
+          border: None,
+          section_kind: None,
+          section_level: None,
+        },
+      }],
+      semantic_styles: vec![DocumentStyleDefinitionSettings {
+        id: 2,
+        name: "semantic.custom".to_string(),
+        label: "Semantic".to_string(),
+        style: CustomSemanticStyle {
+          font_size: Some(px(9.0)),
+          font_family: None,
+          color: Some(gpui::black()),
+          bold: Some(false),
+          italic: Some(true),
+          underline: Some(ThemeUnderline::Double),
+          border_width: Some(px(1.0)),
+        },
+      }],
+      highlight_styles: vec![],
+    };
+
+    let decoded = postcard::from_bytes::<DocumentStyleManifestSettings>(&postcard::to_stdvec(&manifest).unwrap()).unwrap();
+    assert_eq!(decoded.version, 1);
+    assert_eq!(decoded.paragraph_styles[0].id, 7);
+    assert_eq!(decoded.semantic_styles[0].label, "Semantic");
   }
 }

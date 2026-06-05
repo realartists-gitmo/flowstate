@@ -624,6 +624,7 @@ fn write_asset_record(bytes: &mut Vec<u8>, asset: &AssetRecord) {
 }
 
 #[hotpath::measure]
+#[expect(dead_code, reason = "kept as public recovery API for external callers and tests")]
 #[must_use]
 pub fn recovery_path_for_document(path: &Path) -> PathBuf {
   let mut recovery_path = path.to_path_buf();

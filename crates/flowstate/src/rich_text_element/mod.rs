@@ -1,3 +1,6 @@
+// Legacy rich-text editor glue in this crate is retained for compatibility.
+// Active editor fixes and collaboration behavior now live in gpui-flowtext via flowstate-document.
+
 pub use flowstate_document::*;
 
 use crate::commands::CommandId;

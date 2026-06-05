@@ -1,5 +1,5 @@
 #[cfg(test)]
-mod tests {
+mod workspace_tests {
   use super::*;
   use crate::rich_text_element::{DocumentParagraphInput, DocumentRunInput, RunStyles, document_from_paragraphs};
 
@@ -103,7 +103,7 @@ mod tests {
   #[test]
   #[hotpath::measure]
   fn db8_collaboration_source_materializes_workspace_document() {
-    let document = document_from_paragraphs(
+    let mut document = document_from_paragraphs(
       DocumentTheme::default(),
       vec![
         paragraph(flowstate_document::PARAGRAPH_POCKET, "Root"),
@@ -111,7 +111,7 @@ mod tests {
       ],
     );
     let document_id = CollabDocumentId(Uuid::new_v4());
-    let (source, assets) = db8_collaboration_source(&document, document_id).unwrap();
+    let (source, assets) = db8_collaboration_source(&mut document, document_id).unwrap();
 
     assert_eq!(source.document_id(), document_id);
     assert_eq!(source.format_kind(), FormatKind::Db8);
@@ -132,7 +132,45 @@ mod tests {
   }
 
   #[test]
-  fn bounded_pending_collaboration_queue_keeps_latest_source() {
+  #[hotpath::measure]
+  fn bounded_pending_collaboration_queue_keeps_source_and_application_entries_distinct() {
+    let document_id = CollabDocumentId(Uuid::new_v4());
+    let actor_id = ActorId::new();
+    let source = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor_id, b"source", &[]).unwrap();
+    let mut queue = VecDeque::new();
+
+    assert!(!push_bounded_pending_collaboration_update(
+      &mut queue,
+      PendingCollaborationUpdate::Source {
+        source,
+        application: Some(UpdateApplication::Db8CanonicalOperations(vec![1, 2, 3])),
+        hash: Some([7; 32]),
+      },
+      2,
+    ));
+    assert!(!push_bounded_pending_collaboration_update(
+      &mut queue,
+      PendingCollaborationUpdate::Application {
+        application: UpdateApplication::Db8CanonicalOperations(vec![4, 5, 6]),
+      },
+      2,
+    ));
+
+    assert_eq!(queue.len(), 2);
+    let Some(PendingCollaborationUpdate::Source { application, hash, .. }) = queue.pop_front() else {
+      panic!("expected durable source update first");
+    };
+    assert!(application.is_some());
+    assert_eq!(hash, Some([7; 32]));
+    let Some(PendingCollaborationUpdate::Application { application }) = queue.pop_front() else {
+      panic!("expected app-only metadata update second");
+    };
+    assert!(matches!(application, UpdateApplication::Db8CanonicalOperations(bytes) if bytes == vec![4, 5, 6]));
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn bounded_pending_collaboration_queue_discards_oldest_when_full() {
     let document_id = CollabDocumentId(Uuid::new_v4());
     let actor_id = ActorId::new();
     let first = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor_id, b"first", &[]).unwrap();
@@ -146,7 +184,14 @@ mod tests {
         application: None,
         hash: None,
       },
-      1,
+      2,
+    ));
+    assert!(!push_bounded_pending_collaboration_update(
+      &mut queue,
+      PendingCollaborationUpdate::Application {
+        application: UpdateApplication::Db8CanonicalOperations(vec![7, 8]),
+      },
+      2,
     ));
     assert!(push_bounded_pending_collaboration_update(
       &mut queue,
@@ -155,13 +200,49 @@ mod tests {
         application: None,
         hash: None,
       },
-      1,
+      2,
     ));
 
-    assert_eq!(queue.len(), 1);
+    assert_eq!(queue.len(), 2);
+    let Some(PendingCollaborationUpdate::Application { application }) = queue.pop_front() else {
+      panic!("expected oldest source update to be dropped");
+    };
+    assert!(matches!(application, UpdateApplication::Db8CanonicalOperations(bytes) if bytes == vec![7, 8]));
     let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
-      panic!("expected queued source replacement");
+      panic!("expected newest source replacement to remain");
     };
     assert_eq!(source.materialize_projection_cache().unwrap(), b"second");
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn parse_db8_presence_cursor_accepts_valid_index_byte_payloads() {
+    let document = document_from_paragraphs(DocumentTheme::default(), vec![paragraph(ParagraphStyle::Normal, "Body")]);
+    assert_eq!(
+      resolve_db8_presence_cursor("db8:3:128", &document),
+      Some(DocumentOffset { paragraph: 3, byte: 128 })
+    );
+  }
+
+  #[test]
+  #[hotpath::measure]
+  fn parse_db8_presence_cursor_rejects_malformed_payloads() {
+    let document = document_from_paragraphs(DocumentTheme::default(), vec![paragraph(ParagraphStyle::Normal, "Body")]);
+    assert_eq!(resolve_db8_presence_cursor("db8:3", &document), None);
+    assert_eq!(resolve_db8_presence_cursor("db8:x:1", &document), None);
+    assert_eq!(resolve_db8_presence_cursor("fl0:3:1", &document), None);
+    assert_eq!(resolve_db8_presence_cursor("db8:3:1:2", &document), None);
+  }
+
+  #[test]
+  #[ignore = "target state"]
+  fn db8_collaboration_presence_requires_stable_peer_ids() {
+    panic!("target state: DB8 presence should be keyed by stable peer/session identifiers, not transient indices and byte payloads");
+  }
+
+  #[test]
+  #[ignore = "target state"]
+  fn db8_collaboration_document_identity_requires_stable_persisted_ids() {
+    panic!("target state: collaboration document identity should persist across panel UUID churn");
   }
 }

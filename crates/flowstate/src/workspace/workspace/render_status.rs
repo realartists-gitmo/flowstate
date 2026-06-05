@@ -148,6 +148,13 @@ impl Workspace {
   fn render_collaboration_status(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let role = self.collaboration.role.unwrap_or("No role");
     let queued = self.collaboration_pending_updates.len();
+    let lag = self.collaboration_delta_updates_since_checkpoint;
+    let last_hash = self
+      .collaboration_last_published_hash
+      .as_ref()
+      .map(short_hash)
+      .unwrap_or_else(|| "none".to_string());
+    let last_rejected_update = self.collaboration.last_error.as_deref().unwrap_or("none");
     let mut peers = self
       .collaboration
       .peers
@@ -183,8 +190,15 @@ impl Workspace {
       .text_color(cx.theme().muted_foreground)
       .child(collaboration_status_chip(format!("{:?}", self.collaboration.state), cx))
       .child(collaboration_status_chip(role.to_string(), cx))
+      .child(collaboration_status_chip(format!("hash {last_hash}"), cx))
       .when(queued > 0, |this| {
         this.child(collaboration_status_chip(format!("{queued} queued"), cx))
+      })
+      .when(lag > 0, |this| {
+        this.child(collaboration_status_chip(format!("lag {lag}"), cx))
+      })
+      .when(self.collaboration.last_error.is_some(), |this| {
+        this.child(collaboration_status_chip(format!("reject {last_rejected_update}"), cx))
       })
       .children(
         peers
@@ -309,4 +323,8 @@ fn collaboration_peer_status_tooltip(peer: &CollaborationPeerStatusItem, role_la
     lines.push(format!("Viewport: {}", viewport_hint.trim()));
   }
   lines.join("\n")
+}
+
+fn short_hash(hash: &[u8; 32]) -> String {
+  hash[..8].iter().map(|byte| format!("{byte:02x}")).collect()
 }

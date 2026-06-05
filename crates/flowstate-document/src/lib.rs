@@ -1,3 +1,4 @@
+// Editor-facing document APIs sit above collab source: they project UI intent into flowstate-collab's durable Loro state.
 pub use gpui_flowtext::*;
 mod persistence {
   pub mod io;
@@ -54,6 +55,13 @@ pub fn db8_collab_document_with_id(
   created_by_actor: ActorId,
 ) -> io::Result<Db8CollabDocument> {
   persistence::io::db8_collab_document_with_id(document, document_id, created_by_actor)
+}
+
+pub fn ensure_db8_document_id(document: &mut Document) -> CollabDocumentId {
+  if document.ids.document_id == 0 {
+    document.ids.document_id = uuid::Uuid::new_v4().as_u128();
+  }
+  CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id))
 }
 
 pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Document> {
@@ -396,5 +404,22 @@ impl FlowstateParagraphStyleBuilder {
 impl From<FlowstateParagraphStyleBuilder> for CustomParagraphStyle {
   fn from(builder: FlowstateParagraphStyleBuilder) -> Self {
     builder.0
+  }
+}
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn ensure_db8_document_id_generates_and_sticks() {
+    let mut document = document_from_paragraphs(DocumentTheme::default(), Vec::new());
+    document.ids.document_id = 0;
+
+    let first = ensure_db8_document_id(&mut document);
+    let second = ensure_db8_document_id(&mut document);
+
+    assert_eq!(first, second);
+    assert_eq!(document.ids.document_id, first.0.as_u128());
+    assert_ne!(document.ids.document_id, 0);
   }
 }

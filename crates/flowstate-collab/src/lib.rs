@@ -1,3 +1,5 @@
+// Collaboration authority chain: workspace UI and editors write into flowstate-document / gpui-flowtext,
+// flowstate-collab owns the durable Loro source, and flowstate-sync only transports persisted updates/snapshots.
 use std::{
   collections::BTreeMap,
   fmt,
@@ -15,7 +17,7 @@ pub const COLLAB_SCHEMA_VERSION: u32 = 2;
 pub const NATIVE_ENVELOPE_SCHEMA_VERSION: u32 = 1;
 pub const DB8_COLLAB_MAGIC: &[u8; 5] = b"DB8C\0";
 pub const FL0_COLLAB_MAGIC: &[u8; 5] = b"FL0C\0";
-pub const FLOWSTATE_ALPN: &[u8] = b"flowstate/collab/1";
+pub const FLOWSTATE_ALPN: &[u8] = b"flowstate/collab/2";
 
 const CHUNK_MANIFEST: u16 = 1;
 const CHUNK_LORO_SNAPSHOT: u16 = 2;
@@ -196,6 +198,7 @@ pub struct DecodedNativeFile {
   pub snapshot: Vec<u8>,
   pub recent_updates: Vec<Vec<u8>>,
   pub projection_cache: Vec<u8>,
+  pub projection_cache_recovery: ProjectionCacheRecovery,
   pub asset_manifest: Vec<NativeAssetRecord>,
   pub asset_inline_data: Vec<u8>,
   pub integrity: NativeIntegrity,
@@ -276,6 +279,15 @@ pub struct AssetChunkMessage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SnapshotChunkMessage {
+  pub document_id: DocumentId,
+  pub hash: [u8; 32],
+  pub offset: u64,
+  pub total_len: u64,
+  pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UpdateApplication {
   Db8CanonicalOperations(Vec<u8>),
   Fl0ActionBundle(Vec<u8>),
@@ -307,6 +319,7 @@ pub enum WireMessage {
     bytes: Vec<u8>,
     hash: [u8; 32],
   },
+  SnapshotChunk(SnapshotChunkMessage),
   AssetHave(AssetHaveMessage),
   AssetNeed(AssetNeedMessage),
   AssetChunk(AssetChunkMessage),
@@ -465,6 +478,7 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   if manifest.format_kind != expected_format {
     return Err(CollabError::InvalidMagic);
   }
+
   verify_hash("manifest snapshot hash", &snapshot, manifest.snapshot_hash)?;
   verify_hash("manifest asset manifest hash", asset_manifest_bytes, manifest.asset_manifest_hash)?;
 
@@ -472,13 +486,14 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   let asset_manifest: Vec<NativeAssetRecord> = postcard::from_bytes(asset_manifest_bytes)?;
   let integrity: NativeIntegrity = postcard::from_bytes(integrity_bytes)?;
   verify_integrity(expected_format, &chunks, &integrity)?;
+
   let source = CollabDocument::from_snapshot(&snapshot, Some(expected_format), Some(manifest.document_id))?;
   let materialized_projection = source.materialize_projection_cache()?;
   verify_hash("manifest projection hash", &materialized_projection, manifest.projection_hash)?;
-  let projection_cache = if blake3_hash(&stored_projection_cache) == manifest.projection_hash {
-    stored_projection_cache
+  let (projection_cache, projection_cache_recovery) = if blake3_hash(&stored_projection_cache) == manifest.projection_hash {
+    (stored_projection_cache, ProjectionCacheRecovery::Reused)
   } else {
-    materialized_projection
+    (materialized_projection, ProjectionCacheRecovery::Rebuilt)
   };
 
   Ok(DecodedNativeFile {
@@ -486,6 +501,7 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
     snapshot,
     recent_updates,
     projection_cache,
+    projection_cache_recovery,
     asset_manifest,
     asset_inline_data,
     integrity,
@@ -682,12 +698,22 @@ mod tests {
   use super::*;
 
   #[test]
-  fn native_envelope_round_trips() {
+  fn native_envelope_round_trips_reuse_projection_cache() {
     let input = NativeFileInput::new(FormatKind::Db8, b"projection".to_vec());
     let bytes = encode_native_file(input).unwrap();
     let decoded = decode_native_file(&bytes, FormatKind::Db8).unwrap();
     assert_eq!(decoded.projection_cache, b"projection");
+    assert_eq!(decoded.projection_cache_recovery, ProjectionCacheRecovery::Reused);
     assert_eq!(decoded.manifest.format_kind, FormatKind::Db8);
+  }
+
+  #[test]
+  fn corrupt_projection_cache_is_rebuilt_from_loro_source() {
+    let input = NativeFileInput::new(FormatKind::Db8, b"projection".to_vec());
+    let bytes = corrupt_projection_cache(encode_native_file(input).unwrap());
+    let decoded = decode_native_file(&bytes, FormatKind::Db8).unwrap();
+    assert_eq!(decoded.projection_cache, b"projection");
+    assert_eq!(decoded.projection_cache_recovery, ProjectionCacheRecovery::Rebuilt);
   }
 
   #[test]
@@ -714,14 +740,6 @@ mod tests {
     });
     let bytes = encode_wire_message(&message).unwrap();
     assert_eq!(decode_wire_message(&bytes).unwrap(), message);
-  }
-
-  #[test]
-  fn corrupt_projection_cache_rebuilds_from_loro_source() {
-    let input = NativeFileInput::new(FormatKind::Db8, b"projection".to_vec());
-    let bytes = corrupt_projection_cache(encode_native_file(input).unwrap());
-    let decoded = decode_native_file(&bytes, FormatKind::Db8).unwrap();
-    assert_eq!(decoded.projection_cache, b"projection");
   }
 
   #[test]

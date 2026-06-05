@@ -1,5 +1,3 @@
-#[cfg(target_os = "macos")]
-use gpui::ParentElement;
 use gpui_component::button::Button;
 use gpui_component::button::ButtonVariants as _;
 use gpui_component::{Icon, IconName, Sizable as _};
@@ -25,21 +23,6 @@ pub fn icon_button(id: impl Into<gpui::ElementId>, icon: AppIcon) -> Button {
   platform_icon_button(Button::new(id), icon).xsmall().ghost()
 }
 
-#[cfg(target_os = "macos")]
-#[hotpath::measure]
-fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
-  let symbol = match icon {
-    AppIcon::Close => "xmark",
-    AppIcon::NewFile => "doc.badge.plus",
-    AppIcon::SaveFile => "square.and.arrow.down",
-    AppIcon::TabLeft => "chevron.left",
-    AppIcon::TabRight => "chevron.right",
-    AppIcon::MultiPanel => "rectangle.split.2x1",
-  };
-  button.child(gpui_symbols::Icon::new(symbol).size(gpui::px(11.0)))
-}
-
-#[cfg(not(target_os = "macos"))]
 #[hotpath::measure]
 fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
   let icon_name = match icon {

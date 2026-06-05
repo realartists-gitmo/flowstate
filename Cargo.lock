@@ -1874,7 +1874,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccc2776f0c61eca1ca32528f85548abd1a4be8fb53d1b21c013e4f18da1e7090"
 dependencies = [
  "data-encoding",
- "syn 2.0.117",
+ "syn 1.0.109",
 ]
 
 [[package]]
@@ -2773,7 +2773,6 @@ dependencies = [
  "gpui",
  "gpui-component",
  "gpui-component-assets",
- "gpui-symbols",
  "hotpath",
  "mimalloc",
  "postcard",
@@ -3585,19 +3584,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
-]
-
-[[package]]
-name = "gpui-symbols"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96928d6fc8d3b8a9b4e4bb5b128e654cf6106203216993f37dbb7ddec9d72e15"
-dependencies = [
- "gpui",
- "image 0.25.10",
- "objc",
- "sfsymbols",
- "smallvec",
 ]
 
 [[package]]
@@ -8670,12 +8656,6 @@ dependencies = [
  "serde",
  "unsafe-libyaml",
 ]
-
-[[package]]
-name = "sfsymbols"
-version = "0.2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f2888368f031c6bb0aee0e02f7adb300fcc9b867f2edc88c757f92952546ddb4"
 
 [[package]]
 name = "sha1"

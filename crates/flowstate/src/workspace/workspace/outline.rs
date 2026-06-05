@@ -56,6 +56,47 @@ impl OutlineCache {
     self.visible_revision = u64::MAX;
     true
   }
+
+  #[expect(dead_code, reason = "range-aware outline updates are used by collaboration integrations as they mature")]
+  fn update_signature_for_paragraphs(&mut self, document: &Document, edit_generation: u64, touched_paragraphs: &[usize]) -> bool {
+    if touched_paragraphs.is_empty() || self.signature.paragraph_count != document.paragraphs.len() {
+      return self.update_signature(document, edit_generation);
+    }
+
+    let old_entries = self.signature.entries.clone();
+    for paragraph_ix in touched_paragraphs.iter().copied() {
+      let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+        return self.update_signature(document, edit_generation);
+      };
+      let Some(level) = outline_level(paragraph.style) else {
+        if old_entries
+          .iter()
+          .any(|entry| entry.paragraph_ix == paragraph_ix)
+        {
+          return self.update_signature(document, edit_generation);
+        }
+        continue;
+      };
+      let Some(entry) = self
+        .signature
+        .entries
+        .iter_mut()
+        .find(|entry| entry.paragraph_ix == paragraph_ix)
+      else {
+        return self.update_signature(document, edit_generation);
+      };
+      entry.level = level;
+      outline_paragraph_label_into(document, paragraph_ix, &mut entry.text);
+    }
+
+    let changed = self.signature.entries != old_entries;
+    self.edit_generation = edit_generation;
+    if changed {
+      self.nodes = Rc::new(outline_nodes_from_entries(&self.signature.entries));
+      self.visible_revision = u64::MAX;
+    }
+    changed
+  }
 }
 
 #[derive(Clone, PartialEq, Eq)]
