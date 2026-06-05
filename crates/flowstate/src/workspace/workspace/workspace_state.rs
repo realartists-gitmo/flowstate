@@ -270,7 +270,7 @@ impl Workspace {
     cx.notify();
   }
 
-  fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+  pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
     self.speech_document_id = if self.speech_document_id == Some(panel_id) {
       None
     } else {
@@ -333,7 +333,7 @@ impl Workspace {
     true
   }
 
-  fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+  pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
     };

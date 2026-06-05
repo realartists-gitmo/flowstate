@@ -116,6 +116,8 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
   match command_id {
     RibbonCommandId::Paragraph(style) => 1_000 + style.slot(),
     RibbonCommandId::Semantic(style) => 2_000 + style.slot(),
+    RibbonCommandId::ToggleSpeechDocument => 2_700,
+    RibbonCommandId::SendToSpeechDocument => 2_750,
     RibbonCommandId::CondenseMenu => 2_850,
     RibbonCommandId::CondensedMenu => 2_900,
     RibbonCommandId::Underline => 3_000,

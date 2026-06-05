@@ -10,11 +10,48 @@ impl ModernStylesRibbon {
     invisibility_mode: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
+    speech_available: bool,
+    speech_active: bool,
+    speech_send_enabled: bool,
     _available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
   ) -> AnyElement {
-    let groups = modern_command_groups(style_state, armed_tool, document_theme, current_highlight, highlight_mode_active);
+    let mut groups = modern_command_groups(style_state, armed_tool, document_theme, current_highlight, highlight_mode_active);
+    if let Some(group) = groups.iter_mut().find(|group| group.id == "unkeyed") {
+      group.commands.insert(
+        0,
+        RibbonCommand {
+          id: RibbonCommandId::SendToSpeechDocument,
+          label: "Send",
+          group_id: "unkeyed",
+          shortcut: shortcut_for(CommandId::SendToSpeechDocument),
+          command_id: Some(CommandId::SendToSpeechDocument),
+          priority: 74,
+          accent: None,
+          selected: false,
+          disabled: !speech_send_enabled,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+      );
+      group.commands.insert(
+        0,
+        RibbonCommand {
+          id: RibbonCommandId::ToggleSpeechDocument,
+          label: "Speech",
+          group_id: "unkeyed",
+          shortcut: None,
+          command_id: None,
+          priority: 73,
+          accent: None,
+          selected: speech_active,
+          disabled: !speech_available,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+      );
+    }
     let metrics = RibbonLayoutMetrics::from_height(height);
     // Use vertical ribbon room proactively. Width pressure can force wrapping,
     // but when there is spare height we still prefer balanced columns over one
