@@ -122,6 +122,7 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
     RibbonCommandId::Highlight(style) => 4_000 + style.slot(),
     RibbonCommandId::ClearHighlight => 5_000,
     RibbonCommandId::MarkCard => 5_001,
+    RibbonCommandId::ToggleSectionCollapse => 5_004,
     RibbonCommandId::HighlightMenu => 5_002,
     RibbonCommandId::ToggleHighlightMode(style) => {
       5_100

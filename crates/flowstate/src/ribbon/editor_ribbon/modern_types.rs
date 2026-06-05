@@ -44,6 +44,7 @@ pub enum RibbonCommandId {
   Highlight(HighlightStyle),
   ClearHighlight,
   MarkCard,
+  ToggleSectionCollapse,
   HighlightMenu,
   ToggleHighlightMode(Option<HighlightStyle>),
   ClearFormatting,
@@ -87,6 +88,7 @@ impl RibbonLabel {
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
       RibbonCommandId::MarkCard => Some("icons/highlighter.svg"),
+      RibbonCommandId::ToggleSectionCollapse => Some("icons/chevron-right.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
       _ => None,
     };

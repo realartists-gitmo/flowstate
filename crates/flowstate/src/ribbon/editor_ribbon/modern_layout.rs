@@ -255,6 +255,6 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
       cx.theme().warning
     },
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
-    RibbonCommandId::CondensedMenu => cx.theme().info,
+    RibbonCommandId::CondensedMenu | RibbonCommandId::ToggleSectionCollapse => cx.theme().info,
   }
 }
