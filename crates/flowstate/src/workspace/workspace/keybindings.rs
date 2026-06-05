@@ -73,6 +73,7 @@ impl Workspace {
         self.toggle_active_tab_pin(cx);
         true
       },
+      CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(cx),
       CommandId::SwitchToTab1 => {
         self.activate_tab_shortcut(0, cx);
         true

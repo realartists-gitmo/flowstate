@@ -155,6 +155,7 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     | CommandId::NextTab
     | CommandId::PreviousTab
     | CommandId::TogglePinTab
+    | CommandId::SendToSpeechDocument
     | CommandId::SwitchToTab1
     | CommandId::SwitchToTab2
     | CommandId::SwitchToTab3

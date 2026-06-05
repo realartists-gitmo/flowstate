@@ -306,6 +306,44 @@ impl Workspace {
     }
   }
 
+  fn send_selection_to_speech_document(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(speech_document_id) = self.speech_document_id else {
+      return false;
+    };
+    if self.active_document_id == Some(speech_document_id) {
+      return false;
+    }
+    let Some(source_editor) = self.active_editor.clone() else {
+      return false;
+    };
+    let Some(speech_editor) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == speech_document_id)
+      .map(|panel| panel.read(cx).editor())
+    else {
+      return false;
+    };
+    let text = {
+      let editor = source_editor.read(cx);
+      let selection = editor.selection();
+      if selection.anchor == selection.head {
+        String::new()
+      } else {
+        let start_offset = selection.anchor.min(selection.head);
+        let end_offset = selection.anchor.max(selection.head);
+        let start = paragraph_byte_range(editor.document(), start_offset.paragraph).start + start_offset.byte;
+        let end = paragraph_byte_range(editor.document(), end_offset.paragraph).start + end_offset.byte;
+        document_text_slice(editor.document(), start..end)
+      }
+    };
+    if text.trim().is_empty() {
+      return false;
+    }
+    speech_editor.update(cx, |editor, cx| editor.insert_text_command(&text, cx));
+    true
+  }
+
   fn apply_document_theme_to_open_editors(&mut self, theme: DocumentTheme, cx: &mut Context<Self>) {
     for panel in &self.document_panels {
       let editor = panel.read(cx).editor();
