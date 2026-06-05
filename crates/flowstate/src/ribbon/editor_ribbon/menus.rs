@@ -259,7 +259,13 @@ fn condense_text(text: &str, separator: char) -> String {
       if line.is_empty() {
         return output;
       }
-      if output.ends_with('-') && line.trim_start().chars().next().is_some_and(char::is_alphabetic) {
+      if output.ends_with('-')
+        && line
+          .trim_start()
+          .chars()
+          .next()
+          .is_some_and(char::is_alphabetic)
+      {
         output.pop();
         output.push_str(line.trim_start());
       } else {
