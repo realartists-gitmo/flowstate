@@ -341,9 +341,9 @@ impl Workspace {
       return false;
     };
     let text = source_editor.update(cx, |editor, cx| {
-      editor.speech_send_text_at_selection_or_hover(&[2, 3, 4], window, cx).unwrap_or_else(|| {
-        selected_text_or_enclosing_section(editor.document(), editor.selection())
-      })
+      editor
+        .speech_send_text_at_selection_or_hover(&[2, 3, 4], window, cx)
+        .unwrap_or_else(|| selected_text_or_enclosing_section(editor.document(), editor.selection()))
     });
     if text.trim().is_empty() {
       return false;
