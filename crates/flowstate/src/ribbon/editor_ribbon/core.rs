@@ -151,6 +151,12 @@ impl EditorRibbon {
     cx.notify();
   }
 
+  fn set_timer_duration_secs(&mut self, duration_secs: u64, cx: &mut Context<Self>) {
+    self.timer_duration_secs = duration_secs.clamp(1, 99 * 60 + 59);
+    self.timer_started_at = None;
+    cx.notify();
+  }
+
   fn toggle_timer(&mut self, cx: &mut Context<Self>) {
     if self.timer_running() {
       self.timer_duration_secs = self.timer_remaining_secs().max(1);

@@ -327,6 +327,7 @@ fn timer_section(metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -
   let running = cx.entity().read(cx).timer_running();
   let minutes = remaining / 60;
   let seconds = remaining % 60;
+  let ribbon = cx.entity().downgrade();
   div()
     .flex()
     .flex_col()
@@ -355,14 +356,44 @@ fn timer_section(metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -
             .on_click(cx.listener(|ribbon, _, _, cx| ribbon.adjust_timer_duration(-30, cx))),
         )
         .child(
-          Button::new("ribbon-timer-toggle")
+          DropdownButton::new("ribbon-timer-dropdown")
+            .with_size(Size::Size(metrics.chip_height))
             .compact()
             .outline()
-            .h(metrics.chip_height)
-            .px(metrics.chip_padding_x)
-            .label(format!("{minutes:02}:{seconds:02}"))
-            .tooltip(if running { "Pause timer" } else { "Start timer" })
-            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.toggle_timer(cx))),
+            .button(
+              Button::new("ribbon-timer-toggle")
+                .compact()
+                .ghost()
+                .h(metrics.chip_height)
+                .px(metrics.chip_padding_x)
+                .label(format!("{minutes:02}:{seconds:02}"))
+                .tooltip(if running { "Pause timer" } else { "Start timer" })
+                .on_click(cx.listener(|ribbon, _, _, cx| ribbon.toggle_timer(cx))),
+            )
+            .dropdown_menu(move |menu, _, _| {
+              let one_minute = ribbon.clone();
+              let three_minutes = ribbon.clone();
+              let five_minutes = ribbon.clone();
+              let eight_minutes = ribbon.clone();
+              let reset = ribbon.clone();
+              menu
+                .min_w(px(150.0))
+                .item(PopupMenuItem::new("Set 1:00").on_click(move |_, _, cx| {
+                  let _ = one_minute.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(60, cx));
+                }))
+                .item(PopupMenuItem::new("Set 3:00").on_click(move |_, _, cx| {
+                  let _ = three_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(3 * 60, cx));
+                }))
+                .item(PopupMenuItem::new("Set 5:00").on_click(move |_, _, cx| {
+                  let _ = five_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(5 * 60, cx));
+                }))
+                .item(PopupMenuItem::new("Set 8:00").on_click(move |_, _, cx| {
+                  let _ = eight_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(8 * 60, cx));
+                }))
+                .item(PopupMenuItem::new("Reset").on_click(move |_, _, cx| {
+                  let _ = reset.update(cx, |ribbon, cx| ribbon.reset_timer(cx));
+                }))
+            }),
         )
         .child(
           Button::new("ribbon-timer-plus")
