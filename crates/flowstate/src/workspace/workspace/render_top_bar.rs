@@ -60,11 +60,24 @@ impl Workspace {
           .gap_1()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .when_some(active_document_id, |this, panel_id| {
+            let speech_color = cx.theme().success;
             this.child(
               Button::new("ribbon-toggle-speech-doc")
+                .xsmall()
                 .compact()
                 .outline()
                 .h(px(24.0))
+                .px(px(6.0))
+                .rounded(cx.theme().radius)
+                .selected(active_is_speech)
+                .text_color(speech_color)
+                .when(active_is_speech, |this| {
+                  this
+                    .border_color(speech_color)
+                    .bg(speech_color.opacity(0.18))
+                    .text_color(speech_color)
+                })
+                .icon(Icon::default().path("icons/speech.svg").xsmall().text_color(speech_color))
                 .label(if active_is_speech { "Speech ✓" } else { "Speech" })
                 .tooltip(if active_is_speech { "Unset speech document" } else { "Set active document as speech document" })
                 .on_click(cx.listener(move |workspace, _, _, cx| {
@@ -72,19 +85,24 @@ impl Workspace {
                 })),
             )
           })
-          .child(
+          .child({
+            let send_color = cx.theme().info;
             Button::new("ribbon-send-speech")
+              .xsmall()
               .compact()
               .outline()
               .h(px(24.0))
-              .icon(Icon::default().path("icons/send-to-back.svg").text_color(cx.theme().muted_foreground))
+              .px(px(6.0))
+              .rounded(cx.theme().radius)
+              .text_color(send_color)
+              .icon(Icon::default().path("icons/send-to-back.svg").xsmall().text_color(send_color))
               .label("Send")
               .tooltip("Send selection or hovered card to speech document (Ctrl+`)")
               .disabled(self.speech_document_id.is_none() || active_is_speech)
               .on_click(cx.listener(|workspace, _, window, cx| {
                 workspace.send_selection_to_speech_document(window, cx);
-              })),
-          ),
+              }))
+          }),
       )
       .when_some(active_ribbon, |this, ribbon| {
         if let Some(active_id) = self.active_document_id {
@@ -116,28 +134,5 @@ impl Workspace {
             .child("Ribbon placeholder"),
         )
       })
-      .child(
-        h_flex()
-          .absolute()
-          .bottom_0()
-          .right_0()
-          .p_1()
-          .gap_1()
-          .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .child(
-            Button::new("collapse-ribbon-panel")
-              .icon(
-                Icon::default()
-                  .path("icons/panel-top-close.svg")
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .xsmall()
-              .ghost()
-              .tooltip("Collapse ribbon")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_ribbon(cx);
-              })),
-          ),
-      )
   }
 }

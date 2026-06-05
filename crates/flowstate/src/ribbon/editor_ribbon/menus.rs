@@ -131,7 +131,12 @@ fn modern_condense_menu(
         .px(metrics.chip_padding_x)
         .tooltip("Condense")
         .when_some(label.icon_path, |this, path| {
-          this.child(Icon::default().path(path).xsmall().text_color(command_color))
+          this.child(
+            Icon::default()
+              .path(path)
+              .xsmall()
+              .text_color(command_color),
+          )
         })
         .when(!label.prefers_icon(), |this| {
           this.child(

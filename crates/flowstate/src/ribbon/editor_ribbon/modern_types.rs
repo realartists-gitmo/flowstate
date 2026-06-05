@@ -85,7 +85,7 @@ impl RibbonLabel {
       RibbonCommandId::Semantic(flowstate_document::SEMANTIC_EMPHASIS) => Some("icons/bold.svg"),
       RibbonCommandId::Underline => Some("icons/underline.svg"),
       RibbonCommandId::Strikethrough => Some("icons/strikethrough.svg"),
-      RibbonCommandId::CondenseMenu => Some("icons/send-to-back.svg"),
+      RibbonCommandId::CondenseMenu => Some("icons/paragraph-break-two.svg"),
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
       RibbonCommandId::MarkCard => Some("icons/highlighter.svg"),
