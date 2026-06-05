@@ -302,7 +302,9 @@ impl Workspace {
         Some(*count)
       } else {
         let count = speech_word_count(editor.document());
-        self.speech_word_count_cache.insert(document_id, (generation, count));
+        self
+          .speech_word_count_cache
+          .insert(document_id, (generation, count));
         Some(count)
       }
     } else {
