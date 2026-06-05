@@ -73,29 +73,25 @@ impl Workspace {
       })
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
-        let speech_button = Button::new(("speech-tab", panel_id.as_u128() as u64))
-          .label("S")
-          .xsmall()
-          .ghost()
-          .tooltip(if tab.speech { "Unset speech document" } else { "Set speech document" })
-          .text_color(if tab.speech { cx.theme().success } else { cx.theme().muted_foreground })
-          .on_click(cx.listener(move |workspace, _, _, cx| {
-            cx.stop_propagation();
-            workspace.toggle_speech_document(panel_id, cx);
-          }));
-        let pin_button = Button::new(("pin-tab", panel_id.as_u128() as u64))
-          .icon(
-            Icon::new(if tab.pinned { IconName::Star } else { IconName::StarOff })
-              .xsmall()
-              .text_color(if tab.pinned { cx.theme().warning } else { cx.theme().muted_foreground }),
-          )
-          .xsmall()
-          .ghost()
-          .tooltip(if tab.pinned { "Unpin tab" } else { "Pin tab" })
-          .on_click(cx.listener(move |workspace, _, _, cx| {
-            cx.stop_propagation();
-            workspace.toggle_tab_pin(panel_id, cx);
-          }));
+        let tab_prefix = h_flex()
+          .gap_0p5()
+          .when(tab.speech, |this| {
+            this.child(
+              div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().success)
+                .child("S"),
+            )
+          })
+          .when(tab.pinned, |this| {
+            this.child(
+              Icon::default()
+                .path("icons/pin.svg")
+                .xsmall()
+                .text_color(cx.theme().warning),
+            )
+          });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")
           .when(tab.active, |this| {
@@ -115,7 +111,8 @@ impl Workspace {
           // before rendering so long filenames cannot break the tab strip.
           .label(tab.label)
           .selected(tab.active)
-          .prefix(h_flex().gap_0p5().child(speech_button).child(pin_button))
+          .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
+          .prefix(tab_prefix)
           .suffix(close_button)
       }))
       .last_empty_space(div().flex_1().h_full())

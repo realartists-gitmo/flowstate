@@ -279,19 +279,6 @@ impl Workspace {
     cx.notify();
   }
 
-  fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
-    if let Some(ix) = self
-      .pinned_document_ids
-      .iter()
-      .position(|id| *id == panel_id)
-    {
-      self.pinned_document_ids.remove(ix);
-    } else if self.pinned_document_ids.len() < 10 {
-      self.pinned_document_ids.push(panel_id);
-    }
-    cx.notify();
-  }
-
   fn activate_tab_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
     let pinned = self
       .pinned_document_ids
@@ -310,15 +297,22 @@ impl Workspace {
     let Some(editor) = self.active_editor.clone() else {
       return false;
     };
-    let text = {
+    let paragraphs = {
       let editor = editor.read(cx);
-      selected_text(editor.document(), editor.selection())
+      let selection = editor.selection();
+      if selection.anchor == selection.head {
+        Vec::new()
+      } else {
+        condense_fragment_paragraphs(
+          crate::rich_text_element::selected_rich_fragment(editor.document(), selection.anchor.min(selection.head)..selection.anchor.max(selection.head)).paragraphs,
+          ' ',
+        )
+      }
     };
-    if text.is_empty() {
+    if paragraphs.is_empty() {
       return false;
     }
-    let condensed = condense_text(&text, ' ');
-    editor.update(cx, |editor, cx| editor.insert_text_command(&condensed, cx));
+    editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
     true
   }
 
@@ -340,15 +334,22 @@ impl Workspace {
     else {
       return false;
     };
-    let text = source_editor.update(cx, |editor, cx| {
+    let fragment = source_editor.update(cx, |editor, cx| {
       editor
-        .speech_send_text_at_selection_or_hover(&[2, 3, 4], window, cx)
-        .unwrap_or_else(|| selected_text_or_enclosing_section(editor.document(), editor.selection()))
+        .speech_send_fragment_at_selection_or_hover(&[2, 3, 4], window, cx)
+        .unwrap_or_else(|| selected_fragment_or_enclosing_section(editor.document(), editor.selection()))
     });
-    if text.trim().is_empty() {
+    if fragment.paragraphs.is_empty() && fragment.blocks.is_empty() {
       return false;
     }
-    speech_editor.update(cx, |editor, cx| editor.insert_text_command(&text, cx));
+    speech_editor.update(cx, |editor, cx| {
+      let mut paragraphs = fragment.paragraphs;
+      paragraphs.push(InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: Vec::new(),
+      });
+      editor.insert_toolkit_text_at_caret(paragraphs, cx);
+    });
     true
   }
 
@@ -457,55 +458,55 @@ impl Workspace {
   }
 }
 
-fn selected_text(document: &Document, selection: &crate::rich_text_element::EditorSelection) -> String {
-  if selection.anchor == selection.head {
-    return String::new();
+fn condense_fragment_paragraphs(paragraphs: Vec<InputParagraph>, separator: char) -> Vec<InputParagraph> {
+  let mut runs = Vec::new();
+  for paragraph in paragraphs {
+    let mut paragraph_runs = paragraph.runs.into_iter().filter(|run| !run.text.is_empty()).peekable();
+    if paragraph_runs.peek().is_none() {
+      continue;
+    }
+    if !runs.is_empty() {
+      runs.push(InputRun {
+        text: separator.to_string(),
+        styles: crate::rich_text_element::RunStyles::default(),
+      });
+    }
+    runs.extend(paragraph_runs);
   }
-  let start_offset = selection.anchor.min(selection.head);
-  let end_offset = selection.anchor.max(selection.head);
-  document_text_between_offsets(document, start_offset, end_offset)
+  if runs.is_empty() {
+    return Vec::new();
+  }
+  vec![
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs,
+    },
+    InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: Vec::new(),
+    },
+  ]
 }
 
-fn selected_text_or_enclosing_section(document: &Document, selection: &crate::rich_text_element::EditorSelection) -> String {
+fn selected_fragment_or_enclosing_section(
+  document: &Document,
+  selection: &crate::rich_text_element::EditorSelection,
+) -> crate::rich_text_element::RichClipboardFragment {
   if selection.anchor != selection.head {
-    return selected_text(document, selection);
+    return crate::rich_text_element::selected_rich_fragment(document, selection.anchor.min(selection.head)..selection.anchor.max(selection.head));
   }
   let caret = selection.head;
-  let Some((start_paragraph, end_paragraph_exclusive)) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4]) else {
-    return document_text_between_offsets(
-      document,
-      crate::rich_text_element::DocumentOffset {
-        paragraph: caret.paragraph,
-        byte: 0,
-      },
-      crate::rich_text_element::DocumentOffset {
-        paragraph: caret.paragraph,
-        byte: paragraph_byte_range(document, caret.paragraph).len(),
-      },
-    );
-  };
+  let (start_paragraph, end_paragraph_exclusive) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4])
+    .unwrap_or((caret.paragraph, caret.paragraph.saturating_add(1).min(document.paragraphs.len())));
   let end_paragraph = end_paragraph_exclusive.saturating_sub(1);
-  document_text_between_offsets(
+  crate::rich_text_element::selected_rich_fragment(
     document,
-    crate::rich_text_element::DocumentOffset {
-      paragraph: start_paragraph,
-      byte: 0,
-    },
-    crate::rich_text_element::DocumentOffset {
-      paragraph: end_paragraph,
-      byte: paragraph_byte_range(document, end_paragraph).len(),
-    },
+    crate::rich_text_element::DocumentOffset { paragraph: start_paragraph, byte: 0 }
+      ..crate::rich_text_element::DocumentOffset {
+        paragraph: end_paragraph,
+        byte: paragraph_byte_range(document, end_paragraph).len(),
+      },
   )
-}
-
-fn document_text_between_offsets(
-  document: &Document,
-  start_offset: crate::rich_text_element::DocumentOffset,
-  end_offset: crate::rich_text_element::DocumentOffset,
-) -> String {
-  let start = paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
-  let end = paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
-  document_text_slice(document, start..end)
 }
 
 fn enclosing_section_bounds(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
@@ -525,46 +526,4 @@ fn enclosing_section_bounds(document: &Document, paragraph_ix: usize, section_sl
       (start <= paragraph_ix && paragraph_ix < end).then_some((start, end))
     })
     .min_by_key(|(start, end)| end - start)
-}
-
-fn condense_text(text: &str, separator: char) -> String {
-  text
-    .replace("\r\n", "\n")
-    .replace('\r', "\n")
-    .lines()
-    .fold(String::new(), |mut output, raw_line| {
-      let previous_ended_with_punctuation = output
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .is_some_and(is_condense_sentence_punctuation);
-      let line = if output.is_empty() || !previous_ended_with_punctuation {
-        raw_line.trim()
-      } else {
-        raw_line.trim_end()
-      };
-      if line.is_empty() {
-        return output;
-      }
-      if output.ends_with('-')
-        && line
-          .trim_start()
-          .chars()
-          .next()
-          .is_some_and(char::is_alphabetic)
-      {
-        output.pop();
-        output.push_str(line.trim_start());
-      } else {
-        if !output.is_empty() {
-          output.push(separator);
-        }
-        output.push_str(line);
-      }
-      output
-    })
-}
-
-fn is_condense_sentence_punctuation(ch: char) -> bool {
-  matches!(ch, '.' | ',' | ';' | ':' | '?' | '!' | ')' | ']' | '}')
 }

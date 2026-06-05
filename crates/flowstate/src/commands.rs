@@ -199,7 +199,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::NextTab, "Next Tab", APP, &["ctrl-tab"]),
   CommandSpec::new(CommandId::PreviousTab, "Previous Tab", APP, &["ctrl-shift-tab"]),
   CommandSpec::new(CommandId::TogglePinTab, "Toggle Pin Tab", APP, &["ctrl-shift-p"]),
-  CommandSpec::new(CommandId::SendToSpeechDocument, "Send to Speech Document", APP, &["shift-`"]),
+  CommandSpec::new(CommandId::SendToSpeechDocument, "Send to Speech Document", APP, &["ctrl-`"]),
   CommandSpec::new(CommandId::CondenseSelection, "Condense Selection", APP, &["f3"]),
   CommandSpec::new(CommandId::SwitchToTab1, "Switch to Tab 1", APP, &["alt-1"]),
   CommandSpec::new(CommandId::SwitchToTab2, "Switch to Tab 2", APP, &["alt-2"]),

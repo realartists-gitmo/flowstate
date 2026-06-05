@@ -28,8 +28,6 @@ impl Workspace {
 
   fn render_document_tab_bar_prefix(&self, _active_index: usize, tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
-    let active_document_id = self.active_document_id;
-    let active_is_speech = active_document_id.is_some() && self.speech_document_id == active_document_id;
     h_flex()
       .h_full()
       .items_center()
@@ -53,33 +51,6 @@ impl Workspace {
           .tooltip("Save current file")
           .on_click(cx.listener(|workspace, _, window, cx| {
             workspace.save_active(window, cx);
-          })),
-      )
-      .when_some(active_document_id, |this, panel_id| {
-        this.child(
-          Button::new("tab-bar-toggle-speech-doc")
-            .label(if active_is_speech { "Speech ✓" } else { "Speech" })
-            .xsmall()
-            .ghost()
-            .tooltip(if active_is_speech {
-              "Unset speech document"
-            } else {
-              "Set active document as speech document"
-            })
-            .on_click(cx.listener(move |workspace, _, _, cx| {
-              workspace.toggle_speech_document(panel_id, cx);
-            })),
-        )
-      })
-      .child(
-        Button::new("tab-bar-send-speech")
-          .label("~")
-          .xsmall()
-          .ghost()
-          .tooltip("Send selection or current card to speech document")
-          .disabled(self.speech_document_id.is_none() || active_is_speech)
-          .on_click(cx.listener(|workspace, _, window, cx| {
-            workspace.send_selection_to_speech_document(window, cx);
           })),
       )
       .child(

@@ -205,15 +205,20 @@ fn modern_condensed_menu(
 const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
 
 fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
-  let text = {
+  let paragraphs = {
     let editor = editor.read(cx);
-    selected_text(editor.document(), editor.selection())
+    let selection = editor.selection();
+    if selection.anchor == selection.head {
+      Vec::new()
+    } else {
+      let range = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
+      condense_fragment_paragraphs(flowstate_document::selected_rich_fragment(editor.document(), range).paragraphs, separator)
+    }
   };
-  if text.is_empty() {
+  if paragraphs.is_empty() {
     return;
   }
-  let condensed = condense_text(&text, separator);
-  editor.update(cx, |editor, cx| editor.insert_text_command(&condensed, cx));
+  editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
 }
 
 fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
@@ -229,6 +234,36 @@ fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
   });
 }
 
+fn condense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>, separator: char) -> Vec<flowstate_document::InputParagraph> {
+  let mut runs = Vec::new();
+  for paragraph in paragraphs {
+    let mut paragraph_runs = paragraph.runs.into_iter().filter(|run| !run.text.is_empty()).peekable();
+    if paragraph_runs.peek().is_none() {
+      continue;
+    }
+    if !runs.is_empty() {
+      runs.push(flowstate_document::InputRun {
+        text: separator.to_string(),
+        styles: flowstate_document::RunStyles::default(),
+      });
+    }
+    runs.extend(paragraph_runs);
+  }
+  if runs.is_empty() {
+    return Vec::new();
+  }
+  vec![
+    flowstate_document::InputParagraph {
+      style: flowstate_document::ParagraphStyle::Normal,
+      runs,
+    },
+    flowstate_document::InputParagraph {
+      style: flowstate_document::ParagraphStyle::Normal,
+      runs: Vec::new(),
+    },
+  ]
+}
+
 fn selected_text(document: &flowstate_document::Document, selection: &flowstate_document::EditorSelection) -> String {
   if selection.anchor == selection.head {
     return String::new();
@@ -238,48 +273,6 @@ fn selected_text(document: &flowstate_document::Document, selection: &flowstate_
   let start = flowstate_document::paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
   let end = flowstate_document::paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
   flowstate_document::document_text_slice(document, start..end)
-}
-
-fn condense_text(text: &str, separator: char) -> String {
-  text
-    .replace("\r\n", "\n")
-    .replace('\r', "\n")
-    .lines()
-    .fold(String::new(), |mut output, raw_line| {
-      let previous_ended_with_punctuation = output
-        .chars()
-        .rev()
-        .find(|ch| !ch.is_whitespace())
-        .is_some_and(is_condense_sentence_punctuation);
-      let line = if output.is_empty() || !previous_ended_with_punctuation {
-        raw_line.trim()
-      } else {
-        raw_line.trim_end()
-      };
-      if line.is_empty() {
-        return output;
-      }
-      if output.ends_with('-')
-        && line
-          .trim_start()
-          .chars()
-          .next()
-          .is_some_and(char::is_alphabetic)
-      {
-        output.pop();
-        output.push_str(line.trim_start());
-      } else {
-        if !output.is_empty() {
-          output.push(separator);
-        }
-        output.push_str(line);
-      }
-      output
-    })
-}
-
-fn is_condense_sentence_punctuation(ch: char) -> bool {
-  matches!(ch, '.' | ',' | ';' | ':' | '?' | '!' | ')' | ']' | '}')
 }
 
 #[hotpath::measure]
@@ -322,99 +315,6 @@ fn undo_redo_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetric
 }
 
 #[hotpath::measure]
-fn timer_section(metrics: RibbonLayoutMetrics, remaining: u64, running: bool, cx: &mut Context<EditorRibbon>) -> AnyElement {
-  let minutes = remaining / 60;
-  let seconds = remaining % 60;
-  let ribbon = cx.entity().downgrade();
-  div()
-    .flex()
-    .flex_col()
-    .flex_none()
-    .gap_0p5()
-    .pl(metrics.group_divider_padding_left)
-    .border_l_1()
-    .border_color(cx.theme().border.opacity(0.72))
-    .child(
-      div()
-        .text_size(px(10.0))
-        .font_medium()
-        .text_color(cx.theme().foreground)
-        .child("Timer"),
-    )
-    .child(
-      h_flex()
-        .gap_0p5()
-        .child(
-          Button::new("ribbon-timer-minus")
-            .compact()
-            .ghost()
-            .h(metrics.chip_height)
-            .label("−")
-            .tooltip("Subtract 30 seconds")
-            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.adjust_timer_duration(-30, cx))),
-        )
-        .child(
-          DropdownButton::new("ribbon-timer-dropdown")
-            .with_size(Size::Size(metrics.chip_height))
-            .compact()
-            .outline()
-            .button(
-              Button::new("ribbon-timer-toggle")
-                .compact()
-                .ghost()
-                .h(metrics.chip_height)
-                .px(metrics.chip_padding_x)
-                .label(format!("{minutes:02}:{seconds:02}"))
-                .tooltip(if running { "Pause timer" } else { "Start timer" })
-                .on_click(cx.listener(|ribbon, _, _, cx| ribbon.toggle_timer(cx))),
-            )
-            .dropdown_menu(move |menu, _, _| {
-              let one_minute = ribbon.clone();
-              let three_minutes = ribbon.clone();
-              let five_minutes = ribbon.clone();
-              let eight_minutes = ribbon.clone();
-              let reset = ribbon.clone();
-              menu
-                .min_w(px(150.0))
-                .item(PopupMenuItem::new("Set 1:00").on_click(move |_, _, cx| {
-                  let _ = one_minute.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(60, cx));
-                }))
-                .item(PopupMenuItem::new("Set 3:00").on_click(move |_, _, cx| {
-                  let _ = three_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(3 * 60, cx));
-                }))
-                .item(PopupMenuItem::new("Set 5:00").on_click(move |_, _, cx| {
-                  let _ = five_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(5 * 60, cx));
-                }))
-                .item(PopupMenuItem::new("Set 8:00").on_click(move |_, _, cx| {
-                  let _ = eight_minutes.update(cx, |ribbon, cx| ribbon.set_timer_duration_secs(8 * 60, cx));
-                }))
-                .item(PopupMenuItem::new("Reset").on_click(move |_, _, cx| {
-                  let _ = reset.update(cx, |ribbon, cx| ribbon.reset_timer(cx));
-                }))
-            }),
-        )
-        .child(
-          Button::new("ribbon-timer-plus")
-            .compact()
-            .ghost()
-            .h(metrics.chip_height)
-            .label("+")
-            .tooltip("Add 30 seconds")
-            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.adjust_timer_duration(30, cx))),
-        )
-        .child(
-          Button::new("ribbon-timer-reset")
-            .compact()
-            .ghost()
-            .h(metrics.chip_height)
-            .label("↺")
-            .tooltip("Reset timer")
-            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.reset_timer(cx))),
-        ),
-    )
-    .into_any_element()
-}
-
 #[hotpath::measure]
 fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let chip_height = metrics.chip_height;
