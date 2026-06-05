@@ -170,20 +170,35 @@ fn highlight_commands(
   current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommand> {
-  vec![RibbonCommand {
-    id: RibbonCommandId::ToggleHighlightMode(current_highlight),
-    label: "Highlight",
-    group_id: "highlight",
-    shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
-    command_id: Some(CommandId::ApplyHighlightToSelection),
-    priority: 74,
-    accent: Some(match current_highlight {
-      Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
-      None => RibbonAccent::Transparent,
-    }),
-    selected: highlight_mode_active,
-    disabled: false,
-    overflow_behavior: OverflowBehavior::KeepVisible,
-    checked_highlight: current_highlight,
-  }]
+  vec![
+    RibbonCommand {
+      id: RibbonCommandId::ToggleHighlightMode(current_highlight),
+      label: "Highlight",
+      group_id: "highlight",
+      shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
+      command_id: Some(CommandId::ApplyHighlightToSelection),
+      priority: 74,
+      accent: Some(match current_highlight {
+        Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
+        None => RibbonAccent::Transparent,
+      }),
+      selected: highlight_mode_active,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: current_highlight,
+    },
+    RibbonCommand {
+      id: RibbonCommandId::MarkCard,
+      label: "Mark",
+      group_id: "highlight",
+      shortcut: None,
+      command_id: None,
+      priority: 75,
+      accent: Some(RibbonAccent::Color(highlight_color(flowstate_document::HIGHLIGHT_MARKED, document_theme))),
+      selected: false,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: Some(flowstate_document::HIGHLIGHT_MARKED),
+    },
+  ]
 }

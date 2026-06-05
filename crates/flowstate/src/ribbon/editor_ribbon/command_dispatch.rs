@@ -45,6 +45,9 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.clear_armed_inline_tool(cx);
       editor.set_highlight_for_selection(None, cx);
     },
+    RibbonCommandId::MarkCard => {
+      editor.set_highlight_for_selection(Some(flowstate_document::HIGHLIGHT_MARKED), cx);
+    },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {
       editor.clear_formatting(cx);

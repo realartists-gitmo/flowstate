@@ -43,6 +43,7 @@ pub enum RibbonCommandId {
   Strikethrough,
   Highlight(HighlightStyle),
   ClearHighlight,
+  MarkCard,
   HighlightMenu,
   ToggleHighlightMode(Option<HighlightStyle>),
   ClearFormatting,
@@ -85,6 +86,7 @@ impl RibbonLabel {
       RibbonCommandId::Strikethrough => Some("icons/strikethrough.svg"),
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
+      RibbonCommandId::MarkCard => Some("icons/highlighter.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
       _ => None,
     };
