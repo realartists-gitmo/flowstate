@@ -61,7 +61,11 @@ impl Workspace {
             .label(if active_is_speech { "Speech ✓" } else { "Speech" })
             .xsmall()
             .ghost()
-            .tooltip(if active_is_speech { "Unset speech document" } else { "Set active document as speech document" })
+            .tooltip(if active_is_speech {
+              "Unset speech document"
+            } else {
+              "Set active document as speech document"
+            })
             .on_click(cx.listener(move |workspace, _, _, cx| {
               workspace.toggle_speech_document(panel_id, cx);
             })),
