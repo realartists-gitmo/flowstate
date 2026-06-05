@@ -270,6 +270,15 @@ impl Workspace {
     cx.notify();
   }
 
+  fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    self.speech_document_id = if self.speech_document_id == Some(panel_id) {
+      None
+    } else {
+      Some(panel_id)
+    };
+    cx.notify();
+  }
+
   fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
     if let Some(ix) = self
       .pinned_document_ids
@@ -324,6 +333,7 @@ impl Workspace {
           label,
           active: Some(id) == self.active_document_id,
           pinned: self.pinned_document_ids.contains(&id),
+          speech: self.speech_document_id == Some(id),
         }
       })
       .collect::<Vec<_>>();
@@ -339,6 +349,7 @@ impl Workspace {
         label,
         active: Some(id) == self.active_document_id,
         pinned: self.pinned_document_ids.contains(&id),
+        speech: self.speech_document_id == Some(id),
       }
     }));
     tabs

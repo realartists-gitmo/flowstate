@@ -65,6 +65,7 @@ impl Workspace {
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
+      speech_document_id: None,
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
@@ -234,6 +235,9 @@ impl Workspace {
       .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
+    if self.speech_document_id == Some(panel_id) {
+      self.speech_document_id = None;
+    }
     if closing_active_document {
       if let Some(panel) = self.document_panels.last() {
         self.active_document_id = Some(panel.read(cx).id());

@@ -47,7 +47,13 @@ impl Workspace {
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
-    let (active_tab_bg, active_tab_fg) = (cx.theme().background, cx.theme().foreground);
+    let active_is_speech = tabs.get(active_index).is_some_and(|tab| tab.speech);
+    let active_tab_bg = if active_is_speech {
+      cx.theme().success.opacity(0.18)
+    } else {
+      cx.theme().background
+    };
+    let active_tab_fg = cx.theme().foreground;
     TabBar::new("document-tab-bar")
       .small()
       .track_scroll(&self.tab_bar_scroll_handle)
@@ -67,6 +73,16 @@ impl Workspace {
       })
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
+        let speech_button = Button::new(("speech-tab", panel_id.as_u128() as u64))
+          .label("S")
+          .xsmall()
+          .ghost()
+          .tooltip(if tab.speech { "Unset speech document" } else { "Set speech document" })
+          .text_color(if tab.speech { cx.theme().success } else { cx.theme().muted_foreground })
+          .on_click(cx.listener(move |workspace, _, _, cx| {
+            cx.stop_propagation();
+            workspace.toggle_speech_document(panel_id, cx);
+          }));
         let pin_button = Button::new(("pin-tab", panel_id.as_u128() as u64))
           .icon(
             Icon::new(if tab.pinned { IconName::Star } else { IconName::StarOff })
@@ -99,7 +115,7 @@ impl Workspace {
           // before rendering so long filenames cannot break the tab strip.
           .label(tab.label)
           .selected(tab.active)
-          .prefix(pin_button)
+          .prefix(h_flex().gap_0p5().child(speech_button).child(pin_button))
           .suffix(close_button)
       }))
       .last_empty_space(div().flex_1().h_full())
