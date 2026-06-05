@@ -191,6 +191,45 @@ fn modern_condensed_menu(
 }
 
 #[hotpath::measure]
+fn undo_redo_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
+  h_flex()
+    .flex_none()
+    .gap_0p5()
+    .pl(metrics.group_divider_padding_left)
+    .border_l_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .child(
+      Button::new("ribbon-undo")
+        .icon(Icon::new(IconName::Undo).xsmall())
+        .compact()
+        .ghost()
+        .h(metrics.chip_height)
+        .tooltip("Undo")
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            editor.update(cx, |editor, cx| editor.undo(cx));
+          }
+        }),
+    )
+    .child(
+      Button::new("ribbon-redo")
+        .icon(Icon::new(IconName::Redo).xsmall())
+        .compact()
+        .ghost()
+        .h(metrics.chip_height)
+        .tooltip("Redo")
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            editor.update(cx, |editor, cx| editor.redo(cx));
+          }
+        }),
+    )
+    .into_any_element()
+}
+
+#[hotpath::measure]
 fn timer_section(metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let remaining = cx.entity().read(cx).timer_remaining_secs();
   let running = cx.entity().read(cx).timer_running();
