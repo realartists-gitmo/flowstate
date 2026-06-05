@@ -25,6 +25,8 @@ impl Render for EditorRibbon {
         invisibility_mode,
         self.modern_options,
         self.height,
+        self.workspace.clone(),
+        self.panel_id,
         self.panel_id.is_some(),
         self.speech_active,
         self.speech_send_enabled,

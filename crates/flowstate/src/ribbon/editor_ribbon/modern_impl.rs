@@ -10,6 +10,8 @@ impl ModernStylesRibbon {
     invisibility_mode: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
+    workspace: Option<WeakEntity<Workspace>>,
+    panel_id: Option<Uuid>,
     speech_available: bool,
     speech_active: bool,
     speech_send_enabled: bool,
@@ -100,7 +102,18 @@ impl ModernStylesRibbon {
               .min_w_0()
               .children(
                 groups.iter().enumerate().map(|(index, group)| {
-                  modern_group(index > 0, group, editor.clone(), document_theme, options, metrics, wrap_widths[index], cx)
+                  modern_group(
+                    index > 0,
+                    group,
+                    editor.clone(),
+                    document_theme,
+                    options,
+                    metrics,
+                    wrap_widths[index],
+                    workspace.clone(),
+                    panel_id,
+                    cx,
+                  )
                 }),
               ),
           )

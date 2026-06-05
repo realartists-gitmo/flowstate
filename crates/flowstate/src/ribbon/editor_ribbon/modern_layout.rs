@@ -7,6 +7,8 @@ fn modern_group(
   options: ModernRibbonOptions,
   metrics: RibbonLayoutMetrics,
   wrap_width: Option<gpui::Pixels>,
+  workspace: Option<WeakEntity<Workspace>>,
+  panel_id: Option<Uuid>,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   div()
@@ -54,7 +56,7 @@ fn modern_group(
               } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
                 modern_condensed_menu(command, editor.clone(), metrics, cx)
               } else {
-                modern_command_chip(command, editor.clone(), options, metrics, cx)
+                modern_command_chip(command, editor.clone(), options, metrics, workspace.clone(), panel_id, cx)
               }
             })),
         ),
@@ -190,6 +192,8 @@ fn modern_command_chip(
   editor: Entity<RichTextEditor>,
   options: ModernRibbonOptions,
   metrics: RibbonLayoutMetrics,
+  workspace: Option<WeakEntity<Workspace>>,
+  panel_id: Option<Uuid>,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let command_id = command.id;
@@ -198,9 +202,6 @@ fn modern_command_chip(
   let label = RibbonLabel::for_command(command);
   let icon_path = label.prefers_icon().then_some(label.icon_path).flatten();
   let command_color = ribbon_command_color(command, cx);
-
-  let workspace = cx.entity().read(cx).workspace.clone();
-  let panel_id = cx.entity().read(cx).panel_id;
 
   Button::new(("modern-ribbon-command", ribbon_command_key(command_id)))
     .xsmall()
