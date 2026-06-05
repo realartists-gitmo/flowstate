@@ -322,7 +322,7 @@ impl Workspace {
     true
   }
 
-  fn send_selection_to_speech_document(&mut self, cx: &mut Context<Self>) -> bool {
+  fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
     };
@@ -340,10 +340,11 @@ impl Workspace {
     else {
       return false;
     };
-    let text = {
-      let editor = source_editor.read(cx);
-      selected_text_or_enclosing_section(editor.document(), editor.selection())
-    };
+    let text = source_editor.update(cx, |editor, cx| {
+      editor.speech_send_text_at_selection_or_hover(&[2, 3, 4], window, cx).unwrap_or_else(|| {
+        selected_text_or_enclosing_section(editor.document(), editor.selection())
+      })
+    });
     if text.trim().is_empty() {
       return false;
     }

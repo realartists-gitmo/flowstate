@@ -78,8 +78,8 @@ impl Workspace {
           .ghost()
           .tooltip("Send selection or current card to speech document")
           .disabled(self.speech_document_id.is_none() || active_is_speech)
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            workspace.send_selection_to_speech_document(cx);
+          .on_click(cx.listener(|workspace, _, window, cx| {
+            workspace.send_selection_to_speech_document(window, cx);
           })),
       )
       .child(
