@@ -291,10 +291,23 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let speech_word_count = self
-      .active_editor
-      .as_ref()
-      .map(|editor| speech_word_count(editor.read(cx).document()));
+    let speech_word_count = if let (Some(document_id), Some(editor)) = (self.active_document_id, self.active_editor.as_ref()) {
+      let editor = editor.read(cx);
+      let generation = editor.edit_generation();
+      if let Some((_, count)) = self
+        .speech_word_count_cache
+        .get(&document_id)
+        .filter(|(cached_generation, _)| *cached_generation == generation)
+      {
+        Some(*count)
+      } else {
+        let count = speech_word_count(editor.document());
+        self.speech_word_count_cache.insert(document_id, (generation, count));
+        Some(count)
+      }
+    } else {
+      None
+    };
     let zoom = self
       .active_editor
       .as_ref()
