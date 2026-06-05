@@ -262,7 +262,10 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let speech_word_count = self.active_editor.as_ref().map(|editor| speech_word_count(editor.read(cx).document()));
+    let speech_word_count = self
+      .active_editor
+      .as_ref()
+      .map(|editor| speech_word_count(editor.read(cx).document()));
     let zoom = self
       .active_editor
       .as_ref()
@@ -320,5 +323,8 @@ fn speech_word_count(document: &Document) -> usize {
 }
 
 fn count_words(text: &str) -> usize {
-  text.split_whitespace().filter(|word| word.chars().any(char::is_alphanumeric)).count()
+  text
+    .split_whitespace()
+    .filter(|word| word.chars().any(char::is_alphanumeric))
+    .count()
 }

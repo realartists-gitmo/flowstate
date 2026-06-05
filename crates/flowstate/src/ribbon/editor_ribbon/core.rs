@@ -9,7 +9,9 @@ use gpui_component::button::DropdownButton;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _, h_flex};
+use gpui_component::{
+  ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _, h_flex,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, default_keys_for};
@@ -127,7 +129,9 @@ impl EditorRibbon {
     let Some(started_at) = self.timer_started_at else {
       return self.timer_duration_secs;
     };
-    self.timer_duration_secs.saturating_sub(started_at.elapsed().as_secs())
+    self
+      .timer_duration_secs
+      .saturating_sub(started_at.elapsed().as_secs())
   }
 
   fn timer_running(&self) -> bool {
@@ -140,7 +144,9 @@ impl EditorRibbon {
     } else {
       self.timer_duration_secs
     };
-    self.timer_duration_secs = base.saturating_add_signed(delta_secs).clamp(1, 99 * 60 + 59);
+    self.timer_duration_secs = base
+      .saturating_add_signed(delta_secs)
+      .clamp(1, 99 * 60 + 59);
     self.timer_started_at = None;
     cx.notify();
   }
