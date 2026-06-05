@@ -100,22 +100,20 @@ impl ModernStylesRibbon {
               .items_start()
               .gap(metrics.group_gap)
               .min_w_0()
-              .children(
-                groups.iter().enumerate().map(|(index, group)| {
-                  modern_group(
-                    index > 0,
-                    group,
-                    editor.clone(),
-                    document_theme,
-                    options,
-                    metrics,
-                    wrap_widths[index],
-                    workspace.clone(),
-                    panel_id,
-                    cx,
-                  )
-                }),
-              ),
+              .children(groups.iter().enumerate().map(|(index, group)| {
+                modern_group(
+                  index > 0,
+                  group,
+                  editor.clone(),
+                  document_theme,
+                  options,
+                  metrics,
+                  wrap_widths[index],
+                  workspace.clone(),
+                  panel_id,
+                  cx,
+                )
+              })),
           )
           .child(undo_redo_section(editor.clone(), metrics, cx))
           .child(export_section(editor.clone(), metrics, cx))
