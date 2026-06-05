@@ -25,6 +25,8 @@ impl Render for EditorRibbon {
         invisibility_mode,
         self.modern_options,
         self.height,
+        self.timer_remaining_secs(),
+        self.timer_running(),
         window.viewport_size().width,
         window,
         cx,

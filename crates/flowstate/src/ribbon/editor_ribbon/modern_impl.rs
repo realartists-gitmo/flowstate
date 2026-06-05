@@ -10,6 +10,8 @@ impl ModernStylesRibbon {
     invisibility_mode: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
+    timer_remaining_secs: u64,
+    timer_running: bool,
     _available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
@@ -68,7 +70,7 @@ impl ModernStylesRibbon {
               ),
           )
           .child(undo_redo_section(editor.clone(), metrics, cx))
-          .child(timer_section(metrics, cx))
+          .child(timer_section(metrics, timer_remaining_secs, timer_running, cx))
           .child(export_section(editor.clone(), metrics, cx))
           .child(invisibility_mode_button(editor.clone(), invisibility_mode, metrics, cx)),
       )

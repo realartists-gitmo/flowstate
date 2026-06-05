@@ -322,9 +322,7 @@ fn undo_redo_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetric
 }
 
 #[hotpath::measure]
-fn timer_section(metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
-  let remaining = cx.entity().read(cx).timer_remaining_secs();
-  let running = cx.entity().read(cx).timer_running();
+fn timer_section(metrics: RibbonLayoutMetrics, remaining: u64, running: bool, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let minutes = remaining / 60;
   let seconds = remaining % 60;
   let ribbon = cx.entity().downgrade();
