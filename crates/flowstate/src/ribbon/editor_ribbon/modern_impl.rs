@@ -67,6 +67,7 @@ impl ModernStylesRibbon {
                 }),
               ),
           )
+          .child(timer_section(metrics, cx))
           .child(export_section(editor.clone(), metrics, cx))
           .child(invisibility_mode_button(editor.clone(), invisibility_mode, metrics, cx)),
       )

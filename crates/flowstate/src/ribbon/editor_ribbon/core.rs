@@ -1,12 +1,15 @@
+use std::time::{Duration, Instant};
+
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px, relative,
+  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Timer, Window, div, prelude::*, px,
+  relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _, h_flex};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, default_keys_for};
@@ -67,6 +70,9 @@ pub struct EditorRibbon {
   mode: RibbonMode,
   modern_options: ModernRibbonOptions,
   height: gpui::Pixels,
+  timer_duration_secs: u64,
+  timer_started_at: Option<Instant>,
+  timer_tick_running: bool,
 }
 
 /// Compatibility name for code that wants to talk in settings terms.
@@ -84,6 +90,9 @@ impl EditorRibbon {
       mode,
       modern_options: ModernRibbonOptions::default(),
       height: default_ribbon_height(),
+      timer_duration_secs: 300,
+      timer_started_at: None,
+      timer_tick_running: false,
     }
   }
 
@@ -112,6 +121,70 @@ impl EditorRibbon {
       self.height = height;
       cx.notify();
     }
+  }
+
+  fn timer_remaining_secs(&self) -> u64 {
+    let Some(started_at) = self.timer_started_at else {
+      return self.timer_duration_secs;
+    };
+    self.timer_duration_secs.saturating_sub(started_at.elapsed().as_secs())
+  }
+
+  fn timer_running(&self) -> bool {
+    self.timer_started_at.is_some() && self.timer_remaining_secs() > 0
+  }
+
+  fn adjust_timer_duration(&mut self, delta_secs: i64, cx: &mut Context<Self>) {
+    let base = if self.timer_running() {
+      self.timer_remaining_secs()
+    } else {
+      self.timer_duration_secs
+    };
+    self.timer_duration_secs = base.saturating_add_signed(delta_secs).clamp(1, 99 * 60 + 59);
+    self.timer_started_at = None;
+    cx.notify();
+  }
+
+  fn toggle_timer(&mut self, cx: &mut Context<Self>) {
+    if self.timer_running() {
+      self.timer_duration_secs = self.timer_remaining_secs().max(1);
+      self.timer_started_at = None;
+    } else {
+      self.timer_started_at = Some(Instant::now());
+      self.ensure_timer_tick(cx);
+    }
+    cx.notify();
+  }
+
+  fn reset_timer(&mut self, cx: &mut Context<Self>) {
+    self.timer_started_at = None;
+    cx.notify();
+  }
+
+  fn ensure_timer_tick(&mut self, cx: &mut Context<Self>) {
+    if self.timer_tick_running {
+      return;
+    }
+    self.timer_tick_running = true;
+    cx.spawn(async move |ribbon, cx| {
+      loop {
+        Timer::after(Duration::from_secs(1)).await;
+        let keep_ticking = ribbon
+          .update(cx, |ribbon, cx| {
+            let running = ribbon.timer_running();
+            if !running {
+              ribbon.timer_tick_running = false;
+            }
+            cx.notify();
+            running
+          })
+          .unwrap_or(false);
+        if !keep_ticking {
+          break;
+        }
+      }
+    })
+    .detach();
   }
 
   fn paragraph_selected(state: &RichTextEditorStyleState, style: ParagraphStyle) -> bool {

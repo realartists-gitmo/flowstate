@@ -191,6 +191,71 @@ fn modern_condensed_menu(
 }
 
 #[hotpath::measure]
+fn timer_section(metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
+  let remaining = cx.entity().read(cx).timer_remaining_secs();
+  let running = cx.entity().read(cx).timer_running();
+  let minutes = remaining / 60;
+  let seconds = remaining % 60;
+  div()
+    .flex()
+    .flex_col()
+    .flex_none()
+    .gap_0p5()
+    .pl(metrics.group_divider_padding_left)
+    .border_l_1()
+    .border_color(cx.theme().border.opacity(0.72))
+    .child(
+      div()
+        .text_size(px(10.0))
+        .font_medium()
+        .text_color(cx.theme().foreground)
+        .child("Timer"),
+    )
+    .child(
+      h_flex()
+        .gap_0p5()
+        .child(
+          Button::new("ribbon-timer-minus")
+            .compact()
+            .ghost()
+            .h(metrics.chip_height)
+            .label("−")
+            .tooltip("Subtract 30 seconds")
+            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.adjust_timer_duration(-30, cx))),
+        )
+        .child(
+          Button::new("ribbon-timer-toggle")
+            .compact()
+            .outline()
+            .h(metrics.chip_height)
+            .px(metrics.chip_padding_x)
+            .label(format!("{minutes:02}:{seconds:02}"))
+            .tooltip(if running { "Pause timer" } else { "Start timer" })
+            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.toggle_timer(cx))),
+        )
+        .child(
+          Button::new("ribbon-timer-plus")
+            .compact()
+            .ghost()
+            .h(metrics.chip_height)
+            .label("+")
+            .tooltip("Add 30 seconds")
+            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.adjust_timer_duration(30, cx))),
+        )
+        .child(
+          Button::new("ribbon-timer-reset")
+            .compact()
+            .ghost()
+            .h(metrics.chip_height)
+            .label("↺")
+            .tooltip("Reset timer")
+            .on_click(cx.listener(|ribbon, _, _, cx| ribbon.reset_timer(cx))),
+        ),
+    )
+    .into_any_element()
+}
+
+#[hotpath::measure]
 fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
   let chip_height = metrics.chip_height;
   let send_created = editor
