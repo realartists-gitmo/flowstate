@@ -178,7 +178,6 @@ impl Workspace {
     self.tub_index.clone()
   }
 
-  #[allow(dead_code, reason = "Tub root picker is kept for the upcoming toolkit settings entry point.")]
   pub(super) fn prompt_select_tub(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let paths = cx.prompt_for_paths(PathPromptOptions {
       files: false,
@@ -203,7 +202,6 @@ impl Workspace {
     .detach();
   }
 
-  #[allow(dead_code, reason = "Tub root setter is retained for the upcoming toolkit settings entry point.")]
   fn set_tub_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
     let _ = save_tub_root(Some(root.clone()));
     self.tub_root = Some(root.clone());
@@ -421,17 +419,16 @@ impl Workspace {
       cx.notify();
       return;
     };
-    if query.trim().is_empty() {
-      self.toolkit_hits.clear();
-      self.toolkit_status = "Search DB8 blocks, tags, and analytics.".into();
-      cx.notify();
-      return;
-    }
+    let query_is_empty = query.trim().is_empty();
 
     self.toolkit_search_generation = self.toolkit_search_generation.wrapping_add(1);
     let generation = self.toolkit_search_generation;
     let kinds = self.toolkit_search_filter.kinds().to_vec();
-    self.toolkit_status = "Searching...".into();
+    self.toolkit_status = if query_is_empty {
+      "Loading tub cards...".into()
+    } else {
+      "Searching...".into()
+    };
     cx.notify();
 
     cx.spawn(async move |workspace, cx| {
@@ -447,7 +444,13 @@ impl Workspace {
           Ok(hits) => {
             let hit_count = hits.len();
             workspace.toolkit_hits = hits;
-            workspace.toolkit_status = if hit_count == 0 {
+            workspace.toolkit_status = if query_is_empty {
+              if hit_count == 0 {
+                "No DB8 evidence cards".into()
+              } else {
+                format!("{hit_count} tub cards").into()
+              }
+            } else if hit_count == 0 {
               "No matching DB8 evidence".into()
             } else {
               format!("{hit_count} results").into()
@@ -526,7 +529,9 @@ impl Workspace {
       })
       .unwrap_or_else(|| (load_document_theme(), false));
 
-    let result_list = if self.toolkit_hits.is_empty() {
+    let result_list = if self.tub_root.is_none() {
+      self.render_centered_tub_picker("toolkit-select-tub-folder", "Select a tub to search evidence", cx)
+    } else if self.toolkit_hits.is_empty() {
       div()
         .h(px(120.0))
         .flex()
@@ -627,30 +632,44 @@ impl Workspace {
               .font_weight(gpui::FontWeight::SEMIBOLD)
               .text_color(cx.theme().sidebar_primary)
               .child("Toolkit"),
-          ),
+          )
+          .when(self.tub_root.is_some(), |this| {
+            this.child(
+              Button::new("toolkit-change-tub")
+                .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().sidebar_primary))
+                .xsmall()
+                .ghost()
+                .tooltip("Switch tub folder")
+                .on_click(cx.listener(|workspace, _, window, cx| {
+                  workspace.prompt_select_tub(window, cx);
+                })),
+            )
+          }),
       )
-      .child(
-        v_flex()
-          .flex_none()
-          .gap_2()
-          .p_2()
-          .border_b_1()
-          .border_color(cx.theme().border)
-          .child(
-            Input::new(&self.toolkit_search_input)
-              .xsmall()
-              .w_full()
-              .cleanable(true)
-              .prefix(
-                Icon::new(IconName::Search)
-                  .xsmall()
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .suffix(self.render_toolkit_filter_menu(cx))
-              .text_color(cx.theme().foreground)
-              .placeholder_color(cx.theme().muted_foreground),
-          ),
-      )
+      .when(self.tub_root.is_some(), |this| {
+        this.child(
+          v_flex()
+            .flex_none()
+            .gap_2()
+            .p_2()
+            .border_b_1()
+            .border_color(cx.theme().border)
+            .child(
+              Input::new(&self.toolkit_search_input)
+                .xsmall()
+                .w_full()
+                .cleanable(true)
+                .prefix(
+                  Icon::new(IconName::Search)
+                    .xsmall()
+                    .text_color(cx.theme().muted_foreground),
+                )
+                .suffix(self.render_toolkit_filter_menu(cx))
+                .text_color(cx.theme().foreground)
+                .placeholder_color(cx.theme().muted_foreground),
+            ),
+        )
+      })
       .child(
         v_flex()
           .flex_1()
@@ -660,6 +679,26 @@ impl Workspace {
           .p_2()
           .child(result_list),
       )
+  }
+
+  fn render_centered_tub_picker(&self, id: &'static str, label: &'static str, cx: &mut Context<Self>) -> gpui::AnyElement {
+    div()
+      .size_full()
+      .min_h(px(160.0))
+      .flex()
+      .items_center()
+      .justify_center()
+      .child(
+        Button::new(id)
+          .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().primary_foreground))
+          .label(label)
+          .small()
+          .tooltip("Select debate tub folder")
+          .on_click(cx.listener(|workspace, _, window, cx| {
+            workspace.prompt_select_tub(window, cx);
+          })),
+      )
+      .into_any_element()
   }
 
   fn render_toolkit_filter_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -884,7 +923,9 @@ impl Workspace {
       .value()
       .trim()
       .is_empty();
-    let tree_list = if self.tub_tree_entries.is_empty() {
+    let tree_list = if self.tub_root.is_none() {
+      self.render_centered_tub_picker("left-nav-select-tub-folder", "Select a tub folder", cx)
+    } else if self.tub_tree_entries.is_empty() {
       div()
         .h(px(120.0))
         .flex()
@@ -906,23 +947,54 @@ impl Workspace {
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
       .child(self.render_left_nav_header("Tub", cx))
-      .child(
-        div().w_full().flex_none().child(
-          Input::new(&self.tub_file_search_input)
-            .xsmall()
-            .w_full()
-            .cleanable(true)
-            .prefix(
-              Icon::new(IconName::Search)
+      .when(self.tub_root.is_some(), |this| {
+        this
+          .child(
+            h_flex()
+              .w_full()
+              .items_center()
+              .justify_between()
+              .gap_2()
+              .text_xs()
+              .text_color(cx.theme().muted_foreground)
+              .child(
+                div().min_w_0().truncate().child(
+                  self
+                    .tub_root
+                    .as_ref()
+                    .map(|root| root.display().to_string())
+                    .unwrap_or_default(),
+                ),
+              )
+              .child(
+                Button::new("left-nav-change-tub")
+                  .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().sidebar_primary))
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Switch tub folder")
+                  .on_click(cx.listener(|workspace, _, window, cx| {
+                    workspace.prompt_select_tub(window, cx);
+                  })),
+              ),
+          )
+          .child(
+            div().w_full().flex_none().child(
+              Input::new(&self.tub_file_search_input)
                 .xsmall()
-                .text_color(cx.theme().muted_foreground),
-            )
-            .text_color(cx.theme().sidebar_foreground)
-            .placeholder_color(cx.theme().muted_foreground)
-            .bg(cx.theme().sidebar)
-            .border_color(cx.theme().sidebar_border),
-        ),
-      )
+                .w_full()
+                .cleanable(true)
+                .prefix(
+                  Icon::new(IconName::Search)
+                    .xsmall()
+                    .text_color(cx.theme().muted_foreground),
+                )
+                .text_color(cx.theme().sidebar_foreground)
+                .placeholder_color(cx.theme().muted_foreground)
+                .bg(cx.theme().sidebar)
+                .border_color(cx.theme().sidebar_border),
+            ),
+          )
+      })
       .child(
         div()
           .flex_1()

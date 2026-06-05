@@ -366,7 +366,7 @@ impl TubIndex {
 
   pub fn search_content(&self, query: &str, kinds: &[SearchUnitKind], limit: usize) -> Result<Vec<SearchHit>> {
     if query.trim().is_empty() {
-      return Ok(Vec::new());
+      return self.default_content(kinds, limit);
     }
     let kinds = if kinds.is_empty() {
       &[SearchUnitKind::BlockSection, SearchUnitKind::TagSection, SearchUnitKind::Analytic][..]
@@ -374,6 +374,34 @@ impl TubIndex {
       kinds
     };
     self.search_tantivy(query, kinds, limit, false)
+  }
+
+  pub fn default_content(&self, kinds: &[SearchUnitKind], limit: usize) -> Result<Vec<SearchHit>> {
+    let kinds = if kinds.is_empty() {
+      &[SearchUnitKind::BlockSection, SearchUnitKind::TagSection, SearchUnitKind::Analytic][..]
+    } else {
+      kinds
+    };
+    let allowed = kinds.iter().copied().collect::<HashSet<_>>();
+    let mut hits = Vec::with_capacity(limit);
+
+    for file in self.list_files()? {
+      if file.kind != FileKind::Db8 || !file.indexed {
+        continue;
+      }
+      for unit in db8_index_units(&file.file_id, &file.path, &file.display_path, &file.file_name)? {
+        if allowed.contains(&unit.unit_kind) {
+          let mut hit = hit_from_unit(unit);
+          self.hydrate_hit_preview(&mut hit)?;
+          hits.push(hit);
+        }
+        if hits.len() >= limit {
+          return Ok(hits);
+        }
+      }
+    }
+
+    Ok(hits)
   }
 
   pub fn start_watcher(&self) -> notify::Result<TubWatcher> {
@@ -836,6 +864,26 @@ fn unit_document(schema: &TubSchema, unit: &IndexUnit) -> TantivyDocument {
     schema.size_bytes => unit.insert_text.len() as u64,
     schema.modified_ns => 0_u64,
   )
+}
+
+fn hit_from_unit(unit: IndexUnit) -> SearchHit {
+  SearchHit {
+    file_id: unit.file_id,
+    unit_id: unit.unit_id,
+    unit_kind: unit.unit_kind,
+    path: unit.path,
+    display_path: unit.display_path,
+    file_name: unit.file_name,
+    heading_path: unit.heading_path,
+    title: unit.heading,
+    cite: unit.cite,
+    snippet: preview_text(&unit.body, 360),
+    insert_text: unit.insert_text,
+    preview_paragraphs: Vec::new(),
+    score: 0.0,
+    paragraph_start: unit.paragraph_start,
+    paragraph_end_exclusive: unit.paragraph_end_exclusive,
+  }
 }
 
 fn hit_from_document(schema: &TubSchema, document: &TantivyDocument, score: f32) -> Option<SearchHit> {
