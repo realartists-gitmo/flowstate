@@ -342,7 +342,7 @@ impl Workspace {
     };
     let text = {
       let editor = source_editor.read(cx);
-      selected_text(editor.document(), editor.selection())
+      selected_text_or_enclosing_section(editor.document(), editor.selection())
     };
     if text.trim().is_empty() {
       return false;
@@ -462,9 +462,68 @@ fn selected_text(document: &Document, selection: &crate::rich_text_element::Edit
   }
   let start_offset = selection.anchor.min(selection.head);
   let end_offset = selection.anchor.max(selection.head);
+  document_text_between_offsets(document, start_offset, end_offset)
+}
+
+fn selected_text_or_enclosing_section(document: &Document, selection: &crate::rich_text_element::EditorSelection) -> String {
+  if selection.anchor != selection.head {
+    return selected_text(document, selection);
+  }
+  let caret = selection.head;
+  let Some((start_paragraph, end_paragraph_exclusive)) = enclosing_section_bounds(document, caret.paragraph, &[2, 3, 4]) else {
+    return document_text_between_offsets(
+      document,
+      crate::rich_text_element::DocumentOffset {
+        paragraph: caret.paragraph,
+        byte: 0,
+      },
+      crate::rich_text_element::DocumentOffset {
+        paragraph: caret.paragraph,
+        byte: paragraph_byte_range(document, caret.paragraph).len(),
+      },
+    );
+  };
+  let end_paragraph = end_paragraph_exclusive.saturating_sub(1);
+  document_text_between_offsets(
+    document,
+    crate::rich_text_element::DocumentOffset {
+      paragraph: start_paragraph,
+      byte: 0,
+    },
+    crate::rich_text_element::DocumentOffset {
+      paragraph: end_paragraph,
+      byte: paragraph_byte_range(document, end_paragraph).len(),
+    },
+  )
+}
+
+fn document_text_between_offsets(
+  document: &Document,
+  start_offset: crate::rich_text_element::DocumentOffset,
+  end_offset: crate::rich_text_element::DocumentOffset,
+) -> String {
   let start = paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
   let end = paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
   document_text_slice(document, start..end)
+}
+
+fn enclosing_section_bounds(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
+  document
+    .sections
+    .iter()
+    .filter_map(|section| {
+      let SectionKind::Custom(slot) = section.kind;
+      if !section_slots.contains(&slot) {
+        return None;
+      }
+      let start = paragraph_index_for_id(document, section.start_paragraph)?;
+      let end = section
+        .end_paragraph_exclusive
+        .and_then(|id| paragraph_index_for_id(document, id))
+        .unwrap_or(document.paragraphs.len());
+      (start <= paragraph_ix && paragraph_ix < end).then_some((start, end))
+    })
+    .min_by_key(|(start, end)| end - start)
 }
 
 fn condense_text(text: &str, separator: char) -> String {
