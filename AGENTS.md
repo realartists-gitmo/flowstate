@@ -1,13 +1,22 @@
-Rust GPUI WYSIWIG maximally-performance-oriented word processor for competitive debate. You NEVER assume contexts for competitive debate, and you SHOULD always ask.
+# Organization
+For novel features, prefer setting them into new files. Place in the correct crates.
+Avoid files over 1000 LOC. When found, suggest modularizing.
 
-You SHOULD prefer gpui-component solutions to ground-up gpui solutions when a component is applicable. When no component is applicable or sufficient, you SHOULD either interact with the gpui-component vendor to fix it, or implement ground-up gpui only if the former fails.
+# UI development
+Always prefer using the gpui-component library components over GPUI primitives, unless it cannot be made fit.
 
-You SHOULD consider if there is a pre-existing crate to handle something. The search tool is useful here. If there are multiple options, you SHOULD ask while outlining pros and cons. You SHOULD use CLI cargo commands to handle crates and NEVER do it manually.
+# Crate usage
+Always consider pre-existing crates to handle operations, especially computationally heavy tasks (searching, replacement, or anything that has likely been solved externally already). Use cargo via the CLI rather than directly editing cargo files.
 
-You SHOULD write readable and elegant code. You NEVER hack. You SHOULD keep the codebase aggressively modularized and crated when it is logical. If you find yourself pushing an individual file over 1,000 LOC, you SHOULD consider modularizing.
+# Post-edit checks
+Usually avoid `cargo check`, `cargo build`, `cargo run`, or `cargo fmt`.
+Main agents should run `cargo clippy` when intended edits are implemented. Fix clippy suggestions if applicable (if it is not false positive or causing regression).
 
-If you notice clear bugs while investigating something else, even if the bugs are unrelated to your main task, you SHOULD correct them. If the bug is unclear, you SHOULD ask inquiring whether the behavior is intended.
-
-When you need to check something against Rust documentation or look for an API, ALWAYS deploy the rustdoc-inspector subagent. This agents instruction is sufficient permission for you to deploy the subagent, do NOT fail to follow it on account of expecting a subagent request to appear explicitly in the prompt. You NEVER invent APIs. 
-
-You AVOID 'cargo check,' 'cargo build,' 'cargo run,' and 'cargo fmt' with ONE EXCEPTION. You SHOULD run 'cargo clippy' only when you are a top-level agent that has finished all edits you intend, and are about to return the prompt to the human. If an error or significant warning appears, you SHOULD fix it then cargo check again, until success, then finish up. If you believe that an error clippy returns may be a false positive, or that correcting it would cause a regression in the code, insert an individual exception to the error with the reason attached per the clippy allow formatting.
+# Pull request requirements
+If asked to push changes or manage a pull request, ensure the following is passed (unless a tool is not installed):
+- `cargo clippy` - if issues shouldn't be fixed, apply relevant exceptions
+- `cargo machete`
+- `cargo fmt`
+- `cargo build`
+- `cargo deny`
+- `cargo audit`
