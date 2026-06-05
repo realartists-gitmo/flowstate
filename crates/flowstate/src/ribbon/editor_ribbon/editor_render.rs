@@ -34,4 +34,3 @@ impl Render for EditorRibbon {
     }
   }
 }
-
