@@ -217,7 +217,12 @@ fn modern_command_chip(
     })
     .when_some(command.accent, |this, accent| this.child(accent_dot(accent_color(accent, cx))))
     .when_some(icon_path, |this, path| {
-      this.child(Icon::default().path(path).xsmall().text_color(command_color))
+      this.child(
+        Icon::default()
+          .path(path)
+          .xsmall()
+          .text_color(command_color),
+      )
     })
     .when(icon_path.is_none(), |this| {
       this.child(
@@ -246,7 +251,9 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
   match command.id {
     RibbonCommandId::Paragraph(_) => cx.theme().primary,
     RibbonCommandId::Semantic(_) | RibbonCommandId::Underline | RibbonCommandId::Strikethrough => cx.theme().link,
-    RibbonCommandId::Highlight(_) | RibbonCommandId::HighlightMenu | RibbonCommandId::ToggleHighlightMode(_) | RibbonCommandId::MarkCard => cx.theme().warning,
+    RibbonCommandId::Highlight(_) | RibbonCommandId::HighlightMenu | RibbonCommandId::ToggleHighlightMode(_) | RibbonCommandId::MarkCard => {
+      cx.theme().warning
+    },
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
     RibbonCommandId::CondensedMenu => cx.theme().info,
   }

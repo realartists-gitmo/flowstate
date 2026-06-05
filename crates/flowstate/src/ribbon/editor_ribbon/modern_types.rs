@@ -102,4 +102,3 @@ impl RibbonLabel {
     self.icon_path.is_some()
   }
 }
-

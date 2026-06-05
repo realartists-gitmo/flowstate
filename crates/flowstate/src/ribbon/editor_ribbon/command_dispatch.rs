@@ -46,7 +46,11 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.set_highlight_for_selection(None, cx);
     },
     RibbonCommandId::MarkCard => {
-      editor.set_highlight_for_selection(Some(flowstate_document::HIGHLIGHT_MARKED), cx);
+      editor.set_highlight_from_caret_to_enclosing_section_end(
+        flowstate_document::HIGHLIGHT_MARKED,
+        &[2, 3, 4],
+        cx,
+      );
     },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {
@@ -112,8 +116,12 @@ fn semantic_priority(style: RunSemanticStyle) -> u8 {
 #[hotpath::measure]
 fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   match style {
-    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK => OverflowBehavior::KeepVisible,
-    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG => OverflowBehavior::MoveToOverflow,
+    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK => {
+      OverflowBehavior::KeepVisible
+    },
+    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG => {
+      OverflowBehavior::MoveToOverflow
+    },
     ParagraphStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
@@ -121,7 +129,9 @@ fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
 #[hotpath::measure]
 fn semantic_overflow_behavior(style: RunSemanticStyle) -> OverflowBehavior {
   match style {
-    flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_UNDERLINE => OverflowBehavior::KeepVisible,
+    flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_UNDERLINE => {
+      OverflowBehavior::KeepVisible
+    },
     flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED => OverflowBehavior::MoveToOverflow,
     RunSemanticStyle::Plain => OverflowBehavior::HideInCompact,
     RunSemanticStyle::Custom(_) => OverflowBehavior::MoveToOverflow,

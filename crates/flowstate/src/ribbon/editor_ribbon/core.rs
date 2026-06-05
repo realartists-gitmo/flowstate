@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::commands::{CommandId, default_keys_for};
 use crate::ribbon::style_catalog::{HIGHLIGHT_STYLE_SPECS, PARAGRAPH_STYLE_SPECS, SEMANTIC_STYLE_SPECS};
 use crate::rich_text_element::{
-  ApplyHighlightToSelection, ArmedInlineTool, DocumentExportFormat, DocumentTheme, HighlightStyle, ParagraphStyle,
-  RichTextEditor, RichTextEditorStyleState, RunSemanticStyle, SelectionState,
+  ApplyHighlightToSelection, ArmedInlineTool, DocumentExportFormat, DocumentTheme, HighlightStyle, ParagraphStyle, RichTextEditor,
+  RichTextEditorStyleState, RunSemanticStyle, SelectionState,
 };
 
 /// User-selectable ribbon renderer.
