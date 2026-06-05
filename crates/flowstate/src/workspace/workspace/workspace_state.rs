@@ -228,16 +228,57 @@ impl Workspace {
   }
 
   fn navigate_active_tab(&mut self, offset: isize, cx: &mut Context<Self>) {
-    let Some(active_index) = self.active_document_index(cx) else {
+    let tabs = self.document_tabs(cx);
+    let Some(active_id) = self.active_document_id else {
       return;
     };
-    let target = if offset.is_negative() {
-      active_index.checked_sub(offset.unsigned_abs())
-    } else {
-      active_index.checked_add(offset as usize)
+    let Some(active_index) = tabs.iter().position(|tab| tab.id == active_id) else {
+      return;
     };
-    if let Some(target) = target.filter(|target| *target < self.document_tabs(cx).len()) {
-      self.activate_document_at_index(target, cx);
+    let len = tabs.len();
+    if len == 0 {
+      return;
+    }
+    let target = if offset.is_negative() {
+      active_index.wrapping_sub(offset.unsigned_abs()) % len
+    } else {
+      (active_index + offset as usize) % len
+    };
+    self.activate_document_id(tabs[target].id, cx);
+  }
+
+  fn toggle_active_tab_pin(&mut self, cx: &mut Context<Self>) {
+    let Some(active_id) = self.active_document_id else {
+      return;
+    };
+    if let Some(ix) = self.pinned_document_ids.iter().position(|id| *id == active_id) {
+      self.pinned_document_ids.remove(ix);
+    } else if self.pinned_document_ids.len() < 10 {
+      self.pinned_document_ids.push(active_id);
+    }
+    cx.notify();
+  }
+
+  fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    if let Some(ix) = self.pinned_document_ids.iter().position(|id| *id == panel_id) {
+      self.pinned_document_ids.remove(ix);
+    } else if self.pinned_document_ids.len() < 10 {
+      self.pinned_document_ids.push(panel_id);
+    }
+    cx.notify();
+  }
+
+  fn activate_tab_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {
+    let pinned = self
+      .pinned_document_ids
+      .iter()
+      .copied()
+      .filter(|id| self.document_tabs(cx).iter().any(|tab| tab.id == *id))
+      .collect::<Vec<_>>();
+    if let Some(id) = pinned.get(index).copied() {
+      self.activate_document_id(id, cx);
+    } else if pinned.is_empty() {
+      self.activate_document_at_index(index, cx);
     }
   }
 
@@ -262,10 +303,12 @@ impl Workspace {
         let dirty = panel.is_dirty(cx);
         let title = truncate_tab_title(&title, 32);
         let label = if dirty { format!("*{title}").into() } else { title.into() };
+        let id = panel.id();
         DocumentTab {
-          id: panel.id(),
+          id,
           label,
-          active: Some(panel.id()) == self.active_document_id,
+          active: Some(id) == self.active_document_id,
+          pinned: self.pinned_document_ids.contains(&id),
         }
       })
       .collect::<Vec<_>>();
@@ -275,10 +318,12 @@ impl Workspace {
       let dirty = panel.is_dirty(cx);
       let title = truncate_tab_title(&title, 32);
       let label = if dirty { format!("*{title}").into() } else { title.into() };
+      let id = panel.id();
       DocumentTab {
-        id: panel.id(),
+        id,
         label,
-        active: Some(panel.id()) == self.active_document_id,
+        active: Some(id) == self.active_document_id,
+        pinned: self.pinned_document_ids.contains(&id),
       }
     }));
     tabs

@@ -78,6 +78,7 @@ pub struct Workspace {
   temporary_workspace_session_persist_scheduled: bool,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
+  pinned_document_ids: Vec<Uuid>,
   body_resizable_state: Entity<ResizableState>,
   content_resizable_state: Entity<ResizableState>,
   ribbon_resizable_state: Entity<ResizableState>,
@@ -132,6 +133,7 @@ struct DocumentTab {
   id: Uuid,
   label: SharedString,
   active: bool,
+  pinned: bool,
 }
 
 type FontFamilySelectDelegate = SearchableVec<SharedString>;

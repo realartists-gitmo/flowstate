@@ -61,6 +61,58 @@ impl Workspace {
         cx.notify();
         true
       },
+      CommandId::NextTab => {
+        self.navigate_active_tab(1, cx);
+        true
+      },
+      CommandId::PreviousTab => {
+        self.navigate_active_tab(-1, cx);
+        true
+      },
+      CommandId::TogglePinTab => {
+        self.toggle_active_tab_pin(cx);
+        true
+      },
+      CommandId::SwitchToTab1 => {
+        self.activate_tab_shortcut(0, cx);
+        true
+      },
+      CommandId::SwitchToTab2 => {
+        self.activate_tab_shortcut(1, cx);
+        true
+      },
+      CommandId::SwitchToTab3 => {
+        self.activate_tab_shortcut(2, cx);
+        true
+      },
+      CommandId::SwitchToTab4 => {
+        self.activate_tab_shortcut(3, cx);
+        true
+      },
+      CommandId::SwitchToTab5 => {
+        self.activate_tab_shortcut(4, cx);
+        true
+      },
+      CommandId::SwitchToTab6 => {
+        self.activate_tab_shortcut(5, cx);
+        true
+      },
+      CommandId::SwitchToTab7 => {
+        self.activate_tab_shortcut(6, cx);
+        true
+      },
+      CommandId::SwitchToTab8 => {
+        self.activate_tab_shortcut(7, cx);
+        true
+      },
+      CommandId::SwitchToTab9 => {
+        self.activate_tab_shortcut(8, cx);
+        true
+      },
+      CommandId::SwitchToTab10 => {
+        self.activate_tab_shortcut(9, cx);
+        true
+      },
       CommandId::ScrollToParagraph => false,
       command => {
         if let Some(editor) = self.active_editor.clone() {

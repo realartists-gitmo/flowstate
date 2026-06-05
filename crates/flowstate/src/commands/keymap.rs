@@ -152,6 +152,19 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
     | CommandId::ToggleRibbon
+    | CommandId::NextTab
+    | CommandId::PreviousTab
+    | CommandId::TogglePinTab
+    | CommandId::SwitchToTab1
+    | CommandId::SwitchToTab2
+    | CommandId::SwitchToTab3
+    | CommandId::SwitchToTab4
+    | CommandId::SwitchToTab5
+    | CommandId::SwitchToTab6
+    | CommandId::SwitchToTab7
+    | CommandId::SwitchToTab8
+    | CommandId::SwitchToTab9
+    | CommandId::SwitchToTab10
     | CommandId::ScrollToParagraph => return None,
   };
   Some(action)

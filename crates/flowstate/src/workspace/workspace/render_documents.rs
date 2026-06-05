@@ -67,6 +67,19 @@ impl Workspace {
       })
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
+        let pin_button = Button::new(("pin-tab", panel_id.as_u128() as u64))
+          .icon(
+            Icon::new(if tab.pinned { IconName::Star } else { IconName::StarOff })
+              .xsmall()
+              .text_color(if tab.pinned { cx.theme().warning } else { cx.theme().muted_foreground }),
+          )
+          .xsmall()
+          .ghost()
+          .tooltip(if tab.pinned { "Unpin tab" } else { "Pin tab" })
+          .on_click(cx.listener(move |workspace, _, _, cx| {
+            cx.stop_propagation();
+            workspace.toggle_tab_pin(panel_id, cx);
+          }));
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")
           .when(tab.active, |this| {
@@ -86,6 +99,7 @@ impl Workspace {
           // before rendering so long filenames cannot break the tab strip.
           .label(tab.label)
           .selected(tab.active)
+          .prefix(pin_button)
           .suffix(close_button)
       }))
       .last_empty_space(div().flex_1().h_full())

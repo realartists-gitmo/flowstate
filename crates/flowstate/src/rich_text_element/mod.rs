@@ -66,6 +66,19 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::CloseDocument
     | CommandId::FindInDocument
     | CommandId::ToggleRibbon
+    | CommandId::NextTab
+    | CommandId::PreviousTab
+    | CommandId::TogglePinTab
+    | CommandId::SwitchToTab1
+    | CommandId::SwitchToTab2
+    | CommandId::SwitchToTab3
+    | CommandId::SwitchToTab4
+    | CommandId::SwitchToTab5
+    | CommandId::SwitchToTab6
+    | CommandId::SwitchToTab7
+    | CommandId::SwitchToTab8
+    | CommandId::SwitchToTab9
+    | CommandId::SwitchToTab10
     | CommandId::ScrollToParagraph => return None,
   })
 }
