@@ -54,11 +54,31 @@ impl Workspace {
       .items_start()
       .bg(cx.theme().background)
       .child(
-        h_flex()
+        div()
+          .flex()
+          .flex_row()
           .flex_none()
-          .p_1()
-          .gap_1()
-          .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+          .gap_2()
+          .pr(px(8.0))
+          .child(
+            div()
+              .w_full()
+              .flex()
+              .flex_col()
+              .min_w_0()
+              .gap_0p5()
+              .child(
+                div()
+                  .text_size(px(10.0))
+                  .font_weight(gpui::FontWeight::MEDIUM)
+                  .text_color(cx.theme().foreground)
+                  .child("Speech"),
+              )
+              .child(
+                h_flex()
+                  .gap(px(4.0))
+                  .items_center()
+                  .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
           .when_some(active_document_id, |this, panel_id| {
             let speech_color = cx.theme().success;
             this.child(
@@ -77,32 +97,48 @@ impl Workspace {
                     .bg(speech_color.opacity(0.18))
                     .text_color(speech_color)
                 })
-                .icon(Icon::default().path("icons/speech.svg").xsmall().text_color(speech_color))
+                .icon(
+                  Icon::default()
+                    .path("icons/speech.svg")
+                    .xsmall()
+                    .text_color(speech_color),
+                )
                 .label(if active_is_speech { "Speech ✓" } else { "Speech" })
-                .tooltip(if active_is_speech { "Unset speech document" } else { "Set active document as speech document" })
+                .tooltip(if active_is_speech {
+                  "Unset speech document"
+                } else {
+                  "Set active document as speech document"
+                })
                 .on_click(cx.listener(move |workspace, _, _, cx| {
                   workspace.toggle_speech_document(panel_id, cx);
                 })),
             )
           })
-          .child({
-            let send_color = cx.theme().info;
-            Button::new("ribbon-send-speech")
-              .xsmall()
-              .compact()
-              .outline()
-              .h(px(24.0))
-              .px(px(6.0))
-              .rounded(cx.theme().radius)
-              .text_color(send_color)
-              .icon(Icon::default().path("icons/send-to-back.svg").xsmall().text_color(send_color))
-              .label("Send")
-              .tooltip("Send selection or hovered card to speech document (Ctrl+`)")
-              .disabled(self.speech_document_id.is_none() || active_is_speech)
-              .on_click(cx.listener(|workspace, _, window, cx| {
-                workspace.send_selection_to_speech_document(window, cx);
-              }))
-          }),
+                  .child({
+                    let send_color = cx.theme().info;
+                    Button::new("ribbon-send-speech")
+                      .xsmall()
+                      .compact()
+                      .outline()
+                      .h(px(24.0))
+                      .px(px(6.0))
+                      .rounded(cx.theme().radius)
+                      .text_color(send_color)
+                      .icon(
+                        Icon::default()
+                          .path("icons/send-to-back.svg")
+                          .xsmall()
+                          .text_color(send_color),
+                      )
+                      .label("Send")
+                      .tooltip("Send selection or hovered card to speech document (Ctrl+`)")
+                      .disabled(self.speech_document_id.is_none() || active_is_speech)
+                      .on_click(cx.listener(|workspace, _, window, cx| {
+                        workspace.send_selection_to_speech_document(window, cx);
+                      }))
+                  }),
+              ),
+          ),
       )
       .when_some(active_ribbon, |this, ribbon| {
         if let Some(active_id) = self.active_document_id {
