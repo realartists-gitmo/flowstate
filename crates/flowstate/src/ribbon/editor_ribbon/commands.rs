@@ -96,7 +96,9 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
       accent: None,
       selected: matches!(
         armed_tool,
-        Some(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED))
+        Some(ArmedInlineTool::Semantic(
+          flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED
+        ))
       ) || matches!(
         state.semantic,
         SelectionState::Uniform(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED)
@@ -185,4 +187,3 @@ fn highlight_commands(
     checked_highlight: current_highlight,
   }]
 }
-

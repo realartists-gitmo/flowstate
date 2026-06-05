@@ -262,6 +262,7 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let speech_word_count = self.active_editor.as_ref().map(|editor| speech_word_count(editor.read(cx).document()));
     let zoom = self
       .active_editor
       .as_ref()
@@ -279,7 +280,45 @@ impl Workspace {
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
       .child(div().flex_1())
+      .when_some(speech_word_count, |this, count| {
+        this.child(
+          div()
+            .flex_none()
+            .text_xs()
+            .text_color(cx.theme().muted_foreground)
+            .child(format!("Speech: {count} words")),
+        )
+      })
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
       .child(div().flex_1())
   }
+}
+
+fn speech_word_count(document: &Document) -> usize {
+  document
+    .paragraphs
+    .iter()
+    .map(|paragraph| {
+      let paragraph_is_tag = paragraph.style == flowstate_document::PARAGRAPH_TAG;
+      let mut run_start = paragraph.byte_range.start;
+      paragraph
+        .runs
+        .iter()
+        .map(|run| {
+          let run_end = run_start + run.len;
+          let count = if paragraph_is_tag || run.styles.semantic == flowstate_document::SEMANTIC_CITE || run.styles.highlight.is_some() {
+            count_words(&document_text_slice(document, run_start..run_end))
+          } else {
+            0
+          };
+          run_start = run_end;
+          count
+        })
+        .sum::<usize>()
+    })
+    .sum()
+}
+
+fn count_words(text: &str) -> usize {
+  text.split_whitespace().filter(|word| word.chars().any(char::is_alphanumeric)).count()
 }
