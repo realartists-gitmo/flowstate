@@ -64,11 +64,11 @@ pub const SEMANTIC_STYLE_SPECS: &[SemanticStyleSpec] = &[
   },
   SemanticStyleSpec {
     style: flowstate_document::SEMANTIC_CONDENSED,
-    label: "Condensed",
+    label: "Shrink",
   },
   SemanticStyleSpec {
     style: flowstate_document::SEMANTIC_ULTRACONDENSED,
-    label: "Ultracondensed",
+    label: "Ultra shrink",
   },
 ];
 

@@ -347,7 +347,7 @@ impl Workspace {
             ))
             .item(style_face_item(
               workspace.clone(),
-              "Condensed",
+              "Shrink",
               get_condensed_face,
               set_condensed_face,
               get_condensed_box,
@@ -355,7 +355,7 @@ impl Workspace {
             ))
             .item(style_face_item(
               workspace.clone(),
-              "Ultra Condensed",
+              "Ultra Shrink",
               get_ultracondensed_face,
               set_ultracondensed_face,
               get_ultracondensed_box,
@@ -410,10 +410,10 @@ impl Workspace {
             .item(style_color_item(workspace.clone(), "Block", get_block_color, set_block_color))
             .item(style_color_item(workspace.clone(), "Tag", get_tag_color, set_tag_color))
             .item(style_color_item(workspace.clone(), "Cite", get_cite_color, set_cite_color))
-            .item(style_color_item(workspace.clone(), "Condensed", get_condensed_color, set_condensed_color))
+            .item(style_color_item(workspace.clone(), "Shrink", get_condensed_color, set_condensed_color))
             .item(style_color_item(
               workspace.clone(),
-              "Ultra Condensed",
+              "Ultra Shrink",
               get_ultracondensed_color,
               set_ultracondensed_color,
             ))
@@ -505,7 +505,7 @@ impl Workspace {
             ))
             .item(style_number_item(
               workspace.clone(),
-              "Condensed (pt)",
+              "Shrink (pt)",
               1.0,
               200.0,
               0.25,
@@ -514,7 +514,7 @@ impl Workspace {
             ))
             .item(style_number_item(
               workspace.clone(),
-              "Ultra Condensed (pt)",
+              "Ultra Shrink (pt)",
               1.0,
               200.0,
               0.25,

@@ -132,7 +132,7 @@ fn modern_condensed_menu(
             .border_color(command_color)
             .text_color(command_color)
         })
-        .tooltip("Condensed")
+        .tooltip("Shrink")
         .when_some(label.icon_path, |this, path| {
           this.child(Icon::default().path(path).xsmall().text_color(command_color))
         })
@@ -163,7 +163,7 @@ fn modern_condensed_menu(
       menu
         .min_w(px(190.0))
         .item(
-          PopupMenuItem::new("Condensed")
+          PopupMenuItem::new("Shrink")
             .checked(checked)
             .on_click(move |_, _, cx| {
               editor_for_condensed.update(cx, |editor, cx| {
@@ -171,7 +171,7 @@ fn modern_condensed_menu(
               });
             }),
         )
-        .item(PopupMenuItem::new("Ultracondensed").on_click(move |_, _, cx| {
+        .item(PopupMenuItem::new("Ultra shrink").on_click(move |_, _, cx| {
           editor_for_ultra.update(cx, |editor, cx| {
             editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_ULTRACONDENSED), cx);
           });

@@ -88,7 +88,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
   vec![
     RibbonCommand {
       id: RibbonCommandId::CondensedMenu,
-      label: "Condensed",
+      label: "Shrink",
       group_id: "unkeyed",
       shortcut: None,
       command_id: None,
