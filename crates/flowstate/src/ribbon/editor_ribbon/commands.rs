@@ -87,6 +87,19 @@ fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<Ar
 fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
   vec![
     RibbonCommand {
+      id: RibbonCommandId::CondenseMenu,
+      label: "Condense",
+      group_id: "unkeyed",
+      shortcut: Some("F3".to_string()),
+      command_id: Some(CommandId::CondenseSelection),
+      priority: 75,
+      accent: None,
+      selected: false,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: None,
+    },
+    RibbonCommand {
       id: RibbonCommandId::CondensedMenu,
       label: "Shrink",
       group_id: "unkeyed",
@@ -103,19 +116,6 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
         state.semantic,
         SelectionState::Uniform(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED)
       ),
-      disabled: false,
-      overflow_behavior: OverflowBehavior::KeepVisible,
-      checked_highlight: None,
-    },
-    RibbonCommand {
-      id: RibbonCommandId::ToggleSectionCollapse,
-      label: "Collapse",
-      group_id: "unkeyed",
-      shortcut: None,
-      command_id: None,
-      priority: 77,
-      accent: None,
-      selected: false,
       disabled: false,
       overflow_behavior: OverflowBehavior::KeepVisible,
       checked_highlight: None,

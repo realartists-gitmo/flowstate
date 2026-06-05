@@ -109,6 +109,69 @@ fn modern_highlight_menu(
 }
 
 #[hotpath::measure]
+fn modern_condense_menu(
+  command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  let label = RibbonLabel::for_command(command);
+  let command_color = ribbon_command_color(command, cx);
+
+  DropdownButton::new("modern-ribbon-condense-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .button(
+      Button::new("modern-ribbon-condense-toggle")
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .tooltip("Condense")
+        .when_some(label.icon_path, |this, path| {
+          this.child(Icon::default().path(path).xsmall().text_color(command_color))
+        })
+        .when(!label.prefers_icon(), |this| {
+          this.child(
+            div()
+              .flex_none()
+              .text_size(metrics.chip_text_size)
+              .line_height(relative(1.0))
+              .whitespace_nowrap()
+              .text_ellipsis()
+              .text_color(command_color)
+              .child(label.text),
+          )
+        })
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            condense_editor_selection(editor.clone(), ' ', cx);
+          }
+        }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let editor_for_plain_condense = editor.clone();
+      let editor_for_pilcrow_condense = editor.clone();
+      let editor_for_uncondense = editor.clone();
+      menu
+        .min_w(px(190.0))
+        .item(PopupMenuItem::new("Condense").on_click(move |_, _, cx| {
+          condense_editor_selection(editor_for_plain_condense.clone(), ' ', cx);
+        }))
+        .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, _, cx| {
+          condense_editor_selection(editor_for_pilcrow_condense.clone(), CONDENSE_PILCROW_MARKER, cx);
+        }))
+        .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, _, cx| {
+          uncondense_editor_selection(editor_for_uncondense.clone(), cx);
+        }))
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
 fn modern_condensed_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
@@ -168,22 +231,10 @@ fn modern_condensed_menu(
         }),
     )
     .dropdown_menu(move |menu, _, _| {
-      let editor_for_plain_condense = editor.clone();
-      let editor_for_pilcrow_condense = editor.clone();
-      let editor_for_uncondense = editor.clone();
       let editor_for_condensed = editor.clone();
       let editor_for_ultra = editor.clone();
       menu
         .min_w(px(190.0))
-        .item(PopupMenuItem::new("Condense").on_click(move |_, _, cx| {
-          condense_editor_selection(editor_for_plain_condense.clone(), ' ', cx);
-        }))
-        .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, _, cx| {
-          condense_editor_selection(editor_for_pilcrow_condense.clone(), CONDENSE_PILCROW_MARKER, cx);
-        }))
-        .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, _, cx| {
-          uncondense_editor_selection(editor_for_uncondense.clone(), cx);
-        }))
         .item(
           PopupMenuItem::new("Shrink")
             .checked(checked)
@@ -286,10 +337,14 @@ fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParag
       while let Some(marker_ix) = remainder.find(CONDENSE_PILCROW_MARKER) {
         let before = &remainder[..marker_ix];
         if !before.is_empty() {
-          output.last_mut().expect("output has current paragraph").runs.push(flowstate_document::InputRun {
-            text: before.to_string(),
-            styles: run.styles,
-          });
+          output
+            .last_mut()
+            .expect("output has current paragraph")
+            .runs
+            .push(flowstate_document::InputRun {
+              text: before.to_string(),
+              styles: run.styles,
+            });
         }
         output.push(flowstate_document::InputParagraph {
           style: flowstate_document::ParagraphStyle::Normal,
@@ -298,10 +353,14 @@ fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParag
         remainder = &remainder[marker_ix + CONDENSE_PILCROW_MARKER.len_utf8()..];
       }
       if !remainder.is_empty() {
-        output.last_mut().expect("output has current paragraph").runs.push(flowstate_document::InputRun {
-          text: remainder.to_string(),
-          styles: run.styles,
-        });
+        output
+          .last_mut()
+          .expect("output has current paragraph")
+          .runs
+          .push(flowstate_document::InputRun {
+            text: remainder.to_string(),
+            styles: run.styles,
+          });
       }
     }
   }

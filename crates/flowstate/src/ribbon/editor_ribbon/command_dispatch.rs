@@ -26,7 +26,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     RibbonCommandId::Semantic(style) => {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
     },
-    RibbonCommandId::CondensedMenu => {
+    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
     },
     RibbonCommandId::Underline => {
@@ -47,9 +47,6 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     },
     RibbonCommandId::MarkCard => {
       editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[2, 3, 4], cx);
-    },
-    RibbonCommandId::ToggleSectionCollapse => {
-      editor.toggle_enclosing_section_collapsed(&[0, 1, 2, 3], cx);
     },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {

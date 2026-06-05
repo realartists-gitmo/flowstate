@@ -280,7 +280,11 @@ impl Workspace {
   }
 
   fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
-    if let Some(ix) = self.pinned_document_ids.iter().position(|id| *id == panel_id) {
+    if let Some(ix) = self
+      .pinned_document_ids
+      .iter()
+      .position(|id| *id == panel_id)
+    {
       self.pinned_document_ids.remove(ix);
     } else if self.pinned_document_ids.len() < 10 {
       self.pinned_document_ids.push(panel_id);

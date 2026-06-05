@@ -49,6 +49,8 @@ fn modern_group(
             .children(group.commands.iter().map(|command| {
               if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
                 modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::CondenseMenu) {
+                modern_condense_menu(command, editor.clone(), metrics, cx)
               } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
                 modern_condensed_menu(command, editor.clone(), metrics, cx)
               } else {
@@ -255,6 +257,6 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
       cx.theme().warning
     },
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
-    RibbonCommandId::CondensedMenu | RibbonCommandId::ToggleSectionCollapse => cx.theme().info,
+    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => cx.theme().info,
   }
 }

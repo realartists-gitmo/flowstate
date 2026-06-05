@@ -53,6 +53,39 @@ impl Workspace {
       .w_full()
       .items_start()
       .bg(cx.theme().background)
+      .child(
+        h_flex()
+          .flex_none()
+          .p_1()
+          .gap_1()
+          .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+          .when_some(active_document_id, |this, panel_id| {
+            this.child(
+              Button::new("ribbon-toggle-speech-doc")
+                .compact()
+                .outline()
+                .h(px(24.0))
+                .label(if active_is_speech { "Speech ✓" } else { "Speech" })
+                .tooltip(if active_is_speech { "Unset speech document" } else { "Set active document as speech document" })
+                .on_click(cx.listener(move |workspace, _, _, cx| {
+                  workspace.toggle_speech_document(panel_id, cx);
+                })),
+            )
+          })
+          .child(
+            Button::new("ribbon-send-speech")
+              .compact()
+              .outline()
+              .h(px(24.0))
+              .icon(Icon::default().path("icons/send-to-back.svg").text_color(cx.theme().muted_foreground))
+              .label("Send")
+              .tooltip("Send selection or hovered card to speech document (Ctrl+`)")
+              .disabled(self.speech_document_id.is_none() || active_is_speech)
+              .on_click(cx.listener(|workspace, _, window, cx| {
+                workspace.send_selection_to_speech_document(window, cx);
+              })),
+          ),
+      )
       .when_some(active_ribbon, |this, ribbon| {
         if let Some(active_id) = self.active_document_id {
           if let Some(panel) = self
@@ -91,38 +124,6 @@ impl Workspace {
           .p_1()
           .gap_1()
           .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .when_some(active_document_id, |this, panel_id| {
-            this.child(
-              Button::new("ribbon-toggle-speech-doc")
-                .label(if active_is_speech { "Speech ✓" } else { "Speech" })
-                .xsmall()
-                .ghost()
-                .tooltip(if active_is_speech {
-                  "Unset speech document"
-                } else {
-                  "Set active document as speech document"
-                })
-                .on_click(cx.listener(move |workspace, _, _, cx| {
-                  workspace.toggle_speech_document(panel_id, cx);
-                })),
-            )
-          })
-          .child(
-            Button::new("ribbon-send-speech")
-              .icon(
-                Icon::default()
-                  .path("icons/send-to-back.svg")
-                  .text_color(cx.theme().muted_foreground),
-              )
-              .label("Send")
-              .xsmall()
-              .ghost()
-              .tooltip("Send selection or hovered card to speech document (Ctrl+`)")
-              .disabled(self.speech_document_id.is_none() || active_is_speech)
-              .on_click(cx.listener(|workspace, _, window, cx| {
-                workspace.send_selection_to_speech_document(window, cx);
-              })),
-          )
           .child(
             Button::new("collapse-ribbon-panel")
               .icon(
