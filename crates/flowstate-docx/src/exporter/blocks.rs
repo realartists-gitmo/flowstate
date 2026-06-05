@@ -72,6 +72,7 @@ fn add_text_run(
     }
     first = false;
     if !segment.is_empty() {
+      let segment = segment.replace('\u{f8ff}', "¶");
       paragraph = paragraph.add_run(apply_run_style(Run::new().add_text(segment), styles, paragraph_style, theme));
     }
   }

@@ -179,7 +179,7 @@ fn modern_condensed_menu(
           condense_editor_selection(editor_for_plain_condense.clone(), ' ', cx);
         }))
         .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, _, cx| {
-          condense_editor_selection(editor_for_pilcrow_condense.clone(), '¶', cx);
+          condense_editor_selection(editor_for_pilcrow_condense.clone(), CONDENSE_PILCROW_MARKER, cx);
         }))
         .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, _, cx| {
           uncondense_editor_selection(editor_for_uncondense.clone(), cx);
@@ -202,6 +202,8 @@ fn modern_condensed_menu(
     .into_any_element()
 }
 
+const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
+
 fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
   let text = {
     let editor = editor.read(cx);
@@ -222,7 +224,7 @@ fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
   if text.is_empty() {
     return;
   }
-  editor.update(cx, |editor, cx| editor.insert_text_command(&text.replace('¶', "\n"), cx));
+  editor.update(cx, |editor, cx| editor.insert_text_command(&text.replace(CONDENSE_PILCROW_MARKER, "\n"), cx));
 }
 
 fn selected_text(document: &flowstate_document::Document, selection: &flowstate_document::EditorSelection) -> String {
