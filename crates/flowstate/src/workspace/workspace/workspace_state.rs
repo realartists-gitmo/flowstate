@@ -306,6 +306,22 @@ impl Workspace {
     }
   }
 
+  fn condense_active_selection(&mut self, cx: &mut Context<Self>) -> bool {
+    let Some(editor) = self.active_editor.clone() else {
+      return false;
+    };
+    let text = {
+      let editor = editor.read(cx);
+      selected_text(editor.document(), editor.selection())
+    };
+    if text.is_empty() {
+      return false;
+    }
+    let condensed = condense_text(&text, ' ');
+    editor.update(cx, |editor, cx| editor.insert_text_command(&condensed, cx));
+    true
+  }
+
   fn send_selection_to_speech_document(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
@@ -326,16 +342,7 @@ impl Workspace {
     };
     let text = {
       let editor = source_editor.read(cx);
-      let selection = editor.selection();
-      if selection.anchor == selection.head {
-        String::new()
-      } else {
-        let start_offset = selection.anchor.min(selection.head);
-        let end_offset = selection.anchor.max(selection.head);
-        let start = paragraph_byte_range(editor.document(), start_offset.paragraph).start + start_offset.byte;
-        let end = paragraph_byte_range(editor.document(), end_offset.paragraph).start + end_offset.byte;
-        document_text_slice(editor.document(), start..end)
-      }
+      selected_text(editor.document(), editor.selection())
     };
     if text.trim().is_empty() {
       return false;
@@ -447,4 +454,36 @@ impl Workspace {
     });
     self.outline_scrolled_paragraph = Some(paragraph_ix);
   }
+}
+
+fn selected_text(document: &Document, selection: &crate::rich_text_element::EditorSelection) -> String {
+  if selection.anchor == selection.head {
+    return String::new();
+  }
+  let start_offset = selection.anchor.min(selection.head);
+  let end_offset = selection.anchor.max(selection.head);
+  let start = paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
+  let end = paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
+  document_text_slice(document, start..end)
+}
+
+fn condense_text(text: &str, separator: char) -> String {
+  text
+    .replace("\r\n", "\n")
+    .replace('\r', "\n")
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .fold(String::new(), |mut output, line| {
+      if output.ends_with('-') && line.chars().next().is_some_and(char::is_alphabetic) {
+        output.pop();
+        output.push_str(line);
+      } else {
+        if !output.is_empty() {
+          output.push(separator);
+        }
+        output.push_str(line);
+      }
+      output
+    })
 }

@@ -168,10 +168,22 @@ fn modern_condensed_menu(
         }),
     )
     .dropdown_menu(move |menu, _, _| {
+      let editor_for_plain_condense = editor.clone();
+      let editor_for_pilcrow_condense = editor.clone();
+      let editor_for_uncondense = editor.clone();
       let editor_for_condensed = editor.clone();
       let editor_for_ultra = editor.clone();
       menu
         .min_w(px(190.0))
+        .item(PopupMenuItem::new("Condense").on_click(move |_, _, cx| {
+          condense_editor_selection(editor_for_plain_condense.clone(), ' ', cx);
+        }))
+        .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, _, cx| {
+          condense_editor_selection(editor_for_pilcrow_condense.clone(), '¶', cx);
+        }))
+        .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, _, cx| {
+          uncondense_editor_selection(editor_for_uncondense.clone(), cx);
+        }))
         .item(
           PopupMenuItem::new("Shrink")
             .checked(checked)
@@ -188,6 +200,61 @@ fn modern_condensed_menu(
         }))
     })
     .into_any_element()
+}
+
+fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
+  let text = {
+    let editor = editor.read(cx);
+    selected_text(editor.document(), editor.selection())
+  };
+  if text.is_empty() {
+    return;
+  }
+  let condensed = condense_text(&text, separator);
+  editor.update(cx, |editor, cx| editor.insert_text_command(&condensed, cx));
+}
+
+fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
+  let text = {
+    let editor = editor.read(cx);
+    selected_text(editor.document(), editor.selection())
+  };
+  if text.is_empty() {
+    return;
+  }
+  editor.update(cx, |editor, cx| editor.insert_text_command(&text.replace('¶', "\n"), cx));
+}
+
+fn selected_text(document: &flowstate_document::Document, selection: &flowstate_document::EditorSelection) -> String {
+  if selection.anchor == selection.head {
+    return String::new();
+  }
+  let start_offset = selection.anchor.min(selection.head);
+  let end_offset = selection.anchor.max(selection.head);
+  let start = flowstate_document::paragraph_byte_range(document, start_offset.paragraph).start + start_offset.byte;
+  let end = flowstate_document::paragraph_byte_range(document, end_offset.paragraph).start + end_offset.byte;
+  flowstate_document::document_text_slice(document, start..end)
+}
+
+fn condense_text(text: &str, separator: char) -> String {
+  text
+    .replace("\r\n", "\n")
+    .replace('\r', "\n")
+    .lines()
+    .map(str::trim)
+    .filter(|line| !line.is_empty())
+    .fold(String::new(), |mut output, line| {
+      if output.ends_with('-') && line.chars().next().is_some_and(char::is_alphabetic) {
+        output.pop();
+        output.push_str(line);
+      } else {
+        if !output.is_empty() {
+          output.push(separator);
+        }
+        output.push_str(line);
+      }
+      output
+    })
 }
 
 #[hotpath::measure]
