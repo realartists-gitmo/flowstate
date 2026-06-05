@@ -531,12 +531,23 @@ fn condense_text(text: &str, separator: char) -> String {
     .replace("\r\n", "\n")
     .replace('\r', "\n")
     .lines()
-    .map(str::trim)
-    .filter(|line| !line.is_empty())
-    .fold(String::new(), |mut output, line| {
-      if output.ends_with('-') && line.chars().next().is_some_and(char::is_alphabetic) {
+    .fold(String::new(), |mut output, raw_line| {
+      let previous_ended_with_punctuation = output
+        .chars()
+        .rev()
+        .find(|ch| !ch.is_whitespace())
+        .is_some_and(is_condense_sentence_punctuation);
+      let line = if output.is_empty() || !previous_ended_with_punctuation {
+        raw_line.trim()
+      } else {
+        raw_line.trim_end()
+      };
+      if line.is_empty() {
+        return output;
+      }
+      if output.ends_with('-') && line.trim_start().chars().next().is_some_and(char::is_alphabetic) {
         output.pop();
-        output.push_str(line);
+        output.push_str(line.trim_start());
       } else {
         if !output.is_empty() {
           output.push(separator);
@@ -545,4 +556,8 @@ fn condense_text(text: &str, separator: char) -> String {
       }
       output
     })
+}
+
+fn is_condense_sentence_punctuation(ch: char) -> bool {
+  matches!(ch, '.' | ',' | ';' | ':' | '?' | '!' | ')' | ']' | '}')
 }
