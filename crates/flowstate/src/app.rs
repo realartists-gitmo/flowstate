@@ -360,6 +360,10 @@ impl AssetSource for AppAssets {
       "icons/letter-case.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/letter-case.svg")))),
       "icons/text-box-edit.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-box-edit.svg")))),
       "icons/replace.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace.svg")))),
+      "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pin.svg")))),
+      "icons/paragraph-break-two.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/paragraph-break-two.svg")))),
+      "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
+      "icons/speech.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/speech.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -420,6 +424,18 @@ impl AssetSource for AppAssets {
     }
     if "icons/replace.svg".starts_with(path) {
       assets.push("icons/replace.svg".into());
+    }
+    if "icons/pin.svg".starts_with(path) {
+      assets.push("icons/pin.svg".into());
+    }
+    if "icons/paragraph-break-two.svg".starts_with(path) {
+      assets.push("icons/paragraph-break-two.svg".into());
+    }
+    if "icons/send-to-back.svg".starts_with(path) {
+      assets.push("icons/send-to-back.svg".into());
+    }
+    if "icons/speech.svg".starts_with(path) {
+      assets.push("icons/speech.svg".into());
     }
     Ok(assets)
   }

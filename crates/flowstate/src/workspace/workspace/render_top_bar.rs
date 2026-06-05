@@ -59,7 +59,10 @@ impl Workspace {
           .flex_row()
           .flex_none()
           .gap_2()
+          .pl(px(8.0))
           .pr(px(8.0))
+          .border_l_1()
+          .border_color(cx.theme().border.opacity(0.72))
           .child(
             div()
               .w_full()
@@ -72,48 +75,48 @@ impl Workspace {
                   .text_size(px(10.0))
                   .font_weight(gpui::FontWeight::MEDIUM)
                   .text_color(cx.theme().foreground)
-                  .child("Speech"),
+                  .child("No Keybind"),
               )
               .child(
                 h_flex()
                   .gap(px(4.0))
                   .items_center()
                   .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .when_some(active_document_id, |this, panel_id| {
-            let speech_color = cx.theme().success;
-            this.child(
-              Button::new("ribbon-toggle-speech-doc")
-                .xsmall()
-                .compact()
-                .outline()
-                .h(px(24.0))
-                .px(px(6.0))
-                .rounded(cx.theme().radius)
-                .selected(active_is_speech)
-                .text_color(speech_color)
-                .when(active_is_speech, |this| {
-                  this
-                    .border_color(speech_color)
-                    .bg(speech_color.opacity(0.18))
-                    .text_color(speech_color)
-                })
-                .icon(
-                  Icon::default()
-                    .path("icons/speech.svg")
-                    .xsmall()
-                    .text_color(speech_color),
-                )
-                .label(if active_is_speech { "Speech ✓" } else { "Speech" })
-                .tooltip(if active_is_speech {
-                  "Unset speech document"
-                } else {
-                  "Set active document as speech document"
-                })
-                .on_click(cx.listener(move |workspace, _, _, cx| {
-                  workspace.toggle_speech_document(panel_id, cx);
-                })),
-            )
-          })
+                  .when_some(active_document_id, |this, panel_id| {
+                    let speech_color = cx.theme().success;
+                    this.child(
+                      Button::new("ribbon-toggle-speech-doc")
+                        .xsmall()
+                        .compact()
+                        .outline()
+                        .h(px(24.0))
+                        .px(px(6.0))
+                        .rounded(cx.theme().radius)
+                        .selected(active_is_speech)
+                        .text_color(speech_color)
+                        .when(active_is_speech, |this| {
+                          this
+                            .border_color(speech_color)
+                            .bg(speech_color.opacity(0.18))
+                            .text_color(speech_color)
+                        })
+                        .icon(
+                          Icon::default()
+                            .path("icons/speech.svg")
+                            .xsmall()
+                            .text_color(speech_color),
+                        )
+                        .label(if active_is_speech { "Speech ✓" } else { "Speech" })
+                        .tooltip(if active_is_speech {
+                          "Unset speech document"
+                        } else {
+                          "Set active document as speech document"
+                        })
+                        .on_click(cx.listener(move |workspace, _, _, cx| {
+                          workspace.toggle_speech_document(panel_id, cx);
+                        })),
+                    )
+                  })
                   .child({
                     let send_color = cx.theme().info;
                     Button::new("ribbon-send-speech")
