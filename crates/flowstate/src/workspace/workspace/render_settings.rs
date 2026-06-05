@@ -89,6 +89,7 @@ flowstate_color_accessors!(get_undertag_color, set_undertag_color, undertag_colo
 flowstate_color_accessors!(get_highlight_spoken, set_highlight_spoken, highlight_spoken);
 flowstate_color_accessors!(get_highlight_insert, set_highlight_insert, highlight_insert);
 flowstate_color_accessors!(get_highlight_alternative, set_highlight_alternative, highlight_alternative);
+flowstate_color_accessors!(get_highlight_marked, set_highlight_marked, highlight_marked);
 
 flowstate_size_accessors!(get_pocket_size, set_pocket_size, pocket_font_size);
 flowstate_size_accessors!(get_hat_size, set_hat_size, hat_font_size);
@@ -442,6 +443,12 @@ impl Workspace {
               "Alt highlight",
               get_highlight_alternative,
               set_highlight_alternative,
+            ))
+            .item(style_color_item(
+              workspace.clone(),
+              "Marked highlight",
+              get_highlight_marked,
+              set_highlight_marked,
             )),
         ),
       SettingPage::new("Size")

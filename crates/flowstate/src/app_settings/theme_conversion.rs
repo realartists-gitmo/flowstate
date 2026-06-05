@@ -88,6 +88,7 @@ impl From<&DocumentTheme> for DocumentThemeSettings {
       highlight_spoken: flowstate_document::custom_highlight_color(theme, 1).into(),
       highlight_insert: flowstate_document::custom_highlight_color(theme, 2).into(),
       highlight_alternative: flowstate_document::custom_highlight_color(theme, 3).into(),
+      highlight_marked: flowstate_document::custom_highlight_color(theme, 4).into(),
       pocket_color: pocket.color.into(),
       hat_color: hat.color.into(),
       block_color: block.color.into(),
@@ -325,6 +326,7 @@ impl From<DocumentThemeSettings> for DocumentTheme {
     flowstate_document::set_custom_highlight_color(&mut theme, 1, settings.highlight_spoken.into());
     flowstate_document::set_custom_highlight_color(&mut theme, 2, settings.highlight_insert.into());
     flowstate_document::set_custom_highlight_color(&mut theme, 3, settings.highlight_alternative.into());
+    flowstate_document::set_custom_highlight_color(&mut theme, 4, settings.highlight_marked.into());
     theme
   }
 }

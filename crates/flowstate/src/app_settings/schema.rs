@@ -125,6 +125,7 @@ pub struct DocumentThemeSettings {
   pub highlight_spoken: StoredHsla,
   pub highlight_insert: StoredHsla,
   pub highlight_alternative: StoredHsla,
+  pub highlight_marked: StoredHsla,
   pub pocket_color: StoredHsla,
   pub hat_color: StoredHsla,
   pub block_color: StoredHsla,

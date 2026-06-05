@@ -23,6 +23,7 @@ pub const SEMANTIC_ULTRACONDENSED: RunSemanticStyle = RunSemanticStyle::Custom(5
 pub const HIGHLIGHT_SPOKEN: HighlightStyle = HighlightStyle::Custom(1);
 pub const HIGHLIGHT_INSERT: HighlightStyle = HighlightStyle::Custom(2);
 pub const HIGHLIGHT_ALTERNATIVE: HighlightStyle = HighlightStyle::Custom(3);
+pub const HIGHLIGHT_MARKED: HighlightStyle = HighlightStyle::Custom(4);
 
 fn pt(value: f32) -> Pixels {
   px(value * 96.0 / 72.0)
@@ -245,6 +246,12 @@ pub fn flowstate_document_theme() -> DocumentTheme {
     3,
     CustomHighlightStyle {
       color: rgb(0x0000_ffff).into(),
+    },
+  );
+  theme.set_custom_highlight_style(
+    4,
+    CustomHighlightStyle {
+      color: rgb(0x00ff_0000).into(),
     },
   );
   for slot in [0, 1, 2, 3, 4, 6] {

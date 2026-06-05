@@ -85,4 +85,8 @@ pub const HIGHLIGHT_STYLE_SPECS: &[HighlightStyleSpec] = &[
     style: flowstate_document::HIGHLIGHT_ALTERNATIVE,
     label: "Alt",
   },
+  HighlightStyleSpec {
+    style: flowstate_document::HIGHLIGHT_MARKED,
+    label: "Marked",
+  },
 ];
