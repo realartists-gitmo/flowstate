@@ -1,5 +1,6 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div, prelude::*, px, relative,
+  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div, prelude::*,
+  px, relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
