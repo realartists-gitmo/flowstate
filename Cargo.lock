@@ -3005,7 +3005,7 @@ dependencies = [
 [[package]]
 name = "gpui-flowtext"
 version = "0.1.0"
-source = "git+https://github.com/realartists-gitmo/gpui-flowtext?rev=97d66cdf3489a4fd4a57ad783b6402eef136da15#97d66cdf3489a4fd4a57ad783b6402eef136da15"
+source = "git+https://github.com/realartists-gitmo/gpui-flowtext?rev=d6bfbd274c99efcd2805b742746a1c13b6ab09a5#d6bfbd274c99efcd2805b742746a1c13b6ab09a5"
 dependencies = [
  "cosmic-text",
  "crop",
