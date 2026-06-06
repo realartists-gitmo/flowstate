@@ -47,7 +47,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.set_highlight_for_selection(None, cx);
     },
     RibbonCommandId::MarkCard => {
-      editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[2, 3, 4], cx);
+      editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
     },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {
