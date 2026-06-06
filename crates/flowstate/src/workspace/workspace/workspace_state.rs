@@ -245,14 +245,9 @@ impl Workspace {
       (active_index + offset as usize) % len
     };
     self.activate_document_id(tabs[target].id, cx);
+    self.tab_bar_scroll_handle.scroll_to_item(target);
   }
 
-  fn scroll_tab_bar_by(&mut self, delta_x: Pixels, cx: &mut Context<Self>) {
-    let mut offset = self.tab_bar_scroll_handle.offset();
-    offset.x = (offset.x + delta_x).max(px(0.0));
-    self.tab_bar_scroll_handle.set_offset(offset);
-    cx.notify();
-  }
 
   fn toggle_active_tab_pin(&mut self, cx: &mut Context<Self>) {
     let Some(active_id) = self.active_document_id else {

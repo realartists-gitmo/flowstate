@@ -54,6 +54,7 @@ impl Workspace {
       cx.theme().background
     };
     let active_tab_fg = cx.theme().foreground;
+    let workspace = cx.entity().downgrade();
     TabBar::new("document-tab-bar")
       .small()
       .track_scroll(&self.tab_bar_scroll_handle)
@@ -73,8 +74,11 @@ impl Workspace {
       })
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
+        let workspace = workspace.clone();
         let tab_prefix = h_flex()
-          .gap_0p5()
+          .ml(px(5.0))
+          .mr(px(-3.0))
+          .gap(px(2.0))
           .when(tab.speech, |this| {
             this.child(
               div()
@@ -86,12 +90,10 @@ impl Workspace {
           })
           .when(tab.pinned, |this| {
             this.child(
-              div().flex_none().w(px(14.0)).h(px(14.0)).child(
-                Icon::default()
-                  .path("icons/pin.svg")
-                  .size(px(14.0))
-                  .text_color(cx.theme().warning),
-              ),
+              Icon::default()
+                .path("icons/pin.svg")
+                .xsmall()
+                .text_color(cx.theme().warning),
             )
           });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
@@ -116,10 +118,12 @@ impl Workspace {
           .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
           .prefix(tab_prefix)
           .suffix(close_button)
-          .on_mouse_down(MouseButton::Right, cx.listener(move |workspace, _, _, cx| {
-            cx.stop_propagation();
-            workspace.toggle_tab_pin(panel_id, cx);
-          }))
+          .context_menu(move |menu, _, _| {
+            let workspace = workspace.clone();
+            menu.item(PopupMenuItem::new(if tab.pinned { "Unpin tab" } else { "Pin tab" }).on_click(move |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| workspace.toggle_tab_pin(panel_id, cx));
+            }))
+          })
       }))
       .last_empty_space(div().flex_1().h_full())
   }

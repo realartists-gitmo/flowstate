@@ -91,7 +91,7 @@ impl RibbonLabel {
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
       RibbonCommandId::ToggleSpeechDocument => Some("icons/speech.svg"),
-      RibbonCommandId::SendToSpeechDocument => Some("icons/send-to-back.svg"),
+      RibbonCommandId::SendToSpeechDocument => Some("icons/send.svg"),
       RibbonCommandId::MarkCard => Some("icons/highlighter.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
       _ => None,

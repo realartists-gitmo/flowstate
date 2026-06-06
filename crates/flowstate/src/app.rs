@@ -363,6 +363,7 @@ impl AssetSource for AppAssets {
       "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pin.svg")))),
       "icons/paragraph-break-two.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/paragraph-break-two.svg")))),
       "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
+      "icons/send.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send.svg")))),
       "icons/speech.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/speech.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
@@ -433,6 +434,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/send-to-back.svg".starts_with(path) {
       assets.push("icons/send-to-back.svg".into());
+    }
+    if "icons/send.svg".starts_with(path) {
+      assets.push("icons/send.svg".into());
     }
     if "icons/speech.svg".starts_with(path) {
       assets.push("icons/speech.svg".into());
