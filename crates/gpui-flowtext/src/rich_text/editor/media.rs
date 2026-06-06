@@ -383,5 +383,4 @@ impl RichTextEditor {
     })
     .detach();
   }
-
 }

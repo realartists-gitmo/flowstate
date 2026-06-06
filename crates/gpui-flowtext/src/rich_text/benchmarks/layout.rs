@@ -46,7 +46,19 @@ fn benchmark_layout_paths(
     let selection = top_selection(document);
     let paint_selected = include_paint.then(|| {
       repeated(iterations, || {
-        paint_layout(&layout, paint_bounds, selection.as_ref(), None, false, px(1.0), &[], &[], None, window, cx);
+        paint_layout(
+          &layout,
+          paint_bounds,
+          selection.as_ref(),
+          None,
+          false,
+          px(1.0),
+          &[],
+          &[],
+          None,
+          window,
+          cx,
+        );
       })
     });
 

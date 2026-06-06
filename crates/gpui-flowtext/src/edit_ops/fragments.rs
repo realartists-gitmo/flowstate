@@ -61,4 +61,3 @@ pub fn selected_rich_fragment(document: &Document, range: Range<DocumentOffset>)
     assets: Vec::new(),
   }
 }
-

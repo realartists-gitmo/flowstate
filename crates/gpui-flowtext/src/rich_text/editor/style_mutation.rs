@@ -211,5 +211,4 @@ impl RichTextEditor {
   }
 
   // -------- Movement primitives ----------------------------------------
-
 }

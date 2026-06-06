@@ -117,4 +117,3 @@ fn image_format_for_path(path: &Path) -> Option<ImageFormat> {
     _ => None,
   }
 }
-

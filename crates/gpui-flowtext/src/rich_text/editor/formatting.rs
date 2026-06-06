@@ -83,18 +83,27 @@ impl RichTextEditor {
       return Some(selected_rich_fragment(&self.document, self.selection.normalized()));
     }
     let position = self.last_drag_position?;
-    let paragraph_ix = self.hit_test_document_position(position, window, cx).paragraph;
+    let paragraph_ix = self
+      .hit_test_document_position(position, window, cx)
+      .paragraph;
     let (start_paragraph, end_paragraph_exclusive) = hierarchical_section_bounds(&self.document, paragraph_ix, section_slots)
       .or_else(|| enclosing_section_bounds(&self.document, paragraph_ix, section_slots))
-      .unwrap_or((paragraph_ix, paragraph_ix.saturating_add(1).min(self.document.paragraphs.len())));
+      .unwrap_or((
+        paragraph_ix,
+        paragraph_ix
+          .saturating_add(1)
+          .min(self.document.paragraphs.len()),
+      ));
     let end_paragraph = end_paragraph_exclusive.saturating_sub(1);
     Some(selected_rich_fragment(
       &self.document,
-      DocumentOffset { paragraph: start_paragraph, byte: 0 }
-        ..DocumentOffset {
-          paragraph: end_paragraph,
-          byte: paragraph_text_len(&self.document.paragraphs[end_paragraph]),
-        },
+      DocumentOffset {
+        paragraph: start_paragraph,
+        byte: 0,
+      }..DocumentOffset {
+        paragraph: end_paragraph,
+        byte: paragraph_text_len(&self.document.paragraphs[end_paragraph]),
+      },
     ))
   }
 
@@ -104,8 +113,7 @@ impl RichTextEditor {
   }
 
   pub(super) fn section_collapse_state_at_paragraph(&self, paragraph_ix: usize, section_slots: &[u8]) -> Option<bool> {
-    (self.hovered_collapse_paragraph == Some(paragraph_ix))
-      .then(|| self.section_collapsed_at_heading(paragraph_ix, section_slots))?
+    (self.hovered_collapse_paragraph == Some(paragraph_ix)).then(|| self.section_collapsed_at_heading(paragraph_ix, section_slots))?
   }
 
   pub(super) fn section_collapsed_at_heading(&self, paragraph_ix: usize, section_slots: &[u8]) -> Option<bool> {
@@ -117,9 +125,11 @@ impl RichTextEditor {
     let ParagraphStyle::Custom(slot) = paragraph.style else {
       return None;
     };
-    section_slots
-      .contains(&(slot & 0x7f))
-      .then(|| self.collapsed_section_ids.contains(&SectionId(paragraph_ix as u128)))
+    section_slots.contains(&(slot & 0x7f)).then(|| {
+      self
+        .collapsed_section_ids
+        .contains(&SectionId(paragraph_ix as u128))
+    })
   }
 
   pub(super) fn toggle_section_collapsed_at_paragraph(&mut self, paragraph_ix: usize, section_slots: &[u8], cx: &mut Context<Self>) {
@@ -165,10 +175,19 @@ impl RichTextEditor {
     self.set_highlight_for_document_offsets(start, end, highlight, cx);
   }
 
-  pub fn set_highlight_for_document_offsets(&mut self, start: DocumentOffset, end: DocumentOffset, highlight: HighlightStyle, cx: &mut Context<Self>) {
+  pub fn set_highlight_for_document_offsets(
+    &mut self,
+    start: DocumentOffset,
+    end: DocumentOffset,
+    highlight: HighlightStyle,
+    cx: &mut Context<Self>,
+  ) {
     let range_start = start.min(end);
     let range_end = start.max(end);
-    if range_start == range_end || range_start.paragraph >= self.document.paragraphs.len() || range_end.paragraph >= self.document.paragraphs.len() {
+    if range_start == range_end
+      || range_start.paragraph >= self.document.paragraphs.len()
+      || range_end.paragraph >= self.document.paragraphs.len()
+    {
       return;
     }
     self.apply_document_edit(cx, |editor, cx| {
@@ -296,7 +315,6 @@ impl RichTextEditor {
   // Each handler delegates to a movement/edit primitive defined below.
   // The signatures all match what `cx.listener(...)` expects:
   //   fn(&mut Self, &Action, &mut Window, &mut Context<Self>).
-
 }
 
 fn apply_highlight_to_existing_highlights_in_paragraph_range(
@@ -307,7 +325,13 @@ fn apply_highlight_to_existing_highlights_in_paragraph_range(
 ) {
   mutate_runs_in_range(
     document,
-    DocumentOffset { paragraph: paragraph_ix, byte: range.start }..DocumentOffset { paragraph: paragraph_ix, byte: range.end },
+    DocumentOffset {
+      paragraph: paragraph_ix,
+      byte: range.start,
+    }..DocumentOffset {
+      paragraph: paragraph_ix,
+      byte: range.end,
+    },
     |styles| {
       styles.highlight = Some(highlight);
     },

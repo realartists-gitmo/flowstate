@@ -51,7 +51,12 @@ impl RichTextEditor {
       return 0;
     }
 
-    ranges.sort_by(|left, right| left.start.cmp(&right.start).then_with(|| left.end.cmp(&right.end)));
+    ranges.sort_by(|left, right| {
+      left
+        .start
+        .cmp(&right.start)
+        .then_with(|| left.end.cmp(&right.end))
+    });
     let count = ranges.len();
     let paragraph_count = self.document.paragraphs.len();
     self.apply_document_edit_with_capture_range(cx, Some(0..paragraph_count), |editor, cx| {
@@ -85,8 +90,12 @@ impl RichTextEditor {
         final_caret = Some(editor.selection.head);
       }
 
-      let affected_start = paragraph_groups.first().map(|(paragraph_ix, _)| *paragraph_ix);
-      let affected_end = paragraph_groups.last().map(|(paragraph_ix, _)| paragraph_ix + 1);
+      let affected_start = paragraph_groups
+        .first()
+        .map(|(paragraph_ix, _)| *paragraph_ix);
+      let affected_end = paragraph_groups
+        .last()
+        .map(|(paragraph_ix, _)| paragraph_ix + 1);
       for (paragraph_ix, matches) in paragraph_groups.into_iter().rev() {
         final_caret = replace_paragraph_matches(&mut editor.document, paragraph_ix, &matches, replacement).or(final_caret);
       }
@@ -142,7 +151,13 @@ fn replace_paragraph_matches(
     append_original_paragraph_span(&old_text, &old_paragraph, cursor..range.start, &mut new_text, &mut new_runs);
     let styles = styles_at_byte(&old_paragraph, range.start);
     new_text.push_str(replacement);
-    push_merged_run(&mut new_runs, TextRun { len: replacement.len(), styles });
+    push_merged_run(
+      &mut new_runs,
+      TextRun {
+        len: replacement.len(),
+        styles,
+      },
+    );
     cursor = range.end;
   }
   append_original_paragraph_span(&old_text, &old_paragraph, cursor..old_text.len(), &mut new_text, &mut new_runs);
@@ -177,7 +192,13 @@ fn append_original_paragraph_span(
     let start = span.start.max(run_start);
     let end = span.end.min(run_end);
     if start < end {
-      push_merged_run(new_runs, TextRun { len: end - start, styles: run.styles });
+      push_merged_run(
+        new_runs,
+        TextRun {
+          len: end - start,
+          styles: run.styles,
+        },
+      );
     }
     run_start = run_end;
     if run_start >= span.end {
@@ -188,7 +209,10 @@ fn append_original_paragraph_span(
 
 fn styles_at_byte(paragraph: &Paragraph, byte: usize) -> RunStyles {
   let (run_ix, _) = run_containing(paragraph, byte);
-  paragraph.runs.get(run_ix).map_or_else(RunStyles::default, |run| run.styles)
+  paragraph
+    .runs
+    .get(run_ix)
+    .map_or_else(RunStyles::default, |run| run.styles)
 }
 
 fn push_merged_run(runs: &mut Vec<TextRun>, run: TextRun) {
