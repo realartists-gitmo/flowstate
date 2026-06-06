@@ -286,22 +286,7 @@ impl Element for VirtualParagraphChunkElement {
           window.paint_quad(fill(indicator, Background::from(gpui::black().opacity(0.7))));
         }
       }
-      let show_caret = caret_offset.is_some_and(|offset| {
-        layout.paragraphs.first().is_some_and(|paragraph| {
-          if !paragraph.contains_byte(offset.byte) {
-            return false;
-          }
-
-          // Treat chunk ownership as end-exclusive at chunk boundaries so the
-          // trailing chunk paints the caret. The paragraph end is the one
-          // exception: there is no trailing byte, so the final chunk owns it.
-          offset.byte == paragraph.len
-            || offset
-              .byte
-              .checked_add(1)
-              .is_some_and(|next_byte| paragraph.contains_byte(next_byte))
-        })
-      });
+      let show_caret = caret_offset.is_some_and(|offset| caret_offset_belongs_to_chunk(layout.as_ref(), offset));
       let external_carets = external_carets
         .into_iter()
         .filter(|caret| caret_offset_belongs_to_chunk(layout.as_ref(), caret.offset))

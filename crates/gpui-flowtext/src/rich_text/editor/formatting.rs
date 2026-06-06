@@ -309,9 +309,7 @@ fn apply_highlight_to_existing_highlights_in_paragraph_range(
     document,
     DocumentOffset { paragraph: paragraph_ix, byte: range.start }..DocumentOffset { paragraph: paragraph_ix, byte: range.end },
     |styles| {
-      if styles.highlight.is_some() {
-        styles.highlight = Some(highlight);
-      }
+      styles.highlight = Some(highlight);
     },
   );
 }

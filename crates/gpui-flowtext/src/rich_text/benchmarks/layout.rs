@@ -94,6 +94,9 @@ fn benchmark_sample_paragraph_layouts(
   cx: &mut Context<BenchmarkRunner>,
 ) -> Vec<ParagraphLayoutRow> {
   let mut rows = Vec::new();
+  if document.paragraphs.is_empty() {
+    return rows;
+  }
   let mut samples = vec![
     ("first".to_string(), 0usize),
     ("middle".to_string(), document.paragraphs.len() / 2),

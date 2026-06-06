@@ -278,10 +278,13 @@ impl WireCanonicalOperation {
 }
 
 pub fn encode_canonical_operations(operations: &[CanonicalOperation]) -> Option<Vec<u8>> {
-  let wire_operations = operations
+  let wire_operations: Vec<_> = operations
     .iter()
-    .map(WireCanonicalOperation::from_canonical)
-    .collect::<Option<Vec<_>>>()?;
+    .filter_map(WireCanonicalOperation::from_canonical)
+    .collect();
+  if wire_operations.is_empty() && !operations.is_empty() {
+    return None;
+  }
   postcard::to_stdvec(&wire_operations).ok()
 }
 

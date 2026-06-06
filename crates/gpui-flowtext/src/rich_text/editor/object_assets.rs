@@ -57,6 +57,11 @@ fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
 
 #[hotpath::measure]
 fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
+  const MAX_IMAGE_BYTES: u64 = 25 * 1024 * 1024;
+  let metadata = fs::metadata(path).ok()?;
+  if metadata.len() > MAX_IMAGE_BYTES {
+    return None;
+  }
   let bytes = fs::read(path).ok()?;
   let format = image_format_for_path(path)?;
   let original_name = path

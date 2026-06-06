@@ -152,6 +152,7 @@ fn replace_paragraph_matches(
   document.text.insert(paragraph_range.start, &new_text);
   let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
   paragraph.runs = new_runs;
+  paragraph.byte_range = paragraph_range.start..paragraph_range.start + new_text.len();
   bump_paragraph_version(paragraph);
   Some(DocumentOffset {
     paragraph: paragraph_ix,

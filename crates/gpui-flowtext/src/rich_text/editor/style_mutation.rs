@@ -44,6 +44,8 @@ impl RichTextEditor {
             styles.direct_underline = false;
           }
         });
+        paragraph.paragraph.runs = merge_adjacent_runs(std::mem::take(&mut paragraph.paragraph.runs));
+        paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
       });
       return;
     }
