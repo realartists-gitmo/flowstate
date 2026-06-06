@@ -515,7 +515,10 @@ fn paint_search_highlights(
   if highlights.is_empty() {
     return;
   }
-  let visible_start = layout.paragraphs.get(visible_range.start).map_or(usize::MAX, |paragraph| paragraph.index);
+  let visible_start = layout
+    .paragraphs
+    .get(visible_range.start)
+    .map_or(usize::MAX, |paragraph| paragraph.index);
   let visible_end = layout
     .paragraphs
     .get(visible_range.end.saturating_sub(1))
@@ -534,7 +537,11 @@ fn paint_search_highlights(
       origin,
       content_mask,
       visible_range.clone(),
-      if Some(ix) == active { hsla(48.0 / 360.0, 1.0, 0.55, 0.95) } else { hsla(55.0 / 360.0, 1.0, 0.72, 0.86) },
+      if Some(ix) == active {
+        hsla(48.0 / 360.0, 1.0, 0.55, 0.95)
+      } else {
+        hsla(55.0 / 360.0, 1.0, 0.72, 0.86)
+      },
       window,
     );
   }
