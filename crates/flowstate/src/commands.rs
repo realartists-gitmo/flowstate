@@ -1,6 +1,10 @@
 mod keymap;
 
+use gpui::actions;
+
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
+
+actions!(flowstate_workspace, [FindInDocumentAction]);
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 
@@ -72,6 +76,7 @@ pub enum CommandId {
   OpenDocument,
   OpenDemoDocument,
   CloseDocument,
+  FindInDocument,
   ToggleRibbon,
   ScrollToParagraph,
   StartCollaboration,
@@ -103,7 +108,7 @@ impl CommandSpec {
   }
 }
 
-const EDITOR: Option<&str> = None;
+const EDITOR: Option<&str> = Some(RICH_TEXT_CONTEXT);
 const APP: Option<&str> = None;
 
 /// Metadata source for command palette, menus, rebinding UI, toolbar labels,
@@ -182,6 +187,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::OpenDocument, "Open Document", APP, &[]),
   CommandSpec::new(CommandId::OpenDemoDocument, "Open Demo Document", APP, &[]),
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
+  CommandSpec::new(CommandId::FindInDocument, "Find in Document", APP, &["cmd-f", "ctrl-f"]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
   CommandSpec::new(CommandId::StartCollaboration, "Start Collaboration", APP, &[]),

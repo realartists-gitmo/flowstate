@@ -1,4 +1,6 @@
 mod document_panel;
+pub mod document_search;
+pub mod document_search_overlay;
 mod file_management;
 mod file_search_overlay;
 mod icons;

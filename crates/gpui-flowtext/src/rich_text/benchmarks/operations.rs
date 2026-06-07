@@ -127,7 +127,11 @@ fn benchmark_edit_paths(document: &Document, stats: &DocumentStats, iterations: 
   rows.push(operation_row("split_paragraph_at largest midpoint", iterations, || {
     let mut clone = document.clone();
     if paragraph_text_len(&clone.paragraphs[largest]) > 0 {
+<<<<<<< HEAD
       let _ = split_paragraph_at(&mut clone, largest, largest_mid);
+=======
+      split_paragraph_at(&mut clone, largest, largest_mid);
+>>>>>>> main
     }
     check_document_fidelity(&clone).failures.len()
   }));
@@ -171,3 +175,7 @@ fn operation_row(name: &str, iterations: usize, mut run: impl FnMut() -> usize) 
     fidelity_failures: failures,
   }
 }
+<<<<<<< HEAD
+=======
+
+>>>>>>> main

@@ -3,7 +3,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Block, BlockId, Document, DocumentSpan, HighlightStyle, ParagraphId, ParagraphStyle, RunSemanticStyle, RunStyles};
+use super::{Block, BlockId, Document, DocumentSpan, HighlightStyle, ParagraphId, ParagraphStyle, RunSemanticStyle, RunStyles, new_block_id, new_paragraph_id};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TableCellId(pub u128);
@@ -175,7 +175,6 @@ pub fn parse_db8_presence_payload(payload: &str) -> Option<Db8PresencePayload> {
     .ok()?
     .into_payload()
 }
-
 #[derive(Clone, Debug, Default)]
 pub struct DocumentIdentityMap {
   paragraph_ids: Vec<ParagraphId>,
@@ -213,6 +212,14 @@ impl DocumentIdentityMap {
     }
   }
 
+  pub fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
+    self
+      .paragraph_ids
+      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), new_paragraph_id());
+    let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
+    self.block_ids.insert(block_insert_ix, new_block_id());
+    self.table_cell_ids.insert(block_insert_ix, Vec::new());
+  }
   #[must_use]
   pub fn paragraph_id(&self, paragraph_ix: usize) -> Option<ParagraphId> {
     self.paragraph_ids.get(paragraph_ix).copied()
@@ -521,7 +528,6 @@ pub fn decode_canonical_operations(bytes: &[u8]) -> Option<Vec<CanonicalOperatio
         .collect()
     })
 }
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 struct Db8ParagraphMetadata {
   style: ParagraphStyle,
@@ -553,6 +559,7 @@ pub enum Db8CollabSourceMutation {
   },
   SetTextMetadata {
     text_id: String,
+
     metadata: Vec<u8>,
   },
   ClearTextMetadata {

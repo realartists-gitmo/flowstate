@@ -432,6 +432,10 @@ impl ParagraphOffsetIndex {
   }
 
   pub fn update_paragraph_width(&mut self, paragraph_ix: usize, paragraphs: &[Paragraph]) {
+    if paragraph_ix >= self.widths.len() || self.tree.len() != self.widths.len() + 1 {
+      self.rebuild(paragraphs);
+      return;
+    }
     let Some(width) = paragraph_width(paragraphs, paragraph_ix) else {
       return;
     };

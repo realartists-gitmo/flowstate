@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{Action, App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate};
 use serde::{Deserialize, Serialize};
 
-use super::{COMMAND_SPECS, CommandId};
+use super::{COMMAND_SPECS, CommandId, FindInDocumentAction};
 use crate::rich_text_element::{
   ApplyHighlightToSelection, Backspace, ClearFormatting, ClearHighlight, Copy, Cut, Delete, DeleteWordBackward, DeleteWordForward,
   InsertEquation, InsertImage, InsertNewline, InsertSoftLineBreak, InsertTable, MoveDocumentEnd, MoveDocumentStart, MoveDown, MoveLeft,
@@ -146,6 +146,7 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     CommandId::Delete => Box::new(Delete),
     CommandId::InsertNewline => Box::new(InsertNewline),
     CommandId::InsertSoftLineBreak => Box::new(InsertSoftLineBreak),
+    CommandId::FindInDocument => Box::new(FindInDocumentAction),
     CommandId::NewDocument
     | CommandId::OpenDocument
     | CommandId::OpenDemoDocument

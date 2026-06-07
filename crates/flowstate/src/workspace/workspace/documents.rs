@@ -65,6 +65,11 @@ impl Workspace {
       outline_collapsed: false,
       toolkit_collapsed: false,
       active_toolkit_tool: None,
+      recent_documents: load_recent_documents(),
+      recent_document_previews: HashMap::new(),
+      recent_document_preview_generation: 0,
+      temporary_workspace_session_pending: None,
+      temporary_workspace_session_persist_scheduled: false,
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
@@ -76,6 +81,7 @@ impl Workspace {
       collapsed_outline_items: HashSet::new(),
       outline_revision: 0,
       outline_viewport_paragraph: None,
+      outline_active_paragraph: None,
       outline_scrolled_paragraph: None,
       editor_subscriptions: Vec::new(),
       collaboration_host: None,
@@ -87,6 +93,7 @@ impl Workspace {
       collaboration_applied_application_hashes: VecDeque::new(),
       collaboration: CollaborationUiState::default(),
       settings_overlay: None,
+      document_style_picker_revision: 0,
       document_style_section: DocumentStyleSection::Text,
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),
@@ -112,6 +119,7 @@ impl Workspace {
       toolkit_search_filter: ToolkitSearchFilter::All,
       toolkit_hits: Vec::new(),
       expanded_toolkit_hits: HashSet::new(),
+      toolkit_results_scroll_handle: VirtualListScrollHandle::new(),
       toolkit_status: "Select a tub to search evidence.".into(),
       toolkit_search_generation: 0,
       _tub_file_search_subscription,
@@ -120,6 +128,8 @@ impl Workspace {
       _zoom_slider_subscription: zoom_slider_subscription,
       _keybinding_interceptor: keybinding_interceptor,
     };
+
+    this.refresh_recent_document_previews(cx);
 
     if let Some(root) = load_tub_root() {
       this.load_tub_root(root, cx);
@@ -132,6 +142,10 @@ impl Workspace {
       // one frame to give the initial editor the same settled geometry.
       cx.on_next_frame(window, move |workspace, window, cx| {
         workspace.open_document_path(path, window, cx);
+      });
+    } else if let Some(session) = load_temporary_workspace_session() {
+      cx.on_next_frame(window, move |workspace, window, cx| {
+        workspace.restore_temporary_workspace_session(session, window, cx);
       });
     }
 
@@ -999,7 +1013,7 @@ impl Workspace {
     mut document: Document,
     path: Option<PathBuf>,
     title: Option<String>,
-    _window: &mut Window,
+    window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
     // DB8 stores style assignments, not style appearance. The render theme is
@@ -1024,7 +1038,7 @@ impl Workspace {
         editor.set_document_display_name(title.into(), cx);
       });
     }
-    let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, cx));
+    let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
     self.editor_subscriptions.push((
       id,
@@ -1033,11 +1047,15 @@ impl Workspace {
           workspace.refresh_outline_tree(cx);
         }
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
+<<<<<<< HEAD
         if workspace.outline_viewport_paragraph != viewport_paragraph {
           workspace.outline_viewport_paragraph = viewport_paragraph;
           cx.notify();
         }
         workspace.publish_db8_presence(id, editor.clone(), cx);
+=======
+        workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
+>>>>>>> main
         workspace.maybe_autosave_document(id, editor.clone(), cx);
         workspace.publish_db8_collaboration_edit(id, editor.clone(), cx);
       }),
@@ -1053,7 +1071,11 @@ impl Workspace {
     self.active_document_id = Some(panel_id);
     self.active_editor = Some(editor);
     self.active_flow = None;
+    self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
+    self.outline_active_paragraph = None;
+    self.outline_scrolled_paragraph = None;
     self.refresh_outline_tree(cx);
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -1063,7 +1085,9 @@ impl Workspace {
     self.active_flow = Some(editor);
     self.outline_cache = None;
     self.outline_viewport_paragraph = None;
+    self.outline_active_paragraph = None;
     self.outline_scrolled_paragraph = None;
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -1119,11 +1143,15 @@ impl Workspace {
         .active_editor
         .as_ref()
         .and_then(|editor| editor.read(cx).viewport_anchor_paragraph());
+      self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
     }
+    self.persist_temporary_workspace_session(cx);
+
     if self.active_document_id.is_none() {
       self.outline_cache = None;
       self.outline_viewport_paragraph = None;
+      self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
       self.collapsed_outline_items.clear();
       self
@@ -1158,6 +1186,7 @@ impl Workspace {
 
   fn open_document_path_with_target(&mut self, path: PathBuf, target_paragraph_ix: Option<usize>, window: &mut Window, cx: &mut Context<Self>) {
     let window_handle = window.window_handle();
+    let path_for_recent = path.clone();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
       let loaded = cx
@@ -1168,6 +1197,7 @@ impl Workspace {
         Ok(LoadedWorkspaceDocument::Document { document, path, title }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              workspace.record_recent_document(path_for_recent.clone(), cx);
               workspace.add_document_panel_with_title(*document, path, title, window, cx);
               if let Some(paragraph_ix) = target_paragraph_ix {
                 workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
@@ -1181,6 +1211,7 @@ impl Workspace {
         Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              workspace.record_recent_document(path.clone(), cx);
               workspace.add_flow_panel(document, Some(path), window, cx);
             });
           });
@@ -1194,6 +1225,163 @@ impl Workspace {
       }
     })
     .detach();
+  }
+
+  fn persist_temporary_workspace_session(&mut self, cx: &mut Context<Self>) {
+    let mut entries = Vec::new();
+    let mut active_index = None;
+
+    for panel in &self.document_panels {
+      let panel = panel.read(cx);
+      let Some(path) = panel.editor().read(cx).document_path().cloned() else {
+        continue;
+      };
+      if Some(panel.id()) == self.active_document_id {
+        active_index = Some(entries.len());
+      }
+      entries.push(TemporaryWorkspaceSessionEntry {
+        kind: TemporaryWorkspaceSessionEntryKind::Document,
+        path,
+      });
+    }
+
+    for panel in &self.flow_panels {
+      let panel = panel.read(cx);
+      let Some(path) = panel.editor().read(cx).document_path().cloned() else {
+        continue;
+      };
+      if Some(panel.id()) == self.active_document_id {
+        active_index = Some(entries.len());
+      }
+      entries.push(TemporaryWorkspaceSessionEntry {
+        kind: TemporaryWorkspaceSessionEntryKind::Flow,
+        path,
+      });
+    }
+
+    self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession { entries, active_index });
+    if self.temporary_workspace_session_persist_scheduled {
+      return;
+    }
+    self.temporary_workspace_session_persist_scheduled = true;
+
+    cx.spawn(async move |workspace, cx| {
+      cx.background_executor()
+        .timer(Duration::from_millis(150))
+        .await;
+      let session = workspace.update(cx, |workspace, _| {
+        workspace.temporary_workspace_session_persist_scheduled = false;
+        workspace.temporary_workspace_session_pending.take()
+      });
+      let Ok(Some(session)) = session else {
+        return;
+      };
+      cx.background_executor()
+        .spawn(async move { persist_temporary_workspace_session_to_disk(session) })
+        .await;
+    })
+    .detach();
+  }
+
+  fn restore_temporary_workspace_session(&mut self, session: TemporaryWorkspaceSession, window: &mut Window, cx: &mut Context<Self>) {
+    let active_index = session.active_index;
+    let mut active_id = None;
+    for (entry_index, entry) in session.entries.into_iter().enumerate() {
+      if !entry.path.exists() {
+        continue;
+      }
+      let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
+        Some(LoadedWorkspaceDocument::Flow {
+          document: flowstate_flow::load_flow_document_or_new(&entry.path),
+          path: entry.path,
+        })
+      } else {
+        load_workspace_document(entry.path).ok()
+      };
+      let Some(loaded) = loaded else {
+        continue;
+      };
+      let id = match loaded {
+        LoadedWorkspaceDocument::Document { document, path, title } => {
+          let panel = self.create_document_panel(*document, path, title, window, cx);
+          panel.read(cx).id()
+        },
+        LoadedWorkspaceDocument::Flow { document, path } => {
+          let panel = self.create_flow_panel(document, Some(path), window, cx);
+          panel.read(cx).id()
+        },
+      };
+      if Some(entry_index) == active_index {
+        active_id = Some(id);
+      }
+    }
+
+    if let Some(active_id) = active_id {
+      self.activate_document_id(active_id, cx);
+    }
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+  }
+
+  fn refresh_recent_document_previews(&mut self, cx: &mut Context<Self>) {
+    self
+      .recent_document_previews
+      .retain(|path, _| self.recent_documents.iter().any(|recent| recent == path));
+
+    let paths = self
+      .recent_documents
+      .iter()
+      .filter(|path| !self.recent_document_previews.contains_key(*path) && !is_flow_path(path))
+      .cloned()
+      .collect::<Vec<_>>();
+    if paths.is_empty() {
+      return;
+    }
+
+    self.recent_document_preview_generation = self.recent_document_preview_generation.wrapping_add(1);
+    let generation = self.recent_document_preview_generation;
+    for path in paths {
+      cx.spawn(async move |workspace, cx| {
+        let preview = cx
+          .background_executor()
+          .spawn({
+            let path = path.clone();
+            async move {
+              let mut loaded = load_document_for_open(&path).ok()?;
+              loaded.document.theme = load_document_theme();
+              Some(recent_document_preview_document(&loaded.document))
+            }
+          })
+          .await;
+
+        let _ = workspace.update(cx, |workspace, cx| {
+          if workspace.recent_document_preview_generation != generation
+            || !workspace
+              .recent_documents
+              .iter()
+              .any(|recent| recent == &path)
+          {
+            return;
+          }
+          if let Some(preview) = preview {
+            workspace.recent_document_previews.insert(path, preview);
+            cx.notify();
+          }
+        });
+      })
+      .detach();
+    }
+  }
+
+  fn record_recent_document(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    self.recent_documents.retain(|recent| recent != &path);
+    self.recent_documents.insert(0, path);
+    self.recent_documents.truncate(3);
+    if let Err(error) = save_recent_documents(self.recent_documents.clone()) {
+      eprintln!("failed to save recent documents: {error}");
+    }
+    self.refresh_recent_document_previews(cx);
+    cx.notify();
   }
 
   pub fn prompt_open_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1222,6 +1410,7 @@ impl Workspace {
 
   fn add_document_panel(&mut self, document: Document, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
     self.create_document_panel(document, path, None, window, cx);
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -1232,8 +1421,14 @@ impl Workspace {
     title: Option<String>,
     window: &mut Window,
     cx: &mut Context<Self>,
+<<<<<<< HEAD
   ) -> Entity<DocumentPanel> {
     let panel = self.create_document_panel(document, path, title, window, cx);
+=======
+  ) {
+    self.create_document_panel(document, path, title, window, cx);
+    self.persist_temporary_workspace_session(cx);
+>>>>>>> main
     cx.notify();
     panel
   }
@@ -1267,10 +1462,12 @@ impl Workspace {
     self.flow_panels.push(panel.clone());
     self.outline_cache = None;
     self.outline_viewport_paragraph = None;
+    self.outline_active_paragraph = None;
     self.outline_scrolled_paragraph = None;
     panel
   }
 
+<<<<<<< HEAD
   fn add_flow_panel(
     &mut self,
     document: flowstate_flow::FlowDocument,
@@ -1279,6 +1476,11 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
     let panel = self.create_flow_panel(document, path, window, cx);
+=======
+  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    self.create_flow_panel(document, path, window, cx);
+    self.persist_temporary_workspace_session(cx);
+>>>>>>> main
     cx.notify();
     panel
   }
@@ -1566,6 +1768,7 @@ impl Workspace {
               {
                 panel.update(cx, |panel, cx| panel.set_path(path, cx));
               }
+              workspace.persist_temporary_workspace_session(cx);
               cx.notify();
             });
           },
@@ -1618,6 +1821,7 @@ impl Workspace {
               {
                 panel.update(cx, |panel, cx| panel.set_path(path, cx));
               }
+              workspace.persist_temporary_workspace_session(cx);
               cx.notify();
             });
           },
@@ -3405,6 +3609,117 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
       title: loaded.title,
     })
     .map_err(|error| error.to_string())
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TemporaryWorkspaceSession {
+  entries: Vec<TemporaryWorkspaceSessionEntry>,
+  active_index: Option<usize>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct TemporaryWorkspaceSessionEntry {
+  kind: TemporaryWorkspaceSessionEntryKind,
+  path: PathBuf,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+enum TemporaryWorkspaceSessionEntryKind {
+  Document,
+  Flow,
+}
+
+#[hotpath::measure]
+fn temporary_workspace_session_path() -> PathBuf {
+  std::env::temp_dir().join("flowstate-open-tabs-session.json")
+}
+
+#[hotpath::measure]
+fn load_temporary_workspace_session() -> Option<TemporaryWorkspaceSession> {
+  fs::read(temporary_workspace_session_path())
+    .ok()
+    .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+#[hotpath::measure]
+fn persist_temporary_workspace_session_to_disk(session: TemporaryWorkspaceSession) {
+  let path = temporary_workspace_session_path();
+  if session.entries.is_empty() {
+    if let Err(error) = fs::remove_file(&path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      eprintln!("failed to remove temporary workspace session {}: {error}", path.display());
+    }
+    return;
+  }
+
+  match serde_json::to_vec(&session) {
+    Ok(bytes) => {
+      if let Err(error) = fs::write(&path, bytes) {
+        eprintln!("failed to write temporary workspace session {}: {error}", path.display());
+      }
+    },
+    Err(error) => {
+      eprintln!("failed to serialize temporary workspace session: {error}");
+    },
+  }
+}
+
+#[hotpath::measure]
+fn recent_document_preview_document(document: &Document) -> Document {
+  const MAX_PARAGRAPHS: usize = 12;
+  const MAX_CHARS: usize = 2_200;
+
+  let mut remaining_chars = MAX_CHARS;
+  let mut paragraphs = Vec::new();
+
+  for paragraph in document.paragraphs.iter().take(MAX_PARAGRAPHS) {
+    if remaining_chars == 0 {
+      break;
+    }
+
+    let mut run_start = paragraph.byte_range.start;
+    let mut runs = Vec::new();
+    for run in &paragraph.runs {
+      if remaining_chars == 0 {
+        break;
+      }
+
+      let run_end = run_start + run.len;
+      let text = document_text_slice(document, run_start..run_end);
+      run_start = run_end;
+
+      if text.is_empty() {
+        continue;
+      }
+
+      let mut used_chars = 0usize;
+      let capped_text = text
+        .chars()
+        .take_while(|_| {
+          let keep = used_chars < remaining_chars;
+          if keep {
+            used_chars += 1;
+          }
+          keep
+        })
+        .collect::<String>();
+      remaining_chars -= used_chars;
+      runs.push(InputRun {
+        text: capped_text,
+        styles: run.styles,
+      });
+    }
+
+    if !runs.is_empty() {
+      paragraphs.push(InputParagraph {
+        style: paragraph.style,
+        runs,
+      });
+    }
+  }
+
+  document_from_input(document.theme.clone(), paragraphs)
 }
 
 #[hotpath::measure]

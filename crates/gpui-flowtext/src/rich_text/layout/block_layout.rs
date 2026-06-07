@@ -149,24 +149,25 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
       .get(paragraph_ix)
       .is_some_and(|paragraph| !paragraph_is_visible(document, paragraph))
   {
+    let hidden = LaidOutParagraph {
+      index: paragraph_ix,
+      cache_key: document
+        .paragraphs
+        .get(paragraph_ix)
+        .map(|paragraph| paragraph_cache_key(document, paragraph))
+        .unwrap_or(ParagraphCacheKey { fingerprint: 0 }),
+      len: 0,
+      byte_range: 0..0,
+      top: px(0.0),
+      bottom: px(0.0),
+      lines: Vec::new(),
+      borders: Vec::new(),
+    };
     return LayoutState {
-      blocks: vec![LaidOutBlock::Paragraph(LaidOutParagraph {
-        index: paragraph_ix,
-        cache_key: document
-          .paragraphs
-          .get(paragraph_ix)
-          .map(|paragraph| paragraph_cache_key(document, paragraph))
-          .unwrap_or(ParagraphCacheKey { fingerprint: 0 }),
-        len: 0,
-        byte_range: 0..0,
-        top: px(0.0),
-        bottom: px(0.0),
-        lines: Vec::new(),
-        borders: Vec::new(),
-      })],
+      blocks: vec![LaidOutBlock::Paragraph(hidden.clone())],
       paragraph_to_block: vec![0],
       block_to_paragraph: vec![Some(paragraph_ix)],
-      paragraphs: Vec::new(),
+      paragraphs: vec![hidden],
       bounds: None,
       size: size(width, px(0.0)),
       width,
@@ -178,7 +179,9 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
     .flatten();
   let layout_document = projected_document.as_ref().unwrap_or(document);
   let layout_paragraph_ix = if projected_document.is_some() { 0 } else { paragraph_ix };
-  let previous_paragraph = previous_layout.and_then(|layout| paragraph_layout(layout, paragraph_ix));
+  let previous_paragraph = previous_layout
+    .filter(|layout| layout.width == width)
+    .and_then(|layout| paragraph_layout(layout, paragraph_ix));
   let (mut paragraph, mut height, max_width, reused) =
     layout_paragraph_at(layout_document, layout_paragraph_ix, width, start_y, previous_paragraph, window, cx);
   paragraph.index = paragraph_ix;

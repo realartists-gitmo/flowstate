@@ -19,7 +19,8 @@ use gpui::{
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
+use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
@@ -403,8 +404,8 @@ fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
 }
 
 #[hotpath::measure]
-fn is_plain_text_insert(text: &str) -> bool {
-  !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK)
+fn is_single_grapheme_text_insert(text: &str) -> bool {
+  !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK) && text.graphemes(true).take(2).count() == 1
 }
 
 #[hotpath::measure]
@@ -467,6 +468,7 @@ pub struct ExternalCaret {
   pub offset: DocumentOffset,
   pub color_rgb: u32,
 }
+
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalSelection {
@@ -725,6 +727,7 @@ struct ScrollAnchorLock {
 }
 
 struct RenderLayoutSnapshot {
+  width: Pixels,
   item_sizes: Rc<Vec<Size<Pixels>>>,
   items: RenderVirtualItems,
   hide_initial_layout: bool,
@@ -911,6 +914,8 @@ pub struct RichTextEditor {
   last_text_input_at: Option<Instant>,
   external_carets: Vec<ExternalCaret>,
   external_selections: Vec<ExternalSelection>,
+  pub(super) search_highlights: Vec<Range<DocumentOffset>>,
+  pub(super) active_search_highlight: Option<usize>,
   pending_typing_prefetch_resume: bool,
   resume_chunk_prefetch_after_typing: bool,
   paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
@@ -944,6 +949,8 @@ pub struct RichTextEditor {
   layout_cache_retain_ranges: ParagraphCacheRetainRanges,
   prep_cache_retain_ranges: ParagraphCacheRetainRanges,
   invisibility_mode: bool,
+  collapsed_section_ids: FxHashSet<SectionId>,
+  hovered_collapse_paragraph: Option<usize>,
   // Remembered horizontal pixel position for vertical caret motion. When the
   // user presses Up/Down repeatedly we want the caret to track a consistent
   // x even on lines whose contents are shorter than the previous one. The
@@ -955,6 +962,7 @@ pub struct RichTextEditor {
 include!("lifecycle.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
+include!("search_highlights.rs");
 include!("send_export.rs");
 include!("zoom.rs");
 include!("commands.rs");

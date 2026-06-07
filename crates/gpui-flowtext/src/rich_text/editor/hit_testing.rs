@@ -170,10 +170,6 @@ impl RichTextEditor {
     let deleted = if range.start.paragraph == range.end.paragraph {
       delete_range_in_paragraph(&mut self.document, range.start.paragraph, range.start.byte..range.end.byte)
     } else {
-      // Cross-paragraph selection: delete the tail of the start paragraph,
-      // the head of the end paragraph, then merge the end paragraph's
-      // remaining runs onto the end of the start paragraph. Intermediate
-      // paragraphs are dropped wholesale.
       delete_cross_paragraph_range(&mut self.document, range.clone())
     };
     if !deleted {
@@ -204,7 +200,6 @@ impl RichTextEditor {
     }
     let caret = self.selection.head;
     if caret.byte == 0 {
-      if let Some(object) = self.immediate_object_before_paragraph(caret.paragraph) {
         self.select_block(object, cx);
         return;
       }
@@ -263,7 +258,6 @@ impl RichTextEditor {
         self.select_block(object, cx);
         return;
       }
-      // Joining forwards: pull the next paragraph's runs onto this one.
       if caret.paragraph + 1 >= self.document.paragraphs.len() {
         return;
       }
@@ -302,8 +296,6 @@ impl RichTextEditor {
       byte: 0,
     };
     if starts_empty_paragraph {
-      // Pressing Enter at the end starts a genuinely fresh paragraph. Reset it
-      // so header/inline/highlight styling does not leak into the next line.
       clear_whole_paragraph_formatting(&mut self.document, new.paragraph);
     }
     self.selection = EditorSelection { anchor: new, head: new };

@@ -92,4 +92,6 @@ impl RichTextEditor {
     self.reset_caret_blink(cx);
     self.notify_after_mutation(cx);
   }
+
+
 }

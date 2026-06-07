@@ -1,9 +1,15 @@
 use std::{
   cell::Cell,
+<<<<<<< HEAD
   collections::{BTreeMap, HashMap, HashSet, VecDeque},
+=======
+  collections::{HashMap, HashSet},
+  fs,
+>>>>>>> main
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
+  time::Duration,
 };
 
 use gpui::{
@@ -27,21 +33,27 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
-  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar, h_flex,
-  v_flex,
+  ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
+  VirtualListScrollHandle, h_flex, v_flex,
 };
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_send_custom_directory, load_send_to_document_directory, load_smart_word_selection, load_tub_root,
-  save_autosave, save_document_theme, save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory, load_send_to_document_directory,
+  load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
+  save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
+<<<<<<< HEAD
   CollaborationRole as Db8CollaborationRole, Document, DocumentOffset, DocumentTheme, EditorSelection, ExternalCaret, ExternalSelection,
   ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme, load_or_create_document,
+=======
+  CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
+  ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document,
+>>>>>>> main
   paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
@@ -81,6 +93,11 @@ pub struct Workspace {
   outline_collapsed: bool,
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
+  recent_documents: Vec<PathBuf>,
+  recent_document_previews: HashMap<PathBuf, Document>,
+  recent_document_preview_generation: u64,
+  temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
+  temporary_workspace_session_persist_scheduled: bool,
   left_nav_mode: LeftNavMode,
   tab_bar_scroll_handle: ScrollHandle,
   body_resizable_state: Entity<ResizableState>,
@@ -92,6 +109,7 @@ pub struct Workspace {
   collapsed_outline_items: HashSet<usize>,
   outline_revision: u64,
   outline_viewport_paragraph: Option<usize>,
+  outline_active_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   collaboration_host: Option<HostedCollaboration>,
@@ -103,6 +121,7 @@ pub struct Workspace {
   collaboration_delta_updates_since_checkpoint: usize,
   collaboration: CollaborationUiState,
   settings_overlay: Option<WorkspaceSettingsOverlay>,
+  document_style_picker_revision: u64,
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,
@@ -128,6 +147,7 @@ pub struct Workspace {
   toolkit_search_filter: ToolkitSearchFilter,
   toolkit_hits: Vec<SearchHit>,
   expanded_toolkit_hits: HashSet<String>,
+  toolkit_results_scroll_handle: VirtualListScrollHandle,
   toolkit_status: SharedString,
   toolkit_search_generation: u64,
   _tub_file_search_subscription: Subscription,

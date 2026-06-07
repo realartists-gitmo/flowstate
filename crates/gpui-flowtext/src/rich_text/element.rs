@@ -1,8 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-  App, AvailableSpace, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels, Style, Window,
-  px, relative,
+  App, AvailableSpace, Background, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
+  Style, Window, fill, px, relative,
 };
 
 use super::*;
@@ -161,7 +161,7 @@ impl Element for RichTextDocumentElement {
     cx: &mut App,
   ) {
     if let Some((layout, bounds)) = self.layout.positioned() {
-      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, &[], &[], window, cx);
+      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, &[], &[], &[], None, window, cx);
     }
   }
 }
@@ -240,7 +240,7 @@ impl Element for VirtualParagraphChunkElement {
     cx: &mut App,
   ) {
     let paragraph_ix = self.paragraph_ix;
-    let (selection, drag_selection, caret_offset, caret_width, local_caret_color_rgb, external_carets, external_selections) = {
+    let (selection, drag_selection, caret_offset, caret_width, local_caret_color_rgb, external_carets, external_selections, search_highlights, active_search_highlight) = {
       let editor = self.editor.read(cx);
       let drag_selection = editor.drag_source_selection();
       let external_carets = editor.external_carets_for_paragraph(paragraph_ix);
@@ -259,25 +259,39 @@ impl Element for VirtualParagraphChunkElement {
         editor.local_caret_color_rgb,
         external_carets,
         external_selections,
+        editor.search_highlights.clone(),
+        editor.active_search_highlight,
       )
     };
     if let Some((layout, bounds)) = self.layout.positioned() {
-      let show_caret = caret_offset.is_some_and(|offset| {
-        layout.paragraphs.first().is_some_and(|paragraph| {
-          if !paragraph.contains_byte(offset.byte) {
-            return false;
-          }
-
-          // Treat chunk ownership as end-exclusive at chunk boundaries so the
-          // trailing chunk paints the caret. The paragraph end is the one
-          // exception: there is no trailing byte, so the final chunk owns it.
-          offset.byte == paragraph.len
-            || offset
-              .byte
-              .checked_add(1)
-              .is_some_and(|next_byte| paragraph.contains_byte(next_byte))
-        })
-      });
+      if self.chunk_ix == 0 {
+        let collapse_state = self
+          .editor
+          .read(cx)
+          .section_collapse_state_at_paragraph(self.paragraph_ix, &[0, 1, 2, 3]);
+        if let Some(collapsed) = collapse_state {
+          let indicator_width = px(9.0);
+          let indicator_height = if collapsed { px(2.0) } else { px(9.0) };
+          let (indicator_x, indicator_y) = layout
+            .paragraphs
+            .first()
+            .and_then(|paragraph| {
+              paragraph.lines.last().map(|line| {
+                (
+                  line.origin.x + line.width + px(6.0),
+                  line.origin.y + ((line.line_height - indicator_height) / 2.0).max(px(0.0)),
+                )
+              })
+            })
+            .unwrap_or((px(6.0), px(6.0)));
+          let indicator = Bounds::new(
+            gpui::point(bounds.left() + indicator_x, bounds.top() + indicator_y),
+            gpui::size(indicator_width, indicator_height),
+          );
+          window.paint_quad(fill(indicator, Background::from(gpui::black().opacity(0.7))));
+        }
+      }
+      let show_caret = caret_offset.is_some_and(|offset| caret_offset_belongs_to_chunk(layout.as_ref(), offset));
       let external_carets = external_carets
         .into_iter()
         .filter(|caret| caret_offset_belongs_to_chunk(layout.as_ref(), caret.offset))
@@ -296,6 +310,8 @@ impl Element for VirtualParagraphChunkElement {
         local_caret_color_rgb,
         &external_carets,
         &external_selections,
+        &search_highlights,
+        active_search_highlight,
         window,
         cx,
       );

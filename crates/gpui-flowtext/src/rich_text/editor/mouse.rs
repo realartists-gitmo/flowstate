@@ -9,6 +9,10 @@ impl RichTextEditor {
     self.last_drag_position = Some(event.position);
     self.goal_x = None;
     let offset = self.hit_test_document_position(event.position, window, cx);
+    if self.collapse_gutter_hit(event.position, offset.paragraph) {
+      self.toggle_section_collapsed_at_paragraph(offset.paragraph, &[0, 1, 2, 3], cx);
+      return;
+    }
     self.drag_anchor = None;
     self.smart_selection_left_anchor_word = false;
     self.smart_selection_exact_override = false;
@@ -48,7 +52,49 @@ impl RichTextEditor {
     cx.notify();
   }
 
+  fn collapse_gutter_hit(&self, position: Point<Pixels>, paragraph_ix: usize) -> bool {
+    let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return false;
+    };
+    if !matches!(paragraph.style, ParagraphStyle::Custom(0..=3)) {
+      return false;
+    }
+    let Some(layout) = self.layout_for_offset(DocumentOffset {
+      paragraph: paragraph_ix,
+      byte: paragraph_text_len(paragraph),
+    }) else {
+      return false;
+    };
+    let origin = layout.bounds.map(|bounds| bounds.origin).unwrap_or(point(px(0.0), px(0.0)));
+    let Some(caret) = caret_bounds(
+      &layout,
+      DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: paragraph_text_len(paragraph),
+      },
+      origin,
+    ) else {
+      return false;
+    };
+    position.x >= caret.right() + px(2.0)
+      && position.x <= caret.right() + px(26.0)
+      && position.y >= caret.top() - px(10.0)
+      && position.y <= caret.bottom() + px(12.0)
+  }
+
   fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+    self.last_drag_position = Some(event.position);
+    if !event.dragging() {
+      let paragraph_ix = self.hit_test_document_position(event.position, window, cx).paragraph;
+      let next_hover = self
+        .section_collapsed_at_heading(paragraph_ix, &[0, 1, 2, 3])
+        .is_some()
+        .then_some(paragraph_ix);
+      if self.hovered_collapse_paragraph != next_hover {
+        self.hovered_collapse_paragraph = next_hover;
+        cx.notify();
+      }
+    }
     if self.update_table_column_resize_drag(event.position, cx) {
       return;
     }

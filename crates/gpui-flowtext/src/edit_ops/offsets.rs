@@ -95,7 +95,12 @@ pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragr
   refresh_paragraph_ranges_from(document, paragraph_ix);
   let paragraph_count = document.paragraphs.len();
   let replacements = document.paragraphs[paragraph_ix..].to_vec();
-  replace_paragraph_blocks(document, paragraph_ix, paragraph_count.saturating_sub(paragraph_ix), &replacements);
+  replace_paragraph_blocks(
+    document,
+    paragraph_ix,
+    paragraph_count.saturating_sub(paragraph_ix),
+    &replacements,
+  );
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within
@@ -233,6 +238,7 @@ mod offsets_tests {
     assert_eq!(paragraph_text(&utf8_document, 0), "café");
     assert_eq!(utf8_document.paragraphs.len(), 1);
   }
+
 }
 
 // Inserts `text` (with `styles`) into `paragraph` at `byte`. Splits the run

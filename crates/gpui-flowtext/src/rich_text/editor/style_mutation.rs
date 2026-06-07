@@ -44,6 +44,8 @@ impl RichTextEditor {
             styles.direct_underline = false;
           }
         });
+        paragraph.paragraph.runs = merge_adjacent_runs(std::mem::take(&mut paragraph.paragraph.runs));
+        paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
       });
       return;
     }
@@ -194,6 +196,7 @@ impl RichTextEditor {
     cx.notify();
   }
 
+
   pub(super) fn styles_at_caret(&self) -> RunStyles {
     if let Some(styles) = self.pending_styles {
       return styles;
@@ -211,5 +214,5 @@ impl RichTextEditor {
   }
 
   // -------- Movement primitives ----------------------------------------
-
 }
+

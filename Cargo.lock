@@ -2179,8 +2179,8 @@ dependencies = [
 
 [[package]]
 name = "docxide-pdf"
-version = "0.14.0"
-source = "git+https://github.com/realartists-gitmo/docxide-pdf?rev=2c856bf2aa0641e96b350baf7026f43493964072#2c856bf2aa0641e96b350baf7026f43493964072"
+version = "0.15.1"
+source = "git+https://github.com/realartists-gitmo/docxide-pdf.git?branch=main#c290b320b8e2089855d8d0f9d0d7b6a28d2f6459"
 dependencies = [
  "image 0.25.10",
  "log",
@@ -2774,6 +2774,7 @@ dependencies = [
  "gpui-component",
  "gpui-component-assets",
  "hotpath",
+ "memchr",
  "mimalloc",
  "postcard",
  "rustc-hash 2.1.2",
@@ -3793,6 +3794,7 @@ dependencies = [
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "hash32"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3802,6 +3804,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> main
 name = "hashbrown"
 version = "0.14.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3859,6 +3863,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cdc6457c0eb62c71aac4bc17216026d8410337c4126773b9c5daba343f17964f"
 dependencies = [
  "atomic-polyfill",
+<<<<<<< HEAD
  "hash32 0.2.1",
  "rustc_version",
  "serde",
@@ -3883,6 +3888,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25ba4bd83f9415b58b4ed8dc5714c76e626a105be4646c02630ad730ad3b5aa4"
 dependencies = [
  "hash32 0.3.1",
+=======
+ "hash32",
+ "rustc_version",
+ "serde",
+ "spin",
+>>>>>>> main
  "stable_deref_trait",
 ]
 
@@ -7247,12 +7258,17 @@ dependencies = [
  "cobs",
  "embedded-io 0.4.0",
  "embedded-io 0.6.1",
+<<<<<<< HEAD
  "heapless 0.7.17",
  "postcard-derive",
+=======
+ "heapless",
+>>>>>>> main
  "serde",
 ]
 
 [[package]]
+<<<<<<< HEAD
 name = "postcard-derive"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7264,6 +7280,8 @@ dependencies = [
 ]
 
 [[package]]
+=======
+>>>>>>> main
 name = "potential_utf"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

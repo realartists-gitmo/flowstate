@@ -204,6 +204,11 @@ impl RichTextEditor {
 
       let block_start = items.len();
       let mut block_height = px(0.0);
+      if self.paragraph_hidden_by_collapsed_section(paragraph_ix) {
+        block_item_ranges.push(block_start..items.len());
+        block_heights.push(px(0.0));
+        continue;
+      }
       if self.invisibility_mode && !paragraph_is_visible(&self.document, paragraph) {
         block_item_ranges.push(block_start..items.len());
         block_heights.push(px(0.0));
@@ -326,6 +331,11 @@ impl RichTextEditor {
         Some(Block::Paragraph(_paragraph)) => {
           let current_paragraph_ix = paragraph_ix;
           paragraph_ix += 1;
+          if self.paragraph_hidden_by_collapsed_section(current_paragraph_ix) {
+            block_item_ranges.push(block_start..items.len());
+            block_heights.push(px(0.0));
+            continue;
+          }
           if self.invisibility_mode && !self.paragraph_materialized_in_current_mode(current_paragraph_ix) {
             block_item_ranges.push(block_start..items.len());
             block_heights.push(px(0.0));
@@ -382,6 +392,28 @@ impl RichTextEditor {
     }
 
     (Rc::new(items), block_item_ranges, block_heights, Rc::new(sizes))
+  }
+
+  fn paragraph_hidden_by_collapsed_section(&self, paragraph_ix: usize) -> bool {
+    if self.collapsed_section_ids.is_empty() {
+      return false;
+    }
+    self.document.sections.iter().any(|section| {
+      if !self.collapsed_section_ids.contains(&section.id) {
+        return false;
+      }
+      let Some(start) = paragraph_index_for_id(&self.document, section.start_paragraph) else {
+        return false;
+      };
+      if paragraph_ix == start {
+        return false;
+      }
+      let end = section
+        .end_paragraph_exclusive
+        .and_then(|id| paragraph_index_for_id(&self.document, id))
+        .unwrap_or(self.document.paragraphs.len());
+      start < paragraph_ix && paragraph_ix < end
+    })
   }
 
 }

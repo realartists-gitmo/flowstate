@@ -12,3 +12,4 @@ flamegraph
 .ast-bro-ignore
 .pi/hooks.json
 .pi/schedule-prompts.json
+.pi/

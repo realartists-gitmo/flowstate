@@ -1,35 +1,31 @@
 [package]
 name = "gpui-flowtext"
-version = "0.1.0"
-edition = "2024"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
 description = "A GPUI rich text editor component and document engine."
 license = "MIT"
-repository = "https://github.com/realartists-gitmo/gpui-flowtext"
-homepage = "https://github.com/realartists-gitmo/gpui-flowtext"
-documentation = "https://github.com/realartists-gitmo/gpui-flowtext"
 
-
-[lints.clippy]
-too_many_arguments = "allow"
-items_after_test_module = "allow"
+[lints]
+workspace = true
 [dependencies]
-crop = "0.4.3"
-gpui = "0.2.2"
-gpui-component = "0.5.1"
-hotpath = "0.16.1"
-imagesize = "0.13"
+crop = { workspace = true }
+gpui = { workspace = true }
+gpui-component = { workspace = true }
+hotpath = { workspace = true }
+imagesize = { workspace = true }
 postcard = { version = "1.1.3", features = ["use-std"] }
-mathjax_svg = "3.2.0"
-resvg = "0.45.1"
-rustc-hash = "2.1.2"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.150"
-tempfile = "3"
-unicode-segmentation = "1"
-uuid = { version = "1.23.1", features = ["serde", "v4"] }
+mathjax_svg = { workspace = true }
+resvg = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+unicode-segmentation = { workspace = true }
+uuid = { workspace = true }
 
 [target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
-cosmic-text = { version = "0.14.2", default-features = false, features = ["shape-run-cache"] }
+cosmic-text = { workspace = true }
 
 
 [features]

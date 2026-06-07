@@ -52,6 +52,7 @@ pub enum RichTextEditorCommand {
 }
 
 fn rich_text_mutation_command(command: RichTextEditorCommand) -> bool {
+  #[allow(clippy::enum_glob_use, reason = "matches all command variants in a dispatch table")]
   use RichTextEditorCommand::*;
   matches!(
     command,
@@ -86,6 +87,7 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
+    #[allow(clippy::enum_glob_use, reason = "matches all command variants in a dispatch table")]
     use RichTextEditorCommand::*;
 
     match command {

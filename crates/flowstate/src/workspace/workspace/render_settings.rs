@@ -50,10 +50,28 @@ flowstate_face_accessors!(get_hat_face, set_hat_face, hat_bold, hat_italic, hat_
 flowstate_face_accessors!(get_block_face, set_block_face, block_bold, block_italic, block_underline);
 flowstate_face_accessors!(get_tag_face, set_tag_face, tag_bold, tag_italic, tag_underline);
 flowstate_face_accessors!(get_cite_face, set_cite_face, cite_bold, cite_italic, cite_underline);
-flowstate_face_accessors!(get_condensed_face, set_condensed_face, condensed_bold, condensed_italic, condensed_underline);
-flowstate_face_accessors!(get_ultracondensed_face, set_ultracondensed_face, ultracondensed_bold, ultracondensed_italic, ultracondensed_underline);
+flowstate_face_accessors!(
+  get_condensed_face,
+  set_condensed_face,
+  condensed_bold,
+  condensed_italic,
+  condensed_underline
+);
+flowstate_face_accessors!(
+  get_ultracondensed_face,
+  set_ultracondensed_face,
+  ultracondensed_bold,
+  ultracondensed_italic,
+  ultracondensed_underline
+);
 flowstate_face_accessors!(get_emphasis_face, set_emphasis_face, emphasis_bold, emphasis_italic, emphasis_underline);
-flowstate_face_accessors!(get_underline_face, set_underline_face, underline_bold, underline_italic, underline_underline);
+flowstate_face_accessors!(
+  get_underline_face,
+  set_underline_face,
+  underline_bold,
+  underline_italic,
+  underline_underline
+);
 flowstate_face_accessors!(get_analytic_face, set_analytic_face, analytic_bold, analytic_italic, analytic_underline);
 flowstate_face_accessors!(get_undertag_face, set_undertag_face, undertag_bold, undertag_italic, undertag_underline);
 
@@ -80,6 +98,78 @@ flowstate_size_accessors!(get_cite_size, set_cite_size, cite_font_size);
 flowstate_size_accessors!(get_condensed_size, set_condensed_size, condensed_font_size);
 flowstate_size_accessors!(get_ultracondensed_size, set_ultracondensed_size, ultracondensed_font_size);
 flowstate_size_accessors!(get_undertag_size, set_undertag_size, undertag_font_size);
+
+fn paragraph_boxing(theme: &DocumentTheme, slot: u8) -> (bool, f64) {
+  let style = flowstate_document::custom_paragraph_style(theme, slot);
+  let width = style.border.map_or(px(1.0), |border| border.width);
+  (style.border.is_some(), pixels_to_pt(width))
+}
+
+fn set_paragraph_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, width_pt: f64) {
+  let mut style = flowstate_document::custom_paragraph_style(theme, slot);
+  if enabled {
+    let existing = style.border.unwrap_or(CustomParagraphBorder {
+      width: px(1.0),
+      space_x: px(6.0),
+      space_y: px(2.0),
+    });
+    style.border = Some(CustomParagraphBorder {
+      width: pt_to_pixels(width_pt.max(0.0)),
+      ..existing
+    });
+  } else {
+    style.border = None;
+  }
+  theme.set_custom_paragraph_style(slot, style);
+}
+
+fn semantic_boxing(theme: &DocumentTheme, slot: u8) -> (bool, f64) {
+  let style = flowstate_document::custom_semantic_style(theme, slot);
+  let width = style.border_width.unwrap_or(px(1.0));
+  (style.border_width.is_some(), pixels_to_pt(width))
+}
+
+fn set_semantic_boxing(theme: &mut DocumentTheme, slot: u8, enabled: bool, width_pt: f64) {
+  let mut style = flowstate_document::custom_semantic_style(theme, slot);
+  style.border_width = enabled.then(|| pt_to_pixels(width_pt.max(0.0)));
+  theme.set_custom_semantic_style(slot, style);
+}
+
+macro_rules! paragraph_box_accessors {
+  ($get:ident, $set:ident, $slot:literal) => {
+    fn $get(theme: &DocumentTheme) -> (bool, f64) {
+      paragraph_boxing(theme, $slot)
+    }
+
+    fn $set(theme: &mut DocumentTheme, enabled: bool, width_pt: f64) {
+      set_paragraph_boxing(theme, $slot, enabled, width_pt);
+    }
+  };
+}
+
+macro_rules! semantic_box_accessors {
+  ($get:ident, $set:ident, $slot:literal) => {
+    fn $get(theme: &DocumentTheme) -> (bool, f64) {
+      semantic_boxing(theme, $slot)
+    }
+
+    fn $set(theme: &mut DocumentTheme, enabled: bool, width_pt: f64) {
+      set_semantic_boxing(theme, $slot, enabled, width_pt);
+    }
+  };
+}
+
+paragraph_box_accessors!(get_pocket_box, set_pocket_box, 0);
+paragraph_box_accessors!(get_hat_box, set_hat_box, 1);
+paragraph_box_accessors!(get_block_box, set_block_box, 2);
+paragraph_box_accessors!(get_tag_box, set_tag_box, 3);
+paragraph_box_accessors!(get_analytic_box, set_analytic_box, 4);
+paragraph_box_accessors!(get_undertag_box, set_undertag_box, 6);
+semantic_box_accessors!(get_cite_box, set_cite_box, 1);
+semantic_box_accessors!(get_emphasis_box, set_emphasis_box, 2);
+semantic_box_accessors!(get_underline_box, set_underline_box, 3);
+semantic_box_accessors!(get_condensed_box, set_condensed_box, 4);
+semantic_box_accessors!(get_ultracondensed_box, set_ultracondensed_box, 5);
 
 #[hotpath::measure_all]
 impl Workspace {
@@ -121,11 +211,14 @@ impl Workspace {
       .items_center()
       .justify_center()
       .occlude()
-      .on_mouse_down(MouseButton::Left, cx.listener(|workspace, _, _, cx| {
-        workspace.settings_overlay = None;
-        cx.stop_propagation();
-        cx.notify();
-      }))
+      .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|workspace, _, _, cx| {
+          workspace.settings_overlay = None;
+          cx.stop_propagation();
+          cx.notify();
+        }),
+      )
       .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
         v_flex()
@@ -149,11 +242,7 @@ impl Workspace {
               .px_4()
               .border_b_1()
               .border_color(cx.theme().border)
-              .child(
-                div()
-                  .font_weight(gpui::FontWeight::SEMIBOLD)
-                  .child(title),
-              )
+              .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
               .child(
                 Button::new("close-settings-overlay")
                   .icon(IconName::Close)
@@ -221,66 +310,88 @@ impl Workspace {
               "Pocket",
               get_pocket_face,
               set_pocket_face,
+              get_pocket_box,
+              set_pocket_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Hat",
               get_hat_face,
               set_hat_face,
+              get_hat_box,
+              set_hat_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Block",
               get_block_face,
               set_block_face,
+              get_block_box,
+              set_block_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Tag",
               get_tag_face,
               set_tag_face,
+              get_tag_box,
+              set_tag_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Cite",
               get_cite_face,
               set_cite_face,
+              get_cite_box,
+              set_cite_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Condensed",
               get_condensed_face,
               set_condensed_face,
+              get_condensed_box,
+              set_condensed_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Ultra Condensed",
               get_ultracondensed_face,
               set_ultracondensed_face,
+              get_ultracondensed_box,
+              set_ultracondensed_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Emphasis",
               get_emphasis_face,
               set_emphasis_face,
+              get_emphasis_box,
+              set_emphasis_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Underline",
               get_underline_face,
               set_underline_face,
+              get_underline_box,
+              set_underline_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Analytic",
               get_analytic_face,
               set_analytic_face,
+              get_analytic_box,
+              set_analytic_box,
             ))
             .item(style_face_item(
               workspace.clone(),
               "Undertag",
               get_undertag_face,
               set_undertag_face,
+              get_undertag_box,
+              set_undertag_box,
             )),
         ),
       SettingPage::new("Colors")
@@ -294,72 +405,22 @@ impl Workspace {
               |theme| theme.default_text_color,
               |theme, value| theme.default_text_color = value,
             ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Pocket",
-              get_pocket_color,
-              set_pocket_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Hat",
-              get_hat_color,
-              set_hat_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Block",
-              get_block_color,
-              set_block_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Tag",
-              get_tag_color,
-              set_tag_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Cite",
-              get_cite_color,
-              set_cite_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Condensed",
-              get_condensed_color,
-              set_condensed_color,
-            ))
+            .item(style_color_item(workspace.clone(), "Pocket", get_pocket_color, set_pocket_color))
+            .item(style_color_item(workspace.clone(), "Hat", get_hat_color, set_hat_color))
+            .item(style_color_item(workspace.clone(), "Block", get_block_color, set_block_color))
+            .item(style_color_item(workspace.clone(), "Tag", get_tag_color, set_tag_color))
+            .item(style_color_item(workspace.clone(), "Cite", get_cite_color, set_cite_color))
+            .item(style_color_item(workspace.clone(), "Condensed", get_condensed_color, set_condensed_color))
             .item(style_color_item(
               workspace.clone(),
               "Ultra Condensed",
               get_ultracondensed_color,
               set_ultracondensed_color,
             ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Emphasis",
-              get_emphasis_color,
-              set_emphasis_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Underline",
-              get_underline_color,
-              set_underline_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Analytic",
-              get_analytic_color,
-              set_analytic_color,
-            ))
-            .item(style_color_item(
-              workspace.clone(),
-              "Undertag",
-              get_undertag_color,
-              set_undertag_color,
-            )),
+            .item(style_color_item(workspace.clone(), "Emphasis", get_emphasis_color, set_emphasis_color))
+            .item(style_color_item(workspace.clone(), "Underline", get_underline_color, set_underline_color))
+            .item(style_color_item(workspace.clone(), "Analytic", get_analytic_color, set_analytic_color))
+            .item(style_color_item(workspace.clone(), "Undertag", get_undertag_color, set_undertag_color)),
         )
         .group(
           SettingGroup::new()
@@ -516,7 +577,10 @@ impl Workspace {
     vec![
       SettingPage::new("General")
         .default_open(true)
-        .group(reset_workspace_settings_section_group(workspace.clone(), WorkspaceSettingsSection::General))
+        .group(reset_workspace_settings_section_group(
+          workspace.clone(),
+          WorkspaceSettingsSection::General,
+        ))
         .group(
           SettingGroup::new()
             .title("Editing")
@@ -527,7 +591,6 @@ impl Workspace {
         ),
     ]
   }
-
 }
 
 #[hotpath::measure]
@@ -552,8 +615,10 @@ fn reset_workspace_settings_section_group(workspace: WeakEntity<Workspace>, sect
 
 #[hotpath::measure]
 fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGroup {
-  SettingGroup::new().h_0().overflow_hidden().item(
-    SettingItem::new(
+  SettingGroup::new()
+    .h_0()
+    .overflow_hidden()
+    .item(SettingItem::new(
       "",
       SettingField::input(
         |_| SharedString::from("changed"),
@@ -563,8 +628,7 @@ fn reset_section_delegate_group(reset: impl Fn(&mut App) + 'static) -> SettingGr
       )
       .default_value(SharedString::from("default"))
       .hidden(),
-    )
-  )
+    ))
 }
 
 #[hotpath::measure_all]
@@ -604,6 +668,10 @@ impl Workspace {
       DocumentStyleSection::Background => {
         theme.document_background_color = defaults.document_background_color;
       },
+    }
+
+    if matches!(section, DocumentStyleSection::Colors | DocumentStyleSection::Background) {
+      self.document_style_picker_revision = self.document_style_picker_revision.wrapping_add(1);
     }
 
     let theme_for_save = theme.clone();

@@ -15,6 +15,8 @@ pub(super) fn paint_layout(
   local_caret_color_rgb: Option<u32>,
   external_carets: &[ExternalCaret],
   external_selections: &[ExternalSelection],
+  search_highlights: &[Range<DocumentOffset>],
+  active_search_highlight: Option<usize>,
   window: &mut Window,
   cx: &mut App,
 ) {
@@ -47,6 +49,15 @@ pub(super) fn paint_layout(
   }
   // Selection is painted before text so the semi-transparent highlight sits
   // behind glyphs rather than covering them.
+  paint_search_highlights(
+    layout,
+    search_highlights,
+    active_search_highlight,
+    bounds.origin,
+    content_mask,
+    visible_range.clone(),
+    window,
+  );
   if let Some(selection) = selection {
     paint_selection(layout, selection, bounds.origin, content_mask, visible_range.clone(), window);
   }
@@ -109,11 +120,11 @@ pub(super) fn paint_layout(
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
-    if let Some(mut caret) = caret_bounds(layout, external_caret.offset, bounds.origin)
-      && caret.intersects(&content_mask)
-    {
-      caret.size.width = caret_width;
-      window.paint_quad(fill(
+      if let Some(mut caret) = caret_bounds(layout, external_caret.offset, bounds.origin)
+        && caret.intersects(&content_mask)
+      {
+        caret.size.width = caret_width;
+        window.paint_quad(fill(
         snap_vertical_rule_to_device_pixels(caret, window),
         Background::from(rgb(external_caret.color_rgb)),
       ));
@@ -505,6 +516,50 @@ pub(super) fn snap_rule_thickness_to_device_grid(value: Pixels, scale: f32) -> P
   px(((value * scale).round().max(1.0)) / scale)
 }
 
+fn paint_search_highlights(
+  layout: &LayoutState,
+  highlights: &[Range<DocumentOffset>],
+  active: Option<usize>,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  visible_range: Range<usize>,
+  window: &mut Window,
+) {
+  if highlights.is_empty() {
+    return;
+  }
+  let visible_start = layout
+    .paragraphs
+    .get(visible_range.start)
+    .map_or(usize::MAX, |paragraph| paragraph.index);
+  let visible_end = layout
+    .paragraphs
+    .get(visible_range.end.saturating_sub(1))
+    .map_or(0, |paragraph| paragraph.index);
+  for (ix, highlight) in highlights.iter().enumerate() {
+    if highlight.end.paragraph < visible_start || highlight.start.paragraph > visible_end {
+      continue;
+    }
+    let selection = EditorSelection {
+      anchor: highlight.start,
+      head: highlight.end,
+    };
+    paint_text_range_fill(
+      layout,
+      &selection,
+      origin,
+      content_mask,
+      visible_range.clone(),
+      if Some(ix) == active {
+        hsla(48.0 / 360.0, 1.0, 0.55, 0.95)
+      } else {
+        hsla(55.0 / 360.0, 1.0, 0.72, 0.86)
+      },
+      window,
+    );
+  }
+}
+
 #[hotpath::measure]
 pub(super) fn paint_selection(
   layout: &LayoutState,
@@ -514,7 +569,7 @@ pub(super) fn paint_selection(
   visible_range: Range<usize>,
   window: &mut Window,
 ) {
-  paint_selection_with_color(layout, selection, origin, content_mask, visible_range, hsla(0.0, 0.0, 0.0, 0.22), window);
+  paint_text_range_fill(layout, selection, origin, content_mask, visible_range, hsla(0.0, 0.0, 0.0, 0.22), window);
 }
 
 #[hotpath::measure]
@@ -525,6 +580,18 @@ pub(super) fn paint_selection_with_color(
   content_mask: Bounds<Pixels>,
   visible_range: Range<usize>,
   color: Hsla,
+  window: &mut Window,
+) {
+  paint_text_range_fill(layout, selection, origin, content_mask, visible_range, color, window);
+}
+
+fn paint_text_range_fill(
+  layout: &LayoutState,
+  selection: &EditorSelection,
+  origin: Point<Pixels>,
+  content_mask: Bounds<Pixels>,
+  visible_range: Range<usize>,
+  color: impl Into<Background> + Clone,
   window: &mut Window,
 ) {
   if selection.is_caret() {
@@ -561,7 +628,7 @@ pub(super) fn paint_selection_with_color(
       };
       window.paint_quad(fill(
         Bounds::new(origin + line.origin + point(x1, px(0.0)), size((x2 - x1).max(px(1.0)), line.line_height)),
-        color,
+        color.clone(),
       ));
     }
   }

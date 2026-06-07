@@ -67,6 +67,7 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::OpenDocument
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
+    | CommandId::FindInDocument
     | CommandId::ToggleRibbon
     | CommandId::ScrollToParagraph
     | CommandId::StartCollaboration

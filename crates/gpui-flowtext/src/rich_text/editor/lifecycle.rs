@@ -69,6 +69,8 @@ impl RichTextEditor {
       local_caret_color_rgb: None,
       external_carets: Vec::new(),
       external_selections: Vec::new(),
+      search_highlights: Vec::new(),
+      active_search_highlight: None,
       last_text_input_at: None,
       pending_typing_prefetch_resume: false,
       resume_chunk_prefetch_after_typing: false,
@@ -103,6 +105,8 @@ impl RichTextEditor {
       layout_cache_retain_ranges: ParagraphCacheRetainRanges::default(),
       prep_cache_retain_ranges: ParagraphCacheRetainRanges::default(),
       invisibility_mode: false,
+      collapsed_section_ids: FxHashSet::default(),
+      hovered_collapse_paragraph: None,
       goal_x: None,
     }
   }
@@ -136,6 +140,8 @@ impl RichTextEditor {
     self.last_send_document_generation = None;
     self.last_format_export_generation = None;
     self.zoom_percent = 100.0;
+    self.collapsed_section_ids.clear();
+    self.hovered_collapse_paragraph = None;
     self.document.theme.zoom_factor = 1.0;
     self.save_status = SaveStatus::Saved;
     self.last_recovery_generation = 0;
@@ -149,6 +155,8 @@ impl RichTextEditor {
     self.recovery_write_in_progress = false;
     self.recovery_write_pending = false;
     self.paste_cache = None;
+    self.search_highlights.clear();
+    self.active_search_highlight = None;
     self.pending_styles = None;
     self.armed_inline_tool = None;
     self.selecting = false;
@@ -209,6 +217,7 @@ impl RichTextEditor {
     self.prep_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.goal_x = None;
   }
+
   pub fn last_collaboration_edit(&self) -> Option<&CollaborationEdit> {
     self.last_collaboration_edit.as_ref()
   }
@@ -523,7 +532,6 @@ impl RichTextEditor {
       | CanonicalOperation::ReplaceDocument => RemoteOperationOutcome::RepairNeeded,
     }
   }
-
   pub fn set_document_display_name(&mut self, name: SharedString, cx: &mut Context<Self>) {
     self.document_display_name = Some(name);
     cx.notify();
@@ -591,7 +599,6 @@ impl RichTextEditor {
       .cloned()
       .collect()
   }
-
   pub fn set_external_selections(&mut self, external_selections: Vec<ExternalSelection>, cx: &mut Context<Self>) {
     if self.external_selections != external_selections {
       self.external_selections = external_selections;

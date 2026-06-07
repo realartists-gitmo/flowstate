@@ -42,7 +42,7 @@ pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: us
 }
 
 #[hotpath::measure]
-pub fn split_paragraph_at_with_id(document: &mut Document, paragraph_ix: usize, byte: usize, paragraph_id: ParagraphId) -> bool {
+pub fn split_paragraph_at_with_id(document: &mut Document, paragraph_ix: usize, byte: usize, _paragraph_id: ParagraphId) -> bool {
   if !paragraph_offset_is_char_boundary(document, paragraph_ix, byte) {
     return false;
   }
@@ -63,10 +63,7 @@ pub fn split_paragraph_at_with_id(document: &mut Document, paragraph_ix: usize, 
     version: paragraph.version.wrapping_add(1),
   };
   paragraphs.insert(paragraph_ix + 1, new_paragraph.clone());
-  document
-    .ids
-    .paragraph_ids
-    .insert((paragraph_ix + 1).min(document.ids.paragraph_ids.len()), paragraph_id);
+  insert_paragraph_id(document, paragraph_ix + 1);
   if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
     let blocks = Arc::make_mut(&mut document.blocks);
     if let Some(block) = blocks.get_mut(block_ix) {

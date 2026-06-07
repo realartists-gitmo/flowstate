@@ -1,3 +1,7 @@
+<<<<<<< HEAD
+=======
+
+>>>>>>> main
 #[test]
 #[hotpath::measure]
 fn history_operation_round_trip_for_text_and_paragraph_split() {
@@ -9,6 +13,7 @@ fn history_operation_round_trip_for_text_and_paragraph_split() {
     }],
   );
   let before = capture_document_span(&document, 0..1);
+<<<<<<< HEAD
   assert!(split_paragraph_at(&mut document, 0, "alpha".len()));
   assert!(insert_text_at(
     &mut document,
@@ -17,6 +22,10 @@ fn history_operation_round_trip_for_text_and_paragraph_split() {
     "NEW ",
     RunStyles::default().with(RunStyle::Semantic(2)),
   ));
+=======
+  split_paragraph_at(&mut document, 0, "alpha".len());
+  insert_text_at(&mut document, 1, 0, "NEW ", RunStyles::default().with(RunStyle::Semantic(2)));
+>>>>>>> main
   let after = capture_document_span(&document, 0..2);
   assert_eq!(document.paragraphs.len(), 2);
 

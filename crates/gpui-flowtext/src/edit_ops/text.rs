@@ -1,5 +1,6 @@
 use crate::{ParagraphId, new_paragraph_id};
 
+
 #[hotpath::measure]
 #[must_use]
 pub fn paragraph_text(document: &Document, paragraph_ix: usize) -> String {
@@ -15,14 +16,26 @@ pub fn paragraph_text_len(paragraph: &Paragraph) -> usize {
 #[hotpath::measure]
 #[must_use]
 pub fn document_text_slice(document: &Document, range: Range<usize>) -> String {
-  let mut text = String::with_capacity(range.end - range.start);
-  push_document_text_slice(document, range, &mut text);
+  let len = document.text.byte_len();
+  let start = range.start.min(len);
+  let end = range.end.min(len);
+  if start >= end {
+    return String::new();
+  }
+  let mut text = String::with_capacity(end - start);
+  push_document_text_slice(document, start..end, &mut text);
   text
 }
 
 #[hotpath::measure]
 pub fn push_document_text_slice(document: &Document, range: Range<usize>, text: &mut String) {
-  for chunk in document.text.byte_slice(range).chunks() {
+  let len = document.text.byte_len();
+  let start = range.start.min(len);
+  let end = range.end.min(len);
+  if start >= end {
+    return;
+  }
+  for chunk in document.text.byte_slice(start..end).chunks() {
     text.push_str(chunk);
   }
 }
@@ -119,7 +132,9 @@ pub fn paragraph_span_byte_range(document: &Document, start_paragraph: usize, pa
       .map_or_else(|| document.text.byte_len(), |_| paragraph_byte_range(document, start_paragraph).start);
     return byte..byte;
   }
-  let end_paragraph = (start_paragraph + paragraph_count - 1).min(document.paragraphs.len() - 1);
+  let end_paragraph = start_paragraph
+    .saturating_add(paragraph_count.saturating_sub(1))
+    .min(document.paragraphs.len() - 1);
   paragraph_byte_range(document, start_paragraph).start..paragraph_byte_range(document, end_paragraph).end
 }
 
@@ -184,43 +199,117 @@ pub fn global_to_document_offset(document: &Document, byte: usize) -> DocumentOf
 #[hotpath::measure]
 #[must_use]
 pub fn find_text_ranges(document: &Document, query: &str) -> Vec<Range<DocumentOffset>> {
+  find_text_ranges_with_case(document, query, true)
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn find_text_ranges_with_case(document: &Document, query: &str, case_sensitive: bool) -> Vec<Range<DocumentOffset>> {
+  find_text_ranges_with_options(document, query, case_sensitive, false)
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn find_text_ranges_with_options(document: &Document, query: &str, case_sensitive: bool, whole_words: bool) -> Vec<Range<DocumentOffset>> {
   if query.is_empty() {
     return Vec::new();
   }
   let text = full_document_text(document);
-  text
-    .match_indices(query)
-    .map(|(start, matched)| global_to_document_offset(document, start)..global_to_document_offset(document, start + matched.len()))
+  let matches = if case_sensitive {
+    text
+      .match_indices(query)
+      .map(|(start, matched)| start..start + matched.len())
+      .collect::<Vec<_>>()
+  } else {
+    let lower_text = text.to_ascii_lowercase();
+    let lower_query = query.to_ascii_lowercase();
+    lower_text
+      .match_indices(lower_query.as_str())
+      .map(|(start, matched)| start..start + matched.len())
+      .collect::<Vec<_>>()
+  };
+
+  matches
+    .into_iter()
+    .filter(|range| !whole_words || is_whole_word_match(&text, range.clone()))
+    .map(|range| global_to_document_offset(document, range.start)..global_to_document_offset(document, range.end))
     .collect()
+}
+
+#[hotpath::measure]
+fn is_whole_word_match(text: &str, range: Range<usize>) -> bool {
+  !previous_char_is_word_like(text, range.start) && !next_char_is_word_like(text, range.end)
+}
+
+#[hotpath::measure]
+fn previous_char_is_word_like(text: &str, byte: usize) -> bool {
+  text[..byte.min(text.len())]
+    .chars()
+    .next_back()
+    .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
+#[hotpath::measure]
+fn next_char_is_word_like(text: &str, byte: usize) -> bool {
+  text
+    .get(byte.min(text.len())..)
+    .and_then(|suffix| suffix.chars().next())
+    .is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
 #[hotpath::measure]
 #[must_use]
 pub fn selected_plain_text(document: &Document, range: Range<DocumentOffset>) -> String {
-  if range.start.paragraph == range.end.paragraph {
-    let paragraph_range = paragraph_byte_range(document, range.start.paragraph);
+  if document.paragraphs.is_empty() {
+    return String::new();
+  }
+
+  let mut start = range.start;
+  let mut end = range.end;
+  if (end.paragraph, end.byte) < (start.paragraph, start.byte) {
+    std::mem::swap(&mut start, &mut end);
+  }
+
+  let last_paragraph = document.paragraphs.len() - 1;
+  start.paragraph = start.paragraph.min(last_paragraph);
+  end.paragraph = end.paragraph.min(last_paragraph);
+  start.byte = start
+    .byte
+    .min(paragraph_text_len(&document.paragraphs[start.paragraph]));
+  end.byte = end
+    .byte
+    .min(paragraph_text_len(&document.paragraphs[end.paragraph]));
+
+  if start.paragraph == end.paragraph {
+    if start.byte >= end.byte {
+      return String::new();
+    }
+    let paragraph_range = paragraph_byte_range(document, start.paragraph);
     return clipboard_plain_text(document_text_slice(
       document,
-      paragraph_range.start + range.start.byte..paragraph_range.start + range.end.byte,
+      paragraph_range.start + start.byte..paragraph_range.start + end.byte,
     ));
   }
 
   let mut text = String::new();
-  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-    if paragraph_ix > range.start.paragraph {
+  for paragraph_ix in start.paragraph..=end.paragraph {
+    if paragraph_ix > start.paragraph {
       text.push('\n');
     }
     let paragraph = &document.paragraphs[paragraph_ix];
-    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
-    let end = if paragraph_ix == range.end.paragraph {
-      range.end.byte
+    let start_byte = if paragraph_ix == start.paragraph { start.byte } else { 0 };
+    let end_byte = if paragraph_ix == end.paragraph {
+      end.byte
     } else {
       paragraph_text_len(paragraph)
     };
+    if start_byte >= end_byte {
+      continue;
+    }
     let paragraph_range = paragraph_byte_range(document, paragraph_ix);
     text.push_str(&clipboard_plain_text(document_text_slice(
       document,
-      paragraph_range.start + start..paragraph_range.start + end,
+      paragraph_range.start + start_byte..paragraph_range.start + end_byte,
     )));
   }
   text
@@ -234,6 +323,7 @@ fn clipboard_plain_text(text: String) -> String {
     text
   }
 }
+
 
 #[cfg(test)]
 mod tests {

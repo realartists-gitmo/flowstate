@@ -354,7 +354,7 @@ impl RichTextEditor {
           | VirtualItem::ParagraphChunk { block_ix, .. }
           | VirtualItem::ParagraphRemainder { block_ix, .. },
         ) => *block_ix,
-        None => 0,
+        None => return,
       };
       if let Some(selection) = self.selection_for_object_block(block_ix) {
         self.select_block(selection, cx);

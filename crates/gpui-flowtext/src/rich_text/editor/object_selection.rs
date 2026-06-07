@@ -564,6 +564,7 @@ impl RichTextEditor {
   }
 
 }
+
 #[cfg(test)]
 mod object_selection_tests {
   #[test]

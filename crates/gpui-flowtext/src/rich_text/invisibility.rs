@@ -179,6 +179,7 @@ pub(super) fn projected_visible_paragraph_text_and_runs(document: &Document, par
   let mut text = String::with_capacity(visible_text_len.saturating_add(visible_run_count.saturating_sub(1)));
   let mut runs = Vec::with_capacity(visible_run_count.saturating_mul(2).saturating_sub(1));
   let mut byte = 0usize;
+  let mut last_doc_index = None;
 
   for run in &paragraph.runs {
     let start = byte;
@@ -187,7 +188,7 @@ pub(super) fn projected_visible_paragraph_text_and_runs(document: &Document, par
     if start >= end || end > paragraph_len || !run_is_visible(document, run.styles) {
       continue;
     }
-    if !text.is_empty() {
+    if !text.is_empty() && last_doc_index != Some(paragraph_start + start) {
       text.push(' ');
       runs.push(TextRun {
         len: 1,
@@ -204,6 +205,7 @@ pub(super) fn projected_visible_paragraph_text_and_runs(document: &Document, par
       len: piece_len,
       styles: run.styles,
     });
+    last_doc_index = Some(paragraph_start + end);
   }
 
   (!text.is_empty()).then_some((text, runs))
