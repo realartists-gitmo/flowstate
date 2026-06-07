@@ -124,11 +124,17 @@ impl RichTextEditor {
     let Some(range) = self.selection_or_enclosing_section_range(section_slots) else {
       return;
     };
+    let fragment = RichClipboardFragment {
+      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+      paragraphs,
+      blocks: Vec::new(),
+      assets: Vec::new(),
+    };
     self.selection = EditorSelection {
       anchor: range.start,
       head: range.end,
     };
-    self.insert_toolkit_text_at_caret(paragraphs, cx);
+    self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
   }
 
   fn selection_or_enclosing_section_range(&self, section_slots: &[u8]) -> Option<Range<DocumentOffset>> {

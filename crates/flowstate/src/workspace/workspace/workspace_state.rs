@@ -308,7 +308,11 @@ impl Workspace {
       let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(&[0, 1, 2, 3]) else {
         return false;
       };
-      let paragraphs = condense_fragment_paragraphs(fragment.paragraphs, ' ');
+      let paragraphs = if editor.selection().is_caret() {
+        condense_card_fragment_paragraphs(fragment.paragraphs, ' ')
+      } else {
+        condense_fragment_paragraphs(fragment.paragraphs, ' ')
+      };
       if paragraphs.is_empty() {
         return false;
       }
@@ -492,6 +496,46 @@ fn pin_shortcut_label(pin_index: usize) -> Option<&'static str> {
 }
 
 fn condense_fragment_paragraphs(paragraphs: Vec<InputParagraph>, separator: char) -> Vec<InputParagraph> {
+  condense_paragraph_group(paragraphs, separator)
+    .map(|paragraph| {
+      vec![
+        paragraph,
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: Vec::new(),
+        },
+      ]
+    })
+    .unwrap_or_default()
+}
+
+fn condense_card_fragment_paragraphs(paragraphs: Vec<InputParagraph>, separator: char) -> Vec<InputParagraph> {
+  let mut output = Vec::with_capacity(paragraphs.len());
+  let mut group = Vec::new();
+  let mut transformed_any = false;
+  for paragraph in paragraphs {
+    if card_paragraph_excluded_from_condense(&paragraph) {
+      if !group.is_empty()
+        && let Some(paragraph) = condense_paragraph_group(std::mem::take(&mut group), separator)
+      {
+        transformed_any = true;
+        output.push(paragraph);
+      }
+      output.push(paragraph);
+    } else {
+      group.push(paragraph);
+    }
+  }
+  if !group.is_empty()
+    && let Some(paragraph) = condense_paragraph_group(group, separator)
+  {
+    transformed_any = true;
+    output.push(paragraph);
+  }
+  if transformed_any { output } else { Vec::new() }
+}
+
+fn condense_paragraph_group(paragraphs: Vec<InputParagraph>, separator: char) -> Option<InputParagraph> {
   let mut runs = Vec::new();
   for paragraph in paragraphs {
     let mut paragraph_runs = paragraph
@@ -510,19 +554,18 @@ fn condense_fragment_paragraphs(paragraphs: Vec<InputParagraph>, separator: char
     }
     runs.extend(paragraph_runs);
   }
-  if runs.is_empty() {
-    return Vec::new();
-  }
-  vec![
-    InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs,
-    },
-    InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: Vec::new(),
-    },
-  ]
+  (!runs.is_empty()).then_some(InputParagraph {
+    style: ParagraphStyle::Normal,
+    runs,
+  })
+}
+
+fn card_paragraph_excluded_from_condense(paragraph: &InputParagraph) -> bool {
+  paragraph.style == flowstate_document::PARAGRAPH_TAG
+    || paragraph
+      .runs
+      .iter()
+      .any(|run| run.styles.semantic == flowstate_document::SEMANTIC_CITE)
 }
 
 fn selected_fragment_or_enclosing_section(

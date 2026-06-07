@@ -229,9 +229,7 @@ fn modern_condensed_menu(
         .on_click({
           let editor = editor.clone();
           move |_, _, cx| {
-            editor.update(cx, |editor, cx| {
-              editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
-            });
+            apply_shrink_editor_selection(editor.clone(), flowstate_document::SEMANTIC_CONDENSED, cx);
           }
         }),
     )
@@ -244,15 +242,11 @@ fn modern_condensed_menu(
           PopupMenuItem::new("Shrink")
             .checked(checked)
             .on_click(move |_, _, cx| {
-              editor_for_condensed.update(cx, |editor, cx| {
-                editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
-              });
+              apply_shrink_editor_selection(editor_for_condensed.clone(), flowstate_document::SEMANTIC_CONDENSED, cx);
             }),
         )
         .item(PopupMenuItem::new("Ultra shrink").on_click(move |_, _, cx| {
-          editor_for_ultra.update(cx, |editor, cx| {
-            editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_ULTRACONDENSED), cx);
-          });
+          apply_shrink_editor_selection(editor_for_ultra.clone(), flowstate_document::SEMANTIC_ULTRACONDENSED, cx);
         }))
     })
     .into_any_element()
@@ -263,20 +257,44 @@ const CARD_SECTION_SLOTS: &[u8] = &[0, 1, 2, 3];
 
 fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
   editor.update(cx, |editor, cx| {
+    let use_card_fallback = editor.selection().is_caret();
     let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
       return;
     };
-    let paragraphs = condense_fragment_paragraphs(fragment.paragraphs, separator);
+    let paragraphs = if use_card_fallback {
+      condense_card_fragment_paragraphs(fragment.paragraphs, separator)
+    } else {
+      condense_fragment_paragraphs(fragment.paragraphs, separator)
+    };
     editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, CARD_SECTION_SLOTS, cx);
   });
 }
 
 fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
   editor.update(cx, |editor, cx| {
+    let use_card_fallback = editor.selection().is_caret();
     let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
       return;
     };
-    let paragraphs = uncondense_fragment_paragraphs(fragment.paragraphs);
+    let paragraphs = if use_card_fallback {
+      uncondense_card_fragment_paragraphs(fragment.paragraphs)
+    } else {
+      uncondense_fragment_paragraphs(fragment.paragraphs)
+    };
+    editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, CARD_SECTION_SLOTS, cx);
+  });
+}
+
+fn apply_shrink_editor_selection(editor: Entity<RichTextEditor>, semantic: RunSemanticStyle, cx: &mut App) {
+  editor.update(cx, |editor, cx| {
+    if !editor.selection().is_caret() {
+      editor.toggle_inline_tool(ArmedInlineTool::Semantic(semantic), cx);
+      return;
+    }
+    let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
+      return;
+    };
+    let paragraphs = toggle_card_semantic_paragraphs(fragment.paragraphs, semantic);
     editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, CARD_SECTION_SLOTS, cx);
   });
 }
@@ -285,6 +303,23 @@ fn condense_fragment_paragraphs(
   paragraphs: Vec<flowstate_document::InputParagraph>,
   separator: char,
 ) -> Vec<flowstate_document::InputParagraph> {
+  condense_paragraph_group(paragraphs, separator)
+    .map(|paragraph| vec![paragraph, empty_input_paragraph()])
+    .unwrap_or_default()
+}
+
+fn condense_card_fragment_paragraphs(
+  paragraphs: Vec<flowstate_document::InputParagraph>,
+  separator: char,
+) -> Vec<flowstate_document::InputParagraph> {
+  transform_card_paragraph_groups(paragraphs, |group| {
+    condense_paragraph_group(group, separator)
+      .into_iter()
+      .collect()
+  })
+}
+
+fn condense_paragraph_group(paragraphs: Vec<flowstate_document::InputParagraph>, separator: char) -> Option<flowstate_document::InputParagraph> {
   let mut runs = Vec::new();
   for paragraph in paragraphs {
     let mut paragraph_runs = paragraph
@@ -303,26 +338,24 @@ fn condense_fragment_paragraphs(
     }
     runs.extend(paragraph_runs);
   }
-  if runs.is_empty() {
-    return Vec::new();
-  }
-  vec![
-    flowstate_document::InputParagraph {
-      style: flowstate_document::ParagraphStyle::Normal,
-      runs,
-    },
-    flowstate_document::InputParagraph {
-      style: flowstate_document::ParagraphStyle::Normal,
-      runs: Vec::new(),
-    },
-  ]
+  (!runs.is_empty()).then_some(flowstate_document::InputParagraph {
+    style: flowstate_document::ParagraphStyle::Normal,
+    runs,
+  })
 }
 
 fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>) -> Vec<flowstate_document::InputParagraph> {
-  let mut output = vec![flowstate_document::InputParagraph {
-    style: flowstate_document::ParagraphStyle::Normal,
-    runs: Vec::new(),
-  }];
+  let mut output = uncondense_paragraph_group(paragraphs);
+  output.push(empty_input_paragraph());
+  output
+}
+
+fn uncondense_card_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>) -> Vec<flowstate_document::InputParagraph> {
+  transform_card_paragraph_groups(paragraphs, uncondense_paragraph_group)
+}
+
+fn uncondense_paragraph_group(paragraphs: Vec<flowstate_document::InputParagraph>) -> Vec<flowstate_document::InputParagraph> {
+  let mut output = vec![empty_input_paragraph()];
   for paragraph in paragraphs {
     for run in paragraph.runs {
       let mut remainder = run.text.as_str();
@@ -338,10 +371,7 @@ fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParag
               styles: run.styles,
             });
         }
-        output.push(flowstate_document::InputParagraph {
-          style: flowstate_document::ParagraphStyle::Normal,
-          runs: Vec::new(),
-        });
+        output.push(empty_input_paragraph());
         remainder = &remainder[marker_ix + CONDENSE_PILCROW_MARKER.len_utf8()..];
       }
       if !remainder.is_empty() {
@@ -356,11 +386,86 @@ fn uncondense_fragment_paragraphs(paragraphs: Vec<flowstate_document::InputParag
       }
     }
   }
-  output.push(flowstate_document::InputParagraph {
+  output
+}
+
+fn transform_card_paragraph_groups(
+  paragraphs: Vec<flowstate_document::InputParagraph>,
+  mut transform: impl FnMut(Vec<flowstate_document::InputParagraph>) -> Vec<flowstate_document::InputParagraph>,
+) -> Vec<flowstate_document::InputParagraph> {
+  let mut output = Vec::with_capacity(paragraphs.len());
+  let mut group = Vec::new();
+  let mut transformed_any = false;
+  for paragraph in paragraphs {
+    if card_paragraph_excluded_from_condense(&paragraph) {
+      if !group.is_empty() {
+        let transformed = transform(std::mem::take(&mut group));
+        transformed_any |= !transformed.is_empty();
+        output.extend(transformed);
+      }
+      output.push(paragraph);
+    } else {
+      group.push(paragraph);
+    }
+  }
+  if !group.is_empty() {
+    let transformed = transform(group);
+    transformed_any |= !transformed.is_empty();
+    output.extend(transformed);
+  }
+  if transformed_any { output } else { Vec::new() }
+}
+
+fn toggle_card_semantic_paragraphs(
+  mut paragraphs: Vec<flowstate_document::InputParagraph>,
+  semantic: RunSemanticStyle,
+) -> Vec<flowstate_document::InputParagraph> {
+  let mut eligible_run_count = 0usize;
+  let mut all_eligible_have_semantic = true;
+  for paragraph in &paragraphs {
+    if card_paragraph_excluded_from_condense(paragraph) {
+      continue;
+    }
+    for run in paragraph.runs.iter().filter(|run| !run.text.is_empty()) {
+      eligible_run_count += 1;
+      all_eligible_have_semantic &= run.styles.semantic == semantic;
+    }
+  }
+  if eligible_run_count == 0 {
+    return Vec::new();
+  }
+  let target = if all_eligible_have_semantic {
+    flowstate_document::RunSemanticStyle::Plain
+  } else {
+    semantic
+  };
+  for paragraph in &mut paragraphs {
+    if card_paragraph_excluded_from_condense(paragraph) {
+      continue;
+    }
+    for run in paragraph.runs.iter_mut().filter(|run| !run.text.is_empty()) {
+      run.styles.semantic = target;
+      if target != flowstate_document::RunSemanticStyle::Custom(3) {
+        run.styles.direct_underline = false;
+      }
+    }
+  }
+  paragraphs
+}
+
+fn card_paragraph_excluded_from_condense(paragraph: &flowstate_document::InputParagraph) -> bool {
+  paragraph.style == flowstate_document::PARAGRAPH_TAG
+    || paragraph
+      .runs
+      .iter()
+      .any(|run| run.styles.semantic == flowstate_document::SEMANTIC_CITE)
+}
+
+fn empty_input_paragraph() -> flowstate_document::InputParagraph {
+  flowstate_document::InputParagraph {
     style: flowstate_document::ParagraphStyle::Normal,
     runs: Vec::new(),
-  });
-  output
+  }
 }
 
 #[hotpath::measure]
