@@ -139,6 +139,61 @@ impl Workspace {
     cx.notify();
   }
 
+  pub(super) fn toggle_outline_level(&mut self, level: usize, cx: &mut Context<Self>) {
+    let Some(editor) = self.active_editor.as_ref() else {
+      return;
+    };
+    let editor = editor.read(cx);
+    let signature = outline_signature(editor.document());
+    let target_entries: HashSet<usize> = signature
+      .entries
+      .iter()
+      .filter(|entry| entry.level == level)
+      .map(|entry| entry.paragraph_ix)
+      .collect();
+
+    if target_entries.is_empty() {
+      return;
+    }
+
+    let any_expanded = target_entries.iter().any(|ix| !self.collapsed_outline_items.contains(ix));
+    if any_expanded {
+      self.collapsed_outline_items.extend(target_entries);
+    } else {
+      for ix in target_entries {
+        self.collapsed_outline_items.remove(&ix);
+      }
+    }
+    self.outline_revision = self.outline_revision.wrapping_add(1);
+    self.outline_cache = None;
+    self.outline_scrolled_paragraph = None;
+    self.refresh_outline_tree(cx);
+    cx.notify();
+  }
+
+  pub(super) fn show_outline_context_menu(&mut self, level: usize, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    let workspace = cx.entity().downgrade();
+    let menu = PopupMenu::build(window, cx, move |menu, _, _| {
+      menu.min_w(px(180.0)).item(
+        PopupMenuItem::new(format!("Toggle all {}s", outline_level_name(level))).on_click(move |_, _, cx| {
+          let _ = workspace.update(cx, |workspace, cx| {
+            workspace.outline_context_menu = None;
+            workspace.toggle_outline_level(level, cx);
+            cx.notify();
+          });
+        }),
+      )
+    });
+
+    let _subscription = cx.subscribe(&menu, |workspace, _, _: &DismissEvent, cx| {
+      workspace.outline_context_menu = None;
+      cx.notify();
+    });
+
+    self.outline_context_menu = Some(OutlineContextMenu { position, menu_view: menu, _subscription });
+    cx.notify();
+  }
+
   pub fn dirty_editors(&self, cx: &App) -> Vec<Entity<RichTextEditor>> {
     self
       .document_panels

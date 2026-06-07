@@ -908,6 +908,7 @@ impl Workspace {
           label_action,
           stop_icon_mouse_down: !is_folder,
           stop_label_mouse_down: !is_folder,
+          context_menu_action: None,
         },
         window,
         cx,

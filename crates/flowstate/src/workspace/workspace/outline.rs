@@ -225,6 +225,22 @@ fn active_visible_outline_paragraph_from_visible(visible_paragraphs: &[usize], c
     .and_then(|ix| visible_paragraphs.get(ix).copied())
 }
 
+struct OutlineContextMenu {
+  position: Point<Pixels>,
+  menu_view: Entity<PopupMenu>,
+  _subscription: Subscription,
+}
+
+fn outline_level_name(level: usize) -> &'static str {
+  match level {
+    0 => "Pocket",
+    1 => "Hat",
+    2 => "Block",
+    3 => "Tag / Analytic",
+    _ => "Entry",
+  }
+}
+
 #[hotpath::measure]
 fn outline_level(style: ParagraphStyle) -> Option<usize> {
   match style {

@@ -75,6 +75,7 @@ impl Workspace {
       outline_cache: None,
       collapsed_outline_items: HashSet::new(),
       outline_revision: 0,
+      outline_context_menu: None,
       outline_viewport_paragraph: None,
       outline_active_paragraph: None,
       outline_scrolled_paragraph: None,

@@ -9,9 +9,10 @@ use std::{
 };
 
 use gpui::{
-  AnyElement, AnyWindowHandle, App, Context, Corner, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding,
-  Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription,
-  WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, black, div, prelude::*, px,
+  anchored, black, deferred, div, prelude::*, px, AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper,
+  Entity, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point,
+  PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations,
+  WindowOptions,
 };
 #[cfg(target_os = "windows")]
 use gpui::{Bounds, size};
@@ -20,7 +21,7 @@ use gpui_component::checkbox::Checkbox;
 use gpui_component::color_picker::{ColorPicker, ColorPickerState};
 use gpui_component::input::{Input, InputEvent, InputState, NumberInput, NumberInputEvent, StepAction};
 use gpui_component::list::ListItem;
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu, PopupMenuItem};
 use gpui_component::resizable::{ResizableState, h_resizable, resizable_panel, v_resizable};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
@@ -89,6 +90,7 @@ pub struct Workspace {
   outline_cache: Option<OutlineCache>,
   collapsed_outline_items: HashSet<usize>,
   outline_revision: u64,
+  outline_context_menu: Option<OutlineContextMenu>,
   outline_viewport_paragraph: Option<usize>,
   outline_active_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
