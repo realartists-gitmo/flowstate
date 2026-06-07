@@ -587,20 +587,32 @@ fn modern_export_format(
       let docx_editor = editor.clone();
       let pdf_editor = editor.clone();
       menu
-        .min_w(px(120.0))
+        .min_w(px(100.0))
         .item(
-          PopupMenuItem::new(".docx")
-            .icon(Icon::default().path("icons/docx.svg").xsmall())
-            .on_click(move |_, _, cx| {
-              export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
-            }),
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".docx")
+              .into_any_element()
+          })
+          .icon(Icon::default().path("icons/docx.svg").small())
+          .on_click(move |_, _, cx| {
+            export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+          }),
         )
         .item(
-          PopupMenuItem::new(".pdf")
-            .icon(Icon::default().path("icons/pdf.svg").xsmall())
-            .on_click(move |_, _, cx| {
-              export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
-            }),
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".pdf")
+              .into_any_element()
+          })
+          .icon(Icon::default().path("icons/pdf.svg").small())
+          .on_click(move |_, _, cx| {
+            export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+          }),
         )
     })
     .into_any_element()
@@ -653,26 +665,127 @@ fn modern_export_send(
       let docx_editor = editor.clone();
       let pdf_editor = editor.clone();
       menu
-        .min_w(px(120.0))
-        .item(PopupMenuItem::new(".db8").on_click(move |_, _, cx| {
-          send_format_from_ribbon(
-            db8_editor.clone(),
-            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
-            cx,
-          );
-        }))
+        .min_w(px(100.0))
         .item(
-          PopupMenuItem::new(".docx")
-            .icon(Icon::default().path("icons/docx.svg").xsmall())
-            .on_click(move |_, _, cx| {
-              send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".db8")
+              .into_any_element()
+          })
+          .on_click(move |_, _, cx| {
+            send_format_from_ribbon(
+              db8_editor.clone(),
+              DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+              cx,
+            );
+          }),
+        )
+        .item(
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".docx")
+              .into_any_element()
+          })
+          .icon(Icon::default().path("icons/docx.svg").small())
+          .on_click(move |_, _, cx| {
+            send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+          }),
+        )
+        .item(
+          PopupMenuItem::element(|_, _| {
+            h_flex()
+              .flex_1()
+              .justify_end()
+              .child(".pdf")
+              .into_any_element()
+          })
+          .icon(Icon::default().path("icons/pdf.svg").small())
+          .on_click(move |_, _, cx| {
+            send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+          }),
+        )
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn modern_speech_send_menu(
+  command: &RibbonCommand,
+  _editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  workspace: Option<WeakEntity<Workspace>>,
+  _panel_id: Option<Uuid>,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  let command_color = ribbon_command_color(command, cx);
+  let label = RibbonLabel::for_command(command);
+  let shortcut = shortcut_for(CommandId::SendToSpeechDocument);
+
+  DropdownButton::new("modern-ribbon-speech-send-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .button(
+      Button::new("modern-ribbon-speech-send-toggle")
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .tooltip("Send to speech")
+        .when_some(label.icon_path, |this, path| {
+          this.child(
+            Icon::default()
+              .path(path)
+              .xsmall()
+              .text_color(command_color),
+          )
+        })
+        .when(!label.prefers_icon(), |this| {
+          this.child(
+            div()
+              .flex_none()
+              .text_size(metrics.chip_text_size)
+              .line_height(relative(1.0))
+              .whitespace_nowrap()
+              .text_ellipsis()
+              .text_color(command_color)
+              .child(label.text),
+          )
+        })
+        .when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
+        .on_click({
+          let workspace = workspace.clone();
+          move |_, window, cx| {
+            if let Some(workspace) = workspace.clone() {
+              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
+            }
+          }
+        }),
+    )
+    .dropdown_menu(move |menu, _, _| {
+      let send_workspace = workspace.clone();
+      let send_end_workspace = workspace.clone();
+      menu
+        .min_w(px(160.0))
+        .item(
+          PopupMenuItem::new("Send to speech")
+            .on_click(move |_, window, cx| {
+              if let Some(workspace) = send_workspace.clone() {
+                let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
+              }
             }),
         )
         .item(
-          PopupMenuItem::new(".pdf")
-            .icon(Icon::default().path("icons/pdf.svg").xsmall())
-            .on_click(move |_, _, cx| {
-              send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+          PopupMenuItem::new("Send to speech end")
+            .on_click(move |_, window, cx| {
+              if let Some(workspace) = send_end_workspace.clone() {
+                let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx));
+              }
             }),
         )
     })

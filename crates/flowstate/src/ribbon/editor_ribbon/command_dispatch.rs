@@ -26,7 +26,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     RibbonCommandId::Semantic(style) => {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
     },
-    RibbonCommandId::ToggleSpeechDocument | RibbonCommandId::SendToSpeechDocument => {},
+    RibbonCommandId::ToggleSpeechDocument | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => {},
     RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
     },

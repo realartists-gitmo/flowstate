@@ -70,6 +70,7 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::PreviousTab
     | CommandId::TogglePinTab
     | CommandId::SendToSpeechDocument
+    | CommandId::SendToSpeechDocumentEnd
     | CommandId::CondenseSelection
     | CommandId::SwitchToTab1
     | CommandId::SwitchToTab2

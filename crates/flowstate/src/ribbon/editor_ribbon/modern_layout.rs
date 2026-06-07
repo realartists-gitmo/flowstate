@@ -56,6 +56,8 @@ fn modern_group(
                 modern_export_format(command, editor.clone(), metrics, cx)
               } else if matches!(command.id, RibbonCommandId::ExportSend) {
                 modern_export_send(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::SendToSpeechDocument) {
+                modern_speech_send_menu(command, editor.clone(), metrics, workspace.clone(), panel_id, cx)
               } else if matches!(command.id, RibbonCommandId::ToggleInvisibility) {
                 modern_invisibility_toggle(command, editor.clone(), metrics, cx)
               } else {
@@ -179,7 +181,7 @@ fn command_chip_width(
         .unwrap_or(0.0);
       let accent_width = if command.accent.is_some() { 14.0 } else { 0.0 };
       let component_padding_x = px(4.0);
-      let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu) {
+      let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument) {
         10.0
       } else {
         0.0
@@ -263,15 +265,10 @@ fn modern_command_chip(
     .when(show_shortcut(options), |this| {
       this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
     })
-    .on_click(move |_, window, cx| match command_id {
+    .on_click(move |_, _window, cx| match command_id {
       RibbonCommandId::ToggleSpeechDocument => {
         if let (Some(workspace), Some(panel_id)) = (workspace.clone(), panel_id) {
           let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
-        }
-      },
-      RibbonCommandId::SendToSpeechDocument => {
-        if let Some(workspace) = workspace.clone() {
-          let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
         }
       },
       _ => {
@@ -291,7 +288,7 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
       cx.theme().warning
     },
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
-    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument => cx.theme().info,
+    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => cx.theme().info,
     RibbonCommandId::ToggleSpeechDocument => cx.theme().success,
     RibbonCommandId::Undo | RibbonCommandId::Redo => cx.theme().primary,
     RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend => cx.theme().info,

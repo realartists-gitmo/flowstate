@@ -28,9 +28,13 @@ fn show_shortcut(options: ModernRibbonOptions) -> bool {
 
 #[hotpath::measure]
 fn command_tooltip(command: &RibbonCommand) -> String {
+  let label = match command.id {
+    RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => "Send to speech",
+    _ => command.label,
+  };
   match &command.shortcut {
-    Some(shortcut) => format!("{} ({})", command.label, shortcut),
-    None => command.label.to_string(),
+    Some(shortcut) => format!("{label} ({shortcut})"),
+    None => label.to_string(),
   }
 }
 
@@ -118,6 +122,7 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
     RibbonCommandId::Semantic(style) => 2_000 + style.slot(),
     RibbonCommandId::ToggleSpeechDocument => 2_700,
     RibbonCommandId::SendToSpeechDocument => 2_750,
+    RibbonCommandId::SendToSpeechDocumentEnd => 2_751,
     RibbonCommandId::CondenseMenu => 2_850,
     RibbonCommandId::CondensedMenu => 2_900,
     RibbonCommandId::Underline => 3_000,

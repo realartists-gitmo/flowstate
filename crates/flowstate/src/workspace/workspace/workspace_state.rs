@@ -383,6 +383,24 @@ impl Workspace {
     })
   }
 
+  fn empty_input_paragraph_with_style(style: ParagraphStyle) -> InputParagraph {
+    InputParagraph {
+      style,
+      runs: vec![InputRun {
+        text: String::new(),
+        styles: crate::rich_text_element::RunStyles::default(),
+      }],
+    }
+  }
+
+  fn wrap_with_newline_paragraphs(mut paragraphs: Vec<InputParagraph>, target_style: ParagraphStyle) -> Vec<InputParagraph> {
+    let mut wrapped = Vec::with_capacity(paragraphs.len() + 2);
+    wrapped.push(Self::empty_input_paragraph_with_style(target_style));
+    wrapped.append(&mut paragraphs);
+    wrapped.push(Self::empty_input_paragraph_with_style(target_style));
+    wrapped
+  }
+
   pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(speech_document_id) = self.speech_document_id else {
       return false;
@@ -410,14 +428,44 @@ impl Workspace {
       return false;
     }
     speech_editor.update(cx, |editor, cx| {
-      let mut paragraphs = fragment.paragraphs;
-      paragraphs.push(InputParagraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![InputRun {
-          text: String::new(),
-          styles: crate::rich_text_element::RunStyles::default(),
-        }],
-      });
+      editor.move_line_end(cx);
+      let target_style = editor.caret_paragraph_style();
+      let paragraphs = Self::wrap_with_newline_paragraphs(fragment.paragraphs, target_style);
+      editor.insert_toolkit_text_at_caret(paragraphs, cx);
+    });
+    true
+  }
+
+  pub(crate) fn send_selection_to_speech_document_end(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let Some(speech_document_id) = self.speech_document_id else {
+      return false;
+    };
+    if self.active_document_id == Some(speech_document_id) {
+      return false;
+    }
+    let Some(source_editor) = self.active_editor.clone() else {
+      return false;
+    };
+    let Some(speech_editor) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == speech_document_id)
+      .map(|panel| panel.read(cx).editor())
+    else {
+      return false;
+    };
+    let fragment = source_editor.update(cx, |editor, cx| {
+      editor
+        .speech_send_fragment_at_selection_or_hover(&[2, 3, 4], window, cx)
+        .unwrap_or_else(|| selected_fragment_or_enclosing_section(editor.document(), editor.selection()))
+    });
+    if fragment.paragraphs.is_empty() && fragment.blocks.is_empty() {
+      return false;
+    }
+    speech_editor.update(cx, |editor, cx| {
+      editor.move_document_end(cx);
+      let target_style = editor.caret_paragraph_style();
+      let paragraphs = Self::wrap_with_newline_paragraphs(fragment.paragraphs, target_style);
       editor.insert_toolkit_text_at_caret(paragraphs, cx);
     });
     true

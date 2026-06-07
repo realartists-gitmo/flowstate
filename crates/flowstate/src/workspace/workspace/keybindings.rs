@@ -74,6 +74,7 @@ impl Workspace {
         true
       },
       CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(window, cx),
+      CommandId::SendToSpeechDocumentEnd => self.send_selection_to_speech_document_end(window, cx),
       CommandId::CondenseSelection => self.condense_active_selection(cx),
       CommandId::SwitchToTab1 => {
         self.activate_tab_shortcut(0, cx);
