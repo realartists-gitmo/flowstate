@@ -105,7 +105,9 @@ impl Workspace {
         }
       }
     } else {
-      self.outline_cache = Some(OutlineCache::new(active_id, edit_generation, outline_signature(editor.document())));
+      let signature = outline_signature(editor.document());
+      self.collapsed_outline_items = signature.entries.iter().filter(|entry| entry.level == 2).map(|entry| entry.paragraph_ix).collect();
+      self.outline_cache = Some(OutlineCache::new(active_id, edit_generation, signature));
     }
     let Some(cache) = self.outline_cache.as_mut() else {
       return;
