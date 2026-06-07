@@ -133,8 +133,6 @@ impl Workspace {
       self.collapsed_outline_items.remove(&paragraph_ix);
     }
     self.outline_revision = self.outline_revision.wrapping_add(1);
-    self.outline_cache = None;
-    self.outline_scrolled_paragraph = None;
     self.refresh_outline_tree(cx);
     cx.notify();
   }
@@ -165,8 +163,6 @@ impl Workspace {
       }
     }
     self.outline_revision = self.outline_revision.wrapping_add(1);
-    self.outline_cache = None;
-    self.outline_scrolled_paragraph = None;
     self.refresh_outline_tree(cx);
     cx.notify();
   }
