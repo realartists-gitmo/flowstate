@@ -788,7 +788,6 @@ fn modern_speech_send_menu(
         .min_w(px(160.0))
         .item(
           PopupMenuItem::element({
-            let muted = muted;
             let speech_shortcut = speech_shortcut.clone();
             move |_, _| {
               h_flex()
@@ -818,7 +817,6 @@ fn modern_speech_send_menu(
         )
         .item(
           PopupMenuItem::element({
-            let muted = muted;
             let speech_end_shortcut = speech_end_shortcut.clone();
             move |_, _| {
               h_flex()

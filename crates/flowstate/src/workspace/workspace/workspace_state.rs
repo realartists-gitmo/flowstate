@@ -128,6 +128,40 @@ impl Workspace {
     }
   }
 
+  fn save_current_outline_state(&mut self, cx: &mut Context<Self>) {
+    let Some(active_id) = self.active_document_id else { return };
+    let Some(panel) = self.document_panels.iter().find(|p| p.read(cx).id() == active_id) else { return };
+    panel.update(cx, |panel, _| {
+      panel.collapsed_outline_items = Some(self.collapsed_outline_items.clone());
+      panel.outline_revision = self.outline_revision;
+      panel.outline_scrolled_paragraph = self.outline_scrolled_paragraph;
+    });
+  }
+
+  fn restore_outline_state_for_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
+    let Some(panel) = self.document_panels.iter().find(|p| p.read(cx).id() == panel_id) else { return };
+    let panel = panel.read(cx);
+    match &panel.collapsed_outline_items {
+      Some(items) => self.collapsed_outline_items = items.clone(),
+      None => {
+        if let Some(editor) = self.active_editor.as_ref() {
+          let editor = editor.read(cx);
+          let signature = outline_signature(editor.document());
+          self.collapsed_outline_items = signature
+            .entries
+            .iter()
+            .filter(|entry| entry.level == 2)
+            .map(|entry| entry.paragraph_ix)
+            .collect();
+        }
+      }
+    }
+    self.outline_revision = panel.outline_revision.wrapping_add(1);
+    self.outline_scrolled_paragraph = panel.outline_scrolled_paragraph;
+    self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
+    self.outline_active_paragraph = None;
+  }
+
   fn toggle_outline_item(&mut self, paragraph_ix: usize, cx: &mut Context<Self>) {
     if !self.collapsed_outline_items.insert(paragraph_ix) {
       self.collapsed_outline_items.remove(&paragraph_ix);
@@ -230,24 +264,18 @@ impl Workspace {
   }
 
   fn activate_document_id(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
-    if let Some(panel) = self
+    self.save_current_outline_state(cx);
+    let editor = self
       .document_panels
       .iter()
-      .find(|panel| panel.read(cx).id() == panel_id)
-    {
+      .find(|p| p.read(cx).id() == panel_id)
+      .map(|p| p.read(cx).editor());
+    if let Some(editor) = editor {
       self.active_document_id = Some(panel_id);
-      self.active_editor = Some(panel.read(cx).editor());
+      self.active_editor = Some(editor);
       self.active_flow = None;
-      self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
-      self.outline_active_paragraph = None;
-      self.outline_scrolled_paragraph = None;
-      if let Some(editor) = self.active_editor.as_ref() {
-        let editor = editor.read(cx);
-        let signature = outline_signature(editor.document());
-        self.collapsed_outline_items = signature.entries.iter().filter(|entry| entry.level == 2).map(|entry| entry.paragraph_ix).collect();
-      }
       self.outline_cache = None;
-      self.outline_revision = self.outline_revision.wrapping_add(1);
+      self.restore_outline_state_for_document(panel_id, cx);
       self.refresh_outline_tree(cx);
       self.persist_temporary_workspace_session(cx);
       cx.notify();
