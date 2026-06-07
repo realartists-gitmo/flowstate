@@ -8,7 +8,8 @@ impl RichTextEditor {
     EquationRenderer::clear_entries(keys);
   }
 
-  pub fn new_with_path(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+  pub fn new_with_path(mut document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+    rebuild_document_sections(&mut document);
     let paragraph_count = document.paragraphs.len();
     let saved_generation = if document_path.is_some() { 0 } else { u64::MAX };
     let identity_map = DocumentIdentityMap::new(&document);

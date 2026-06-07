@@ -92,7 +92,7 @@ impl RibbonLabel {
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
       RibbonCommandId::ToggleSpeechDocument => Some("icons/speech.svg"),
       RibbonCommandId::SendToSpeechDocument => Some("icons/send.svg"),
-      RibbonCommandId::MarkCard => Some("icons/highlighter.svg"),
+      RibbonCommandId::MarkCard => Some("icons/mark-card.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
       _ => None,
     };

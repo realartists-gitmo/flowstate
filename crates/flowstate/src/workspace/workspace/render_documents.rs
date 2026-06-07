@@ -88,12 +88,21 @@ impl Workspace {
                 .child("S"),
             )
           })
-          .when(tab.pinned, |this| {
+          .when_some(tab.pin_index.and_then(pin_shortcut_label), |this, pin_label| {
             this.child(
-              Icon::default()
-                .path("icons/pin.svg")
-                .xsmall()
-                .text_color(cx.theme().warning),
+              div()
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().warning)
+                .border_1()
+                .border_color(cx.theme().warning.opacity(0.72))
+                .child(pin_label),
             )
           });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)

@@ -109,6 +109,7 @@ impl RichTextEditor {
 
   pub fn update_document_theme(&mut self, update: impl FnOnce(&mut DocumentTheme), cx: &mut Context<Self>) {
     update(&mut self.document.theme);
+    rebuild_document_sections(&mut self.document);
     self.invalidate_document_theme_layout(cx);
   }
 
@@ -151,9 +152,7 @@ impl RichTextEditor {
         continue;
       };
       let key = paragraph_cache_key(&self.document, paragraph);
-      let chunk_valid = self
-        .valid_chunk_cache_entry(paragraph_ix, width)
-        .is_some();
+      let chunk_valid = self.valid_chunk_cache_entry(paragraph_ix, width).is_some();
       if !chunk_valid {
         self.paragraph_chunk_layout_cache[paragraph_ix] = None;
       }
@@ -306,11 +305,11 @@ impl RichTextEditor {
 
   pub fn discard_recovery_file(&mut self, cx: &mut Context<Self>) {
     if let Some(path) = self.recovery_path.clone() {
-      cx.background_executor().spawn(async move {
-        let _ = fs::remove_file(path);
-      })
-      .detach();
+      cx.background_executor()
+        .spawn(async move {
+          let _ = fs::remove_file(path);
+        })
+        .detach();
     }
   }
-
 }

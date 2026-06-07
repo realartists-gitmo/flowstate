@@ -56,7 +56,10 @@ impl RichTextEditor {
     let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
       return false;
     };
-    if !matches!(paragraph.style, ParagraphStyle::Custom(0..=3)) {
+    if self
+      .section_collapsed_at_heading(paragraph_ix, &[0, 1, 2, 3])
+      .is_none()
+    {
       return false;
     }
     let Some(layout) = self.layout_for_offset(DocumentOffset {
@@ -65,7 +68,10 @@ impl RichTextEditor {
     }) else {
       return false;
     };
-    let origin = layout.bounds.map(|bounds| bounds.origin).unwrap_or(point(px(0.0), px(0.0)));
+    let origin = layout
+      .bounds
+      .map(|bounds| bounds.origin)
+      .unwrap_or(point(px(0.0), px(0.0)));
     let Some(caret) = caret_bounds(
       &layout,
       DocumentOffset {
@@ -85,7 +91,9 @@ impl RichTextEditor {
   fn on_mouse_move(&mut self, event: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
     self.last_drag_position = Some(event.position);
     if !event.dragging() {
-      let paragraph_ix = self.hit_test_document_position(event.position, window, cx).paragraph;
+      let paragraph_ix = self
+        .hit_test_document_position(event.position, window, cx)
+        .paragraph;
       let next_hover = self
         .section_collapsed_at_heading(paragraph_ix, &[0, 1, 2, 3])
         .is_some()

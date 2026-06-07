@@ -107,6 +107,60 @@ impl RichTextEditor {
     ))
   }
 
+  pub fn fragment_at_selection_or_enclosing_section(&self, section_slots: &[u8]) -> Option<RichClipboardFragment> {
+    let range = self.selection_or_enclosing_section_range(section_slots)?;
+    Some(selected_rich_fragment(&self.document, range))
+  }
+
+  pub fn replace_selection_or_enclosing_section_with_paragraphs(
+    &mut self,
+    paragraphs: Vec<InputParagraph>,
+    section_slots: &[u8],
+    cx: &mut Context<Self>,
+  ) {
+    if paragraphs.is_empty() {
+      return;
+    }
+    let Some(range) = self.selection_or_enclosing_section_range(section_slots) else {
+      return;
+    };
+    self.selection = EditorSelection {
+      anchor: range.start,
+      head: range.end,
+    };
+    self.insert_toolkit_text_at_caret(paragraphs, cx);
+  }
+
+  fn selection_or_enclosing_section_range(&self, section_slots: &[u8]) -> Option<Range<DocumentOffset>> {
+    if !self.selection.is_caret() {
+      return Some(self.selection.normalized());
+    }
+    let paragraph_count = self.document.paragraphs.len();
+    if paragraph_count == 0 {
+      return None;
+    }
+    let caret = self.selection.head;
+    let paragraph_ix = caret.paragraph.min(paragraph_count - 1);
+    let (start_paragraph, end_paragraph_exclusive) = hierarchical_section_bounds(&self.document, paragraph_ix, section_slots)
+      .or_else(|| enclosing_section_bounds(&self.document, paragraph_ix, section_slots))
+      .unwrap_or((paragraph_ix, paragraph_ix.saturating_add(1).min(paragraph_count)));
+    let end_paragraph = end_paragraph_exclusive
+      .saturating_sub(1)
+      .min(paragraph_count - 1);
+    if start_paragraph > end_paragraph {
+      return None;
+    }
+    Some(
+      DocumentOffset {
+        paragraph: start_paragraph,
+        byte: 0,
+      }..DocumentOffset {
+        paragraph: end_paragraph,
+        byte: paragraph_text_len(&self.document.paragraphs[end_paragraph]),
+      },
+    )
+  }
+
   pub fn toggle_enclosing_section_collapsed(&mut self, section_slots: &[u8], cx: &mut Context<Self>) {
     let caret = self.selection.head;
     self.toggle_section_collapsed_at_paragraph(caret.paragraph, section_slots, cx);
@@ -117,35 +171,25 @@ impl RichTextEditor {
   }
 
   pub(super) fn section_collapsed_at_heading(&self, paragraph_ix: usize, section_slots: &[u8]) -> Option<bool> {
-    if let Some(section) = enclosing_section(&self.document, paragraph_ix, section_slots) {
-      let start = paragraph_index_for_id(&self.document, section.start_paragraph)?;
-      return (start == paragraph_ix).then(|| self.collapsed_section_ids.contains(&section.id));
-    }
-    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
-    let ParagraphStyle::Custom(slot) = paragraph.style else {
-      return None;
+    let heading_kind = collapse_heading_kind(&self.document, paragraph_ix, section_slots)?;
+    let Some(section) = section_at_heading(&self.document, paragraph_ix, heading_kind) else {
+      return Some(false);
     };
-    section_slots.contains(&(slot & 0x7f)).then(|| {
-      self
-        .collapsed_section_ids
-        .contains(&SectionId(paragraph_ix as u128))
-    })
+    Some(self.collapsed_section_ids.contains(&section.id))
   }
 
   pub(super) fn toggle_section_collapsed_at_paragraph(&mut self, paragraph_ix: usize, section_slots: &[u8], cx: &mut Context<Self>) {
-    let section_id = if let Some(section) = enclosing_section(&self.document, paragraph_ix, section_slots) {
-      section.id
-    } else {
-      let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
-        return;
-      };
-      let ParagraphStyle::Custom(slot) = paragraph.style else {
-        return;
-      };
-      if !section_slots.contains(&(slot & 0x7f)) {
-        return;
-      }
-      SectionId(paragraph_ix as u128)
+    let Some(heading_kind) = collapse_heading_kind(&self.document, paragraph_ix, section_slots) else {
+      return;
+    };
+    let section_id = section_at_heading(&self.document, paragraph_ix, heading_kind)
+      .map(|section| section.id)
+      .or_else(|| {
+        rebuild_document_sections(&mut self.document);
+        section_at_heading(&self.document, paragraph_ix, heading_kind).map(|section| section.id)
+      });
+    let Some(section_id) = section_id else {
+      return;
     };
     if !self.collapsed_section_ids.insert(section_id) {
       self.collapsed_section_ids.remove(&section_id);
@@ -368,6 +412,27 @@ fn hierarchical_section_bounds(document: &Document, paragraph_ix: usize, section
     }
   }
   Some((paragraph_ix, end))
+}
+
+fn collapse_heading_kind(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<u8> {
+  let paragraph = document.paragraphs.get(paragraph_ix)?;
+  let ParagraphStyle::Custom(slot) = paragraph.style else {
+    return None;
+  };
+  let slot = slot & 0x7f;
+  if !section_slots.contains(&slot) {
+    return None;
+  }
+  let style = document.theme.custom_paragraph_styles.get(&slot)?;
+  style.section_level?;
+  Some(style.section_kind.unwrap_or(slot))
+}
+
+fn section_at_heading(document: &Document, paragraph_ix: usize, heading_kind: u8) -> Option<&DocumentSection> {
+  document.sections.iter().find(|section| {
+    let SectionKind::Custom(section_kind) = section.kind;
+    section_kind == heading_kind && paragraph_index_for_id(document, section.start_paragraph) == Some(paragraph_ix)
+  })
 }
 
 fn enclosing_section<'a>(document: &'a Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<&'a DocumentSection> {

@@ -259,39 +259,26 @@ fn modern_condensed_menu(
 }
 
 const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
+const CARD_SECTION_SLOTS: &[u8] = &[0, 1, 2, 3];
 
 fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
-  let paragraphs = {
-    let editor = editor.read(cx);
-    let selection = editor.selection();
-    if selection.anchor == selection.head {
-      Vec::new()
-    } else {
-      let range = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
-      condense_fragment_paragraphs(flowstate_document::selected_rich_fragment(editor.document(), range).paragraphs, separator)
-    }
-  };
-  if paragraphs.is_empty() {
-    return;
-  }
-  editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
+  editor.update(cx, |editor, cx| {
+    let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
+      return;
+    };
+    let paragraphs = condense_fragment_paragraphs(fragment.paragraphs, separator);
+    editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, CARD_SECTION_SLOTS, cx);
+  });
 }
 
 fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
-  let paragraphs = {
-    let editor = editor.read(cx);
-    let selection = editor.selection();
-    if selection.anchor == selection.head {
-      Vec::new()
-    } else {
-      let range = selection.anchor.min(selection.head)..selection.anchor.max(selection.head);
-      uncondense_fragment_paragraphs(flowstate_document::selected_rich_fragment(editor.document(), range).paragraphs)
-    }
-  };
-  if paragraphs.is_empty() {
-    return;
-  }
-  editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
+  editor.update(cx, |editor, cx| {
+    let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
+      return;
+    };
+    let paragraphs = uncondense_fragment_paragraphs(fragment.paragraphs);
+    editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, CARD_SECTION_SLOTS, cx);
+  });
 }
 
 fn condense_fragment_paragraphs(

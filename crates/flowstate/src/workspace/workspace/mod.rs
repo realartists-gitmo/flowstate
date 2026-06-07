@@ -136,6 +136,7 @@ struct DocumentTab {
   label: SharedString,
   active: bool,
   pinned: bool,
+  pin_index: Option<usize>,
   speech: bool,
 }
 

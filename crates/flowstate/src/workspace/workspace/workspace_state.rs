@@ -248,7 +248,6 @@ impl Workspace {
     self.tab_bar_scroll_handle.scroll_to_item(target);
   }
 
-
   fn toggle_active_tab_pin(&mut self, cx: &mut Context<Self>) {
     let Some(active_id) = self.active_document_id else {
       return;
@@ -305,27 +304,17 @@ impl Workspace {
     let Some(editor) = self.active_editor.clone() else {
       return false;
     };
-    let paragraphs = {
-      let editor = editor.read(cx);
-      let selection = editor.selection();
-      if selection.anchor == selection.head {
-        Vec::new()
-      } else {
-        condense_fragment_paragraphs(
-          crate::rich_text_element::selected_rich_fragment(
-            editor.document(),
-            selection.anchor.min(selection.head)..selection.anchor.max(selection.head),
-          )
-          .paragraphs,
-          ' ',
-        )
+    editor.update(cx, |editor, cx| {
+      let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(&[0, 1, 2, 3]) else {
+        return false;
+      };
+      let paragraphs = condense_fragment_paragraphs(fragment.paragraphs, ' ');
+      if paragraphs.is_empty() {
+        return false;
       }
-    };
-    if paragraphs.is_empty() {
-      return false;
-    }
-    editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
-    true
+      editor.replace_selection_or_enclosing_section_with_paragraphs(paragraphs, &[0, 1, 2, 3], cx);
+      true
+    })
   }
 
   pub(crate) fn send_selection_to_speech_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -358,7 +347,10 @@ impl Workspace {
       let mut paragraphs = fragment.paragraphs;
       paragraphs.push(InputParagraph {
         style: ParagraphStyle::Normal,
-        runs: Vec::new(),
+        runs: vec![InputRun {
+          text: String::new(),
+          styles: crate::rich_text_element::RunStyles::default(),
+        }],
       });
       editor.insert_toolkit_text_at_caret(paragraphs, cx);
     });
@@ -391,7 +383,8 @@ impl Workspace {
           id,
           label,
           active: Some(id) == self.active_document_id,
-          pinned: self.pinned_document_ids.contains(&id),
+          pinned: false,
+          pin_index: None,
           speech: self.speech_document_id == Some(id),
         }
       })
@@ -407,11 +400,12 @@ impl Workspace {
         id,
         label,
         active: Some(id) == self.active_document_id,
-        pinned: self.pinned_document_ids.contains(&id),
+        pinned: false,
+        pin_index: None,
         speech: self.speech_document_id == Some(id),
       }
     }));
-    tabs
+    ordered_document_tabs(tabs, &self.pinned_document_ids)
   }
 
   fn active_outline_paragraph(&self, _: &App) -> Option<usize> {
@@ -467,6 +461,33 @@ impl Workspace {
       }
     });
     self.outline_scrolled_paragraph = Some(paragraph_ix);
+  }
+}
+
+fn ordered_document_tabs(mut tabs: Vec<DocumentTab>, pinned_document_ids: &[Uuid]) -> Vec<DocumentTab> {
+  for tab in &mut tabs {
+    tab.pin_index = pinned_document_ids
+      .iter()
+      .position(|pinned_id| *pinned_id == tab.id);
+    tab.pinned = tab.pin_index.is_some();
+  }
+  tabs.sort_by_key(|tab| (tab.pin_index.is_none(), tab.pin_index.unwrap_or(usize::MAX)));
+  tabs
+}
+
+fn pin_shortcut_label(pin_index: usize) -> Option<&'static str> {
+  match pin_index {
+    0 => Some("1"),
+    1 => Some("2"),
+    2 => Some("3"),
+    3 => Some("4"),
+    4 => Some("5"),
+    5 => Some("6"),
+    6 => Some("7"),
+    7 => Some("8"),
+    8 => Some("9"),
+    9 => Some("0"),
+    _ => None,
   }
 }
 
