@@ -1,6 +1,25 @@
 #[hotpath::measure_all]
 impl Render for Workspace {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    let workspace = cx.entity().downgrade();
+    window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, _, window, cx| {
+      if event.modifiers.control {
+        let delta = event.delta.pixel_delta(window.line_height());
+        if let Some(workspace) = workspace.upgrade() {
+          workspace.update(cx, |workspace, cx| {
+            if let Some(editor) = workspace.active_editor.clone() {
+              if delta.y < px(0.0) {
+                editor.update(cx, |editor, cx| editor.zoom_in(cx));
+              } else {
+                editor.update(cx, |editor, cx| editor.zoom_out(cx));
+              }
+            }
+          });
+        }
+        cx.stop_propagation();
+      }
+    });
+
     div()
       .size_full()
       .relative()

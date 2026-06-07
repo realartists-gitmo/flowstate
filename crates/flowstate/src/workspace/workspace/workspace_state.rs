@@ -168,6 +168,7 @@ impl Workspace {
     }
     self.outline_revision = self.outline_revision.wrapping_add(1);
     self.refresh_outline_tree(cx);
+    self.save_current_outline_state(cx);
     cx.notify();
   }
 
@@ -198,6 +199,7 @@ impl Workspace {
     }
     self.outline_revision = self.outline_revision.wrapping_add(1);
     self.refresh_outline_tree(cx);
+    self.save_current_outline_state(cx);
     cx.notify();
   }
 

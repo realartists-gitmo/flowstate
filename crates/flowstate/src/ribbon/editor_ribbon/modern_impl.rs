@@ -148,13 +148,14 @@ impl ModernStylesRibbon {
     let wrap_widths = groups
       .iter()
       .map(|group| {
-        (metrics.max_chip_rows > 1).then(|| {
+        let has_wrap = group.id == "speech" || metrics.max_chip_rows > 1;
+        has_wrap.then(|| {
           if group.id == "style" {
             group_row_width(group, metrics, 2, window, cx)
           } else if group.id == "history" {
             group_row_width(group, metrics, 1, window, cx)
           } else if group.id == "speech" {
-            balanced_group_width(group, metrics, 2, window, cx)
+            speech_two_row_width(group, metrics, window, cx)
           } else if group.id == "views" {
             let label_width = measure_ribbon_text("Views", metrics.chip_text_size, window, cx).as_f32();
             let cmd_width = group_row_width(group, metrics, metrics.max_chip_rows, window, cx).as_f32();

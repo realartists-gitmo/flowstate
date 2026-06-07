@@ -651,7 +651,7 @@ fn modern_export_send(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip("Copy Without Analytics")
+        .tooltip("Copy without analytics")
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()

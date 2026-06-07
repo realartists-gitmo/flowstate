@@ -1,5 +1,4 @@
 use crate::commands::FindInDocumentAction;
-
 #[hotpath::measure]
 fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
   COMMAND_SPECS.iter().find_map(|spec| {
@@ -76,6 +75,20 @@ impl Workspace {
       CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(window, cx),
       CommandId::SendToSpeechDocumentEnd => self.send_selection_to_speech_document_end(window, cx),
       CommandId::CondenseSelection => self.condense_active_selection(cx),
+      CommandId::MarkCard => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| {
+            editor.set_highlight_from_caret_to_enclosing_section_end(
+              flowstate_document::HIGHLIGHT_MARKED,
+              &[0, 1, 2, 3],
+              cx,
+            );
+          });
+          true
+        } else {
+          false
+        }
+      },
       CommandId::SwitchToTab1 => {
         self.activate_tab_shortcut(0, cx);
         true
