@@ -503,7 +503,11 @@ fn modern_undo_button(
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
-  modern_icon_chip(IconName::Undo, "Undo", command, editor, metrics, cx, |editor, cx| {
+  let enabled = editor.read(cx).can_undo();
+  let tooltip = shortcut_for(CommandId::Undo)
+    .map(|s| format!("Undo ({s})"))
+    .unwrap_or_else(|| "Undo".to_string());
+  modern_icon_chip(IconName::Undo, tooltip, command, editor, metrics, cx, enabled, |editor, cx| {
     editor.undo(cx);
   })
 }
@@ -515,21 +519,27 @@ fn modern_redo_button(
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
-  modern_icon_chip(IconName::Redo, "Redo", command, editor, metrics, cx, |editor, cx| {
+  let enabled = editor.read(cx).can_redo();
+  let tooltip = shortcut_for(CommandId::Redo)
+    .map(|s| format!("Redo ({s})"))
+    .unwrap_or_else(|| "Redo".to_string());
+  modern_icon_chip(IconName::Redo, tooltip, command, editor, metrics, cx, enabled, |editor, cx| {
     editor.redo(cx);
   })
 }
 
 fn modern_icon_chip(
   icon: IconName,
-  tooltip: &'static str,
+  tooltip: String,
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
+  enabled: bool,
   action: impl Fn(&mut RichTextEditor, &mut Context<RichTextEditor>) + 'static,
 ) -> AnyElement {
   let command_color = ribbon_command_color(command, cx);
+  let icon_color = if enabled { command_color } else { cx.theme().muted_foreground.opacity(0.5) };
   Button::new(("modern-ribbon-command", ribbon_command_key(command.id)))
     .xsmall()
     .compact()
@@ -537,8 +547,9 @@ fn modern_icon_chip(
     .h(metrics.chip_height)
     .w(metrics.chip_height)
     .px(metrics.chip_padding_x)
-    .icon(Icon::new(icon).xsmall().text_color(command_color))
+    .icon(Icon::new(icon).xsmall().text_color(icon_color))
     .tooltip(tooltip)
+    .disabled(!enabled)
     .on_click(move |_, _, cx| {
       editor.update(cx, |editor, cx| action(editor, cx));
     })
