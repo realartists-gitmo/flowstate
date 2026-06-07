@@ -1047,15 +1047,8 @@ impl Workspace {
           workspace.refresh_outline_tree(cx);
         }
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
-<<<<<<< HEAD
-        if workspace.outline_viewport_paragraph != viewport_paragraph {
-          workspace.outline_viewport_paragraph = viewport_paragraph;
-          cx.notify();
-        }
-        workspace.publish_db8_presence(id, editor.clone(), cx);
-=======
         workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
->>>>>>> main
+        workspace.publish_db8_presence(id, editor.clone(), cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
         workspace.publish_db8_collaboration_edit(id, editor.clone(), cx);
       }),
@@ -1421,14 +1414,9 @@ impl Workspace {
     title: Option<String>,
     window: &mut Window,
     cx: &mut Context<Self>,
-<<<<<<< HEAD
   ) -> Entity<DocumentPanel> {
     let panel = self.create_document_panel(document, path, title, window, cx);
-=======
-  ) {
-    self.create_document_panel(document, path, title, window, cx);
     self.persist_temporary_workspace_session(cx);
->>>>>>> main
     cx.notify();
     panel
   }
@@ -1467,7 +1455,6 @@ impl Workspace {
     panel
   }
 
-<<<<<<< HEAD
   fn add_flow_panel(
     &mut self,
     document: flowstate_flow::FlowDocument,
@@ -1476,11 +1463,7 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
     let panel = self.create_flow_panel(document, path, window, cx);
-=======
-  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(document, path, window, cx);
     self.persist_temporary_workspace_session(cx);
->>>>>>> main
     cx.notify();
     panel
   }

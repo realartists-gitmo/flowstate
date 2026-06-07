@@ -344,9 +344,6 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    if self.replace_selection_with_text_fast_path(text, cx) {
-      return;
-    }
     if self.insert_single_grapheme_fast_path(text, cx) {
       return;
     }
@@ -362,15 +359,6 @@ impl RichTextEditor {
       let _ = self.delete_selection_with_document_snapshot(cx);
       return;
     }
-    if self.delete_selection_fast_path(cx) {
-      return;
-    }
-    if self.delete_single_grapheme_fast_path(true, cx) {
-      return;
-    }
-    if self.join_paragraph_fast_path(true, cx) {
-      return;
-    }
     self.apply_document_edit(cx, |editor, cx| editor.backspace(cx));
   }
 
@@ -381,15 +369,6 @@ impl RichTextEditor {
     }
     if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
       let _ = self.delete_selection_with_document_snapshot(cx);
-      return;
-    }
-    if self.delete_selection_fast_path(cx) {
-      return;
-    }
-    if self.delete_single_grapheme_fast_path(false, cx) {
-      return;
-    }
-    if self.join_paragraph_fast_path(false, cx) {
       return;
     }
     self.apply_document_edit(cx, |editor, cx| editor.delete_forward(cx));

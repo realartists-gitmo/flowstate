@@ -444,5 +444,10 @@ fn collaboration_peer_status_tooltip(peer: &CollaborationPeerStatusItem, role_la
 }
 
 fn short_hash(hash: &[u8; 32]) -> String {
-  hash[..8].iter().map(|byte| format!("{byte:02x}")).collect()
+  let mut s = String::with_capacity(16);
+  for byte in &hash[..8] {
+    use std::fmt::Write;
+    write!(s, "{byte:02x}").unwrap();
+  }
+  s
 }

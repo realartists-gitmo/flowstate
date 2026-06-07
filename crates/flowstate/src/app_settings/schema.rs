@@ -174,7 +174,10 @@ pub struct DocumentThemeSettings {
   pub ultracondensed_underline: ThemeUnderlineSetting,
 }
 
-<<<<<<< HEAD
+fn default_true() -> bool {
+  true
+}
+
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default)]
 pub struct DocumentStyleManifestSettings {
@@ -201,10 +204,6 @@ pub struct DocumentStyleDefinitionSettings<T> {
   pub name: String,
   pub label: String,
   pub style: T,
-=======
-fn default_true() -> bool {
-  true
->>>>>>> main
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]

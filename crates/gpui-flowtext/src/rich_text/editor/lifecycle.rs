@@ -812,12 +812,6 @@ enum RemoteOperationOutcome {
   Conflict,
 }
 
-impl RemoteOperationOutcome {
-  fn max(self, other: Self) -> Self {
-    core::cmp::max(self, other)
-  }
-}
-
 #[cfg(test)]
 mod lifecycle_tests {
   use super::*;

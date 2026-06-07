@@ -47,49 +47,21 @@ pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<Run
           (text_bottom - text_top + document.theme.box_padding_top + document.theme.box_padding_bottom).max(px(1.0)),
         ),
       );
-<<<<<<< HEAD
-      push_merged_box(&mut borders, box_bounds);
-    }
-  }
-  let border_color = document.theme.default_text_color;
-  let border_thickness = document.theme.inline_border_paint_width;
-=======
       push_merged_box(&mut borders, InlineBorderBox { bounds: box_bounds, thickness: segment.format.border_width });
     }
   }
   let border_color = document.theme.default_text_color;
->>>>>>> main
   // Word paints fills before border rules. Keeping all run borders after all
   // run highlights prevents a following highlighted run from hiding the right
   // edge of the previous boxed run.
   backgrounds.extend(
     borders
       .into_iter()
-<<<<<<< HEAD
-      .flat_map(|bounds| box_rules(bounds, border_thickness, border_color)),
-=======
       .flat_map(|border| box_rules(border.bounds, border.thickness, border_color)),
->>>>>>> main
   );
   backgrounds
 }
 
-<<<<<<< HEAD
-#[hotpath::measure]
-fn push_merged_box(boxes: &mut Vec<Bounds<Pixels>>, bounds: Bounds<Pixels>) {
-  const EPSILON: f32 = 0.5;
-  if let Some(last) = boxes.last_mut() {
-    let same_band = (f32::from(last.origin.y) - f32::from(bounds.origin.y)).abs() <= EPSILON
-      && (f32::from(last.size.height) - f32::from(bounds.size.height)).abs() <= EPSILON;
-    let touching = f32::from(bounds.origin.x) <= f32::from(last.origin.x + last.size.width) + EPSILON;
-    if same_band && touching {
-      let right = (last.origin.x + last.size.width).max(bounds.origin.x + bounds.size.width);
-      last.size.width = right - last.origin.x;
-      return;
-    }
-  }
-  boxes.push(bounds);
-=======
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct InlineBorderBox {
   bounds: Bounds<Pixels>,
@@ -111,7 +83,6 @@ fn push_merged_box(boxes: &mut Vec<InlineBorderBox>, border: InlineBorderBox) {
     }
   }
   boxes.push(border);
->>>>>>> main
 }
 
 #[hotpath::measure]

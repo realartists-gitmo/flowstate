@@ -1,7 +1,4 @@
-<<<<<<< HEAD
-=======
 
->>>>>>> main
 #[test]
 #[hotpath::measure]
 fn single_paragraph_edits_keep_following_derived_byte_ranges_current() {
@@ -66,11 +63,7 @@ fn split_and_merge_preserve_empty_styled_paragraphs() {
   );
 
   let first_len = paragraph_text_len(&document.paragraphs[0]);
-<<<<<<< HEAD
   assert!(split_paragraph_at(&mut document, 0, first_len));
-=======
-  split_paragraph_at(&mut document, 0, first_len);
->>>>>>> main
   assert_eq!(document.paragraphs.len(), 2);
   assert_eq!(document.paragraphs[1].style, ParagraphStyle::Custom(0));
   assert_eq!(paragraph_text_len(&document.paragraphs[1]), 0);

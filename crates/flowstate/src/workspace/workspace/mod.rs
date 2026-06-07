@@ -1,11 +1,7 @@
 use std::{
   cell::Cell,
-<<<<<<< HEAD
   collections::{BTreeMap, HashMap, HashSet, VecDeque},
-=======
-  collections::{HashMap, HashSet},
   fs,
->>>>>>> main
   path::{Path, PathBuf},
   rc::Rc,
   sync::Arc,
@@ -47,13 +43,9 @@ use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
-<<<<<<< HEAD
-  CollaborationRole as Db8CollaborationRole, Document, DocumentOffset, DocumentTheme, EditorSelection, ExternalCaret, ExternalSelection,
-  ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme, load_or_create_document,
-=======
-  CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
+  CollaborationRole as Db8CollaborationRole, CustomParagraphBorder, Document, DocumentOffset, DocumentTheme, EditorSelection,
+  ExternalCaret, ExternalSelection, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
   ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document,
->>>>>>> main
   paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;

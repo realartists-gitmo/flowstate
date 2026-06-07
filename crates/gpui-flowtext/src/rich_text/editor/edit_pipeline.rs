@@ -50,11 +50,18 @@ impl RichTextEditor {
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: vec![EditOperation::ReplaceParagraphSpan {
-        before: before_span,
-        after: after_span,
+      operations: vec![EditOperation::InsertText {
+        paragraph: caret.paragraph,
+        byte: caret.byte,
+        text,
+        styles,
       }],
-      canonical_operations: vec![CanonicalOperation::JoinParagraphs { first, second }],
+      canonical_operations: vec![CanonicalOperation::InsertText {
+        paragraph: paragraph_id,
+        byte: caret.byte,
+        text: canonical_text,
+        styles,
+      }],
     });
     self.redo_stack.clear();
     self.after_text_mutation(cx);

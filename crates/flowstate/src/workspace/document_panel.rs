@@ -91,10 +91,10 @@ impl DocumentPanel {
     self.ribbon.clone()
   }
 
-<<<<<<< HEAD
   pub fn path(&self) -> Option<&PathBuf> {
     self.path.as_ref()
-=======
+  }
+
   pub fn search_bar(&self) -> Entity<DocumentSearchBar> {
     self.search_bar.clone()
   }
@@ -112,7 +112,6 @@ impl DocumentPanel {
       .search_matches
       .iter()
       .map(|range| range.start.paragraph)
->>>>>>> main
   }
 
   pub fn title_text(&self) -> SharedString {

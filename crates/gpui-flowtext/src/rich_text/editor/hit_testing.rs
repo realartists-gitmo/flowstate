@@ -200,11 +200,10 @@ impl RichTextEditor {
     }
     let caret = self.selection.head;
     if caret.byte == 0 {
+      if let Some(object) = self.immediate_object_before_paragraph(caret.paragraph) {
         self.select_block(object, cx);
         return;
       }
-      // Joining backwards: merge this paragraph onto the previous one. The
-      // caret lands at the join seam.
       if caret.paragraph == 0 {
         return;
       }

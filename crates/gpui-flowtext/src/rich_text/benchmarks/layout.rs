@@ -40,11 +40,7 @@ fn benchmark_layout_paths(
     let paint_bounds = Bounds::new(point(px(0.0), px(0.0)), size(width_px, layout.size.height));
     let paint_plain = include_paint.then(|| {
       repeated(iterations, || {
-<<<<<<< HEAD
-        paint_layout(&layout, paint_bounds, None, None, false, px(1.0), None, &[], &[], window, cx);
-=======
-        paint_layout(&layout, paint_bounds, None, None, false, px(1.0), &[], &[], None, window, cx);
->>>>>>> main
+        paint_layout(&layout, paint_bounds, None, None, false, px(1.0), None, &[], &[], &[], None, window, cx);
       })
     });
     let selection = top_selection(document);
@@ -57,15 +53,11 @@ fn benchmark_layout_paths(
           None,
           false,
           px(1.0),
-<<<<<<< HEAD
           None,
           &[],
           &[],
-=======
-          &[],
           &[],
           None,
->>>>>>> main
           window,
           cx,
         );
@@ -116,12 +108,9 @@ fn benchmark_sample_paragraph_layouts(
   cx: &mut Context<BenchmarkRunner>,
 ) -> Vec<ParagraphLayoutRow> {
   let mut rows = Vec::new();
-<<<<<<< HEAD
-=======
   if document.paragraphs.is_empty() {
     return rows;
   }
->>>>>>> main
   let mut samples = vec![
     ("first".to_string(), 0usize),
     ("middle".to_string(), document.paragraphs.len() / 2),
