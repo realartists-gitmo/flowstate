@@ -8,7 +8,7 @@ use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, T
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
 use gpui_component::{
-  ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _,
+  ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _,
 };
 use serde::{Deserialize, Serialize};
 

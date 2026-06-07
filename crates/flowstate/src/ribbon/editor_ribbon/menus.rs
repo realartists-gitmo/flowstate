@@ -113,11 +113,13 @@ fn modern_condense_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
+  options: ModernRibbonOptions,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let chip_height = metrics.chip_height;
   let label = RibbonLabel::for_command(command);
   let command_color = ribbon_command_color(command, cx);
+  let shortcut = command.shortcut.clone();
 
   DropdownButton::new("modern-ribbon-condense-dropdown")
     .with_size(Size::Size(chip_height))
@@ -129,7 +131,7 @@ fn modern_condense_menu(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip("Condense")
+        .tooltip(command_tooltip(command))
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()
@@ -149,6 +151,9 @@ fn modern_condense_menu(
               .text_color(command_color)
               .child(label.text),
           )
+        })
+        .when(show_shortcut(options), |this| {
+          this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
         })
         .on_click({
           let editor = editor.clone();
@@ -469,30 +474,6 @@ fn empty_input_paragraph() -> flowstate_document::InputParagraph {
 }
 
 #[hotpath::measure]
-fn export_chip_button(
-  id: &'static str,
-  tooltip: &'static str,
-  label: &'static str,
-  chip_height: gpui::Pixels,
-  metrics: RibbonLayoutMetrics,
-) -> Button {
-  Button::new(id)
-    .compact()
-    .ghost()
-    .h(chip_height)
-    .px(metrics.chip_padding_x)
-    .tooltip(tooltip)
-    .child(
-      div()
-        .flex_none()
-        .text_size(metrics.chip_text_size)
-        .line_height(relative(1.0))
-        .whitespace_nowrap()
-        .text_ellipsis()
-        .child(label),
-    )
-}
-
 #[hotpath::measure]
 fn send_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExportFormat, cx: &mut App) {
   let task = editor.update(cx, |editor, cx| editor.send_document(format, cx));
@@ -566,12 +547,14 @@ fn modern_icon_chip(
 
 #[hotpath::measure]
 fn modern_export_format(
-  _command: &RibbonCommand,
+  command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let chip_height = metrics.chip_height;
+  let command_color = ribbon_command_color(command, cx);
+  let label = RibbonLabel::for_command(command);
   let format_created = editor.read(cx).format_export_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-format-dropdown")
     .with_size(Size::Size(chip_height))
@@ -579,36 +562,60 @@ fn modern_export_format(
     .outline()
     .when(format_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
     .button(
-      export_chip_button("modern-ribbon-format", "Export as DOCX", "Format", chip_height, metrics).on_click({
-        let editor = editor.clone();
-        move |_, _, cx| {
-          export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
-        }
-      }),
+      Button::new("modern-ribbon-export-format")
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .tooltip("Export as format")
+        .when_some(label.icon_path, |this, path| {
+          this.child(
+            Icon::default()
+              .path(path)
+              .xsmall()
+              .text_color(command_color),
+          )
+        })
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
+          }
+        }),
     )
     .dropdown_menu(move |menu, _, _| {
       let docx_editor = editor.clone();
       let pdf_editor = editor.clone();
       menu
         .min_w(px(120.0))
-        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
-          export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
-        }))
-        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
-          export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
-        }))
+        .item(
+          PopupMenuItem::new(".docx")
+            .icon(Icon::default().path("icons/docx.svg").xsmall())
+            .on_click(move |_, _, cx| {
+              export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+            }),
+        )
+        .item(
+          PopupMenuItem::new(".pdf")
+            .icon(Icon::default().path("icons/pdf.svg").xsmall())
+            .on_click(move |_, _, cx| {
+              export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+            }),
+        )
     })
     .into_any_element()
 }
 
 #[hotpath::measure]
 fn modern_export_send(
-  _command: &RibbonCommand,
+  command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let chip_height = metrics.chip_height;
+  let command_color = ribbon_command_color(command, cx);
+  let label = RibbonLabel::for_command(command);
   let send_created = editor.read(cx).send_document_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-send-dropdown")
     .with_size(Size::Size(chip_height))
@@ -616,16 +623,30 @@ fn modern_export_send(
     .outline()
     .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
     .button(
-      export_chip_button("modern-ribbon-send", "Send as DB8", "Send", chip_height, metrics).on_click({
-        let editor = editor.clone();
-        move |_, _, cx| {
-          send_format_from_ribbon(
-            editor.clone(),
-            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
-            cx,
-          );
-        }
-      }),
+      Button::new("modern-ribbon-export-send")
+        .compact()
+        .ghost()
+        .h(chip_height)
+        .px(metrics.chip_padding_x)
+        .tooltip("Copy Without Analytics")
+        .when_some(label.icon_path, |this, path| {
+          this.child(
+            Icon::default()
+              .path(path)
+              .xsmall()
+              .text_color(command_color),
+          )
+        })
+        .on_click({
+          let editor = editor.clone();
+          move |_, _, cx| {
+            send_format_from_ribbon(
+              editor.clone(),
+              DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+              cx,
+            );
+          }
+        }),
     )
     .dropdown_menu(move |menu, _, _| {
       let db8_editor = editor.clone();
@@ -640,12 +661,20 @@ fn modern_export_send(
             cx,
           );
         }))
-        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
-          send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
-        }))
-        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
-          send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
-        }))
+        .item(
+          PopupMenuItem::new(".docx")
+            .icon(Icon::default().path("icons/docx.svg").xsmall())
+            .on_click(move |_, _, cx| {
+              send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+            }),
+        )
+        .item(
+          PopupMenuItem::new(".pdf")
+            .icon(Icon::default().path("icons/pdf.svg").xsmall())
+            .on_click(move |_, _, cx| {
+              send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+            }),
+        )
     })
     .into_any_element()
 }

@@ -100,8 +100,8 @@ impl RibbonLabel {
       RibbonCommandId::SendToSpeechDocument => Some("icons/send.svg"),
       RibbonCommandId::MarkCard => Some("icons/mark-card.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
-      RibbonCommandId::ExportFormat => Some("icons/file-search-corner.svg"),
-      RibbonCommandId::ExportSend => Some("icons/send.svg"),
+      RibbonCommandId::ExportFormat => Some("icons/export.svg"),
+      RibbonCommandId::ExportSend => Some("icons/send-horizontal.svg"),
       _ => None,
     };
     Self {

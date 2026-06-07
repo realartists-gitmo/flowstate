@@ -32,13 +32,6 @@ fn modern_group(
         .gap_0p5()
         .child(
           div()
-            .text_size(px(10.0))
-            .font_medium()
-            .text_color(cx.theme().foreground)
-            .child(group.label),
-        )
-        .child(
-          div()
             .id(group.id)
             .flex()
             .flex_row()
@@ -52,7 +45,7 @@ fn modern_group(
               if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
                 modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
               } else if matches!(command.id, RibbonCommandId::CondenseMenu) {
-                modern_condense_menu(command, editor.clone(), metrics, cx)
+                modern_condense_menu(command, editor.clone(), metrics, options, cx)
               } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
                 modern_condensed_menu(command, editor.clone(), metrics, cx)
               } else if matches!(command.id, RibbonCommandId::Undo) {

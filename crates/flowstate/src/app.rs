@@ -366,6 +366,10 @@ impl AssetSource for AppAssets {
       "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
       "icons/send.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send.svg")))),
       "icons/speech.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/speech.svg")))),
+      "icons/export.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/export.svg")))),
+      "icons/send-horizontal.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-horizontal.svg")))),
+      "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
+      "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -444,6 +448,18 @@ impl AssetSource for AppAssets {
     }
     if "icons/speech.svg".starts_with(path) {
       assets.push("icons/speech.svg".into());
+    }
+    if "icons/export.svg".starts_with(path) {
+      assets.push("icons/export.svg".into());
+    }
+    if "icons/send-horizontal.svg".starts_with(path) {
+      assets.push("icons/send-horizontal.svg".into());
+    }
+    if "icons/pdf.svg".starts_with(path) {
+      assets.push("icons/pdf.svg".into());
+    }
+    if "icons/docx.svg".starts_with(path) {
+      assets.push("icons/docx.svg".into());
     }
     Ok(assets)
   }
