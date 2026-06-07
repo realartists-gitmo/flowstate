@@ -891,6 +891,55 @@ mod tests {
   }
 
   #[test]
+  fn concurrent_style_only_source_replacements_do_not_duplicate_text() {
+    let document_id = DocumentId::new();
+    let actor = ActorId::new();
+    let text_id = granular_record_id_u128(1);
+    let base = GranularSource {
+      metadata: b"cache".to_vec(),
+      orders: Vec::new(),
+      texts: vec![GranularTextRecord {
+        id: text_id.clone(),
+        text: "unchanged text".to_string(),
+        metadata: Vec::new(),
+        marks: Vec::new(),
+      }],
+      binaries: Vec::new(),
+    };
+    let left = CollabDocument::from_granular_source(FormatKind::Db8, document_id, actor, &base, b"cache", &[]).unwrap();
+    let right = CollabDocument::from_snapshot(&left.export_snapshot().unwrap(), Some(FormatKind::Db8), Some(document_id)).unwrap();
+
+    let mut left_source = base.clone();
+    left_source.texts[0].metadata = b"left-style".to_vec();
+    let left_update = left
+      .replace_granular_source(Role::Owner, &left_source, b"left-cache", &[])
+      .unwrap();
+
+    let mut right_source = base;
+    right_source.texts[0].marks = vec![GranularTextMark {
+      start_utf8: 0,
+      end_utf8: "unchanged".len(),
+      key: "semantic".to_string(),
+      value: GranularValue::I64(1),
+    }];
+    let right_update = right
+      .replace_granular_source(Role::Editor, &right_source, b"right-cache", &[])
+      .unwrap();
+
+    left
+      .import_update_checked(Role::Editor, &right_update)
+      .unwrap();
+    right
+      .import_update_checked(Role::Owner, &left_update)
+      .unwrap();
+
+    let left_source = left.materialize_granular_source().unwrap().unwrap();
+    let right_source = right.materialize_granular_source().unwrap().unwrap();
+    assert_eq!(left_source, right_source);
+    assert_eq!(left_source.texts[0].text, "unchanged text");
+  }
+
+  #[test]
   fn granular_viewer_text_update_is_rejected_before_mutation() {
     let document_id = DocumentId::new();
     let actor = ActorId::new();

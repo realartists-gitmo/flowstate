@@ -1211,12 +1211,101 @@ fn merge_granular_texts(root: &LoroMap, current: &[GranularTextRecord], target: 
     }
   }
   for (id, record) in target_by_id {
-    if current_by_id.get(&id) == Some(&record) {
-      continue;
+    match current_by_id.get(&id) {
+      Some(current_record) if current_record == &record => {},
+      Some(current_record) => merge_granular_text_record(&text_map, current_record, &record)?,
+      None => write_granular_text_record(&text_map, &record)?,
     }
-    write_granular_text_record(&text_map, &record)?;
   }
   Ok(())
+}
+
+fn merge_granular_text_record(text_map: &LoroMap, current: &GranularTextRecord, target: &GranularTextRecord) -> CollabResult<()> {
+  validate_granular_text_record(target)?;
+  let record_map = text_map
+    .get_or_create_container(target.id.as_str(), LoroMap::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  record_map
+    .insert(KEY_RECORD_METADATA, target.metadata.as_slice())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+  let text = record_map
+    .get_or_create_container(KEY_RECORD_TEXT, LoroText::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))?;
+
+  sync_granular_text_marks(&text, current, &[])?;
+  sync_granular_text_content(&text, &current.text, &target.text)?;
+  sync_granular_text_marks(
+    &text,
+    &GranularTextRecord {
+      marks: Vec::new(),
+      ..target.clone()
+    },
+    &target.marks,
+  )
+}
+
+fn sync_granular_text_content(text: &LoroText, current: &str, target: &str) -> CollabResult<()> {
+  if current == target {
+    return Ok(());
+  }
+  let prefix_len = common_prefix_boundary(current, target);
+  let suffix_len = common_suffix_boundary(&current[prefix_len..], &target[prefix_len..]);
+  let current_delete_end = current.len().saturating_sub(suffix_len);
+  if current_delete_end > prefix_len {
+    text
+      .delete_utf8(prefix_len, current_delete_end - prefix_len)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  let target_insert_end = target.len().saturating_sub(suffix_len);
+  if target_insert_end > prefix_len {
+    text
+      .insert_utf8(prefix_len, &target[prefix_len..target_insert_end])
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  Ok(())
+}
+
+fn sync_granular_text_marks(text: &LoroText, current: &GranularTextRecord, target_marks: &[GranularTextMark]) -> CollabResult<()> {
+  for mark in &current.marks {
+    if target_marks.iter().any(|target| target == mark) {
+      continue;
+    }
+    text
+      .unmark(utf8_range_to_unicode_range(&current.text, mark.start_utf8..mark.end_utf8)?, &mark.key)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  for mark in target_marks {
+    if current.marks.iter().any(|current| current == mark) {
+      continue;
+    }
+    text
+      .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.clone().into_loro())
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+  }
+  Ok(())
+}
+
+fn common_prefix_boundary(left: &str, right: &str) -> usize {
+  let mut boundary = 0;
+  for ((left_ix, left_char), (right_ix, right_char)) in left.char_indices().zip(right.char_indices()) {
+    if left_char != right_char {
+      break;
+    }
+    boundary = left_ix + left_char.len_utf8();
+    debug_assert_eq!(boundary, right_ix + right_char.len_utf8());
+  }
+  boundary
+}
+
+fn common_suffix_boundary(left: &str, right: &str) -> usize {
+  let mut len = 0;
+  for (left_char, right_char) in left.chars().rev().zip(right.chars().rev()) {
+    if left_char != right_char {
+      break;
+    }
+    len += left_char.len_utf8();
+  }
+  len
 }
 
 fn write_granular_binaries(root: &LoroMap, binaries: &[GranularBinaryRecord]) -> CollabResult<()> {

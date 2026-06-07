@@ -1,0 +1,240 @@
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_runs_len(paragraph: &Paragraph) -> usize {
+  paragraph.runs.iter().map(|run| run.len).sum()
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_widths(paragraphs: &[Paragraph]) -> Vec<usize> {
+  paragraphs
+    .iter()
+    .enumerate()
+    .map(|(ix, _)| paragraph_width(paragraphs, ix).unwrap_or(0))
+    .collect()
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_width(paragraphs: &[Paragraph], paragraph_ix: usize) -> Option<usize> {
+  let paragraph = paragraphs.get(paragraph_ix)?;
+  let newline_len = usize::from(paragraph_ix + 1 < paragraphs.len());
+  Some(paragraph_runs_len(paragraph) + newline_len)
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_byte_range(document: &Document, paragraph_ix: usize) -> Range<usize> {
+  let start = document.offset_index.paragraph_start(paragraph_ix);
+  start..start + paragraph_text_len(&document.paragraphs[paragraph_ix])
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_offset_is_char_boundary(document: &Document, paragraph_ix: usize, byte: usize) -> bool {
+  let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+    return false;
+  };
+  let paragraph_len = paragraph_text_len(paragraph);
+  if byte > paragraph_len {
+    return false;
+  }
+  if byte == 0 || byte == paragraph_len {
+    return true;
+  }
+
+  let mut run_end = 0;
+  for run in &paragraph.runs {
+    run_end += run.len;
+    if byte == run_end {
+      return true;
+    }
+    if byte < run_end {
+      return paragraph_text(document, paragraph_ix).is_char_boundary(byte);
+    }
+  }
+
+  false
+}
+
+#[hotpath::measure]
+pub fn refresh_paragraph_range(document: &mut Document, paragraph_ix: usize) {
+  let range = paragraph_byte_range(document, paragraph_ix);
+  paragraphs_mut(document)[paragraph_ix].byte_range = range;
+}
+
+#[hotpath::measure]
+pub fn refresh_paragraph_ranges(document: &mut Document) {
+  for paragraph_ix in 0..document.paragraphs.len() {
+    refresh_paragraph_range(document, paragraph_ix);
+  }
+}
+
+#[hotpath::measure]
+fn refresh_paragraph_ranges_from(document: &mut Document, start_paragraph: usize) {
+  let paragraph_count = document.paragraphs.len();
+  for paragraph_ix in start_paragraph.min(paragraph_count)..paragraph_count {
+    refresh_paragraph_range(document, paragraph_ix);
+  }
+}
+
+#[hotpath::measure]
+pub fn rebuild_document_offset_index(document: &mut Document) {
+  document.offset_index.rebuild(&document.paragraphs);
+  refresh_paragraph_ranges(document);
+}
+
+#[hotpath::measure]
+pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragraph_ix: usize) {
+  if paragraph_ix >= document.paragraphs.len() {
+    return;
+  }
+  document
+    .offset_index
+    .update_paragraph_width(paragraph_ix, &document.paragraphs);
+  refresh_paragraph_ranges_from(document, paragraph_ix);
+  let paragraph_count = document.paragraphs.len();
+  let replacements = document.paragraphs[paragraph_ix..].to_vec();
+  replace_paragraph_blocks(document, paragraph_ix, paragraph_count.saturating_sub(paragraph_ix), &replacements);
+}
+
+// Returns `(run_index, local_byte)` for the given absolute byte offset within
+// the paragraph. Biases to the LEFT run at run boundaries — i.e. when `byte`
+// equals the end of run i and the start of run i+1, we return run i. This is
+// what lets typed text inherit styles from the run "just before the caret".
+#[hotpath::measure]
+#[must_use]
+pub fn run_containing(paragraph: &Paragraph, byte: usize) -> (usize, usize) {
+  let mut offset = 0;
+  for (ix, run) in paragraph.runs.iter().enumerate() {
+    let run_end = offset + run.len;
+    if byte <= run_end {
+      return (ix, byte - offset);
+    }
+    offset = run_end;
+  }
+  // byte is beyond the end — clamp to the last run.
+  if paragraph.runs.is_empty() {
+    (0, 0)
+  } else {
+    let last = paragraph.runs.len() - 1;
+    (last, paragraph.runs[last].len)
+  }
+}
+
+#[cfg(test)]
+mod offsets_tests {
+  use super::*;
+  use crate::{DocumentTheme, document_from_input};
+
+  #[test]
+  fn insert_text_refreshes_following_paragraph_ranges_and_blocks() {
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "alpha".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "Kepe et al. ‘23".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+      ],
+    );
+
+    insert_text_at(&mut document, 0, "alpha".len(), " beta", RunStyles::default());
+
+    assert_eq!(
+      document.paragraphs[1].byte_range,
+      "alpha beta\n".len().."alpha beta\nKepe et al. ‘23".len()
+    );
+    assert!(matches!(&document.blocks[1], Block::Paragraph(paragraph) if paragraph.byte_range == document.paragraphs[1].byte_range));
+  }
+
+  #[test]
+  fn insert_text_rejects_offsets_inside_utf8_codepoints() {
+    let mut document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "café".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+
+    assert!(!insert_text_at(&mut document, 0, "caf".len() + 1, "!", RunStyles::default()));
+    assert_eq!(paragraph_text(&document, 0), "café");
+  }
+
+  #[test]
+  fn delete_range_rejects_invalid_byte_offsets() {
+    let mut short_document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "s".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    assert!(!delete_range_in_paragraph(&mut short_document, 0, 3..4));
+    assert_eq!(paragraph_text(&short_document, 0), "s");
+
+    let mut utf8_document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "café".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    assert!(!delete_range_in_paragraph(&mut utf8_document, 0, "caf".len() + 1.."café".len()));
+    assert_eq!(paragraph_text(&utf8_document, 0), "café");
+  }
+  #[test]
+  fn split_paragraph_rejects_invalid_byte_offsets() {
+    let mut short_document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "s".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    assert!(!split_paragraph_at(&mut short_document, 0, 18));
+    assert_eq!(paragraph_text(&short_document, 0), "s");
+    assert_eq!(short_document.paragraphs.len(), 1);
+
+    let mut utf8_document = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "café".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    );
+    assert!(!split_paragraph_at(&mut utf8_document, 0, "caf".len() + 1));
+    assert_eq!(paragraph_text(&utf8_document, 0), "café");
+    assert_eq!(utf8_document.paragraphs.len(), 1);
+  }
+}
+
+// Inserts `text` (with `styles`) into `paragraph` at `byte`. Splits the run
+// straddling the byte if needed and re-merges adjacent runs with identical
+// styles afterwards.

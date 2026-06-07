@@ -1,0 +1,903 @@
+#[hotpath::measure_all]
+impl RichTextEditor {
+  #[hotpath::measure]
+  fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if !is_plain_text_insert(text) || !self.selection.is_caret() || self.selected_block.is_some() {
+      return false;
+    }
+    let caret = self.selection.head;
+    let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
+      return false;
+    };
+    if self.invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
+      return false;
+    }
+    if caret.byte > paragraph_text_len(paragraph) {
+      return false;
+    }
+    let Some(paragraph_id) = paragraph_id_at(&self.document, caret.paragraph) else {
+      return false;
+    };
+
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let styles = if let Some(styles) = self.pending_styles {
+      styles
+    } else {
+      let (run_ix, _) = run_containing(paragraph, caret.byte);
+      paragraph
+        .runs
+        .get(run_ix)
+        .map(|run| run.styles)
+        .unwrap_or_default()
+    };
+    let text = text.to_owned();
+    let canonical_text = text.clone();
+
+    if !insert_text_at(&mut self.document, caret.paragraph, caret.byte, &text, styles) {
+      return false;
+    }
+    let after = DocumentOffset {
+      paragraph: caret.paragraph,
+      byte: caret.byte + text.len(),
+    };
+    self.selection = EditorSelection { anchor: after, head: after };
+
+    self.undo_stack.push(EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::InsertText {
+        paragraph: caret.paragraph,
+        byte: caret.byte,
+        text,
+        styles,
+      }],
+      canonical_operations: vec![CanonicalOperation::InsertText {
+        paragraph: paragraph_id,
+        byte: caret.byte,
+        text: canonical_text,
+        styles,
+      }],
+    });
+    self.redo_stack.clear();
+    self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
+    self.suppress_mutation_notify += 1;
+    self.after_text_mutation(cx);
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    true
+  }
+
+  fn replace_selection_with_text_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if text.is_empty() || self.selection.is_caret() || self.selected_block.is_some() {
+      return false;
+    }
+    let range = self.selection.normalized();
+    if range.start.paragraph != range.end.paragraph || !is_plain_text_insert(text) {
+      return false;
+    }
+    let Some(paragraph_id) = paragraph_id_at(&self.document, range.start.paragraph) else {
+      return false;
+    };
+    if !paragraph_offset_in_bounds(&self.document, range.start) || !paragraph_offset_in_bounds(&self.document, range.end) {
+      return false;
+    }
+
+    let paragraph = &self.document.paragraphs[range.start.paragraph];
+    let (run_ix, _) = run_containing(paragraph, range.start.byte);
+    let styles = paragraph
+      .runs
+      .get(run_ix)
+      .map(|run| run.styles)
+      .unwrap_or_default();
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, range.start.paragraph..range.start.paragraph + 1);
+
+    self.layout_invalidation_hint = Some(range.start.paragraph..range.start.paragraph + 1);
+    self.suppress_mutation_notify += 1;
+    if !delete_range_in_paragraph(&mut self.document, range.start.paragraph, range.start.byte..range.end.byte)
+      || !insert_text_at(&mut self.document, range.start.paragraph, range.start.byte, text, styles)
+    {
+      self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+      self.layout_invalidation_hint = None;
+      return false;
+    }
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+
+    let new = DocumentOffset {
+      paragraph: range.start.paragraph,
+      byte: range.start.byte + text.len(),
+    };
+    self.selection = EditorSelection { anchor: new, head: new };
+    let after_span = capture_document_span(&self.document, range.start.paragraph..range.start.paragraph + 1);
+    self.undo_stack.push(EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span,
+        after: after_span,
+      }],
+      canonical_operations: vec![
+        CanonicalOperation::DeleteRange {
+          start_paragraph: paragraph_id,
+          start_byte: range.start.byte,
+          end_paragraph: paragraph_id,
+          end_byte: range.end.byte,
+        },
+        CanonicalOperation::InsertText {
+          paragraph: paragraph_id,
+          byte: range.start.byte,
+          text: text.to_string(),
+          styles,
+        },
+      ],
+    });
+    self.redo_stack.clear();
+    self.after_text_mutation(cx);
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    true
+  }
+
+  fn delete_single_grapheme_fast_path(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+    if !self.selection.is_caret() || self.selected_block.is_some() {
+      return false;
+    }
+    let caret = self.selection.head;
+    let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
+      return false;
+    };
+    let Some(paragraph_id) = paragraph_id_at(&self.document, caret.paragraph) else {
+      return false;
+    };
+    let para_len = paragraph_text_len(paragraph);
+    let range = if backward {
+      if caret.byte == 0 {
+        return false;
+      }
+      prev_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte)..caret.byte
+    } else {
+      if caret.byte >= para_len {
+        return false;
+      }
+      caret.byte..next_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte)
+    };
+    if range.start == range.end {
+      return false;
+    }
+
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
+    let byte_len = range.end.saturating_sub(range.start);
+
+    self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
+    self.suppress_mutation_notify += 1;
+    if !delete_range_in_paragraph(&mut self.document, caret.paragraph, range.clone()) {
+      self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+      self.layout_invalidation_hint = None;
+      return false;
+    }
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+
+    let new = DocumentOffset {
+      paragraph: caret.paragraph,
+      byte: range.start,
+    };
+    self.selection = EditorSelection { anchor: new, head: new };
+    let after_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
+    self.undo_stack.push(EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span.clone(),
+        after: after_span.clone(),
+      }],
+      canonical_operations: vec![CanonicalOperation::DeleteRange {
+        start_paragraph: paragraph_id,
+        start_byte: range.start,
+        end_paragraph: paragraph_id,
+        end_byte: range.start + byte_len,
+      }],
+    });
+    self.redo_stack.clear();
+    self.after_text_mutation(cx);
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    true
+  }
+
+  fn delete_selection_fast_path(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.selection.is_caret() || self.selected_block.is_some() {
+      return false;
+    }
+    let range = self.selection.normalized();
+    if range.start.paragraph != range.end.paragraph {
+      return false;
+    }
+    let Some(paragraph_id) = paragraph_id_at(&self.document, range.start.paragraph) else {
+      return false;
+    };
+    if !paragraph_offset_in_bounds(&self.document, range.start) || !paragraph_offset_in_bounds(&self.document, range.end) {
+      return false;
+    }
+
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, range.start.paragraph..range.start.paragraph + 1);
+    let byte_len = range.end.byte.saturating_sub(range.start.byte);
+
+    self.layout_invalidation_hint = Some(range.start.paragraph..range.start.paragraph + 1);
+    self.suppress_mutation_notify += 1;
+    if !delete_range_in_paragraph(&mut self.document, range.start.paragraph, range.start.byte..range.end.byte) {
+      self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+      self.layout_invalidation_hint = None;
+      return false;
+    }
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+
+    self.selection = EditorSelection {
+      anchor: range.start,
+      head: range.start,
+    };
+    let after_span = capture_document_span(&self.document, range.start.paragraph..range.start.paragraph + 1);
+    self.undo_stack.push(EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span,
+        after: after_span,
+      }],
+      canonical_operations: vec![CanonicalOperation::DeleteRange {
+        start_paragraph: paragraph_id,
+        start_byte: range.start.byte,
+        end_paragraph: paragraph_id,
+        end_byte: range.start.byte + byte_len,
+      }],
+    });
+    self.redo_stack.clear();
+    self.after_text_mutation(cx);
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    true
+  }
+
+  fn join_paragraph_fast_path(&mut self, backward: bool, cx: &mut Context<Self>) -> bool {
+    if !self.selection.is_caret() || self.selected_block.is_some() {
+      return false;
+    }
+    let caret = self.selection.head;
+    let (first_ix, second_ix, seam_byte, range) = if backward {
+      if caret.byte != 0 || caret.paragraph == 0 {
+        return false;
+      }
+      let first_ix = caret.paragraph - 1;
+      let seam_byte = paragraph_text_len(&self.document.paragraphs[first_ix]);
+      (
+        first_ix,
+        caret.paragraph,
+        seam_byte,
+        DocumentOffset {
+          paragraph: first_ix,
+          byte: seam_byte,
+        }..caret,
+      )
+    } else {
+      let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
+        return false;
+      };
+      if caret.byte != paragraph_text_len(paragraph) || caret.paragraph + 1 >= self.document.paragraphs.len() {
+        return false;
+      }
+      (
+        caret.paragraph,
+        caret.paragraph + 1,
+        caret.byte,
+        caret..DocumentOffset {
+          paragraph: caret.paragraph + 1,
+          byte: 0,
+        },
+      )
+    };
+    let (Some(first), Some(second)) = (paragraph_id_at(&self.document, first_ix), paragraph_id_at(&self.document, second_ix)) else {
+      return false;
+    };
+
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, first_ix..second_ix + 1);
+    self.layout_invalidation_hint = Some(first_ix..second_ix + 1);
+    self.suppress_mutation_notify += 1;
+    if !delete_cross_paragraph_range(&mut self.document, range) {
+      self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+      self.layout_invalidation_hint = None;
+      return false;
+    }
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+    let new = DocumentOffset {
+      paragraph: first_ix,
+      byte: seam_byte,
+    };
+    self.selection = EditorSelection { anchor: new, head: new };
+    let after_span = capture_document_span(&self.document, first_ix..first_ix + 1);
+    self.undo_stack.push(EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span,
+        after: after_span,
+      }],
+      canonical_operations: vec![CanonicalOperation::JoinParagraphs { first, second }],
+    });
+    self.redo_stack.clear();
+    self.after_text_mutation(cx);
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    true
+  }
+
+  fn apply_document_edit_with_capture_range(
+    &mut self,
+    cx: &mut Context<Self>,
+    capture_range: Option<Range<usize>>,
+    edit: impl FnOnce(&mut Self, &mut Context<Self>),
+  ) {
+    let timing = Instant::now();
+    let before_selection = self.selection.clone();
+    let before_paragraph_count = self.document.paragraphs.len();
+    let before_block_count = self.document.blocks.len();
+    let before_range = capture_range.unwrap_or_else(|| self.edit_capture_range());
+    let before_span = capture_document_span(&self.document, before_range);
+    self.layout_invalidation_hint = Some(before_span.start_paragraph..before_span.start_paragraph + before_span.paragraphs.len());
+    self.suppress_mutation_notify += 1;
+    edit(self, cx);
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+    let paragraph_delta = self.document.paragraphs.len() as isize - before_paragraph_count as isize;
+    let after_count = before_span
+      .paragraphs
+      .len()
+      .saturating_add_signed(paragraph_delta)
+      .min(
+        self
+          .document
+          .paragraphs
+          .len()
+          .saturating_sub(before_span.start_paragraph),
+      );
+    let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
+    self.finish_document_edit(before_span, before_selection, before_block_count, after_span, cx);
+    log_timing_lazy("edit command", timing, || format!("paragraphs={}", self.document.paragraphs.len()));
+  }
+
+  fn edit_capture_range(&self) -> Range<usize> {
+    let paragraph_count = self.document.paragraphs.len();
+    if paragraph_count == 0 {
+      return 0..0;
+    }
+    let range = self.selection.normalized();
+    let start = range.start.paragraph.saturating_sub(1);
+    let end = (range.end.paragraph + 2)
+      .min(paragraph_count)
+      .max(start + 1);
+    start..end
+  }
+
+  fn finish_document_edit(
+    &mut self,
+    before_span: DocumentSpan,
+    before_selection: EditorSelection,
+    before_block_count: usize,
+    after_span: DocumentSpan,
+    cx: &mut Context<Self>,
+  ) {
+    if before_span == after_span && before_selection == self.selection {
+      return;
+    }
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let canonical_operations = self.canonical_operations_for_span_edit(&before_span, &after_span, before_block_count);
+    self.identity_map.reconcile(&self.document);
+    let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len() || before_block_count != self.document.blocks.len();
+    let record = EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span,
+        after: after_span,
+      }],
+      canonical_operations,
+    };
+    self.undo_stack.push(record);
+    self.redo_stack.clear();
+    self.mark_document_changed_with_reconcile(after_generation, identity_shape_changed, cx);
+  }
+
+  fn canonical_operations_for_span_edit(
+    &self,
+    before_span: &DocumentSpan,
+    after_span: &DocumentSpan,
+    before_block_count: usize,
+  ) -> Vec<CanonicalOperation> {
+    let fallback = || {
+      vec![CanonicalOperation::ReplaceParagraphSpan {
+        start_paragraph: self.identity_map.paragraph_id(before_span.start_paragraph),
+        before: before_span.clone(),
+        after: after_span.clone(),
+      }]
+    };
+    if before_block_count != self.document.blocks.len() {
+      return fallback();
+    }
+    if before_span.paragraphs.len() != after_span.paragraphs.len() || before_span.text != after_span.text {
+      return self
+        .canonical_operations_for_content_replacement(before_span, after_span)
+        .unwrap_or_else(fallback);
+    }
+
+    let mut operations = Vec::new();
+    for (relative_ix, (before, after)) in before_span
+      .paragraphs
+      .iter()
+      .zip(&after_span.paragraphs)
+      .enumerate()
+    {
+      let Some(paragraph_id) = self
+        .identity_map
+        .paragraph_id(before_span.start_paragraph + relative_ix)
+      else {
+        return fallback();
+      };
+      if before.style != after.style {
+        operations.push(CanonicalOperation::SetParagraphStyle {
+          paragraph: paragraph_id,
+          style: after.style,
+        });
+      }
+      Self::append_run_style_diff_operations(&mut operations, paragraph_id, &before.runs, &after.runs);
+    }
+    if operations.is_empty() { fallback() } else { operations }
+  }
+
+  fn canonical_operations_for_content_replacement(
+    &self,
+    before_span: &DocumentSpan,
+    after_span: &DocumentSpan,
+  ) -> Option<Vec<CanonicalOperation>> {
+    let start = before_span.start_paragraph;
+    let before_len = before_span.paragraphs.len();
+    let after_len = after_span.paragraphs.len();
+    if before_len == 0 || after_len == 0 {
+      return None;
+    }
+    let before_start = self.identity_map.paragraph_id(start)?;
+    let before_end = self.identity_map.paragraph_id(start + before_len - 1)?;
+    let after_ids = self.document.ids.paragraph_ids.get(start..start + after_len)?;
+    let mut operations = Vec::with_capacity(2 + after_len * 4);
+    operations.push(CanonicalOperation::DeleteRange {
+      start_paragraph: before_start,
+      start_byte: 0,
+      end_paragraph: before_end,
+      end_byte: paragraph_text_len(before_span.paragraphs.last()?),
+    });
+
+    for (paragraph_ix, (paragraph, paragraph_id)) in after_span.paragraphs.iter().zip(after_ids.iter().copied()).enumerate() {
+      if paragraph_ix > 0 {
+        let previous_id = after_ids[paragraph_ix - 1];
+        let previous_len = paragraph_text_len(&after_span.paragraphs[paragraph_ix - 1]);
+        operations.push(CanonicalOperation::SplitParagraph {
+          paragraph: previous_id,
+          byte: previous_len,
+          new_paragraph: paragraph_id,
+        });
+      }
+      let text = paragraph_text_from_span(after_span, paragraph_ix)?;
+      if !text.is_empty() {
+        operations.push(CanonicalOperation::InsertText {
+          paragraph: paragraph_id,
+          byte: 0,
+          text,
+          styles: RunStyles::default(),
+        });
+      }
+      operations.push(CanonicalOperation::SetParagraphStyle {
+        paragraph: paragraph_id,
+        style: paragraph.style,
+      });
+      Self::append_exact_run_style_operations(&mut operations, paragraph_id, &paragraph.runs);
+    }
+    Some(operations)
+  }
+
+  fn append_exact_run_style_operations(operations: &mut Vec<CanonicalOperation>, paragraph: ParagraphId, runs: &[TextRun]) {
+    let mut offset = 0;
+    for run in runs {
+      let end = offset + run.len;
+      if end > offset {
+        operations.push(CanonicalOperation::SetRunStyles {
+          paragraph,
+          range: offset..end,
+          styles: run.styles,
+        });
+      }
+      offset = end;
+    }
+  }
+
+  fn append_run_style_diff_operations(
+    operations: &mut Vec<CanonicalOperation>,
+    paragraph: ParagraphId,
+    before_runs: &[TextRun],
+    after_runs: &[TextRun],
+  ) {
+    let before_len = before_runs.iter().map(|run| run.len).sum::<usize>();
+    let after_len = after_runs.iter().map(|run| run.len).sum::<usize>();
+    if before_len != after_len || before_len == 0 {
+      return;
+    }
+    let mut boundaries = Vec::with_capacity(before_runs.len() + after_runs.len() + 2);
+    boundaries.push(0);
+    boundaries.push(before_len);
+    append_run_boundaries(&mut boundaries, before_runs);
+    append_run_boundaries(&mut boundaries, after_runs);
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    let mut pending: Option<(Range<usize>, RunStyles)> = None;
+    for window in boundaries.windows(2) {
+      let start = window[0];
+      let end = window[1];
+      if start == end {
+        continue;
+      }
+      let before_style = run_style_at_byte(before_runs, start);
+      let after_style = run_style_at_byte(after_runs, start);
+      if before_style == after_style {
+        continue;
+      }
+      match &mut pending {
+        Some((range, style)) if *style == after_style && range.end == start => range.end = end,
+        Some((range, style)) => {
+          operations.push(CanonicalOperation::SetRunStyles {
+            paragraph,
+            range: range.clone(),
+            styles: *style,
+          });
+          pending = Some((start..end, after_style));
+        },
+        None => pending = Some((start..end, after_style)),
+      }
+    }
+    if let Some((range, styles)) = pending {
+      operations.push(CanonicalOperation::SetRunStyles { paragraph, range, styles });
+    }
+  }
+
+  fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, _block_ix: usize, cx: &mut Context<Self>) {
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let before_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
+    let before_paragraph_id = paragraph_id_at(&self.document, caret.paragraph);
+    self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
+    self.suppress_mutation_notify += 1;
+    self.insert_paragraph_break(cx);
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+    self.layout_invalidation_hint = None;
+    self.identity_map.reconcile(&self.document);
+    let after_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 2);
+
+    if before_span == after_span && before_selection == self.selection {
+      return;
+    }
+
+    let record = EditRecord {
+      before_selection,
+      before_generation,
+      after_selection: self.selection.clone(),
+      after_generation,
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span.clone(),
+        after: after_span.clone(),
+      }],
+      canonical_operations: match (before_paragraph_id, paragraph_id_at(&self.document, caret.paragraph + 1)) {
+        (Some(paragraph), Some(new_paragraph)) => vec![CanonicalOperation::SplitParagraph {
+          paragraph,
+          byte: caret.byte,
+          new_paragraph,
+        }],
+        _ => vec![CanonicalOperation::ReplaceParagraphSpan {
+          start_paragraph: paragraph_id_at(&self.document, caret.paragraph),
+          before: before_span,
+          after: after_span,
+        }],
+      },
+    };
+    self.undo_stack.push(record);
+    self.redo_stack.clear();
+    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+  }
+
+  fn mark_document_changed(&mut self, generation: u64, cx: &mut Context<Self>) {
+    self.mark_document_changed_with_reconcile(generation, true, cx);
+  }
+
+  fn mark_document_changed_with_reconcile(&mut self, generation: u64, reconcile_identity: bool, cx: &mut Context<Self>) {
+    self.edit_generation = generation;
+    if reconcile_identity {
+      self.identity_map.reconcile(&self.document);
+    }
+    self.last_collaboration_edit = self
+      .undo_stack
+      .last()
+      .map(|record| CollaborationEdit::from_operations(record.canonical_operations.clone()));
+    self.refresh_save_status();
+    self.schedule_recovery_write(cx);
+    cx.notify();
+  }
+
+  fn notify_after_mutation(&self, cx: &mut Context<Self>) {
+    if self.suppress_mutation_notify == 0 {
+      cx.notify();
+    }
+  }
+
+  fn after_history_restore(&mut self, cx: &mut Context<Self>) {
+    self.goal_x = None;
+    self.identity_map.reconcile(&self.document);
+    self.invalidate_document_layout_caches();
+    self.refresh_save_status();
+    self.scroll_head_into_view();
+    self.reset_caret_blink(cx);
+    self.schedule_recovery_write(cx);
+    cx.notify();
+  }
+
+  fn redo_collaboration_edit_for_history(record: &EditRecord) -> CollaborationEdit {
+    Self::collaboration_edit_from_history_operations(record.canonical_operations.clone())
+  }
+
+  fn undo_collaboration_edit_for_history(&self, record: &EditRecord) -> CollaborationEdit {
+    if let Some(operations) = self.collaboration_undo_operations_from_edit_record(record) {
+      return Self::collaboration_edit_from_history_operations(operations);
+    }
+    let operations = Self::invert_history_canonical_operations(&record.canonical_operations)
+      .unwrap_or_else(|| vec![CanonicalOperation::ReplaceDocument]);
+    Self::collaboration_edit_from_history_operations(operations)
+  }
+
+  fn collaboration_undo_operations_from_edit_record(&self, record: &EditRecord) -> Option<Vec<CanonicalOperation>> {
+    let mut operations = Vec::new();
+    for operation in record.operations.iter().rev() {
+      match operation {
+        EditOperation::ReplaceParagraphSpan { before, after } => {
+          self.append_style_restore_operations(&mut operations, before, after)?;
+        },
+        _ => return None,
+      }
+    }
+    Some(operations)
+  }
+
+  fn append_style_restore_operations(
+    &self,
+    operations: &mut Vec<CanonicalOperation>,
+    restore: &DocumentSpan,
+    current: &DocumentSpan,
+  ) -> Option<()> {
+    if restore.paragraphs.len() != current.paragraphs.len() || restore.text != current.text {
+      return None;
+    }
+    for (relative_ix, (restore_paragraph, current_paragraph)) in restore
+      .paragraphs
+      .iter()
+      .zip(&current.paragraphs)
+      .enumerate()
+    {
+      let paragraph = self.identity_map.paragraph_id(restore.start_paragraph + relative_ix)?;
+      if restore_paragraph.style != current_paragraph.style {
+        operations.push(CanonicalOperation::SetParagraphStyle {
+          paragraph,
+          style: restore_paragraph.style,
+        });
+      }
+      Self::append_run_style_diff_operations(operations, paragraph, &current_paragraph.runs, &restore_paragraph.runs);
+    }
+    Some(())
+  }
+
+  fn collaboration_edit_from_history_operations(operations: Vec<CanonicalOperation>) -> CollaborationEdit {
+    if operations.is_empty() {
+      CollaborationEdit::from_operations(vec![CanonicalOperation::ReplaceDocument])
+    } else {
+      CollaborationEdit::from_operations(operations)
+    }
+  }
+
+  fn invert_history_canonical_operations(operations: &[CanonicalOperation]) -> Option<Vec<CanonicalOperation>> {
+    let mut inverted = Vec::with_capacity(operations.len());
+    for operation in operations.iter().rev() {
+      inverted.push(Self::invert_history_canonical_operation(operation)?);
+    }
+    Some(inverted)
+  }
+
+  fn invert_history_canonical_operation(operation: &CanonicalOperation) -> Option<CanonicalOperation> {
+    match operation {
+      CanonicalOperation::InsertText { paragraph, byte, text, .. } => Some(CanonicalOperation::DeleteRange {
+        start_paragraph: *paragraph,
+        start_byte: *byte,
+        end_paragraph: *paragraph,
+        end_byte: byte.saturating_add(text.len()),
+      }),
+      CanonicalOperation::SplitParagraph {
+        paragraph, new_paragraph, ..
+      } => Some(CanonicalOperation::JoinParagraphs {
+        first: *paragraph,
+        second: *new_paragraph,
+      }),
+      CanonicalOperation::ReplaceParagraphSpan {
+        start_paragraph,
+        before,
+        after,
+      } => Some(CanonicalOperation::ReplaceParagraphSpan {
+        start_paragraph: *start_paragraph,
+        before: after.clone(),
+        after: before.clone(),
+      }),
+      CanonicalOperation::DeleteRange { .. }
+      | CanonicalOperation::JoinParagraphs { .. }
+      | CanonicalOperation::SetParagraphStyle { .. }
+      | CanonicalOperation::SetRunStyles { .. }
+      | CanonicalOperation::InsertBlock { .. }
+      | CanonicalOperation::DeleteBlock { .. }
+      | CanonicalOperation::MoveBlock { .. }
+      | CanonicalOperation::ReplaceBlock { .. }
+      | CanonicalOperation::ReplaceDocument => None,
+    }
+  }
+}
+
+fn append_run_boundaries(boundaries: &mut Vec<usize>, runs: &[TextRun]) {
+  let mut offset = 0;
+  for run in runs {
+    offset += run.len;
+    boundaries.push(offset);
+  }
+}
+
+fn run_style_at_byte(runs: &[TextRun], byte: usize) -> RunStyles {
+  let mut offset = 0;
+  for run in runs {
+    let next = offset + run.len;
+    if byte < next {
+      return run.styles;
+    }
+    offset = next;
+  }
+  RunStyles::default()
+}
+
+fn paragraph_text_from_span(span: &DocumentSpan, paragraph_ix: usize) -> Option<String> {
+  let mut byte = 0;
+  for (ix, paragraph) in span.paragraphs.iter().enumerate() {
+    let len = paragraph_text_len(paragraph);
+    if ix == paragraph_ix {
+      return span.text.get(byte..byte + len).map(str::to_string);
+    }
+    byte = byte.checked_add(len)?.checked_add(1)?;
+  }
+  None
+}
+#[cfg(test)]
+mod edit_pipeline_tests {
+  use super::*;
+
+  #[test]
+  fn undo_collaboration_edit_inverts_representable_history_operations() {
+    let record = EditRecord {
+      before_selection: EditorSelection::caret(),
+      before_generation: 1,
+      after_selection: EditorSelection::caret(),
+      after_generation: 2,
+      operations: Vec::new(),
+      canonical_operations: vec![CanonicalOperation::InsertText {
+        paragraph: ParagraphId(7),
+        byte: 2,
+        text: "abc".to_string(),
+        styles: RunStyles::default(),
+      }],
+    };
+
+    let edit = RichTextEditor::collaboration_edit_from_history_operations(
+      RichTextEditor::invert_history_canonical_operations(&record.canonical_operations)
+        .unwrap_or_else(|| vec![CanonicalOperation::ReplaceDocument]),
+    );
+
+    assert!(!edit.repair_required);
+    assert!(matches!(
+      edit.operations.as_slice(),
+      [CanonicalOperation::DeleteRange {
+        start_paragraph: ParagraphId(7),
+        start_byte: 2,
+        end_paragraph: ParagraphId(7),
+        end_byte: 5,
+      }]
+    ));
+  }
+
+  #[test]
+  fn redo_collaboration_edit_reuses_record_canonical_operations() {
+    let record = EditRecord {
+      before_selection: EditorSelection::caret(),
+      before_generation: 1,
+      after_selection: EditorSelection::caret(),
+      after_generation: 2,
+      operations: Vec::new(),
+      canonical_operations: vec![CanonicalOperation::InsertText {
+        paragraph: ParagraphId(7),
+        byte: 2,
+        text: "abc".to_string(),
+        styles: RunStyles::default(),
+      }],
+    };
+
+    let edit = RichTextEditor::redo_collaboration_edit_for_history(&record);
+
+    assert!(!edit.repair_required);
+    assert!(matches!(
+      edit.operations.as_slice(),
+      [CanonicalOperation::InsertText {
+        paragraph: ParagraphId(7),
+        byte: 2,
+        text,
+        styles,
+      }] if text == "abc" && *styles == RunStyles::default()
+    ));
+  }
+
+  #[test]
+  fn undo_collaboration_edit_uses_source_repair_for_unrepresentable_history_operations() {
+    let record = EditRecord {
+      before_selection: EditorSelection::caret(),
+      before_generation: 1,
+      after_selection: EditorSelection::caret(),
+      after_generation: 2,
+      operations: Vec::new(),
+      canonical_operations: vec![CanonicalOperation::ReplaceDocument],
+    };
+
+    let edit = RichTextEditor::collaboration_edit_from_history_operations(
+      RichTextEditor::invert_history_canonical_operations(&record.canonical_operations)
+        .unwrap_or_else(|| vec![CanonicalOperation::ReplaceDocument]),
+    );
+
+    assert!(edit.repair_required);
+    assert!(matches!(edit.operations.as_slice(), [CanonicalOperation::ReplaceDocument]));
+  }
+}

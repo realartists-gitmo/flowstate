@@ -1072,6 +1072,122 @@ pub struct HostedCollaboration {
   live_updates: LiveUpdateHub,
 }
 
+#[derive(Clone, Debug)]
+pub struct HostedCollaborationPublisher {
+  config: FlowstateSyncConfig,
+  document_state: SessionDocumentState,
+  live_updates: LiveUpdateHub,
+}
+
+impl HostedCollaborationPublisher {
+  #[must_use]
+  pub const fn session_id(&self) -> SessionId {
+    self.config.session_id
+  }
+
+  #[must_use]
+  pub fn document_state(&self) -> SessionDocumentState {
+    self.document_state.clone()
+  }
+
+  pub fn publish_presence(
+    &self,
+    user_label: impl Into<String>,
+    cursor: Option<String>,
+    focus: Option<String>,
+    viewport_hint: Option<String>,
+  ) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish presence");
+    let frontier = self
+      .document_state
+      .document
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+      .frontier()?;
+    let presence = PeerPresence {
+      actor_id: self.config.actor_id,
+      session_id: self.config.session_id,
+      role: self.config.role_request,
+      user_label: user_label.into(),
+      cursor,
+      focus,
+      viewport_hint,
+      last_known_frontier: frontier,
+      monotonic_millis: now_unix_millis(),
+    };
+    self.live_updates.publish(LiveUpdate::wire(
+      Some(self.config.session_id),
+      WireMessage::Presence(presence.message(self.config.document_id)),
+    ))?;
+    Ok(())
+  }
+
+  pub fn publish_application_update(&self, application: UpdateApplication) -> AnyResult<()> {
+    ensure!(
+      self.config.role_request.can_write(),
+      "local role is not allowed to publish application updates"
+    );
+    self.publish_update(Vec::new(), Some(application))
+  }
+
+  pub fn replace_source_from(&self, source: &CollabDocument) -> AnyResult<()> {
+    self.publish_update_from_source(source, None)
+  }
+
+  pub fn publish_update_from_source(&self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
+    ensure!(source.document_id() == self.config.document_id, "replacement source document mismatch");
+    ensure!(source.format_kind() == self.config.format_kind, "replacement source format mismatch");
+    let projection_cache = source.materialize_projection_cache()?;
+    let asset_manifest = source.asset_manifest_bytes()?;
+    let update = if let Ok(Some(granular_source)) = source.materialize_granular_source() {
+      self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+        .replace_granular_source(self.config.role_request, &granular_source, &projection_cache, &asset_manifest)?
+    } else {
+      self
+        .document_state
+        .document
+        .lock()
+        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+        .replace_projection_source(self.config.role_request, &projection_cache, &asset_manifest)?
+    };
+    self.publish_update(update, application)
+  }
+
+  pub fn publish_granular_source_mutations(&self, mutations: &[GranularSourceMutation], application: UpdateApplication) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
+    let update = self
+      .document_state
+      .document
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+      .apply_granular_source_mutations(self.config.role_request, mutations)?;
+    ensure!(
+      !update.is_empty(),
+      "granular collaboration mutation batch did not produce a durable update"
+    );
+    self.publish_update(update, Some(application))
+  }
+
+  pub fn publish_update(&self, update: Vec<u8>, application: Option<UpdateApplication>) -> AnyResult<()> {
+    ensure_update_size(&update, self.config.max_update_bytes)?;
+    self.live_updates.publish(LiveUpdate::wire(
+      None,
+      WireMessage::Update {
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        hash: blake3_hash(&update),
+        bytes: update,
+        application,
+      },
+    ))
+  }
+}
+
 impl HostedCollaboration {
   pub async fn start(document: CollabDocument, assets: AssetStore, local_role: Role) -> AnyResult<Self> {
     let config = FlowstateSyncConfig::new(document.document_id(), document.format_kind(), local_role);
@@ -1116,6 +1232,20 @@ impl HostedCollaboration {
   #[must_use]
   pub const fn format_kind(&self) -> FormatKind {
     self.config.format_kind
+  }
+
+  #[must_use]
+  pub const fn session_id(&self) -> SessionId {
+    self.config.session_id
+  }
+
+  #[must_use]
+  pub fn publisher(&self) -> HostedCollaborationPublisher {
+    HostedCollaborationPublisher {
+      config: self.config.clone(),
+      document_state: self.document_state.clone(),
+      live_updates: self.live_updates.clone(),
+    }
   }
 
   pub fn issue_invite_link(&self, invited_role: Role, label: Option<String>, multi_use: bool) -> AnyResult<String> {
@@ -1249,9 +1379,10 @@ impl HostedCollaboration {
       last_known_frontier: frontier,
       monotonic_millis: now_unix_millis(),
     };
-    self
-      .live_updates
-      .publish(LiveUpdate::event(Some(self.config.session_id), SessionEvent::Presence(presence)))?;
+    self.live_updates.publish(LiveUpdate::wire(
+      Some(self.config.session_id),
+      WireMessage::Presence(presence.message(self.config.document_id)),
+    ))?;
     Ok(())
   }
 
@@ -1922,6 +2053,10 @@ fn application_label(application: Option<&UpdateApplication>) -> String {
 const MAX_RECENT_LOCAL_UPDATE_HASHES: usize = 256;
 
 impl LiveCollaborationClient {
+  #[must_use]
+  pub const fn local_session_id(&self) -> SessionId {
+    self.config.session_id
+  }
   fn remember_local_update_hash(&mut self, hash: [u8; 32]) {
     if self.recent_local_update_hashes.len() >= MAX_RECENT_LOCAL_UPDATE_HASHES {
       self.recent_local_update_hashes.pop_front();
@@ -2789,6 +2924,7 @@ async fn serve_live_stream(
             ),
           );
         }
+
         if bytes.is_empty() && application.is_some() {
           if collab_canary_enabled() {
             collab_canary(
@@ -2802,6 +2938,16 @@ async fn serve_live_stream(
             .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
             .frontier()?;
           if let Some(hub) = live_updates {
+            hub.publish(LiveUpdate::wire(
+              Some(hello.session_id),
+              WireMessage::Update {
+                document_id,
+                actor_id,
+                hash,
+                bytes,
+                application,
+              },
+            ))?;
             hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::UpdateHint { document_id, hash }))?;
           }
           write_wire_message(
@@ -2815,19 +2961,7 @@ async fn serve_live_stream(
           .await?;
           continue;
         }
-        let speculative_message = if let Some(hub) = live_updates {
-          let message = WireMessage::Update {
-            document_id,
-            actor_id,
-            hash,
-            bytes: bytes.clone(),
-            application: application.clone(),
-          };
-          hub.publish(LiveUpdate::wire(Some(hello.session_id), message.clone()))?;
-          Some(message)
-        } else {
-          None
-        };
+
         let outcome = {
           state
             .document
@@ -2838,11 +2972,21 @@ async fn serve_live_stream(
         if collab_canary_enabled() {
           collab_canary("host_imported_update", format!("patch={} bytes={}", outcome.patch.is_some(), bytes.len()));
         }
-        if outcome.patch.is_none()
-          && let Some(hub) = live_updates
-          && speculative_message.is_none()
-        {
-          hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::UpdateHint { document_id, hash }))?;
+        if let Some(hub) = live_updates {
+          if outcome.patch.is_some() {
+            hub.publish(LiveUpdate::wire(
+              Some(hello.session_id),
+              WireMessage::Update {
+                document_id,
+                actor_id,
+                hash,
+                bytes,
+                application,
+              },
+            ))?;
+          } else {
+            hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::UpdateHint { document_id, hash }))?;
+          }
         }
         write_wire_message(
           send,
@@ -4184,6 +4328,86 @@ mod tests {
     .unwrap();
     assert_eq!(joiner_presence.user_label, "Left debater");
     assert_eq!(joiner_presence.viewport_hint.as_deref(), Some("visible:0-5"));
+
+    left.shutdown().await.unwrap();
+    right.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_presence_is_visible_to_joiners() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut joiner = connect_live_invite(&invite).await.unwrap();
+
+    host
+      .publish_presence(
+        "Host debater",
+        Some("db8:0:0".to_string()),
+        Some("case".to_string()),
+        Some("visible:0-1".to_string()),
+      )
+      .unwrap();
+
+    let host_presence = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let event = joiner.receive_next_update().await.unwrap();
+        if let Some(SessionEvent::Presence(presence)) = event
+          && presence.user_label == "Host debater"
+        {
+          break presence;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert_eq!(host_presence.cursor.as_deref(), Some("db8:0:0"));
+    assert_eq!(host_presence.viewport_hint.as_deref(), Some("visible:0-1"));
+
+    joiner.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_client_application_only_updates_reach_other_joiners() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut left = connect_live_invite(&invite).await.unwrap();
+    let mut right = connect_live_invite(&invite).await.unwrap();
+
+    let application = UpdateApplication::Fl0ActionBundle(vec![7, 8, 9]);
+    left
+      .publish_application_update(application.clone())
+      .await
+      .unwrap();
+
+    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        if let Some(event) = right.receive_next_update().await.unwrap()
+          && matches!(event, SessionEvent::UpdateHint { .. })
+        {
+          break event;
+        }
+      }
+    })
+    .await
+    .unwrap();
+    assert!(matches!(event, SessionEvent::UpdateHint { .. }));
+    assert_eq!(right.last_application, Some(application));
 
     left.shutdown().await.unwrap();
     right.shutdown().await.unwrap();

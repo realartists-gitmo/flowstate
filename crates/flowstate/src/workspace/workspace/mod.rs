@@ -40,8 +40,9 @@ use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
-  CollaborationRole as Db8CollaborationRole, Document, DocumentOffset, DocumentTheme, ExternalCaret, ParagraphStyle, RichTextEditor, Save,
-  ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme, load_or_create_document, paragraph_byte_range,
+  CollaborationRole as Db8CollaborationRole, Document, DocumentOffset, DocumentTheme, EditorSelection, ExternalCaret, ExternalSelection,
+  ParagraphStyle, RichTextEditor, Save, ThemeUnderline, ZoomIn, ZoomOut, flowstate_document_theme, load_or_create_document,
+  paragraph_byte_range,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -51,20 +52,21 @@ use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_collab::{
   ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularSourceMutation, GranularValue, UpdateApplication, WireMessage,
-  decode_native_file,
+  blake3_hash, decode_native_file,
 };
 use flowstate_document::{
   Db8CollabSourceMutation, Db8GranularValue, db8_collab_document_with_id, document_from_db8_collab_source, ensure_db8_document_id,
 };
 use flowstate_sync::{
-  AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, LiveUpdate, LiveUpdateKind, Role, SessionDocumentState, SessionEvent, SessionId,
-  SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,
+  AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, HostedCollaborationPublisher, LiveUpdate, LiveUpdateKind, Role,
+  SessionDocumentState, SessionEvent, SessionId, SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,
 };
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 use tokio::sync::{broadcast, mpsc};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
+const MAX_RECENT_COLLABORATION_APPLICATION_HASHES: usize = 128;
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
@@ -94,6 +96,7 @@ pub struct Workspace {
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   collaboration_host: Option<HostedCollaboration>,
   collaboration_last_published_hash: Option<[u8; 32]>,
+  collaboration_applied_application_hashes: VecDeque<[u8; 32]>,
   collaboration_client_updates: Option<mpsc::UnboundedSender<PendingCollaborationUpdate>>,
   collaboration_pending_updates: VecDeque<PendingCollaborationUpdate>,
   collaboration_runtime_id: u64,
@@ -191,6 +194,7 @@ struct CollaborationUiState {
   panel_id: Option<Uuid>,
   document_id: Option<flowstate_collab::DocumentId>,
   format_kind: Option<FormatKind>,
+  local_session_id: Option<SessionId>,
   pending_invite: Option<String>,
   pending_invite_copy_role: Option<CollaborationInviteRole>,
   last_error: Option<String>,
@@ -209,6 +213,7 @@ impl Default for CollaborationUiState {
       panel_id: None,
       document_id: None,
       format_kind: None,
+      local_session_id: None,
       pending_invite: None,
       pending_invite_copy_role: None,
       last_error: None,
