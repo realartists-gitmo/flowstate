@@ -714,6 +714,7 @@ struct ScrollAnchorLock {
 }
 
 struct RenderLayoutSnapshot {
+  width: Pixels,
   item_sizes: Rc<Vec<Size<Pixels>>>,
   items: RenderVirtualItems,
   hide_initial_layout: bool,

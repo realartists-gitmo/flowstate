@@ -448,6 +448,7 @@ impl RichTextEditor {
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let (items, item_sizes) = self.render_items_with_drop_preview(base_items, item_sizes, width, window, cx);
     RenderLayoutSnapshot {
+      width,
       item_sizes,
       items,
       hide_initial_layout: hide_until_viewport_measured || self.initial_layout_hidden,
