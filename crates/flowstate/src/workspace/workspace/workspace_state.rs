@@ -105,9 +105,7 @@ impl Workspace {
         }
       }
     } else {
-      let signature = outline_signature(editor.document());
-      self.collapsed_outline_items = signature.entries.iter().filter(|entry| entry.level == 2).map(|entry| entry.paragraph_ix).collect();
-      self.outline_cache = Some(OutlineCache::new(active_id, edit_generation, signature));
+      self.outline_cache = Some(OutlineCache::new(active_id, edit_generation, outline_signature(editor.document())));
     }
     let Some(cache) = self.outline_cache.as_mut() else {
       return;
@@ -192,6 +190,13 @@ impl Workspace {
       self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
       self.outline_active_paragraph = None;
       self.outline_scrolled_paragraph = None;
+      if let Some(editor) = self.active_editor.as_ref() {
+        let editor = editor.read(cx);
+        let signature = outline_signature(editor.document());
+        self.collapsed_outline_items = signature.entries.iter().filter(|entry| entry.level == 2).map(|entry| entry.paragraph_ix).collect();
+      }
+      self.outline_cache = None;
+      self.outline_revision = self.outline_revision.wrapping_add(1);
       self.refresh_outline_tree(cx);
       self.persist_temporary_workspace_session(cx);
       cx.notify();
