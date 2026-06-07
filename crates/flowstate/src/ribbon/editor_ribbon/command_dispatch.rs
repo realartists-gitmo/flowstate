@@ -18,17 +18,21 @@ fn command_sort_key(command_id: Option<CommandId>) -> u16 {
 }
 
 #[hotpath::measure]
-fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, cx: &mut Context<RichTextEditor>) {
+fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, window: &Window, cx: &mut Context<RichTextEditor>) {
   match command_id {
     RibbonCommandId::Paragraph(style) => {
       editor.set_paragraph_style_for_selection(style, cx);
     },
     RibbonCommandId::Semantic(style) => {
-      editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
+      }
     },
     RibbonCommandId::ToggleSpeechDocument | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => {},
     RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => {
-      editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
+      }
     },
     RibbonCommandId::Underline => {
       editor.toggle_inline_tool(ArmedInlineTool::Underline, cx);
@@ -47,7 +51,9 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.set_highlight_for_selection(None, cx);
     },
     RibbonCommandId::MarkCard => {
-      editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+      }
     },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {

@@ -1,16 +1,14 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div, prelude::*,
-  px, relative,
+  AnyElement, App, Context, Entity, Focusable, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
+  prelude::*, px, relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
-use gpui_component::h_flex;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
+use gpui_component::h_flex;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{
-  ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _,
-};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _};
 use serde::{Deserialize, Serialize};
 
 use crate::commands::{CommandId, default_keys_for};

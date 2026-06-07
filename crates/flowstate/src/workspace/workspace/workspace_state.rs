@@ -2,6 +2,7 @@
 impl Workspace {
   pub fn toggle_ribbon(&mut self, cx: &mut Context<Self>) {
     self.ribbon_collapsed = !self.ribbon_collapsed;
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -20,6 +21,7 @@ impl Workspace {
     };
     self.prepare_active_editor_for_width_delta(delta, cx);
     self.outline_collapsed = !self.outline_collapsed;
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -41,6 +43,7 @@ impl Workspace {
     if self.toolkit_collapsed {
       self.active_toolkit_tool = None;
     }
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -57,6 +60,7 @@ impl Workspace {
       let delta = if is_expanded { px(40.0) - px(380.0) } else { px(380.0) - px(40.0) };
       self.prepare_active_editor_for_width_delta(delta, cx);
     }
+    self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
@@ -130,7 +134,13 @@ impl Workspace {
 
   fn save_current_outline_state(&mut self, cx: &mut Context<Self>) {
     let Some(active_id) = self.active_document_id else { return };
-    let Some(panel) = self.document_panels.iter().find(|p| p.read(cx).id() == active_id) else { return };
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|p| p.read(cx).id() == active_id)
+    else {
+      return;
+    };
     panel.update(cx, |panel, _| {
       panel.collapsed_outline_items = Some(self.collapsed_outline_items.clone());
       panel.outline_revision = self.outline_revision;
@@ -139,7 +149,13 @@ impl Workspace {
   }
 
   fn restore_outline_state_for_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
-    let Some(panel) = self.document_panels.iter().find(|p| p.read(cx).id() == panel_id) else { return };
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|p| p.read(cx).id() == panel_id)
+    else {
+      return;
+    };
     let panel = panel.read(cx);
     match &panel.collapsed_outline_items {
       Some(items) => self.collapsed_outline_items = items.clone(),
@@ -154,7 +170,7 @@ impl Workspace {
             .map(|entry| entry.paragraph_ix)
             .collect();
         }
-      }
+      },
     }
     self.outline_revision = panel.outline_revision.wrapping_add(1);
     self.outline_scrolled_paragraph = panel.outline_scrolled_paragraph;
@@ -189,7 +205,9 @@ impl Workspace {
       return;
     }
 
-    let any_expanded = target_entries.iter().any(|ix| !self.collapsed_outline_items.contains(ix));
+    let any_expanded = target_entries
+      .iter()
+      .any(|ix| !self.collapsed_outline_items.contains(ix));
     if any_expanded {
       self.collapsed_outline_items.extend(target_entries);
     } else {
@@ -222,7 +240,11 @@ impl Workspace {
       cx.notify();
     });
 
-    self.outline_context_menu = Some(OutlineContextMenu { position, menu_view: menu, _subscription });
+    self.outline_context_menu = Some(OutlineContextMenu {
+      position,
+      menu_view: menu,
+      _subscription,
+    });
     cx.notify();
   }
 
@@ -388,11 +410,14 @@ impl Workspace {
     }
   }
 
-  fn condense_active_selection(&mut self, cx: &mut Context<Self>) -> bool {
+  fn condense_active_selection(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(editor) = self.active_editor.clone() else {
       return false;
     };
     editor.update(cx, |editor, cx| {
+      if !editor.focus_handle(cx).is_focused(window) {
+        return false;
+      }
       let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(&[0, 1, 2, 3]) else {
         return false;
       };

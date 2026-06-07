@@ -157,8 +157,8 @@ fn modern_condense_menu(
         })
         .on_click({
           let editor = editor.clone();
-          move |_, _, cx| {
-            condense_editor_selection(editor.clone(), ' ', cx);
+          move |_, window, cx| {
+            condense_editor_selection(editor.clone(), ' ', window, cx);
           }
         }),
     )
@@ -168,14 +168,14 @@ fn modern_condense_menu(
       let editor_for_uncondense = editor.clone();
       menu
         .min_w(px(190.0))
-        .item(PopupMenuItem::new("Condense").on_click(move |_, _, cx| {
-          condense_editor_selection(editor_for_plain_condense.clone(), ' ', cx);
+        .item(PopupMenuItem::new("Condense").on_click(move |_, window, cx| {
+          condense_editor_selection(editor_for_plain_condense.clone(), ' ', window, cx);
         }))
-        .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, _, cx| {
-          condense_editor_selection(editor_for_pilcrow_condense.clone(), CONDENSE_PILCROW_MARKER, cx);
+        .item(PopupMenuItem::new("Condense with pilcrows").on_click(move |_, window, cx| {
+          condense_editor_selection(editor_for_pilcrow_condense.clone(), CONDENSE_PILCROW_MARKER, window, cx);
         }))
-        .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, _, cx| {
-          uncondense_editor_selection(editor_for_uncondense.clone(), cx);
+        .item(PopupMenuItem::new("Uncondense pilcrows").on_click(move |_, window, cx| {
+          uncondense_editor_selection(editor_for_uncondense.clone(), window, cx);
         }))
     })
     .into_any_element()
@@ -233,8 +233,8 @@ fn modern_condensed_menu(
         })
         .on_click({
           let editor = editor.clone();
-          move |_, _, cx| {
-            apply_shrink_editor_selection(editor.clone(), flowstate_document::SEMANTIC_CONDENSED, cx);
+          move |_, window, cx| {
+            apply_shrink_editor_selection(editor.clone(), flowstate_document::SEMANTIC_CONDENSED, window, cx);
           }
         }),
     )
@@ -246,12 +246,12 @@ fn modern_condensed_menu(
         .item(
           PopupMenuItem::new("Shrink")
             .checked(checked)
-            .on_click(move |_, _, cx| {
-              apply_shrink_editor_selection(editor_for_condensed.clone(), flowstate_document::SEMANTIC_CONDENSED, cx);
+            .on_click(move |_, window, cx| {
+              apply_shrink_editor_selection(editor_for_condensed.clone(), flowstate_document::SEMANTIC_CONDENSED, window, cx);
             }),
         )
-        .item(PopupMenuItem::new("Ultra shrink").on_click(move |_, _, cx| {
-          apply_shrink_editor_selection(editor_for_ultra.clone(), flowstate_document::SEMANTIC_ULTRACONDENSED, cx);
+        .item(PopupMenuItem::new("Ultra shrink").on_click(move |_, window, cx| {
+          apply_shrink_editor_selection(editor_for_ultra.clone(), flowstate_document::SEMANTIC_ULTRACONDENSED, window, cx);
         }))
     })
     .into_any_element()
@@ -260,8 +260,15 @@ fn modern_condensed_menu(
 const CONDENSE_PILCROW_MARKER: char = '\u{f8ff}';
 const CARD_SECTION_SLOTS: &[u8] = &[0, 1, 2, 3];
 
-fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx: &mut App) {
+fn editor_has_selected_text_or_focused_caret(editor: &RichTextEditor, window: &Window, cx: &App) -> bool {
+  !editor.selection().is_caret() || editor.focus_handle(cx).is_focused(window)
+}
+
+fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
+    if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
+      return;
+    }
     let use_card_fallback = editor.selection().is_caret();
     let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
       return;
@@ -275,8 +282,11 @@ fn condense_editor_selection(editor: Entity<RichTextEditor>, separator: char, cx
   });
 }
 
-fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
+fn uncondense_editor_selection(editor: Entity<RichTextEditor>, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
+    if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
+      return;
+    }
     let use_card_fallback = editor.selection().is_caret();
     let Some(fragment) = editor.fragment_at_selection_or_enclosing_section(CARD_SECTION_SLOTS) else {
       return;
@@ -290,8 +300,11 @@ fn uncondense_editor_selection(editor: Entity<RichTextEditor>, cx: &mut App) {
   });
 }
 
-fn apply_shrink_editor_selection(editor: Entity<RichTextEditor>, semantic: RunSemanticStyle, cx: &mut App) {
+fn apply_shrink_editor_selection(editor: Entity<RichTextEditor>, semantic: RunSemanticStyle, window: &Window, cx: &mut App) {
   editor.update(cx, |editor, cx| {
+    if !editor_has_selected_text_or_focused_caret(editor, window, cx) {
+      return;
+    }
     if !editor.selection().is_caret() {
       editor.toggle_inline_tool(ArmedInlineTool::Semantic(semantic), cx);
       return;
@@ -539,7 +552,11 @@ fn modern_icon_chip(
   action: impl Fn(&mut RichTextEditor, &mut Context<RichTextEditor>) + 'static,
 ) -> AnyElement {
   let command_color = ribbon_command_color(command, cx);
-  let icon_color = if enabled { command_color } else { cx.theme().muted_foreground.opacity(0.5) };
+  let icon_color = if enabled {
+    command_color
+  } else {
+    cx.theme().muted_foreground.opacity(0.5)
+  };
   Button::new(("modern-ribbon-command", ribbon_command_key(command.id)))
     .xsmall()
     .compact()
@@ -566,7 +583,9 @@ fn modern_export_format(
   let chip_height = metrics.chip_height;
   let command_color = ribbon_command_color(command, cx);
   let label = RibbonLabel::for_command(command);
-  let format_created = editor.read(cx).format_export_created_since_last_saved_edit();
+  let format_created = editor
+    .read(cx)
+    .format_export_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-format-dropdown")
     .with_size(Size::Size(chip_height))
     .compact()
@@ -639,7 +658,9 @@ fn modern_export_send(
   let chip_height = metrics.chip_height;
   let command_color = ribbon_command_color(command, cx);
   let label = RibbonLabel::for_command(command);
-  let send_created = editor.read(cx).send_document_created_since_last_saved_edit();
+  let send_created = editor
+    .read(cx)
+    .send_document_created_since_last_saved_edit();
   DropdownButton::new("modern-ribbon-send-dropdown")
     .with_size(Size::Size(chip_height))
     .compact()

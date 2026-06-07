@@ -24,47 +24,41 @@ fn modern_group(
         .border_color(cx.theme().border.opacity(0.72))
     })
     .child(
-      div()
-        .w_full()
-        .flex()
-        .flex_col()
-        .min_w_0()
-        .gap_0p5()
-        .child(
-          div()
-            .id(group.id)
-            .flex()
-            .flex_row()
-            .when(metrics.max_chip_rows == 1 && group.id != "speech", |this| this.flex_nowrap())
-            .when(metrics.max_chip_rows > 1 || group.id == "speech", |this| this.flex_wrap())
-            .items_center()
-            .content_start()
-            .gap(metrics.chip_gap)
-            .when_some(wrap_width, |this, wrap_width| this.w(wrap_width))
-            .children(group.commands.iter().map(|command| {
-              if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
-                modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::CondenseMenu) {
-                modern_condense_menu(command, editor.clone(), metrics, options, cx)
-              } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
-                modern_condensed_menu(command, editor.clone(), metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::Undo) {
-                modern_undo_button(command, editor.clone(), metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::Redo) {
-                modern_redo_button(command, editor.clone(), metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::ExportFormat) {
-                modern_export_format(command, editor.clone(), metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::ExportSend) {
-                modern_export_send(command, editor.clone(), metrics, cx)
-              } else if matches!(command.id, RibbonCommandId::SendToSpeechDocument) {
-                modern_speech_send_menu(command, editor.clone(), metrics, workspace.clone(), panel_id, cx)
-              } else if matches!(command.id, RibbonCommandId::ToggleInvisibility) {
-                modern_invisibility_toggle(command, editor.clone(), metrics, cx)
-              } else {
-                modern_command_chip(command, editor.clone(), options, metrics, workspace.clone(), panel_id, cx)
-              }
-            })),
-        ),
+      div().w_full().flex().flex_col().min_w_0().gap_0p5().child(
+        div()
+          .id(group.id)
+          .flex()
+          .flex_row()
+          .when(metrics.max_chip_rows == 1 && group.id != "speech", |this| this.flex_nowrap())
+          .when(metrics.max_chip_rows > 1 || group.id == "speech", |this| this.flex_wrap())
+          .items_center()
+          .content_start()
+          .gap(metrics.chip_gap)
+          .when_some(wrap_width, |this, wrap_width| this.w(wrap_width))
+          .children(group.commands.iter().map(|command| {
+            if matches!(command.id, RibbonCommandId::ToggleHighlightMode(_)) {
+              modern_highlight_menu(command, editor.clone(), document_theme, metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::CondenseMenu) {
+              modern_condense_menu(command, editor.clone(), metrics, options, cx)
+            } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
+              modern_condensed_menu(command, editor.clone(), metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::Undo) {
+              modern_undo_button(command, editor.clone(), metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::Redo) {
+              modern_redo_button(command, editor.clone(), metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::ExportFormat) {
+              modern_export_format(command, editor.clone(), metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::ExportSend) {
+              modern_export_send(command, editor.clone(), metrics, cx)
+            } else if matches!(command.id, RibbonCommandId::SendToSpeechDocument) {
+              modern_speech_send_menu(command, editor.clone(), metrics, workspace.clone(), panel_id, cx)
+            } else if matches!(command.id, RibbonCommandId::ToggleInvisibility) {
+              modern_invisibility_toggle(command, editor.clone(), metrics, cx)
+            } else {
+              modern_command_chip(command, editor.clone(), options, metrics, workspace.clone(), panel_id, cx)
+            }
+          })),
+      ),
     )
     .into_any_element()
 }
@@ -175,9 +169,7 @@ fn command_chip_width(
   cx: &mut Context<EditorRibbon>,
 ) -> gpui::Pixels {
   match command.id {
-    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::ToggleInvisibility => {
-      px(metrics.chip_height.as_f32())
-    },
+    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::ToggleInvisibility => px(metrics.chip_height.as_f32()),
     RibbonCommandId::ExportFormat => {
       let text_width = measure_ribbon_text("Format", metrics.chip_text_size, window, cx).as_f32();
       px(text_width + 10.0 + metrics.chip_padding_x.as_f32() * 2.0 + 10.0)
@@ -204,7 +196,10 @@ fn command_chip_width(
         .unwrap_or(0.0);
       let accent_width = if command.accent.is_some() { 14.0 } else { 0.0 };
       let component_padding_x = px(4.0);
-      let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument) {
+      let caret_width = if matches!(
+        command.id,
+        RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument
+      ) {
         10.0
       } else {
         0.0
@@ -288,7 +283,7 @@ fn modern_command_chip(
     .when(show_shortcut(options), |this| {
       this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
     })
-    .on_click(move |_, _window, cx| match command_id {
+    .on_click(move |_, window, cx| match command_id {
       RibbonCommandId::ToggleSpeechDocument => {
         if let (Some(workspace), Some(panel_id)) = (workspace.clone(), panel_id) {
           let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
@@ -296,7 +291,7 @@ fn modern_command_chip(
       },
       _ => {
         editor.update(cx, |editor, cx| {
-          perform_ribbon_command(editor, command_id, cx);
+          perform_ribbon_command(editor, command_id, window, cx);
         });
       },
     })
@@ -311,7 +306,10 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
       cx.theme().warning
     },
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
-    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => cx.theme().info,
+    RibbonCommandId::CondenseMenu
+    | RibbonCommandId::CondensedMenu
+    | RibbonCommandId::SendToSpeechDocument
+    | RibbonCommandId::SendToSpeechDocumentEnd => cx.theme().info,
     RibbonCommandId::ToggleSpeechDocument => cx.theme().success,
     RibbonCommandId::Undo | RibbonCommandId::Redo => cx.theme().primary,
     RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend => cx.theme().info,
