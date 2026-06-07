@@ -767,26 +767,73 @@ fn modern_speech_send_menu(
           }
         }),
     )
-    .dropdown_menu(move |menu, _, _| {
+    .dropdown_menu(move |menu, _, cx| {
       let send_workspace = workspace.clone();
       let send_end_workspace = workspace.clone();
+      let speech_shortcut = shortcut_for(CommandId::SendToSpeechDocument);
+      let speech_end_shortcut = shortcut_for(CommandId::SendToSpeechDocumentEnd);
+      let muted = cx.theme().muted_foreground;
       menu
         .min_w(px(160.0))
         .item(
-          PopupMenuItem::new("Send to speech")
-            .on_click(move |_, window, cx| {
-              if let Some(workspace) = send_workspace.clone() {
-                let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
-              }
-            }),
+          PopupMenuItem::element({
+            let muted = muted;
+            let speech_shortcut = speech_shortcut.clone();
+            move |_, _| {
+              h_flex()
+                .flex_1()
+                .justify_between()
+                .gap_3()
+                .child("Send to speech")
+                .when_some(speech_shortcut.clone(), |this, s| {
+                  this.child(
+                    div()
+                      .flex_none()
+                      .whitespace_nowrap()
+                      .text_size(px(10.0))
+                      .line_height(relative(1.0))
+                      .text_color(muted)
+                      .child(s),
+                  )
+                })
+                .into_any_element()
+            }
+          })
+          .on_click(move |_, window, cx| {
+            if let Some(workspace) = send_workspace.clone() {
+              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
+            }
+          }),
         )
         .item(
-          PopupMenuItem::new("Send to speech end")
-            .on_click(move |_, window, cx| {
-              if let Some(workspace) = send_end_workspace.clone() {
-                let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx));
-              }
-            }),
+          PopupMenuItem::element({
+            let muted = muted;
+            let speech_end_shortcut = speech_end_shortcut.clone();
+            move |_, _| {
+              h_flex()
+                .flex_1()
+                .justify_between()
+                .gap_3()
+                .child("Send to speech end")
+                .when_some(speech_end_shortcut.clone(), |this, s| {
+                  this.child(
+                    div()
+                      .flex_none()
+                      .whitespace_nowrap()
+                      .text_size(px(10.0))
+                      .line_height(relative(1.0))
+                      .text_color(muted)
+                      .child(s),
+                  )
+                })
+                .into_any_element()
+            }
+          })
+          .on_click(move |_, window, cx| {
+            if let Some(workspace) = send_end_workspace.clone() {
+              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx));
+            }
+          }),
         )
     })
     .into_any_element()
