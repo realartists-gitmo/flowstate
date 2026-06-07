@@ -297,10 +297,16 @@ impl Render for DocumentSearchBar {
               .gap_1()
               .items_center()
               .child(
-                Icon::default()
-                  .path("icons/letter-case.svg")
+                Button::new("document-search-case-sensitive-icon")
+                  .child(
+                    Icon::default()
+                      .path("icons/letter-case.svg")
+                      .xsmall()
+                      .text_color(cx.theme().muted_foreground),
+                  )
                   .xsmall()
-                  .text_color(cx.theme().muted_foreground),
+                  .ghost()
+                  .tooltip("Case sensitive"),
               )
               .child(
                 Checkbox::new("document-search-case-sensitive")
@@ -320,10 +326,16 @@ impl Render for DocumentSearchBar {
               .gap_1()
               .items_center()
               .child(
-                Icon::default()
-                  .path("icons/text-box-edit.svg")
+                Button::new("document-search-whole-words-icon")
+                  .child(
+                    Icon::default()
+                      .path("icons/text-box-edit.svg")
+                      .xsmall()
+                      .text_color(cx.theme().muted_foreground),
+                  )
                   .xsmall()
-                  .text_color(cx.theme().muted_foreground),
+                  .ghost()
+                  .tooltip("Match whole word"),
               )
               .child(
                 Checkbox::new("document-search-whole-words")
