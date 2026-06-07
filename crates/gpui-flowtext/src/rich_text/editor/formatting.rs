@@ -383,7 +383,9 @@ fn apply_highlight_to_existing_highlights_in_paragraph_range(
       byte: range.end,
     },
     |styles| {
-      styles.highlight = Some(highlight);
+      if styles.highlight.is_some() {
+        styles.highlight = Some(highlight);
+      }
     },
   );
 }
