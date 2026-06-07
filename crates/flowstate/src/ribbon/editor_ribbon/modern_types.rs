@@ -50,6 +50,12 @@ pub enum RibbonCommandId {
   HighlightMenu,
   ToggleHighlightMode(Option<HighlightStyle>),
   ClearFormatting,
+
+  Undo,
+  Redo,
+  ExportFormat,
+  ExportSend,
+  ToggleInvisibility,
 }
 
 #[derive(Clone, Debug)]
@@ -94,6 +100,8 @@ impl RibbonLabel {
       RibbonCommandId::SendToSpeechDocument => Some("icons/send.svg"),
       RibbonCommandId::MarkCard => Some("icons/mark-card.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
+      RibbonCommandId::ExportFormat => Some("icons/file-search-corner.svg"),
+      RibbonCommandId::ExportSend => Some("icons/send.svg"),
       _ => None,
     };
     Self {

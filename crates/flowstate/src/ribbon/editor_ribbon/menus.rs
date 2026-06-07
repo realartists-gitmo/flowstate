@@ -469,164 +469,6 @@ fn empty_input_paragraph() -> flowstate_document::InputParagraph {
 }
 
 #[hotpath::measure]
-fn undo_redo_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
-  h_flex()
-    .flex_none()
-    .gap_0p5()
-    .pl(metrics.group_divider_padding_left)
-    .border_l_1()
-    .border_color(cx.theme().border.opacity(0.72))
-    .child(
-      Button::new("ribbon-undo")
-        .icon(Icon::new(IconName::Undo).xsmall())
-        .compact()
-        .ghost()
-        .h(metrics.chip_height)
-        .tooltip("Undo")
-        .on_click({
-          let editor = editor.clone();
-          move |_, _, cx| {
-            editor.update(cx, |editor, cx| editor.undo(cx));
-          }
-        }),
-    )
-    .child(
-      Button::new("ribbon-redo")
-        .icon(Icon::new(IconName::Redo).xsmall())
-        .compact()
-        .ghost()
-        .h(metrics.chip_height)
-        .tooltip("Redo")
-        .on_click({
-          let editor = editor.clone();
-          move |_, _, cx| {
-            editor.update(cx, |editor, cx| editor.redo(cx));
-          }
-        }),
-    )
-    .into_any_element()
-}
-
-#[hotpath::measure]
-#[hotpath::measure]
-fn export_section(editor: Entity<RichTextEditor>, metrics: RibbonLayoutMetrics, cx: &mut Context<EditorRibbon>) -> AnyElement {
-  let chip_height = metrics.chip_height;
-  let send_created = editor
-    .read(cx)
-    .send_document_created_since_last_saved_edit();
-  let format_created = editor
-    .read(cx)
-    .format_export_created_since_last_saved_edit();
-  div()
-    .flex()
-    .flex_col()
-    .flex_none()
-    .gap_0p5()
-    .pl(metrics.group_divider_padding_left)
-    .border_l_1()
-    .border_color(cx.theme().border.opacity(0.72))
-    .child(
-      div()
-        .text_size(px(10.0))
-        .font_medium()
-        .text_color(cx.theme().foreground)
-        .child("Export"),
-    )
-    .child(
-      div()
-        .flex()
-        .gap_0p5()
-        .child(format_dropdown(editor.clone(), chip_height, metrics, format_created, cx))
-        .child(send_dropdown(editor, chip_height, metrics, send_created, cx)),
-    )
-    .into_any_element()
-}
-
-#[hotpath::measure]
-fn format_dropdown(
-  editor: Entity<RichTextEditor>,
-  chip_height: gpui::Pixels,
-  metrics: RibbonLayoutMetrics,
-  format_created: bool,
-  cx: &mut Context<EditorRibbon>,
-) -> AnyElement {
-  DropdownButton::new("modern-ribbon-format-dropdown")
-    .with_size(Size::Size(chip_height))
-    .compact()
-    .outline()
-    .when(format_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
-    .button(
-      export_chip_button("modern-ribbon-format", "Export as DOCX", "Format", chip_height, metrics).on_click({
-        let editor = editor.clone();
-        move |_, _, cx| {
-          export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
-        }
-      }),
-    )
-    .dropdown_menu(move |menu, _, _| {
-      let docx_editor = editor.clone();
-      let pdf_editor = editor.clone();
-      menu
-        .min_w(px(120.0))
-        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
-          export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
-        }))
-        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
-          export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
-        }))
-    })
-    .into_any_element()
-}
-
-#[hotpath::measure]
-fn send_dropdown(
-  editor: Entity<RichTextEditor>,
-  chip_height: gpui::Pixels,
-  metrics: RibbonLayoutMetrics,
-  send_created: bool,
-  cx: &mut Context<EditorRibbon>,
-) -> AnyElement {
-  DropdownButton::new("modern-ribbon-send-dropdown")
-    .with_size(Size::Size(chip_height))
-    .compact()
-    .outline()
-    .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
-    .button(
-      export_chip_button("modern-ribbon-send", "Send as DB8", "Send", chip_height, metrics).on_click({
-        let editor = editor.clone();
-        move |_, _, cx| {
-          send_format_from_ribbon(
-            editor.clone(),
-            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
-            cx,
-          );
-        }
-      }),
-    )
-    .dropdown_menu(move |menu, _, _| {
-      let db8_editor = editor.clone();
-      let docx_editor = editor.clone();
-      let pdf_editor = editor.clone();
-      menu
-        .min_w(px(120.0))
-        .item(PopupMenuItem::new(".db8").on_click(move |_, _, cx| {
-          send_format_from_ribbon(
-            db8_editor.clone(),
-            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
-            cx,
-          );
-        }))
-        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
-          send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
-        }))
-        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
-          send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
-        }))
-    })
-    .into_any_element()
-}
-
-#[hotpath::measure]
 fn export_chip_button(
   id: &'static str,
   tooltip: &'static str,
@@ -674,42 +516,164 @@ fn export_format_from_ribbon(editor: Entity<RichTextEditor>, format: DocumentExp
 }
 
 #[hotpath::measure]
-fn invisibility_mode_button(
+fn modern_undo_button(
+  command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
-  invisibility_mode: bool,
   metrics: RibbonLayoutMetrics,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
-  div()
-    .flex()
-    .flex_col()
-    .flex_none()
-    .gap_0p5()
-    .pl(metrics.group_divider_padding_left)
-    .border_l_1()
-    .border_color(cx.theme().border.opacity(0.72))
-    .child(
-      div()
-        .text_size(px(10.0))
-        .font_medium()
-        .text_color(cx.theme().foreground)
-        .child("Views"),
+  modern_icon_chip(IconName::Undo, "Undo", command, editor, metrics, cx, |editor, cx| {
+    editor.undo(cx);
+  })
+}
+
+#[hotpath::measure]
+fn modern_redo_button(
+  command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  modern_icon_chip(IconName::Redo, "Redo", command, editor, metrics, cx, |editor, cx| {
+    editor.redo(cx);
+  })
+}
+
+fn modern_icon_chip(
+  icon: IconName,
+  tooltip: &'static str,
+  command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+  action: impl Fn(&mut RichTextEditor, &mut Context<RichTextEditor>) + 'static,
+) -> AnyElement {
+  let command_color = ribbon_command_color(command, cx);
+  Button::new(("modern-ribbon-command", ribbon_command_key(command.id)))
+    .xsmall()
+    .compact()
+    .outline()
+    .h(metrics.chip_height)
+    .w(metrics.chip_height)
+    .px(metrics.chip_padding_x)
+    .icon(Icon::new(icon).xsmall().text_color(command_color))
+    .tooltip(tooltip)
+    .on_click(move |_, _, cx| {
+      editor.update(cx, |editor, cx| action(editor, cx));
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn modern_export_format(
+  _command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  let format_created = editor.read(cx).format_export_created_since_last_saved_edit();
+  DropdownButton::new("modern-ribbon-format-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .when(format_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
+    .button(
+      export_chip_button("modern-ribbon-format", "Export as DOCX", "Format", chip_height, metrics).on_click({
+        let editor = editor.clone();
+        move |_, _, cx| {
+          export_format_from_ribbon(editor.clone(), DocumentExportFormat::Docx, cx);
+        }
+      }),
     )
-    .child(
-      Button::new("invisibility-mode-toggle")
-        .xsmall()
-        .compact()
-        .outline()
-        .h(metrics.chip_height)
-        .w(metrics.chip_height)
-        .icon(Icon::new(if invisibility_mode { IconName::EyeOff } else { IconName::Eye }).text_color(cx.theme().info))
-        .selected(invisibility_mode)
-        .tooltip("Invisibility mode")
-        .on_click(move |_, _, cx| {
-          editor.update(cx, |editor, cx| {
-            editor.toggle_invisibility_mode(cx);
-          });
-        }),
+    .dropdown_menu(move |menu, _, _| {
+      let docx_editor = editor.clone();
+      let pdf_editor = editor.clone();
+      menu
+        .min_w(px(120.0))
+        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
+          export_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+        }))
+        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
+          export_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+        }))
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn modern_export_send(
+  _command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let chip_height = metrics.chip_height;
+  let send_created = editor.read(cx).send_document_created_since_last_saved_edit();
+  DropdownButton::new("modern-ribbon-send-dropdown")
+    .with_size(Size::Size(chip_height))
+    .compact()
+    .outline()
+    .when(send_created, |this| this.dropdown_icon(IconName::Check, Some(cx.theme().success)))
+    .button(
+      export_chip_button("modern-ribbon-send", "Send as DB8", "Send", chip_height, metrics).on_click({
+        let editor = editor.clone();
+        move |_, _, cx| {
+          send_format_from_ribbon(
+            editor.clone(),
+            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+            cx,
+          );
+        }
+      }),
     )
+    .dropdown_menu(move |menu, _, _| {
+      let db8_editor = editor.clone();
+      let docx_editor = editor.clone();
+      let pdf_editor = editor.clone();
+      menu
+        .min_w(px(120.0))
+        .item(PopupMenuItem::new(".db8").on_click(move |_, _, cx| {
+          send_format_from_ribbon(
+            db8_editor.clone(),
+            DocumentExportFormat::NativeWithExtension(flowstate_document::FLOWSTATE_EXTENSION),
+            cx,
+          );
+        }))
+        .item(PopupMenuItem::new(".docx").on_click(move |_, _, cx| {
+          send_format_from_ribbon(docx_editor.clone(), DocumentExportFormat::Docx, cx);
+        }))
+        .item(PopupMenuItem::new(".pdf").on_click(move |_, _, cx| {
+          send_format_from_ribbon(pdf_editor.clone(), DocumentExportFormat::Pdf, cx);
+        }))
+    })
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn modern_invisibility_toggle(
+  command: &RibbonCommand,
+  editor: Entity<RichTextEditor>,
+  metrics: RibbonLayoutMetrics,
+  cx: &mut Context<EditorRibbon>,
+) -> AnyElement {
+  let invisibility_mode = command.selected;
+  Button::new(("modern-ribbon-command", ribbon_command_key(command.id)))
+    .xsmall()
+    .compact()
+    .outline()
+    .h(metrics.chip_height)
+    .w(metrics.chip_height)
+    .icon(Icon::new(if invisibility_mode { IconName::EyeOff } else { IconName::Eye }).text_color(cx.theme().info))
+    .selected(invisibility_mode)
+    .tooltip("Invisibility mode")
+    .on_click({
+      let editor = editor.clone();
+      move |_, _, cx| {
+        editor.update(cx, |editor, cx| {
+          editor.toggle_invisibility_mode(cx);
+        });
+      }
+    })
     .into_any_element()
 }

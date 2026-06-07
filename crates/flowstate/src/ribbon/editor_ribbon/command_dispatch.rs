@@ -53,6 +53,13 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     RibbonCommandId::ClearFormatting => {
       editor.clear_formatting(cx);
     },
+    RibbonCommandId::Undo => {
+      editor.undo(cx);
+    },
+    RibbonCommandId::Redo => {
+      editor.redo(cx);
+    },
+    RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend | RibbonCommandId::ToggleInvisibility => {},
   }
 }
 

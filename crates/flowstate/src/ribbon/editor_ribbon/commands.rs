@@ -6,31 +6,43 @@ fn modern_command_groups(
   current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommandGroup> {
-  let mut keyed = Vec::new();
-  let mut unkeyed = Vec::new();
+  let mut style = Vec::new();
+  let mut speech = Vec::new();
 
-  keyed.extend(
+  style.extend(
     paragraph_commands(state)
       .into_iter()
       .filter(|command| command.command_id.is_some()),
   );
-  keyed.extend(keyed_inline_commands(state, armed_tool));
-  keyed.extend(highlight_commands(document_theme, current_highlight, highlight_mode_active));
-  keyed.push(clear_formatting_command("keyed"));
-  keyed.sort_by_key(|command| command_sort_key(command.command_id));
+  style.extend(keyed_inline_commands(state, armed_tool));
+  style.push(clear_formatting_command("style"));
+  style.extend(unkeyed_inline_commands(state, armed_tool));
 
-  unkeyed.extend(unkeyed_inline_commands(state, armed_tool));
+  for mut cmd in highlight_commands(document_theme, current_highlight, highlight_mode_active) {
+    match cmd.id {
+      RibbonCommandId::MarkCard => {
+        cmd.group_id = "speech";
+        speech.push(cmd);
+      },
+      _ => {
+        cmd.group_id = "style";
+        style.push(cmd);
+      },
+    }
+  }
+
+  style.sort_by_key(|command| command_sort_key(command.command_id));
 
   vec![
     RibbonCommandGroup {
-      id: "keyed",
-      label: "Keybinds",
-      commands: keyed,
+      id: "style",
+      label: "Style",
+      commands: style,
     },
     RibbonCommandGroup {
-      id: "unkeyed",
-      label: "No Keybind",
-      commands: unkeyed,
+      id: "speech",
+      label: "Speech",
+      commands: speech,
     },
   ]
 }
@@ -45,7 +57,7 @@ fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
       RibbonCommand {
         id: RibbonCommandId::Paragraph(spec.style),
         label: spec.label,
-        group_id: "keyed",
+        group_id: "style",
         shortcut: command_id.and_then(shortcut_for),
         command_id,
         priority: paragraph_priority(spec.style),
@@ -64,13 +76,13 @@ fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<Ar
   let mut commands = SEMANTIC_STYLE_SPECS
     .iter()
     .filter(|spec| matches!(spec.style, flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS))
-    .map(|spec| semantic_command(spec.style, spec.label, "keyed", state, armed_tool))
+    .map(|spec| semantic_command(spec.style, spec.label, "style", state, armed_tool))
     .collect::<Vec<_>>();
 
   commands.push(RibbonCommand {
     id: RibbonCommandId::Underline,
     label: "Underline",
-    group_id: "keyed",
+    group_id: "style",
     shortcut: shortcut_for(CommandId::ToggleUnderline),
     command_id: Some(CommandId::ToggleUnderline),
     priority: 82,
@@ -89,7 +101,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
     RibbonCommand {
       id: RibbonCommandId::CondenseMenu,
       label: "Condense",
-      group_id: "unkeyed",
+      group_id: "style",
       shortcut: Some("F3".to_string()),
       command_id: Some(CommandId::CondenseSelection),
       priority: 75,
@@ -102,7 +114,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
     RibbonCommand {
       id: RibbonCommandId::CondensedMenu,
       label: "Shrink",
-      group_id: "unkeyed",
+      group_id: "style",
       shortcut: None,
       command_id: None,
       priority: 76,
@@ -123,7 +135,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
     RibbonCommand {
       id: RibbonCommandId::Strikethrough,
       label: "Strikethrough",
-      group_id: "unkeyed",
+      group_id: "style",
       shortcut: None,
       command_id: None,
       priority: 81,

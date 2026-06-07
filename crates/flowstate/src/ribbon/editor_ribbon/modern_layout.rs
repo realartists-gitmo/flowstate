@@ -55,6 +55,16 @@ fn modern_group(
                 modern_condense_menu(command, editor.clone(), metrics, cx)
               } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
                 modern_condensed_menu(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::Undo) {
+                modern_undo_button(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::Redo) {
+                modern_redo_button(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::ExportFormat) {
+                modern_export_format(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::ExportSend) {
+                modern_export_send(command, editor.clone(), metrics, cx)
+              } else if matches!(command.id, RibbonCommandId::ToggleInvisibility) {
+                modern_invisibility_toggle(command, editor.clone(), metrics, cx)
               } else {
                 modern_command_chip(command, editor.clone(), options, metrics, workspace.clone(), panel_id, cx)
               }
@@ -146,31 +156,46 @@ fn command_chip_width(
   window: &mut Window,
   cx: &mut Context<EditorRibbon>,
 ) -> gpui::Pixels {
-  let label = RibbonLabel::for_command(command);
-  let label_width = if label.prefers_icon() {
-    0.0
-  } else {
-    measure_ribbon_text(label.text, metrics.chip_text_size, window, cx).as_f32()
-  };
-  let icon_width = label
-    .icon_path
-    .map(|_| metrics.chip_height.as_f32())
-    .unwrap_or(0.0);
-  let shortcut_width = command
-    .shortcut
-    .as_ref()
-    .map(|shortcut| measure_ribbon_text(shortcut, px(10.0), window, cx).as_f32() + 16.0)
-    .unwrap_or(0.0);
-  let accent_width = if command.accent.is_some() { 14.0 } else { 0.0 };
-  let component_padding_x = px(4.0);
-  let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu) {
-    10.0
-  } else {
-    0.0
-  };
-  let chrome_width = metrics.chip_padding_x.as_f32() * 2.0 + component_padding_x.as_f32() * 2.0 + 10.0 + caret_width;
+  match command.id {
+    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::ToggleInvisibility => {
+      px(metrics.chip_height.as_f32())
+    },
+    RibbonCommandId::ExportFormat => {
+      let text_width = measure_ribbon_text("Format", metrics.chip_text_size, window, cx).as_f32();
+      px(text_width + 10.0 + metrics.chip_padding_x.as_f32() * 2.0 + 10.0)
+    },
+    RibbonCommandId::ExportSend => {
+      let text_width = measure_ribbon_text("Send", metrics.chip_text_size, window, cx).as_f32();
+      px(text_width + 10.0 + metrics.chip_padding_x.as_f32() * 2.0 + 10.0)
+    },
+    _ => {
+      let label = RibbonLabel::for_command(command);
+      let label_width = if label.prefers_icon() {
+        0.0
+      } else {
+        measure_ribbon_text(label.text, metrics.chip_text_size, window, cx).as_f32()
+      };
+      let icon_width = label
+        .icon_path
+        .map(|_| metrics.chip_height.as_f32())
+        .unwrap_or(0.0);
+      let shortcut_width = command
+        .shortcut
+        .as_ref()
+        .map(|shortcut| measure_ribbon_text(shortcut, px(10.0), window, cx).as_f32() + 16.0)
+        .unwrap_or(0.0);
+      let accent_width = if command.accent.is_some() { 14.0 } else { 0.0 };
+      let component_padding_x = px(4.0);
+      let caret_width = if matches!(command.id, RibbonCommandId::HighlightMenu | RibbonCommandId::CondensedMenu) {
+        10.0
+      } else {
+        0.0
+      };
+      let chrome_width = metrics.chip_padding_x.as_f32() * 2.0 + component_padding_x.as_f32() * 2.0 + 10.0 + caret_width;
 
-  px(label_width.max(icon_width) + shortcut_width + accent_width + chrome_width)
+      px(label_width.max(icon_width) + shortcut_width + accent_width + chrome_width)
+    },
+  }
 }
 
 #[hotpath::measure]
@@ -275,5 +300,8 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
     RibbonCommandId::ClearHighlight | RibbonCommandId::ClearFormatting => cx.theme().danger,
     RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu | RibbonCommandId::SendToSpeechDocument => cx.theme().info,
     RibbonCommandId::ToggleSpeechDocument => cx.theme().success,
+    RibbonCommandId::Undo | RibbonCommandId::Redo => cx.theme().primary,
+    RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend => cx.theme().info,
+    RibbonCommandId::ToggleInvisibility => cx.theme().primary,
   }
 }
