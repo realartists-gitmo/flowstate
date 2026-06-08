@@ -219,15 +219,13 @@ fn equation_source_text_elements(source: &str, selection: Option<EquationSourceS
     && caret_visible
   {
     let caret_ix = char_index_for_byte(source, caret);
-    children.push(
+    children.insert(
+      caret_ix,
       div()
-        .absolute()
-        .top(px(3.0))
-        .bottom(px(3.0))
-        .left(px(caret_ix as f32 * SOURCE_CHAR_WIDTH))
         .w(px(1.0))
+        .h(px(16.0))
+        .flex_none()
         .bg(rgb(0x000000))
-        .text_color(rgb(0x000000))
         .into_any_element(),
     );
   }

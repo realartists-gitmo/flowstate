@@ -273,6 +273,16 @@ impl RichTextEditor {
   }
 
   pub fn select_all(&mut self, cx: &mut Context<Self>) {
+    if let Some(BlockSelection::Equation(_)) = self.selected_block {
+      if let Some(source) = self.selected_equation_source() {
+        self.equation_source_anchor = 0;
+        self.equation_source_caret = source.len();
+        self.goal_x = None;
+        self.reset_caret_blink(cx);
+        cx.notify();
+      }
+      return;
+    }
     if self.document.paragraphs.is_empty() {
       return;
     }
@@ -473,6 +483,12 @@ impl RichTextEditor {
     let Some(item) = cx.read_from_clipboard() else {
       return;
     };
+    if matches!(self.selected_block, Some(BlockSelection::Equation(_))) {
+      if let Some(text) = item.text() {
+        self.insert_text_into_selected_equation(&text, cx);
+      }
+      return;
+    }
     if let Some(image) = item.entries().iter().find_map(|entry| match entry {
       ClipboardEntry::Image(image) => Some(image.clone()),
       ClipboardEntry::String(_) => None,

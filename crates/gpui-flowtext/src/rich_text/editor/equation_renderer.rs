@@ -68,6 +68,9 @@ impl EquationRenderer {
 }
 
 fn render_typst_equation(latex: &str, display: bool) -> Result<String, String> {
+  if latex.trim().is_empty() {
+    return Ok(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" width="1" height="1"/>"#.to_string());
+  }
   let typst_math =
     mitex::convert_math(latex, None).map_err(|e| format!("LaTeX conversion failed: {e}"))?;
 
