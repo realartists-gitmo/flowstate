@@ -67,6 +67,7 @@ impl Workspace {
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
       speech_word_count_cache: HashMap::new(),
+      speech_word_count_pending: false,
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
