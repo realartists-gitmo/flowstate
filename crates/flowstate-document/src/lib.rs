@@ -3,6 +3,8 @@ pub use gpui_flowtext::*;
 mod persistence {
   pub mod io;
 }
+
+pub use persistence::io::deserialize_paragraph_metadata;
 use std::{io, path::Path};
 
 use flowstate_collab::{ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind};

@@ -214,6 +214,12 @@ struct Db8GranularParagraphMetadata {
   runs: Vec<TextRun>,
 }
 
+pub fn deserialize_paragraph_metadata(bytes: &[u8]) -> Option<(ParagraphStyle, Vec<TextRun>)> {
+  postcard::from_bytes::<Db8GranularParagraphMetadata>(bytes)
+    .ok()
+    .map(|m| (m.style, m.runs))
+}
+
 // DB8 projection cache stored inside the collaboration-native envelope. The
 // external file format is the Flowstate collaboration envelope, not this chunk.
 const DB8_PROJECTION_MAGIC: &[u8; 5] = b"DB8P\0";

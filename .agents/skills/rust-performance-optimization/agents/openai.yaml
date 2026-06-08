@@ -1,4 +1,0 @@
-interface:
-  display_name: "Rust Performance Optimization"
-  short_description: "Optimize Rust hot paths with evidence"
-  default_prompt: "Use $rust-performance-optimization to diagnose and optimize this Rust performance issue."

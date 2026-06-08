@@ -264,11 +264,6 @@ impl Workspace {
     let role = self.collaboration.role.unwrap_or("No role");
     let queued = self.collaboration_pending_updates.len();
     let lag = self.collaboration_delta_updates_since_checkpoint;
-    let last_hash = self
-      .collaboration_last_published_hash
-      .as_ref()
-      .map(short_hash)
-      .unwrap_or_else(|| "none".to_string());
     let last_rejected_update = self.collaboration.last_error.as_deref().unwrap_or("none");
     let mut peers = self
       .collaboration
@@ -305,7 +300,7 @@ impl Workspace {
       .text_color(cx.theme().muted_foreground)
       .child(collaboration_status_chip(format!("{:?}", self.collaboration.state), cx))
       .child(collaboration_status_chip(role.to_string(), cx))
-      .child(collaboration_status_chip(format!("hash {last_hash}"), cx))
+
       .when(queued > 0, |this| {
         this.child(collaboration_status_chip(format!("{queued} queued"), cx))
       })
@@ -443,11 +438,4 @@ fn collaboration_peer_status_tooltip(peer: &CollaborationPeerStatusItem, role_la
   lines.join("\n")
 }
 
-fn short_hash(hash: &[u8; 32]) -> String {
-  let mut s = String::with_capacity(16);
-  for byte in &hash[..8] {
-    use std::fmt::Write;
-    write!(s, "{byte:02x}").unwrap();
-  }
-  s
-}
+

@@ -1122,14 +1122,6 @@ impl HostedCollaborationPublisher {
     Ok(())
   }
 
-  pub fn publish_application_update(&self, application: UpdateApplication) -> AnyResult<()> {
-    ensure!(
-      self.config.role_request.can_write(),
-      "local role is not allowed to publish application updates"
-    );
-    self.publish_update(Vec::new(), Some(application))
-  }
-
   pub fn replace_source_from(&self, source: &CollabDocument) -> AnyResult<()> {
     self.publish_update_from_source(source, None)
   }
@@ -1176,7 +1168,7 @@ impl HostedCollaborationPublisher {
   pub fn publish_update(&self, update: Vec<u8>, application: Option<UpdateApplication>) -> AnyResult<()> {
     ensure_update_size(&update, self.config.max_update_bytes)?;
     self.live_updates.publish(LiveUpdate::wire(
-      None,
+      Some(self.config.session_id),
       WireMessage::Update {
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
@@ -1270,15 +1262,7 @@ impl HostedCollaboration {
     self.registry.revoke_all()
   }
 
-  pub fn document_hash(&self) -> AnyResult<[u8; 32]> {
-    self
-      .document_state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .projection_hash()
-      .map_err(Into::into)
-  }
+
 
   #[must_use]
   pub fn document_state(&self) -> SessionDocumentState {
@@ -1386,14 +1370,6 @@ impl HostedCollaboration {
     Ok(())
   }
 
-  pub fn publish_application_update(&self, application: UpdateApplication) -> AnyResult<()> {
-    ensure!(
-      self.config.role_request.can_write(),
-      "local role is not allowed to publish application updates"
-    );
-    self.publish_update(Vec::new(), Some(application))
-  }
-
   pub fn replace_source_from(&self, source: &CollabDocument) -> AnyResult<()> {
     self.publish_update_from_source(source, None)
   }
@@ -1424,7 +1400,7 @@ impl HostedCollaboration {
   pub fn publish_update(&self, update: Vec<u8>, application: Option<UpdateApplication>) -> AnyResult<()> {
     ensure_update_size(&update, self.config.max_update_bytes)?;
     self.live_updates.publish(LiveUpdate::wire(
-      None,
+      Some(self.config.session_id),
       WireMessage::Update {
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
@@ -2157,33 +2133,6 @@ impl LiveCollaborationClient {
         actor_id: self.config.actor_id,
         bytes: update,
         hash,
-        application: Some(application),
-      },
-      self.config.max_message_bytes,
-    )
-    .await
-  }
-
-  pub async fn publish_application_update(&mut self, application: UpdateApplication) -> AnyResult<()> {
-    ensure!(
-      self.authorization.role.can_write(),
-      "local role is not allowed to publish application updates"
-    );
-    let bytes = Vec::new();
-    if collab_canary_enabled() {
-      collab_canary(
-        "client_publish_application_update",
-        format!("application={}", application_label(Some(&application))),
-      );
-    }
-    write_wire_message_reusing_buffer(
-      &mut self.send,
-      &mut self.wire_encode_buffer,
-      &WireMessage::Update {
-        document_id: self.config.document_id,
-        actor_id: self.config.actor_id,
-        hash: blake3_hash(&bytes),
-        bytes,
         application: Some(application),
       },
       self.config.max_message_bytes,
@@ -2928,28 +2877,18 @@ async fn serve_live_stream(
         if bytes.is_empty() && application.is_some() {
           if collab_canary_enabled() {
             collab_canary(
-              "host_handle_application_only",
+              "host_dropped_application_only",
               format!("application={}", application_label(application.as_ref())),
             );
           }
+          // Application-only updates are no longer supported — every update
+          // must carry source bytes.  Acknowledge the sender so they don't
+          // stall, but do NOT import into the CRDT or broadcast to peers.
           let frontier = state
             .document
             .lock()
             .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
             .frontier()?;
-          if let Some(hub) = live_updates {
-            hub.publish(LiveUpdate::wire(
-              Some(hello.session_id),
-              WireMessage::Update {
-                document_id,
-                actor_id,
-                hash,
-                bytes,
-                application,
-              },
-            ))?;
-            hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::UpdateHint { document_id, hash }))?;
-          }
           write_wire_message(
             send,
             &WireMessage::Ack {
@@ -3045,7 +2984,10 @@ async fn serve_live_stream(
         write_wire_message(send, &WireMessage::AssetChunk(chunk), config.max_message_bytes).await?;
       },
       WireMessage::Presence(mut presence) => {
-        ensure!(presence_rate.check(now_unix_millis()), "presence rate limit exceeded");
+        if !presence_rate.check(now_unix_millis()) {
+          eprintln!("[FLOWSTATE_COLLAB_CANARY sync::presence_rate_limit] dropping presence message");
+          continue;
+        }
         ensure!(presence.document_id == config.document_id, SyncError::ProtocolMismatch);
         ensure!(presence.actor_id == hello.actor_id, "presence actor does not match authorized peer");
         ensure!(presence.session_id == hello.session_id, "presence session does not match authorized peer");
@@ -3942,51 +3884,6 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn live_host_subscriber_receives_app_only_update_as_hint() {
-    let document_id = DocumentId::new();
-    let owner = ActorId::new();
-    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
-    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
-      .await
-      .unwrap();
-    let mut host_updates = host.subscribe_live_updates();
-    let invite = host
-      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
-      .unwrap();
-    let mut client = connect_live_invite(&invite).await.unwrap();
-
-    client
-      .publish_application_update(UpdateApplication::Db8CanonicalOperations(vec![1, 2, 3]))
-      .await
-      .unwrap();
-    let update = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-      loop {
-        let update = host_updates.recv().await.unwrap();
-        if matches!(update.kind, LiveUpdateKind::Event(SessionEvent::UpdateHint { .. })) {
-          break update;
-        }
-      }
-    })
-    .await
-    .unwrap();
-
-    assert!(update.source_session_id.is_some());
-    assert!(matches!(update.kind, LiveUpdateKind::Event(SessionEvent::UpdateHint { document_id: id, .. }) if id == document_id));
-    assert_eq!(
-      host
-        .document_state()
-        .document
-        .lock()
-        .unwrap()
-        .materialize_projection_cache()
-        .unwrap(),
-      b"one"
-    );
-    let _ = client.shutdown().await;
-    host.shutdown().await.unwrap();
-  }
-
-  #[tokio::test]
   async fn live_host_subscriber_receives_peer_lifecycle_events() {
     let document_id = DocumentId::new();
     let owner = ActorId::new();
@@ -4372,45 +4269,6 @@ mod tests {
     assert_eq!(host_presence.viewport_hint.as_deref(), Some("visible:0-1"));
 
     joiner.shutdown().await.unwrap();
-    host.shutdown().await.unwrap();
-  }
-
-  #[tokio::test]
-  async fn live_client_application_only_updates_reach_other_joiners() {
-    let document_id = DocumentId::new();
-    let owner = ActorId::new();
-    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
-    let host = HostedCollaboration::start(host_doc, AssetStore::default(), Role::Owner)
-      .await
-      .unwrap();
-    let invite = host
-      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
-      .unwrap();
-    let mut left = connect_live_invite(&invite).await.unwrap();
-    let mut right = connect_live_invite(&invite).await.unwrap();
-
-    let application = UpdateApplication::Fl0ActionBundle(vec![7, 8, 9]);
-    left
-      .publish_application_update(application.clone())
-      .await
-      .unwrap();
-
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
-      loop {
-        if let Some(event) = right.receive_next_update().await.unwrap()
-          && matches!(event, SessionEvent::UpdateHint { .. })
-        {
-          break event;
-        }
-      }
-    })
-    .await
-    .unwrap();
-    assert!(matches!(event, SessionEvent::UpdateHint { .. }));
-    assert_eq!(right.last_application, Some(application));
-
-    left.shutdown().await.unwrap();
-    right.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
   }
 

@@ -150,8 +150,8 @@ mod workspace_tests {
     ));
     assert!(!push_bounded_pending_collaboration_update(
       &mut queue,
-      PendingCollaborationUpdate::Application {
-        application: UpdateApplication::Db8CanonicalOperations(vec![4, 5, 6]),
+      PendingCollaborationUpdate::Presence {
+        cursor: Some("db8:0:4".to_string()),
       },
       2,
     ));
@@ -162,10 +162,10 @@ mod workspace_tests {
     };
     assert!(application.is_some());
     assert_eq!(hash, Some([7; 32]));
-    let Some(PendingCollaborationUpdate::Application { application }) = queue.pop_front() else {
-      panic!("expected app-only metadata update second");
+    let Some(PendingCollaborationUpdate::Presence { cursor }) = queue.pop_front() else {
+      panic!("expected presence update second");
     };
-    assert!(matches!(application, UpdateApplication::Db8CanonicalOperations(bytes) if bytes == vec![4, 5, 6]));
+    assert_eq!(cursor, Some("db8:0:4".to_string()));
   }
 
   #[test]
@@ -188,8 +188,8 @@ mod workspace_tests {
     ));
     assert!(!push_bounded_pending_collaboration_update(
       &mut queue,
-      PendingCollaborationUpdate::Application {
-        application: UpdateApplication::Db8CanonicalOperations(vec![7, 8]),
+      PendingCollaborationUpdate::Presence {
+        cursor: Some("db8:0:7".to_string()),
       },
       2,
     ));
@@ -204,10 +204,10 @@ mod workspace_tests {
     ));
 
     assert_eq!(queue.len(), 2);
-    let Some(PendingCollaborationUpdate::Application { application }) = queue.pop_front() else {
+    let Some(PendingCollaborationUpdate::Presence { cursor }) = queue.pop_front() else {
       panic!("expected oldest source update to be dropped");
     };
-    assert!(matches!(application, UpdateApplication::Db8CanonicalOperations(bytes) if bytes == vec![7, 8]));
+    assert_eq!(cursor, Some("db8:0:7".to_string()));
     let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
       panic!("expected newest source replacement to remain");
     };

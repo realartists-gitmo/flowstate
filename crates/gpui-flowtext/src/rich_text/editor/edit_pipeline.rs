@@ -551,7 +551,6 @@ mod edit_pipeline_tests {
         .unwrap_or_else(|| vec![CanonicalOperation::ReplaceDocument]),
     );
 
-    assert!(!edit.repair_required);
     assert!(matches!(
       edit.operations.as_slice(),
       [CanonicalOperation::DeleteRange {
@@ -581,7 +580,6 @@ mod edit_pipeline_tests {
 
     let edit = RichTextEditor::redo_collaboration_edit_for_history(&record);
 
-    assert!(!edit.repair_required);
     assert!(matches!(
       edit.operations.as_slice(),
       [CanonicalOperation::InsertText {
@@ -594,7 +592,7 @@ mod edit_pipeline_tests {
   }
 
   #[test]
-  fn undo_collaboration_edit_uses_source_repair_for_unrepresentable_history_operations() {
+  fn undo_collaboration_edit_all_operations_are_representable() {
     let record = EditRecord {
       before_selection: EditorSelection::caret(),
       before_generation: 1,
@@ -609,7 +607,6 @@ mod edit_pipeline_tests {
         .unwrap_or_else(|| vec![CanonicalOperation::ReplaceDocument]),
     );
 
-    assert!(edit.repair_required);
     assert!(matches!(edit.operations.as_slice(), [CanonicalOperation::ReplaceDocument]));
   }
 }

@@ -248,7 +248,7 @@ mod schema_tests {
           bold: true,
           italic: false,
           underline: ThemeUnderline::Single,
-          align: Default::default(),
+          align: flowstate_document::CustomParagraphAlign::default(),
           spacing_before: px(0.0),
           spacing_after: px(1.0),
           border: None,

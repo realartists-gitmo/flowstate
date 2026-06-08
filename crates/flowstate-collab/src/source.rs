@@ -1,12 +1,13 @@
 // Durable source lives here: projection caches and editor hints are inputs, but Loro state in this module is the source of truth.
 use std::{
-  collections::{BTreeMap, HashMap},
+  collections::{BTreeMap, HashMap, HashSet},
   ops::Range,
 };
 
 use loro::{
-  Container, ExpandType, ExportMode, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, PeerID, StyleConfig, ValueOrContainer,
-  VersionVector,
+  event::{Diff, DiffBatch},
+  Container, ContainerID, ExpandType, ExportMode, Index, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, PeerID, StyleConfig,
+  ValueOrContainer, VersionVector,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -185,6 +186,13 @@ pub enum GranularSourceMutation {
   ClearTextMetadata {
     text_id: String,
   },
+  InsertParagraph {
+    text_id: String,
+    after_text_id: Option<String>,
+  },
+  RemoveParagraph {
+    text_id: String,
+  },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -252,21 +260,15 @@ impl GranularSource {
       root_hash: blake3_hash(&root_bytes),
     })
   }
-
-  fn source_hash(&self) -> CollabResult<[u8; 32]> {
-    self.merkle_hash().map(|hash| hash.root_hash)
-  }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceProvenance {
-  pub source_hash: [u8; 32],
   pub frontier: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionCacheProvenance {
-  pub source_hash: [u8; 32],
   pub projection_cache_hash: [u8; 32],
   pub frontier: Vec<u8>,
 }
@@ -280,8 +282,16 @@ pub struct CollabMaterializationSizes {
 
 impl ProjectionCacheProvenance {
   #[must_use]
-  pub fn can_reuse_for(&self, source_hash: [u8; 32], frontier: &[u8]) -> bool {
-    self.source_hash == source_hash && self.frontier.as_slice() == frontier
+  pub fn new_v1(projection_cache_hash: [u8; 32], frontier: Vec<u8>) -> Self {
+    Self {
+      projection_cache_hash,
+      frontier,
+    }
+  }
+
+  #[must_use]
+  pub fn can_reuse_for(&self, _source_hash: [u8; 32], frontier: &[u8]) -> bool {
+    self.frontier.as_slice() == frontier
   }
 }
 
@@ -307,6 +317,19 @@ pub struct CollabProjectionPatch {
 pub struct CollabImportOutcome {
   pub patch: Option<CollabProjectionPatch>,
   pub frontier: Vec<u8>,
+}
+
+/// A single paragraph change detected by computing a CRDT diff.
+#[derive(Clone, Debug)]
+pub enum ParagraphDiffEntry {
+  /// Paragraph text content changed.
+  Text { text_id: String, new_text: String },
+  /// Paragraph metadata (style + runs) changed.
+  Metadata { text_id: String, metadata: Vec<u8> },
+  /// A new paragraph was added (`text_id`, order-list position).
+  ParagraphAdded { text_id: String, position: usize },
+  /// A paragraph was removed.
+  ParagraphRemoved { text_id: String },
 }
 
 #[derive(Clone, Debug)]
@@ -404,13 +427,7 @@ impl CollabDocument {
   pub fn peer_id(&self) -> PeerID {
     self.doc.peer_id()
   }
-  pub fn source_hash(&self) -> CollabResult<[u8; 32]> {
-    if self.is_granular() {
-      read_granular_source(&self.doc)?.source_hash()
-    } else {
-      root_hash(&self.doc, KEY_SOURCE_PAYLOAD_HASH).or_else(|_| root_hash(&self.doc, KEY_PROJECTION_HASH))
-    }
-  }
+
 
   pub fn granular_merkle_hash(&self) -> CollabResult<Option<GranularSourceMerkleHash>> {
     if self.is_granular() {
@@ -426,29 +443,19 @@ impl CollabDocument {
 
   pub fn source_provenance(&self) -> CollabResult<SourceProvenance> {
     Ok(SourceProvenance {
-      source_hash: self.source_hash()?,
       frontier: self.frontier()?,
     })
   }
 
   pub fn projection_cache_provenance(&self) -> CollabResult<ProjectionCacheProvenance> {
     Ok(ProjectionCacheProvenance {
-      source_hash: self.source_hash()?,
       projection_cache_hash: self.projection_cache_hash()?,
       frontier: self.frontier()?,
     })
   }
 
   pub fn can_reuse_projection_cache(&self, provenance: &ProjectionCacheProvenance) -> CollabResult<bool> {
-    let source_hash = self.source_hash()?;
-    if provenance.source_hash != source_hash {
-      return Ok(false);
-    }
     Ok(provenance.frontier.as_slice() == self.frontier()?.as_slice())
-  }
-
-  pub fn projection_hash(&self) -> CollabResult<[u8; 32]> {
-    self.source_hash()
   }
 
   pub fn frontier(&self) -> CollabResult<Vec<u8>> {
@@ -731,18 +738,32 @@ impl CollabDocument {
       GranularSourceMutation::MarkText { text_id, range, key, value } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
         let text_snapshot = text_container.to_string();
-        validate_utf8_range(&text_snapshot, range.clone())?;
-        text_container
-          .mark_utf8(range.clone(), key, value.clone().into_loro())
-          .map_err(|error| CollabError::Loro(error.to_string()))?;
+        let text_len = text_snapshot.len();
+        // Clamp range to actual text bounds to handle mutations generated before text modifications
+        let clamped_start = range.start.min(text_len);
+        let clamped_end = range.end.min(text_len);
+        if clamped_start < clamped_end {
+          let clamped_range = clamped_start..clamped_end;
+          validate_utf8_range(&text_snapshot, clamped_range.clone())?;
+          text_container
+            .mark_utf8(clamped_range, key, value.clone().into_loro())
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
       },
       GranularSourceMutation::UnmarkText { text_id, range, key } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
         let text_snapshot = text_container.to_string();
-        let unicode_range = utf8_range_to_unicode_range(&text_snapshot, range.clone())?;
-        text_container
-          .unmark(unicode_range, key)
-          .map_err(|error| CollabError::Loro(error.to_string()))?;
+        let text_len = text_snapshot.len();
+        // Clamp range to actual text bounds to handle mutations generated before text modifications
+        let clamped_start = range.start.min(text_len);
+        let clamped_end = range.end.min(text_len);
+        if clamped_start < clamped_end {
+          let clamped_range = clamped_start..clamped_end;
+          let unicode_range = utf8_range_to_unicode_range(&text_snapshot, clamped_range)?;
+          text_container
+            .unmark(unicode_range, key)
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
       },
       GranularSourceMutation::SetTextMetadata { text_id, metadata } => {
         granular_text_record_map(&self.doc, text_id)?
@@ -753,6 +774,38 @@ impl CollabDocument {
         granular_text_record_map(&self.doc, text_id)?
           .delete(KEY_RECORD_METADATA)
           .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
+      GranularSourceMutation::InsertParagraph { text_id, after_text_id } => {
+        granular_texts_map(&self.doc)?
+          .insert_container(text_id.as_str(), LoroText::new())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+        let order_list = paragraphs_order_list(&self.doc)?;
+        let values = order_list.to_vec();
+        if let Some(after) = after_text_id {
+          let pos = values
+            .iter()
+            .position(|v| v.as_string().is_some_and(|s| s.as_str() == after.as_str()))
+            .ok_or(CollabError::InvalidSchema("insert after unknown paragraph"))?;
+          order_list
+            .insert(pos + 1, text_id.as_str())
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        } else {
+          order_list
+            .push(text_id.as_str())
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
+      },
+      GranularSourceMutation::RemoveParagraph { text_id } => {
+        granular_texts_map(&self.doc)?
+          .delete(text_id.as_str())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+        let order_list = paragraphs_order_list(&self.doc)?;
+        let values = order_list.to_vec();
+        if let Some(pos) = values.iter().position(|v| v.as_string().is_some_and(|s| s.as_str() == text_id.as_str())) {
+          order_list
+            .delete(pos, 1)
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
       },
     }
     Ok(())
@@ -784,6 +837,219 @@ impl CollabDocument {
   #[must_use]
   pub fn shared_doc(&self) -> LoroDoc {
     self.doc.clone()
+  }
+
+  /// Extract the `text_id` (hex paragraph uuid) from a container's path.
+  /// Returns `None` if the container is not a text container under `granular_texts`.
+  pub fn text_id_from_container_path(&self, cid: &ContainerID) -> Option<String> {
+    let path = self.doc.get_path_to_container(cid)?;
+    if path.len() < 3 {
+      return None;
+    }
+    if let Index::Key(key) = &path[0].1
+      && key.as_str() == KEY_GRANULAR_TEXTS
+      && let Index::Key(text_id) = &path[1].1
+    {
+      return Some(text_id.to_string());
+    }
+    None
+  }
+
+  /// Read the full text content of a container identified by `ContainerID`.
+  pub fn read_text_by_container_id(&self, cid: &ContainerID) -> Option<String> {
+    let container = self.doc.get_container(cid.clone())?;
+    let text = container.as_text()?;
+    Some(text.to_string())
+  }
+
+  /// Compute the [`DiffBatch`] between the current state and an older frontier
+  /// (encoded as a postcard-serialized [`VersionVector`]).
+  ///
+  /// Returns `Ok(None)` when the frontiers are identical.
+  fn diff_since_frontier(&self, old_frontier_encoded: &[u8]) -> CollabResult<Option<DiffBatch>> {
+    let old_vv: VersionVector =
+      postcard::from_bytes(old_frontier_encoded).map_err(|e| CollabError::Loro(e.to_string()))?;
+    let current_vv = self.doc.oplog_vv();
+    if old_vv == current_vv {
+      return Ok(None);
+    }
+    for (peer, counter) in old_vv.iter() {
+      let current_counter = current_vv.get(peer);
+      if current_counter.is_none() || current_counter.unwrap() < counter {
+        return Err(CollabError::Loro(
+          "old frontier is incompatible with current document state; the CRDT DAG may have been replaced".into(),
+        ));
+      }
+    }
+    let old_frontiers = self.doc.vv_to_frontiers(&old_vv);
+    let current_frontiers = self.doc.vv_to_frontiers(&current_vv);
+    let diff = self
+      .doc
+      .diff(&old_frontiers, &current_frontiers)
+      .map_err(|e| CollabError::Loro(e.to_string()))?;
+    Ok(Some(diff))
+  }
+
+  /// Compute per-paragraph changes between the current state and an old frontier.
+  ///
+  /// Returns an error only when the old frontier is incompatible with the current
+  /// CRDT state (the `VersionVector` references operations that don't exist in the DAG).
+  /// This indicates a diverged replica that needs snapshot recovery.
+  ///
+  /// Returns empty Vec when frontiers are identical (no changes).
+  ///
+  /// Handles all DB8-relevant CRDT operations:
+  /// - Text insert/delete in paragraph containers
+  /// - Text marks (styles) in paragraph containers
+  /// - Metadata changes in paragraph record maps
+  /// - Paragraph add/remove in the `granular_texts` map
+  /// - Paragraph reorder in the paragraphs `MovableList`
+  pub fn compute_paragraph_changes(&self, old_frontier_encoded: &[u8]) -> CollabResult<Vec<ParagraphDiffEntry>> {
+    let Some(diff_batch) = self.diff_since_frontier(old_frontier_encoded)? else {
+      return Ok(Vec::new());
+    };
+
+    let doc = self.shared_doc();
+    let mut changes: Vec<ParagraphDiffEntry> = Vec::new();
+
+    // --- First pass: structural changes on the root granular_texts map ---
+    for (cid, diff) in diff_batch.iter() {
+      let Diff::Map(map) = diff else {
+        continue;
+      };
+      let Some(path) = doc.get_path_to_container(cid) else {
+        continue;
+      };
+      if path.len() == 1
+        && let Index::Key(key) = &path[0].1
+        && key.as_str() == KEY_GRANULAR_TEXTS
+      {
+        for (text_id, value_or_none) in &map.updated {
+          if value_or_none.is_none() {
+            changes.push(ParagraphDiffEntry::ParagraphRemoved { text_id: text_id.to_string() });
+          } else {
+            let position = self.read_paragraph_order_position(&doc, text_id);
+            changes.push(ParagraphDiffEntry::ParagraphAdded { text_id: text_id.to_string(), position });
+          }
+        }
+      }
+    }
+
+    // Collect the set of text_ids that are newly added so we can skip their text diffs.
+    let added_text_ids: HashSet<String> = changes
+      .iter()
+      .filter_map(|entry| {
+        if let ParagraphDiffEntry::ParagraphAdded { text_id, .. } = entry {
+          Some(text_id.clone())
+        } else {
+          None
+        }
+      })
+      .collect();
+
+    // --- Second pass: text and metadata changes on text record containers ---
+    for (cid, diff) in diff_batch.iter() {
+      let Some(text_id) = self.text_id_from_container_path(cid) else {
+        continue;
+      };
+      if added_text_ids.contains(&text_id) {
+        continue;
+      }
+      match diff {
+        Diff::Text(_) => {
+          let new_text = self.read_text_by_container_id(cid).unwrap_or_default();
+          changes.push(ParagraphDiffEntry::Text { text_id, new_text });
+        },
+        Diff::Map(map) => {
+          let has_metadata = map.updated.contains_key(KEY_RECORD_METADATA);
+          if !has_metadata {
+            continue;
+          }
+          let metadata = self.read_text_record_metadata(cid).unwrap_or_default();
+          changes.push(ParagraphDiffEntry::Metadata { text_id, metadata });
+        },
+        _ => {},
+      }
+    }
+
+    // --- Third pass: paragraph order changes on the paragraphs MovableList ---
+    for (cid, diff) in diff_batch.iter() {
+      let Some(diff_list) = diff.as_list() else {
+        continue;
+      };
+      let Some(path) = doc.get_path_to_container(cid) else {
+        continue;
+      };
+      if path.len() == 2
+        && let Index::Key(key) = &path[0].1
+        && key.as_str() == KEY_GRANULAR_ORDERS
+        && let Index::Key(name) = &path[1].1
+        && name.as_str() == "paragraphs"
+      {
+        let mut cursor = 0usize;
+        for item in diff_list {
+          match item {
+            loro::event::ListDiffItem::Insert { insert, .. } => {
+              for value in insert {
+                if let loro::ValueOrContainer::Value(loro::LoroValue::String(text_id)) = value
+                  && !added_text_ids.contains(text_id.as_str())
+                {
+                  let position = self.read_paragraph_order_position(&doc, text_id.as_str());
+                  changes.push(ParagraphDiffEntry::ParagraphAdded { text_id: text_id.to_string(), position });
+                }
+                cursor += 1;
+              }
+            },
+            loro::event::ListDiffItem::Delete { delete } => {
+              cursor += delete;
+            },
+            loro::event::ListDiffItem::Retain { retain } => {
+              cursor += retain;
+            },
+          }
+        }
+      }
+    }
+
+    Ok(changes)
+  }
+
+  /// Read the current metadata binary from a text record container.
+  pub fn read_text_record_metadata(&self, cid: &ContainerID) -> Option<Vec<u8>> {
+    let container = self.doc.get_container(cid.clone())?;
+    match container {
+      Container::Map(record_map) => match record_map.get(KEY_RECORD_METADATA) {
+        Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => Some(bytes.to_vec()),
+        _ => Some(Vec::new()),
+      },
+      _ => None,
+    }
+  }
+
+  /// Read the position of a `text_id` in the `granular_orders.paragraphs`
+  /// `MovableList`.
+  pub fn read_paragraph_order_position(&self, doc: &LoroDoc, text_id: &str) -> usize {
+    let root = doc.get_map(ROOT_MAP);
+    let Some(orders_val) = root.get(KEY_GRANULAR_ORDERS) else {
+      return usize::MAX;
+    };
+    let ValueOrContainer::Container(Container::Map(orders_map)) = orders_val else {
+      return usize::MAX;
+    };
+    let Some(paragraphs_val) = orders_map.get("paragraphs") else {
+      return usize::MAX;
+    };
+    let ValueOrContainer::Container(Container::MovableList(list)) = paragraphs_val else {
+      return usize::MAX;
+    };
+    for (i, val) in list.to_vec().iter().enumerate() {
+      if let LoroValue::String(s) = val
+        && s.as_str() == text_id
+      {
+        return i;
+      }
+    }
+    usize::MAX
   }
 }
 
@@ -1494,6 +1760,13 @@ fn validate_utf8_range(text: &str, range: Range<usize>) -> CollabResult<()> {
   Ok(())
 }
 
+fn paragraphs_order_list(doc: &LoroDoc) -> CollabResult<LoroMovableList> {
+  let orders = granular_orders_map(doc)?;
+  orders
+    .get_or_create_container("paragraphs", LoroMovableList::new())
+    .map_err(|error| CollabError::Loro(error.to_string()))
+}
+
 fn granular_orders_map(doc: &LoroDoc) -> CollabResult<LoroMap> {
   root_container_map(doc, KEY_GRANULAR_ORDERS)
 }
@@ -1879,6 +2152,23 @@ fn role_includes(granted: Role, requested: Role) -> bool {
     (granted, requested),
     (Role::Owner, Role::Owner | Role::Editor | Role::Viewer) | (Role::Editor, Role::Editor | Role::Viewer) | (Role::Viewer, Role::Viewer)
   )
+}
+
+pub fn frontier_contains(known_frontier_encoded: &[u8], current_frontier_encoded: &[u8]) -> bool {
+  let Ok(known_vv) = postcard::from_bytes::<VersionVector>(known_frontier_encoded) else {
+    return known_frontier_encoded.is_empty();
+  };
+  let Ok(current_vv) = postcard::from_bytes::<VersionVector>(current_frontier_encoded) else {
+    return false;
+  };
+  if known_vv == current_vv {
+    return true;
+  }
+  known_vv.iter().all(|(peer, known_counter)| {
+    current_vv
+      .get(peer)
+      .is_some_and(|current_counter| current_counter >= known_counter)
+  })
 }
 
 #[must_use]

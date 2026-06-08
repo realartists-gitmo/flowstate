@@ -334,6 +334,140 @@ impl RichTextEditor {
     self.after_remote_text_mutation(cx);
   }
 
+  /// Apply a remote text-content change to a single paragraph, bypassing
+  /// `CanonicalOperation`.  This is the single-authority incremental path:
+  /// the paragraph's text is replaced according to the CRDT diff, and runs
+  /// are preserved for unchanged portions.
+  pub fn apply_remote_text_change(&mut self, paragraph: ParagraphId, new_text: &str, cx: &mut Context<Self>) -> bool {
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    let old_text = crate::paragraph_text(&self.document, paragraph_ix);
+    if old_text == new_text {
+      return true;
+    }
+
+    let old_bytes = old_text.as_bytes();
+    let new_bytes = new_text.as_bytes();
+
+    let prefix = old_bytes
+      .iter()
+      .zip(new_bytes.iter())
+      .take_while(|(a, b)| a == b)
+      .count();
+
+    let suffix = old_bytes[prefix..]
+      .iter()
+      .rev()
+      .zip(new_bytes[prefix..].iter().rev())
+      .take_while(|(a, b)| a == b)
+      .count();
+
+    let old_middle_end = old_bytes.len() - suffix;
+
+    if prefix < old_middle_end
+      && !delete_range_in_paragraph(&mut self.document, paragraph_ix, prefix..old_middle_end)
+    {
+      return false;
+    }
+
+    let new_middle = &new_bytes[prefix..(new_bytes.len() - suffix)];
+    if !new_middle.is_empty() {
+      let text = String::from_utf8_lossy(new_middle).to_string();
+      if !insert_text_at(&mut self.document, paragraph_ix, prefix, &text, RunStyles::default()) {
+        return false;
+      }
+    }
+
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
+  /// Apply a remote style/metadata change to a single paragraph, bypassing
+  /// `CanonicalOperation`.  Sets both the paragraph-level style and the
+  /// full run list (from the CRDT metadata).
+  pub fn apply_remote_style_change(
+    &mut self,
+    paragraph: ParagraphId,
+    style: ParagraphStyle,
+    runs: Vec<TextRun>,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    let Some(p) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix) else {
+      return false;
+    };
+    p.style = style;
+    p.runs = runs;
+    bump_paragraph_version(p);
+    update_paragraph_block(&mut self.document, paragraph_ix);
+    rebuild_document_sections(&mut self.document);
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
+  /// Insert a new paragraph at the given positional index, bypassing
+  /// `CanonicalOperation`.  `new_paragraph` is the stable ID the new
+  /// paragraph should carry (from the CRDT).
+  pub fn apply_remote_insert_paragraph(&mut self, new_paragraph: ParagraphId, position: usize, cx: &mut Context<Self>) -> bool {
+    if self.identity_map.paragraph_index(new_paragraph).is_some() {
+      return false;
+    }
+    let split_ix = if position >= self.document.paragraphs.len() {
+      self.document.paragraphs.len().saturating_sub(1)
+    } else {
+      position
+    };
+    let byte = crate::paragraph_text_len(&self.document.paragraphs[split_ix]);
+    if !split_paragraph_at_with_id(&mut self.document, split_ix, byte, new_paragraph) {
+      return false;
+    }
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
+  /// Remove a paragraph by joining it with its neighbour, bypassing
+  /// `CanonicalOperation`.  Joins with the previous paragraph if possible,
+  /// otherwise the next.
+  pub fn apply_remote_remove_paragraph(&mut self, paragraph: ParagraphId, cx: &mut Context<Self>) -> bool {
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    if paragraph_ix > 0 {
+      let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix - 1]);
+      delete_cross_paragraph_range(
+        &mut self.document,
+        crate::DocumentOffset { paragraph: paragraph_ix - 1, byte }
+          ..crate::DocumentOffset { paragraph: paragraph_ix, byte: 0 },
+      );
+    } else if paragraph_ix + 1 < self.document.paragraphs.len() {
+      let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
+      delete_cross_paragraph_range(
+        &mut self.document,
+        crate::DocumentOffset { paragraph: paragraph_ix, byte }
+          ..crate::DocumentOffset { paragraph: paragraph_ix + 1, byte: 0 },
+      );
+    } else {
+      return false;
+    }
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
   fn mark_remote_document_changed(&mut self, cx: &mut Context<Self>) {
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);

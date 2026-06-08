@@ -44,7 +44,7 @@ use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
 use crate::flow::{FlowEditor, FlowPanel, editor::CollaborationRole as FlowCollaborationRole};
 use crate::rich_text_element::{
   CollaborationRole as Db8CollaborationRole, CustomParagraphBorder, Document, DocumentOffset, DocumentTheme, EditorSelection,
-  ExternalCaret, ExternalSelection, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
+  ExternalCaret, ExternalSelection, InputParagraph, InputRun, ParagraphId, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
   ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document,
   paragraph_byte_range,
 };
@@ -55,8 +55,8 @@ use crate::workspace::file_management::{
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_collab::{
-  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularSourceMutation, GranularValue, UpdateApplication, WireMessage,
-  blake3_hash, decode_native_file,
+  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularSourceMutation, GranularValue, ParagraphDiffEntry,
+  UpdateApplication, WireMessage, decode_native_file, granular_record_id_to_u128,
 };
 use flowstate_document::{
   Db8CollabSourceMutation, Db8GranularValue, db8_collab_document_with_id, document_from_db8_collab_source, ensure_db8_document_id,
@@ -70,7 +70,6 @@ use tokio::sync::{broadcast, mpsc};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
-const MAX_RECENT_COLLABORATION_APPLICATION_HASHES: usize = 128;
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
@@ -105,8 +104,7 @@ pub struct Workspace {
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
   collaboration_host: Option<HostedCollaboration>,
-  collaboration_last_published_hash: Option<[u8; 32]>,
-  collaboration_applied_application_hashes: VecDeque<[u8; 32]>,
+  collaboration_last_frontier: Vec<u8>,
   collaboration_client_updates: Option<mpsc::UnboundedSender<PendingCollaborationUpdate>>,
   collaboration_pending_updates: VecDeque<PendingCollaborationUpdate>,
   collaboration_runtime_id: u64,
@@ -262,6 +260,7 @@ struct CollaborationPeerInfo {
   cursor: Option<String>,
   focus: Option<String>,
   viewport_hint: Option<String>,
+  last_known_frontier: Vec<u8>,
   last_seen_millis: Option<u64>,
 }
 
@@ -301,11 +300,11 @@ mod tests {
       }],
       application: UpdateApplication::Db8CanonicalOperations(vec![0]),
     });
-    queue.push_back(PendingCollaborationUpdate::Application {
-      application: UpdateApplication::Db8CanonicalOperations(vec![1, 2, 3]),
+    queue.push_back(PendingCollaborationUpdate::Presence {
+      cursor: Some("db8:0:4".to_string()),
     });
     let summary = pending_collaboration_update_summary(&queue);
-    assert_eq!(summary, vec!["granular source mutations".to_string(), "application hint".to_string()]);
+    assert_eq!(summary, vec!["granular source mutations".to_string(), "presence hint".to_string()]);
   }
 }
 
