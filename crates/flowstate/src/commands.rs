@@ -85,6 +85,11 @@ pub enum CommandId {
   SendToSpeechDocumentEnd,
   CondenseSelection,
   MarkCard,
+  CondensedSelection,
+  ToggleSpeechDocument,
+  ExportFormat,
+  ExportSend,
+  ToggleInvisibility,
   SwitchToTab1,
   SwitchToTab2,
   SwitchToTab3,
@@ -205,6 +210,11 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::SendToSpeechDocumentEnd, "Send to Speech Document End", APP, &["ctrl-~"]),
   CommandSpec::new(CommandId::CondenseSelection, "Condense Selection", APP, &["f3"]),
   CommandSpec::new(CommandId::MarkCard, "Mark Card", APP, &["ctrl-m"]),
+  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &[]),
+  CommandSpec::new(CommandId::ToggleSpeechDocument, "Toggle Speech Document", APP, &[]),
+  CommandSpec::new(CommandId::ExportFormat, "Export Format", APP, &[]),
+  CommandSpec::new(CommandId::ExportSend, "Export Send", APP, &[]),
+  CommandSpec::new(CommandId::ToggleInvisibility, "Toggle Invisibility", APP, &[]),
   CommandSpec::new(CommandId::SwitchToTab1, "Switch to Tab 1", APP, &["alt-1"]),
   CommandSpec::new(CommandId::SwitchToTab2, "Switch to Tab 2", APP, &["alt-2"]),
   CommandSpec::new(CommandId::SwitchToTab3, "Switch to Tab 3", APP, &["alt-3"]),
@@ -223,11 +233,46 @@ pub fn command_spec(id: CommandId) -> Option<&'static CommandSpec> {
   COMMAND_SPECS.iter().find(|spec| spec.id == id)
 }
 
+pub const RIBBON_KEYMAP_COMMANDS: &[CommandId] = &[
+  CommandId::SetParagraphPocket,
+  CommandId::SetParagraphHat,
+  CommandId::SetParagraphBlock,
+  CommandId::SetParagraphTag,
+  CommandId::SetParagraphAnalytic,
+  CommandId::SetParagraphUndertag,
+  CommandId::ToggleCite,
+  CommandId::ToggleEmphasis,
+  CommandId::ToggleUnderline,
+  CommandId::ToggleStrikethrough,
+  CommandId::CondenseSelection,
+  CommandId::CondensedSelection,
+  CommandId::ApplyHighlightToSelection,
+  CommandId::ClearHighlight,
+  CommandId::ClearFormatting,
+  CommandId::MarkCard,
+  CommandId::ToggleSpeechDocument,
+  CommandId::SendToSpeechDocument,
+  CommandId::SendToSpeechDocumentEnd,
+  CommandId::ExportFormat,
+  CommandId::ExportSend,
+  CommandId::ToggleInvisibility,
+];
+
 #[hotpath::measure]
 pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
   command_spec(id)
     .map(|spec| spec.default_keys)
     .unwrap_or(&[])
+}
+
+pub fn active_keys_for(id: CommandId) -> Vec<String> {
+  let keymap = crate::app_settings::load_keymap();
+  keymap
+    .entries
+    .iter()
+    .filter(|entry| entry.command == id)
+    .map(|entry| entry.key.clone())
+    .collect()
 }
 
 #[hotpath::measure]

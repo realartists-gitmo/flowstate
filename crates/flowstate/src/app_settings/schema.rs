@@ -18,6 +18,7 @@ pub struct AppSettings {
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
+  pub keymap: Vec<crate::commands::KeymapEntry>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

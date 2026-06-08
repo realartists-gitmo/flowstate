@@ -14,8 +14,8 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeRegistry, h_flex, v_flex};
 
-use crate::app_settings::load_app_settings;
-use crate::commands::register_default_keybindings;
+use crate::app_settings::{load_app_settings, load_keymap};
+use crate::commands::register_keymap;
 use crate::rich_text_element::{
   Document, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter, write_db8,
 };
@@ -71,7 +71,7 @@ impl Render for RichTextEditorView {
 /// the rich text component has focus.
 #[hotpath::measure]
 pub fn register_rich_text_editor_keybindings(cx: &mut App) {
-  register_default_keybindings(cx);
+  register_keymap(cx, &load_keymap());
 }
 
 #[hotpath::measure]

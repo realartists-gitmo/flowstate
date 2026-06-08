@@ -9,10 +9,10 @@ use std::{
 };
 
 use gpui::{
-  anchored, black, deferred, div, prelude::*, px, AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper,
-  Entity, Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point,
-  PromptButton, PromptLevel, Render, ScrollHandle, SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations,
-  WindowOptions,
+  AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
+  IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
+  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
+  px,
 };
 #[cfg(target_os = "windows")]
 use gpui::{Bounds, size};
@@ -40,13 +40,13 @@ use crate::app_settings::{
   load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
   save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
-use crate::commands::{COMMAND_SPECS, CommandId};
+use crate::commands::CommandId;
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement, RichTextEditor, Save,
-  SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme, load_or_create_document,
-  paragraph_byte_range, paragraph_index_for_id,
+  ArmedInlineTool, CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
+  RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
+  load_or_create_document, paragraph_byte_range, paragraph_index_for_id,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -155,6 +155,12 @@ struct StyleNumberInputState {
   _subscriptions: Vec<Subscription>,
 }
 
+struct KeymapInputState {
+  input: Entity<InputState>,
+  initial_value: String,
+  _subscription: Subscription,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsOverlay {
   Styles,
@@ -164,6 +170,7 @@ enum WorkspaceSettingsOverlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsSection {
   General,
+  Keymap,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -209,12 +216,14 @@ impl WorkspaceSettingsSection {
   fn title(self) -> &'static str {
     match self {
       Self::General => "General",
+      Self::Keymap => "Keymap",
     }
   }
 
   fn index(self) -> usize {
     match self {
       Self::General => 0,
+      Self::Keymap => 1,
     }
   }
 }
@@ -266,5 +275,6 @@ include!("window.rs");
 include!("outline.rs");
 include!("top_bar.rs");
 include!("style_settings.rs");
+include!("keymap_settings.rs");
 include!("theme.rs");
 include!("tests.rs");

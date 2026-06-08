@@ -256,7 +256,7 @@ fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _, _| {
-          [WorkspaceSettingsSection::General]
+          [WorkspaceSettingsSection::General, WorkspaceSettingsSection::Keymap]
             .into_iter()
             .fold(menu, |menu, section| {
               let workspace = workspace.clone();

@@ -158,6 +158,11 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     | CommandId::SendToSpeechDocument
     | CommandId::SendToSpeechDocumentEnd
     | CommandId::CondenseSelection
+    | CommandId::CondensedSelection
+    | CommandId::ToggleSpeechDocument
+    | CommandId::ExportFormat
+    | CommandId::ExportSend
+    | CommandId::ToggleInvisibility
     | CommandId::MarkCard
     | CommandId::SwitchToTab1
     | CommandId::SwitchToTab2

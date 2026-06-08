@@ -27,8 +27,8 @@ impl ModernStylesRibbon {
           id: RibbonCommandId::ToggleSpeechDocument,
           label: "Speech",
           group_id: "speech",
-          shortcut: None,
-          command_id: None,
+          shortcut: shortcut_for(CommandId::ToggleSpeechDocument),
+          command_id: Some(CommandId::ToggleSpeechDocument),
           priority: 73,
           accent: None,
           selected: speech_active,
@@ -55,57 +55,58 @@ impl ModernStylesRibbon {
       );
     }
 
-    groups.insert(0, RibbonCommandGroup {
-      id: "history",
-      label: "History",
-      commands: vec![
-        RibbonCommand {
-          id: RibbonCommandId::Undo,
-          label: "Undo",
-          group_id: "history",
-          shortcut: None,
-          command_id: None,
-          priority: 0,
-          accent: None,
-          selected: false,
-          disabled: false,
-          overflow_behavior: OverflowBehavior::KeepVisible,
-          checked_highlight: None,
-        },
-        RibbonCommand {
-          id: RibbonCommandId::Redo,
-          label: "Redo",
-          group_id: "history",
-          shortcut: None,
-          command_id: None,
-          priority: 1,
-          accent: None,
-          selected: false,
-          disabled: false,
-          overflow_behavior: OverflowBehavior::KeepVisible,
-          checked_highlight: None,
-        },
-      ],
-    });
+    groups.insert(
+      0,
+      RibbonCommandGroup {
+        id: "history",
+        label: "History",
+        commands: vec![
+          RibbonCommand {
+            id: RibbonCommandId::Undo,
+            label: "Undo",
+            group_id: "history",
+            shortcut: None,
+            command_id: None,
+            priority: 0,
+            accent: None,
+            selected: false,
+            disabled: false,
+            overflow_behavior: OverflowBehavior::KeepVisible,
+            checked_highlight: None,
+          },
+          RibbonCommand {
+            id: RibbonCommandId::Redo,
+            label: "Redo",
+            group_id: "history",
+            shortcut: None,
+            command_id: None,
+            priority: 1,
+            accent: None,
+            selected: false,
+            disabled: false,
+            overflow_behavior: OverflowBehavior::KeepVisible,
+            checked_highlight: None,
+          },
+        ],
+      },
+    );
 
     groups.push(RibbonCommandGroup {
       id: "views",
       label: "Views",
-      commands: vec![
-        RibbonCommand {
-          id: RibbonCommandId::ToggleInvisibility,
-          label: "",
-          group_id: "views",
-          shortcut: None,
-          command_id: None,
-          priority: 0,
-          accent: None,
-          selected: invisibility_mode,
-          disabled: false,
-          overflow_behavior: OverflowBehavior::KeepVisible,
-          checked_highlight: None,
-        },
-      ],
+      commands: vec![RibbonCommand {
+        id: RibbonCommandId::ToggleInvisibility,
+        label: "",
+        group_id: "views",
+        shortcut: shortcut_for(CommandId::ToggleInvisibility),
+        command_id: Some(CommandId::ToggleInvisibility),
+        priority: 0,
+        accent: None,
+        selected: invisibility_mode,
+        disabled: false,
+        overflow_behavior: OverflowBehavior::KeepVisible,
+        checked_highlight: None,
+      }],
     });
 
     groups.push(RibbonCommandGroup {
@@ -116,8 +117,8 @@ impl ModernStylesRibbon {
           id: RibbonCommandId::ExportFormat,
           label: "Format",
           group_id: "export",
-          shortcut: None,
-          command_id: None,
+          shortcut: shortcut_for(CommandId::ExportFormat),
+          command_id: Some(CommandId::ExportFormat),
           priority: 0,
           accent: None,
           selected: false,
@@ -129,8 +130,8 @@ impl ModernStylesRibbon {
           id: RibbonCommandId::ExportSend,
           label: "Send",
           group_id: "export",
-          shortcut: None,
-          command_id: None,
+          shortcut: shortcut_for(CommandId::ExportSend),
+          command_id: Some(CommandId::ExportSend),
           priority: 1,
           accent: None,
           selected: false,
@@ -152,10 +153,8 @@ impl ModernStylesRibbon {
         has_wrap.then(|| {
           if group.id == "style" {
             group_row_width(group, metrics, 2, window, cx)
-          } else if group.id == "history" {
+          } else if group.id == "history" || group.id == "speech" {
             group_row_width(group, metrics, 1, window, cx)
-          } else if group.id == "speech" {
-            speech_two_row_width(group, metrics, window, cx)
           } else if group.id == "views" {
             let label_width = measure_ribbon_text("Views", metrics.chip_text_size, window, cx).as_f32();
             let cmd_width = group_row_width(group, metrics, metrics.max_chip_rows, window, cx).as_f32();
@@ -193,8 +192,8 @@ impl ModernStylesRibbon {
               .flex_none()
               .flex_row()
               .flex_nowrap()
-          .gap(metrics.group_gap)
-          .min_w_0()
+              .gap(metrics.group_gap)
+              .min_w_0()
               .children(groups.iter().enumerate().map(|(index, group)| {
                 modern_group(
                   index > 0,

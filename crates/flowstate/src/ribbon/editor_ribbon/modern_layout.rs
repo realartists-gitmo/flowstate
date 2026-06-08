@@ -29,8 +29,8 @@ fn modern_group(
           .id(group.id)
           .flex()
           .flex_row()
-          .when(metrics.max_chip_rows == 1 && group.id != "speech", |this| this.flex_nowrap())
-          .when(metrics.max_chip_rows > 1 || group.id == "speech", |this| this.flex_wrap())
+          .when(metrics.max_chip_rows == 1 || group.id == "speech", |this| this.flex_nowrap())
+          .when(metrics.max_chip_rows > 1 && group.id != "speech", |this| this.flex_wrap())
           .items_center()
           .content_start()
           .gap(metrics.chip_gap)
@@ -117,48 +117,6 @@ fn group_row_width(
   let gap_width = metrics.chip_gap.as_f32() * columns.len().saturating_sub(1) as f32;
 
   px(commands_width + gap_width)
-}
-
-/// Guarantee 2 rows for the speech group by computing the minimum wrap width
-/// that forces the first two chips (Toggle + Send) to share row 1,
-/// pushing `MarkCard` to row 2. The 10% safety margin prevents 3-row
-/// breakdown when chip measurements have sub-pixel rounding.
-#[hotpath::measure]
-fn speech_two_row_width(
-  group: &RibbonCommandGroup,
-  metrics: RibbonLayoutMetrics,
-  window: &mut Window,
-  cx: &mut Context<EditorRibbon>,
-) -> gpui::Pixels {
-  let widths: Vec<f32> = group
-    .commands
-    .iter()
-    .map(|cmd| command_chip_width(cmd, metrics, window, cx).as_f32())
-    .collect();
-  if widths.len() < 2 {
-    return balanced_group_width(group, metrics, 2, window, cx);
-  }
-  let min_two = widths[0] + metrics.chip_gap.as_f32() + widths[1];
-  px(min_two * 1.1)
-}
-
-#[hotpath::measure]
-fn balanced_group_width(
-  group: &RibbonCommandGroup,
-  metrics: RibbonLayoutMetrics,
-  max_rows: usize,
-  window: &mut Window,
-  cx: &mut Context<EditorRibbon>,
-) -> gpui::Pixels {
-  let rows = max_rows.clamp(1, 3).min(group.commands.len().max(1));
-  if rows <= 1 {
-    return group_row_width(group, metrics, 1, window, cx);
-  }
-
-  // Use the same chunking model as the rendered command order. This width is
-  // the sum of each column's widest button, so GPUI's flex-wrap has enough
-  // horizontal room to keep the visual row count at or below `rows`.
-  group_row_width(group, metrics, rows, window, cx)
 }
 
 #[hotpath::measure]

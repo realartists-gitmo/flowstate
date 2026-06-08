@@ -198,6 +198,7 @@ impl Workspace {
       },
       WorkspaceSettingsOverlay::Settings => match self.settings_section {
         WorkspaceSettingsSection::General => "app-popup-settings-general",
+        WorkspaceSettingsSection::Keymap => "app-popup-settings-keymap",
       },
     };
 
@@ -594,7 +595,17 @@ impl Workspace {
             .item(smart_word_selection_item(workspace.clone()))
             .item(autosave_item(workspace.clone()))
             .item(send_to_document_directory_item(workspace.clone()))
-            .item(send_custom_directory_item(workspace)),
+            .item(send_custom_directory_item(workspace.clone())),
+        ),
+      SettingPage::new("Keymap")
+        .group(reset_workspace_settings_section_group(
+          workspace.clone(),
+          WorkspaceSettingsSection::Keymap,
+        ))
+        .group(
+          SettingGroup::new()
+            .title("Keyboard shortcuts")
+            .item(keymap_editor_item(workspace)),
         ),
     ]
   }
@@ -718,6 +729,17 @@ impl Workspace {
             }
             if let Err(error) = save_send_custom_directory(None) {
               eprintln!("failed to save send directory setting: {error}");
+            }
+          })
+          .detach();
+        cx.notify();
+      },
+      WorkspaceSettingsSection::Keymap => {
+        let entries = crate::commands::Keymap::defaults().entries;
+        cx.background_executor()
+          .spawn(async move {
+            if let Err(error) = crate::app_settings::save_keymap_entries(entries) {
+              eprintln!("failed to reset keymap: {error}");
             }
           })
           .detach();

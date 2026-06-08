@@ -10,10 +10,10 @@ fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
 
 #[hotpath::measure]
 fn shortcut_for(command_id: CommandId) -> Option<String> {
-  default_keys_for(command_id).first().map(|key| {
+  active_keys_for(command_id).first().map(|key| {
     Keystroke::parse(key)
       .map(|stroke| Kbd::format(&stroke))
-      .unwrap_or_else(|_| (*key).to_string())
+      .unwrap_or_else(|_| key.clone())
   })
 }
 
