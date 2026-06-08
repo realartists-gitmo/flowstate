@@ -28,10 +28,12 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
   runs.extend(right_runs);
   {
     let target = &mut paragraphs_mut(document)[offset.paragraph];
+    target.style = paragraph.style;
     target.runs = merge_adjacent_runs(runs);
     bump_paragraph_version(target);
   };
   update_paragraph_offsets_after_len_change(document, offset.paragraph);
+  rebuild_document_sections(document);
   DocumentOffset {
     paragraph: offset.paragraph,
     byte: byte + text.len(),
@@ -67,7 +69,7 @@ fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentO
       runs.extend(right_runs.iter().cloned());
     }
     replacements.push(Paragraph {
-      style: if ix == 0 { target.style } else { paragraph.style },
+      style: if ix == 0 && !left_runs.is_empty() { target.style } else { paragraph.style },
       byte_range: 0..0,
       runs: merge_adjacent_runs(runs),
       version: target.version.wrapping_add(1),
@@ -112,4 +114,3 @@ fn input_paragraph_text_runs(paragraph: &InputParagraph) -> Vec<TextRun> {
       .collect(),
   )
 }
-

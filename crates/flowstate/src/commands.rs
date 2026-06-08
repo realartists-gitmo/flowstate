@@ -78,6 +78,28 @@ pub enum CommandId {
   CloseDocument,
   FindInDocument,
   ToggleRibbon,
+  NextTab,
+  PreviousTab,
+  TogglePinTab,
+  SendToSpeechDocument,
+  SendToSpeechDocumentEnd,
+  CondenseSelection,
+  MarkCard,
+  CondensedSelection,
+  ToggleSpeechDocument,
+  ExportFormat,
+  ExportSend,
+  ToggleInvisibility,
+  SwitchToTab1,
+  SwitchToTab2,
+  SwitchToTab3,
+  SwitchToTab4,
+  SwitchToTab5,
+  SwitchToTab6,
+  SwitchToTab7,
+  SwitchToTab8,
+  SwitchToTab9,
+  SwitchToTab10,
   ScrollToParagraph,
 }
 
@@ -150,8 +172,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::Cut, "Cut", EDITOR, &["cmd-x", "ctrl-x"]),
   CommandSpec::new(CommandId::Paste, "Paste", EDITOR, &["cmd-v", "ctrl-v"]),
   CommandSpec::new(CommandId::Save, "Save", EDITOR, &["cmd-s", "ctrl-s"]),
-  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["cmd-z", "ctrl-z"]),
-  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["cmd-shift-z", "ctrl-shift-z", "ctrl-y"]),
+  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["ctrl-z", "cmd-z"]),
+  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["ctrl-y", "cmd-shift-z", "ctrl-shift-z"]),
   CommandSpec::new(CommandId::SetParagraphPocket, "Set Paragraph: Pocket", EDITOR, &["f4"]),
   CommandSpec::new(CommandId::SetParagraphHat, "Set Paragraph: Hat", EDITOR, &["f5"]),
   CommandSpec::new(CommandId::SetParagraphBlock, "Set Paragraph: Block", EDITOR, &["f6"]),
@@ -181,6 +203,28 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
   CommandSpec::new(CommandId::FindInDocument, "Find in Document", APP, &["cmd-f", "ctrl-f"]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
+  CommandSpec::new(CommandId::NextTab, "Next Tab", APP, &["ctrl-tab"]),
+  CommandSpec::new(CommandId::PreviousTab, "Previous Tab", APP, &["ctrl-shift-tab"]),
+  CommandSpec::new(CommandId::TogglePinTab, "Toggle Pin Tab", APP, &["ctrl-shift-p"]),
+  CommandSpec::new(CommandId::SendToSpeechDocument, "Send to Speech Document", APP, &["ctrl-`"]),
+  CommandSpec::new(CommandId::SendToSpeechDocumentEnd, "Send to Speech Document End", APP, &["ctrl-~"]),
+  CommandSpec::new(CommandId::CondenseSelection, "Condense Selection", APP, &["f3"]),
+  CommandSpec::new(CommandId::MarkCard, "Mark Card", APP, &["ctrl-m"]),
+  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &[]),
+  CommandSpec::new(CommandId::ToggleSpeechDocument, "Toggle Speech Document", APP, &[]),
+  CommandSpec::new(CommandId::ExportFormat, "Export Format", APP, &[]),
+  CommandSpec::new(CommandId::ExportSend, "Export Send", APP, &[]),
+  CommandSpec::new(CommandId::ToggleInvisibility, "Toggle Invisibility", APP, &[]),
+  CommandSpec::new(CommandId::SwitchToTab1, "Switch to Tab 1", APP, &["alt-1"]),
+  CommandSpec::new(CommandId::SwitchToTab2, "Switch to Tab 2", APP, &["alt-2"]),
+  CommandSpec::new(CommandId::SwitchToTab3, "Switch to Tab 3", APP, &["alt-3"]),
+  CommandSpec::new(CommandId::SwitchToTab4, "Switch to Tab 4", APP, &["alt-4"]),
+  CommandSpec::new(CommandId::SwitchToTab5, "Switch to Tab 5", APP, &["alt-5"]),
+  CommandSpec::new(CommandId::SwitchToTab6, "Switch to Tab 6", APP, &["alt-6"]),
+  CommandSpec::new(CommandId::SwitchToTab7, "Switch to Tab 7", APP, &["alt-7"]),
+  CommandSpec::new(CommandId::SwitchToTab8, "Switch to Tab 8", APP, &["alt-8"]),
+  CommandSpec::new(CommandId::SwitchToTab9, "Switch to Tab 9", APP, &["alt-9"]),
+  CommandSpec::new(CommandId::SwitchToTab10, "Switch to Tab 10", APP, &["alt-0"]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
 ];
 
@@ -189,11 +233,47 @@ pub fn command_spec(id: CommandId) -> Option<&'static CommandSpec> {
   COMMAND_SPECS.iter().find(|spec| spec.id == id)
 }
 
+pub const RIBBON_KEYMAP_COMMANDS: &[CommandId] = &[
+  CommandId::SetParagraphPocket,
+  CommandId::SetParagraphHat,
+  CommandId::SetParagraphBlock,
+  CommandId::SetParagraphTag,
+  CommandId::SetParagraphAnalytic,
+  CommandId::SetParagraphUndertag,
+  CommandId::ToggleCite,
+  CommandId::ToggleEmphasis,
+  CommandId::ToggleUnderline,
+  CommandId::ToggleStrikethrough,
+  CommandId::CondenseSelection,
+  CommandId::CondensedSelection,
+  CommandId::ApplyHighlightToSelection,
+  CommandId::ClearHighlight,
+  CommandId::ClearFormatting,
+  CommandId::MarkCard,
+  CommandId::ToggleSpeechDocument,
+  CommandId::SendToSpeechDocument,
+  CommandId::SendToSpeechDocumentEnd,
+  CommandId::ExportFormat,
+  CommandId::ExportSend,
+  CommandId::ToggleInvisibility,
+];
+
 #[hotpath::measure]
 pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
   command_spec(id)
     .map(|spec| spec.default_keys)
     .unwrap_or(&[])
+}
+
+#[hotpath::measure]
+pub fn active_keys_for(id: CommandId) -> Vec<String> {
+  let keymap = crate::app_settings::load_keymap();
+  keymap
+    .entries
+    .iter()
+    .filter(|entry| entry.command == id)
+    .map(|entry| entry.key.clone())
+    .collect()
 }
 
 #[hotpath::measure]

@@ -14,8 +14,8 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::ScrollableElement;
 use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt as _, Theme, ThemeRegistry, h_flex, v_flex};
 
-use crate::app_settings::load_app_settings;
-use crate::commands::register_default_keybindings;
+use crate::app_settings::{load_app_settings, load_keymap};
+use crate::commands::register_keymap;
 use crate::rich_text_element::{
   Document, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter, write_db8,
 };
@@ -71,7 +71,7 @@ impl Render for RichTextEditorView {
 /// the rich text component has focus.
 #[hotpath::measure]
 pub fn register_rich_text_editor_keybindings(cx: &mut App) {
-  register_default_keybindings(cx);
+  register_keymap(cx, &load_keymap());
 }
 
 #[hotpath::measure]
@@ -346,6 +346,7 @@ impl AssetSource for AppAssets {
       "icons/bold.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/bold.svg")))),
       "icons/eraser.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/eraser.svg")))),
       "icons/highlighter.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/highlighter.svg")))),
+      "icons/mark-card.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/mark-card.svg")))),
       "icons/shrink.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/shrink.svg")))),
       "icons/strikethrough.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/strikethrough.svg")))),
       "icons/underline.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/underline.svg")))),
@@ -360,6 +361,15 @@ impl AssetSource for AppAssets {
       "icons/letter-case.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/letter-case.svg")))),
       "icons/text-box-edit.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-box-edit.svg")))),
       "icons/replace.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace.svg")))),
+      "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pin.svg")))),
+      "icons/paragraph-break-two.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/paragraph-break-two.svg")))),
+      "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
+      "icons/send.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send.svg")))),
+      "icons/speech.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/speech.svg")))),
+      "icons/export.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/export.svg")))),
+      "icons/send-horizontal.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-horizontal.svg")))),
+      "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
+      "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -378,6 +388,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/highlighter.svg".starts_with(path) {
       assets.push("icons/highlighter.svg".into());
+    }
+    if "icons/mark-card.svg".starts_with(path) {
+      assets.push("icons/mark-card.svg".into());
     }
     if "icons/shrink.svg".starts_with(path) {
       assets.push("icons/shrink.svg".into());
@@ -420,6 +433,33 @@ impl AssetSource for AppAssets {
     }
     if "icons/replace.svg".starts_with(path) {
       assets.push("icons/replace.svg".into());
+    }
+    if "icons/pin.svg".starts_with(path) {
+      assets.push("icons/pin.svg".into());
+    }
+    if "icons/paragraph-break-two.svg".starts_with(path) {
+      assets.push("icons/paragraph-break-two.svg".into());
+    }
+    if "icons/send-to-back.svg".starts_with(path) {
+      assets.push("icons/send-to-back.svg".into());
+    }
+    if "icons/send.svg".starts_with(path) {
+      assets.push("icons/send.svg".into());
+    }
+    if "icons/speech.svg".starts_with(path) {
+      assets.push("icons/speech.svg".into());
+    }
+    if "icons/export.svg".starts_with(path) {
+      assets.push("icons/export.svg".into());
+    }
+    if "icons/send-horizontal.svg".starts_with(path) {
+      assets.push("icons/send-horizontal.svg".into());
+    }
+    if "icons/pdf.svg".starts_with(path) {
+      assets.push("icons/pdf.svg".into());
+    }
+    if "icons/docx.svg".starts_with(path) {
+      assets.push("icons/docx.svg".into());
     }
     Ok(assets)
   }

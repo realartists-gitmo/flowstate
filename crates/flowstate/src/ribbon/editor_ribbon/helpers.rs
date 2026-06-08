@@ -10,10 +10,10 @@ fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
 
 #[hotpath::measure]
 fn shortcut_for(command_id: CommandId) -> Option<String> {
-  default_keys_for(command_id).first().map(|key| {
+  active_keys_for(command_id).first().map(|key| {
     Keystroke::parse(key)
       .map(|stroke| Kbd::format(&stroke))
-      .unwrap_or_else(|_| (*key).to_string())
+      .unwrap_or_else(|_| key.clone())
   })
 }
 
@@ -28,9 +28,13 @@ fn show_shortcut(options: ModernRibbonOptions) -> bool {
 
 #[hotpath::measure]
 fn command_tooltip(command: &RibbonCommand) -> String {
+  let label = match command.id {
+    RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => "Send to speech",
+    _ => command.label,
+  };
   match &command.shortcut {
-    Some(shortcut) => format!("{} ({})", command.label, shortcut),
-    None => command.label.to_string(),
+    Some(shortcut) => format!("{label} ({shortcut})"),
+    None => label.to_string(),
   }
 }
 
@@ -116,11 +120,16 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
   match command_id {
     RibbonCommandId::Paragraph(style) => 1_000 + style.slot(),
     RibbonCommandId::Semantic(style) => 2_000 + style.slot(),
+    RibbonCommandId::ToggleSpeechDocument => 2_700,
+    RibbonCommandId::SendToSpeechDocument => 2_750,
+    RibbonCommandId::SendToSpeechDocumentEnd => 2_751,
+    RibbonCommandId::CondenseMenu => 2_850,
     RibbonCommandId::CondensedMenu => 2_900,
     RibbonCommandId::Underline => 3_000,
     RibbonCommandId::Strikethrough => 3_100,
     RibbonCommandId::Highlight(style) => 4_000 + style.slot(),
     RibbonCommandId::ClearHighlight => 5_000,
+    RibbonCommandId::MarkCard => 5_001,
     RibbonCommandId::HighlightMenu => 5_002,
     RibbonCommandId::ToggleHighlightMode(style) => {
       5_100
@@ -129,6 +138,11 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
           None => 999,
         }
     },
-    RibbonCommandId::ClearFormatting => 5_001,
+    RibbonCommandId::ClearFormatting => 5_003,
+    RibbonCommandId::Undo => 6_000,
+    RibbonCommandId::Redo => 6_001,
+    RibbonCommandId::ExportFormat => 7_000,
+    RibbonCommandId::ExportSend => 7_001,
+    RibbonCommandId::ToggleInvisibility => 8_000,
   }
 }

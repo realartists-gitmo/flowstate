@@ -173,7 +173,7 @@ impl EditorSelection {
     self.anchor.min(self.head)..self.anchor.max(self.head)
   }
 
-  pub(super) fn is_caret(&self) -> bool {
+  pub fn is_caret(&self) -> bool {
     self.anchor == self.head
   }
 }

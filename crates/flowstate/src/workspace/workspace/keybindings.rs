@@ -1,19 +1,32 @@
 use crate::commands::FindInDocumentAction;
-
 #[hotpath::measure]
 fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
-  COMMAND_SPECS.iter().find_map(|spec| {
-    spec
-      .default_keys
-      .iter()
-      .any(|key| {
-        KeyBinding::load(key, Box::new(NoAction), None, false, None, &DummyKeyboardMapper)
-          .ok()
-          .and_then(|binding| binding.match_keystrokes(std::slice::from_ref(keystroke)))
-          == Some(false)
-      })
-      .then_some(spec.id)
-  })
+  crate::app_settings::load_keymap()
+    .entries
+    .iter()
+    .find_map(|entry| {
+      KeyBinding::load(&entry.key, Box::new(NoAction), None, false, None, &DummyKeyboardMapper)
+        .ok()
+        .and_then(|binding| binding.match_keystrokes(std::slice::from_ref(keystroke)))
+        .is_some_and(|matched| !matched)
+        .then_some(entry.command)
+    })
+}
+
+fn tab_index(command: &CommandId) -> Option<usize> {
+  match command {
+    CommandId::SwitchToTab1 => Some(0),
+    CommandId::SwitchToTab2 => Some(1),
+    CommandId::SwitchToTab3 => Some(2),
+    CommandId::SwitchToTab4 => Some(3),
+    CommandId::SwitchToTab5 => Some(4),
+    CommandId::SwitchToTab6 => Some(5),
+    CommandId::SwitchToTab7 => Some(6),
+    CommandId::SwitchToTab8 => Some(7),
+    CommandId::SwitchToTab9 => Some(8),
+    CommandId::SwitchToTab10 => Some(9),
+    _ => None,
+  }
 }
 
 #[hotpath::measure_all]
@@ -57,8 +70,98 @@ impl Workspace {
         }
       },
       CommandId::ToggleRibbon => {
-        self.ribbon_collapsed = !self.ribbon_collapsed;
-        cx.notify();
+        self.toggle_ribbon(cx);
+        true
+      },
+      CommandId::NextTab => {
+        self.navigate_active_tab(1, cx);
+        true
+      },
+      CommandId::PreviousTab => {
+        self.navigate_active_tab(-1, cx);
+        true
+      },
+      CommandId::TogglePinTab => {
+        self.toggle_active_tab_pin(cx);
+        true
+      },
+      CommandId::SendToSpeechDocument => self.send_selection_to_speech_document(window, cx),
+      CommandId::SendToSpeechDocumentEnd => self.send_selection_to_speech_document_end(window, cx),
+      CommandId::CondenseSelection => self.condense_active_selection(window, cx),
+      CommandId::CondensedSelection => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| {
+            if !editor.selection().is_caret() || editor.focus_handle(cx).is_focused(window) {
+              editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
+            }
+          });
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::MarkCard => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| {
+            if editor.focus_handle(cx).is_focused(window) {
+              editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+            }
+          });
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::ToggleSpeechDocument => {
+        if let Some(panel_id) = self.active_document_id {
+          self.toggle_speech_document(panel_id, cx);
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::ExportFormat => {
+        if let Some(editor) = self.active_editor.clone() {
+          let task = editor.update(cx, |editor, cx| {
+            editor.export_document_format(crate::rich_text_element::DocumentExportFormat::Docx, cx)
+          });
+          cx.spawn(async move |_, _| {
+            if let Err(error) = task.await {
+              eprintln!("format export failed: {error}");
+            }
+          })
+          .detach();
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::ExportSend => {
+        if let Some(editor) = self.active_editor.clone() {
+          let task = editor.update(cx, |editor, cx| {
+            editor.send_document(crate::rich_text_element::DocumentExportFormat::Docx, cx)
+          });
+          cx.spawn(async move |_, _| {
+            if let Err(error) = task.await {
+              eprintln!("send export failed: {error}");
+            }
+          })
+          .detach();
+          true
+        } else {
+          false
+        }
+      },
+      CommandId::ToggleInvisibility => {
+        if let Some(editor) = self.active_editor.clone() {
+          editor.update(cx, |editor, cx| editor.toggle_invisibility_mode(cx));
+          true
+        } else {
+          false
+        }
+      },
+      command if tab_index(&command).is_some() => {
+        self.activate_tab_shortcut(tab_index(&command).unwrap(), cx);
         true
       },
       CommandId::ScrollToParagraph => false,

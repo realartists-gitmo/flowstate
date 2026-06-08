@@ -6,31 +6,43 @@ fn modern_command_groups(
   current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommandGroup> {
-  let mut keyed = Vec::new();
-  let mut unkeyed = Vec::new();
+  let mut style = Vec::new();
+  let mut speech = Vec::new();
 
-  keyed.extend(
+  style.extend(
     paragraph_commands(state)
       .into_iter()
       .filter(|command| command.command_id.is_some()),
   );
-  keyed.extend(keyed_inline_commands(state, armed_tool));
-  keyed.extend(highlight_commands(document_theme, current_highlight, highlight_mode_active));
-  keyed.push(clear_formatting_command("keyed"));
-  keyed.sort_by_key(|command| command_sort_key(command.command_id));
+  style.extend(keyed_inline_commands(state, armed_tool));
+  style.push(clear_formatting_command("style"));
+  style.extend(unkeyed_inline_commands(state, armed_tool));
 
-  unkeyed.extend(unkeyed_inline_commands(state, armed_tool));
+  for mut cmd in highlight_commands(document_theme, current_highlight, highlight_mode_active) {
+    match cmd.id {
+      RibbonCommandId::MarkCard => {
+        cmd.group_id = "speech";
+        speech.push(cmd);
+      },
+      _ => {
+        cmd.group_id = "style";
+        style.push(cmd);
+      },
+    }
+  }
+
+  style.sort_by_key(|command| command_sort_key(command.command_id));
 
   vec![
     RibbonCommandGroup {
-      id: "keyed",
-      label: "Keybinds",
-      commands: keyed,
+      id: "style",
+      label: "Style",
+      commands: style,
     },
     RibbonCommandGroup {
-      id: "unkeyed",
-      label: "No Keybind",
-      commands: unkeyed,
+      id: "speech",
+      label: "Speech",
+      commands: speech,
     },
   ]
 }
@@ -45,7 +57,7 @@ fn paragraph_commands(state: &RichTextEditorStyleState) -> Vec<RibbonCommand> {
       RibbonCommand {
         id: RibbonCommandId::Paragraph(spec.style),
         label: spec.label,
-        group_id: "keyed",
+        group_id: "style",
         shortcut: command_id.and_then(shortcut_for),
         command_id,
         priority: paragraph_priority(spec.style),
@@ -64,13 +76,13 @@ fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<Ar
   let mut commands = SEMANTIC_STYLE_SPECS
     .iter()
     .filter(|spec| matches!(spec.style, flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS))
-    .map(|spec| semantic_command(spec.style, spec.label, "keyed", state, armed_tool))
+    .map(|spec| semantic_command(spec.style, spec.label, "style", state, armed_tool))
     .collect::<Vec<_>>();
 
   commands.push(RibbonCommand {
     id: RibbonCommandId::Underline,
     label: "Underline",
-    group_id: "keyed",
+    group_id: "style",
     shortcut: shortcut_for(CommandId::ToggleUnderline),
     command_id: Some(CommandId::ToggleUnderline),
     priority: 82,
@@ -87,16 +99,31 @@ fn keyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<Ar
 fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<ArmedInlineTool>) -> Vec<RibbonCommand> {
   vec![
     RibbonCommand {
+      id: RibbonCommandId::CondenseMenu,
+      label: "Condense",
+      group_id: "style",
+      shortcut: shortcut_for(CommandId::CondenseSelection),
+      command_id: Some(CommandId::CondenseSelection),
+      priority: 75,
+      accent: None,
+      selected: false,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: None,
+    },
+    RibbonCommand {
       id: RibbonCommandId::CondensedMenu,
-      label: "Condensed",
-      group_id: "unkeyed",
-      shortcut: None,
-      command_id: None,
+      label: "Shrink",
+      group_id: "style",
+      shortcut: shortcut_for(CommandId::CondensedSelection),
+      command_id: Some(CommandId::CondensedSelection),
       priority: 76,
       accent: None,
       selected: matches!(
         armed_tool,
-        Some(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED))
+        Some(ArmedInlineTool::Semantic(
+          flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED
+        ))
       ) || matches!(
         state.semantic,
         SelectionState::Uniform(flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED)
@@ -108,9 +135,9 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
     RibbonCommand {
       id: RibbonCommandId::Strikethrough,
       label: "Strikethrough",
-      group_id: "unkeyed",
-      shortcut: None,
-      command_id: None,
+      group_id: "style",
+      shortcut: shortcut_for(CommandId::ToggleStrikethrough),
+      command_id: Some(CommandId::ToggleStrikethrough),
       priority: 81,
       accent: None,
       selected: EditorRibbon::strikethrough_selected(state, armed_tool),
@@ -168,21 +195,35 @@ fn highlight_commands(
   current_highlight: Option<HighlightStyle>,
   highlight_mode_active: bool,
 ) -> Vec<RibbonCommand> {
-  vec![RibbonCommand {
-    id: RibbonCommandId::ToggleHighlightMode(current_highlight),
-    label: "Highlight",
-    group_id: "highlight",
-    shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
-    command_id: Some(CommandId::ApplyHighlightToSelection),
-    priority: 74,
-    accent: Some(match current_highlight {
-      Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
-      None => RibbonAccent::Transparent,
-    }),
-    selected: highlight_mode_active,
-    disabled: false,
-    overflow_behavior: OverflowBehavior::KeepVisible,
-    checked_highlight: current_highlight,
-  }]
+  vec![
+    RibbonCommand {
+      id: RibbonCommandId::ToggleHighlightMode(current_highlight),
+      label: "Highlight",
+      group_id: "highlight",
+      shortcut: shortcut_for(CommandId::ApplyHighlightToSelection),
+      command_id: Some(CommandId::ApplyHighlightToSelection),
+      priority: 74,
+      accent: Some(match current_highlight {
+        Some(highlight) => RibbonAccent::Color(highlight_color(highlight, document_theme)),
+        None => RibbonAccent::Transparent,
+      }),
+      selected: highlight_mode_active,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: current_highlight,
+    },
+    RibbonCommand {
+      id: RibbonCommandId::MarkCard,
+      label: "Mark",
+      group_id: "highlight",
+      shortcut: shortcut_for(CommandId::MarkCard),
+      command_id: Some(CommandId::MarkCard),
+      priority: 75,
+      accent: Some(RibbonAccent::Color(highlight_color(flowstate_document::HIGHLIGHT_MARKED, document_theme))),
+      selected: false,
+      disabled: false,
+      overflow_behavior: OverflowBehavior::KeepVisible,
+      checked_highlight: Some(flowstate_document::HIGHLIGHT_MARKED),
+    },
+  ]
 }
-

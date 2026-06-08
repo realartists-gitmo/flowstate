@@ -18,6 +18,7 @@ pub struct AppSettings {
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
+  pub keymap: Vec<crate::commands::KeymapEntry>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -125,6 +126,7 @@ pub struct DocumentThemeSettings {
   pub highlight_spoken: StoredHsla,
   pub highlight_insert: StoredHsla,
   pub highlight_alternative: StoredHsla,
+  pub highlight_marked: StoredHsla,
   pub pocket_color: StoredHsla,
   pub hat_color: StoredHsla,
   pub block_color: StoredHsla,

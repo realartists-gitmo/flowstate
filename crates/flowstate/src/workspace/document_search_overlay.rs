@@ -297,10 +297,22 @@ impl Render for DocumentSearchBar {
               .gap_1()
               .items_center()
               .child(
-                Icon::default()
-                  .path("icons/letter-case.svg")
+                Button::new("document-search-case-sensitive-icon")
+                  .child(
+                    Icon::default()
+                      .path("icons/letter-case.svg")
+                      .xsmall()
+                      .text_color(cx.theme().muted_foreground),
+                  )
                   .xsmall()
-                  .text_color(cx.theme().muted_foreground),
+                  .ghost()
+                  .tooltip("Case sensitive")
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |_, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_case_sensitive(!bar.case_sensitive, cx));
+                    }
+                  }),
               )
               .child(
                 Checkbox::new("document-search-case-sensitive")
@@ -320,10 +332,22 @@ impl Render for DocumentSearchBar {
               .gap_1()
               .items_center()
               .child(
-                Icon::default()
-                  .path("icons/text-box-edit.svg")
+                Button::new("document-search-whole-words-icon")
+                  .child(
+                    Icon::default()
+                      .path("icons/text-box-edit.svg")
+                      .xsmall()
+                      .text_color(cx.theme().muted_foreground),
+                  )
                   .xsmall()
-                  .text_color(cx.theme().muted_foreground),
+                  .ghost()
+                  .tooltip("Match whole word")
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |_, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(!bar.whole_words, cx));
+                    }
+                  }),
               )
               .child(
                 Checkbox::new("document-search-whole-words")

@@ -26,7 +26,7 @@ impl Workspace {
     format!("Untitled{index}.fl0")
   }
 
-  fn render_document_tab_bar_prefix(&self, active_index: usize, tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render_document_tab_bar_prefix(&self, _active_index: usize, _tab_count: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
     h_flex()
       .h_full()
@@ -51,22 +51,6 @@ impl Workspace {
           .tooltip("Save current file")
           .on_click(cx.listener(|workspace, _, window, cx| {
             workspace.save_active(window, cx);
-          })),
-      )
-      .child(
-        icon_button("tab-bar-navigate-left", AppIcon::TabLeft)
-          .tooltip("Navigate tab left")
-          .disabled(active_index == 0)
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            workspace.navigate_active_tab(-1, cx);
-          })),
-      )
-      .child(
-        icon_button("tab-bar-navigate-right", AppIcon::TabRight)
-          .tooltip("Navigate tab right")
-          .disabled(active_index + 1 >= tab_count)
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            workspace.navigate_active_tab(1, cx);
           })),
       )
   }
@@ -248,10 +232,26 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let zoom = self
-      .active_editor
-      .as_ref()
-      .map(|editor| editor.read(cx).zoom_percent());
+    let speech_word_count = if let (Some(document_id), Some(editor)) = (self.active_document_id, self.active_editor.as_ref()) {
+      let editor = editor.read(cx);
+      let generation = editor.edit_generation();
+      if let Some((_, count)) = self
+        .speech_word_count_cache
+        .get(&document_id)
+        .filter(|(cached_generation, _)| *cached_generation == generation)
+      {
+        Some(*count)
+      } else {
+        let count = speech_word_count(editor.document());
+        self
+          .speech_word_count_cache
+          .insert(document_id, (generation, count));
+        Some(count)
+      }
+    } else {
+      None
+    };
+    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
@@ -266,6 +266,47 @@ impl Workspace {
       .bg(cx.theme().background)
       .child(div().flex_1())
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
-      .child(div().flex_1())
+      .when_some(speech_word_count, |this, count| {
+        this.child(
+          div()
+            .flex_none()
+            .pl_2()
+            .text_size(px(10.0))
+            .text_color(cx.theme().muted_foreground.opacity(0.82))
+            .child(format!("Speech: {count} words")),
+        )
+      })
   }
+}
+
+fn speech_word_count(document: &Document) -> usize {
+  document
+    .paragraphs
+    .iter()
+    .map(|paragraph| {
+      let paragraph_is_tag = paragraph.style == flowstate_document::PARAGRAPH_TAG;
+      let mut run_start = paragraph.byte_range.start;
+      paragraph
+        .runs
+        .iter()
+        .map(|run| {
+          let run_end = run_start + run.len;
+          let count = if paragraph_is_tag || run.styles.semantic == flowstate_document::SEMANTIC_CITE || run.styles.highlight.is_some() {
+            count_words(&document_text_slice(document, run_start..run_end))
+          } else {
+            0
+          };
+          run_start = run_end;
+          count
+        })
+        .sum::<usize>()
+    })
+    .sum()
+}
+
+fn count_words(text: &str) -> usize {
+  text
+    .split_whitespace()
+    .filter(|word| word.chars().any(char::is_alphanumeric))
+    .count()
 }

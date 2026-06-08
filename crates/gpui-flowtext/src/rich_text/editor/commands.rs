@@ -216,6 +216,14 @@ impl RichTextEditor {
     self.after_history_restore(cx);
   }
 
+  pub fn can_undo(&self) -> bool {
+    !self.undo_stack.is_empty()
+  }
+
+  pub fn can_redo(&self) -> bool {
+    !self.redo_stack.is_empty()
+  }
+
   pub fn move_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.move_horizontal(HDir::Left, false, window, cx);
   }

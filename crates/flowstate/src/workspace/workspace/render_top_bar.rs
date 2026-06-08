@@ -16,8 +16,13 @@ impl Workspace {
           .child(file_top_bar_button(self.active_document_id.is_some(), cx))
           .child(insert_top_bar_button(cx, self.active_editor.is_some()))
           .child(document_top_bar_button(cx))
-          .child(view_top_bar_button(cx, !self.outline_collapsed, !self.ribbon_collapsed, !self.toolkit_collapsed))
-          .child(settings_top_bar_button(cx))
+          .child(view_top_bar_button(
+            cx,
+            !self.outline_collapsed,
+            !self.ribbon_collapsed,
+            !self.toolkit_collapsed,
+          ))
+          .child(settings_top_bar_button(cx)),
       )
   }
 
@@ -47,11 +52,24 @@ impl Workspace {
       .bg(cx.theme().background)
       .when_some(active_ribbon, |this, ribbon| {
         if let Some(active_id) = self.active_document_id {
-          if let Some(panel) = self.document_panels.iter().find(|panel| panel.read(cx).id() == active_id) {
+          if let Some(panel) = self
+            .document_panels
+            .iter()
+            .find(|panel| panel.read(cx).id() == active_id)
+          {
+            let panel_id = panel.read(cx).id();
+            let speech_active = self.speech_document_id == Some(panel_id);
+            let speech_send_enabled = self.speech_document_id.is_some() && !speech_active;
+            let workspace = cx.entity().downgrade();
             panel.read(cx).ribbon().update(cx, |ribbon, cx| {
               ribbon.set_height(ribbon_height, cx);
+              ribbon.set_workspace_context(workspace, panel_id, speech_active, speech_send_enabled, cx);
             });
-          } else if let Some(panel) = self.flow_panels.iter().find(|panel| panel.read(cx).id() == active_id) {
+          } else if let Some(panel) = self
+            .flow_panels
+            .iter()
+            .find(|panel| panel.read(cx).id() == active_id)
+          {
             panel.read(cx).ribbon().update(cx, |ribbon, cx| {
               ribbon.set_height(ribbon_height, cx);
             });
@@ -67,25 +85,5 @@ impl Workspace {
             .child("Ribbon placeholder"),
         )
       })
-      .child(
-        h_flex()
-          .absolute()
-          .bottom_0()
-          .right_0()
-          .p_1()
-          .gap_1()
-          .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .child(
-            Button::new("collapse-ribbon-panel")
-              .icon(Icon::default().path("icons/panel-top-close.svg").text_color(cx.theme().muted_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Collapse ribbon")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_ribbon(cx);
-              })),
-          ),
-      )
   }
-
 }

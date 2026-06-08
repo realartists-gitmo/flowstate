@@ -10,11 +10,138 @@ impl ModernStylesRibbon {
     invisibility_mode: bool,
     options: ModernRibbonOptions,
     height: gpui::Pixels,
+    workspace: Option<WeakEntity<Workspace>>,
+    panel_id: Option<Uuid>,
+    speech_available: bool,
+    speech_active: bool,
+    speech_send_enabled: bool,
     _available_width: gpui::Pixels,
     window: &mut Window,
     cx: &mut Context<EditorRibbon>,
   ) -> AnyElement {
-    let groups = modern_command_groups(style_state, armed_tool, document_theme, current_highlight, highlight_mode_active);
+    let mut groups = modern_command_groups(style_state, armed_tool, document_theme, current_highlight, highlight_mode_active);
+    if let Some(group) = groups.iter_mut().find(|group| group.id == "speech") {
+      group.commands.insert(
+        0,
+        RibbonCommand {
+          id: RibbonCommandId::ToggleSpeechDocument,
+          label: "Speech",
+          group_id: "speech",
+          shortcut: shortcut_for(CommandId::ToggleSpeechDocument),
+          command_id: Some(CommandId::ToggleSpeechDocument),
+          priority: 73,
+          accent: None,
+          selected: speech_active,
+          disabled: !speech_available,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+      );
+      group.commands.insert(
+        1,
+        RibbonCommand {
+          id: RibbonCommandId::SendToSpeechDocument,
+          label: "Send",
+          group_id: "speech",
+          shortcut: shortcut_for(CommandId::SendToSpeechDocument),
+          command_id: Some(CommandId::SendToSpeechDocument),
+          priority: 74,
+          accent: None,
+          selected: false,
+          disabled: !speech_send_enabled,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+      );
+    }
+
+    groups.insert(
+      0,
+      RibbonCommandGroup {
+        id: "history",
+        label: "History",
+        commands: vec![
+          RibbonCommand {
+            id: RibbonCommandId::Undo,
+            label: "Undo",
+            group_id: "history",
+            shortcut: shortcut_for(CommandId::Undo),
+            command_id: Some(CommandId::Undo),
+            priority: 0,
+            accent: None,
+            selected: false,
+            disabled: false,
+            overflow_behavior: OverflowBehavior::KeepVisible,
+            checked_highlight: None,
+          },
+          RibbonCommand {
+            id: RibbonCommandId::Redo,
+            label: "Redo",
+            group_id: "history",
+            shortcut: shortcut_for(CommandId::Redo),
+            command_id: Some(CommandId::Redo),
+            priority: 1,
+            accent: None,
+            selected: false,
+            disabled: false,
+            overflow_behavior: OverflowBehavior::KeepVisible,
+            checked_highlight: None,
+          },
+        ],
+      },
+    );
+
+    groups.push(RibbonCommandGroup {
+      id: "views",
+      label: "Views",
+      commands: vec![RibbonCommand {
+        id: RibbonCommandId::ToggleInvisibility,
+        label: "",
+        group_id: "views",
+        shortcut: shortcut_for(CommandId::ToggleInvisibility),
+        command_id: Some(CommandId::ToggleInvisibility),
+        priority: 0,
+        accent: None,
+        selected: invisibility_mode,
+        disabled: false,
+        overflow_behavior: OverflowBehavior::KeepVisible,
+        checked_highlight: None,
+      }],
+    });
+
+    groups.push(RibbonCommandGroup {
+      id: "export",
+      label: "Export",
+      commands: vec![
+        RibbonCommand {
+          id: RibbonCommandId::ExportFormat,
+          label: "Format",
+          group_id: "export",
+          shortcut: shortcut_for(CommandId::ExportFormat),
+          command_id: Some(CommandId::ExportFormat),
+          priority: 0,
+          accent: None,
+          selected: false,
+          disabled: false,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+        RibbonCommand {
+          id: RibbonCommandId::ExportSend,
+          label: "Send",
+          group_id: "export",
+          shortcut: shortcut_for(CommandId::ExportSend),
+          command_id: Some(CommandId::ExportSend),
+          priority: 1,
+          accent: None,
+          selected: false,
+          disabled: false,
+          overflow_behavior: OverflowBehavior::KeepVisible,
+          checked_highlight: None,
+        },
+      ],
+    });
+
     let metrics = RibbonLayoutMetrics::from_height(height);
     // Use vertical ribbon room proactively. Width pressure can force wrapping,
     // but when there is spare height we still prefer balanced columns over one
@@ -22,9 +149,16 @@ impl ModernStylesRibbon {
     let wrap_widths = groups
       .iter()
       .map(|group| {
-        (metrics.max_chip_rows > 1).then(|| {
-          if group.id == "keyed" {
-            balanced_group_width(group, metrics, metrics.max_chip_rows, window, cx)
+        let has_wrap = group.id == "speech" || metrics.max_chip_rows > 1;
+        has_wrap.then(|| {
+          if group.id == "style" {
+            group_row_width(group, metrics, 2, window, cx)
+          } else if group.id == "history" || group.id == "speech" {
+            group_row_width(group, metrics, 1, window, cx)
+          } else if group.id == "views" {
+            let label_width = measure_ribbon_text("Views", metrics.chip_text_size, window, cx).as_f32();
+            let cmd_width = group_row_width(group, metrics, metrics.max_chip_rows, window, cx).as_f32();
+            px(label_width.max(cmd_width))
           } else {
             group_row_width(group, metrics, metrics.max_chip_rows, window, cx)
           }
@@ -58,17 +192,23 @@ impl ModernStylesRibbon {
               .flex_none()
               .flex_row()
               .flex_nowrap()
-              .items_start()
               .gap(metrics.group_gap)
               .min_w_0()
-              .children(
-                groups.iter().enumerate().map(|(index, group)| {
-                  modern_group(index > 0, group, editor.clone(), document_theme, options, metrics, wrap_widths[index], cx)
-                }),
-              ),
-          )
-          .child(export_section(editor.clone(), metrics, cx))
-          .child(invisibility_mode_button(editor.clone(), invisibility_mode, metrics, cx)),
+              .children(groups.iter().enumerate().map(|(index, group)| {
+                modern_group(
+                  index > 0,
+                  group,
+                  editor.clone(),
+                  document_theme,
+                  options,
+                  metrics,
+                  wrap_widths[index],
+                  workspace.clone(),
+                  panel_id,
+                  cx,
+                )
+              })),
+          ),
       )
       .into_any_element()
   }

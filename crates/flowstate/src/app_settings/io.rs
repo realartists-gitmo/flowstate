@@ -53,6 +53,19 @@ pub fn load_recent_documents() -> Vec<PathBuf> {
   load_app_settings().recent_documents
 }
 
+pub fn load_keymap_entries() -> Vec<crate::commands::KeymapEntry> {
+  load_app_settings().keymap
+}
+
+pub fn load_keymap() -> crate::commands::Keymap {
+  let entries = load_keymap_entries();
+  if entries.is_empty() {
+    crate::commands::Keymap::defaults()
+  } else {
+    crate::commands::Keymap { entries }
+  }
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 #[hotpath::measure]
@@ -114,8 +127,14 @@ pub fn save_recent_documents(recent_documents: Vec<PathBuf>) -> io::Result<()> {
   save_app_settings(settings)
 }
 
+pub fn save_keymap_entries(keymap: Vec<crate::commands::KeymapEntry>) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.keymap = keymap;
+  save_app_settings(settings)
+}
+
 #[hotpath::measure]
-fn save_app_settings(settings: AppSettings) -> io::Result<()> {
+pub fn save_app_settings(settings: AppSettings) -> io::Result<()> {
   save_app_settings_to_path(&settings, settings_path())
 }
 

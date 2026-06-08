@@ -1,4 +1,4 @@
-use std::{ops::Range, path::PathBuf};
+use std::{collections::HashSet, ops::Range, path::PathBuf};
 
 use gpui::{
   App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, SharedString, Subscription, WeakEntity, Window, div,
@@ -31,6 +31,9 @@ pub struct DocumentPanel {
   search_bar_open: bool,
   search_matches: Vec<Range<DocumentOffset>>,
   active_search_match: Option<usize>,
+  pub(crate) collapsed_outline_items: Option<HashSet<usize>>,
+  pub(crate) outline_revision: u64,
+  pub(crate) outline_scrolled_paragraph: Option<usize>,
 }
 
 #[hotpath::measure_all]
@@ -76,6 +79,9 @@ impl DocumentPanel {
       search_bar_open: false,
       search_matches: Vec::new(),
       active_search_match: None,
+      collapsed_outline_items: None,
+      outline_revision: 0,
+      outline_scrolled_paragraph: None,
     }
   }
 

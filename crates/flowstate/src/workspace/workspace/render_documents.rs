@@ -47,7 +47,14 @@ impl Workspace {
 
   fn render_document_tab_bar(&self, active_index: usize, cx: &mut Context<Self>) -> impl IntoElement {
     let tabs = self.document_tabs(cx);
-    let (active_tab_bg, active_tab_fg) = (cx.theme().background, cx.theme().foreground);
+    let active_is_speech = tabs.get(active_index).is_some_and(|tab| tab.speech);
+    let active_tab_bg = if active_is_speech {
+      cx.theme().success.opacity(0.18)
+    } else {
+      cx.theme().background
+    };
+    let active_tab_fg = cx.theme().foreground;
+    let workspace = cx.entity().downgrade();
     TabBar::new("document-tab-bar")
       .small()
       .track_scroll(&self.tab_bar_scroll_handle)
@@ -67,6 +74,37 @@ impl Workspace {
       })
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
+        let workspace = workspace.clone();
+        let tab_prefix = h_flex()
+          .ml(px(5.0))
+          .mr(px(-3.0))
+          .gap(px(2.0))
+          .when(tab.speech, |this| {
+            this.child(
+              div()
+                .text_xs()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().success)
+                .child("S"),
+            )
+          })
+          .when_some(tab.pin_index.and_then(pin_shortcut_label), |this, pin_label| {
+            this.child(
+              div()
+                .w(px(14.0))
+                .h(px(14.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .text_size(px(9.0))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(cx.theme().warning)
+                .border_1()
+                .border_color(cx.theme().warning.opacity(0.72))
+                .child(pin_label),
+            )
+          });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")
           .when(tab.active, |this| {
@@ -86,7 +124,15 @@ impl Workspace {
           // before rendering so long filenames cannot break the tab strip.
           .label(tab.label)
           .selected(tab.active)
+          .when(tab.speech, |this| this.bg(cx.theme().success.opacity(0.14)))
+          .prefix(tab_prefix)
           .suffix(close_button)
+          .context_menu(move |menu, _, _| {
+            let workspace = workspace.clone();
+            menu.item(PopupMenuItem::new(if tab.pinned { "Unpin tab" } else { "Pin tab" }).on_click(move |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| workspace.toggle_tab_pin(panel_id, cx));
+            }))
+          })
       }))
       .last_empty_space(div().flex_1().h_full())
   }

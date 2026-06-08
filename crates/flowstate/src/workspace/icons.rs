@@ -9,8 +9,6 @@ pub enum AppIcon {
   Close,
   NewFile,
   SaveFile,
-  TabLeft,
-  TabRight,
   MultiPanel,
 }
 
@@ -32,8 +30,6 @@ fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
     AppIcon::Close => "xmark",
     AppIcon::NewFile => "doc.badge.plus",
     AppIcon::SaveFile => "square.and.arrow.down",
-    AppIcon::TabLeft => "chevron.left",
-    AppIcon::TabRight => "chevron.right",
     AppIcon::MultiPanel => "rectangle.split.2x1",
   };
   button.child(gpui_symbols::Icon::new(symbol).size(gpui::px(11.0)))
@@ -46,8 +42,6 @@ fn platform_icon_button(button: Button, icon: AppIcon) -> Button {
     AppIcon::Close => IconName::WindowClose,
     AppIcon::NewFile => IconName::Plus,
     AppIcon::SaveFile => IconName::File,
-    AppIcon::TabLeft => IconName::ChevronLeft,
-    AppIcon::TabRight => IconName::ChevronRight,
     AppIcon::MultiPanel => IconName::PanelRight,
   };
   button.icon(icon_name)

@@ -18,16 +18,21 @@ fn command_sort_key(command_id: Option<CommandId>) -> u16 {
 }
 
 #[hotpath::measure]
-fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, cx: &mut Context<RichTextEditor>) {
+fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommandId, window: &Window, cx: &mut Context<RichTextEditor>) {
   match command_id {
     RibbonCommandId::Paragraph(style) => {
       editor.set_paragraph_style_for_selection(style, cx);
     },
     RibbonCommandId::Semantic(style) => {
-      editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.toggle_inline_tool(ArmedInlineTool::Semantic(style), cx);
+      }
     },
-    RibbonCommandId::CondensedMenu => {
-      editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
+    RibbonCommandId::ToggleSpeechDocument | RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => {},
+    RibbonCommandId::CondenseMenu | RibbonCommandId::CondensedMenu => {
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.toggle_inline_tool(ArmedInlineTool::Semantic(flowstate_document::SEMANTIC_CONDENSED), cx);
+      }
     },
     RibbonCommandId::Underline => {
       editor.toggle_inline_tool(ArmedInlineTool::Underline, cx);
@@ -45,10 +50,22 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
       editor.clear_armed_inline_tool(cx);
       editor.set_highlight_for_selection(None, cx);
     },
+    RibbonCommandId::MarkCard => {
+      if editor_has_selected_text_or_focused_caret(editor, window, cx) {
+        editor.set_highlight_from_caret_to_enclosing_section_end(flowstate_document::HIGHLIGHT_MARKED, &[0, 1, 2, 3], cx);
+      }
+    },
     RibbonCommandId::HighlightMenu => {},
     RibbonCommandId::ClearFormatting => {
       editor.clear_formatting(cx);
     },
+    RibbonCommandId::Undo => {
+      editor.undo(cx);
+    },
+    RibbonCommandId::Redo => {
+      editor.redo(cx);
+    },
+    RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend | RibbonCommandId::ToggleInvisibility => {},
   }
 }
 
@@ -109,8 +126,12 @@ fn semantic_priority(style: RunSemanticStyle) -> u8 {
 #[hotpath::measure]
 fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
   match style {
-    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK => OverflowBehavior::KeepVisible,
-    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG => OverflowBehavior::MoveToOverflow,
+    ParagraphStyle::Normal | flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT | flowstate_document::PARAGRAPH_BLOCK => {
+      OverflowBehavior::KeepVisible
+    },
+    flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC | flowstate_document::PARAGRAPH_UNDERTAG => {
+      OverflowBehavior::MoveToOverflow
+    },
     ParagraphStyle::Custom(_) => OverflowBehavior::MoveToOverflow,
   }
 }
@@ -118,7 +139,9 @@ fn paragraph_overflow_behavior(style: ParagraphStyle) -> OverflowBehavior {
 #[hotpath::measure]
 fn semantic_overflow_behavior(style: RunSemanticStyle) -> OverflowBehavior {
   match style {
-    flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_UNDERLINE => OverflowBehavior::KeepVisible,
+    flowstate_document::SEMANTIC_CITE | flowstate_document::SEMANTIC_EMPHASIS | flowstate_document::SEMANTIC_UNDERLINE => {
+      OverflowBehavior::KeepVisible
+    },
     flowstate_document::SEMANTIC_CONDENSED | flowstate_document::SEMANTIC_ULTRACONDENSED => OverflowBehavior::MoveToOverflow,
     RunSemanticStyle::Plain => OverflowBehavior::HideInCompact,
     RunSemanticStyle::Custom(_) => OverflowBehavior::MoveToOverflow,

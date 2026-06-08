@@ -38,14 +38,25 @@ pub enum OverflowBehavior {
 pub enum RibbonCommandId {
   Paragraph(ParagraphStyle),
   Semantic(RunSemanticStyle),
+  CondenseMenu,
   CondensedMenu,
+  ToggleSpeechDocument,
+  SendToSpeechDocument,
+  SendToSpeechDocumentEnd,
   Underline,
   Strikethrough,
   Highlight(HighlightStyle),
   ClearHighlight,
+  MarkCard,
   HighlightMenu,
   ToggleHighlightMode(Option<HighlightStyle>),
   ClearFormatting,
+
+  Undo,
+  Redo,
+  ExportFormat,
+  ExportSend,
+  ToggleInvisibility,
 }
 
 #[derive(Clone, Debug)]
@@ -83,9 +94,15 @@ impl RibbonLabel {
       RibbonCommandId::Semantic(flowstate_document::SEMANTIC_EMPHASIS) => Some("icons/bold.svg"),
       RibbonCommandId::Underline => Some("icons/underline.svg"),
       RibbonCommandId::Strikethrough => Some("icons/strikethrough.svg"),
+      RibbonCommandId::CondenseMenu => Some("icons/paragraph-break-two.svg"),
       RibbonCommandId::CondensedMenu => Some("icons/shrink.svg"),
       RibbonCommandId::ToggleHighlightMode(_) => Some("icons/highlighter.svg"),
+      RibbonCommandId::ToggleSpeechDocument => Some("icons/speech.svg"),
+      RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => Some("icons/send.svg"),
+      RibbonCommandId::MarkCard => Some("icons/mark-card.svg"),
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
+      RibbonCommandId::ExportFormat => Some("icons/export.svg"),
+      RibbonCommandId::ExportSend => Some("icons/send-horizontal.svg"),
       _ => None,
     };
     Self {
@@ -100,4 +117,3 @@ impl RibbonLabel {
     self.icon_path.is_some()
   }
 }
-

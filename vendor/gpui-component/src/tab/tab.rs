@@ -1,6 +1,7 @@
 use std::rc::Rc;
 
 use crate::{h_flex, ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt};
+use crate::menu::{ContextMenuExt as _, PopupMenu};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     div, px, relative, AnyElement, App, ClickEvent, Div, Edges, ElementId, Hsla,
@@ -396,6 +397,7 @@ pub struct Tab {
     pub(super) active_bg: Option<Hsla>,
     pub(super) active_fg: Option<Hsla>,
     on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    context_menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut gpui::Context<PopupMenu>) -> PopupMenu + 'static>>,
 }
 
 impl From<&'static str> for Tab {
@@ -445,6 +447,7 @@ impl Default for Tab {
             variant: TabVariant::default(),
             size: Size::default(),
             on_click: None,
+            context_menu: None,
         }
     }
 }
@@ -521,6 +524,15 @@ impl Tab {
         on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.on_click = Some(Rc::new(on_click));
+        self
+    }
+
+    /// Set the context menu shown on right click.
+    pub fn context_menu(
+        mut self,
+        f: impl Fn(PopupMenu, &mut Window, &mut gpui::Context<PopupMenu>) -> PopupMenu + 'static,
+    ) -> Self {
+        self.context_menu = Some(Rc::new(f));
         self
     }
 
@@ -604,7 +616,9 @@ impl RenderOnce for Tab {
         let inner_height = self.variant.inner_height(self.size);
         let height = self.variant.height(self.size);
 
-        self.base
+        let context_menu = self.context_menu.clone();
+
+        let tab = self.base
             .id(self.id)
             .flex()
             .flex_wrap()
@@ -681,6 +695,13 @@ impl RenderOnce for Tab {
                 this.when_some(self.on_click.clone(), |this, on_click| {
                     this.on_click(move |event, window, cx| on_click(event, window, cx))
                 })
-            })
+            });
+
+        if let Some(context_menu) = context_menu {
+            tab.context_menu(move |menu, window, cx| context_menu(menu, window, cx))
+                .into_any_element()
+        } else {
+            tab.into_any_element()
+        }
     }
 }

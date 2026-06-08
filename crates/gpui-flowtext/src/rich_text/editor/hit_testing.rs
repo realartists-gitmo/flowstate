@@ -123,7 +123,13 @@ impl RichTextEditor {
       self.delete_selection_internal();
     }
     let caret = self.selection.head;
-    if self.invisibility_mode && self.document.paragraphs.get(caret.paragraph).is_some_and(|paragraph| matches!(paragraph.style, ParagraphStyle::Normal)) {
+    if self.invisibility_mode
+      && self
+        .document
+        .paragraphs
+        .get(caret.paragraph)
+        .is_some_and(|paragraph| matches!(paragraph.style, ParagraphStyle::Normal))
+    {
       if let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(caret.paragraph) {
         paragraph.style = ParagraphStyle::Custom(4);
         bump_paragraph_version(paragraph);
@@ -279,9 +285,9 @@ impl RichTextEditor {
       // Pressing Enter at the end starts a genuinely fresh paragraph. Reset it
       // so header/inline/highlight styling does not leak into the next line.
       clear_whole_paragraph_formatting(&mut self.document, new.paragraph);
+      rebuild_document_sections(&mut self.document);
     }
     self.selection = EditorSelection { anchor: new, head: new };
     self.after_text_mutation(cx);
   }
-
 }

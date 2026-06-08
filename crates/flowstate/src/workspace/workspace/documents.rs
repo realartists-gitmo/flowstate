@@ -64,6 +64,9 @@ impl Workspace {
       temporary_workspace_session_persist_scheduled: false,
       left_nav_mode: LeftNavMode::Outline,
       tab_bar_scroll_handle: ScrollHandle::new(),
+      pinned_document_ids: Vec::new(),
+      speech_document_id: None,
+      speech_word_count_cache: HashMap::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
@@ -72,6 +75,7 @@ impl Workspace {
       outline_cache: None,
       collapsed_outline_items: HashSet::new(),
       outline_revision: 0,
+      outline_context_menu: None,
       outline_viewport_paragraph: None,
       outline_active_paragraph: None,
       outline_scrolled_paragraph: None,
@@ -184,18 +188,19 @@ impl Workspace {
   }
 
   pub fn set_active_document(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    self.save_current_outline_state(cx);
     self.active_document_id = Some(panel_id);
     self.active_editor = Some(editor);
     self.active_flow = None;
-    self.outline_viewport_paragraph = self.active_editor_viewport_paragraph(cx);
-    self.outline_active_paragraph = None;
-    self.outline_scrolled_paragraph = None;
+    self.restore_outline_state_for_document(panel_id, cx);
+    self.outline_cache = None;
     self.refresh_outline_tree(cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
   pub fn set_active_flow(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
+    self.save_current_outline_state(cx);
     self.active_document_id = Some(panel_id);
     self.active_editor = None;
     self.active_flow = Some(editor);
@@ -232,6 +237,11 @@ impl Workspace {
       .flow_panels
       .retain(|panel| panel.read(cx).id() != panel_id);
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
+    self.pinned_document_ids.retain(|id| *id != panel_id);
+    self.speech_word_count_cache.remove(&panel_id);
+    if self.speech_document_id == Some(panel_id) {
+      self.speech_document_id = None;
+    }
     if closing_active_document {
       if let Some(panel) = self.document_panels.last() {
         self.active_document_id = Some(panel.read(cx).id());
@@ -347,9 +357,19 @@ impl Workspace {
       if Some(panel.id()) == self.active_document_id {
         active_index = Some(entries.len());
       }
+      let (collapsed_outline_items, outline_scrolled_paragraph) = if Some(panel.id()) == self.active_document_id {
+        (self.collapsed_outline_items.iter().copied().collect(), self.outline_scrolled_paragraph)
+      } else {
+        let items = panel.collapsed_outline_items.clone().unwrap_or_default();
+        (items.into_iter().collect(), panel.outline_scrolled_paragraph)
+      };
+      let viewport_paragraph = panel.editor().read(cx).viewport_anchor_paragraph();
       entries.push(TemporaryWorkspaceSessionEntry {
         kind: TemporaryWorkspaceSessionEntryKind::Document,
         path,
+        collapsed_outline_items,
+        outline_scrolled_paragraph,
+        viewport_paragraph,
       });
     }
 
@@ -364,10 +384,19 @@ impl Workspace {
       entries.push(TemporaryWorkspaceSessionEntry {
         kind: TemporaryWorkspaceSessionEntryKind::Flow,
         path,
+        collapsed_outline_items: Vec::new(),
+        outline_scrolled_paragraph: None,
+        viewport_paragraph: None,
       });
     }
 
-    self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession { entries, active_index });
+    self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession {
+      entries,
+      active_index,
+      ribbon_collapsed: self.ribbon_collapsed,
+      outline_collapsed: self.outline_collapsed,
+      toolkit_collapsed: self.toolkit_collapsed,
+    });
     if self.temporary_workspace_session_persist_scheduled {
       return;
     }
@@ -394,6 +423,7 @@ impl Workspace {
   fn restore_temporary_workspace_session(&mut self, session: TemporaryWorkspaceSession, window: &mut Window, cx: &mut Context<Self>) {
     let active_index = session.active_index;
     let mut active_id = None;
+    let mut viewport_scrolls: Vec<(Uuid, Option<usize>)> = Vec::new();
     for (entry_index, entry) in session.entries.into_iter().enumerate() {
       if !entry.path.exists() {
         continue;
@@ -410,9 +440,22 @@ impl Workspace {
         continue;
       };
       let id = match loaded {
-        LoadedWorkspaceDocument::Document { document, path, title } => {
+        LoadedWorkspaceDocument::Document {
+          document,
+          path,
+          title,
+        } => {
           let panel = self.create_document_panel(*document, path, title, window, cx);
-          panel.read(cx).id()
+          let panel_id = panel.read(cx).id();
+          panel.update(cx, |panel, _| {
+            if !entry.collapsed_outline_items.is_empty() {
+              panel.collapsed_outline_items =
+                Some(entry.collapsed_outline_items.iter().copied().collect());
+            }
+            panel.outline_scrolled_paragraph = entry.outline_scrolled_paragraph;
+          });
+          viewport_scrolls.push((panel_id, entry.viewport_paragraph));
+          panel_id
         },
         LoadedWorkspaceDocument::Flow { document, path } => {
           let panel = self.create_flow_panel(document, Some(path), window, cx);
@@ -427,6 +470,26 @@ impl Workspace {
     if let Some(active_id) = active_id {
       self.activate_document_id(active_id, cx);
     }
+    self.ribbon_collapsed = session.ribbon_collapsed;
+    self.outline_collapsed = session.outline_collapsed;
+    self.toolkit_collapsed = session.toolkit_collapsed;
+
+    // Restore editor scroll positions after activation so editors are ready
+    for (panel_id, viewport_paragraph) in viewport_scrolls {
+      if let Some(paragraph_ix) = viewport_paragraph
+        && let Some(panel) = self
+          .document_panels
+          .iter()
+          .find(|p| p.read(cx).id() == panel_id)
+      {
+        panel.update(cx, |panel, cx| {
+          panel.editor().update(cx, |editor, cx| {
+            editor.scroll_to_paragraph(paragraph_ix, window, cx);
+          });
+        });
+      }
+    }
+
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -1092,12 +1155,24 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
 struct TemporaryWorkspaceSession {
   entries: Vec<TemporaryWorkspaceSessionEntry>,
   active_index: Option<usize>,
+  #[serde(default)]
+  ribbon_collapsed: bool,
+  #[serde(default)]
+  outline_collapsed: bool,
+  #[serde(default)]
+  toolkit_collapsed: bool,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]
 struct TemporaryWorkspaceSessionEntry {
   kind: TemporaryWorkspaceSessionEntryKind,
   path: PathBuf,
+  #[serde(default)]
+  collapsed_outline_items: Vec<usize>,
+  #[serde(default)]
+  outline_scrolled_paragraph: Option<usize>,
+  #[serde(default)]
+  viewport_paragraph: Option<usize>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

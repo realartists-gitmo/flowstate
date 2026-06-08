@@ -1,16 +1,21 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, Window, div, prelude::*, px, relative,
+  AnyElement, App, Context, Entity, Focusable, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
+  prelude::*, px, relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
 use gpui_component::button::{Button, ButtonGroup, ButtonVariants as _, Toggle, ToggleVariants as _};
+use gpui_component::h_flex;
 use gpui_component::kbd::Kbd;
 use gpui_component::menu::PopupMenuItem;
-use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _, StyledExt as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::{CommandId, default_keys_for};
+use crate::commands::{CommandId, active_keys_for};
 use crate::ribbon::style_catalog::{HIGHLIGHT_STYLE_SPECS, PARAGRAPH_STYLE_SPECS, SEMANTIC_STYLE_SPECS};
+use crate::workspace::Workspace;
+use uuid::Uuid;
+
 use crate::rich_text_element::{
   ApplyHighlightToSelection, ArmedInlineTool, DocumentExportFormat, DocumentTheme, HighlightStyle, ParagraphStyle, RichTextEditor,
   RichTextEditorStyleState, RunSemanticStyle, SelectionState,
@@ -67,6 +72,10 @@ pub struct EditorRibbon {
   mode: RibbonMode,
   modern_options: ModernRibbonOptions,
   height: gpui::Pixels,
+  workspace: Option<WeakEntity<Workspace>>,
+  panel_id: Option<Uuid>,
+  speech_active: bool,
+  speech_send_enabled: bool,
 }
 
 /// Compatibility name for code that wants to talk in settings terms.
@@ -84,6 +93,10 @@ impl EditorRibbon {
       mode,
       modern_options: ModernRibbonOptions::default(),
       height: default_ribbon_height(),
+      workspace: None,
+      panel_id: None,
+      speech_active: false,
+      speech_send_enabled: false,
     }
   }
 
@@ -105,6 +118,21 @@ impl EditorRibbon {
       self.modern_options = modern_options;
       cx.notify();
     }
+  }
+
+  pub fn set_workspace_context(
+    &mut self,
+    workspace: WeakEntity<Workspace>,
+    panel_id: Uuid,
+    speech_active: bool,
+    speech_send_enabled: bool,
+    cx: &mut Context<Self>,
+  ) {
+    self.workspace = Some(workspace);
+    self.panel_id = Some(panel_id);
+    self.speech_active = speech_active;
+    self.speech_send_enabled = speech_send_enabled;
+    cx.notify();
   }
 
   pub fn set_height(&mut self, height: gpui::Pixels, cx: &mut Context<Self>) {

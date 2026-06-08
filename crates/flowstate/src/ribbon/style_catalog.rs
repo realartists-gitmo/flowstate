@@ -64,11 +64,11 @@ pub const SEMANTIC_STYLE_SPECS: &[SemanticStyleSpec] = &[
   },
   SemanticStyleSpec {
     style: flowstate_document::SEMANTIC_CONDENSED,
-    label: "Condensed",
+    label: "Shrink",
   },
   SemanticStyleSpec {
     style: flowstate_document::SEMANTIC_ULTRACONDENSED,
-    label: "Ultracondensed",
+    label: "Ultra shrink",
   },
 ];
 
@@ -84,5 +84,9 @@ pub const HIGHLIGHT_STYLE_SPECS: &[HighlightStyleSpec] = &[
   HighlightStyleSpec {
     style: flowstate_document::HIGHLIGHT_ALTERNATIVE,
     label: "Alt",
+  },
+  HighlightStyleSpec {
+    style: flowstate_document::HIGHLIGHT_MARKED,
+    label: "Marked",
   },
 ];

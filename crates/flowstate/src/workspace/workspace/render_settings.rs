@@ -89,6 +89,7 @@ flowstate_color_accessors!(get_undertag_color, set_undertag_color, undertag_colo
 flowstate_color_accessors!(get_highlight_spoken, set_highlight_spoken, highlight_spoken);
 flowstate_color_accessors!(get_highlight_insert, set_highlight_insert, highlight_insert);
 flowstate_color_accessors!(get_highlight_alternative, set_highlight_alternative, highlight_alternative);
+flowstate_color_accessors!(get_highlight_marked, set_highlight_marked, highlight_marked);
 
 flowstate_size_accessors!(get_pocket_size, set_pocket_size, pocket_font_size);
 flowstate_size_accessors!(get_hat_size, set_hat_size, hat_font_size);
@@ -197,6 +198,7 @@ impl Workspace {
       },
       WorkspaceSettingsOverlay::Settings => match self.settings_section {
         WorkspaceSettingsSection::General => "app-popup-settings-general",
+        WorkspaceSettingsSection::Keymap => "app-popup-settings-keymap",
       },
     };
 
@@ -347,7 +349,7 @@ impl Workspace {
             ))
             .item(style_face_item(
               workspace.clone(),
-              "Condensed",
+              "Shrink",
               get_condensed_face,
               set_condensed_face,
               get_condensed_box,
@@ -355,7 +357,7 @@ impl Workspace {
             ))
             .item(style_face_item(
               workspace.clone(),
-              "Ultra Condensed",
+              "Ultra Shrink",
               get_ultracondensed_face,
               set_ultracondensed_face,
               get_ultracondensed_box,
@@ -410,10 +412,10 @@ impl Workspace {
             .item(style_color_item(workspace.clone(), "Block", get_block_color, set_block_color))
             .item(style_color_item(workspace.clone(), "Tag", get_tag_color, set_tag_color))
             .item(style_color_item(workspace.clone(), "Cite", get_cite_color, set_cite_color))
-            .item(style_color_item(workspace.clone(), "Condensed", get_condensed_color, set_condensed_color))
+            .item(style_color_item(workspace.clone(), "Shrink", get_condensed_color, set_condensed_color))
             .item(style_color_item(
               workspace.clone(),
-              "Ultra Condensed",
+              "Ultra Shrink",
               get_ultracondensed_color,
               set_ultracondensed_color,
             ))
@@ -442,6 +444,12 @@ impl Workspace {
               "Alt highlight",
               get_highlight_alternative,
               set_highlight_alternative,
+            ))
+            .item(style_color_item(
+              workspace.clone(),
+              "Marked highlight",
+              get_highlight_marked,
+              set_highlight_marked,
             )),
         ),
       SettingPage::new("Size")
@@ -505,7 +513,7 @@ impl Workspace {
             ))
             .item(style_number_item(
               workspace.clone(),
-              "Condensed (pt)",
+              "Shrink (pt)",
               1.0,
               200.0,
               0.25,
@@ -514,7 +522,7 @@ impl Workspace {
             ))
             .item(style_number_item(
               workspace.clone(),
-              "Ultra Condensed (pt)",
+              "Ultra Shrink (pt)",
               1.0,
               200.0,
               0.25,
@@ -587,7 +595,17 @@ impl Workspace {
             .item(smart_word_selection_item(workspace.clone()))
             .item(autosave_item(workspace.clone()))
             .item(send_to_document_directory_item(workspace.clone()))
-            .item(send_custom_directory_item(workspace)),
+            .item(send_custom_directory_item(workspace.clone())),
+        ),
+      SettingPage::new("Keymap")
+        .group(reset_workspace_settings_section_group(
+          workspace.clone(),
+          WorkspaceSettingsSection::Keymap,
+        ))
+        .group(
+          SettingGroup::new()
+            .title("Keyboard shortcuts")
+            .item(keymap_editor_item(workspace)),
         ),
     ]
   }
@@ -711,6 +729,17 @@ impl Workspace {
             }
             if let Err(error) = save_send_custom_directory(None) {
               eprintln!("failed to save send directory setting: {error}");
+            }
+          })
+          .detach();
+        cx.notify();
+      },
+      WorkspaceSettingsSection::Keymap => {
+        let entries = crate::commands::Keymap::defaults().entries;
+        cx.background_executor()
+          .spawn(async move {
+            if let Err(error) = crate::app_settings::save_keymap_entries(entries) {
+              eprintln!("failed to reset keymap: {error}");
             }
           })
           .detach();

@@ -18,6 +18,23 @@ impl Workspace {
       .map(|cache| cache.row_guides.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let search_match_outline_paragraphs = self.search_match_outline_paragraphs(cx);
+    let outline_levels: HashMap<usize, usize> = self
+      .outline_cache
+      .as_ref()
+      .map(|cache| {
+        let mut levels = HashMap::new();
+        fn collect_levels(node: &OutlineNode, levels: &mut HashMap<usize, usize>) {
+          levels.insert(node.paragraph_ix, node.level);
+          for child in &node.children {
+            collect_levels(child, levels);
+          }
+        }
+        for node in cache.nodes.iter() {
+          collect_levels(node, &mut levels);
+        }
+        levels
+      })
+      .unwrap_or_default();
     v_flex()
       .size_full()
       .h_full()
@@ -39,7 +56,6 @@ impl Workspace {
             let has_search_match = paragraph_ix.is_some_and(|paragraph_ix| search_match_outline_paragraphs.contains(&paragraph_ix));
             let depth = entry.depth();
             let guide = outline_guides.get(ix).cloned().unwrap_or_default();
-            let workspace = workspace.clone();
             let toggle_action: SidebarTreeAction = Rc::new({
               let workspace = workspace.clone();
               move |_: &mut Window, cx: &mut App| {
@@ -48,11 +64,23 @@ impl Workspace {
                 }
               }
             });
-            let label_action: SidebarTreeAction = Rc::new(move |window: &mut Window, cx: &mut App| {
-              if let Some(paragraph_ix) = paragraph_ix {
-                let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
+            let label_action: SidebarTreeAction = {
+              let workspace = workspace.clone();
+              Rc::new(move |window: &mut Window, cx: &mut App| {
+                if let Some(paragraph_ix) = paragraph_ix {
+                  let _ = workspace.update(cx, |workspace, cx| workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx));
+                }
+              })
+            };
+            let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied()).unwrap_or(3);
+            let context_menu_action: Option<ContextMenuAction> = Some(Rc::new({
+              let workspace = workspace.clone();
+              move |position, window, cx| {
+                let _ = workspace.update(cx, |workspace, cx| {
+                  workspace.show_outline_context_menu(outline_level, position, window, cx);
+                });
               }
-            });
+            }));
             render_sidebar_tree_row(
               SidebarTreeRow {
                 row_id: ("outline-tree-item", ix),
@@ -72,6 +100,7 @@ impl Workspace {
                 label_action,
                 stop_icon_mouse_down: true,
                 stop_label_mouse_down: true,
+                context_menu_action,
               },
               window,
               cx,
@@ -250,6 +279,7 @@ impl Workspace {
 }
 
 type SidebarTreeAction = Rc<dyn Fn(&mut Window, &mut App)>;
+type ContextMenuAction = Rc<dyn Fn(Point<Pixels>, &mut Window, &mut App)>;
 
 struct SidebarTreeRow {
   row_id: (&'static str, usize),
@@ -269,6 +299,7 @@ struct SidebarTreeRow {
   label_action: SidebarTreeAction,
   stop_icon_mouse_down: bool,
   stop_label_mouse_down: bool,
+  context_menu_action: Option<ContextMenuAction>,
 }
 
 fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut App) -> ListItem {
@@ -456,6 +487,12 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
               if stop_label_mouse_down {
                 cx.stop_propagation();
               }
+            })
+            .when_some(row.context_menu_action.clone(), |this, action| {
+              this.on_mouse_down(MouseButton::Right, move |event, window, cx| {
+                cx.stop_propagation();
+                action(event.position, window, cx);
+              })
             })
             .on_click({
               move |_, window, cx| {

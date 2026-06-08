@@ -515,6 +515,15 @@ impl RichTextEditor {
     self.selection.head.paragraph
   }
 
+  pub fn caret_paragraph_style(&self) -> ParagraphStyle {
+    self
+      .document
+      .paragraphs
+      .get(self.selection.head.paragraph)
+      .map(|p| p.style)
+      .unwrap_or(ParagraphStyle::Normal)
+  }
+
   pub fn viewport_anchor_paragraph(&self) -> Option<usize> {
     if self.scroll_handle.bounds().size.height <= px(1.0) {
       return None;
