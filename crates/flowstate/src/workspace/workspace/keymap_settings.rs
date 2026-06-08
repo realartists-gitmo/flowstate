@@ -106,6 +106,10 @@ fn update_keymap_command(cx: &mut App, workspace: &WeakEntity<Workspace>, comman
     .map(str::trim)
     .filter(|key| !key.is_empty())
   {
+    if gpui::KeyBinding::load(key, Box::new(gpui::NoAction), None, false, None, &gpui::DummyKeyboardMapper).is_err() {
+      eprintln!("invalid key binding: {key}");
+      continue;
+    }
     keymap.entries.push(crate::commands::KeymapEntry {
       command,
       key: key.to_string(),

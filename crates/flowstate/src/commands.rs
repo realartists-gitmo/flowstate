@@ -265,6 +265,7 @@ pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
     .unwrap_or(&[])
 }
 
+#[hotpath::measure]
 pub fn active_keys_for(id: CommandId) -> Vec<String> {
   let keymap = crate::app_settings::load_keymap();
   keymap

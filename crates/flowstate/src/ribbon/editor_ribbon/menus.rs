@@ -463,7 +463,7 @@ fn toggle_card_semantic_paragraphs(
     }
     for run in paragraph.runs.iter_mut().filter(|run| !run.text.is_empty()) {
       run.styles.semantic = target;
-      if target != flowstate_document::RunSemanticStyle::Custom(3) {
+      if target != flowstate_document::SEMANTIC_UNDERLINE {
         run.styles.direct_underline = false;
       }
     }
@@ -793,8 +793,10 @@ fn modern_speech_send_menu(
         .on_click({
           let workspace = workspace.clone();
           move |_, window, cx| {
-            if let Some(workspace) = workspace.clone() {
-              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
+            if let Some(workspace) = workspace.clone()
+              && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
+            {
+              eprintln!("failed to send selection to speech document: {err:?}");
             }
           }
         }),
@@ -831,8 +833,10 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
-            if let Some(workspace) = send_workspace.clone() {
-              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx));
+            if let Some(workspace) = send_workspace.clone()
+              && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document(window, cx))
+            {
+              eprintln!("failed to send selection to speech document: {err:?}");
             }
           }),
         )
@@ -860,8 +864,10 @@ fn modern_speech_send_menu(
             }
           })
           .on_click(move |_, window, cx| {
-            if let Some(workspace) = send_end_workspace.clone() {
-              let _ = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx));
+            if let Some(workspace) = send_end_workspace.clone()
+              && let Err(err) = workspace.update(cx, |workspace, cx| workspace.send_selection_to_speech_document_end(window, cx))
+            {
+              eprintln!("failed to send selection to speech document end: {err:?}");
             }
           }),
         )

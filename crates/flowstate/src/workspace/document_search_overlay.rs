@@ -306,7 +306,13 @@ impl Render for DocumentSearchBar {
                   )
                   .xsmall()
                   .ghost()
-                  .tooltip("Case sensitive"),
+                  .tooltip("Case sensitive")
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |_, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_case_sensitive(!bar.case_sensitive, cx));
+                    }
+                  }),
               )
               .child(
                 Checkbox::new("document-search-case-sensitive")
@@ -335,7 +341,13 @@ impl Render for DocumentSearchBar {
                   )
                   .xsmall()
                   .ghost()
-                  .tooltip("Match whole word"),
+                  .tooltip("Match whole word")
+                  .on_click({
+                    let search_bar = search_bar.clone();
+                    move |_, _, cx| {
+                      let _ = search_bar.update(cx, |bar, cx| bar.set_whole_words(!bar.whole_words, cx));
+                    }
+                  }),
               )
               .child(
                 Checkbox::new("document-search-whole-words")

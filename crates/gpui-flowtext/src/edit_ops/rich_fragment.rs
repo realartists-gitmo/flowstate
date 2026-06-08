@@ -69,7 +69,7 @@ fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentO
       runs.extend(right_runs.iter().cloned());
     }
     replacements.push(Paragraph {
-      style: paragraph.style,
+      style: if ix == 0 && !left_runs.is_empty() { target.style } else { paragraph.style },
       byte_range: 0..0,
       runs: merge_adjacent_runs(runs),
       version: target.version.wrapping_add(1),

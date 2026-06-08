@@ -18,6 +18,23 @@ impl Workspace {
       .map(|cache| cache.row_guides.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let search_match_outline_paragraphs = self.search_match_outline_paragraphs(cx);
+    let outline_levels: HashMap<usize, usize> = self
+      .outline_cache
+      .as_ref()
+      .map(|cache| {
+        let mut levels = HashMap::new();
+        fn collect_levels(node: &OutlineNode, levels: &mut HashMap<usize, usize>) {
+          levels.insert(node.paragraph_ix, node.level);
+          for child in &node.children {
+            collect_levels(child, levels);
+          }
+        }
+        for node in cache.nodes.iter() {
+          collect_levels(node, &mut levels);
+        }
+        levels
+      })
+      .unwrap_or_default();
     v_flex()
       .size_full()
       .h_full()
@@ -55,7 +72,7 @@ impl Workspace {
                 }
               })
             };
-            let outline_level = entry.depth().min(3);
+            let outline_level = paragraph_ix.and_then(|ix| outline_levels.get(&ix).copied()).unwrap_or(3);
             let context_menu_action: Option<ContextMenuAction> = Some(Rc::new({
               let workspace = workspace.clone();
               move |position, window, cx| {

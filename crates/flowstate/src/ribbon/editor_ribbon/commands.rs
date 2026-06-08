@@ -102,7 +102,7 @@ fn unkeyed_inline_commands(state: &RichTextEditorStyleState, armed_tool: Option<
       id: RibbonCommandId::CondenseMenu,
       label: "Condense",
       group_id: "style",
-      shortcut: Some("F3".to_string()),
+      shortcut: shortcut_for(CommandId::CondenseSelection),
       command_id: Some(CommandId::CondenseSelection),
       priority: 75,
       accent: None,

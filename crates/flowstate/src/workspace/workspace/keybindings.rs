@@ -13,6 +13,22 @@ fn workspace_command_for_keystroke(keystroke: &Keystroke) -> Option<CommandId> {
     })
 }
 
+fn tab_index(command: &CommandId) -> Option<usize> {
+  match command {
+    CommandId::SwitchToTab1 => Some(0),
+    CommandId::SwitchToTab2 => Some(1),
+    CommandId::SwitchToTab3 => Some(2),
+    CommandId::SwitchToTab4 => Some(3),
+    CommandId::SwitchToTab5 => Some(4),
+    CommandId::SwitchToTab6 => Some(5),
+    CommandId::SwitchToTab7 => Some(6),
+    CommandId::SwitchToTab8 => Some(7),
+    CommandId::SwitchToTab9 => Some(8),
+    CommandId::SwitchToTab10 => Some(9),
+    _ => None,
+  }
+}
+
 #[hotpath::measure_all]
 impl Workspace {
   fn handle_window_keybinding(&mut self, command: CommandId, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -144,44 +160,8 @@ impl Workspace {
           false
         }
       },
-      CommandId::SwitchToTab1 => {
-        self.activate_tab_shortcut(0, cx);
-        true
-      },
-      CommandId::SwitchToTab2 => {
-        self.activate_tab_shortcut(1, cx);
-        true
-      },
-      CommandId::SwitchToTab3 => {
-        self.activate_tab_shortcut(2, cx);
-        true
-      },
-      CommandId::SwitchToTab4 => {
-        self.activate_tab_shortcut(3, cx);
-        true
-      },
-      CommandId::SwitchToTab5 => {
-        self.activate_tab_shortcut(4, cx);
-        true
-      },
-      CommandId::SwitchToTab6 => {
-        self.activate_tab_shortcut(5, cx);
-        true
-      },
-      CommandId::SwitchToTab7 => {
-        self.activate_tab_shortcut(6, cx);
-        true
-      },
-      CommandId::SwitchToTab8 => {
-        self.activate_tab_shortcut(7, cx);
-        true
-      },
-      CommandId::SwitchToTab9 => {
-        self.activate_tab_shortcut(8, cx);
-        true
-      },
-      CommandId::SwitchToTab10 => {
-        self.activate_tab_shortcut(9, cx);
+      command if tab_index(&command).is_some() => {
+        self.activate_tab_shortcut(tab_index(&command).unwrap(), cx);
         true
       },
       CommandId::ScrollToParagraph => false,
