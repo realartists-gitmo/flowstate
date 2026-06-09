@@ -209,7 +209,12 @@ impl RichTextEditor {
     let before_start = self.identity_map.paragraph_id(start)?;
     let before_end = self.identity_map.paragraph_id(start + before_len - 1)?;
     let after_ids = self.document.ids.paragraph_ids.get(start..start + after_len)?;
-    let mut operations = Vec::with_capacity(2 + after_len * 4);
+
+    let before_ids: Vec<ParagraphId> = (0..before_len)
+      .filter_map(|ix| self.identity_map.paragraph_id(start + ix))
+      .collect();
+
+    let mut operations = Vec::with_capacity(1 + before_ids.len() + after_len * 4);
     operations.push(CanonicalOperation::DeleteRange {
       start_paragraph: before_start,
       start_byte: 0,
@@ -217,8 +222,17 @@ impl RichTextEditor {
       end_byte: paragraph_text_len(before_span.paragraphs.last()?),
     });
 
+    for &removed_id in &before_ids {
+      if !after_ids.contains(&removed_id) {
+        operations.push(CanonicalOperation::JoinParagraphs {
+          first: before_start,
+          second: removed_id,
+        });
+      }
+    }
+
     for (paragraph_ix, (paragraph, paragraph_id)) in after_span.paragraphs.iter().zip(after_ids.iter().copied()).enumerate() {
-      if paragraph_ix > 0 {
+      if paragraph_ix > 0 && !before_ids.contains(&paragraph_id) {
         let previous_id = after_ids[paragraph_ix - 1];
         let previous_len = paragraph_text_len(&after_span.paragraphs[paragraph_ix - 1]);
         operations.push(CanonicalOperation::SplitParagraph {
