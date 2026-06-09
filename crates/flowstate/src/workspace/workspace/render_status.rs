@@ -241,12 +241,24 @@ impl Workspace {
         .filter(|(cached_generation, _)| *cached_generation == generation)
       {
         Some(*count)
+      } else if self.speech_word_count_pending.contains(&document_id) {
+        None
       } else {
-        let count = speech_word_count(editor.document());
-        self
-          .speech_word_count_cache
-          .insert(document_id, (generation, count));
-        Some(count)
+        self.speech_word_count_pending.insert(document_id);
+        let document = editor.document().clone();
+        cx.spawn(async move |this, cx| {
+          let count = speech_word_count(&document);
+          let _ = this.update(cx, |this, cx| {
+            let is_open = this.document_panels.iter().any(|panel| panel.read(cx).id() == document_id);
+            if is_open {
+              this.speech_word_count_cache.insert(document_id, (generation, count));
+            }
+            this.speech_word_count_pending.remove(&document_id);
+            cx.notify();
+          });
+        })
+        .detach();
+        None
       }
     } else {
       None

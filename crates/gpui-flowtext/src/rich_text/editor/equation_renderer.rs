@@ -1,3 +1,12 @@
+use typst::diag::FileError;
+use typst::foundations::{Bytes, Datetime};
+use typst::layout::PagedDocument;
+use typst::syntax::{FileId, Source};
+use typst::text::{Font, FontBook};
+use typst::utils::LazyHash;
+use typst::LibraryExt;
+use typst::World;
+
 struct EquationRenderer;
 
 #[hotpath::measure_all]
@@ -32,13 +41,9 @@ impl EquationRenderer {
     if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
       return cached;
     }
-    let result = if display {
-      mathjax_svg::convert_to_svg(key.0.as_ref())
-    } else {
-      mathjax_svg::convert_to_svg_inline(key.0.as_ref())
-    }
-    .map(|svg| Arc::new(pad_mathjax_svg_viewbox(&svg).into_bytes()))
-    .map_err(|error| error.to_string());
+    let result = render_typst_equation(key.0.as_ref(), display)
+      .map(|svg| Arc::new(pad_svg_viewbox(&svg).into_bytes()))
+      .map_err(|error| error.to_string());
     if let Ok(mut cache) = cache.lock() {
       cache.insert(key, result.clone());
     }
@@ -62,6 +67,104 @@ impl EquationRenderer {
   }
 }
 
+fn render_typst_equation(latex: &str, display: bool) -> Result<String, String> {
+  if latex.trim().is_empty() {
+    return Ok(r#"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1" width="1" height="1"/>"#.to_string());
+  }
+  let typst_math =
+    mitex::convert_math(latex, None).map_err(|e| format!("LaTeX conversion failed: {e}"))?;
+
+  let (math_kind, padding) = if display { ("display", "\n") } else { ("inline", "") };
+
+  let typst_source = format!(
+    "#set page(width: auto, height: auto, margin: 0pt)\n\
+     #set text(size: 14pt)\n\
+     ${padding}{math_kind}({typst_math}){padding}$\n"
+  );
+
+  let world = EquationWorld::new(&typst_source);
+  let warned = typst::compile::<PagedDocument>(&world);
+  let document = warned.output.map_err(|errors| {
+    errors
+      .into_iter()
+      .map(|e| format!("{e:?}"))
+      .collect::<Vec<_>>()
+      .join("; ")
+  })?;
+
+  let Some(page) = document.pages.first() else {
+    return Err("Typst produced no output".to_string());
+  };
+
+  Ok(typst_svg::svg(page))
+}
+
+struct EquationWorld {
+  library: LazyHash<typst_library::Library>,
+  book: LazyHash<FontBook>,
+  main_source: Source,
+  fonts: Vec<Font>,
+}
+
+impl EquationWorld {
+  fn new(source: &str) -> Self {
+    let library = LazyHash::new(<typst_library::Library as LibraryExt>::builder().build());
+
+    let (fonts, book) = Self::global_fonts();
+    let book = LazyHash::new(book.clone());
+    let fonts = fonts.clone();
+
+    let main_source = Source::detached(source);
+
+    Self { library, book, main_source, fonts }
+  }
+
+  fn global_fonts() -> &'static (Vec<Font>, FontBook) {
+    static FONTS: OnceLock<(Vec<Font>, FontBook)> = OnceLock::new();
+    FONTS.get_or_init(|| {
+      let fonts: Vec<Font> = typst_assets::fonts()
+        .flat_map(|data| Font::iter(Bytes::new(data)))
+        .collect();
+      let book = FontBook::from_fonts(&fonts);
+      (fonts, book)
+    })
+  }
+}
+
+impl World for EquationWorld {
+  fn library(&self) -> &LazyHash<typst_library::Library> {
+    &self.library
+  }
+
+  fn book(&self) -> &LazyHash<FontBook> {
+    &self.book
+  }
+
+  fn main(&self) -> FileId {
+    self.main_source.id()
+  }
+
+  fn source(&self, id: FileId) -> Result<Source, FileError> {
+    if id == self.main_source.id() {
+      Ok(self.main_source.clone())
+    } else {
+      Err(FileError::NotFound(PathBuf::new()))
+    }
+  }
+
+  fn file(&self, _id: FileId) -> Result<Bytes, FileError> {
+    Err(FileError::NotFound(PathBuf::new()))
+  }
+
+  fn font(&self, index: usize) -> Option<Font> {
+    self.fonts.get(index).cloned()
+  }
+
+  fn today(&self, _offset: Option<i64>) -> Option<Datetime> {
+    None
+  }
+}
+
 #[hotpath::measure]
 fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
   const EQUATION_RASTER_SCALE: f32 = 4.0;
@@ -80,7 +183,7 @@ fn rasterize_svg_to_png(svg: &[u8]) -> Result<Vec<u8>, String> {
 }
 
 #[hotpath::measure]
-fn pad_mathjax_svg_viewbox(svg: &str) -> String {
+fn pad_svg_viewbox(svg: &str) -> String {
   let Some(viewbox_start) = svg.find("viewBox=\"") else {
     return svg.to_string();
   };
@@ -107,4 +210,3 @@ fn pad_mathjax_svg_viewbox(svg: &str) -> String {
   output.push_str(&svg[values_end..]);
   output
 }
-

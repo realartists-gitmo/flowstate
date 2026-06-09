@@ -67,6 +67,7 @@ impl Workspace {
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
       speech_word_count_cache: HashMap::new(),
+      speech_word_count_pending: HashSet::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
@@ -239,6 +240,7 @@ impl Workspace {
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
     self.speech_word_count_cache.remove(&panel_id);
+    self.speech_word_count_pending.remove(&panel_id);
     if self.speech_document_id == Some(panel_id) {
       self.speech_document_id = None;
     }
@@ -348,14 +350,17 @@ impl Workspace {
   fn persist_temporary_workspace_session(&mut self, cx: &mut Context<Self>) {
     let mut entries = Vec::new();
     let mut active_index = None;
+    let mut panel_id_to_entry_index: std::collections::HashMap<Uuid, usize> = std::collections::HashMap::new();
 
     for panel in &self.document_panels {
       let panel = panel.read(cx);
       let Some(path) = panel.editor().read(cx).document_path().cloned() else {
         continue;
       };
+      let entry_index = entries.len();
+      panel_id_to_entry_index.insert(panel.id(), entry_index);
       if Some(panel.id()) == self.active_document_id {
-        active_index = Some(entries.len());
+        active_index = Some(entry_index);
       }
       let (collapsed_outline_items, outline_scrolled_paragraph) = if Some(panel.id()) == self.active_document_id {
         (self.collapsed_outline_items.iter().copied().collect(), self.outline_scrolled_paragraph)
@@ -378,8 +383,10 @@ impl Workspace {
       let Some(path) = panel.editor().read(cx).document_path().cloned() else {
         continue;
       };
+      let entry_index = entries.len();
+      panel_id_to_entry_index.insert(panel.id(), entry_index);
       if Some(panel.id()) == self.active_document_id {
-        active_index = Some(entries.len());
+        active_index = Some(entry_index);
       }
       entries.push(TemporaryWorkspaceSessionEntry {
         kind: TemporaryWorkspaceSessionEntryKind::Flow,
@@ -390,12 +397,23 @@ impl Workspace {
       });
     }
 
+    let pinned_entry_indices = self
+      .pinned_document_ids
+      .iter()
+      .filter_map(|id| panel_id_to_entry_index.get(id).copied())
+      .collect();
+    let speech_entry_index = self
+      .speech_document_id
+      .and_then(|id| panel_id_to_entry_index.get(&id).copied());
+
     self.temporary_workspace_session_pending = Some(TemporaryWorkspaceSession {
       entries,
       active_index,
       ribbon_collapsed: self.ribbon_collapsed,
       outline_collapsed: self.outline_collapsed,
       toolkit_collapsed: self.toolkit_collapsed,
+      pinned_entry_indices,
+      speech_entry_index,
     });
     if self.temporary_workspace_session_persist_scheduled {
       return;
@@ -424,6 +442,10 @@ impl Workspace {
     let active_index = session.active_index;
     let mut active_id = None;
     let mut viewport_scrolls: Vec<(Uuid, Option<usize>)> = Vec::new();
+    let pinned_indices: std::collections::HashSet<usize> = session.pinned_entry_indices.iter().copied().collect();
+    let speech_index = session.speech_entry_index;
+    let mut pinned_ids = Vec::new();
+    let mut speech_id = None;
     for (entry_index, entry) in session.entries.into_iter().enumerate() {
       if !entry.path.exists() {
         continue;
@@ -465,6 +487,12 @@ impl Workspace {
       if Some(entry_index) == active_index {
         active_id = Some(id);
       }
+      if pinned_indices.contains(&entry_index) {
+        pinned_ids.push(id);
+      }
+      if speech_index == Some(entry_index) {
+        speech_id = Some(id);
+      }
     }
 
     if let Some(active_id) = active_id {
@@ -473,6 +501,8 @@ impl Workspace {
     self.ribbon_collapsed = session.ribbon_collapsed;
     self.outline_collapsed = session.outline_collapsed;
     self.toolkit_collapsed = session.toolkit_collapsed;
+    self.pinned_document_ids = pinned_ids;
+    self.speech_document_id = speech_id;
 
     // Restore editor scroll positions after activation so editors are ready
     for (panel_id, viewport_paragraph) in viewport_scrolls {
@@ -1161,6 +1191,10 @@ struct TemporaryWorkspaceSession {
   outline_collapsed: bool,
   #[serde(default)]
   toolkit_collapsed: bool,
+  #[serde(default)]
+  pinned_entry_indices: Vec<usize>,
+  #[serde(default)]
+  speech_entry_index: Option<usize>,
 }
 
 #[derive(serde::Deserialize, serde::Serialize)]

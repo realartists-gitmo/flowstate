@@ -372,6 +372,7 @@ impl Workspace {
       self.pinned_document_ids.push(active_id);
     }
     cx.notify();
+    self.persist_temporary_workspace_session(cx);
   }
 
   pub(crate) fn toggle_speech_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
@@ -381,6 +382,7 @@ impl Workspace {
       Some(panel_id)
     };
     cx.notify();
+    self.persist_temporary_workspace_session(cx);
   }
 
   fn toggle_tab_pin(&mut self, panel_id: Uuid, cx: &mut Context<Self>) {
@@ -394,6 +396,7 @@ impl Workspace {
       self.pinned_document_ids.push(panel_id);
     }
     cx.notify();
+    self.persist_temporary_workspace_session(cx);
   }
 
   fn activate_tab_shortcut(&mut self, index: usize, cx: &mut Context<Self>) {

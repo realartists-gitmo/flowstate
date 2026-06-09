@@ -893,7 +893,7 @@ impl FlowEditor {
         editor.on_box_change(&id, value, cx);
       },
       InputEvent::Focus => {
-        if editor.focus_id.as_deref() != Some(&id) {
+        if editor.focus_id.as_deref() != Some(id.as_str()) {
           editor.resolve_pending_edit(cx);
           editor.focus_id = Some(id.clone());
           if let Some(flow_id) = editor.document.parent_flow_id(&id) {
@@ -906,17 +906,17 @@ impl FlowEditor {
         editor.resolve_pending_edit(cx);
       },
       InputEvent::BackspaceEmpty | InputEvent::DeleteEmpty => {
-        if editor.focus_id.as_deref() == Some(&id) {
+        if editor.focus_id.as_deref() == Some(id.as_str()) {
           editor.delete_empty_focus(window, cx);
         }
       },
       InputEvent::PressEnter { secondary: false } => {
-        if editor.focus_id.as_deref() == Some(&id) {
+        if editor.focus_id.as_deref() == Some(id.as_str()) {
           editor.add_sibling_to_focus(1, window, cx);
         }
       },
       InputEvent::PressEnter { secondary: true } => {
-        if editor.focus_id.as_deref() == Some(&id) {
+        if editor.focus_id.as_deref() == Some(id.as_str()) {
           editor.add_child_to_focus(window, cx);
         }
       },
