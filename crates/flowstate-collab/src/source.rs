@@ -994,12 +994,19 @@ impl CollabDocument {
     require_writer(remote_role)?;
 
     let before_frontier = self.frontier()?;
+    // Validate on an isolated fork first. A rejected update must never partially
+    // mutate the authoritative document.
+    let fork = self.doc.fork();
+    configure_granular_text_styles(&fork);
+    fork
+      .import(update)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    validate_schema(&fork, Some(self.format_kind), Some(self.document_id))?;
+
     self
       .doc
       .import(update)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-
-    #[cfg(debug_assertions)]
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
 
     let after_frontier = self.frontier()?;

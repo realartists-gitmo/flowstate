@@ -13,7 +13,8 @@ pub use flowstate_collab::{ActorId, DocumentId, FormatKind, Role, SessionId};
 use flowstate_collab::{
   AssetChunkMessage, AssetHaveMessage, AssetNeedMessage, AuthorizeMessage, COLLAB_SCHEMA_VERSION, CollabDocument, FLOWSTATE_ALPN,
   GranularSourceMutation, HelloMessage, NativeAssetRecord, PeerEventKind, PeerEventMessage, PresenceMessage, SnapshotChunkMessage,
-  UpdateApplication, WireMessage, blake3_hash, decode_wire_message, encode_wire_message,
+  UpdateApplication, UpdateId, UpdateRecoveryAction, UpdateRejectionCode, WireMessage, blake3_hash, decode_wire_message,
+  encode_wire_message,
 };
 use iroh::{
   Endpoint, EndpointAddr,
@@ -38,7 +39,7 @@ pub const DEFAULT_MAX_PEER_COUNT: usize = 64;
 pub const DEFAULT_MAX_PRESENCE_MESSAGES_PER_MINUTE: usize = 600;
 pub const DEFAULT_MAX_ASSET_REQUESTS_PER_MINUTE: usize = 120;
 const RATE_LIMIT_WINDOW_MILLIS: u64 = 60_000;
-pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 2;
+pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 3;
 pub const FLOWSTATE_INVITE_PREFIX: &str = "flowstate://collab/";
 
 static SYNC_RUNTIME: std::sync::LazyLock<Runtime> = std::sync::LazyLock::new(|| {
@@ -1170,6 +1171,7 @@ impl HostedCollaborationPublisher {
     self.live_updates.publish(LiveUpdate::wire(
       Some(self.config.session_id),
       WireMessage::Update {
+        update_id: None,
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         hash: blake3_hash(&update),
@@ -1322,6 +1324,7 @@ impl HostedCollaboration {
     self.live_updates.publish(LiveUpdate::wire(
       None,
       WireMessage::Update {
+        update_id: None,
         document_id: self.config.document_id,
 
         actor_id: self.config.actor_id,
@@ -1333,6 +1336,7 @@ impl HostedCollaboration {
     self.live_updates.publish(LiveUpdate::wire(
       None,
       WireMessage::Ack {
+        update_id: None,
         document_id: self.config.document_id,
         frontier,
       },
@@ -1402,6 +1406,7 @@ impl HostedCollaboration {
     self.live_updates.publish(LiveUpdate::wire(
       Some(self.config.session_id),
       WireMessage::Update {
+        update_id: None,
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         hash: blake3_hash(&update),
@@ -1956,6 +1961,7 @@ pub struct LiveCollaborationClient {
   pending_events: VecDeque<(SessionEvent, Option<UpdateApplication>)>,
   pending_snapshot: Option<IncomingSnapshotChunks>,
   recent_local_update_hashes: VecDeque<[u8; 32]>,
+  next_update_id: UpdateId,
   wire_encode_buffer: Vec<u8>,
   config: FlowstateSyncConfig,
 }
@@ -1988,7 +1994,7 @@ fn wire_priority_lane(message: &WireMessage) -> WirePriorityLane {
   match message {
     WireMessage::Update { bytes, application, .. } if !bytes.is_empty() || application.is_some() => WirePriorityLane::LiveEdit,
     WireMessage::Update { .. } => WirePriorityLane::LiveEdit,
-    WireMessage::Ack { .. } | WireMessage::PeerEvent(_) => WirePriorityLane::LiveEdit,
+    WireMessage::Ack { .. } | WireMessage::UpdateRejected { .. } | WireMessage::PeerEvent(_) => WirePriorityLane::LiveEdit,
     WireMessage::Presence(_) => WirePriorityLane::Presence,
     WireMessage::AssetHave(_) | WireMessage::AssetNeed(_) | WireMessage::AssetChunk(_) => WirePriorityLane::Asset,
     WireMessage::Snapshot { .. } | WireMessage::SnapshotChunk(_) | WireMessage::Need { .. } => WirePriorityLane::Repair,
@@ -2052,10 +2058,51 @@ impl LiveCollaborationClient {
     true
   }
 
+  fn allocate_update_id(&mut self) -> UpdateId {
+    let update_id = self.next_update_id;
+    self.next_update_id = self.next_update_id.wrapping_add(1).max(1);
+    update_id
+  }
+
+  async fn await_update_result(&mut self, expected_update_id: UpdateId) -> AnyResult<()> {
+    loop {
+      let message = read_wire_message(&mut self.recv, self.config.max_message_bytes).await?;
+      match message {
+        WireMessage::Ack {
+          update_id: Some(update_id),
+          document_id,
+          ..
+        } if update_id == expected_update_id => {
+          ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
+          return Ok(());
+        },
+        WireMessage::UpdateRejected {
+          update_id,
+          document_id,
+          code,
+          reason,
+          recovery,
+          host_state_changed,
+          ..
+        } if update_id == expected_update_id => {
+          ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
+          bail!(
+            "COLLAB_UPDATE_REJECTED update_id={update_id} code={code:?} recovery={recovery:?} host_state_changed={host_state_changed} reason={reason}"
+          );
+        },
+        other => match self.handle_live_message(other).await? {
+          LiveClientMessage::Event(event, application) => self.pending_events.push_back((event, application)),
+          LiveClientMessage::AssetChunk(_) | LiveClientMessage::Continue => {},
+        },
+      }
+    }
+  }
+
   pub async fn publish_update(&mut self, bytes: Vec<u8>) -> AnyResult<()> {
     ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
     ensure_update_size(&bytes, self.config.max_update_bytes)?;
     let hash = blake3_hash(&bytes);
+    let update_id = self.allocate_update_id();
     self
       .document
       .import_update_checked(self.authorization.role, &bytes)?;
@@ -2065,6 +2112,7 @@ impl LiveCollaborationClient {
       &mut self.send,
       &mut self.wire_encode_buffer,
       &WireMessage::Update {
+        update_id: Some(update_id),
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         bytes,
@@ -2073,13 +2121,15 @@ impl LiveCollaborationClient {
       },
       self.config.max_message_bytes,
     )
-    .await
+    .await?;
+    self.await_update_result(update_id).await
   }
 
   pub async fn publish_applied_update_with_application(&mut self, bytes: Vec<u8>, application: UpdateApplication) -> AnyResult<()> {
     ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
     ensure_update_size(&bytes, self.config.max_update_bytes)?;
     let hash = blake3_hash(&bytes);
+    let update_id = self.allocate_update_id();
     self.remember_local_update_hash(hash);
     collab_canary(
       "client_publish_applied_update_with_application",
@@ -2089,6 +2139,7 @@ impl LiveCollaborationClient {
       &mut self.send,
       &mut self.wire_encode_buffer,
       &WireMessage::Update {
+        update_id: Some(update_id),
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         bytes,
@@ -2097,7 +2148,8 @@ impl LiveCollaborationClient {
       },
       self.config.max_message_bytes,
     )
-    .await
+    .await?;
+    self.await_update_result(update_id).await
   }
 
   pub async fn publish_granular_source_mutations(
@@ -2115,6 +2167,7 @@ impl LiveCollaborationClient {
     );
     ensure_update_size(&update, self.config.max_update_bytes)?;
     let hash = blake3_hash(&update);
+    let update_id = self.allocate_update_id();
     self.remember_local_update_hash(hash);
     collab_canary(
       "client_publish_granular_source_mutations",
@@ -2129,6 +2182,7 @@ impl LiveCollaborationClient {
       &mut self.send,
       &mut self.wire_encode_buffer,
       &WireMessage::Update {
+        update_id: Some(update_id),
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         bytes: update,
@@ -2137,7 +2191,8 @@ impl LiveCollaborationClient {
       },
       self.config.max_message_bytes,
     )
-    .await
+    .await?;
+    self.await_update_result(update_id).await
   }
 
   pub async fn replace_source_from(&mut self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
@@ -2163,11 +2218,13 @@ impl LiveCollaborationClient {
     };
     ensure_update_size(&update, self.config.max_update_bytes)?;
     let hash = blake3_hash(&update);
+    let update_id = self.allocate_update_id();
     self.remember_local_update_hash(hash);
     write_wire_message_reusing_buffer(
       &mut self.send,
       &mut self.wire_encode_buffer,
       &WireMessage::Update {
+        update_id: Some(update_id),
         document_id: self.config.document_id,
         actor_id: self.config.actor_id,
         hash,
@@ -2176,7 +2233,8 @@ impl LiveCollaborationClient {
       },
       self.config.max_message_bytes,
     )
-    .await
+    .await?;
+    self.await_update_result(update_id).await
   }
 
   pub async fn publish_presence(
@@ -2241,6 +2299,7 @@ impl LiveCollaborationClient {
   async fn handle_live_message(&mut self, message: WireMessage) -> AnyResult<LiveClientMessage> {
     match message {
       WireMessage::Update {
+        update_id,
         document_id,
         application,
         actor_id: _,
@@ -2259,7 +2318,11 @@ impl LiveCollaborationClient {
           write_wire_message_reusing_buffer(
             &mut self.send,
             &mut self.wire_encode_buffer,
-            &WireMessage::Ack { document_id, frontier },
+            &WireMessage::Ack {
+              update_id,
+              document_id,
+              frontier,
+            },
             self.config.max_message_bytes,
           )
           .await?;
@@ -2269,6 +2332,7 @@ impl LiveCollaborationClient {
         write_wire_message(
           &mut self.send,
           &WireMessage::Ack {
+            update_id,
             document_id,
             frontier: outcome.frontier,
           },
@@ -2361,6 +2425,16 @@ impl LiveCollaborationClient {
         ))
       },
       WireMessage::Ack { .. } => Ok(LiveClientMessage::Continue),
+      WireMessage::UpdateRejected {
+        update_id,
+        code,
+        reason,
+        recovery,
+        host_state_changed,
+        ..
+      } => bail!(
+        "COLLAB_UPDATE_REJECTED update_id={update_id} code={code:?} recovery={recovery:?} host_state_changed={host_state_changed} reason={reason}"
+      ),
       WireMessage::Error { message, .. } => bail!(message),
       WireMessage::Hello(_) | WireMessage::Authorize(_) | WireMessage::Need { .. } | WireMessage::AssetNeed(_) => {
         Ok(LiveClientMessage::Continue)
@@ -2511,6 +2585,7 @@ pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClien
     pending_events: VecDeque::new(),
     pending_snapshot: None,
     recent_local_update_hashes: VecDeque::new(),
+    next_update_id: 1,
     wire_encode_buffer: Vec::with_capacity(1024),
     config,
   })
@@ -2787,6 +2862,23 @@ async fn send_peer_roster(
   Ok(())
 }
 
+fn classify_update_rejection(error: &flowstate_collab::CollabError) -> UpdateRejectionCode {
+  match error {
+    flowstate_collab::CollabError::Unauthorized(_) => UpdateRejectionCode::Unauthorized,
+    flowstate_collab::CollabError::InvalidSchema(_)
+    | flowstate_collab::CollabError::MissingRootValue(_)
+    | flowstate_collab::CollabError::UnsupportedCollabSchema(_) => UpdateRejectionCode::SchemaViolation,
+    flowstate_collab::CollabError::HashMismatch(_)
+    | flowstate_collab::CollabError::InvalidIntegrity
+    | flowstate_collab::CollabError::Postcard(_) => UpdateRejectionCode::MalformedUpdate,
+    flowstate_collab::CollabError::Loro(message) if message.contains("frontier") || message.contains("history") => {
+      UpdateRejectionCode::HistoryIncompatible
+    },
+    flowstate_collab::CollabError::Loro(_) => UpdateRejectionCode::SchemaViolation,
+    _ => UpdateRejectionCode::InternalFailure,
+  }
+}
+
 async fn serve_live_stream(
   send: &mut SendStream,
   recv: &mut RecvStream,
@@ -2800,6 +2892,8 @@ async fn serve_live_stream(
   let mut remote_role = remote_role;
   let mut presence_rate = RateWindow::new(config.max_presence_messages_per_minute, RATE_LIMIT_WINDOW_MILLIS);
   let mut asset_request_rate = RateWindow::new(config.max_asset_requests_per_minute, RATE_LIMIT_WINDOW_MILLIS);
+  let mut accepted_updates: HashMap<UpdateId, ([u8; 32], Vec<u8>)> = HashMap::new();
+  let mut document_lane_blocked = false;
   loop {
     let message = if let Some(rx) = live_rx.as_mut() {
       tokio::select! {
@@ -2852,6 +2946,7 @@ async fn serve_live_stream(
     };
     match message {
       WireMessage::Update {
+        update_id,
         document_id,
         actor_id,
         bytes,
@@ -2862,6 +2957,72 @@ async fn serve_live_stream(
         ensure!(actor_id == hello.actor_id, "update actor does not match authorized peer");
         ensure_update_size(&bytes, config.max_update_bytes)?;
         ensure!(blake3_hash(&bytes) == hash, "update hash mismatch");
+        let Some(update_id) = update_id else {
+          write_wire_message(
+            send,
+            &WireMessage::Error {
+              document_id: Some(config.document_id),
+              message: "document updates require an update id".to_string(),
+            },
+            config.max_message_bytes,
+          )
+          .await?;
+          continue;
+        };
+        if let Some((accepted_hash, frontier)) = accepted_updates.get(&update_id) {
+          if *accepted_hash == hash {
+            write_wire_message(
+              send,
+              &WireMessage::Ack {
+                update_id: Some(update_id),
+                document_id: config.document_id,
+                frontier: frontier.clone(),
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+          } else {
+            write_wire_message(
+              send,
+              &WireMessage::UpdateRejected {
+                update_id,
+                document_id: config.document_id,
+                hash,
+                code: UpdateRejectionCode::MalformedUpdate,
+                reason: "update id was reused with different bytes".to_string(),
+                authoritative_frontier: frontier.clone(),
+                recovery: UpdateRecoveryAction::DoNotRetry,
+                host_state_changed: false,
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+          }
+          continue;
+        }
+        if document_lane_blocked {
+          let frontier = state
+            .document
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+            .frontier()?;
+          write_wire_message(
+            send,
+            &WireMessage::UpdateRejected {
+              update_id,
+              document_id: config.document_id,
+              hash,
+              code: UpdateRejectionCode::HistoryIncompatible,
+              reason: "document lane is blocked pending snapshot recovery".to_string(),
+              authoritative_frontier: frontier,
+              recovery: UpdateRecoveryAction::RequestSnapshot,
+              host_state_changed: false,
+            },
+            config.max_message_bytes,
+          )
+          .await?;
+          continue;
+        }
         if collab_canary_enabled() {
           collab_canary(
             "host_handle_update",
@@ -2892,6 +3053,7 @@ async fn serve_live_stream(
           write_wire_message(
             send,
             &WireMessage::Ack {
+              update_id: Some(update_id),
               document_id: config.document_id,
               frontier,
             },
@@ -2906,7 +3068,34 @@ async fn serve_live_stream(
             .document
             .lock()
             .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-            .import_update_checked(remote_role, &bytes)?
+            .import_update_checked(remote_role, &bytes)
+        };
+        let outcome = match outcome {
+          Ok(outcome) => outcome,
+          Err(error) => {
+            let frontier = state
+              .document
+              .lock()
+              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
+              .frontier()?;
+            document_lane_blocked = true;
+            write_wire_message(
+              send,
+              &WireMessage::UpdateRejected {
+                update_id,
+                document_id: config.document_id,
+                hash,
+                code: classify_update_rejection(&error),
+                reason: error.to_string(),
+                authoritative_frontier: frontier,
+                recovery: UpdateRecoveryAction::RequestSnapshot,
+                host_state_changed: false,
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+            continue;
+          },
         };
         if collab_canary_enabled() {
           collab_canary("host_imported_update", format!("patch={} bytes={}", outcome.patch.is_some(), bytes.len()));
@@ -2916,6 +3105,7 @@ async fn serve_live_stream(
             hub.publish(LiveUpdate::wire(
               Some(hello.session_id),
               WireMessage::Update {
+                update_id: None,
                 document_id,
                 actor_id,
                 hash,
@@ -2927,9 +3117,11 @@ async fn serve_live_stream(
             hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::UpdateHint { document_id, hash }))?;
           }
         }
+        accepted_updates.insert(update_id, (hash, outcome.frontier.clone()));
         write_wire_message(
           send,
           &WireMessage::Ack {
+            update_id: Some(update_id),
             document_id: config.document_id,
             frontier: outcome.frontier,
           },
@@ -2945,6 +3137,7 @@ async fn serve_live_stream(
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         if snapshot {
           send_snapshot_and_have(send, state, config).await?;
+          document_lane_blocked = false;
         } else {
           let update = state
             .document
@@ -2958,6 +3151,7 @@ async fn serve_live_stream(
               write_wire_message(
                 send,
                 &WireMessage::Update {
+                  update_id: None,
                   document_id,
                   actor_id: config.actor_id,
                   hash: blake3_hash(&update),
@@ -3015,6 +3209,7 @@ async fn serve_live_stream(
         write_wire_message(
           send,
           &WireMessage::Ack {
+            update_id: None,
             document_id: hello.document_id,
             frontier,
           },
@@ -3031,6 +3226,7 @@ async fn serve_live_stream(
       | WireMessage::AssetChunk(_)
       | WireMessage::PeerEvent(_)
       | WireMessage::Ack { .. }
+      | WireMessage::UpdateRejected { .. }
       | WireMessage::Error { .. } => {},
     }
   }
@@ -3417,6 +3613,7 @@ mod tests {
         .publish(LiveUpdate::wire(
           None,
           WireMessage::Ack {
+            update_id: None,
             document_id: DocumentId::new(),
             frontier: Vec::new(),
           },
@@ -3932,6 +4129,7 @@ mod tests {
     write_wire_message(
       &mut client.send,
       &WireMessage::Update {
+        update_id: Some(1),
         document_id,
         actor_id,
         bytes: update,

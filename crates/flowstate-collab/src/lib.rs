@@ -293,6 +293,31 @@ pub enum UpdateApplication {
   Fl0ActionBundle(Vec<u8>),
 }
 
+pub type UpdateId = u64;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UpdateRejectionCode {
+  Unauthorized,
+  WrongDocument,
+  WrongActor,
+  InvalidHash,
+  OversizedUpdate,
+  MalformedUpdate,
+  SchemaViolation,
+  HistoryIncompatible,
+  InternalFailure,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum UpdateRecoveryAction {
+  DoNotRetry,
+  RetrySameUpdate,
+  RequestMissingUpdates,
+  RequestSnapshot,
+  Reauthenticate,
+  FatalDocumentError,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum WireMessage {
   Hello(HelloMessage),
@@ -308,6 +333,7 @@ pub enum WireMessage {
     snapshot: bool,
   },
   Update {
+    update_id: Option<UpdateId>,
     document_id: DocumentId,
     actor_id: ActorId,
     bytes: Vec<u8>,
@@ -326,8 +352,19 @@ pub enum WireMessage {
   Presence(PresenceMessage),
   PeerEvent(PeerEventMessage),
   Ack {
+    update_id: Option<UpdateId>,
     document_id: DocumentId,
     frontier: Vec<u8>,
+  },
+  UpdateRejected {
+    update_id: UpdateId,
+    document_id: DocumentId,
+    hash: [u8; 32],
+    code: UpdateRejectionCode,
+    reason: String,
+    authoritative_frontier: Vec<u8>,
+    recovery: UpdateRecoveryAction,
+    host_state_changed: bool,
   },
   Error {
     document_id: Option<DocumentId>,

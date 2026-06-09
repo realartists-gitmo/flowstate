@@ -560,17 +560,12 @@ impl Workspace {
                                 && collaboration_error_is_retryable(error)
                               {
                                 collab_diagnostic("COLLAB_RETRYABLE_TRANSPORT_FAILURE", &format!("{error:#}"));
-                                result = match &update {
-                                  PendingCollaborationUpdate::Source { source, application, .. } => {
-                                    client.replace_source_from(source, application.clone()).await
-                                  },
-                                  PendingCollaborationUpdate::GranularMutations { mutations, application } => {
-                                    client.publish_granular_source_mutations(mutations.clone(), application.clone()).await
-                                  },
-                                  PendingCollaborationUpdate::Presence { cursor } => {
-                                    client.publish_presence("", cursor.clone(), None, None).await
-                                  },
-                                };
+                                // Presence is ephemeral and safe to retry. Document updates are
+                                // already applied to the local CRDT; replaying their semantic
+                                // mutation here would apply them twice. Reconnect/resync instead.
+                                if let PendingCollaborationUpdate::Presence { cursor } = &update {
+                                  result = client.publish_presence("", cursor.clone(), None, None).await;
+                                }
                               }
                               if let Err(error) = result {
                                 if collab_canary_enabled() {
