@@ -110,14 +110,24 @@ impl EquationWorld {
   fn new(source: &str) -> Self {
     let library = LazyHash::new(<typst_library::Library as LibraryExt>::builder().build());
 
-    let fonts: Vec<Font> = typst_assets::fonts()
-      .flat_map(|data| Font::iter(Bytes::new(data)))
-      .collect();
-    let book = LazyHash::new(FontBook::from_fonts(&fonts));
+    let (fonts, book) = Self::global_fonts();
+    let book = LazyHash::new(book.clone());
+    let fonts = fonts.clone();
 
     let main_source = Source::detached(source);
 
     Self { library, book, main_source, fonts }
+  }
+
+  fn global_fonts() -> &'static (Vec<Font>, FontBook) {
+    static FONTS: OnceLock<(Vec<Font>, FontBook)> = OnceLock::new();
+    FONTS.get_or_init(|| {
+      let fonts: Vec<Font> = typst_assets::fonts()
+        .flat_map(|data| Font::iter(Bytes::new(data)))
+        .collect();
+      let book = FontBook::from_fonts(&fonts);
+      (fonts, book)
+    })
   }
 }
 

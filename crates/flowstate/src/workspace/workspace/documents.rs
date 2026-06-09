@@ -67,7 +67,7 @@ impl Workspace {
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
       speech_word_count_cache: HashMap::new(),
-      speech_word_count_pending: false,
+      speech_word_count_pending: HashSet::new(),
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
@@ -240,6 +240,7 @@ impl Workspace {
     self.editor_subscriptions.retain(|(id, _)| *id != panel_id);
     self.pinned_document_ids.retain(|id| *id != panel_id);
     self.speech_word_count_cache.remove(&panel_id);
+    self.speech_word_count_pending.remove(&panel_id);
     if self.speech_document_id == Some(panel_id) {
       self.speech_document_id = None;
     }
