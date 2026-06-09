@@ -4,7 +4,7 @@ mod persistence {
   pub mod io;
 }
 
-pub use persistence::io::deserialize_paragraph_metadata;
+pub use persistence::io::{db8_runs_from_marks, deserialize_paragraph_metadata};
 use std::{io, path::Path};
 
 use flowstate_collab::{ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind};

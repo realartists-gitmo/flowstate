@@ -826,7 +826,7 @@ fn db8_marks_from_runs(runs: &[TextRun]) -> Vec<GranularTextMark> {
 }
 
 #[hotpath::measure]
-fn db8_runs_from_marks(text_len: usize, marks: &[GranularTextMark]) -> Vec<TextRun> {
+pub fn db8_runs_from_marks(text_len: usize, marks: &[GranularTextMark]) -> Vec<TextRun> {
   let mut boundaries = vec![0, text_len];
   for mark in marks {
     boundaries.push(mark.start_utf8.min(text_len));

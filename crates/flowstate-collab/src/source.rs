@@ -7,7 +7,7 @@ use std::{
 use loro::{
   event::{Diff, DiffBatch},
   Container, ContainerID, ExpandType, ExportMode, Index, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, PeerID, StyleConfig,
-  ValueOrContainer, VersionVector,
+  StyleConfigMap, ValueOrContainer, VersionVector,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -32,6 +32,7 @@ const KEY_GRANULAR_TEXTS: &str = "granular_texts";
 const KEY_GRANULAR_BINARIES: &str = "granular_binaries";
 const KEY_RECORD_METADATA: &str = "metadata";
 const KEY_RECORD_TEXT: &str = "text";
+const INLINE_STYLE_KEYS: &[&str] = &["semantic", "direct_underline", "strikethrough", "highlight"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CollabRolePolicy {
@@ -167,6 +168,10 @@ pub enum GranularSourceMutation {
     text_id: String,
     byte_offset: usize,
     byte_len: usize,
+  },
+  DeleteTextToEnd {
+    text_id: String,
+    byte_offset: usize,
   },
   MarkText {
     text_id: String,
@@ -322,14 +327,21 @@ pub struct CollabImportOutcome {
 /// A single paragraph change detected by computing a CRDT diff.
 #[derive(Clone, Debug)]
 pub enum ParagraphDiffEntry {
-  /// Paragraph text content changed.
-  Text { text_id: String, new_text: String },
-  /// Paragraph metadata (style + runs) changed.
+  Text {
+    text_id: String,
+    new_text: String,
+    marks: Vec<GranularTextMark>,
+  },
   Metadata { text_id: String, metadata: Vec<u8> },
-  /// A new paragraph was added (`text_id`, order-list position).
-  ParagraphAdded { text_id: String, position: usize },
-  /// A paragraph was removed.
+  ParagraphAdded {
+    text_id: String,
+    position: usize,
+    text: String,
+    metadata: Vec<u8>,
+    marks: Vec<GranularTextMark>,
+  },
   ParagraphRemoved { text_id: String },
+  ParagraphMoved { text_id: String, position: usize },
 }
 
 #[derive(Clone, Debug)]
@@ -555,17 +567,33 @@ impl CollabDocument {
     if mutations.is_empty() {
       return Ok(Vec::new());
     }
-    let before = self.doc.oplog_vv();
-    let mut text_cache = HashMap::new();
-    for mutation in mutations {
-      self.apply_granular_source_mutation_uncommitted(mutation, &mut text_cache)?;
-    }
+
+    // Prevalidate against an evolving shadow state, normalizing explicit
+    // delete-to-end operations before touching any Loro container.
+    let normalized = self.validate_and_normalize_granular_mutations(mutations)?;
     self.doc.commit();
-    validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
-    self
-      .doc
-      .export(ExportMode::updates(&before))
-      .map_err(|error| CollabError::Loro(error.to_string()))
+    let before = self.doc.oplog_vv();
+    let before_encoded = postcard::to_stdvec(&before)?;
+
+    // Loro forks use a distinct peer and are designed for isolated branch/merge.
+    // Only a fully validated fork delta is imported into the live document.
+    let working = Self::from_doc(self.doc.fork(), Some(self.format_kind), Some(self.document_id))?;
+    configure_granular_text_styles(&working.doc);
+    let mut text_cache = HashMap::new();
+    for (index, mutation) in normalized.iter().enumerate() {
+      working
+        .apply_granular_source_mutation_uncommitted(mutation, &mut text_cache)
+        .map_err(|error| CollabError::Loro(format!(
+          "COLLAB_MUTATION_STATE_DIVERGENCE mutation_index={index} mutation_kind={} detail={error}",
+          granular_mutation_kind(mutation)
+        )))?;
+    }
+    working.doc.commit();
+    validate_schema(&working.doc, Some(self.format_kind), Some(self.document_id))
+      .map_err(|error| CollabError::Loro(format!("COLLAB_MUTATION_SCHEMA_FAILURE detail={error}")))?;
+    let update = working.export_update_since_frontier(&before_encoded)?;
+    self.import_update_checked(role, &update)?;
+    Ok(update)
   }
 
   pub fn apply_granular_source_mutation(&self, role: Role, mutation: &GranularSourceMutation) -> CollabResult<Vec<u8>> {
@@ -593,12 +621,18 @@ impl CollabDocument {
     let before = self.doc.oplog_vv();
     let text_container = granular_text_container(&self.doc, text_id)?;
     let text_snapshot = text_container.to_string();
-    let Some(byte_end) = byte_offset.checked_add(byte_len) else {
-      return Err(CollabError::InvalidSchema("granular text range"));
-    };
+    validate_utf8_offset(&text_snapshot, byte_offset)?;
+    let available = text_snapshot.len() - byte_offset;
+    let normalized_len = if byte_len == usize::MAX { available } else { byte_len };
+    if normalized_len > available {
+      return Err(CollabError::Loro(format!(
+        "COLLAB_MUTATION_STATE_DIVERGENCE delete length {normalized_len} exceeds available bytes {available}"
+      )));
+    }
+    let byte_end = byte_offset + normalized_len;
     validate_utf8_range(&text_snapshot, byte_offset..byte_end)?;
     text_container
-      .delete_utf8(byte_offset, byte_len)
+      .delete_utf8(byte_offset, normalized_len)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
     self.doc.commit();
     validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
@@ -700,11 +734,138 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
+  fn validate_and_normalize_granular_mutations(&self, mutations: &[GranularSourceMutation]) -> CollabResult<Vec<GranularSourceMutation>> {
+    #[derive(Clone)]
+    struct ShadowParagraph {
+      text: String,
+      exists: bool,
+    }
+
+    // Paragraph existence is defined by `granular_texts`, not by the order list.
+    // The order list may be absent or temporarily incomplete while live text
+    // containers remain valid mutation targets.
+    let texts = granular_texts_map(&self.doc)?;
+    let mut shadow: HashMap<String, ShadowParagraph> = HashMap::new();
+    for text_id in texts.keys() {
+      let text_id = text_id.to_string();
+      shadow.insert(text_id.clone(), ShadowParagraph {
+        text: granular_text_container(&self.doc, &text_id)?.to_string(),
+        exists: true,
+      });
+    }
+
+    // Read order without creating it. Validation must not mutate the document.
+    let orders = granular_orders_map(&self.doc)?;
+    let mut shadow_order = match orders.get("paragraphs") {
+      Some(ValueOrContainer::Container(Container::MovableList(order))) => order
+        .to_vec()
+        .into_iter()
+        .map(loro_string)
+        .collect::<CollabResult<Vec<_>>>()?,
+      None => Vec::new(),
+      _ => return Err(CollabError::InvalidSchema(KEY_GRANULAR_ORDERS)),
+    };
+    shadow_order.retain(|text_id| shadow.contains_key(text_id));
+    // Do NOT append missing granular_texts IDs to shadow_order here.
+    // If a paragraph ID exists in granular_texts but not in the order list,
+    // the order list is incomplete. Silently patching it would mask schema
+    // inconsistencies and cause "insert after unknown paragraph" errors at
+    // apply time when the real order list doesn't contain the anchor.
+    // Instead, mutations referencing missing anchors will be rejected below,
+    // and the caller should recover via snapshot or order repair at load time.
+
+    let mut normalized = Vec::with_capacity(mutations.len());
+    for (index, mutation) in mutations.iter().enumerate() {
+      match mutation {
+        GranularSourceMutation::InsertParagraph { text_id, after_text_id } => {
+          if shadow.get(text_id).is_some_and(|paragraph| paragraph.exists) {
+            return Err(mutation_validation_error(index, mutation, "paragraph already exists"));
+          }
+          let position = if let Some(after) = after_text_id {
+            shadow_order.iter().position(|id| id == after)
+              .map(|position| position + 1)
+              .ok_or_else(|| mutation_validation_error(index, mutation, "insert-after paragraph does not exist"))?
+          } else {
+            shadow_order.len()
+          };
+          shadow_order.insert(position, text_id.clone());
+          shadow.insert(text_id.clone(), ShadowParagraph { text: String::new(), exists: true });
+          normalized.push(mutation.clone());
+        },
+        GranularSourceMutation::RemoveParagraph { text_id } => {
+          let Some(paragraph) = shadow.get_mut(text_id) else {
+            return Err(mutation_validation_error(index, mutation, "paragraph does not exist"));
+          };
+          if !paragraph.exists {
+            return Err(mutation_validation_error(index, mutation, "paragraph was already removed"));
+          }
+          paragraph.exists = false;
+          shadow_order.retain(|id| id != text_id);
+          normalized.push(mutation.clone());
+        },
+        GranularSourceMutation::InsertText { text_id, byte_offset, text } => {
+          let paragraph = shadow.get_mut(text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "text target paragraph does not exist"))?;
+          if *byte_offset > paragraph.text.len() || !paragraph.text.is_char_boundary(*byte_offset) {
+            return Err(mutation_validation_error(index, mutation, "insert offset is outside current UTF-8 text"));
+          }
+          paragraph.text.insert_str(*byte_offset, text);
+          normalized.push(mutation.clone());
+        },
+        GranularSourceMutation::DeleteText { text_id, byte_offset, byte_len } => {
+          let paragraph = shadow.get_mut(text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "delete target paragraph does not exist"))?;
+          normalize_shadow_delete(index, mutation, text_id, *byte_offset, *byte_len, &mut paragraph.text, &mut normalized)?;
+        },
+        GranularSourceMutation::DeleteTextToEnd { text_id, byte_offset } => {
+          let paragraph = shadow.get_mut(text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "delete target paragraph does not exist"))?;
+          if *byte_offset > paragraph.text.len() {
+            return Err(mutation_validation_error(index, mutation, "delete-to-end offset is outside current UTF-8 text"));
+          }
+          let byte_len = paragraph.text.len() - *byte_offset;
+          normalize_shadow_delete(index, mutation, text_id, *byte_offset, byte_len, &mut paragraph.text, &mut normalized)?;
+        },
+        GranularSourceMutation::MarkText { text_id, range, .. }
+        | GranularSourceMutation::UnmarkText { text_id, range, .. } => {
+          let paragraph = shadow.get(text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "style target paragraph does not exist"))?;
+          if range.start > range.end
+            || range.end > paragraph.text.len()
+            || !paragraph.text.is_char_boundary(range.start)
+            || !paragraph.text.is_char_boundary(range.end)
+          {
+            return Err(mutation_validation_error(index, mutation, "style range is invalid for current UTF-8 text"));
+          }
+          normalized.push(mutation.clone());
+        },
+        GranularSourceMutation::SetTextMetadata { text_id, .. }
+        | GranularSourceMutation::ClearTextMetadata { text_id } => {
+          if !shadow.get(text_id).is_some_and(|paragraph| paragraph.exists) {
+            return Err(mutation_validation_error(index, mutation, "metadata target paragraph does not exist"));
+          }
+          normalized.push(mutation.clone());
+        },
+      }
+    }
+    Ok(normalized)
+  }
+
   fn cached_granular_text_container(&self, cache: &mut HashMap<String, LoroText>, text_id: &str) -> CollabResult<LoroText> {
     if let Some(text) = cache.get(text_id) {
+      if text.is_deleted() || !text.is_attached() {
+        return Err(CollabError::Loro("COLLAB_MUTATION_STATE_DIVERGENCE cached text container is deleted or detached".into()));
+      }
       return Ok(text.clone());
     }
     let text = granular_text_container(&self.doc, text_id)?;
+    if text.is_deleted() || !text.is_attached() {
+      return Err(CollabError::Loro("COLLAB_MUTATION_STATE_DIVERGENCE text container is deleted or detached".into()));
+    }
     cache.insert(text_id.to_string(), text.clone());
     Ok(text)
   }
@@ -722,44 +883,61 @@ impl CollabDocument {
           .insert_utf8(*byte_offset, text)
           .map_err(|error| CollabError::Loro(error.to_string()))?;
       },
-      GranularSourceMutation::DeleteText {
-        text_id,
-        byte_offset,
-        byte_len,
-      } => {
+      GranularSourceMutation::DeleteText { text_id, byte_offset, byte_len } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
-        if byte_offset.checked_add(*byte_len).is_none() {
-          return Err(CollabError::InvalidSchema("granular text range"));
+        let snapshot = text_container.to_string();
+        validate_utf8_offset(&snapshot, *byte_offset)?;
+        let available = snapshot.len() - *byte_offset;
+        let normalized_len = if *byte_len == usize::MAX { available } else { *byte_len };
+        if normalized_len > available {
+          return Err(CollabError::Loro(format!(
+            "COLLAB_MUTATION_STATE_DIVERGENCE delete length {normalized_len} exceeds available bytes {available}"
+          )));
         }
+        validate_utf8_range(&snapshot, *byte_offset..*byte_offset + normalized_len)?;
         text_container
-          .delete_utf8(*byte_offset, *byte_len)
-          .map_err(|error| CollabError::Loro(error.to_string()))?;
+          .delete_utf8(*byte_offset, normalized_len)
+          .map_err(|error| CollabError::Loro(format!(
+            "COLLAB_DELETE_LORO_FAILURE text_id={text_id} text_bytes={} text_unicode={} offset={} len={} end={} detail={error}",
+            snapshot.len(),
+            snapshot.chars().count(),
+            byte_offset,
+            normalized_len,
+            byte_offset + normalized_len,
+          )))?;
+      },
+      GranularSourceMutation::DeleteTextToEnd { text_id, byte_offset } => {
+        let text_container = self.cached_granular_text_container(text_cache, text_id)?;
+        let snapshot = text_container.to_string();
+        validate_utf8_offset(&snapshot, *byte_offset)?;
+        let delete_len = snapshot.len() - *byte_offset;
+        text_container
+          .delete_utf8(*byte_offset, delete_len)
+          .map_err(|error| CollabError::Loro(format!(
+            "COLLAB_DELETE_LORO_FAILURE text_id={text_id} text_bytes={} text_unicode={} offset={} len={} end={} detail={error}",
+            snapshot.len(),
+            snapshot.chars().count(),
+            byte_offset,
+            delete_len,
+            byte_offset + delete_len,
+          )))?;
       },
       GranularSourceMutation::MarkText { text_id, range, key, value } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
         let text_snapshot = text_container.to_string();
-        let text_len = text_snapshot.len();
-        // Clamp range to actual text bounds to handle mutations generated before text modifications
-        let clamped_start = range.start.min(text_len);
-        let clamped_end = range.end.min(text_len);
-        if clamped_start < clamped_end {
-          let clamped_range = clamped_start..clamped_end;
-          validate_utf8_range(&text_snapshot, clamped_range.clone())?;
+        validate_utf8_range(&text_snapshot, range.clone())?;
+        if !range.is_empty() {
           text_container
-            .mark_utf8(clamped_range, key, value.clone().into_loro())
+            .mark_utf8(range.clone(), key, value.clone().into_loro())
             .map_err(|error| CollabError::Loro(error.to_string()))?;
         }
       },
       GranularSourceMutation::UnmarkText { text_id, range, key } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
         let text_snapshot = text_container.to_string();
-        let text_len = text_snapshot.len();
-        // Clamp range to actual text bounds to handle mutations generated before text modifications
-        let clamped_start = range.start.min(text_len);
-        let clamped_end = range.end.min(text_len);
-        if clamped_start < clamped_end {
-          let clamped_range = clamped_start..clamped_end;
-          let unicode_range = utf8_range_to_unicode_range(&text_snapshot, clamped_range)?;
+        validate_utf8_range(&text_snapshot, range.clone())?;
+        if !range.is_empty() {
+          let unicode_range = utf8_range_to_unicode_range(&text_snapshot, range.clone())?;
           text_container
             .unmark(unicode_range, key)
             .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -796,6 +974,7 @@ impl CollabDocument {
         }
       },
       GranularSourceMutation::RemoveParagraph { text_id } => {
+        text_cache.remove(text_id);
         granular_texts_map(&self.doc)?
           .delete(text_id.as_str())
           .map_err(|error| CollabError::Loro(error.to_string()))?;
@@ -843,14 +1022,13 @@ impl CollabDocument {
   /// Returns `None` if the container is not a text container under `granular_texts`.
   pub fn text_id_from_container_path(&self, cid: &ContainerID) -> Option<String> {
     let path = self.doc.get_path_to_container(cid)?;
-    if path.len() < 3 {
-      return None;
-    }
-    if let Index::Key(key) = &path[0].1
-      && key.as_str() == KEY_GRANULAR_TEXTS
-      && let Index::Key(text_id) = &path[1].1
-    {
-      return Some(text_id.to_string());
+    for pair in path.windows(2) {
+      if let Index::Key(key) = &pair[0].1
+        && key.as_str() == KEY_GRANULAR_TEXTS
+        && let Index::Key(text_id) = &pair[1].1
+      {
+        return Some(text_id.to_string());
+      }
     }
     None
   }
@@ -908,104 +1086,69 @@ impl CollabDocument {
     let Some(diff_batch) = self.diff_since_frontier(old_frontier_encoded)? else {
       return Ok(Vec::new());
     };
-
     let doc = self.shared_doc();
-    let mut changes: Vec<ParagraphDiffEntry> = Vec::new();
+    let mut changes = Vec::new();
+    let mut added_text_ids = HashSet::new();
 
-    // --- First pass: structural changes on the root granular_texts map ---
     for (cid, diff) in diff_batch.iter() {
-      let Diff::Map(map) = diff else {
+      let Diff::Map(map) = diff else { continue; };
+      let Some(path) = doc.get_path_to_container(cid) else { continue; };
+      if !path.last().is_some_and(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == KEY_GRANULAR_TEXTS)) {
         continue;
-      };
-      let Some(path) = doc.get_path_to_container(cid) else {
-        continue;
-      };
-      if path.len() == 1
-        && let Index::Key(key) = &path[0].1
-        && key.as_str() == KEY_GRANULAR_TEXTS
-      {
-        for (text_id, value_or_none) in &map.updated {
-          if value_or_none.is_none() {
-            changes.push(ParagraphDiffEntry::ParagraphRemoved { text_id: text_id.to_string() });
-          } else {
-            let position = self.read_paragraph_order_position(&doc, text_id);
-            changes.push(ParagraphDiffEntry::ParagraphAdded { text_id: text_id.to_string(), position });
-          }
+      }
+      for (text_id, value_or_none) in &map.updated {
+        if value_or_none.is_none() {
+          changes.push(ParagraphDiffEntry::ParagraphRemoved { text_id: text_id.to_string() });
+        } else {
+          let position = self.read_paragraph_order_position(&doc, text_id).ok_or(CollabError::InvalidSchema("paragraph order position"))?;
+          let text_container = granular_text_container(&doc, text_id)?;
+          let text = text_container.to_string();
+          let marks = text_marks(&text_container);
+          let metadata = match granular_text_record_map(&doc, text_id)?.get(KEY_RECORD_METADATA) {
+            Some(ValueOrContainer::Value(LoroValue::Binary(bytes))) => bytes.to_vec(),
+            _ => Vec::new(),
+          };
+          added_text_ids.insert(text_id.to_string());
+          changes.push(ParagraphDiffEntry::ParagraphAdded { text_id: text_id.to_string(), position, text, metadata, marks });
         }
       }
     }
 
-    // Collect the set of text_ids that are newly added so we can skip their text diffs.
-    let added_text_ids: HashSet<String> = changes
-      .iter()
-      .filter_map(|entry| {
-        if let ParagraphDiffEntry::ParagraphAdded { text_id, .. } = entry {
-          Some(text_id.clone())
-        } else {
-          None
-        }
-      })
-      .collect();
-
-    // --- Second pass: text and metadata changes on text record containers ---
     for (cid, diff) in diff_batch.iter() {
-      let Some(text_id) = self.text_id_from_container_path(cid) else {
-        continue;
-      };
-      if added_text_ids.contains(&text_id) {
-        continue;
-      }
+      let Some(text_id) = self.text_id_from_container_path(cid) else { continue; };
+      if added_text_ids.contains(&text_id) { continue; }
       match diff {
         Diff::Text(_) => {
-          let new_text = self.read_text_by_container_id(cid).unwrap_or_default();
-          changes.push(ParagraphDiffEntry::Text { text_id, new_text });
+          let Some(Container::Text(text_container)) = self.doc.get_container(cid.clone()) else { continue; };
+          changes.push(ParagraphDiffEntry::Text {
+            text_id,
+            new_text: text_container.to_string(),
+            marks: text_marks(&text_container),
+          });
         },
-        Diff::Map(map) => {
-          let has_metadata = map.updated.contains_key(KEY_RECORD_METADATA);
-          if !has_metadata {
-            continue;
-          }
-          let metadata = self.read_text_record_metadata(cid).unwrap_or_default();
-          changes.push(ParagraphDiffEntry::Metadata { text_id, metadata });
-        },
+        Diff::Map(map) if map.updated.contains_key(KEY_RECORD_METADATA) => changes.push(ParagraphDiffEntry::Metadata {
+          text_id,
+          metadata: self.read_text_record_metadata(cid).unwrap_or_default(),
+        }),
         _ => {},
       }
     }
 
-    // --- Third pass: paragraph order changes on the paragraphs MovableList ---
     for (cid, diff) in diff_batch.iter() {
-      let Some(diff_list) = diff.as_list() else {
-        continue;
-      };
-      let Some(path) = doc.get_path_to_container(cid) else {
-        continue;
-      };
-      if path.len() == 2
-        && let Index::Key(key) = &path[0].1
-        && key.as_str() == KEY_GRANULAR_ORDERS
-        && let Index::Key(name) = &path[1].1
-        && name.as_str() == "paragraphs"
-      {
-        let mut cursor = 0usize;
-        for item in diff_list {
-          match item {
-            loro::event::ListDiffItem::Insert { insert, .. } => {
-              for value in insert {
-                if let loro::ValueOrContainer::Value(loro::LoroValue::String(text_id)) = value
-                  && !added_text_ids.contains(text_id.as_str())
-                {
-                  let position = self.read_paragraph_order_position(&doc, text_id.as_str());
-                  changes.push(ParagraphDiffEntry::ParagraphAdded { text_id: text_id.to_string(), position });
-                }
-                cursor += 1;
-              }
-            },
-            loro::event::ListDiffItem::Delete { delete } => {
-              cursor += delete;
-            },
-            loro::event::ListDiffItem::Retain { retain } => {
-              cursor += retain;
-            },
+      let Some(diff_list) = diff.as_list() else { continue; };
+      let Some(path) = doc.get_path_to_container(cid) else { continue; };
+      let is_paragraph_order = path.iter().any(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == KEY_GRANULAR_ORDERS))
+        && path.iter().any(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == "paragraphs"));
+      if !is_paragraph_order { continue; }
+      for item in diff_list {
+        if let loro::event::ListDiffItem::Insert { insert, .. } = item {
+          for value in insert {
+            if let ValueOrContainer::Value(LoroValue::String(text_id)) = value
+              && !added_text_ids.contains(text_id.as_str())
+              && let Some(position) = self.read_paragraph_order_position(&doc, text_id.as_str())
+            {
+              changes.push(ParagraphDiffEntry::ParagraphMoved { text_id: text_id.to_string(), position });
+            }
           }
         }
       }
@@ -1014,7 +1157,6 @@ impl CollabDocument {
     Ok(changes)
   }
 
-  /// Read the current metadata binary from a text record container.
   pub fn read_text_record_metadata(&self, cid: &ContainerID) -> Option<Vec<u8>> {
     let container = self.doc.get_container(cid.clone())?;
     match container {
@@ -1026,31 +1168,69 @@ impl CollabDocument {
     }
   }
 
-  /// Read the position of a `text_id` in the `granular_orders.paragraphs`
-  /// `MovableList`.
-  pub fn read_paragraph_order_position(&self, doc: &LoroDoc, text_id: &str) -> usize {
+  pub fn read_paragraph_order_position(&self, doc: &LoroDoc, text_id: &str) -> Option<usize> {
     let root = doc.get_map(ROOT_MAP);
-    let Some(orders_val) = root.get(KEY_GRANULAR_ORDERS) else {
-      return usize::MAX;
-    };
-    let ValueOrContainer::Container(Container::Map(orders_map)) = orders_val else {
-      return usize::MAX;
-    };
-    let Some(paragraphs_val) = orders_map.get("paragraphs") else {
-      return usize::MAX;
-    };
-    let ValueOrContainer::Container(Container::MovableList(list)) = paragraphs_val else {
-      return usize::MAX;
-    };
-    for (i, val) in list.to_vec().iter().enumerate() {
-      if let LoroValue::String(s) = val
-        && s.as_str() == text_id
-      {
-        return i;
-      }
-    }
-    usize::MAX
+    let orders_val = root.get(KEY_GRANULAR_ORDERS)?;
+    let ValueOrContainer::Container(Container::Map(orders_map)) = orders_val else { return None; };
+    let paragraphs_val = orders_map.get("paragraphs")?;
+    let ValueOrContainer::Container(Container::MovableList(list)) = paragraphs_val else { return None; };
+    list.to_vec().iter().position(|value| matches!(value, LoroValue::String(text) if text.as_str() == text_id))
   }
+
+}
+
+fn granular_mutation_kind(mutation: &GranularSourceMutation) -> &'static str {
+  match mutation {
+    GranularSourceMutation::InsertText { .. } => "insert_text",
+    GranularSourceMutation::DeleteText { .. } => "delete_text",
+    GranularSourceMutation::DeleteTextToEnd { .. } => "delete_text_to_end",
+    GranularSourceMutation::MarkText { .. } => "mark_text",
+    GranularSourceMutation::UnmarkText { .. } => "unmark_text",
+    GranularSourceMutation::SetTextMetadata { .. } => "set_text_metadata",
+    GranularSourceMutation::ClearTextMetadata { .. } => "clear_text_metadata",
+    GranularSourceMutation::InsertParagraph { .. } => "insert_paragraph",
+    GranularSourceMutation::RemoveParagraph { .. } => "remove_paragraph",
+  }
+}
+
+fn mutation_validation_error(index: usize, mutation: &GranularSourceMutation, detail: &str) -> CollabError {
+  CollabError::Loro(format!(
+    "COLLAB_MUTATION_STATE_DIVERGENCE mutation_index={index} mutation_kind={} detail={detail}",
+    granular_mutation_kind(mutation)
+  ))
+}
+
+fn normalize_shadow_delete(
+  index: usize,
+  mutation: &GranularSourceMutation,
+  text_id: &str,
+  byte_offset: usize,
+  byte_len: usize,
+  current: &mut String,
+  normalized: &mut Vec<GranularSourceMutation>,
+) -> CollabResult<()> {
+  if byte_offset > current.len() || !current.is_char_boundary(byte_offset) {
+    return Err(mutation_validation_error(index, mutation, "delete offset is outside current UTF-8 text"));
+  }
+  let available = current.len() - byte_offset;
+  let normalized_len = if byte_len == usize::MAX { available } else { byte_len };
+  if normalized_len > available {
+    return Err(mutation_validation_error(index, mutation, "delete length exceeds current UTF-8 text"));
+  }
+  let end = byte_offset + normalized_len;
+  if !current.is_char_boundary(end) {
+    return Err(CollabError::Loro(format!(
+      "COLLAB_MUTATION_INVALID_INPUT mutation_index={index} mutation_kind={} detail=delete end is not a UTF-8 boundary",
+      granular_mutation_kind(mutation)
+    )));
+  }
+  current.replace_range(byte_offset..end, "");
+  normalized.push(GranularSourceMutation::DeleteText {
+    text_id: text_id.to_string(),
+    byte_offset,
+    byte_len: normalized_len,
+  });
+  Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -1284,7 +1464,13 @@ fn validate_schema(
 }
 
 fn configure_granular_text_styles(doc: &LoroDoc) {
-  doc.config_default_text_style(Some(StyleConfig { expand: ExpandType::After }));
+  let config = StyleConfig { expand: ExpandType::After };
+  doc.config_default_text_style(Some(config.clone()));
+  let mut styles = StyleConfigMap::new();
+  for key in INLINE_STYLE_KEYS {
+    styles.insert((*key).into(), config.clone());
+  }
+  doc.config_text_style(styles);
 }
 
 fn validate_granular_source(doc: &LoroDoc) -> CollabResult<()> {

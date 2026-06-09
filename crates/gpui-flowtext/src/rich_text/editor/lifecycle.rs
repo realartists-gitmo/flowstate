@@ -386,6 +386,66 @@ impl RichTextEditor {
     true
   }
 
+  /// Apply authoritative remote text and inline runs atomically.
+  pub fn apply_remote_paragraph_state(
+    &mut self,
+    paragraph: ParagraphId,
+    new_text: &str,
+    runs: Vec<TextRun>,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let run_total: usize = runs.iter().map(|run| run.len).sum();
+    if run_total != new_text.len() || runs.iter().any(|run| run.len == 0) {
+      return false;
+    }
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    let old_len = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
+    if old_len > 0 && !delete_range_in_paragraph(&mut self.document, paragraph_ix, 0..old_len) {
+      return false;
+    }
+    if !new_text.is_empty() && !insert_text_at(&mut self.document, paragraph_ix, 0, new_text, RunStyles::default()) {
+      return false;
+    }
+    let Some(p) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix) else {
+      return false;
+    };
+    p.runs = runs;
+    bump_paragraph_version(p);
+    update_paragraph_block(&mut self.document, paragraph_ix);
+    rebuild_document_sections(&mut self.document);
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
+  /// Apply paragraph-level style while preserving authoritative inline runs.
+  pub fn apply_remote_paragraph_style(
+    &mut self,
+    paragraph: ParagraphId,
+    style: ParagraphStyle,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    let Some(p) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix) else {
+      return false;
+    };
+    p.style = style;
+    bump_paragraph_version(p);
+    update_paragraph_block(&mut self.document, paragraph_ix);
+    rebuild_document_sections(&mut self.document);
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+    true
+  }
+
   /// Apply a remote style/metadata change to a single paragraph, bypassing
   /// `CanonicalOperation`.  Sets both the paragraph-level style and the
   /// full run list (from the CRDT metadata).

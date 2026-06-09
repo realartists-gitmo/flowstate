@@ -230,6 +230,7 @@ impl Workspace {
             Err(error) => {
               workspace.collaboration_host = None;
               workspace.collaboration.state = SessionState::Failed;
+              collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
               workspace.collaboration.last_error = Some(format!("{error:#}"));
               workspace.collaboration.pending_invite_copy_role = None;
               workspace.collaboration.peers.clear();
@@ -313,6 +314,7 @@ impl Workspace {
       },
       Err(error) => {
         let detail = format!("{error:#}");
+        collab_diagnostic("COLLAB_LAST_ERROR", &detail);
         self.collaboration.last_error = Some(detail.clone());
         show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite unavailable", &detail);
       },
@@ -340,6 +342,7 @@ impl Workspace {
       Err(error) => {
         let detail = format!("{error:#}");
         show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite revoke failed", &detail);
+        collab_diagnostic("COLLAB_LAST_ERROR", &detail);
         self.collaboration.last_error = Some(detail);
       },
     }
@@ -383,6 +386,7 @@ impl Workspace {
         let detail = format!("{error:#}");
         self.collaboration.state = SessionState::Failed;
         self.collaboration.role = None;
+        collab_diagnostic("COLLAB_LAST_ERROR", &detail);
         self.collaboration.last_error = Some(detail.clone());
         show_collaboration_prompt(window, cx, PromptLevel::Critical, "Join failed", &detail);
         cx.notify();
@@ -466,6 +470,7 @@ impl Workspace {
                       if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, client.document.clone(), None, cx) {
                         workspace.collaboration.reconnect_rejected_update = Some(format!("host snapshot import failed: {error:#}"));
                         workspace.collaboration.state = SessionState::Failed;
+                        collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
                         workspace.collaboration.last_error = Some(format!("{error:#}"));
                         cx.notify();
                         return None;
@@ -485,6 +490,7 @@ impl Workspace {
                         Err(error) => {
                           workspace.collaboration.reconnect_rejected_update = Some(format!("snapshot materialization failed: {error:#}"));
                           workspace.collaboration.state = SessionState::Failed;
+                          collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
                           workspace.collaboration.last_error = Some(format!("{error:#}"));
                           cx.notify();
                           return None;
@@ -520,12 +526,13 @@ impl Workspace {
             reconnect_delay = std::time::Duration::from_millis(500);
             let mut local_disconnect = false;
             loop {
-              let (next_client, next_update_rx, received, handled_local_update, disconnected, update_error) = cx
+              let (next_client, next_update_rx, received, handled_local_update, disconnected, force_reconnect, update_error) = cx
                 .background_executor()
                 .spawn(async move {
                   let mut update_error = None;
                   let mut handled_local_update = false;
                   let mut disconnected = false;
+                  let mut force_reconnect = false;
                   let received = run_on_sync_runtime(async {
                     tokio::select! {
                       update = client.receive_next_update() => update,
@@ -538,23 +545,41 @@ impl Workspace {
                                 collab_canary("client_local_update_dequeue", update.diagnostic_label());
                               }
                               let is_presence = matches!(update, PendingCollaborationUpdate::Presence { .. });
-                              let result = match update {
+                              let mut result = match &update {
                                 PendingCollaborationUpdate::Source { source, application, .. } => {
-                                  client.replace_source_from(&source, application).await
+                                  client.replace_source_from(source, application.clone()).await
                                 },
                                 PendingCollaborationUpdate::GranularMutations { mutations, application } => {
-                                  client.publish_granular_source_mutations(mutations, application).await
+                                  client.publish_granular_source_mutations(mutations.clone(), application.clone()).await
                                 },
                                 PendingCollaborationUpdate::Presence { cursor } => {
-                                  client.publish_presence("", cursor, None, None).await
+                                  client.publish_presence("", cursor.clone(), None, None).await
                                 },
                               };
+                              if let Err(error) = &result
+                                && collaboration_error_is_retryable(error)
+                              {
+                                collab_diagnostic("COLLAB_RETRYABLE_TRANSPORT_FAILURE", &format!("{error:#}"));
+                                result = match &update {
+                                  PendingCollaborationUpdate::Source { source, application, .. } => {
+                                    client.replace_source_from(source, application.clone()).await
+                                  },
+                                  PendingCollaborationUpdate::GranularMutations { mutations, application } => {
+                                    client.publish_granular_source_mutations(mutations.clone(), application.clone()).await
+                                  },
+                                  PendingCollaborationUpdate::Presence { cursor } => {
+                                    client.publish_presence("", cursor.clone(), None, None).await
+                                  },
+                                };
+                              }
                               if let Err(error) = result {
                                 if collab_canary_enabled() {
                                   collab_canary("client_local_update_error", format!("{error:#} presence={is_presence}"));
                                 }
+                                collab_diagnostic(collaboration_error_code(&error), &format!("{error:#}"));
                                 if !is_presence {
-                                  update_error = Some(format!("{error:#}"));
+                                  update_error = Some(format!("{}: {error:#}", collaboration_error_code(&error)));
+                                  force_reconnect = true;
                                   break;
                                 }
                               }
@@ -573,12 +598,13 @@ impl Workspace {
                       },
                     }
                   });
-                  (client, update_rx, received, handled_local_update, disconnected, update_error)
+                  (client, update_rx, received, handled_local_update, disconnected, force_reconnect, update_error)
                 })
                 .await;
               client = next_client;
               update_rx = next_update_rx;
               if let Some(detail) = update_error {
+                collab_diagnostic("COLLAB_LAST_ERROR", &detail);
                 let _ = window_handle.update(cx, |_, _, cx| {
                   let _ = workspace.update(cx, |workspace, cx| {
                     if workspace.collaboration.panel_id == Some(collaboration_panel_id) {
@@ -590,6 +616,10 @@ impl Workspace {
               }
               if disconnected {
                 local_disconnect = true;
+              }
+              if force_reconnect {
+                collab_diagnostic("COLLAB_RESYNC_REQUIRED", "closing client and requesting fresh snapshot");
+                break;
               }
               if handled_local_update {
                 continue;
@@ -619,6 +649,7 @@ impl Workspace {
                         ),
                       );
                       if let Err(error) = workspace.apply_collaboration_source_to_panel(collaboration_panel_id, source, application, cx) {
+                        collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
                         workspace.collaboration.last_error = Some(format!("{error:#}"));
                       } else {
                         workspace.collaboration.last_error = None;
@@ -656,6 +687,7 @@ impl Workspace {
                 } else {
                   SessionState::Failed
                 };
+                collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
                 workspace.collaboration.last_error = Some(format!("{error:#}"));
                 workspace.collaboration_client_updates = None;
                 cx.notify();
@@ -714,6 +746,7 @@ impl Workspace {
       );
       return;
     }
+    collab_diagnostic("COLLAB_LAST_ERROR", "No reconnect path is available for this collaboration state.");
     self.collaboration.last_error = Some("No reconnect path is available for this collaboration state.".to_string());
     show_collaboration_prompt(
       window,
@@ -766,7 +799,9 @@ impl Workspace {
         );
       },
       Ok(false) => {
-        self.collaboration.last_error = Some(format!("{peer_label} is not connected."));
+        let msg = format!("{peer_label} is not connected.");
+        collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+        self.collaboration.last_error = Some(msg);
         show_collaboration_prompt(
           window,
           cx,
@@ -777,6 +812,7 @@ impl Workspace {
       },
       Err(error) => {
         let detail = format!("{error:#}");
+        collab_diagnostic("COLLAB_LAST_ERROR", &detail);
         self.collaboration.last_error = Some(detail.clone());
         show_collaboration_prompt(window, cx, PromptLevel::Warning, "Peer role update failed", &detail);
       },
@@ -806,7 +842,11 @@ impl Workspace {
       match host.set_peer_role(session_id, role) {
         Ok(true) => changed += 1,
         Ok(false) => {},
-        Err(error) => last_error = Some(format!("{error:#}")),
+        Err(error) => {
+          let msg = format!("{error:#}");
+          collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+          last_error = Some(msg);
+        },
       }
     }
     self.collaboration.last_error = last_error;
@@ -851,7 +891,9 @@ impl Workspace {
         );
       },
       Ok(false) => {
-        self.collaboration.last_error = Some(format!("{peer_label} is not connected."));
+        let msg = format!("{peer_label} is not connected.");
+        collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+        self.collaboration.last_error = Some(msg);
         show_collaboration_prompt(
           window,
           cx,
@@ -862,6 +904,7 @@ impl Workspace {
       },
       Err(error) => {
         let detail = format!("{error:#}");
+        collab_diagnostic("COLLAB_LAST_ERROR", &detail);
         self.collaboration.last_error = Some(detail.clone());
         show_collaboration_prompt(window, cx, PromptLevel::Warning, "Peer removal failed", &detail);
       },
@@ -891,7 +934,11 @@ impl Workspace {
       match host.kick_peer(session_id) {
         Ok(true) => kicked += 1,
         Ok(false) => {},
-        Err(error) => last_error = Some(format!("{error:#}")),
+        Err(error) => {
+          let msg = format!("{error:#}");
+          collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+          last_error = Some(msg);
+        },
       }
     }
     self.collaboration.last_error = last_error;
@@ -2061,8 +2108,9 @@ impl Workspace {
                 let _ = window_handle.update(cx, |_, _, cx| {
                   let _ = workspace.update(cx, |workspace, cx| {
                     if workspace.collaboration.panel_id == Some(panel_id) {
-                      workspace.collaboration.state = SessionState::Failed;
-                      workspace.collaboration.last_error = Some("Flowstate document state lock is poisoned".to_string());
+                  workspace.collaboration.state = SessionState::Failed;
+                  collab_diagnostic("COLLAB_LAST_ERROR", "Flowstate document state lock is poisoned");
+                  workspace.collaboration.last_error = Some("Flowstate document state lock is poisoned".to_string());
                       cx.notify();
                     }
                   });
@@ -2079,6 +2127,7 @@ impl Workspace {
                   );
                 }
                 if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, source, application, cx) {
+                  collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
                   workspace.collaboration.last_error = Some(format!("{error:#}"));
                 } else {
                   workspace.collaboration.last_error = None;
@@ -2091,7 +2140,7 @@ impl Workspace {
           LiveUpdateKind::Wire(WireMessage::Update { application, .. }) => {
             if collab_canary_enabled() {
               collab_canary(
-                "host_ignored_local_or_unscoped_update",
+                "host_ignored_unscoped_update",
                 format!(
                   "source_session={:?} application={}",
                   update.source_session_id,
@@ -2124,7 +2173,11 @@ impl Workspace {
             if workspace.collaboration.panel_id == Some(panel_id) {
               match result {
                 Ok(()) => workspace.collaboration.last_error = None,
-                Err(error) => workspace.collaboration.last_error = Some(format!("{error:#}")),
+                Err(error) => {
+                  let msg = format!("{error:#}");
+                  collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+                  workspace.collaboration.last_error = Some(msg);
+                },
               }
               cx.notify();
             }
@@ -2167,6 +2220,7 @@ impl Workspace {
         self.collaboration.state = state;
       },
       SessionEvent::UpdateRejected { reason, .. } | SessionEvent::AssetRejected { reason, .. } => {
+        collab_diagnostic("COLLAB_LAST_ERROR", &reason);
         self.collaboration.last_error = Some(reason);
       },
       SessionEvent::Presence(presence) => {
@@ -2318,32 +2372,89 @@ impl Workspace {
         if !self.collaboration_last_frontier.is_empty() {
           match source.compute_paragraph_changes(&self.collaboration_last_frontier) {
             Ok(changes) => {
+              if changes.is_empty() {
+                collab_canary("apply_db8_incremental_empty_fallback", "frontier changed; replacing full projection");
+                let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
+                  anyhow::bail!("remote DB8 update materialized as a different document kind");
+                };
+                editor.update(cx, |editor, cx| {
+                  editor.clear_collaboration_edit();
+                  editor.replace_document_from_collaboration(*document, cx);
+                  editor.clear_collaboration_edit();
+                });
+                self.collaboration_last_frontier = current_frontier;
+                self.refresh_db8_remote_carets(cx);
+                return Ok(());
+              }
+              let inputs_valid = changes.iter().all(|entry| match entry {
+                ParagraphDiffEntry::Text { text_id, .. }
+                | ParagraphDiffEntry::ParagraphRemoved { text_id }
+                | ParagraphDiffEntry::ParagraphMoved { text_id, .. } => granular_record_id_to_u128(text_id).is_ok(),
+                ParagraphDiffEntry::Metadata { text_id, metadata } => {
+                  granular_record_id_to_u128(text_id).is_ok()
+                    && flowstate_document::deserialize_paragraph_metadata(metadata).is_some()
+                },
+                ParagraphDiffEntry::ParagraphAdded { text_id, metadata, .. } => {
+                  granular_record_id_to_u128(text_id).is_ok()
+                    && flowstate_document::deserialize_paragraph_metadata(metadata).is_some()
+                },
+              });
+              let requires_structural_fallback = changes
+                .iter()
+                .any(|entry| matches!(entry, ParagraphDiffEntry::ParagraphMoved { .. }));
+              if !inputs_valid || requires_structural_fallback {
+                collab_canary(
+                  "apply_db8_incremental_validation_fallback",
+                  format!("inputs_valid={inputs_valid} structural_fallback={requires_structural_fallback}"),
+                );
+                let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
+                  anyhow::bail!("remote DB8 update materialized as a different document kind");
+                };
+                editor.update(cx, |editor, cx| {
+                  editor.clear_collaboration_edit();
+                  editor.replace_document_from_collaboration(*document, cx);
+                  editor.clear_collaboration_edit();
+                });
+                self.collaboration_last_frontier = current_frontier;
+                self.refresh_db8_remote_carets(cx);
+                return Ok(());
+              }
               let incremental_ok = editor.update(cx, |editor, cx| {
                 editor.clear_collaboration_edit();
                 for entry in &changes {
                   match entry {
-                    ParagraphDiffEntry::Text { text_id, new_text } => {
+                    ParagraphDiffEntry::Text { text_id, new_text, marks } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let paragraph_id = ParagraphId(id_u128);
-                      if !editor.apply_remote_text_change(paragraph_id, new_text, cx) {
+                      let runs = flowstate_document::db8_runs_from_marks(new_text.len(), marks);
+                      if !valid_remote_runs(new_text, &runs)
+                        || !editor.apply_remote_paragraph_state(paragraph_id, new_text, runs, cx)
+                      {
                         return false;
                       }
                     },
                     ParagraphDiffEntry::Metadata { text_id, metadata } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let paragraph_id = ParagraphId(id_u128);
-                      let Some((style, runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
-                      if !editor.apply_remote_style_change(paragraph_id, style, runs, cx) {
+                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
+                      if !editor.apply_remote_paragraph_style(paragraph_id, style, cx) {
                         return false;
                       }
                     },
-                    ParagraphDiffEntry::ParagraphAdded { text_id, position } => {
+                    ParagraphDiffEntry::ParagraphAdded { text_id, position, text, metadata, marks } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let new_paragraph_id = ParagraphId(id_u128);
-                      if !editor.apply_remote_insert_paragraph(new_paragraph_id, *position, cx) {
+                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
+                      let runs = flowstate_document::db8_runs_from_marks(text.len(), marks);
+                      if !valid_remote_runs(text, &runs)
+                        || !editor.apply_remote_insert_paragraph(new_paragraph_id, *position, cx)
+                        || !editor.apply_remote_paragraph_state(new_paragraph_id, text, runs, cx)
+                        || !editor.apply_remote_paragraph_style(new_paragraph_id, style, cx)
+                      {
                         return false;
                       }
                     },
+                    ParagraphDiffEntry::ParagraphMoved { .. } => return false,
                     ParagraphDiffEntry::ParagraphRemoved { text_id } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let paragraph_id = ParagraphId(id_u128);
@@ -2357,7 +2468,18 @@ impl Workspace {
                 true
               });
               if !incremental_ok {
-                anyhow::bail!("incremental DB8 projection failed; identity map may be inconsistent");
+                collab_diagnostic("COLLAB_DB8_INCREMENTAL_FAILURE", "incremental DB8 projection failed; identity map may be inconsistent; replacing full projection");
+                let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
+                  anyhow::bail!("remote DB8 update materialized as a different document kind");
+                };
+                editor.update(cx, |editor, cx| {
+                  editor.clear_collaboration_edit();
+                  editor.replace_document_from_collaboration(*document, cx);
+                  editor.clear_collaboration_edit();
+                });
+                self.collaboration_last_frontier = current_frontier;
+                self.refresh_db8_remote_carets(cx);
+                return Ok(());
               }
               if collab_canary_enabled() {
                 collab_canary("apply_db8_incremental", format!("changes={}", changes.len()));
@@ -2569,14 +2691,18 @@ impl Workspace {
 
   fn publish_collaboration_source(&mut self, source: Option<CollabDocument>, label: &str, application: Option<UpdateApplication>) {
     let Some(source) = source else {
+      let msg = format!("Failed to build {label} collaboration source from edited document.");
+      collab_diagnostic("COLLAB_LAST_ERROR", &msg);
       self
         .collaboration
         .last_error
-        .replace(format!("Failed to build {label} collaboration source from edited document."));
+        .replace(msg);
       return;
     };
     if Some(source.document_id()) != self.collaboration.document_id || Some(source.format_kind()) != self.collaboration.format_kind {
-      self.collaboration.last_error = Some(format!("{label} edit does not belong to the active collaboration document."));
+      let msg = format!("{label} edit does not belong to the active collaboration document.");
+      collab_diagnostic("COLLAB_LAST_ERROR", &msg);
+      self.collaboration.last_error = Some(msg);
       return;
     }
     if let Some(sender) = &self.collaboration_client_updates {
@@ -2588,15 +2714,16 @@ impl Workspace {
             self.queue_pending_collaboration_update(source, label, application);
           },
           update @ PendingCollaborationUpdate::GranularMutations { .. } => {
-            let dropped_oldest = push_bounded_pending_collaboration_update(
-              &mut self.collaboration_pending_updates,
-              update,
-              Self::MAX_PENDING_COLLABORATION_UPDATES,
-            );
-            if dropped_oldest {
-              let message = format!("{label} collaboration update queue is full; dropped the oldest pending granular mutation batch.");
-              self.collaboration.last_error.replace(message);
-            }
+              let dropped_oldest = push_bounded_pending_collaboration_update(
+                &mut self.collaboration_pending_updates,
+                update,
+                Self::MAX_PENDING_COLLABORATION_UPDATES,
+              );
+              if dropped_oldest {
+                let message = format!("{label} collaboration update queue is full; dropped the oldest pending granular mutation batch.");
+                collab_diagnostic("COLLAB_LAST_ERROR", &message);
+                self.collaboration.last_error.replace(message);
+              }
           },
           PendingCollaborationUpdate::Presence { .. } => {},
         }
@@ -2607,6 +2734,7 @@ impl Workspace {
     }
     if let Some(host) = self.collaboration_host.as_ref() {
       if let Err(error) = host.publish_update_from_source(&source, application) {
+        collab_diagnostic("COLLAB_LAST_ERROR", &format!("{error:#}"));
         self.collaboration.last_error = Some(format!("{error:#}"));
       } else {
         self.collaboration_delta_updates_since_checkpoint = 0;
@@ -2765,6 +2893,7 @@ impl Workspace {
   }
 }
 
+#[derive(Clone)]
 enum PendingCollaborationUpdate {
   Source {
     source: CollabDocument,
@@ -2920,6 +3049,53 @@ fn push_bounded_pending_collaboration_update(
   dropped_oldest
 }
 
+fn valid_remote_runs(text: &str, runs: &[flowstate_document::TextRun]) -> bool {
+  if text.is_empty() {
+    return runs.is_empty();
+  }
+  let mut offset = 0usize;
+  for run in runs {
+    if run.len == 0 {
+      return false;
+    }
+    let Some(end) = offset.checked_add(run.len) else { return false; };
+    if end > text.len() || !text.is_char_boundary(offset) || !text.is_char_boundary(end) {
+      return false;
+    }
+    offset = end;
+  }
+  offset == text.len()
+}
+
+fn collaboration_error_is_retryable(error: &anyhow::Error) -> bool {
+  let detail = format!("{error:#}").to_ascii_lowercase();
+  !detail.contains("collab_mutation_")
+    && (detail.contains("transport")
+      || detail.contains("connection")
+      || detail.contains("timed out")
+      || detail.contains("temporarily unavailable")
+      || detail.contains("closed"))
+}
+
+fn collaboration_error_code(error: &anyhow::Error) -> &'static str {
+  let detail = format!("{error:#}");
+  if detail.contains("COLLAB_MUTATION_INVALID_INPUT") {
+    "COLLAB_MUTATION_INVALID_INPUT"
+  } else if detail.contains("COLLAB_MUTATION_STATE_DIVERGENCE") {
+    "COLLAB_MUTATION_STATE_DIVERGENCE"
+  } else if detail.contains("COLLAB_MUTATION_SCHEMA_FAILURE") {
+    "COLLAB_MUTATION_SCHEMA_FAILURE"
+  } else if collaboration_error_is_retryable(error) {
+    "COLLAB_RETRYABLE_TRANSPORT_FAILURE"
+  } else {
+    "COLLAB_NONRETRYABLE_SYNC_FAILURE"
+  }
+}
+
+fn collab_diagnostic(code: &str, detail: &str) {
+  eprintln!("[FLOWSTATE_COLLAB_DIAGNOSTIC code={code}] {detail}");
+}
+
 fn collab_canary_enabled() -> bool {
   std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some()
 }
@@ -2942,6 +3118,7 @@ fn db8_mutation_label(mutation: &Db8CollabSourceMutation) -> &'static str {
   match mutation {
     Db8CollabSourceMutation::InsertText { .. } => "insert_text",
     Db8CollabSourceMutation::DeleteText { .. } => "delete_text",
+    Db8CollabSourceMutation::DeleteTextToEnd { .. } => "delete_text_to_end",
     Db8CollabSourceMutation::MarkText { .. } => "mark_text",
     Db8CollabSourceMutation::UnmarkText { .. } => "unmark_text",
     Db8CollabSourceMutation::SetTextMetadata { .. } => "set_text_metadata",
@@ -2999,6 +3176,10 @@ fn db8_source_mutation_to_granular_interned(
       text_id: intern_string(text_ids, text_id),
       byte_offset: *byte_offset,
       byte_len: *byte_len,
+    },
+    Db8CollabSourceMutation::DeleteTextToEnd { text_id, byte_offset } => GranularSourceMutation::DeleteTextToEnd {
+      text_id: intern_string(text_ids, text_id),
+      byte_offset: *byte_offset,
     },
     Db8CollabSourceMutation::MarkText { text_id, range, key, value } => GranularSourceMutation::MarkText {
       text_id: intern_string(text_ids, text_id),

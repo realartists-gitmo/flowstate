@@ -557,6 +557,10 @@ pub enum Db8CollabSourceMutation {
     byte_offset: usize,
     byte_len: usize,
   },
+  DeleteTextToEnd {
+    text_id: String,
+    byte_offset: usize,
+  },
   MarkText {
     text_id: String,
     range: Range<usize>,
@@ -642,10 +646,9 @@ impl Db8CollabAdapter {
         // Cross-paragraph delete: trim both endpoints.
         // Intermediate paragraphs must be removed separately by canonical_operations_for_content_replacement
         // which generates proper paragraph removals when the document structure changes.
-        result.mutations.push(Db8CollabSourceMutation::DeleteText {
+        result.mutations.push(Db8CollabSourceMutation::DeleteTextToEnd {
           text_id: granular_record_id_u128(start_paragraph.0),
           byte_offset: *start_byte,
-          byte_len: usize::MAX,
         });
         result.mutations.push(Db8CollabSourceMutation::DeleteText {
           text_id: granular_record_id_u128(end_paragraph.0),
@@ -831,20 +834,50 @@ impl Db8CollabAdapter {
   }
 
   fn adapt_run_diffs(result: &mut Db8CollabAdapterResult, text_id: String, before: &super::Paragraph, after: &super::Paragraph) {
-    let mut offset = 0usize;
-    for (before_run, after_run) in before.runs.iter().zip(&after.runs) {
-      let range = offset..offset + before_run.len.min(after_run.len);
-      Self::push_style_mark_mutations(result, text_id.clone(), range.clone(), before_run.styles, after_run.styles);
-      offset += before_run.len.min(after_run.len);
+    let before_len: usize = before.runs.iter().map(|run| run.len).sum();
+    let after_len: usize = after.runs.iter().map(|run| run.len).sum();
+    let text_len = before_len.min(after_len);
+    if text_len == 0 {
+      return;
     }
-    if before.runs.len() != after.runs.len() {
-      let remaining_offset = offset;
-      for run in &after.runs[before.runs.len().min(after.runs.len())..] {
-        let range = remaining_offset..remaining_offset + run.len;
-        Self::push_exact_style_set_mutations(result, text_id.clone(), range, run.styles);
+
+    let mut boundaries = vec![0, text_len];
+    let mut offset = 0usize;
+    for run in &before.runs {
+      offset = (offset + run.len).min(text_len);
+      boundaries.push(offset);
+    }
+    offset = 0;
+    for run in &after.runs {
+      offset = (offset + run.len).min(text_len);
+      boundaries.push(offset);
+    }
+    boundaries.sort_unstable();
+    boundaries.dedup();
+
+    for pair in boundaries.windows(2) {
+      let start = pair[0];
+      let end = pair[1];
+      if start == end {
+        continue;
       }
+      let before_styles = styles_at_offset(&before.runs, start);
+      let after_styles = styles_at_offset(&after.runs, start);
+      Self::push_style_mark_mutations(result, text_id.clone(), start..end, before_styles, after_styles);
     }
   }
+}
+
+fn styles_at_offset(runs: &[super::TextRun], offset: usize) -> RunStyles {
+  let mut cursor = 0usize;
+  for run in runs {
+    let end = cursor + run.len;
+    if offset < end {
+      return run.styles;
+    }
+    cursor = end;
+  }
+  RunStyles::default()
 }
 
 fn semantic_mark_value(style: RunSemanticStyle) -> Option<Db8GranularValue> {
