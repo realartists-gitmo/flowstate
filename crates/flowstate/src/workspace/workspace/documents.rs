@@ -3402,9 +3402,14 @@ fn db8_source_mutation_to_granular_interned(
     Db8CollabSourceMutation::ClearTextMetadata { text_id } => GranularSourceMutation::ClearTextMetadata {
       text_id: intern_string(text_ids, text_id),
     },
-    Db8CollabSourceMutation::InsertParagraph { text_id, after_text_id } => GranularSourceMutation::InsertParagraph {
+    Db8CollabSourceMutation::InsertParagraph {
+      text_id,
+      after_text_id,
+      split_byte,
+    } => GranularSourceMutation::InsertParagraph {
       text_id: intern_string(text_ids, text_id),
       after_text_id: after_text_id.as_ref().map(|id| intern_string(text_ids, id)),
+      split_byte: *split_byte,
     },
     Db8CollabSourceMutation::RemoveParagraph { text_id } => GranularSourceMutation::RemoveParagraph {
       text_id: intern_string(text_ids, text_id),

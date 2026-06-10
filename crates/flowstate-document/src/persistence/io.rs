@@ -621,11 +621,36 @@ fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Docu
     .into_iter()
     .map(ParagraphId)
     .collect::<Vec<_>>();
-  let block_ids = db8_order_u128(source, DB8_BLOCK_ORDER)?
+  let base_paragraph_only = document.blocks.iter().all(|block| matches!(block, Block::Paragraph(_)));
+  let base_block_by_paragraph = if base_paragraph_only
+    && document.ids.paragraph_ids.len() == document.ids.block_ids.len()
+  {
+    document
+      .ids
+      .paragraph_ids
+      .iter()
+      .copied()
+      .zip(document.ids.block_ids.iter().copied())
+      .collect::<std::collections::HashMap<_, _>>()
+  } else {
+    std::collections::HashMap::new()
+  };
+  let mut block_ids = db8_order_u128(source, DB8_BLOCK_ORDER)?
     .unwrap_or_else(|| document.ids.block_ids.iter().map(|id| id.0).collect())
     .into_iter()
     .map(BlockId)
     .collect::<Vec<_>>();
+  if base_paragraph_only {
+    block_ids = paragraph_ids
+      .iter()
+      .map(|paragraph_id| {
+        base_block_by_paragraph
+          .get(paragraph_id)
+          .copied()
+          .unwrap_or(BlockId(paragraph_id.0))
+      })
+      .collect();
+  }
   let records = db8_paragraph_records(source)?;
   let base_paragraphs = document
     .ids
@@ -675,8 +700,12 @@ fn document_from_db8_granular_source(source: &GranularSource) -> io::Result<Docu
   document.ids.paragraph_ids = paragraph_ids;
   document.ids.block_ids = block_ids.clone();
   rebuild_document_offset_index(&mut document);
-  let block_records = db8_block_records(source)?;
-  document.blocks = Arc::new(db8_materialize_blocks(&document, &block_ids, &block_records)?);
+  if base_paragraph_only {
+    document.blocks = Arc::new(document.paragraphs.iter().cloned().map(Block::Paragraph).collect());
+  } else {
+    let block_records = db8_block_records(source)?;
+    document.blocks = Arc::new(db8_materialize_blocks(&document, &block_ids, &block_records)?);
+  }
   rebuild_document_sections(&mut document);
   validate_document(&document)?;
   Ok(document)

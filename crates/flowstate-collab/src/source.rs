@@ -195,6 +195,7 @@ pub enum GranularSourceMutation {
   InsertParagraph {
     text_id: String,
     after_text_id: Option<String>,
+    split_byte: Option<usize>,
   },
   RemoveParagraph {
     text_id: String,
@@ -784,7 +785,11 @@ impl CollabDocument {
     let mut normalized = Vec::with_capacity(mutations.len());
     for (index, mutation) in mutations.iter().enumerate() {
       match mutation {
-        GranularSourceMutation::InsertParagraph { text_id, after_text_id } => {
+        GranularSourceMutation::InsertParagraph {
+          text_id,
+          after_text_id,
+          split_byte,
+        } => {
           if shadow.get(text_id).is_some_and(|paragraph| paragraph.exists) {
             return Err(mutation_validation_error(index, mutation, "paragraph already exists"));
           }
@@ -795,8 +800,23 @@ impl CollabDocument {
           } else {
             shadow_order.len()
           };
+          let new_text = if let Some(split_byte) = split_byte {
+            let after = after_text_id
+              .as_ref()
+              .ok_or_else(|| mutation_validation_error(index, mutation, "split paragraph requires an anchor"))?;
+            let paragraph = shadow
+              .get_mut(after)
+              .filter(|paragraph| paragraph.exists)
+              .ok_or_else(|| mutation_validation_error(index, mutation, "split source paragraph does not exist"))?;
+            if *split_byte > paragraph.text.len() || !paragraph.text.is_char_boundary(*split_byte) {
+              return Err(mutation_validation_error(index, mutation, "split offset is outside current UTF-8 text"));
+            }
+            paragraph.text.split_off(*split_byte)
+          } else {
+            String::new()
+          };
           shadow_order.insert(position, text_id.clone());
-          shadow.insert(text_id.clone(), ShadowParagraph { text: String::new(), exists: true });
+          shadow.insert(text_id.clone(), ShadowParagraph { text: new_text, exists: true });
           normalized.push(mutation.clone());
         },
         GranularSourceMutation::RemoveParagraph { text_id } => {
@@ -981,7 +1001,11 @@ impl CollabDocument {
           .delete(KEY_RECORD_METADATA)
           .map_err(|error| CollabError::Loro(error.to_string()))?;
       },
-      GranularSourceMutation::InsertParagraph { text_id, after_text_id } => {
+      GranularSourceMutation::InsertParagraph {
+        text_id,
+        after_text_id,
+        split_byte,
+      } => {
         let order_list = paragraphs_order_list(&self.doc)?;
         let values = order_list.to_vec();
         let (position, inherited_metadata) = if let Some(after) = after_text_id {
@@ -1002,7 +1026,51 @@ impl CollabDocument {
         if inherited_metadata.is_empty() {
           return Err(CollabError::InvalidSchema("paragraph metadata is empty"));
         }
+
+        let (split_source, suffix, suffix_marks) = if let Some(split_byte) = split_byte {
+          let source_id = after_text_id
+            .as_ref()
+            .ok_or(CollabError::InvalidSchema("split paragraph requires an anchor"))?;
+          let source = self.cached_granular_text_container(text_cache, source_id)?;
+          let source_text = source.to_string();
+          validate_utf8_offset(&source_text, *split_byte)?;
+          let suffix = source_text[*split_byte..].to_string();
+          let suffix_marks = text_marks(&source)
+            .into_iter()
+            .filter_map(|mark| {
+              let start = mark.start_utf8.max(*split_byte);
+              let end = mark.end_utf8.min(source_text.len());
+              (start < end).then(|| GranularTextMark {
+                start_utf8: start - *split_byte,
+                end_utf8: end - *split_byte,
+                key: mark.key,
+                value: mark.value,
+              })
+            })
+            .collect::<Vec<_>>();
+          (Some((source, source_text.len() - *split_byte, *split_byte)), suffix, suffix_marks)
+        } else {
+          (None, String::new(), Vec::new())
+        };
+
         let text_container = create_empty_granular_text_record(&self.doc, text_id, &inherited_metadata)?;
+        if !suffix.is_empty() {
+          text_container
+            .insert_utf8(0, &suffix)
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
+        for mark in suffix_marks {
+          text_container
+            .mark_utf8(mark.start_utf8..mark.end_utf8, &mark.key, mark.value.into_loro())
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
+        if let Some((source, delete_len, split_byte)) = split_source
+          && delete_len > 0
+        {
+          source
+            .delete_utf8(split_byte, delete_len)
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
         text_cache.insert(text_id.clone(), text_container);
         order_list
           .insert(position, text_id.as_str())
