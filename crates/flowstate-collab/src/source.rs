@@ -200,6 +200,10 @@ pub enum GranularSourceMutation {
   RemoveParagraph {
     text_id: String,
   },
+  JoinParagraphs {
+    first_text_id: String,
+    second_text_id: String,
+  },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -830,6 +834,43 @@ impl CollabDocument {
           shadow_order.retain(|id| id != text_id);
           normalized.push(mutation.clone());
         },
+        GranularSourceMutation::JoinParagraphs {
+          first_text_id,
+          second_text_id,
+        } => {
+          if first_text_id == second_text_id {
+            return Err(mutation_validation_error(index, mutation, "join paragraphs must be distinct"));
+          }
+          let first_position = shadow_order
+            .iter()
+            .position(|id| id == first_text_id)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "first join paragraph is not ordered"))?;
+          let second_position = shadow_order
+            .iter()
+            .position(|id| id == second_text_id)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "second join paragraph is not ordered"))?;
+          if second_position != first_position + 1 {
+            return Err(mutation_validation_error(index, mutation, "join paragraphs are not adjacent"));
+          }
+          let second_text = shadow
+            .get(second_text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "second join paragraph does not exist"))?
+            .text
+            .clone();
+          shadow
+            .get_mut(first_text_id)
+            .filter(|paragraph| paragraph.exists)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "first join paragraph does not exist"))?
+            .text
+            .push_str(&second_text);
+          shadow
+            .get_mut(second_text_id)
+            .ok_or_else(|| mutation_validation_error(index, mutation, "second join paragraph does not exist"))?
+            .exists = false;
+          shadow_order.remove(second_position);
+          normalized.push(mutation.clone());
+        },
         GranularSourceMutation::InsertText { text_id, byte_offset, text } => {
           let paragraph = shadow.get_mut(text_id)
             .filter(|paragraph| paragraph.exists)
@@ -1089,6 +1130,53 @@ impl CollabDocument {
           .delete(text_id.as_str())
           .map_err(|error| CollabError::Loro(error.to_string()))?;
       },
+      GranularSourceMutation::JoinParagraphs {
+        first_text_id,
+        second_text_id,
+      } => {
+        let order_list = paragraphs_order_list(&self.doc)?;
+        let values = order_list.to_vec();
+        let first_position = values
+          .iter()
+          .position(|value| value.as_string().is_some_and(|id| id.as_str() == first_text_id.as_str()))
+          .ok_or(CollabError::InvalidSchema("first join paragraph is not ordered"))?;
+        let second_position = values
+          .iter()
+          .position(|value| value.as_string().is_some_and(|id| id.as_str() == second_text_id.as_str()))
+          .ok_or(CollabError::InvalidSchema("second join paragraph is not ordered"))?;
+        if second_position != first_position + 1 {
+          return Err(CollabError::InvalidSchema("join paragraphs are not adjacent"));
+        }
+
+        let first = self.cached_granular_text_container(text_cache, first_text_id)?;
+        let second = self.cached_granular_text_container(text_cache, second_text_id)?;
+        let first_len = first.to_string().len();
+        let second_text = second.to_string();
+        let second_marks = text_marks(&second);
+
+        if !second_text.is_empty() {
+          first
+            .insert_utf8(first_len, &second_text)
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
+        for mark in second_marks {
+          first
+            .mark_utf8(
+              first_len + mark.start_utf8..first_len + mark.end_utf8,
+              &mark.key,
+              mark.value.into_loro(),
+            )
+            .map_err(|error| CollabError::Loro(error.to_string()))?;
+        }
+
+        order_list
+          .delete(second_position, 1)
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+        text_cache.remove(second_text_id);
+        granular_texts_map(&self.doc)?
+          .delete(second_text_id.as_str())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
+      },
     }
     Ok(())
   }
@@ -1316,6 +1404,7 @@ fn granular_mutation_kind(mutation: &GranularSourceMutation) -> &'static str {
     GranularSourceMutation::ClearTextMetadata { .. } => "clear_text_metadata",
     GranularSourceMutation::InsertParagraph { .. } => "insert_paragraph",
     GranularSourceMutation::RemoveParagraph { .. } => "remove_paragraph",
+    GranularSourceMutation::JoinParagraphs { .. } => "join_paragraphs",
   }
 }
 

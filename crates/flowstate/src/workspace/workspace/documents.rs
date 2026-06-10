@@ -3328,6 +3328,7 @@ fn db8_mutation_label(mutation: &Db8CollabSourceMutation) -> &'static str {
     Db8CollabSourceMutation::ClearTextMetadata { .. } => "clear_text_metadata",
     Db8CollabSourceMutation::InsertParagraph { .. } => "insert_paragraph",
     Db8CollabSourceMutation::RemoveParagraph { .. } => "remove_paragraph",
+    Db8CollabSourceMutation::JoinParagraphs { .. } => "join_paragraphs",
   }
 }
 
@@ -3413,6 +3414,13 @@ fn db8_source_mutation_to_granular_interned(
     },
     Db8CollabSourceMutation::RemoveParagraph { text_id } => GranularSourceMutation::RemoveParagraph {
       text_id: intern_string(text_ids, text_id),
+    },
+    Db8CollabSourceMutation::JoinParagraphs {
+      first_text_id,
+      second_text_id,
+    } => GranularSourceMutation::JoinParagraphs {
+      first_text_id: intern_string(text_ids, first_text_id),
+      second_text_id: intern_string(text_ids, second_text_id),
     },
   }
 }

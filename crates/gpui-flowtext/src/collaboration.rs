@@ -587,6 +587,10 @@ pub enum Db8CollabSourceMutation {
   RemoveParagraph {
     text_id: String,
   },
+  JoinParagraphs {
+    first_text_id: String,
+    second_text_id: String,
+  },
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -695,14 +699,13 @@ impl Db8CollabAdapter {
             split_byte: Some(*byte),
           });
       },
-      CanonicalOperation::JoinParagraphs { second, .. } => {
-        // RemoveParagraph removes the second paragraph container.
-        // Text and style transfers are handled by the edit pipeline which generates
-        // InsertText + RemoveParagraph sequences through canonical_operations_for_content_replacement.
+      CanonicalOperation::JoinParagraphs { first, second } => {
+        // Merge text, marks, and structure in one authority transaction.
         result
           .mutations
-          .push(Db8CollabSourceMutation::RemoveParagraph {
-            text_id: granular_record_id_u128(second.0),
+          .push(Db8CollabSourceMutation::JoinParagraphs {
+            first_text_id: granular_record_id_u128(first.0),
+            second_text_id: granular_record_id_u128(second.0),
           });
       },
       CanonicalOperation::InsertBlock { .. }

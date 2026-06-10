@@ -512,21 +512,24 @@ impl RichTextEditor {
     let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
       return false;
     };
-    if paragraph_ix > 0 {
+    let removed = if paragraph_ix > 0 {
       let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix - 1]);
       delete_cross_paragraph_range(
         &mut self.document,
         crate::DocumentOffset { paragraph: paragraph_ix - 1, byte }
           ..crate::DocumentOffset { paragraph: paragraph_ix, byte: 0 },
-      );
+      )
     } else if paragraph_ix + 1 < self.document.paragraphs.len() {
       let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
       delete_cross_paragraph_range(
         &mut self.document,
         crate::DocumentOffset { paragraph: paragraph_ix, byte }
           ..crate::DocumentOffset { paragraph: paragraph_ix + 1, byte: 0 },
-      );
+      )
     } else {
+      return false;
+    };
+    if !removed {
       return false;
     }
     self.identity_map.reconcile(&self.document);
