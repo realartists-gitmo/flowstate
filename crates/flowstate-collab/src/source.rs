@@ -982,23 +982,31 @@ impl CollabDocument {
           .map_err(|error| CollabError::Loro(error.to_string()))?;
       },
       GranularSourceMutation::InsertParagraph { text_id, after_text_id } => {
-        let text_container = create_empty_granular_text_record(&self.doc, text_id)?;
-        text_cache.insert(text_id.clone(), text_container);
         let order_list = paragraphs_order_list(&self.doc)?;
         let values = order_list.to_vec();
-        if let Some(after) = after_text_id {
+        let (position, inherited_metadata) = if let Some(after) = after_text_id {
           let pos = values
             .iter()
             .position(|v| v.as_string().is_some_and(|s| s.as_str() == after.as_str()))
             .ok_or(CollabError::InvalidSchema("insert after unknown paragraph"))?;
-          order_list
-            .insert(pos + 1, text_id.as_str())
-            .map_err(|error| CollabError::Loro(error.to_string()))?;
+          (pos + 1, granular_text_metadata(&self.doc, after)?)
         } else {
-          order_list
-            .push(text_id.as_str())
-            .map_err(|error| CollabError::Loro(error.to_string()))?;
+          let inherited = values
+            .last()
+            .and_then(LoroValue::as_string)
+            .map(|text_id| granular_text_metadata(&self.doc, text_id.as_str()))
+            .transpose()?
+            .ok_or(CollabError::InvalidSchema("paragraph insertion has no metadata source"))?;
+          (values.len(), inherited)
+        };
+        if inherited_metadata.is_empty() {
+          return Err(CollabError::InvalidSchema("paragraph metadata is empty"));
         }
+        let text_container = create_empty_granular_text_record(&self.doc, text_id, &inherited_metadata)?;
+        text_cache.insert(text_id.clone(), text_container);
+        order_list
+          .insert(position, text_id.as_str())
+          .map_err(|error| CollabError::Loro(error.to_string()))?;
       },
       GranularSourceMutation::RemoveParagraph { text_id } => {
         let order_list = paragraphs_order_list(&self.doc)?;
@@ -1689,7 +1697,19 @@ fn write_granular_texts(root: &LoroMap, texts: &[GranularTextRecord]) -> CollabR
   Ok(())
 }
 
-fn create_empty_granular_text_record(doc: &LoroDoc, text_id: &str) -> CollabResult<LoroText> {
+fn granular_text_metadata(doc: &LoroDoc, text_id: &str) -> CollabResult<Vec<u8>> {
+  match granular_text_record_map(doc, text_id)?.get(KEY_RECORD_METADATA) {
+    Some(ValueOrContainer::Value(LoroValue::Binary(metadata))) => Ok(metadata.to_vec()),
+    Some(_) => Err(CollabError::InvalidSchema("paragraph metadata")),
+    None => Err(CollabError::MissingRootValue(KEY_RECORD_METADATA)),
+  }
+}
+
+fn create_empty_granular_text_record(
+  doc: &LoroDoc,
+  text_id: &str,
+  metadata: &[u8],
+) -> CollabResult<LoroText> {
   let text_map = granular_texts_map(doc)?;
   if text_map.get(text_id).is_some() {
     return Err(CollabError::Loro(
@@ -1700,7 +1720,7 @@ fn create_empty_granular_text_record(doc: &LoroDoc, text_id: &str) -> CollabResu
     .insert_container(text_id, LoroMap::new())
     .map_err(|error| CollabError::Loro(error.to_string()))?;
   record_map
-    .insert(KEY_RECORD_METADATA, &[] as &[u8])
+    .insert(KEY_RECORD_METADATA, metadata)
     .map_err(|error| CollabError::Loro(error.to_string()))?;
   record_map
     .insert_container(KEY_RECORD_TEXT, LoroText::new())
