@@ -537,12 +537,22 @@ impl RichTextEditor {
     for operation in record.operations.iter().rev() {
       match operation {
         EditOperation::ReplaceParagraphSpan { before, after } => {
-          self.append_style_restore_operations(&mut operations, before, after)?;
+          // History restore has already captured both exact paragraph states.
+          // For non-structural edits, derive the inverse CRDT transaction from
+          // the current (after) span back to the restored (before) span. The
+          // previous implementation only restored styles when text was equal,
+          // so undoing deletions/replacements fell through to ReplaceDocument,
+          // which intentionally produces no granular collaboration mutations.
+          if before.paragraphs.len() != after.paragraphs.len() {
+            return None;
+          }
+          let mut inverse = self.canonical_operations_for_content_replacement(after, before)?;
+          operations.append(&mut inverse);
         },
         _ => return None,
       }
     }
-    Some(operations)
+    (!operations.is_empty()).then_some(operations)
   }
 
   fn append_style_restore_operations(
@@ -652,6 +662,11 @@ fn paragraph_text_from_span(span: &DocumentSpan, paragraph_ix: usize) -> Option<
       return span.text.get(byte..byte + len).map(str::to_string);
     }
     byte = byte.checked_add(len)?;
+    // DocumentSpan::text preserves the document's newline separator between
+    // captured paragraphs. Skip that separator before slicing the next
+    // paragraph. Omitting it shifted every non-first paragraph one byte left,
+    // causing collaboration deletions to target the character to the right.
+    byte = byte.checked_add(1)?;
   }
   None
 }
@@ -671,6 +686,41 @@ fn collaboration_text_window(text: &str, start: usize, end: usize) -> String {
 #[cfg(test)]
 mod edit_pipeline_tests {
   use super::*;
+
+  #[test]
+  fn paragraph_text_from_span_skips_inter_paragraph_separators() {
+    let document = document_from_input(
+      DocumentTheme::default(),
+      vec![
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "before".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "Africa War".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+        InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "after".to_string(),
+            styles: RunStyles::default(),
+          }],
+        },
+      ],
+    );
+    let span = capture_document_span(&document, 0..3);
+
+    assert_eq!(paragraph_text_from_span(&span, 0).as_deref(), Some("before"));
+    assert_eq!(paragraph_text_from_span(&span, 1).as_deref(), Some("Africa War"));
+    assert_eq!(paragraph_text_from_span(&span, 2).as_deref(), Some("after"));
+  }
 
   #[test]
   fn undo_collaboration_edit_inverts_representable_history_operations() {

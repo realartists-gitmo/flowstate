@@ -63,35 +63,8 @@ pub fn capture_document_span(document: &Document, range: Range<usize>) -> Docume
   let start = range.start.min(document.paragraphs.len());
   let end = range.end.min(document.paragraphs.len()).max(start);
   let text = if start < end {
-    let mut byte_range = paragraph_span_byte_range(document, start, end - start);
-    let expected_len = document.paragraphs[start..end]
-      .iter()
-      .map(paragraph_text_len)
-      .sum::<usize>()
-      .saturating_add(end.saturating_sub(start + 1));
-    let captured = document_text_slice(document, byte_range.clone());
-
-    // Some loaded DB8 documents carry one leading sentinel byte before the
-    // first paragraph while the paragraph offset index is built from logical
-    // paragraph widths. In that state every indexed paragraph range is shifted
-    // one byte left: capture starts with the preceding newline and drops the
-    // paragraph's final byte. Collaboration diffs then emit every deletion at
-    // `intended_offset + 1`.
-    //
-    // Detect that precise invariant violation and shift the whole contiguous
-    // span right by one byte. Do not trim the captured string: extending the
-    // end is required to recover the byte that the stale range omitted.
-    if captured.len() == expected_len
-      && captured.starts_with('\n')
-      && paragraph_text_len(&document.paragraphs[start]) > 0
-      && byte_range.end < document.text.byte_len()
-    {
-      byte_range.start += 1;
-      byte_range.end += 1;
-      document_text_slice(document, byte_range)
-    } else {
-      captured
-    }
+    let byte_range = paragraph_span_byte_range(document, start, end - start);
+    document_text_slice(document, byte_range)
   } else {
     String::new()
   };
