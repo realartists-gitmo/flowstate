@@ -607,39 +607,42 @@ impl RichTextEditor {
       return false;
     }
 
-    let old_first_len = crate::paragraph_text_len(&self.document.paragraphs[first_ix]);
-    if old_first_len > 0 && !delete_range_in_paragraph(&mut self.document, first_ix, 0..old_first_len) {
+    let first_range = paragraph_byte_range(&self.document, first_ix);
+    let second_range = paragraph_byte_range(&self.document, second_ix);
+    if first_range.start > first_range.end || first_range.end > second_range.start || second_range.start > second_range.end {
       return false;
     }
-    if !merged_text.is_empty() && !insert_text_at(&mut self.document, first_ix, 0, merged_text, RunStyles::default()) {
-      return false;
-    }
-    let Some(first_paragraph) = paragraphs_mut(&mut self.document).get_mut(first_ix) else {
-      return false;
-    };
-    first_paragraph.runs = runs;
-    bump_paragraph_version(first_paragraph);
-    update_paragraph_block(&mut self.document, first_ix);
 
-    let merged_len = crate::paragraph_text_len(&self.document.paragraphs[first_ix]);
-    let second_len = crate::paragraph_text_len(&self.document.paragraphs[second_ix]);
-    let removed = delete_cross_paragraph_range(
-      &mut self.document,
-      crate::DocumentOffset {
-        paragraph: first_ix,
-        byte: merged_len,
-      }..crate::DocumentOffset {
-        paragraph: second_ix,
-        byte: second_len,
-      },
-    );
-    if !removed {
-      return false;
+    // Replace the authoritative two-paragraph span directly. The deleted span
+    // includes the newline between the joined paragraphs and excludes the
+    // newline after the second paragraph, so following paragraphs remain
+    // separated correctly.
+    self.document.text.delete(first_range.start..second_range.end);
+    if !merged_text.is_empty() {
+      self.document.text.insert(first_range.start, merged_text);
     }
+
+    let replacement = {
+      let paragraphs = paragraphs_mut(&mut self.document);
+      {
+        let Some(first_paragraph) = paragraphs.get_mut(first_ix) else {
+          return false;
+        };
+        first_paragraph.byte_range = first_range.start..first_range.start + merged_text.len();
+        first_paragraph.runs = runs;
+        bump_paragraph_version(first_paragraph);
+      }
+      let replacement = paragraphs[first_ix].clone();
+      paragraphs.drain(second_ix..second_ix + 1);
+      replacement
+    };
+
+    remove_paragraph_ids(&mut self.document, second_ix..second_ix + 1);
+    replace_paragraph_blocks(&mut self.document, first_ix, 2, &[replacement]);
+    rebuild_document_offset_index(&mut self.document);
     self.finish_remote_projection_change(true, cx);
     true
   }
-
   /// Remove a paragraph after its predecessor has already been replaced with
   /// authoritative merged CRDT text. This deletes the paragraph break and the
   /// removed paragraph's local text instead of appending that local text again.
