@@ -540,6 +540,11 @@ impl Workspace {
                       update = update_rx.recv() => {
                         match update {
                           Some(update) => {
+                            // Collect one UI frame of adjacent edits before
+                            // preparing a CRDT transaction. This keeps typing
+                            // responsive while avoiding one network round trip
+                            // and one schema validation per key.
+                            tokio::time::sleep(Duration::from_millis(8)).await;
                             let updates = collect_outbound_update_batch(update, &mut update_rx);
                             for update in updates {
                               if collab_canary_enabled() {
@@ -2168,8 +2173,13 @@ impl Workspace {
   ) {
     cx.spawn(async move |workspace, cx| {
       while let Some(first_update) = update_rx.recv().await {
+        cx.background_executor().timer(Duration::from_millis(8)).await;
         let updates = collect_outbound_update_batch(first_update, &mut update_rx);
-        let result = publish_outbound_update_batch_to_host_publisher(&publisher, &updates);
+        let publisher = publisher.clone();
+        let result = cx
+          .background_executor()
+          .spawn(async move { publish_outbound_update_batch_to_host_publisher(&publisher, &updates) })
+          .await;
         let _ = window_handle.update(cx, |_, _, cx| {
           let _ = workspace.update(cx, |workspace, cx| {
             if workspace.collaboration.panel_id == Some(panel_id) {
@@ -2971,6 +2981,13 @@ fn coalesce_pending_collaboration_update(
   queue: &mut VecDeque<PendingCollaborationUpdate>,
   update: &mut Option<PendingCollaborationUpdate>,
 ) -> bool {
+  if let Some(PendingCollaborationUpdate::Presence { cursor }) = update.as_ref()
+    && let Some(PendingCollaborationUpdate::Presence { cursor: pending_cursor }) =
+      queue.iter_mut().rev().find(|entry| matches!(entry, PendingCollaborationUpdate::Presence { .. }))
+  {
+    pending_cursor.clone_from(cursor);
+    return true;
+  }
   let Some(PendingCollaborationUpdate::GranularMutations { mutations, application }) = update.as_mut() else {
     return false;
   };
@@ -2985,6 +3002,7 @@ fn coalesce_pending_collaboration_update(
     return false;
   }
   pending_mutations.append(mutations);
+  coalesce_granular_text_mutations(pending_mutations);
   true
 }
 
@@ -3002,6 +3020,7 @@ fn merge_outbound_collaboration_update(
     ) => {
       if merge_update_application(application, &next_application) {
         mutations.append(&mut next_mutations);
+        coalesce_granular_text_mutations(mutations);
         Ok(())
       } else {
         Err(PendingCollaborationUpdate::GranularMutations {
@@ -3010,8 +3029,71 @@ fn merge_outbound_collaboration_update(
         })
       }
     },
+    (PendingCollaborationUpdate::Presence { cursor }, PendingCollaborationUpdate::Presence { cursor: next_cursor }) => {
+      *cursor = next_cursor;
+      Ok(())
+    },
     (_, next) => Err(next),
   }
+}
+
+fn coalesce_granular_text_mutations(mutations: &mut Vec<GranularSourceMutation>) {
+  let mut compacted = Vec::with_capacity(mutations.len());
+  for mutation in mutations.drain(..) {
+    let merged = match (compacted.last_mut(), &mutation) {
+      (
+        Some(GranularSourceMutation::InsertText {
+          text_id,
+          byte_offset,
+          text,
+        }),
+        GranularSourceMutation::InsertText {
+          text_id: next_text_id,
+          byte_offset: next_byte_offset,
+          text: next_text,
+        },
+      ) if text_id == next_text_id && (*byte_offset).saturating_add(text.len()) == *next_byte_offset => {
+        text.push_str(next_text);
+        true
+      },
+      (
+        Some(GranularSourceMutation::DeleteText {
+          text_id,
+          byte_offset,
+          byte_len,
+        }),
+        GranularSourceMutation::DeleteText {
+          text_id: next_text_id,
+          byte_offset: next_byte_offset,
+          byte_len: next_byte_len,
+        },
+      ) if text_id == next_text_id && *byte_offset == *next_byte_offset => {
+        *byte_len = byte_len.saturating_add(*next_byte_len);
+        true
+      },
+      (
+        Some(GranularSourceMutation::DeleteText {
+          text_id,
+          byte_offset,
+          byte_len,
+        }),
+        GranularSourceMutation::DeleteText {
+          text_id: next_text_id,
+          byte_offset: next_byte_offset,
+          byte_len: next_byte_len,
+        },
+      ) if text_id == next_text_id && (*next_byte_offset).saturating_add(*next_byte_len) == *byte_offset => {
+        *byte_offset = *next_byte_offset;
+        *byte_len = byte_len.saturating_add(*next_byte_len);
+        true
+      },
+      _ => false,
+    };
+    if !merged {
+      compacted.push(mutation);
+    }
+  }
+  *mutations = compacted;
 }
 
 fn merge_update_application(current: &mut UpdateApplication, next: &UpdateApplication) -> bool {
@@ -3051,7 +3133,21 @@ fn collect_outbound_update_batch(
       }
     }
   }
-  updates
+
+  // Presence is ephemeral. Keep only the newest value and send it after all
+  // durable updates so cursor traffic cannot stall document convergence.
+  let mut durable = Vec::with_capacity(updates.len());
+  let mut latest_presence = None;
+  for update in updates {
+    match update {
+      PendingCollaborationUpdate::Presence { .. } => latest_presence = Some(update),
+      _ => durable.push(update),
+    }
+  }
+  if let Some(presence) = latest_presence {
+    durable.push(presence);
+  }
+  durable
 }
 
 fn publish_outbound_update_batch_to_host_publisher(

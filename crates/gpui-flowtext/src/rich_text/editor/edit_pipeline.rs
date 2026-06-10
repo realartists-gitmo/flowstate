@@ -223,17 +223,27 @@ impl RichTextEditor {
         let paragraph_id = before_ids[relative_ix];
         let before_text = paragraph_text_from_span(before_span, relative_ix)?;
         let after_text = paragraph_text_from_span(after_span, relative_ix)?;
-        Self::append_minimal_text_replacement(&mut operations, paragraph_id, &before_text, &after_text);
-
         let before_paragraph = before_span.paragraphs.get(relative_ix)?;
         let after_paragraph = after_span.paragraphs.get(relative_ix)?;
+        Self::append_minimal_text_replacement(
+          &mut operations,
+          paragraph_id,
+          &before_text,
+          &after_text,
+          &after_paragraph.runs,
+        );
         if before_paragraph.style != after_paragraph.style {
           operations.push(CanonicalOperation::SetParagraphStyle {
             paragraph: paragraph_id,
             style: after_paragraph.style,
           });
         }
-        if before_paragraph.runs != after_paragraph.runs || before_text != after_text {
+        // Text insertions carry their own style and Loro marks contract around
+        // deletions automatically. Replaying every run after every keystroke
+        // multiplied one edit into many mark/unmark mutations and dominated
+        // collaboration throughput. Full run replay is only needed for a
+        // style-only edit.
+        if before_text == after_text && before_paragraph.runs != after_paragraph.runs {
           Self::append_exact_run_style_operations(&mut operations, paragraph_id, &after_paragraph.runs);
         }
       }
@@ -277,14 +287,20 @@ impl RichTextEditor {
       if let Some(before_ix) = before_ids.iter().position(|id| *id == paragraph_id) {
         let before_text = paragraph_text_from_span(before_span, before_ix)?;
         let before_paragraph = before_span.paragraphs.get(before_ix)?;
-        Self::append_minimal_text_replacement(&mut operations, paragraph_id, &before_text, &after_text);
+        Self::append_minimal_text_replacement(
+          &mut operations,
+          paragraph_id,
+          &before_text,
+          &after_text,
+          &after_paragraph.runs,
+        );
         if before_paragraph.style != after_paragraph.style {
           operations.push(CanonicalOperation::SetParagraphStyle {
             paragraph: paragraph_id,
             style: after_paragraph.style,
           });
         }
-        if before_paragraph.runs != after_paragraph.runs || before_text != after_text {
+        if before_text == after_text && before_paragraph.runs != after_paragraph.runs {
           Self::append_exact_run_style_operations(&mut operations, paragraph_id, &after_paragraph.runs);
         }
       } else {
@@ -298,8 +314,8 @@ impl RichTextEditor {
           operations.push(CanonicalOperation::InsertText {
             paragraph: paragraph_id,
             byte: 0,
+            styles: run_style_at_byte(&after_paragraph.runs, 0),
             text: after_text,
-            styles: RunStyles::default(),
           });
         }
         operations.push(CanonicalOperation::SetParagraphStyle {
@@ -317,6 +333,7 @@ impl RichTextEditor {
     paragraph: ParagraphId,
     before_text: &str,
     after_text: &str,
+    after_runs: &[TextRun],
   ) {
     if before_text == after_text {
       return;
@@ -369,7 +386,7 @@ impl RichTextEditor {
         paragraph,
         byte: prefix,
         text: after_text[prefix..after_middle_end].to_string(),
-        styles: RunStyles::default(),
+        styles: run_style_at_byte(after_runs, prefix),
       });
     }
   }

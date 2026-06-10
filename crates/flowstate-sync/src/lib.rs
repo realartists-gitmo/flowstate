@@ -3188,13 +3188,20 @@ async fn serve_live_stream(
           continue;
         }
 
-        let outcome = {
-          state
+        // CRDT import performs schema validation and update decoding. Run it on
+        // Tokio's blocking pool so one busy document cannot starve transport
+        // reads/writes for every peer on the async runtime.
+        let import_state = state.clone();
+        let import_bytes = bytes.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+          import_state
             .document
             .lock()
-            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-            .import_update_checked(remote_role, &bytes)
-        };
+            .map_err(|_| flowstate_collab::CollabError::Loro("Flowstate document state lock is poisoned".to_string()))?
+            .import_update_checked(remote_role, &import_bytes)
+        })
+        .await
+        .map_err(|error| anyhow::anyhow!("Flowstate CRDT import worker failed: {error}"))?;
         let outcome = match outcome {
           Ok(outcome) => outcome,
           Err(error) => {
