@@ -2486,13 +2486,70 @@ impl Workspace {
                     ParagraphDiffEntry::ParagraphAdded { text_id, position, text, metadata, marks } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let new_paragraph_id = ParagraphId(id_u128);
-                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
+                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else {
+                        if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                          eprintln!(
+                            "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=metadata_decode text_id={text_id} position={position} text_len={} metadata_len={} result=false",
+                            text.len(),
+                            metadata.len(),
+                          );
+                        }
+                        return false;
+                      };
                       let runs = flowstate_document::db8_runs_from_marks(text.len(), marks);
-                      if !valid_remote_runs(text, &runs)
-                        || !editor.apply_remote_insert_paragraph(new_paragraph_id, *position, cx)
-                        || !editor.apply_remote_paragraph_state(new_paragraph_id, text, runs, cx)
-                        || !editor.apply_remote_paragraph_style(new_paragraph_id, style, cx)
-                      {
+                      let run_count = runs.len();
+                      let run_total = runs.iter().map(|run| run.len).sum::<usize>();
+                      let runs_valid = valid_remote_runs(text, &runs);
+                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                        eprintln!(
+                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=validate text_id={text_id} paragraph_id={} position={position} text_len={} marks={} runs={} run_total={} result={runs_valid}",
+                          new_paragraph_id.0,
+                          text.len(),
+                          marks.len(),
+                          run_count,
+                          run_total,
+                        );
+                      }
+                      if !runs_valid {
+                        return false;
+                      }
+
+                      let inserted = editor.apply_remote_insert_paragraph(new_paragraph_id, *position, cx);
+                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                        eprintln!(
+                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=insert text_id={text_id} paragraph_id={} position={position} paragraph_count={} result={inserted}",
+                          new_paragraph_id.0,
+                          editor.document().paragraphs.len(),
+                        );
+                      }
+                      if !inserted {
+                        return false;
+                      }
+
+                      let state_applied = editor.apply_remote_paragraph_state(new_paragraph_id, text, runs, cx);
+                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                        eprintln!(
+                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=state text_id={text_id} paragraph_id={} position={position} text_len={} runs={} run_total={} paragraph_count={} result={state_applied}",
+                          new_paragraph_id.0,
+                          text.len(),
+                          run_count,
+                          run_total,
+                          editor.document().paragraphs.len(),
+                        );
+                      }
+                      if !state_applied {
+                        return false;
+                      }
+
+                      let style_applied = editor.apply_remote_paragraph_style(new_paragraph_id, style, cx);
+                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                        eprintln!(
+                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=style text_id={text_id} paragraph_id={} position={position} paragraph_count={} result={style_applied}",
+                          new_paragraph_id.0,
+                          editor.document().paragraphs.len(),
+                        );
+                      }
+                      if !style_applied {
                         return false;
                       }
                     },
