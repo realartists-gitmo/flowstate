@@ -2553,7 +2553,7 @@ impl Workspace {
                             .previous_paragraph_id_for_remote_removal(paragraph_id)
                             .is_some_and(|previous| granular_record_id_to_u128(text_id).ok().map(ParagraphId) == Some(previous)) =>
                         {
-                          Some((*new_text, marks))
+                          Some((new_text.as_str(), marks))
                         },
                         _ => None,
                       });

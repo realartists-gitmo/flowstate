@@ -568,7 +568,7 @@ impl RichTextEditor {
       position,
       "",
       Vec::new(),
-      ParagraphStyle::default(),
+      ParagraphStyle::Normal,
       cx,
     )
   }
