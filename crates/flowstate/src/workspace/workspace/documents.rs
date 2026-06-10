@@ -2521,22 +2521,17 @@ impl Workspace {
                         return false;
                       }
 
-                      let inserted = editor.apply_remote_insert_paragraph(new_paragraph_id, *position, cx);
+                      let inserted = editor.apply_remote_insert_paragraph_authoritative(
+                        new_paragraph_id,
+                        *position,
+                        text,
+                        runs,
+                        style,
+                        cx,
+                      );
                       if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
                         eprintln!(
-                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=insert text_id={text_id} paragraph_id={} position={position} paragraph_count={} result={inserted}",
-                          new_paragraph_id.0,
-                          editor.document().paragraphs.len(),
-                        );
-                      }
-                      if !inserted {
-                        return false;
-                      }
-
-                      let state_applied = editor.apply_remote_paragraph_state(new_paragraph_id, text, runs, cx);
-                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
-                        eprintln!(
-                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=state text_id={text_id} paragraph_id={} position={position} text_len={} runs={} run_total={} paragraph_count={} result={state_applied}",
+                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=atomic_insert text_id={text_id} paragraph_id={} position={position} text_len={} runs={} run_total={} paragraph_count={} result={inserted}",
                           new_paragraph_id.0,
                           text.len(),
                           run_count,
@@ -2544,19 +2539,7 @@ impl Workspace {
                           editor.document().paragraphs.len(),
                         );
                       }
-                      if !state_applied {
-                        return false;
-                      }
-
-                      let style_applied = editor.apply_remote_paragraph_style(new_paragraph_id, style, cx);
-                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
-                        eprintln!(
-                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=style text_id={text_id} paragraph_id={} position={position} paragraph_count={} result={style_applied}",
-                          new_paragraph_id.0,
-                          editor.document().paragraphs.len(),
-                        );
-                      }
-                      if !style_applied {
+                      if !inserted {
                         return false;
                       }
                     },
@@ -2564,11 +2547,21 @@ impl Workspace {
                     ParagraphDiffEntry::ParagraphRemoved { text_id } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let paragraph_id = ParagraphId(id_u128);
-                      let predecessor_was_replaced = editor
-                        .previous_paragraph_id_for_remote_removal(paragraph_id)
-                        .is_some_and(|previous| authoritative_text_paragraphs.contains(&previous));
-                      let removed = if predecessor_was_replaced {
-                        editor.apply_remote_remove_paragraph_after_authoritative_join(paragraph_id, cx)
+                      let join_text = changes.iter().find_map(|entry| match entry {
+                        ParagraphDiffEntry::Text { text_id, new_text, marks }
+                          if editor
+                            .previous_paragraph_id_for_remote_removal(paragraph_id)
+                            .is_some_and(|previous| granular_record_id_to_u128(text_id).ok().map(ParagraphId) == Some(previous)) =>
+                        {
+                          Some((*new_text, marks))
+                        },
+                        _ => None,
+                      });
+                      let removed = if let Some((merged_text, marks)) = join_text {
+                        let Some(first_id) = editor.previous_paragraph_id_for_remote_removal(paragraph_id) else { return false; };
+                        let runs = flowstate_document::db8_runs_from_marks(merged_text.len(), marks);
+                        valid_remote_runs(merged_text, &runs)
+                          && editor.apply_remote_join_paragraphs_authoritative(first_id, paragraph_id, merged_text, runs, cx)
                       } else {
                         editor.apply_remote_remove_paragraph(paragraph_id, cx)
                       };

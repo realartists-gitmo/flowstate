@@ -512,29 +512,65 @@ impl RichTextEditor {
     true
   }
 
-  /// Insert a new paragraph at the given positional index, bypassing
-  /// `CanonicalOperation`.  `new_paragraph` is the stable ID the new
-  /// paragraph should carry (from the CRDT).
-  pub fn apply_remote_insert_paragraph(&mut self, new_paragraph: ParagraphId, position: usize, cx: &mut Context<Self>) -> bool {
-    if self.identity_map.paragraph_index(new_paragraph).is_some() {
+  /// Insert a paragraph and apply its full authoritative state as one receiver
+  /// projection. This is used for remote splits and avoids exposing intermediate
+  /// split/replace/style states to layout and identity reconciliation.
+  pub fn apply_remote_insert_paragraph_authoritative(
+    &mut self,
+    new_paragraph: ParagraphId,
+    position: usize,
+    text: &str,
+    runs: Vec<TextRun>,
+    style: ParagraphStyle,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let run_total: usize = runs.iter().map(|run| run.len).sum();
+    if run_total != text.len() || runs.iter().any(|run| run.len == 0) {
       return false;
     }
-    // `position` is the target index in paragraph order. Splitting paragraph
-    // `position` inserts after it, yielding `position + 1`. Split the previous
-    // paragraph so the new paragraph lands at the requested index.
-    let split_ix = if position == 0 {
-      0
-    } else {
-      position
-        .saturating_sub(1)
-        .min(self.document.paragraphs.len().saturating_sub(1))
-    };
+    if self.identity_map.paragraph_index(new_paragraph).is_some() || self.document.paragraphs.is_empty() || position == 0 {
+      return false;
+    }
+
+    let split_ix = position
+      .saturating_sub(1)
+      .min(self.document.paragraphs.len().saturating_sub(1));
     let byte = crate::paragraph_text_len(&self.document.paragraphs[split_ix]);
     if !split_paragraph_at_with_id(&mut self.document, split_ix, byte, new_paragraph) {
       return false;
     }
+
+    let new_ix = split_ix + 1;
+    let old_len = crate::paragraph_text_len(&self.document.paragraphs[new_ix]);
+    if old_len > 0 && !delete_range_in_paragraph(&mut self.document, new_ix, 0..old_len) {
+      return false;
+    }
+    if !text.is_empty() && !insert_text_at(&mut self.document, new_ix, 0, text, RunStyles::default()) {
+      return false;
+    }
+    let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(new_ix) else {
+      return false;
+    };
+    paragraph.style = style;
+    paragraph.runs = runs;
+    bump_paragraph_version(paragraph);
+    update_paragraph_block(&mut self.document, new_ix);
     self.finish_remote_projection_change(true, cx);
     true
+  }
+
+  /// Insert a new paragraph at the given positional index, bypassing
+  /// `CanonicalOperation`.  `new_paragraph` is the stable ID the new
+  /// paragraph should carry (from the CRDT).
+  pub fn apply_remote_insert_paragraph(&mut self, new_paragraph: ParagraphId, position: usize, cx: &mut Context<Self>) -> bool {
+    self.apply_remote_insert_paragraph_authoritative(
+      new_paragraph,
+      position,
+      "",
+      Vec::new(),
+      ParagraphStyle::default(),
+      cx,
+    )
   }
 
   #[must_use]
@@ -546,30 +582,55 @@ impl RichTextEditor {
     self.identity_map.paragraph_id(paragraph_ix - 1)
   }
 
-  /// Remove a paragraph after its predecessor has already been replaced with
-  /// authoritative merged CRDT text. This deletes the paragraph break and the
-  /// removed paragraph's local text instead of appending that local text again.
-  pub fn apply_remote_remove_paragraph_after_authoritative_join(
+  /// Apply a remote paragraph join as one receiver projection. The first
+  /// paragraph is replaced with the authoritative merged text/runs, then the
+  /// removed paragraph plus its local text is deleted in the same operation.
+  pub fn apply_remote_join_paragraphs_authoritative(
     &mut self,
-    paragraph: ParagraphId,
+    first: ParagraphId,
+    second: ParagraphId,
+    merged_text: &str,
+    runs: Vec<TextRun>,
     cx: &mut Context<Self>,
   ) -> bool {
-    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
-      return false;
-    };
-    if paragraph_ix == 0 {
+    let run_total: usize = runs.iter().map(|run| run.len).sum();
+    if run_total != merged_text.len() || runs.iter().any(|run| run.len == 0) {
       return false;
     }
-    let previous_len = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix - 1]);
-    let removed_len = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
+    let Some(first_ix) = self.identity_map.paragraph_index(first) else {
+      return false;
+    };
+    let Some(second_ix) = self.identity_map.paragraph_index(second) else {
+      return false;
+    };
+    if second_ix != first_ix + 1 {
+      return false;
+    }
+
+    let old_first_len = crate::paragraph_text_len(&self.document.paragraphs[first_ix]);
+    if old_first_len > 0 && !delete_range_in_paragraph(&mut self.document, first_ix, 0..old_first_len) {
+      return false;
+    }
+    if !merged_text.is_empty() && !insert_text_at(&mut self.document, first_ix, 0, merged_text, RunStyles::default()) {
+      return false;
+    }
+    let Some(first_paragraph) = paragraphs_mut(&mut self.document).get_mut(first_ix) else {
+      return false;
+    };
+    first_paragraph.runs = runs;
+    bump_paragraph_version(first_paragraph);
+    update_paragraph_block(&mut self.document, first_ix);
+
+    let merged_len = crate::paragraph_text_len(&self.document.paragraphs[first_ix]);
+    let second_len = crate::paragraph_text_len(&self.document.paragraphs[second_ix]);
     let removed = delete_cross_paragraph_range(
       &mut self.document,
       crate::DocumentOffset {
-        paragraph: paragraph_ix - 1,
-        byte: previous_len,
+        paragraph: first_ix,
+        byte: merged_len,
       }..crate::DocumentOffset {
-        paragraph: paragraph_ix,
-        byte: removed_len,
+        paragraph: second_ix,
+        byte: second_len,
       },
     );
     if !removed {
@@ -579,35 +640,48 @@ impl RichTextEditor {
     true
   }
 
+  /// Remove a paragraph after its predecessor has already been replaced with
+  /// authoritative merged CRDT text. This deletes the paragraph break and the
+  /// removed paragraph's local text instead of appending that local text again.
+  pub fn apply_remote_remove_paragraph_after_authoritative_join(
+    &mut self,
+    paragraph: ParagraphId,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let Some(first) = self.previous_paragraph_id_for_remote_removal(paragraph) else {
+      return false;
+    };
+    let Some(first_ix) = self.identity_map.paragraph_index(first) else {
+      return false;
+    };
+    let merged_text = crate::paragraph_text(&self.document, first_ix);
+    let runs = self.document.paragraphs[first_ix].runs.clone();
+    self.apply_remote_join_paragraphs_authoritative(first, paragraph, &merged_text, runs, cx)
+  }
+
   /// Remove a paragraph by joining it with its neighbour, bypassing
   /// `CanonicalOperation`.  Joins with the previous paragraph if possible,
   /// otherwise the next.
   pub fn apply_remote_remove_paragraph(&mut self, paragraph: ParagraphId, cx: &mut Context<Self>) -> bool {
-    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+    let Some(first) = self.previous_paragraph_id_for_remote_removal(paragraph) else {
       return false;
     };
-    let removed = if paragraph_ix > 0 {
-      let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix - 1]);
-      delete_cross_paragraph_range(
-        &mut self.document,
-        crate::DocumentOffset { paragraph: paragraph_ix - 1, byte }
-          ..crate::DocumentOffset { paragraph: paragraph_ix, byte: 0 },
-      )
-    } else if paragraph_ix + 1 < self.document.paragraphs.len() {
-      let byte = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
-      delete_cross_paragraph_range(
-        &mut self.document,
-        crate::DocumentOffset { paragraph: paragraph_ix, byte }
-          ..crate::DocumentOffset { paragraph: paragraph_ix + 1, byte: 0 },
-      )
-    } else {
+    let Some(first_ix) = self.identity_map.paragraph_index(first) else {
       return false;
     };
-    if !removed {
+    let Some(second_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    if second_ix != first_ix + 1 {
       return false;
     }
-    self.finish_remote_projection_change(true, cx);
-    true
+    let first_text = crate::paragraph_text(&self.document, first_ix);
+    let second_text = crate::paragraph_text(&self.document, second_ix);
+    let mut merged_text = String::with_capacity(first_text.len() + second_text.len());
+    merged_text.push_str(&first_text);
+    merged_text.push_str(&second_text);
+    let runs = self.document.paragraphs[first_ix].runs.clone();
+    self.apply_remote_join_paragraphs_authoritative(first, paragraph, &merged_text, runs, cx)
   }
 
   fn mark_remote_document_changed(&mut self, cx: &mut Context<Self>) {
