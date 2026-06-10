@@ -162,7 +162,9 @@ impl RichTextEditor {
         after: after_span.clone(),
       }]
     };
-    if before_block_count != self.document.blocks.len() {
+    let paragraph_delta = after_span.paragraphs.len() as isize - before_span.paragraphs.len() as isize;
+    let block_delta = self.document.blocks.len() as isize - before_block_count as isize;
+    if before_block_count != self.document.blocks.len() && block_delta != paragraph_delta {
       return fallback();
     }
     if before_span.paragraphs.len() != after_span.paragraphs.len() || before_span.text != after_span.text {
@@ -270,14 +272,29 @@ impl RichTextEditor {
     }
 
     let mut operations = Vec::with_capacity(before_ids.len() + after_len * 4);
+    let mut atomic_join_texts = Vec::<(ParagraphId, String)>::new();
 
-    // Remove vanished containers first. `JoinParagraphs` maps to an explicit
-    // RemoveParagraph mutation; text transferred into a survivor is represented
-    // by that survivor's minimal text delta below.
-    let survivor = common_after[0];
+    // Capture ranges include neighbouring paragraphs. Pair each removed
+    // paragraph with its actual surviving predecessor, not the first survivor
+    // in the capture range.
     for removed_id in before_ids.iter().copied().filter(|id| !after_ids.contains(id)) {
+      let removed_ix = before_ids.iter().position(|id| *id == removed_id)?;
+      let first_ix = removed_ix.checked_sub(1)?;
+      let first_id = before_ids[first_ix];
+      if !after_ids.contains(&first_id) {
+        return None;
+      }
+
+      let removed_text = paragraph_text_from_span(before_span, removed_ix)?;
+      if let Some((_, expected_text)) = atomic_join_texts.iter_mut().find(|(id, _)| *id == first_id) {
+        expected_text.push_str(&removed_text);
+      } else {
+        let mut expected_text = paragraph_text_from_span(before_span, first_ix)?;
+        expected_text.push_str(&removed_text);
+        atomic_join_texts.push((first_id, expected_text));
+      }
       operations.push(CanonicalOperation::JoinParagraphs {
-        first: survivor,
+        first: first_id,
         second: removed_id,
       });
     }
@@ -287,13 +304,18 @@ impl RichTextEditor {
       if let Some(before_ix) = before_ids.iter().position(|id| *id == paragraph_id) {
         let before_text = paragraph_text_from_span(before_span, before_ix)?;
         let before_paragraph = before_span.paragraphs.get(before_ix)?;
-        Self::append_minimal_text_replacement(
-          &mut operations,
-          paragraph_id,
-          &before_text,
-          &after_text,
-          &after_paragraph.runs,
-        );
+        let handled_by_atomic_join = atomic_join_texts
+          .iter()
+          .any(|(id, expected_text)| *id == paragraph_id && expected_text == &after_text);
+        if !handled_by_atomic_join {
+          Self::append_minimal_text_replacement(
+            &mut operations,
+            paragraph_id,
+            &before_text,
+            &after_text,
+            &after_paragraph.runs,
+          );
+        }
         if before_paragraph.style != after_paragraph.style {
           operations.push(CanonicalOperation::SetParagraphStyle {
             paragraph: paragraph_id,
