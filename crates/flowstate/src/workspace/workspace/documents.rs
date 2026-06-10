@@ -2461,6 +2461,13 @@ impl Workspace {
                 self.refresh_db8_remote_carets(cx);
                 return Ok(());
               }
+              let authoritative_text_paragraphs = changes
+                .iter()
+                .filter_map(|entry| match entry {
+                  ParagraphDiffEntry::Text { text_id, .. } => granular_record_id_to_u128(text_id).ok().map(ParagraphId),
+                  _ => None,
+                })
+                .collect::<Vec<_>>();
               let incremental_ok = editor.update(cx, |editor, cx| {
                 editor.clear_collaboration_edit();
                 for entry in &changes {
@@ -2557,7 +2564,15 @@ impl Workspace {
                     ParagraphDiffEntry::ParagraphRemoved { text_id } => {
                       let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
                       let paragraph_id = ParagraphId(id_u128);
-                      if !editor.apply_remote_remove_paragraph(paragraph_id, cx) {
+                      let predecessor_was_replaced = editor
+                        .previous_paragraph_id_for_remote_removal(paragraph_id)
+                        .is_some_and(|previous| authoritative_text_paragraphs.contains(&previous));
+                      let removed = if predecessor_was_replaced {
+                        editor.apply_remote_remove_paragraph_after_authoritative_join(paragraph_id, cx)
+                      } else {
+                        editor.apply_remote_remove_paragraph(paragraph_id, cx)
+                      };
+                      if !removed {
                         return false;
                       }
                     },

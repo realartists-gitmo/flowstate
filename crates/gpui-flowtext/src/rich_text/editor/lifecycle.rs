@@ -537,6 +537,48 @@ impl RichTextEditor {
     true
   }
 
+  #[must_use]
+  pub fn previous_paragraph_id_for_remote_removal(&self, paragraph: ParagraphId) -> Option<ParagraphId> {
+    let paragraph_ix = self.identity_map.paragraph_index(paragraph)?;
+    if paragraph_ix == 0 {
+      return None;
+    }
+    self.identity_map.paragraph_id(paragraph_ix - 1)
+  }
+
+  /// Remove a paragraph after its predecessor has already been replaced with
+  /// authoritative merged CRDT text. This deletes the paragraph break and the
+  /// removed paragraph's local text instead of appending that local text again.
+  pub fn apply_remote_remove_paragraph_after_authoritative_join(
+    &mut self,
+    paragraph: ParagraphId,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let Some(paragraph_ix) = self.identity_map.paragraph_index(paragraph) else {
+      return false;
+    };
+    if paragraph_ix == 0 {
+      return false;
+    }
+    let previous_len = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix - 1]);
+    let removed_len = crate::paragraph_text_len(&self.document.paragraphs[paragraph_ix]);
+    let removed = delete_cross_paragraph_range(
+      &mut self.document,
+      crate::DocumentOffset {
+        paragraph: paragraph_ix - 1,
+        byte: previous_len,
+      }..crate::DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: removed_len,
+      },
+    );
+    if !removed {
+      return false;
+    }
+    self.finish_remote_projection_change(true, cx);
+    true
+  }
+
   /// Remove a paragraph by joining it with its neighbour, bypassing
   /// `CanonicalOperation`.  Joins with the previous paragraph if possible,
   /// otherwise the next.
@@ -564,10 +606,7 @@ impl RichTextEditor {
     if !removed {
       return false;
     }
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(true, cx);
     true
   }
 
