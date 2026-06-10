@@ -91,6 +91,8 @@ impl RichTextEditor {
       pending_item_sizes_patch_range: None,
       layout_invalidation_hint: None,
       suppress_mutation_notify: 0,
+      remote_projection_depth: 0,
+      remote_projection_dirty: false,
       last_scroll_anchor: None,
       scroll_anchor_lock: None,
       height_prefix_index: HeightPrefixIndex::default(),
@@ -202,6 +204,8 @@ impl RichTextEditor {
     self.pending_item_sizes_patch_range = None;
     self.layout_invalidation_hint = None;
     self.suppress_mutation_notify = 0;
+    self.remote_projection_depth = 0;
+    self.remote_projection_dirty = false;
     self.last_scroll_anchor = None;
     self.scroll_anchor_lock = None;
     self.height_prefix_index = HeightPrefixIndex::default();
@@ -334,6 +338,52 @@ impl RichTextEditor {
     self.after_remote_text_mutation(cx);
   }
 
+  pub fn apply_remote_projection_batch<F>(&mut self, cx: &mut Context<Self>, apply: F) -> bool
+  where
+    F: FnOnce(&mut Self, &mut Context<Self>) -> bool,
+  {
+    let backup_document = self.document.clone();
+    let backup_selection = self.selection.clone();
+    self.remote_projection_depth = self.remote_projection_depth.saturating_add(1);
+    let success = apply(self, cx);
+    self.remote_projection_depth = self.remote_projection_depth.saturating_sub(1);
+
+    if !success {
+      self.document = backup_document;
+      self.selection = backup_selection;
+      self.identity_map.reconcile(&self.document);
+      self.remote_projection_dirty = false;
+      self.after_remote_text_mutation(cx);
+      cx.notify();
+      return false;
+    }
+
+    if self.remote_projection_depth == 0 && self.remote_projection_dirty {
+      self.remote_projection_dirty = false;
+      rebuild_document_sections(&mut self.document);
+      self.identity_map.reconcile(&self.document);
+      self.clamp_selection_to_document();
+      self.mark_remote_document_changed(cx);
+      self.after_remote_text_mutation(cx);
+    }
+    true
+  }
+
+  fn finish_remote_projection_change(&mut self, structural: bool, cx: &mut Context<Self>) {
+    if structural {
+      self.identity_map.reconcile(&self.document);
+    }
+    if self.remote_projection_depth > 0 {
+      self.remote_projection_dirty = true;
+      return;
+    }
+    rebuild_document_sections(&mut self.document);
+    self.identity_map.reconcile(&self.document);
+    self.clamp_selection_to_document();
+    self.mark_remote_document_changed(cx);
+    self.after_remote_text_mutation(cx);
+  }
+
   /// Apply a remote text-content change to a single paragraph, bypassing
   /// `CanonicalOperation`.  This is the single-authority incremental path:
   /// the paragraph's text is replaced according to the CRDT diff, and runs
@@ -379,10 +429,7 @@ impl RichTextEditor {
       }
     }
 
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(false, cx);
     true
   }
 
@@ -414,14 +461,10 @@ impl RichTextEditor {
     p.runs = runs;
     bump_paragraph_version(p);
     update_paragraph_block(&mut self.document, paragraph_ix);
-    rebuild_document_sections(&mut self.document);
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
     if crate::paragraph_text(&self.document, paragraph_ix) != new_text {
       return false;
     }
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(false, cx);
     true
   }
 
@@ -441,11 +484,7 @@ impl RichTextEditor {
     p.style = style;
     bump_paragraph_version(p);
     update_paragraph_block(&mut self.document, paragraph_ix);
-    rebuild_document_sections(&mut self.document);
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(false, cx);
     true
   }
 
@@ -469,11 +508,7 @@ impl RichTextEditor {
     p.runs = runs;
     bump_paragraph_version(p);
     update_paragraph_block(&mut self.document, paragraph_ix);
-    rebuild_document_sections(&mut self.document);
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(false, cx);
     true
   }
 
@@ -498,10 +533,7 @@ impl RichTextEditor {
     if !split_paragraph_at_with_id(&mut self.document, split_ix, byte, new_paragraph) {
       return false;
     }
-    self.identity_map.reconcile(&self.document);
-    self.clamp_selection_to_document();
-    self.mark_remote_document_changed(cx);
-    self.after_remote_text_mutation(cx);
+    self.finish_remote_projection_change(true, cx);
     true
   }
 

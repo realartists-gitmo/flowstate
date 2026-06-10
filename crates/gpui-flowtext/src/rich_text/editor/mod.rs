@@ -935,6 +935,8 @@ pub struct RichTextEditor {
   pending_item_sizes_patch_range: Option<Range<usize>>,
   layout_invalidation_hint: Option<Range<usize>>,
   suppress_mutation_notify: usize,
+  remote_projection_depth: usize,
+  remote_projection_dirty: bool,
   last_scroll_anchor: Option<ScrollAnchorSnapshot>,
   scroll_anchor_lock: Option<ScrollAnchorLock>,
   height_prefix_index: HeightPrefixIndex,
