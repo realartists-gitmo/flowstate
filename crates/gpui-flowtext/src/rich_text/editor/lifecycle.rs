@@ -484,10 +484,15 @@ impl RichTextEditor {
     if self.identity_map.paragraph_index(new_paragraph).is_some() {
       return false;
     }
-    let split_ix = if position >= self.document.paragraphs.len() {
-      self.document.paragraphs.len().saturating_sub(1)
+    // `position` is the target index in paragraph order. Splitting paragraph
+    // `position` inserts after it, yielding `position + 1`. Split the previous
+    // paragraph so the new paragraph lands at the requested index.
+    let split_ix = if position == 0 {
+      0
     } else {
       position
+        .saturating_sub(1)
+        .min(self.document.paragraphs.len().saturating_sub(1))
     };
     let byte = crate::paragraph_text_len(&self.document.paragraphs[split_ix]);
     if !split_paragraph_at_with_id(&mut self.document, split_ix, byte, new_paragraph) {

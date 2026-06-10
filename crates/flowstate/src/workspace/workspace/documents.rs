@@ -2437,9 +2437,13 @@ impl Workspace {
                     && flowstate_document::deserialize_paragraph_metadata(metadata).is_some()
                 },
               });
+              // Paragraph insertion/removal has a dedicated incremental editor path
+              // below. Full DB8 materialization compares the new CRDT paragraph
+              // order against the old projection shape and fails before those
+              // handlers can run. Moves still require full projection.
               let requires_structural_fallback = changes
                 .iter()
-                .any(|entry| matches!(entry, ParagraphDiffEntry::ParagraphAdded { .. } | ParagraphDiffEntry::ParagraphRemoved { .. } | ParagraphDiffEntry::ParagraphMoved { .. }));
+                .any(|entry| matches!(entry, ParagraphDiffEntry::ParagraphMoved { .. }));
               if !inputs_valid || requires_structural_fallback {
                 collab_canary(
                   "apply_db8_incremental_validation_fallback",
