@@ -902,6 +902,16 @@ impl CollabDocument {
           )));
         }
         validate_utf8_range(&snapshot, *byte_offset..*byte_offset + normalized_len)?;
+        if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+          eprintln!(
+            "[FLOWSTATE_COLLAB_CANARY collab::delete_before] text_id={} byte_offset={} byte_len={} text_bytes={} text_window={:?}",
+            text_id,
+            byte_offset,
+            normalized_len,
+            snapshot.len(),
+            collaboration_text_window(&snapshot, *byte_offset, *byte_offset + normalized_len),
+          );
+        }
         text_container
           .delete_utf8(*byte_offset, normalized_len)
           .map_err(|error| CollabError::Loro(format!(
@@ -912,6 +922,17 @@ impl CollabDocument {
             normalized_len,
             byte_offset + normalized_len,
           )))?;
+        if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+          let after = text_container.to_string();
+          eprintln!(
+            "[FLOWSTATE_COLLAB_CANARY collab::delete_after] text_id={} byte_offset={} byte_len={} text_bytes={} text_window={:?}",
+            text_id,
+            byte_offset,
+            normalized_len,
+            after.len(),
+            collaboration_text_window(&after, *byte_offset, *byte_offset),
+          );
+        }
       },
       GranularSourceMutation::DeleteTextToEnd { text_id, byte_offset } => {
         let text_container = self.cached_granular_text_container(text_cache, text_id)?;
@@ -1001,12 +1022,17 @@ impl CollabDocument {
     require_writer(remote_role)?;
 
     let before_frontier = self.frontier()?;
+    let validation_doc = self.doc.fork();
+    configure_granular_text_styles(&validation_doc);
+    validation_doc
+      .import(update)
+      .map_err(|error| CollabError::Loro(error.to_string()))?;
+    validate_schema(&validation_doc, Some(self.format_kind), Some(self.document_id))?;
+
     self
       .doc
       .import(update)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
-    validate_schema(&self.doc, Some(self.format_kind), Some(self.document_id))?;
-
     let after_frontier = self.frontier()?;
     let patch = (before_frontier != after_frontier).then_some(CollabProjectionPatch {
       old_projection_hash: [0; 32],
@@ -2359,6 +2385,18 @@ mod tests {
     panic!("projection cache corruption/staleness should become an explicit recoverable state");
   }
 }
+fn collaboration_text_window(text: &str, start: usize, end: usize) -> String {
+  let mut window_start = start.saturating_sub(32);
+  while window_start > 0 && !text.is_char_boundary(window_start) {
+    window_start -= 1;
+  }
+  let mut window_end = end.saturating_add(32).min(text.len());
+  while window_end < text.len() && !text.is_char_boundary(window_end) {
+    window_end += 1;
+  }
+  text[window_start..window_end].to_string()
+}
+
 fn configure_peer_id(doc: &LoroDoc, actor_id: ActorId) -> CollabResult<()> {
   // Hash the full 128-bit UUID via BLAKE3 to extract uniform 64-bit PeerID,
   // avoiding the non-uniform bit distribution in UUID v4's version/variant nibbles.

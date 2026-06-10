@@ -206,57 +206,172 @@ impl RichTextEditor {
     if before_len == 0 || after_len == 0 {
       return None;
     }
-    let before_start = self.identity_map.paragraph_id(start)?;
-    let before_end = self.identity_map.paragraph_id(start + before_len - 1)?;
     let after_ids = self.document.ids.paragraph_ids.get(start..start + after_len)?;
 
     let before_ids: Vec<ParagraphId> = (0..before_len)
       .filter_map(|ix| self.identity_map.paragraph_id(start + ix))
       .collect();
 
-    let mut operations = Vec::with_capacity(1 + before_ids.len() + after_len * 4);
-    operations.push(CanonicalOperation::DeleteRange {
-      start_paragraph: before_start,
-      start_byte: 0,
-      end_paragraph: before_end,
-      end_byte: paragraph_text_len(before_span.paragraphs.last()?),
-    });
+    // Capture ranges intentionally include neighbouring paragraphs. When the
+    // paragraph shape and stable IDs are unchanged, diff each paragraph in
+    // place instead of replacing the whole captured span. Whole-span replay
+    // caused unchanged paragraph text to be inserted again after destructive
+    // edits, producing the collaboration "ghost paragraph" duplication.
+    if before_len == after_len && before_ids.as_slice() == after_ids {
+      let mut operations = Vec::new();
+      for relative_ix in 0..before_len {
+        let paragraph_id = before_ids[relative_ix];
+        let before_text = paragraph_text_from_span(before_span, relative_ix)?;
+        let after_text = paragraph_text_from_span(after_span, relative_ix)?;
+        Self::append_minimal_text_replacement(&mut operations, paragraph_id, &before_text, &after_text);
 
-    for &removed_id in &before_ids {
-      if !after_ids.contains(&removed_id) {
-        operations.push(CanonicalOperation::JoinParagraphs {
-          first: before_start,
-          second: removed_id,
-        });
+        let before_paragraph = before_span.paragraphs.get(relative_ix)?;
+        let after_paragraph = after_span.paragraphs.get(relative_ix)?;
+        if before_paragraph.style != after_paragraph.style {
+          operations.push(CanonicalOperation::SetParagraphStyle {
+            paragraph: paragraph_id,
+            style: after_paragraph.style,
+          });
+        }
+        if before_paragraph.runs != after_paragraph.runs || before_text != after_text {
+          Self::append_exact_run_style_operations(&mut operations, paragraph_id, &after_paragraph.runs);
+        }
       }
+      return Some(operations);
     }
 
-    for (paragraph_ix, (paragraph, paragraph_id)) in after_span.paragraphs.iter().zip(after_ids.iter().copied()).enumerate() {
-      if paragraph_ix > 0 && !before_ids.contains(&paragraph_id) {
-        let previous_id = after_ids[paragraph_ix - 1];
-        let previous_len = paragraph_text_len(&after_span.paragraphs[paragraph_ix - 1]);
+    // Structural edits still reconcile by stable paragraph ID. Never encode a
+    // captured multi-paragraph span as one cross-paragraph DeleteRange followed
+    // by reinsertion: the granular adapter only trims the two endpoints, so
+    // surviving middle paragraphs retain their old text and then receive a
+    // second copy.
+    let common_before = before_ids
+      .iter()
+      .copied()
+      .filter(|id| after_ids.contains(id))
+      .collect::<Vec<_>>();
+    let common_after = after_ids
+      .iter()
+      .copied()
+      .filter(|id| before_ids.contains(id))
+      .collect::<Vec<_>>();
+    if common_before != common_after || common_after.is_empty() {
+      return None;
+    }
+
+    let mut operations = Vec::with_capacity(before_ids.len() + after_len * 4);
+
+    // Remove vanished containers first. `JoinParagraphs` maps to an explicit
+    // RemoveParagraph mutation; text transferred into a survivor is represented
+    // by that survivor's minimal text delta below.
+    let survivor = common_after[0];
+    for removed_id in before_ids.iter().copied().filter(|id| !after_ids.contains(id)) {
+      operations.push(CanonicalOperation::JoinParagraphs {
+        first: survivor,
+        second: removed_id,
+      });
+    }
+
+    for (after_ix, (&paragraph_id, after_paragraph)) in after_ids.iter().zip(&after_span.paragraphs).enumerate() {
+      let after_text = paragraph_text_from_span(after_span, after_ix)?;
+      if let Some(before_ix) = before_ids.iter().position(|id| *id == paragraph_id) {
+        let before_text = paragraph_text_from_span(before_span, before_ix)?;
+        let before_paragraph = before_span.paragraphs.get(before_ix)?;
+        Self::append_minimal_text_replacement(&mut operations, paragraph_id, &before_text, &after_text);
+        if before_paragraph.style != after_paragraph.style {
+          operations.push(CanonicalOperation::SetParagraphStyle {
+            paragraph: paragraph_id,
+            style: after_paragraph.style,
+          });
+        }
+        if before_paragraph.runs != after_paragraph.runs || before_text != after_text {
+          Self::append_exact_run_style_operations(&mut operations, paragraph_id, &after_paragraph.runs);
+        }
+      } else {
+        let previous_id = *after_ids.get(after_ix.checked_sub(1)?)?;
         operations.push(CanonicalOperation::SplitParagraph {
           paragraph: previous_id,
-          byte: previous_len,
+          byte: paragraph_text_len(after_span.paragraphs.get(after_ix - 1)?),
           new_paragraph: paragraph_id,
         });
-      }
-      let text = paragraph_text_from_span(after_span, paragraph_ix)?;
-      if !text.is_empty() {
-        operations.push(CanonicalOperation::InsertText {
+        if !after_text.is_empty() {
+          operations.push(CanonicalOperation::InsertText {
+            paragraph: paragraph_id,
+            byte: 0,
+            text: after_text,
+            styles: RunStyles::default(),
+          });
+        }
+        operations.push(CanonicalOperation::SetParagraphStyle {
           paragraph: paragraph_id,
-          byte: 0,
-          text,
-          styles: RunStyles::default(),
+          style: after_paragraph.style,
         });
+        Self::append_exact_run_style_operations(&mut operations, paragraph_id, &after_paragraph.runs);
       }
-      operations.push(CanonicalOperation::SetParagraphStyle {
-        paragraph: paragraph_id,
-        style: paragraph.style,
-      });
-      Self::append_exact_run_style_operations(&mut operations, paragraph_id, &paragraph.runs);
     }
     Some(operations)
+  }
+
+  fn append_minimal_text_replacement(
+    operations: &mut Vec<CanonicalOperation>,
+    paragraph: ParagraphId,
+    before_text: &str,
+    after_text: &str,
+  ) {
+    if before_text == after_text {
+      return;
+    }
+
+    let mut prefix = 0usize;
+    for (before_char, after_char) in before_text.chars().zip(after_text.chars()) {
+      if before_char != after_char {
+        break;
+      }
+      prefix += before_char.len_utf8();
+    }
+
+    let mut suffix = 0usize;
+    for (before_char, after_char) in before_text[prefix..].chars().rev().zip(after_text[prefix..].chars().rev()) {
+      if before_char != after_char {
+        break;
+      }
+      suffix += before_char.len_utf8();
+    }
+
+    let before_middle_end = before_text.len().saturating_sub(suffix);
+    let after_middle_end = after_text.len().saturating_sub(suffix);
+    if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+      eprintln!(
+        "[FLOWSTATE_COLLAB_CANARY editor::minimal_text_diff] paragraph={} before_bytes={} after_bytes={} prefix={} suffix={} delete_start={} delete_end={} insert_start={} insert_end={} before_window={:?} after_window={:?}",
+        paragraph.0,
+        before_text.len(),
+        after_text.len(),
+        prefix,
+        suffix,
+        prefix,
+        before_middle_end,
+        prefix,
+        after_middle_end,
+        collaboration_text_window(before_text, prefix, before_middle_end),
+        collaboration_text_window(after_text, prefix, after_middle_end),
+      );
+    }
+    if prefix < before_middle_end {
+      operations.push(CanonicalOperation::DeleteRange {
+        start_paragraph: paragraph,
+        start_byte: prefix,
+        end_paragraph: paragraph,
+        end_byte: before_middle_end,
+      });
+    }
+    if prefix < after_middle_end {
+      operations.push(CanonicalOperation::InsertText {
+        paragraph,
+        byte: prefix,
+        text: after_text[prefix..after_middle_end].to_string(),
+        styles: RunStyles::default(),
+      });
+    }
   }
 
   fn append_exact_run_style_operations(operations: &mut Vec<CanonicalOperation>, paragraph: ParagraphId, runs: &[TextRun]) {
@@ -536,10 +651,23 @@ fn paragraph_text_from_span(span: &DocumentSpan, paragraph_ix: usize) -> Option<
     if ix == paragraph_ix {
       return span.text.get(byte..byte + len).map(str::to_string);
     }
-    byte = byte.checked_add(len)?.checked_add(1)?;
+    byte = byte.checked_add(len)?;
   }
   None
 }
+
+fn collaboration_text_window(text: &str, start: usize, end: usize) -> String {
+  let mut window_start = start.saturating_sub(32);
+  while window_start > 0 && !text.is_char_boundary(window_start) {
+    window_start -= 1;
+  }
+  let mut window_end = end.saturating_add(32).min(text.len());
+  while window_end < text.len() && !text.is_char_boundary(window_end) {
+    window_end += 1;
+  }
+  text[window_start..window_end].to_string()
+}
+
 #[cfg(test)]
 mod edit_pipeline_tests {
   use super::*;

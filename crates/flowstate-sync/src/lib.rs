@@ -796,7 +796,7 @@ pub fn queue_durable_update(
 ) -> bool {
   if is_app_only_hint {
     queue.push_app_only_hint(update);
-    true
+    false
   } else {
     queue.push_durable(update, max_durable_updates)
   }
@@ -810,10 +810,7 @@ pub struct LiveUpdateHub {
 
 impl Default for LiveUpdateHub {
   fn default() -> Self {
-    // 4096-slot ring buffer accommodates bursty collaboration traffic
-    // (rapid keystroke edits, presence updates from N peers) without
-    // forcing expensive snapshot recovery on lagged consumers.
-    Self::new(4096)
+    Self::new(1024)
   }
 }
 
@@ -3545,11 +3542,11 @@ mod tests {
     assert!(queue_durable_update(&mut queue, first.clone(), 2, false));
     assert!(queue_durable_update(&mut queue, second.clone(), 2, false));
     assert!(!queue_durable_update(&mut queue, hint.clone(), 2, true));
-    assert!(queue_durable_update(&mut queue, third.clone(), 2, false));
+    assert!(!queue_durable_update(&mut queue, third, 2, false));
     assert_eq!(queue.durable_len(), 2);
     assert_eq!(queue.hint_len(), 1);
+    assert_eq!(queue.pop_durable(), Some(first));
     assert_eq!(queue.pop_durable(), Some(second));
-    assert_eq!(queue.pop_durable(), Some(third));
     assert_eq!(queue.pop_durable(), None);
     assert_eq!(queue.pop_hint(), Some(hint));
   }

@@ -417,6 +417,9 @@ impl RichTextEditor {
     rebuild_document_sections(&mut self.document);
     self.identity_map.reconcile(&self.document);
     self.clamp_selection_to_document();
+    if crate::paragraph_text(&self.document, paragraph_ix) != new_text {
+      return false;
+    }
     self.mark_remote_document_changed(cx);
     self.after_remote_text_mutation(cx);
     true
@@ -538,17 +541,6 @@ impl RichTextEditor {
 
   fn collab_canary_enabled() -> bool {
     std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some()
-  }
-
-  /// Suppress mutation notifications to avoid re-entrant observe callbacks
-  /// during remote CRDT projection updates.
-  pub fn suppress_mutation_notifications(&mut self) {
-    self.suppress_mutation_notify += 1;
-  }
-
-  /// Re-enable mutation notifications after a remote projection update.
-  pub fn unsuppress_mutation_notifications(&mut self) {
-    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
   }
 
   fn apply_canonical_operation(&mut self, operation: &CanonicalOperation) -> RemoteOperationOutcome {
