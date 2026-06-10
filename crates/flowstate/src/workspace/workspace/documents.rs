@@ -2075,9 +2075,7 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) {
     cx.spawn(async move |workspace, cx| {
-      if let Ok(guard) = document_state.document.lock()
-        && let Ok(frontier) = guard.frontier()
-      {
+      if let Ok(frontier) = document_state.frontier() {
         let _ = workspace.update(cx, |workspace, _| {
           workspace.collaboration_last_frontier = frontier;
         });
@@ -2087,8 +2085,8 @@ impl Workspace {
           Ok(update) => update,
           Err(broadcast::error::RecvError::Lagged(count)) => {
             collab_canary("host_subscriber_lagged", format!("missed={count}"));
-            let source = match document_state.document.lock() {
-              Ok(document) => document.clone(),
+            let source = match document_state.snapshot_document() {
+              Ok(document) => document,
               Err(_) => break,
             };
             let _ = window_handle.update(cx, |_, _, cx| {
@@ -2113,8 +2111,8 @@ impl Workspace {
             });
           },
           LiveUpdateKind::Wire(WireMessage::Update { application, .. }) => {
-            let source = match document_state.document.lock() {
-              Ok(document) => document.clone(),
+            let source = match document_state.snapshot_document() {
+              Ok(document) => document,
               Err(_) => {
                 let _ = window_handle.update(cx, |_, _, cx| {
                   let _ = workspace.update(cx, |workspace, cx| {
@@ -3360,10 +3358,8 @@ fn publish_granular_source_mutations_to_host(
 ) -> anyhow::Result<()> {
   let bytes = host
     .document_state()
-    .document
-    .lock()
-    .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-    .apply_granular_source_mutations(Role::Owner, mutations)?;
+    .authority
+    .apply_granular_source_mutations(Role::Owner, mutations.to_vec())?;
   if bytes.is_empty() {
     anyhow::bail!("granular collaboration mutation batch did not produce a durable update");
   }

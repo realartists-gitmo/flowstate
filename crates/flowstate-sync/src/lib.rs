@@ -3,7 +3,7 @@ use std::{
   fmt,
   future::Future,
   ops::Range,
-  sync::{Arc, Mutex},
+  sync::{Arc, Mutex, mpsc},
   time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -974,24 +974,14 @@ impl ProtocolHandler for FlowstateProtocol {
       let stream_result = async {
         let mut incremental_catchup = false;
         if !hello.known_frontier.is_empty() {
-          let current_frontier = {
-            let doc = state
-              .document
-              .lock()
-              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
-            doc.frontier()?
-          };
+          let current_frontier = state.frontier()?;
           if flowstate_collab::frontier_contains(&hello.known_frontier, &current_frontier) {
             incremental_catchup = true;
             // Send incremental updates since the peer's known frontier so they
             // can catch up without a full snapshot transfer.
-            let incremental_update = {
-              let doc = state
-                .document
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
-              doc.export_update_since_frontier(&hello.known_frontier)?
-            };
+            let incremental_update = state
+              .authority
+              .export_update_since_frontier(hello.known_frontier.clone())?;
             if !incremental_update.is_empty() && incremental_update.len() <= self.config.max_update_bytes {
               write_wire_message(
                 &mut send,
@@ -1020,13 +1010,7 @@ impl ProtocolHandler for FlowstateProtocol {
           }
         } else {
           // Send Have with frontier + assets to signal handshake complete.
-          let frontier = {
-            let doc = state
-              .document
-              .lock()
-              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
-            doc.frontier()?
-          };
+          let frontier = state.frontier()?;
           let assets = advertised_asset_hashes(state)?;
           write_wire_message(
             &mut send,
@@ -1158,12 +1142,7 @@ impl HostedCollaborationPublisher {
     viewport_hint: Option<String>,
   ) -> AnyResult<()> {
     ensure!(self.config.role_request.can_write(), "local role is not allowed to publish presence");
-    let frontier = self
-      .document_state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .frontier()?;
+    let frontier = self.document_state.frontier()?;
     let presence = PeerPresence {
       actor_id: self.config.actor_id,
       session_id: self.config.session_id,
@@ -1193,19 +1172,18 @@ impl HostedCollaborationPublisher {
     let projection_cache = source.materialize_projection_cache()?;
     let asset_manifest = source.asset_manifest_bytes()?;
     let update = if let Ok(Some(granular_source)) = source.materialize_granular_source() {
-      self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-        .replace_granular_source(self.config.role_request, &granular_source, &projection_cache, &asset_manifest)?
+      self.document_state.authority.replace_granular_source(
+        self.config.role_request,
+        granular_source,
+        projection_cache.clone(),
+        asset_manifest.clone(),
+      )?
     } else {
-      self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-        .replace_projection_source(self.config.role_request, &projection_cache, &asset_manifest)?
+      self.document_state.authority.replace_projection_source(
+        self.config.role_request,
+        projection_cache,
+        asset_manifest,
+      )?
     };
     self.publish_update(update, application)
   }
@@ -1214,10 +1192,8 @@ impl HostedCollaborationPublisher {
     ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
     let update = self
       .document_state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .apply_granular_source_mutations(self.config.role_request, mutations)?;
+      .authority
+      .apply_granular_source_mutations(self.config.role_request, mutations.to_vec())?;
     ensure!(
       !update.is_empty(),
       "granular collaboration mutation batch did not produce a durable update"
@@ -1371,15 +1347,11 @@ impl HostedCollaboration {
   pub fn apply_local_update(&self, bytes: Vec<u8>) -> AnyResult<()> {
     ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
     ensure_update_size(&bytes, self.config.max_update_bytes)?;
-    let frontier = {
-      self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-        .import_update_checked(self.config.role_request, &bytes)?
-        .frontier
-    };
+    let frontier = self
+      .document_state
+      .authority
+      .import_update_checked(self.config.role_request, bytes.clone())?
+      .frontier;
     self.live_updates.publish(LiveUpdate::wire(
       None,
       WireMessage::Update {
@@ -1409,12 +1381,7 @@ impl HostedCollaboration {
     focus: Option<String>,
     viewport_hint: Option<String>,
   ) -> AnyResult<()> {
-    let frontier = self
-      .document_state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-      .frontier()?;
+    let frontier = self.document_state.frontier()?;
     let presence = PeerPresence {
       actor_id: self.config.actor_id,
       session_id: self.config.session_id,
@@ -1444,19 +1411,18 @@ impl HostedCollaboration {
     let projection_cache = source.materialize_projection_cache()?;
     let asset_manifest = source.asset_manifest_bytes()?;
     let update = if let Ok(Some(granular_source)) = source.materialize_granular_source() {
-      self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-        .replace_granular_source(self.config.role_request, &granular_source, &projection_cache, &asset_manifest)?
+      self.document_state.authority.replace_granular_source(
+        self.config.role_request,
+        granular_source,
+        projection_cache.clone(),
+        asset_manifest.clone(),
+      )?
     } else {
-      self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-        .replace_projection_source(self.config.role_request, &projection_cache, &asset_manifest)?
+      self.document_state.authority.replace_projection_source(
+        self.config.role_request,
+        projection_cache,
+        asset_manifest,
+      )?
     };
     self.publish_update(update, application)
   }
@@ -1521,9 +1487,109 @@ pub async fn connect_and_authorize(endpoint: &Endpoint, invite: &InviteTicket, c
   Ok(authorization)
 }
 
+type DocumentAuthorityJob = Box<dyn FnOnce(&mut CollabDocument) + Send + 'static>;
+
+#[derive(Clone)]
+pub struct CollabDocumentAuthority {
+  sender: mpsc::Sender<DocumentAuthorityJob>,
+}
+
+impl fmt::Debug for CollabDocumentAuthority {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("CollabDocumentAuthority").finish_non_exhaustive()
+  }
+}
+
+impl CollabDocumentAuthority {
+  fn new(mut document: CollabDocument) -> Self {
+    let (sender, receiver) = mpsc::channel::<DocumentAuthorityJob>();
+    std::thread::Builder::new()
+      .name("flowstate-collab-authority".to_string())
+      .spawn(move || {
+        while let Ok(job) = receiver.recv() {
+          job(&mut document);
+        }
+      })
+      .expect("failed to start Flowstate collaboration authority thread");
+    Self { sender }
+  }
+
+  fn call<R, F>(&self, operation: F) -> flowstate_collab::CollabResult<R>
+  where
+    R: Send + 'static,
+    F: FnOnce(&mut CollabDocument) -> flowstate_collab::CollabResult<R> + Send + 'static,
+  {
+    let (reply_tx, reply_rx) = mpsc::sync_channel(1);
+    self
+      .sender
+      .send(Box::new(move |document| {
+        let _ = reply_tx.send(operation(document));
+      }))
+      .map_err(|_| flowstate_collab::CollabError::Loro("Flowstate document authority thread is closed".to_string()))?;
+    reply_rx
+      .recv()
+      .map_err(|_| flowstate_collab::CollabError::Loro("Flowstate document authority reply channel is closed".to_string()))?
+  }
+
+  pub fn snapshot(&self) -> flowstate_collab::CollabResult<CollabDocument> {
+    self.call(|document| Ok(document.clone()))
+  }
+
+  pub fn frontier(&self) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(|document| document.frontier())
+  }
+
+  pub fn export_snapshot_and_frontier(&self) -> flowstate_collab::CollabResult<(Vec<u8>, Vec<u8>)> {
+    self.call(|document| Ok((document.export_snapshot()?, document.frontier()?)))
+  }
+
+  pub fn export_update_since_frontier(&self, frontier: Vec<u8>) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(move |document| document.export_update_since_frontier(&frontier))
+  }
+
+  pub fn asset_manifest_bytes(&self) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(|document| document.asset_manifest_bytes())
+  }
+
+  pub fn apply_granular_source_mutations(
+    &self,
+    role: Role,
+    mutations: Vec<GranularSourceMutation>,
+  ) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(move |document| document.apply_granular_source_mutations(role, &mutations))
+  }
+
+  pub fn replace_granular_source(
+    &self,
+    role: Role,
+    granular_source: flowstate_collab::GranularSource,
+    projection_cache: Vec<u8>,
+    asset_manifest: Vec<u8>,
+  ) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(move |document| document.replace_granular_source(role, &granular_source, &projection_cache, &asset_manifest))
+  }
+
+  pub fn replace_projection_source(
+    &self,
+    role: Role,
+    projection_cache: Vec<u8>,
+    asset_manifest: Vec<u8>,
+  ) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.call(move |document| document.replace_projection_source(role, &projection_cache, &asset_manifest))
+  }
+
+  pub fn import_update_checked(
+    &self,
+    role: Role,
+    bytes: Vec<u8>,
+  ) -> flowstate_collab::CollabResult<flowstate_collab::CollabImportOutcome> {
+    self.call(move |document| document.import_update_checked(role, &bytes))
+  }
+}
+
 #[derive(Clone, Debug)]
 pub struct SessionDocumentState {
-  pub document: Arc<Mutex<CollabDocument>>,
+  pub authority: CollabDocumentAuthority,
   pub assets: Arc<Mutex<AssetStore>>,
 }
 
@@ -1531,9 +1597,17 @@ impl SessionDocumentState {
   #[must_use]
   pub fn new(document: CollabDocument, assets: AssetStore) -> Self {
     Self {
-      document: Arc::new(Mutex::new(document)),
+      authority: CollabDocumentAuthority::new(document),
       assets: Arc::new(Mutex::new(assets)),
     }
+  }
+
+  pub fn snapshot_document(&self) -> flowstate_collab::CollabResult<CollabDocument> {
+    self.authority.snapshot()
+  }
+
+  pub fn frontier(&self) -> flowstate_collab::CollabResult<Vec<u8>> {
+    self.authority.frontier()
   }
 }
 
@@ -1868,14 +1942,10 @@ impl CollabSession {
   }
 
   pub fn apply_remote_update(&mut self, actor_id: ActorId, remote_role: Role, bytes: &[u8]) -> AnyResult<()> {
-    let import_result = {
-      let document = self
-        .document_state
-        .document
-        .lock()
-        .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
-      document.import_update_checked(remote_role, bytes)
-    };
+    let import_result = self
+      .document_state
+      .authority
+      .import_update_checked(remote_role, bytes.to_vec());
     match import_result {
       Ok(outcome) => {
         let hash = blake3_hash(bytes);
@@ -2851,13 +2921,7 @@ async fn send_snapshot_chunks(
 }
 
 async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentState, config: &FlowstateSyncConfig) -> AnyResult<()> {
-  let (snapshot, frontier) = {
-    let document = state
-      .document
-      .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
-    (document.export_snapshot()?, document.frontier()?)
-  };
+  let (snapshot, frontier) = state.authority.export_snapshot_and_frontier()?;
   collab_canary(
     "host_snapshot_export",
     format!(
@@ -2898,11 +2962,7 @@ async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentSt
 }
 
 fn document_asset_manifest_records(state: &SessionDocumentState) -> AnyResult<Vec<NativeAssetRecord>> {
-  let manifest_bytes = state
-    .document
-    .lock()
-    .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-    .asset_manifest_bytes()?;
+  let manifest_bytes = state.authority.asset_manifest_bytes()?;
   if manifest_bytes.is_empty() {
     return Ok(Vec::new());
   }
@@ -3122,11 +3182,7 @@ async fn serve_live_stream(
           continue;
         }
         if document_lane_blocked {
-          let frontier = state
-            .document
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-            .frontier()?;
+          let frontier = state.frontier()?;
           write_wire_message(
             send,
             &WireMessage::UpdateRejected {
@@ -3159,11 +3215,7 @@ async fn serve_live_stream(
         if bytes.is_empty() {
           // An update must always carry CRDT source bytes; application metadata
           // alone is no longer supported — the CRDT is the single authority.
-          let frontier = state
-            .document
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-            .frontier()?;
+          let frontier = state.frontier()?;
           write_wire_message(
             send,
             &WireMessage::UpdateRejected {
@@ -3194,22 +3246,14 @@ async fn serve_live_stream(
         let import_state = state.clone();
         let import_bytes = bytes.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-          import_state
-            .document
-            .lock()
-            .map_err(|_| flowstate_collab::CollabError::Loro("Flowstate document state lock is poisoned".to_string()))?
-            .import_update_checked(remote_role, &import_bytes)
+          import_state.authority.import_update_checked(remote_role, import_bytes)
         })
         .await
         .map_err(|error| anyhow::anyhow!("Flowstate CRDT import worker failed: {error}"))?;
         let outcome = match outcome {
           Ok(outcome) => outcome,
           Err(error) => {
-            let frontier = state
-              .document
-              .lock()
-              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-              .frontier()?;
+            let frontier = state.frontier()?;
             document_lane_blocked = true;
             write_wire_message(
               send,
@@ -3271,11 +3315,7 @@ async fn serve_live_stream(
           send_snapshot_and_have(send, state, config).await?;
           document_lane_blocked = false;
         } else {
-          let update = state
-            .document
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-            .export_update_since_frontier(&frontier)?;
+          let update = state.authority.export_update_since_frontier(frontier)?;
           if !update.is_empty() {
             if update.len() > config.max_update_bytes {
               send_snapshot_and_have(send, state, config).await?;
@@ -3333,11 +3373,7 @@ async fn serve_live_stream(
           hub.publish(LiveUpdate::event(Some(hello.session_id), SessionEvent::Presence(peer_presence)))?;
           hub.publish(LiveUpdate::wire(Some(hello.session_id), WireMessage::Presence(presence)))?;
         }
-        let frontier = state
-          .document
-          .lock()
-          .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
-          .frontier()?;
+        let frontier = state.frontier()?;
         write_wire_message(
           send,
           &WireMessage::Ack {
@@ -4201,8 +4237,7 @@ mod tests {
     assert_eq!(
       host
         .document_state()
-        .document
-        .lock()
+        .snapshot_document()
         .unwrap()
         .materialize_projection_cache()
         .unwrap(),
@@ -4440,8 +4475,7 @@ mod tests {
     assert_eq!(
       host
         .document_state()
-        .document
-        .lock()
+        .snapshot_document()
         .unwrap()
         .materialize_projection_cache()
         .unwrap(),
