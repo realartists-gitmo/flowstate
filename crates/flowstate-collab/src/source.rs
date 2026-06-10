@@ -32,6 +32,7 @@ const KEY_GRANULAR_TEXTS: &str = "granular_texts";
 const KEY_GRANULAR_BINARIES: &str = "granular_binaries";
 const KEY_RECORD_METADATA: &str = "metadata";
 const KEY_RECORD_TEXT: &str = "text";
+const DB8_PARAGRAPH_ORDER: &str = "paragraph_order";
 const INLINE_STYLE_KEYS: &[&str] = &["semantic", "direct_underline", "strikethrough", "highlight"];
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -562,21 +563,21 @@ impl CollabDocument {
       .map_err(|error| CollabError::Loro(error.to_string()))
   }
 
-  pub fn apply_granular_source_mutations(&self, role: Role, mutations: &[GranularSourceMutation]) -> CollabResult<Vec<u8>> {
+  pub fn prepare_granular_source_mutations(&self, role: Role, mutations: &[GranularSourceMutation]) -> CollabResult<Vec<u8>> {
     require_writer(role)?;
     if mutations.is_empty() {
       return Ok(Vec::new());
     }
 
     // Prevalidate against an evolving shadow state, normalizing explicit
-    // delete-to-end operations before touching any Loro container.
+    // delete-to-end operations before touching any authoritative Loro container.
     let normalized = self.validate_and_normalize_granular_mutations(mutations)?;
     self.doc.commit();
     let before = self.doc.oplog_vv();
     let before_encoded = postcard::to_stdvec(&before)?;
 
-    // Loro forks use a distinct peer and are designed for isolated branch/merge.
-    // Only a fully validated fork delta is imported into the live document.
+    // Prepare on an isolated fork. Callers decide when authority accepts the
+    // resulting update and only then import it into this replica.
     let working = Self::from_doc(self.doc.fork(), Some(self.format_kind), Some(self.document_id))?;
     configure_granular_text_styles(&working.doc);
     let mut text_cache = HashMap::new();
@@ -591,8 +592,14 @@ impl CollabDocument {
     working.doc.commit();
     validate_schema(&working.doc, Some(self.format_kind), Some(self.document_id))
       .map_err(|error| CollabError::Loro(format!("COLLAB_MUTATION_SCHEMA_FAILURE detail={error}")))?;
-    let update = working.export_update_since_frontier(&before_encoded)?;
-    self.import_update_checked(role, &update)?;
+    working.export_update_since_frontier(&before_encoded)
+  }
+
+  pub fn apply_granular_source_mutations(&self, role: Role, mutations: &[GranularSourceMutation]) -> CollabResult<Vec<u8>> {
+    let update = self.prepare_granular_source_mutations(role, mutations)?;
+    if !update.is_empty() {
+      self.import_update_checked(role, &update)?;
+    }
     Ok(update)
   }
 
@@ -756,7 +763,7 @@ impl CollabDocument {
 
     // Read order without creating it. Validation must not mutate the document.
     let orders = granular_orders_map(&self.doc)?;
-    let mut shadow_order = match orders.get("paragraphs") {
+    let mut shadow_order = match orders.get(DB8_PARAGRAPH_ORDER) {
       Some(ValueOrContainer::Container(Container::MovableList(order))) => order
         .to_vec()
         .into_iter()
@@ -994,15 +1001,6 @@ impl CollabDocument {
     require_writer(remote_role)?;
 
     let before_frontier = self.frontier()?;
-    // Validate on an isolated fork first. A rejected update must never partially
-    // mutate the authoritative document.
-    let fork = self.doc.fork();
-    configure_granular_text_styles(&fork);
-    fork
-      .import(update)
-      .map_err(|error| CollabError::Loro(error.to_string()))?;
-    validate_schema(&fork, Some(self.format_kind), Some(self.document_id))?;
-
     self
       .doc
       .import(update)
@@ -1095,7 +1093,19 @@ impl CollabDocument {
     };
     let doc = self.shared_doc();
     let mut changes = Vec::new();
+    if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+        for (cid, diff) in diff_batch.iter() {
+            let variant = match diff {
+                Diff::Text(_) => "Text".to_string(),
+                Diff::Map(m) => format!("Map(updated={:?})", m.updated.keys().collect::<Vec<_>>()),
+                Diff::List(_) => "List".to_string(),
+                _ => "other".to_string(),
+            };
+            eprintln!("[CANARY diff] cid={:?} path={:?} diff_variant={variant}", cid, doc.get_path_to_container(cid));
+        }
+    }
     let mut added_text_ids = HashSet::new();
+    let mut removed_text_ids = HashSet::new();
 
     for (cid, diff) in diff_batch.iter() {
       let Diff::Map(map) = diff else { continue; };
@@ -1105,6 +1115,7 @@ impl CollabDocument {
       }
       for (text_id, value_or_none) in &map.updated {
         if value_or_none.is_none() {
+          removed_text_ids.insert(text_id.to_string());
           changes.push(ParagraphDiffEntry::ParagraphRemoved { text_id: text_id.to_string() });
         } else {
           let position = self.read_paragraph_order_position(&doc, text_id).ok_or(CollabError::InvalidSchema("paragraph order position"))?;
@@ -1123,7 +1134,7 @@ impl CollabDocument {
 
     for (cid, diff) in diff_batch.iter() {
       let Some(text_id) = self.text_id_from_container_path(cid) else { continue; };
-      if added_text_ids.contains(&text_id) { continue; }
+      if added_text_ids.contains(&text_id) || removed_text_ids.contains(&text_id) { continue; }
       match diff {
         Diff::Text(_) => {
           let Some(Container::Text(text_container)) = self.doc.get_container(cid.clone()) else { continue; };
@@ -1145,7 +1156,7 @@ impl CollabDocument {
       let Some(diff_list) = diff.as_list() else { continue; };
       let Some(path) = doc.get_path_to_container(cid) else { continue; };
       let is_paragraph_order = path.iter().any(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == KEY_GRANULAR_ORDERS))
-        && path.iter().any(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == "paragraphs"));
+        && path.iter().any(|(_, index)| matches!(index, Index::Key(key) if key.as_str() == DB8_PARAGRAPH_ORDER));
       if !is_paragraph_order { continue; }
       for item in diff_list {
         if let loro::event::ListDiffItem::Insert { insert, .. } = item {
@@ -1179,7 +1190,7 @@ impl CollabDocument {
     let root = doc.get_map(ROOT_MAP);
     let orders_val = root.get(KEY_GRANULAR_ORDERS)?;
     let ValueOrContainer::Container(Container::Map(orders_map)) = orders_val else { return None; };
-    let paragraphs_val = orders_map.get("paragraphs")?;
+    let paragraphs_val = orders_map.get(DB8_PARAGRAPH_ORDER)?;
     let ValueOrContainer::Container(Container::MovableList(list)) = paragraphs_val else { return None; };
     list.to_vec().iter().position(|value| matches!(value, LoroValue::String(text) if text.as_str() == text_id))
   }
@@ -1472,19 +1483,39 @@ fn validate_schema(
 
 fn configure_granular_text_styles(doc: &LoroDoc) {
   let config = StyleConfig { expand: ExpandType::After };
-  doc.config_default_text_style(Some(config.clone()));
+  doc.config_default_text_style(Some(config));
   let mut styles = StyleConfigMap::new();
   for key in INLINE_STYLE_KEYS {
-    styles.insert((*key).into(), config.clone());
+    styles.insert((*key).into(), config);
   }
   doc.config_text_style(styles);
 }
 
 fn validate_granular_source(doc: &LoroDoc) -> CollabResult<()> {
   let _ = root_binary(doc, KEY_GRANULAR_METADATA)?;
-  let _ = granular_orders_map(doc)?;
-  let _ = granular_texts_map(doc)?;
+  let orders = granular_orders_map(doc)?;
+  let texts = granular_texts_map(doc)?;
   let _ = granular_binaries_map(doc)?;
+
+  let order = match orders.get(DB8_PARAGRAPH_ORDER) {
+    Some(ValueOrContainer::Container(Container::MovableList(order))) => order,
+    _ => return Err(CollabError::InvalidSchema("missing paragraph order list")),
+  };
+  let ordered_ids = order
+    .to_vec()
+    .into_iter()
+    .map(loro_string)
+    .collect::<CollabResult<Vec<_>>>()?;
+  let mut ordered_set = HashSet::with_capacity(ordered_ids.len());
+  for text_id in &ordered_ids {
+    if !ordered_set.insert(text_id.clone()) {
+      return Err(CollabError::InvalidSchema("duplicate paragraph ID in order list"));
+    }
+  }
+  let text_ids = texts.keys().map(|key| key.to_string()).collect::<HashSet<_>>();
+  if ordered_set != text_ids {
+    return Err(CollabError::InvalidSchema("paragraph order and granular_texts disagree"));
+  }
   Ok(())
 }
 
@@ -1956,7 +1987,7 @@ fn validate_utf8_range(text: &str, range: Range<usize>) -> CollabResult<()> {
 fn paragraphs_order_list(doc: &LoroDoc) -> CollabResult<LoroMovableList> {
   let orders = granular_orders_map(doc)?;
   orders
-    .get_or_create_container("paragraphs", LoroMovableList::new())
+    .get_or_create_container(DB8_PARAGRAPH_ORDER, LoroMovableList::new())
     .map_err(|error| CollabError::Loro(error.to_string()))
 }
 
@@ -2054,7 +2085,7 @@ mod tests {
     let source = GranularSource {
       metadata: b"root".to_vec(),
       orders: vec![GranularOrderRecord {
-        name: "paragraphs".to_string(),
+        name: DB8_PARAGRAPH_ORDER.to_string(),
         ids: vec!["p1".to_string()],
       }],
       texts: vec![GranularTextRecord {
@@ -2329,8 +2360,10 @@ mod tests {
   }
 }
 fn configure_peer_id(doc: &LoroDoc, actor_id: ActorId) -> CollabResult<()> {
-  let mut bytes = [0; 8];
-  bytes.copy_from_slice(&actor_id.0.as_bytes()[..8]);
+  // Hash the full 128-bit UUID via BLAKE3 to extract uniform 64-bit PeerID,
+  // avoiding the non-uniform bit distribution in UUID v4's version/variant nibbles.
+  let hash = blake3_hash(actor_id.0.as_bytes());
+  let bytes: [u8; 8] = hash[..8].try_into().unwrap();
   let mut peer_id = PeerID::from_le_bytes(bytes);
   if peer_id == 0 {
     peer_id = 1;

@@ -170,7 +170,7 @@ mod workspace_tests {
 
   #[test]
   #[hotpath::measure]
-  fn bounded_pending_collaboration_queue_discards_oldest_when_full() {
+  fn bounded_pending_collaboration_queue_preserves_oldest_when_full() {
     let document_id = CollabDocumentId(Uuid::new_v4());
     let actor_id = ActorId::new();
     let first = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor_id, b"first", &[]).unwrap();
@@ -204,14 +204,14 @@ mod workspace_tests {
     ));
 
     assert_eq!(queue.len(), 2);
+    let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
+      panic!("expected oldest source update to be preserved");
+    };
+    assert_eq!(source.materialize_projection_cache().unwrap(), b"first");
     let Some(PendingCollaborationUpdate::Presence { cursor }) = queue.pop_front() else {
-      panic!("expected oldest source update to be dropped");
+      panic!("expected existing presence update to remain");
     };
     assert_eq!(cursor, Some("db8:0:7".to_string()));
-    let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
-      panic!("expected newest source replacement to remain");
-    };
-    assert_eq!(source.materialize_projection_cache().unwrap(), b"second");
   }
 
   #[test]

@@ -540,6 +540,17 @@ impl RichTextEditor {
     std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some()
   }
 
+  /// Suppress mutation notifications to avoid re-entrant observe callbacks
+  /// during remote CRDT projection updates.
+  pub fn suppress_mutation_notifications(&mut self) {
+    self.suppress_mutation_notify += 1;
+  }
+
+  /// Re-enable mutation notifications after a remote projection update.
+  pub fn unsuppress_mutation_notifications(&mut self) {
+    self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
+  }
+
   fn apply_canonical_operation(&mut self, operation: &CanonicalOperation) -> RemoteOperationOutcome {
     match operation {
       CanonicalOperation::InsertText {

@@ -672,14 +672,15 @@ impl OutboundDurableUpdateQueue {
     self.app_only_hints.len()
   }
 
-  pub fn push_durable(&mut self, update: OutboundUpdate, max_durable_updates: usize) {
+  pub fn push_durable(&mut self, update: OutboundUpdate, max_durable_updates: usize) -> bool {
     if max_durable_updates == 0 {
-      return;
+      return false;
     }
-    if self.durable_updates.len() == max_durable_updates {
-      self.durable_updates.pop_front();
+    if self.durable_updates.len() >= max_durable_updates {
+      return false;
     }
     self.durable_updates.push_back(update);
+    true
   }
 
   pub fn push_app_only_hint(&mut self, update: OutboundUpdate) {
@@ -795,10 +796,9 @@ pub fn queue_durable_update(
 ) -> bool {
   if is_app_only_hint {
     queue.push_app_only_hint(update);
-    false
-  } else {
-    queue.push_durable(update, max_durable_updates);
     true
+  } else {
+    queue.push_durable(update, max_durable_updates)
   }
 }
 
@@ -810,7 +810,10 @@ pub struct LiveUpdateHub {
 
 impl Default for LiveUpdateHub {
   fn default() -> Self {
-    Self::new(1024)
+    // 4096-slot ring buffer accommodates bursty collaboration traffic
+    // (rapid keystroke edits, presence updates from N peers) without
+    // forcing expensive snapshot recovery on lagged consumers.
+    Self::new(4096)
   }
 }
 
@@ -972,13 +975,72 @@ impl ProtocolHandler for FlowstateProtocol {
           .map_err(accept_error)?;
       }
       let stream_result = async {
-        if let Err(error) = send_snapshot_and_have(&mut send, state, &self.config).await {
-          let message = format!("{error:#}");
-          collab_canary("host_initial_snapshot_reject", &message);
-          send_protocol_error(&mut send, self.config.document_id, message, self.config.max_message_bytes).await?;
-          finish_protocol_error_stream(&mut send).await?;
-          send_finished = true;
-          return Ok(());
+        let mut incremental_catchup = false;
+        if !hello.known_frontier.is_empty() {
+          let current_frontier = {
+            let doc = state
+              .document
+              .lock()
+              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
+            doc.frontier()?
+          };
+          if flowstate_collab::frontier_contains(&hello.known_frontier, &current_frontier) {
+            incremental_catchup = true;
+            // Send incremental updates since the peer's known frontier so they
+            // can catch up without a full snapshot transfer.
+            let incremental_update = {
+              let doc = state
+                .document
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
+              doc.export_update_since_frontier(&hello.known_frontier)?
+            };
+            if !incremental_update.is_empty() && incremental_update.len() <= self.config.max_update_bytes {
+              write_wire_message(
+                &mut send,
+                &WireMessage::Update {
+                  update_id: None,
+                  document_id: self.config.document_id,
+                  actor_id: self.config.actor_id,
+                  hash: blake3_hash(&incremental_update),
+                  bytes: incremental_update,
+                  application: None,
+                },
+                self.config.max_message_bytes,
+              )
+              .await?;
+            }
+          }
+        }
+        if !incremental_catchup {
+          if let Err(error) = send_snapshot_and_have(&mut send, state, &self.config).await {
+            let message = format!("{error:#}");
+            collab_canary("host_initial_snapshot_reject", &message);
+            send_protocol_error(&mut send, self.config.document_id, message, self.config.max_message_bytes).await?;
+            finish_protocol_error_stream(&mut send).await?;
+            send_finished = true;
+            return Ok(());
+          }
+        } else {
+          // Send Have with frontier + assets to signal handshake complete.
+          let frontier = {
+            let doc = state
+              .document
+              .lock()
+              .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?;
+            doc.frontier()?
+          };
+          let assets = advertised_asset_hashes(state)?;
+          write_wire_message(
+            &mut send,
+            &WireMessage::Have {
+              document_id: self.config.document_id,
+              frontier,
+              assets,
+            },
+            self.config.max_message_bytes,
+          )
+          .await?;
         }
         if let Some(hub) = &self.live_updates {
           send_peer_roster(&mut send, hub, hello.session_id, self.config.document_id, self.config.max_message_bytes).await?;
@@ -2103,10 +2165,8 @@ impl LiveCollaborationClient {
     ensure_update_size(&bytes, self.config.max_update_bytes)?;
     let hash = blake3_hash(&bytes);
     let update_id = self.allocate_update_id();
-    self
-      .document
-      .import_update_checked(self.authorization.role, &bytes)?;
     self.remember_local_update_hash(hash);
+    let accepted_bytes = bytes.clone();
     collab_canary("client_publish_update", format!("bytes={} application=none", bytes.len()));
     write_wire_message_reusing_buffer(
       &mut self.send,
@@ -2122,7 +2182,9 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await
+    self.await_update_result(update_id).await?;
+    self.document.import_update_checked(self.authorization.role, &accepted_bytes)?;
+    Ok(())
   }
 
   pub async fn publish_applied_update_with_application(&mut self, bytes: Vec<u8>, application: UpdateApplication) -> AnyResult<()> {
@@ -2160,13 +2222,14 @@ impl LiveCollaborationClient {
     ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
     let update = self
       .document
-      .apply_granular_source_mutations(self.authorization.role, &mutations)?;
+      .prepare_granular_source_mutations(self.authorization.role, &mutations)?;
     ensure!(
       !update.is_empty(),
       "granular collaboration mutation batch did not produce a durable update"
     );
     ensure_update_size(&update, self.config.max_update_bytes)?;
     let hash = blake3_hash(&update);
+    let accepted_update = update.clone();
     let update_id = self.allocate_update_id();
     self.remember_local_update_hash(hash);
     collab_canary(
@@ -2192,7 +2255,9 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await
+    self.await_update_result(update_id).await?;
+    self.document.import_update_checked(self.authorization.role, &accepted_update)?;
+    Ok(())
   }
 
   pub async fn replace_source_from(&mut self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
@@ -2218,6 +2283,7 @@ impl LiveCollaborationClient {
     };
     ensure_update_size(&update, self.config.max_update_bytes)?;
     let hash = blake3_hash(&update);
+    let accepted_update = update.clone();
     let update_id = self.allocate_update_id();
     self.remember_local_update_hash(hash);
     write_wire_message_reusing_buffer(
@@ -2234,7 +2300,9 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await
+    self.await_update_result(update_id).await?;
+    self.document.import_update_checked(self.authorization.role, &accepted_update)?;
+    Ok(())
   }
 
   pub async fn publish_presence(
@@ -2518,6 +2586,13 @@ impl LiveCollaborationClient {
 }
 
 pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClient> {
+  connect_live_invite_with_frontier(link, Vec::new()).await
+}
+
+pub async fn connect_live_invite_with_frontier(
+  link: &str,
+  known_frontier: Vec<u8>,
+) -> AnyResult<LiveCollaborationClient> {
   let ticket = decode_invite_link(link)?;
   let endpoint = bind_endpoint().await?;
   let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role);
@@ -2529,9 +2604,18 @@ pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClien
     .open_bi()
     .await
     .context("failed to open Flowstate live stream")?;
-  let hello = config.hello(Vec::new(), ticket.capability.clone());
-  write_wire_message(&mut send, &WireMessage::Hello(hello), config.max_message_bytes).await?;
-  let message = read_wire_message(&mut recv, config.max_message_bytes).await?;
+  let handshake_timeout = std::time::Duration::from_secs(30);
+  let hello = config.hello(known_frontier, ticket.capability.clone());
+  tokio::time::timeout(handshake_timeout, async {
+    write_wire_message(&mut send, &WireMessage::Hello(hello), config.max_message_bytes).await
+  })
+  .await
+  .context("handshake timeout sending Hello")??;
+  let message = tokio::time::timeout(handshake_timeout, async {
+    read_wire_message(&mut recv, config.max_message_bytes).await
+  })
+  .await
+  .context("handshake timeout waiting for Authorize")??;
   let WireMessage::Authorize(authorization) = message else {
     bail!(SyncError::UnexpectedMessage("Authorize"));
   };
@@ -2548,7 +2632,12 @@ pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClien
   let mut saw_have = false;
   let mut pending_snapshot = None;
   while document.is_none() || !saw_have {
-    match read_wire_message(&mut recv, config.max_message_bytes).await? {
+    let message = tokio::time::timeout(handshake_timeout, async {
+      read_wire_message(&mut recv, config.max_message_bytes).await
+    })
+    .await
+    .context("handshake timeout during snapshot/asset sync")??;
+    match message {
       WireMessage::Snapshot { document_id, bytes, hash } => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         document = Some(collab_document_from_snapshot_bytes(bytes, hash, &config)?);
@@ -2559,6 +2648,16 @@ pub async fn connect_live_invite(link: &str) -> AnyResult<LiveCollaborationClien
           document = Some(collab_document_from_snapshot_bytes(bytes, hash, &config)?);
         }
       },
+      WireMessage::Update { document_id, bytes, hash, .. } if document.is_some() => {
+        ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure_update_size(&bytes, config.max_update_bytes)?;
+        ensure!(blake3_hash(&bytes) == hash, "incremental update hash mismatch");
+        document.as_ref().unwrap().import_update_checked(authorization.role, &bytes)
+          .context("failed to import incremental catchup update")?;
+      },
+      // Incremental updates received without a base document are silently
+      // dropped — the full snapshot will follow.
+      WireMessage::Update { .. } => {},
       WireMessage::Have { document_id, assets, .. } | WireMessage::AssetHave(AssetHaveMessage { document_id, assets }) => {
         ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
         assets_available = assets;
@@ -2928,8 +3027,33 @@ async fn serve_live_stream(
             }
             continue;
           },
-          Err(broadcast::error::RecvError::Lagged(_)) => {
-            send_snapshot_and_have(send, state, config).await?;
+          Err(broadcast::error::RecvError::Lagged(skipped)) => {
+            collab_canary(
+              "host_broadcast_lag",
+              format!("skipped={skipped}"),
+            );
+            // Try to catch up by draining any immediately available messages.
+            // If the latest message is still stale, fall back to snapshot repair.
+            let caught_up = loop {
+              match rx.try_recv() {
+                Ok(live) => {
+                  if let Some(message) = live_update_wire_message(config.document_id, hello.session_id, live)
+                    && write_wire_message(send, &message, config.max_message_bytes).await.is_err()
+                  {
+                    break false;
+                  }
+                },
+                Err(broadcast::error::TryRecvError::Empty) => break true,
+                Err(broadcast::error::TryRecvError::Closed) => {
+                  live_rx = None;
+                  break true;
+                },
+                Err(broadcast::error::TryRecvError::Lagged(_)) => break false,
+              }
+            };
+            if !caught_up {
+              send_snapshot_and_have(send, state, config).await?;
+            }
             continue;
           },
           Err(broadcast::error::RecvError::Closed) => {
@@ -3035,16 +3159,9 @@ async fn serve_live_stream(
           );
         }
 
-        if bytes.is_empty() && application.is_some() {
-          if collab_canary_enabled() {
-            collab_canary(
-              "host_dropped_application_only",
-              format!("application={}", application_label(application.as_ref())),
-            );
-          }
-          // Application-only updates are no longer supported — every update
-          // must carry source bytes.  Acknowledge the sender so they don't
-          // stall, but do NOT import into the CRDT or broadcast to peers.
+        if bytes.is_empty() {
+          // An update must always carry CRDT source bytes; application metadata
+          // alone is no longer supported — the CRDT is the single authority.
           let frontier = state
             .document
             .lock()
@@ -3052,14 +3169,25 @@ async fn serve_live_stream(
             .frontier()?;
           write_wire_message(
             send,
-            &WireMessage::Ack {
-              update_id: Some(update_id),
+            &WireMessage::UpdateRejected {
+              update_id,
               document_id: config.document_id,
-              frontier,
+              hash,
+              code: UpdateRejectionCode::MalformedUpdate,
+              reason: "update with empty bytes is not supported (CRDT source required)".to_string(),
+              authoritative_frontier: frontier,
+              recovery: UpdateRecoveryAction::DoNotRetry,
+              host_state_changed: false,
             },
             config.max_message_bytes,
           )
           .await?;
+          if collab_canary_enabled() {
+            collab_canary(
+              "host_rejected_empty_update",
+              format!("application={}", application_label(application.as_ref())),
+            );
+          }
           continue;
         }
 
