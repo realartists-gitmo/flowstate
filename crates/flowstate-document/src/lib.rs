@@ -4,7 +4,12 @@ mod persistence {
   pub mod io;
 }
 
-pub use persistence::io::{db8_runs_from_marks, deserialize_paragraph_metadata};
+pub use persistence::io::{
+  db8_runs_from_marks, deserialize_block_metadata, deserialize_paragraph_metadata, serialize_block_metadata, serialize_paragraph_metadata,
+};
+
+mod controller;
+pub use controller::*;
 use std::{io, path::Path};
 
 use flowstate_collab::{ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind};
@@ -75,6 +80,23 @@ pub fn document_from_db8_collab_source(source: &CollabDocument) -> io::Result<Do
 
 pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
   persistence::io::db8_bytes(document)
+}
+
+pub fn db8_vnext_bytes(document: &Document, source_snapshot: Vec<u8>, created_by_actor: ActorId) -> io::Result<Vec<u8>> {
+  persistence::io::db8_vnext_bytes(document, source_snapshot, created_by_actor)
+}
+
+pub fn db8_vnext_bytes_with_updates(
+  document: &Document,
+  source_snapshot: Vec<u8>,
+  recent_updates: Vec<Vec<u8>>,
+  created_by_actor: ActorId,
+) -> io::Result<Vec<u8>> {
+  persistence::io::db8_vnext_bytes_with_updates(document, source_snapshot, recent_updates, created_by_actor)
+}
+
+pub fn db8_flow_snapshot_from_bytes(bytes: &[u8]) -> io::Result<Option<Vec<u8>>> {
+  persistence::io::db8_flow_snapshot_from_bytes(bytes)
 }
 
 pub fn flowstate_document_theme() -> DocumentTheme {

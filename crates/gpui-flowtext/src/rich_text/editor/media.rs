@@ -148,6 +148,17 @@ impl RichTextEditor {
       cx.notify();
       return true;
     }
+    if self.set_image_properties_authoritatively(drag.block_ix, after.clone(), cx) {
+      return true;
+    }
+    if self.authoritative_edit_controller.is_some() {
+      if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) {
+        *block = Block::Image(drag.before);
+      }
+      self.invalidate_document_layout_caches();
+      self.reject_projection_first_edit("Image resize", cx);
+      return true;
+    }
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
@@ -209,6 +220,12 @@ impl RichTextEditor {
     if updated == image {
       return;
     }
+    if self.set_image_properties_authoritatively(block_ix, updated.clone(), cx) {
+      return;
+    }
+    if self.reject_projection_first_edit("Image metadata mutation", cx) {
+      return;
+    }
     let before = Block::Image(image);
     let after = Block::Image(updated);
     if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
@@ -232,6 +249,23 @@ impl RichTextEditor {
     self.mark_document_changed(after_generation, cx);
   }
 
+  fn set_image_properties_authoritatively(&mut self, block_ix: usize, image: ImageBlock, cx: &mut Context<Self>) -> bool {
+    if self.authoritative_edit_controller.is_none() {
+      return false;
+    }
+    let Some(block_id) = self.identity_map.block_id(block_ix) else {
+      return false;
+    };
+    let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+      return false;
+    };
+    self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::SetImageProperties { block_id, image }],
+      planned_selection,
+      cx,
+    )
+  }
+
   pub fn insert_equation(&mut self, source: impl Into<SharedString>, cx: &mut Context<Self>) {
     self.insert_blocks_after_caret(
       vec![Block::Equation(EquationBlock {
@@ -250,6 +284,31 @@ impl RichTextEditor {
 
   fn insert_image_assets(&mut self, assets: Vec<(AssetRecord, SharedString)>, cx: &mut Context<Self>) {
     if assets.is_empty() {
+      return;
+    }
+    if self.authoritative_edit_controller.is_some() {
+      let insert_ix = self.authoritative_object_insert_index();
+      let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+        return;
+      };
+      let mut operations = Vec::with_capacity(assets.len() * 2);
+      for (offset, (asset, alt_text)) in assets.into_iter().enumerate() {
+        let asset_id = asset.id;
+        operations.push(AuthoritativeSourceOperation::RegisterAsset { asset });
+        operations.push(AuthoritativeSourceOperation::InsertBlock {
+          block_id: new_block_id(),
+          block_ix: insert_ix + offset,
+          block: Block::Image(ImageBlock {
+            asset_id,
+            alt_text,
+            caption: None,
+            sizing: ImageSizing::FitWidth,
+            alignment: BlockAlignment::Center,
+            version: 0,
+          }),
+        });
+      }
+      self.apply_authoritative_source_operations(operations, planned_selection, cx);
       return;
     }
     let before_document = self.document.clone();

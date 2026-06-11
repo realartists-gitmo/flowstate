@@ -19,10 +19,6 @@ impl RichTextEditor {
       return false;
     };
 
-    let before_selection = self.selection.clone();
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let styles = if let Some(styles) = self.pending_styles {
       styles
     } else {
@@ -35,14 +31,42 @@ impl RichTextEditor {
     };
     let text = text.to_owned();
     let canonical_text = text.clone();
-
-    if !insert_text_at(&mut self.document, caret.paragraph, caret.byte, &text, styles) {
-      return false;
-    }
     let after = DocumentOffset {
       paragraph: caret.paragraph,
       byte: caret.byte + text.len(),
     };
+
+    if self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::InsertText {
+        at: AuthoritativeSourcePosition {
+          paragraph: paragraph_id,
+          byte: caret.byte,
+        },
+        text: canonical_text.clone(),
+        styles,
+      }],
+      AuthoritativeSourceSelection {
+        anchor: AuthoritativeSourcePosition {
+          paragraph: paragraph_id,
+          byte: after.byte,
+        },
+        head: AuthoritativeSourcePosition {
+          paragraph: paragraph_id,
+          byte: after.byte,
+        },
+      },
+      cx,
+    ) {
+      return true;
+    }
+
+    let before_selection = self.selection.clone();
+    let before_generation = self.edit_generation;
+    let after_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    if !insert_text_at(&mut self.document, caret.paragraph, caret.byte, &text, styles) {
+      return false;
+    }
     self.selection = EditorSelection { anchor: after, head: after };
 
     self.undo_stack.push(EditRecord {
@@ -75,6 +99,9 @@ impl RichTextEditor {
     capture_range: Option<Range<usize>>,
     edit: impl FnOnce(&mut Self, &mut Context<Self>),
   ) {
+    if self.reject_projection_first_edit("This edit", cx) {
+      return;
+    }
     let timing = Instant::now();
     let before_selection = self.selection.clone();
     let before_paragraph_count = self.document.paragraphs.len();
@@ -221,8 +248,7 @@ impl RichTextEditor {
     // edits, producing the collaboration "ghost paragraph" duplication.
     if before_len == after_len && before_ids.as_slice() == after_ids {
       let mut operations = Vec::new();
-      for relative_ix in 0..before_len {
-        let paragraph_id = before_ids[relative_ix];
+      for (relative_ix, paragraph_id) in before_ids.iter().copied().enumerate().take(before_len) {
         let before_text = paragraph_text_from_span(before_span, relative_ix)?;
         let after_text = paragraph_text_from_span(after_span, relative_ix)?;
         let before_paragraph = before_span.paragraphs.get(relative_ix)?;
@@ -478,6 +504,9 @@ impl RichTextEditor {
   }
 
   fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, _block_ix: usize, cx: &mut Context<Self>) {
+    if self.reject_projection_first_edit("Paragraph insertion", cx) {
+      return;
+    }
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
@@ -546,14 +575,24 @@ impl RichTextEditor {
   }
 
   fn mark_document_changed_with_reconcile(&mut self, generation: u64, reconcile_identity: bool, cx: &mut Context<Self>) {
+    if let Some(controller) = self.authoritative_edit_controller.clone() {
+      // This path exists only as a recovery guard for a missed projection-first
+      // caller. Normal authoritative edits submit typed source operations.
+      let response = controller
+        .borrow_mut()
+        .recover_projection("projection-first edit rejected by authoritative source boundary".to_string());
+      self.apply_authoritative_edit_response(response);
+    }
     self.edit_generation = generation;
     if reconcile_identity {
       self.identity_map.reconcile(&self.document);
     }
-    self.last_collaboration_edit = self
-      .undo_stack
-      .last()
-      .map(|record| CollaborationEdit::from_operations(record.canonical_operations.clone()));
+    if self.authoritative_edit_controller.is_none() {
+      self.last_collaboration_edit = self
+        .undo_stack
+        .last()
+        .map(|record| CollaborationEdit::from_operations(record.canonical_operations.clone()));
+    }
     self.refresh_save_status();
     self.schedule_recovery_write(cx);
     cx.notify();
@@ -610,33 +649,6 @@ impl RichTextEditor {
       }
     }
     (!operations.is_empty()).then_some(operations)
-  }
-
-  fn append_style_restore_operations(
-    &self,
-    operations: &mut Vec<CanonicalOperation>,
-    restore: &DocumentSpan,
-    current: &DocumentSpan,
-  ) -> Option<()> {
-    if restore.paragraphs.len() != current.paragraphs.len() || restore.text != current.text {
-      return None;
-    }
-    for (relative_ix, (restore_paragraph, current_paragraph)) in restore
-      .paragraphs
-      .iter()
-      .zip(&current.paragraphs)
-      .enumerate()
-    {
-      let paragraph = self.identity_map.paragraph_id(restore.start_paragraph + relative_ix)?;
-      if restore_paragraph.style != current_paragraph.style {
-        operations.push(CanonicalOperation::SetParagraphStyle {
-          paragraph,
-          style: restore_paragraph.style,
-        });
-      }
-      Self::append_run_style_diff_operations(operations, paragraph, &current_paragraph.runs, &restore_paragraph.runs);
-    }
-    Some(())
   }
 
   fn collaboration_edit_from_history_operations(operations: Vec<CanonicalOperation>) -> CollaborationEdit {

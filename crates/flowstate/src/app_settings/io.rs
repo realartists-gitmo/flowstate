@@ -53,6 +53,29 @@ pub fn load_recent_documents() -> Vec<PathBuf> {
   load_app_settings().recent_documents
 }
 
+pub fn load_or_create_collaboration_identity() -> (flowstate_collab::ActorId, flowstate_collab::ReplicaId) {
+  let mut settings = load_app_settings();
+  let actor_id = settings
+    .collaboration_identity
+    .actor_id
+    .unwrap_or_else(uuid::Uuid::new_v4);
+  let replica_id = settings
+    .collaboration_identity
+    .replica_id
+    .unwrap_or_else(uuid::Uuid::new_v4);
+  if settings.collaboration_identity.actor_id != Some(actor_id) || settings.collaboration_identity.replica_id != Some(replica_id) {
+    settings.collaboration_identity.actor_id = Some(actor_id);
+    settings.collaboration_identity.replica_id = Some(replica_id);
+    if let Err(error) = save_app_settings(settings) {
+      eprintln!("failed to persist collaboration identity: {error}");
+    }
+  }
+  (
+    flowstate_collab::ActorId(actor_id),
+    flowstate_collab::ReplicaId(replica_id),
+  )
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 #[hotpath::measure]

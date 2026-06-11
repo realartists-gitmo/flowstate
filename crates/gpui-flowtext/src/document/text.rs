@@ -20,6 +20,7 @@ pub struct DocumentIds {
   pub document_id: u128,
   pub paragraph_ids: Vec<ParagraphId>,
   pub block_ids: Vec<BlockId>,
+  pub rich_block_ids: FxHashMap<BlockId, RichBlockIdentity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]

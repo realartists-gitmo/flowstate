@@ -193,64 +193,13 @@ impl RichTextEditor {
     self.insert_text_command(SOFT_LINE_BREAK_STR, cx);
   }
 
-  // Raw key handler: routes printable characters to `insert_text`. Non-
-  // printable keys (arrows, Backspace, etc.) carry `key_char = None` and are
-  // ignored here — they are routed via the action system above instead.
-  fn on_key_down_event(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-    // If the user is holding a modifier that turns the key into a shortcut
-    // (Ctrl/Cmd), don't insert the character. Shift and Alt remain available
-    // for things like capital letters and option-letter accented chars.
+  // Text is delivered by GPUI's platform input handler so IME composition and
+  // normal typing share one source-first commit path. Raw key handling remains
+  // only for Tab's table-navigation behavior.
+  fn on_key_down_event(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
     let m = &event.keystroke.modifiers;
-    if m.control || m.platform {
-      return;
-    }
-    if event.keystroke.key == "tab"
-      && self.move_selected_table_cell(!m.shift, cx)
-    {
-      return;
-    }
-    #[cfg(target_os = "windows")]
-    let key_char = event
-      .keystroke
-      .key_char
-      .as_deref()
-      .or_else(|| (event.keystroke.key == "space" && !m.alt && !m.function).then_some(" "));
-
-    #[cfg(not(target_os = "windows"))]
-    let key_char = event.keystroke.key_char.as_deref();
-
-    let Some(key_char) = key_char else {
-      return;
-    };
-    if key_char.is_empty() {
-      return;
-    }
-    #[cfg(target_os = "windows")]
-    {
-      let key_char = if window.capslock().on {
-        windows_apply_capslock(key_char)
-      } else {
-        key_char.to_string()
-      };
-      if self.insert_text_into_selected_table_cell(&key_char, cx) {
-        return;
-      }
-      if self.insert_text_into_selected_equation(&key_char, cx) {
-        return;
-      }
-      self.insert_text_command(&key_char, cx);
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-      let _ = window;
-      if self.insert_text_into_selected_table_cell(key_char, cx) {
-        return;
-      }
-      if self.insert_text_into_selected_equation(key_char, cx) {
-        return;
-      }
-      self.insert_text_command(key_char, cx);
+    if event.keystroke.key == "tab" {
+      self.move_selected_table_cell(!m.shift, cx);
     }
   }
 

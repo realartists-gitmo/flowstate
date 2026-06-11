@@ -241,6 +241,10 @@ impl RichTextEditor {
   }
 
   fn move_rich_text_fragment(&mut self, drag: ActiveTextDrag, drop: DocumentOffset, cx: &mut Context<Self>) {
+    if self.reject_projection_first_edit("Collaborative text move", cx) {
+      self.clear_drop_preview();
+      return;
+    }
     if offset_in_range(drop, drag.source_range.clone()) {
       self.clear_drop_preview();
       self.selection = EditorSelection {

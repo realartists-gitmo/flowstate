@@ -41,6 +41,15 @@ impl RichTextEditor {
     }
     let range = self.selection.normalized();
     let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.strikethrough);
+    if self.apply_run_style_source_first(
+      |mut styles| {
+        styles.strikethrough = !all_selected;
+        styles
+      },
+      cx,
+    ) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| styles.strikethrough = !all_selected);
       editor.after_formatting_mutation(cx);
@@ -226,6 +235,46 @@ impl RichTextEditor {
       });
       return;
     }
+    if self.authoritative_edit_controller.is_some()
+      && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+    {
+      let (range, clear_paragraph_styles) = if self.selection.is_caret() {
+        let paragraph = self.selection.head.paragraph;
+        (
+          DocumentOffset { paragraph, byte: 0 }..DocumentOffset {
+            paragraph,
+            byte: paragraph_text_len(&self.document.paragraphs[paragraph]),
+          },
+          true,
+        )
+      } else {
+        let range = self.selection.normalized();
+        let clear_paragraph_styles = selection_contains_whole_paragraph(&self.document, range.clone());
+        (range, clear_paragraph_styles)
+      };
+      if let Some(mut operations) = self.run_style_source_operations(range.clone(), |_| RunStyles::default()) {
+        if clear_paragraph_styles {
+          for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+            if self
+              .document
+              .paragraphs
+              .get(paragraph_ix)
+              .is_some_and(|paragraph| paragraph.style != ParagraphStyle::Normal)
+              && let Some(paragraph) = paragraph_id_at(&self.document, paragraph_ix)
+            {
+              operations.push(AuthoritativeSourceOperation::SetParagraphStyle {
+                paragraph,
+                style: ParagraphStyle::Normal,
+              });
+            }
+          }
+        }
+        self.pending_styles = None;
+        if operations.is_empty() || self.apply_authoritative_source_operations(operations, planned_selection, cx) {
+          return;
+        }
+      }
+    }
     self.apply_document_edit(cx, |editor, cx| {
       if editor.selection.is_caret() {
         let paragraph_ix = editor.selection.head.paragraph;
@@ -270,6 +319,15 @@ impl RichTextEditor {
     if self.selection.is_caret() {
       return;
     }
+    if self.apply_run_style_source_first(
+      |mut styles| {
+        styles.apply(style);
+        styles
+      },
+      cx,
+    ) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       let range = editor.selection.normalized();
       for paragraph_ix in range.start.paragraph..=range.end.paragraph {
@@ -294,6 +352,26 @@ impl RichTextEditor {
         }
       });
       return;
+    }
+    if self.authoritative_edit_controller.is_some()
+      && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+    {
+      let range = self.selection.normalized();
+      let operations = (range.start.paragraph..=range.end.paragraph)
+        .filter_map(|paragraph_ix| {
+          let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+          if paragraph.style == style {
+            return None;
+          }
+          Some(AuthoritativeSourceOperation::SetParagraphStyle {
+            paragraph: paragraph_id_at(&self.document, paragraph_ix)?,
+            style,
+          })
+        })
+        .collect::<Vec<_>>();
+      if operations.is_empty() || self.apply_authoritative_source_operations(operations, planned_selection, cx) {
+        return;
+      }
     }
     self.apply_document_edit(cx, |editor, cx| {
       let range = editor.selection.normalized();

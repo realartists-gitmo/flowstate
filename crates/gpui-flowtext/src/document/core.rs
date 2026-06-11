@@ -59,6 +59,7 @@ pub enum DocumentInvariantError {
   OffsetWidthCount { widths: usize, paragraphs: usize },
   OffsetTreeCount { tree: usize, expected: usize },
   ParagraphRangeStart { paragraph: usize, start: usize, expected: usize },
+  ParagraphSeparator { paragraph: usize, offset: usize },
   ParagraphRangeInvalid { paragraph: usize, start: usize, end: usize, text_len: usize },
   ParagraphRangeLen { paragraph: usize, range_len: usize, run_len: usize },
   ParagraphRunZero { paragraph: usize, run: usize },
@@ -79,6 +80,7 @@ impl std::fmt::Display for DocumentInvariantError {
       Self::OffsetWidthCount { widths, paragraphs } => write!(f, "offset_width_len={widths} paragraph_len={paragraphs}"),
       Self::OffsetTreeCount { tree, expected } => write!(f, "offset_tree_len={tree} expected={expected}"),
       Self::ParagraphRangeStart { paragraph, start, expected } => write!(f, "paragraph={paragraph} range_start={start} expected={expected}"),
+      Self::ParagraphSeparator { paragraph, offset } => write!(f, "paragraph={paragraph} missing_newline_separator_at={offset}"),
       Self::ParagraphRangeInvalid { paragraph, start, end, text_len } => write!(f, "paragraph={paragraph} invalid_range={start}..{end} text_len={text_len}"),
       Self::ParagraphRangeLen { paragraph, range_len, run_len } => write!(f, "paragraph={paragraph} run_len={run_len} byte_range_len={range_len}"),
       Self::ParagraphRunZero { paragraph, run } => write!(f, "paragraph={paragraph} zero_run={run}"),
@@ -132,11 +134,18 @@ pub fn validate_document_invariants(document: &Document) -> Result<(), DocumentI
   let text_len = full_text.len();
   let mut previous_end = 0usize;
   for (ix, paragraph) in document.paragraphs.iter().enumerate() {
-    if paragraph.byte_range.start != previous_end {
+    let expected_start = previous_end + usize::from(ix > 0);
+    if paragraph.byte_range.start != expected_start {
       return Err(DocumentInvariantError::ParagraphRangeStart {
         paragraph: ix,
         start: paragraph.byte_range.start,
-        expected: previous_end,
+        expected: expected_start,
+      });
+    }
+    if ix > 0 && full_text.as_bytes().get(previous_end) != Some(&b'\n') {
+      return Err(DocumentInvariantError::ParagraphSeparator {
+        paragraph: ix,
+        offset: previous_end,
       });
     }
     if paragraph.byte_range.end < paragraph.byte_range.start || paragraph.byte_range.end > text_len {
@@ -394,6 +403,7 @@ pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> Doc
     block_ids: std::iter::repeat_with(new_block_id)
       .take(block_count)
       .collect(),
+    rich_block_ids: FxHashMap::default(),
   }
 }
 

@@ -37,7 +37,8 @@ pub(crate) async fn read_frame(recv: &mut RecvStream, max_message_bytes: usize) 
 
 pub(crate) fn validate_hello(hello: &HelloMessage, config: &FlowstateSyncConfig) -> AnyResult<()> {
   ensure!(hello.protocol_version == FLOWSTATE_PROTOCOL_VERSION, SyncError::ProtocolMismatch);
-  ensure!(hello.collab_schema == COLLAB_SCHEMA_VERSION, SyncError::ProtocolMismatch);
+  ensure!(hello.collab_schema == config.collab_schema, SyncError::ProtocolMismatch);
+  ensure!(hello.history_epoch == config.history_epoch, SyncError::ProtocolMismatch);
   ensure!(hello.crdt_engine == "loro", SyncError::ProtocolMismatch);
   ensure!(hello.document_id == config.document_id, SyncError::ProtocolMismatch);
   ensure!(hello.format_kind == config.format_kind, SyncError::ProtocolMismatch);

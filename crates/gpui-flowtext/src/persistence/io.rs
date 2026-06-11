@@ -106,6 +106,14 @@ pub fn write_document(path: impl AsRef<Path>, document: &Document) -> io::Result
   write_bytes_atomic(path, &bytes)
 }
 
+pub fn write_document_bytes_atomic(path: impl AsRef<Path>, bytes: &[u8]) -> io::Result<()> {
+  let path = path.as_ref();
+  if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+    fs::create_dir_all(parent)?;
+  }
+  write_bytes_atomic(path, bytes)
+}
+
 #[hotpath::measure]
 pub fn document_bytes(document: &Document) -> io::Result<Vec<u8>> {
   let document = document_for_serialization(document);

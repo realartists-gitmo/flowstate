@@ -38,6 +38,9 @@ impl RichTextEditor {
       identity_map,
       last_collaboration_edit: None,
       collaboration_role: None,
+      authoritative_edit_controller: None,
+      authoritative_edit_error: None,
+      ime_composition: None,
       recovery_write_in_progress: false,
       recovery_write_pending: false,
       last_recovery_generation: 0,
@@ -158,6 +161,9 @@ impl RichTextEditor {
     self.redo_stack = Vec::new();
     self.last_collaboration_edit = None;
     self.collaboration_role = None;
+    self.authoritative_edit_controller = None;
+    self.authoritative_edit_error = None;
+    self.ime_composition = None;
     self.recovery_write_in_progress = false;
     self.recovery_write_pending = false;
     self.paste_cache = None;
@@ -290,6 +296,57 @@ impl RichTextEditor {
 
   pub fn table_cell_id(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> Option<TableCellId> {
     self.identity_map.table_cell_id(block_ix, row_ix, cell_ix)
+  }
+
+  pub fn selected_rich_presence_payload(&self) -> Option<Db8PresencePayload> {
+    match self.selected_block? {
+      BlockSelection::TableCell { block_ix, row_ix, cell_ix } => {
+        let block_id = self.identity_map.block_id(block_ix)?;
+        let cell_id = self.identity_map.table_cell_id(block_ix, row_ix, cell_ix)?;
+        let paragraph_id = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, self.table_cell_block_ix)?;
+        let target = |byte| Db8PresenceTarget::TableCell {
+          block_id,
+          cell_id,
+          paragraph_id,
+          byte,
+        };
+        if self.table_cell_anchor == self.table_cell_caret {
+          Some(Db8PresencePayload::Caret {
+            target: target(self.table_cell_caret),
+          })
+        } else {
+          Some(Db8PresencePayload::Range {
+            anchor: target(self.table_cell_anchor),
+            head: target(self.table_cell_caret),
+          })
+        }
+      },
+      BlockSelection::Equation(block_ix) => {
+        let block_id = self.identity_map.block_id(block_ix)?;
+        let RichBlockIdentity::Equation { source } = self.document.ids.rich_block_ids.get(&block_id)? else {
+          return None;
+        };
+        let target = |byte| Db8PresenceTarget::Paragraph {
+          paragraph_id: *source,
+          byte,
+        };
+        if self.equation_source_anchor == self.equation_source_caret {
+          Some(Db8PresencePayload::Caret {
+            target: target(self.equation_source_caret),
+          })
+        } else {
+          Some(Db8PresencePayload::Range {
+            anchor: target(self.equation_source_anchor),
+            head: target(self.equation_source_caret),
+          })
+        }
+      },
+      BlockSelection::Image(block_ix) | BlockSelection::Table(block_ix) => Some(Db8PresencePayload::Caret {
+        target: Db8PresenceTarget::Block {
+          block_id: self.identity_map.block_id(block_ix)?,
+        },
+      }),
+    }
   }
 
   #[hotpath::measure]
@@ -689,17 +746,13 @@ impl RichTextEditor {
     let second_range = paragraph_byte_range(&self.document, second_ix);
     if canary {
       eprintln!(
-        "[flowstate-collab] remote_join phase=ranges first_ix={first_ix} second_ix={second_ix} first_range={:?} second_range={:?}",
-        first_range,
-        second_range,
+        "[flowstate-collab] remote_join phase=ranges first_ix={first_ix} second_ix={second_ix} first_range={first_range:?} second_range={second_range:?}",
       );
     }
     if first_range.start > first_range.end || first_range.end > second_range.start || second_range.start > second_range.end {
       if canary {
         eprintln!(
-          "[flowstate-collab] remote_join phase=reject_bad_ranges first_range={:?} second_range={:?}",
-          first_range,
-          second_range,
+          "[flowstate-collab] remote_join phase=reject_bad_ranges first_range={first_range:?} second_range={second_range:?}",
         );
       }
       return false;
@@ -733,7 +786,7 @@ impl RichTextEditor {
         first_paragraph.byte_range = first_range.start..first_range.start + merged_text.len();
         first_paragraph.runs = runs;
         bump_paragraph_version(first_paragraph);
-      }
+      };
       let replacement = paragraphs[first_ix].clone();
       paragraphs.drain(second_ix..second_ix + 1);
       replacement

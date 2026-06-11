@@ -57,6 +57,9 @@ impl RichTextEditor {
     if fragment.blocks.is_empty() {
       return;
     }
+    if self.reject_projection_first_edit("Rich block fragment insertion", cx) {
+      return;
+    }
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
     for asset in fragment.assets {
@@ -153,10 +156,55 @@ impl RichTextEditor {
     if blocks.is_empty() {
       return;
     }
+    if self.authoritative_edit_controller.is_some()
+      && blocks.iter().all(|block| !matches!(block, Block::Paragraph(_)))
+    {
+      if let [block] = blocks.as_slice() {
+        self.insert_object_block_authoritatively(block.clone(), cx);
+      }
+      return;
+    }
+    if self.reject_projection_first_edit("Multi-block insertion", cx) {
+      return;
+    }
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
     self.insert_blocks_after_caret_without_history(blocks);
     self.push_replace_document_history(before_document, before_selection, cx);
+  }
+
+  fn insert_object_block_authoritatively(&mut self, block: Block, cx: &mut Context<Self>) -> bool {
+    let insert_ix = self.authoritative_object_insert_index();
+    let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+      return false;
+    };
+    self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::InsertBlock {
+        block_id: new_block_id(),
+        block_ix: insert_ix,
+        block,
+      }],
+      planned_selection,
+      cx,
+    )
+  }
+
+  fn authoritative_object_insert_index(&self) -> usize {
+    match self.selected_block {
+      Some(
+        BlockSelection::Image(block_ix)
+        | BlockSelection::Equation(block_ix)
+        | BlockSelection::Table(block_ix)
+        | BlockSelection::TableCell { block_ix, .. },
+      ) => (block_ix + 1).min(self.document.blocks.len()),
+      None => document_position_for_offset(&self.document, self.selection.head)
+        .map(|position| match position {
+          DocumentPosition::Text { block_ix, .. } => (block_ix + 1).min(self.document.blocks.len()),
+          DocumentPosition::Object { block_ix, .. } => (block_ix + 1).min(self.document.blocks.len()),
+          DocumentPosition::TableCell { table_block_ix, .. } => (table_block_ix + 1).min(self.document.blocks.len()),
+        })
+        .unwrap_or(self.document.blocks.len()),
+    }
   }
 
   fn insert_blocks_after_caret_without_history(&mut self, blocks: Vec<Block>) {

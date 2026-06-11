@@ -1,5 +1,6 @@
 struct LoadedDocumentForOpen {
   document: Document,
+  flow_snapshot: Option<Vec<u8>>,
   path: Option<PathBuf>,
   title: Option<String>,
 }
@@ -11,6 +12,7 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
       let (document, _) = convert_docx_to_document(path)?;
       return Ok(LoadedDocumentForOpen {
         document,
+        flow_snapshot: None,
         path: None,
         title: path
           .with_extension("db8")
@@ -26,6 +28,7 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
       };
       return Ok(LoadedDocumentForOpen {
         document,
+        flow_snapshot: None,
         path: None,
         title: path
           .with_extension("db8")
@@ -35,9 +38,15 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
     }
   }
 
-  load_or_create_document(path).map(|document| LoadedDocumentForOpen {
-    document,
-    path: Some(path.clone()),
-    title: None,
+  load_or_create_document(path).map(|document| {
+    let flow_snapshot = fs::read(path)
+      .ok()
+      .and_then(|bytes| flowstate_document::db8_flow_snapshot_from_bytes(&bytes).ok().flatten());
+    LoadedDocumentForOpen {
+      document,
+      flow_snapshot,
+      path: Some(path.clone()),
+      title: None,
+    }
   })
 }

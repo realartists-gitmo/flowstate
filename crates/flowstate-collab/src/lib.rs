@@ -10,7 +10,9 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 mod source;
+mod flow_document;
 
+pub use flow_document::*;
 pub use source::*;
 
 pub const COLLAB_SCHEMA_VERSION: u32 = 2;
@@ -86,6 +88,9 @@ pub struct DocumentId(pub Uuid);
 pub struct ActorId(pub Uuid);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ReplicaId(pub Uuid);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SessionId(pub Uuid);
 
 impl DocumentId {
@@ -109,6 +114,19 @@ impl ActorId {
 }
 
 impl Default for ActorId {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
+impl ReplicaId {
+  #[must_use]
+  pub fn new() -> Self {
+    Self(Uuid::new_v4())
+  }
+}
+
+impl Default for ReplicaId {
   fn default() -> Self {
     Self::new()
   }
@@ -167,6 +185,7 @@ pub struct NativeIntegrity {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NativeFileInput {
   pub format_kind: FormatKind,
+  pub collab_schema: u32,
   pub document_id: DocumentId,
   pub created_by_actor: ActorId,
   pub projection_cache: Vec<u8>,
@@ -181,6 +200,7 @@ impl NativeFileInput {
   pub fn new(format_kind: FormatKind, projection_cache: Vec<u8>) -> Self {
     Self {
       format_kind,
+      collab_schema: COLLAB_SCHEMA_VERSION,
       document_id: DocumentId::new(),
       created_by_actor: ActorId::new(),
       projection_cache,
@@ -211,8 +231,10 @@ pub struct HelloMessage {
   pub document_id: DocumentId,
   pub format_kind: FormatKind,
   pub collab_schema: u32,
+  pub history_epoch: u64,
   pub crdt_engine: String,
   pub actor_id: ActorId,
+  pub replica_id: ReplicaId,
   pub session_id: SessionId,
   pub role_request: Role,
   pub known_frontier: Vec<u8>,
@@ -288,6 +310,28 @@ pub struct SnapshotChunkMessage {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FlowUpdateMessage {
+  pub update_id: Option<UpdateId>,
+  pub document_id: DocumentId,
+  pub actor_id: ActorId,
+  pub peer_id: u64,
+  pub schema_version: u32,
+  pub history_epoch: u64,
+  pub base_frontier: Vec<u8>,
+  pub resulting_frontier: Vec<u8>,
+  pub bytes: Vec<u8>,
+  pub hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FlowSnapshotMessage {
+  pub document_id: DocumentId,
+  pub history_epoch: u64,
+  pub bytes: Vec<u8>,
+  pub hash: [u8; 32],
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum UpdateApplication {
   Db8CanonicalOperations(Vec<u8>),
   Fl0ActionBundle(Vec<u8>),
@@ -340,12 +384,15 @@ pub enum WireMessage {
     hash: [u8; 32],
     application: Option<UpdateApplication>,
   },
+  FlowUpdate(FlowUpdateMessage),
   Snapshot {
     document_id: DocumentId,
     bytes: Vec<u8>,
     hash: [u8; 32],
   },
   SnapshotChunk(SnapshotChunkMessage),
+  FlowSnapshot(FlowSnapshotMessage),
+  FlowSnapshotChunk(SnapshotChunkMessage),
   AssetHave(AssetHaveMessage),
   AssetNeed(AssetNeedMessage),
   AssetChunk(AssetChunkMessage),
@@ -460,20 +507,14 @@ pub fn encode_native_file(input: NativeFileInput) -> CollabResult<Vec<u8>> {
     document_id: input.document_id,
     format_kind: input.format_kind,
     envelope_schema: NATIVE_ENVELOPE_SCHEMA_VERSION,
-    collab_schema: COLLAB_SCHEMA_VERSION,
+    collab_schema: input.collab_schema,
     crdt_engine: "loro".to_string(),
     created_by_actor: input.created_by_actor,
     projection_hash: blake3_hash(&input.projection_cache),
     snapshot_hash: blake3_hash(&snapshot),
     asset_manifest_hash: blake3_hash(&asset_manifest),
     role_model: vec![Role::Owner, Role::Editor, Role::Viewer],
-    capabilities: vec![
-      "loro-snapshot".to_string(),
-      "projection-cache".to_string(),
-      "document-level-assets".to_string(),
-      "granular-source-records".to_string(),
-      "ephemeral-presence".to_string(),
-    ],
+    capabilities: native_capabilities(input.collab_schema),
   };
   let manifest_bytes = postcard::to_stdvec(&manifest)?;
   let mut chunks = vec![
@@ -496,6 +537,26 @@ pub fn encode_native_file(input: NativeFileInput) -> CollabResult<Vec<u8>> {
   };
   chunks.push((CHUNK_INTEGRITY, postcard::to_stdvec(&integrity)?));
   write_envelope(input.format_kind, chunks)
+}
+
+fn native_capabilities(collab_schema: u32) -> Vec<String> {
+  let mut capabilities = vec![
+    "loro-snapshot".to_string(),
+    "causal-recent-updates".to_string(),
+    "projection-cache".to_string(),
+    "document-level-assets".to_string(),
+    "ephemeral-presence".to_string(),
+  ];
+  if collab_schema == flow_document::FLOW_SOURCE_SCHEMA_VERSION {
+    capabilities.extend([
+      "flow-text-structural-tokens".to_string(),
+      "stable-rich-object-ids".to_string(),
+      "anchored-selections".to_string(),
+    ]);
+  } else {
+    capabilities.push("granular-source-records".to_string());
+  }
+  capabilities
 }
 
 pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabResult<DecodedNativeFile> {
@@ -524,13 +585,23 @@ pub fn decode_native_file(bytes: &[u8], expected_format: FormatKind) -> CollabRe
   let integrity: NativeIntegrity = postcard::from_bytes(integrity_bytes)?;
   verify_integrity(expected_format, &chunks, &integrity)?;
 
-  let source = CollabDocument::from_snapshot(&snapshot, Some(expected_format), Some(manifest.document_id))?;
-  let materialized_projection = source.materialize_projection_cache()?;
-  verify_hash("manifest projection hash", &materialized_projection, manifest.projection_hash)?;
-  let (projection_cache, projection_cache_recovery) = if blake3_hash(&stored_projection_cache) == manifest.projection_hash {
-    (stored_projection_cache, ProjectionCacheRecovery::Reused)
-  } else {
-    (materialized_projection, ProjectionCacheRecovery::Rebuilt)
+  let (projection_cache, projection_cache_recovery) = match manifest.collab_schema {
+    COLLAB_SCHEMA_VERSION => {
+      let source = CollabDocument::from_snapshot(&snapshot, Some(expected_format), Some(manifest.document_id))?;
+      let materialized_projection = source.materialize_projection_cache()?;
+      verify_hash("manifest projection hash", &materialized_projection, manifest.projection_hash)?;
+      if blake3_hash(&stored_projection_cache) == manifest.projection_hash {
+        (stored_projection_cache, ProjectionCacheRecovery::Reused)
+      } else {
+        (materialized_projection, ProjectionCacheRecovery::Rebuilt)
+      }
+    },
+    flow_document::FLOW_SOURCE_SCHEMA_VERSION => {
+      FlowDocument::from_snapshot(&snapshot, Some(manifest.document_id), ReplicaId::new())?;
+      verify_hash("manifest projection hash", &stored_projection_cache, manifest.projection_hash)?;
+      (stored_projection_cache, ProjectionCacheRecovery::Reused)
+    },
+    schema => return Err(CollabError::UnsupportedCollabSchema(schema)),
   };
 
   Ok(DecodedNativeFile {
@@ -768,8 +839,10 @@ mod tests {
       document_id: DocumentId::new(),
       format_kind: FormatKind::Fl0,
       collab_schema: COLLAB_SCHEMA_VERSION,
+      history_epoch: FLOW_HISTORY_EPOCH,
       crdt_engine: "loro".to_string(),
       actor_id: ActorId::new(),
+      replica_id: ReplicaId::new(),
       session_id: SessionId::new(),
       role_request: Role::Editor,
       known_frontier: Vec::new(),
@@ -934,7 +1007,10 @@ mod tests {
     let text_id = granular_record_id_u128(1);
     let base = GranularSource {
       metadata: b"cache".to_vec(),
-      orders: Vec::new(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraph_order".to_string(),
+        ids: vec![text_id.clone()],
+      }],
       texts: vec![GranularTextRecord {
         id: text_id.clone(),
         text: "unchanged text".to_string(),
@@ -982,7 +1058,10 @@ mod tests {
     let actor = ActorId::new();
     let source = GranularSource {
       metadata: Vec::new(),
-      orders: Vec::new(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraph_order".to_string(),
+        ids: vec!["p1".to_string()],
+      }],
       texts: vec![GranularTextRecord {
         id: "p1".to_string(),
         text: "locked".to_string(),
@@ -1023,7 +1102,10 @@ mod tests {
     let actor = ActorId::new();
     let source = GranularSource {
       metadata: Vec::new(),
-      orders: Vec::new(),
+      orders: vec![GranularOrderRecord {
+        name: "paragraph_order".to_string(),
+        ids: vec!["p1".to_string()],
+      }],
       texts: vec![GranularTextRecord {
         id: "p1".to_string(),
         text: "éa".to_string(),

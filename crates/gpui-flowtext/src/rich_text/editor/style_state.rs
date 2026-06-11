@@ -264,6 +264,19 @@ impl RichTextEditor {
     }
     let generation = self.edit_generation;
     let document = self.document.clone();
+    let authoritative_bytes = match self
+      .authoritative_edit_controller
+      .as_ref()
+      .map(|controller| controller.borrow().native_snapshot_bytes())
+      .transpose()
+    {
+      Ok(bytes) => bytes.flatten(),
+      Err(error) => {
+        self.save_status = SaveStatus::SaveFailed(error.to_string());
+        cx.notify();
+        return cx.background_executor().spawn(async move { Err(error) });
+      },
+    };
     let recovery_path = self.recovery_path.clone();
     self.save_status = SaveStatus::Saving;
     cx.notify();
@@ -271,8 +284,12 @@ impl RichTextEditor {
       let write_result = cx
         .background_executor()
         .spawn(async move {
-          let document = detach_document_for_background_write(&document);
-          let result = write_document(&path, &document);
+          let result = if let Some(bytes) = authoritative_bytes {
+            write_document_bytes_atomic(&path, &bytes)
+          } else {
+            let document = detach_document_for_background_write(&document);
+            write_document(&path, &document)
+          };
           if result.is_ok()
             && let Some(recovery_path) = recovery_path
           {

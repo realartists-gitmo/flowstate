@@ -33,6 +33,18 @@ impl RichTextEditor {
       anchor: range.start,
       head: range.end,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let applied = if replacement.is_empty() {
+        self.delete_range_source_first(range, cx)
+      } else {
+        self.insert_text_source_first(replacement, cx)
+      };
+      if !applied {
+        return false;
+      }
+      self.clear_search_highlights(cx);
+      return true;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       editor.insert_text(replacement, cx);
     });
@@ -57,7 +69,82 @@ impl RichTextEditor {
         .cmp(&right.start)
         .then_with(|| left.end.cmp(&right.end))
     });
+    let mut non_overlapping = Vec::with_capacity(ranges.len());
+    for range in ranges {
+      if non_overlapping
+        .last()
+        .is_none_or(|previous: &Range<DocumentOffset>| previous.end <= range.start)
+      {
+        non_overlapping.push(range);
+      }
+    }
+    let ranges = non_overlapping;
     let count = ranges.len();
+    if self.authoritative_edit_controller.is_some() {
+      let mut operations = Vec::with_capacity(ranges.len().saturating_mul(2));
+      for range in ranges.iter().rev() {
+        if self.selection_crosses_object_blocks(range.clone()) {
+          self.search_highlights = ranges;
+          self.active_search_highlight = None;
+          cx.notify();
+          return 0;
+        }
+        let Some(start) = self.authoritative_source_position(range.start) else {
+          self.search_highlights = ranges;
+          self.active_search_highlight = None;
+          cx.notify();
+          return 0;
+        };
+        let Some(end) = self.authoritative_source_position(range.end) else {
+          self.search_highlights = ranges;
+          self.active_search_highlight = None;
+          cx.notify();
+          return 0;
+        };
+        let styles = self
+          .document
+          .paragraphs
+          .get(range.start.paragraph)
+          .map(|paragraph| styles_at_byte(paragraph, range.start.byte))
+          .unwrap_or_default();
+        operations.push(AuthoritativeSourceOperation::DeleteText { start, end });
+        if !replacement.is_empty() {
+          operations.push(AuthoritativeSourceOperation::InsertText {
+            at: start,
+            text: replacement.to_string(),
+            styles,
+          });
+        }
+      }
+      let first = &ranges[0];
+      let Some(first_start) = self.authoritative_source_position(first.start) else {
+        self.search_highlights = ranges;
+        self.active_search_highlight = None;
+        cx.notify();
+        return 0;
+      };
+      let after = AuthoritativeSourcePosition {
+        paragraph: first_start.paragraph,
+        byte: first_start.byte + replacement.len(),
+      };
+      if !self.apply_authoritative_source_operations(
+        operations,
+        AuthoritativeSourceSelection {
+          anchor: after,
+          head: after,
+        },
+        cx,
+      ) {
+        self.search_highlights = ranges;
+        self.active_search_highlight = None;
+        cx.notify();
+        return 0;
+      }
+      self.search_highlights.clear();
+      self.active_search_highlight = None;
+      cx.notify();
+      return count;
+    }
     let paragraph_count = self.document.paragraphs.len();
     self.apply_document_edit_with_capture_range(cx, Some(0..paragraph_count), |editor, cx| {
       let mut final_caret = None;

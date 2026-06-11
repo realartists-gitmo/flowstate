@@ -108,9 +108,8 @@ impl Render for RichTextEditor {
       .on_action(cx.listener(Self::on_delete))
       .on_action(cx.listener(Self::on_insert_newline))
       .on_action(cx.listener(Self::on_insert_soft_line_break))
-      // Catch printable characters (anything with a `key_char`) and insert
-      // them as text. Action keys (arrows, Enter, etc.) have `key_char = None`
-      // so they fall through to the action system above.
+      // Tab navigation still needs the raw key event. Printable input is
+      // delivered through `RichTextInputElement` and `EntityInputHandler`.
       .on_key_down(cx.listener(Self::on_key_down_event))
       .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
       .on_mouse_move(cx.listener(Self::on_mouse_move))
@@ -252,5 +251,7 @@ impl Render for RichTextEditor {
               .scrollbar_show(ScrollbarShow::Always)
           ),
       )
+      .child(RichTextInputElement { editor: cx.entity() })
+      .when_some(self.ime_overlay_element(), |this, overlay| this.child(overlay))
   }
 }

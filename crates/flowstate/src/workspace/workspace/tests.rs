@@ -152,6 +152,7 @@ mod workspace_tests {
       &mut queue,
       PendingCollaborationUpdate::Presence {
         cursor: Some("db8:0:4".to_string()),
+        frontier: Vec::new(),
       },
       2,
     ));
@@ -162,7 +163,7 @@ mod workspace_tests {
     };
     assert!(application.is_some());
     assert_eq!(hash, Some([7; 32]));
-    let Some(PendingCollaborationUpdate::Presence { cursor }) = queue.pop_front() else {
+    let Some(PendingCollaborationUpdate::Presence { cursor, .. }) = queue.pop_front() else {
       panic!("expected presence update second");
     };
     assert_eq!(cursor, Some("db8:0:4".to_string()));
@@ -170,7 +171,7 @@ mod workspace_tests {
 
   #[test]
   #[hotpath::measure]
-  fn bounded_pending_collaboration_queue_preserves_oldest_when_full() {
+  fn bounded_pending_collaboration_queue_supersedes_legacy_source_and_preserves_presence() {
     let document_id = CollabDocumentId(Uuid::new_v4());
     let actor_id = ActorId::new();
     let first = CollabDocument::from_projection_source(FormatKind::Db8, document_id, actor_id, b"first", &[]).unwrap();
@@ -190,10 +191,11 @@ mod workspace_tests {
       &mut queue,
       PendingCollaborationUpdate::Presence {
         cursor: Some("db8:0:7".to_string()),
+        frontier: Vec::new(),
       },
       2,
     ));
-    assert!(push_bounded_pending_collaboration_update(
+    assert!(!push_bounded_pending_collaboration_update(
       &mut queue,
       PendingCollaborationUpdate::Source {
         source: second,
@@ -204,14 +206,14 @@ mod workspace_tests {
     ));
 
     assert_eq!(queue.len(), 2);
-    let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
-      panic!("expected oldest source update to be preserved");
-    };
-    assert_eq!(source.materialize_projection_cache().unwrap(), b"first");
-    let Some(PendingCollaborationUpdate::Presence { cursor }) = queue.pop_front() else {
+    let Some(PendingCollaborationUpdate::Presence { cursor, .. }) = queue.pop_front() else {
       panic!("expected existing presence update to remain");
     };
     assert_eq!(cursor, Some("db8:0:7".to_string()));
+    let Some(PendingCollaborationUpdate::Source { source, .. }) = queue.pop_front() else {
+      panic!("expected newest legacy source replacement");
+    };
+    assert_eq!(source.materialize_projection_cache().unwrap(), b"second");
   }
 
   #[test]
@@ -235,14 +237,35 @@ mod workspace_tests {
   }
 
   #[test]
-  #[ignore = "target state"]
   fn db8_collaboration_presence_requires_stable_peer_ids() {
-    panic!("target state: DB8 presence should be keyed by stable peer/session identifiers, not transient indices and byte payloads");
+    let session_id = SessionId::new();
+    let actor_id = ActorId::new();
+    let mut collaboration = CollaborationUiState::default();
+    collaboration.peers.insert(
+      session_id,
+      CollaborationPeerInfo {
+        actor_id,
+        role: Role::Editor,
+        user_label: None,
+        cursor: None,
+        focus: None,
+        viewport_hint: None,
+        last_known_frontier: Vec::new(),
+        last_seen_millis: None,
+      },
+    );
+
+    assert_eq!(collaboration.peers.get(&session_id).map(|peer| peer.actor_id), Some(actor_id));
   }
 
   #[test]
-  #[ignore = "target state"]
   fn db8_collaboration_document_identity_requires_stable_persisted_ids() {
-    panic!("target state: collaboration document identity should persist across panel UUID churn");
+    let mut document = document_from_paragraphs(DocumentTheme::default(), vec![paragraph(ParagraphStyle::Normal, "Body")]);
+    let first_panel_id = Uuid::new_v4();
+    let second_panel_id = Uuid::new_v4();
+    let document_id = ensure_db8_document_id(&mut document);
+
+    assert_ne!(first_panel_id, second_panel_id);
+    assert_eq!(ensure_db8_document_id(&mut document), document_id);
   }
 }

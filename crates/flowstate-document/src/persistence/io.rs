@@ -10,9 +10,9 @@ use std::{
 
 use crop::Rope;
 use flowstate_collab::{
-  ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularBinaryRecord, GranularOrderRecord,
-  GranularSource, GranularTextMark, GranularTextRecord, GranularValue, NativeAssetRecord, NativeFileInput, blake3_hash, decode_native_file,
-  encode_native_file, granular_record_id_to_u128, granular_record_id_u128,
+  ActorId, CollabDocument, Db8CollabDocument, DocumentId as CollabDocumentId, FLOW_SOURCE_SCHEMA_VERSION, FormatKind, GranularBinaryRecord,
+  GranularOrderRecord, GranularSource, GranularTextMark, GranularTextRecord, GranularValue, NativeAssetRecord, NativeFileInput, blake3_hash,
+  decode_native_file, encode_native_file, granular_record_id_to_u128, granular_record_id_u128,
 };
 use tempfile::NamedTempFile;
 
@@ -220,6 +220,25 @@ pub fn deserialize_paragraph_metadata(bytes: &[u8]) -> Option<(ParagraphStyle, V
     .map(|m| (m.style, m.runs))
 }
 
+pub fn serialize_paragraph_metadata(style: ParagraphStyle, runs: &[TextRun]) -> io::Result<Vec<u8>> {
+  postcard::to_stdvec(&Db8GranularParagraphMetadata {
+    style,
+    runs: runs.to_vec(),
+  })
+  .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+pub fn serialize_block_metadata(block: &Block) -> Vec<u8> {
+  let mut bytes = Vec::new();
+  write_block_record(&mut bytes, block);
+  bytes
+}
+
+pub fn deserialize_block_metadata(bytes: &[u8]) -> io::Result<Block> {
+  let mut cursor = Cursor::new(bytes);
+  read_block_record(&mut cursor)
+}
+
 // DB8 projection cache stored inside the collaboration-native envelope. The
 // external file format is the Flowstate collaboration envelope, not this chunk.
 const DB8_PROJECTION_MAGIC: &[u8; 5] = b"DB8P\0";
@@ -319,6 +338,34 @@ pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
 }
 
 #[hotpath::measure]
+pub fn db8_vnext_bytes(document: &Document, source_snapshot: Vec<u8>, created_by_actor: ActorId) -> io::Result<Vec<u8>> {
+  db8_vnext_bytes_with_updates(document, source_snapshot, Vec::new(), created_by_actor)
+}
+
+#[hotpath::measure]
+pub fn db8_vnext_bytes_with_updates(
+  document: &Document,
+  source_snapshot: Vec<u8>,
+  recent_updates: Vec<Vec<u8>>,
+  created_by_actor: ActorId,
+) -> io::Result<Vec<u8>> {
+  let document = document_for_serialization(document);
+  validate_document(&document)?;
+  let projection_cache = serialize_db8_projection(&document);
+  let mut input = native_file_input_for_document(&document, projection_cache);
+  input.collab_schema = FLOW_SOURCE_SCHEMA_VERSION;
+  input.created_by_actor = created_by_actor;
+  input.source_snapshot = Some(source_snapshot);
+  input.recent_updates = recent_updates;
+  encode_native_file(input).map_err(collab_to_io_error)
+}
+
+pub fn db8_flow_snapshot_from_bytes(bytes: &[u8]) -> io::Result<Option<Vec<u8>>> {
+  let decoded = decode_native_file(bytes, FormatKind::Db8).map_err(collab_to_io_error)?;
+  Ok((decoded.manifest.collab_schema == FLOW_SOURCE_SCHEMA_VERSION).then_some(decoded.snapshot))
+}
+
+#[hotpath::measure]
 #[expect(dead_code, reason = "used by collaboration and projection-cache integrations outside this crate")]
 pub fn db8_projection_cache_bytes(document: &Document) -> io::Result<Vec<u8>> {
   let document = document_for_serialization(document);
@@ -332,7 +379,7 @@ pub fn read_db8_projection_cache_bytes(bytes: &[u8]) -> io::Result<Document> {
 }
 
 #[hotpath::measure]
-#[expect(dead_code, reason = "used by collaboration integrations outside this crate")]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by collaboration integrations outside this crate"))]
 pub fn db8_collab_document(document: &Document, created_by_actor: ActorId) -> io::Result<Db8CollabDocument> {
   let document = document_for_serialization(document);
   db8_collab_document_with_id_from_serialized(
@@ -420,7 +467,7 @@ fn serialize_db8_native(document: &Document) -> io::Result<Vec<u8>> {
 }
 
 #[hotpath::measure]
-fn document_for_serialization(document: &Document) -> Document {
+pub(crate) fn document_for_serialization(document: &Document) -> Document {
   let mut document = document.clone();
   // Recovery/autosave can snapshot while live editing is still settling; make
   // sure byte offsets are derived from the paragraph projection we are about
@@ -1093,12 +1140,7 @@ mod collab_source_tests {
   #[hotpath::measure]
   fn db8_collab_source_roundtrips_style_manifest_through_granular_metadata() {
     let mut document = demo_document();
-    let style = document
-      .theme
-      .custom_paragraph_styles
-      .get(&0)
-      .cloned()
-      .unwrap();
+    let style = crate::flowstate_document_theme().custom_paragraph_styles[&0].clone();
     document.theme.set_custom_paragraph_style(7, style.clone());
     let source = db8_collab_document(&document, ActorId::new()).unwrap();
     let materialized = document_from_db8_collab_source(source.inner()).unwrap();
@@ -1112,10 +1154,33 @@ mod collab_source_tests {
   #[test]
   #[hotpath::measure]
   fn db8_bytes_roundtrip_preserves_style_manifest_chunk() {
-    let document = demo_document();
+    let mut document = demo_document();
+    let style = crate::flowstate_document_theme().custom_paragraph_styles[&0].clone();
+    document.theme.set_custom_paragraph_style(7, style);
     let bytes = db8_bytes(&document).unwrap();
     let reread = read_db8_bytes(&bytes).unwrap();
-    assert_eq!(db8_bytes(&reread).unwrap(), bytes);
+    assert_eq!(
+      serialize_db8_style_manifest(&reread).unwrap(),
+      serialize_db8_style_manifest(&document).unwrap()
+    );
+  }
+
+  #[test]
+  fn db8_vnext_native_roundtrip_preserves_source_snapshot_and_projection() {
+    let document = demo_document();
+    let actor = ActorId::new();
+    let controller = crate::Db8DocumentController::from_document(&document, actor, flowstate_collab::ReplicaId::new()).unwrap();
+    let snapshot = controller.source().export_snapshot().unwrap();
+    let retained = vec![b"retained-exact-update".to_vec()];
+    let bytes = db8_vnext_bytes_with_updates(controller.projection(), snapshot.clone(), retained.clone(), actor).unwrap();
+
+    let reread = read_db8_bytes(&bytes).unwrap();
+    assert_eq!(reread.ids.document_id, document.ids.document_id);
+    assert_eq!(db8_flow_snapshot_from_bytes(&bytes).unwrap(), Some(snapshot));
+    assert_eq!(
+      decode_native_file(&bytes, FormatKind::Db8).unwrap().recent_updates,
+      retained
+    );
   }
 
   #[test]
@@ -1368,6 +1433,7 @@ mod collab_source_tests {
         document_id: 1,
         paragraph_ids: Vec::new(),
         block_ids: vec![BlockId(1)],
+        rich_block_ids: rustc_hash::FxHashMap::default(),
       },
       sections: Arc::new(Vec::new()),
       offset_index: ParagraphOffsetIndex {

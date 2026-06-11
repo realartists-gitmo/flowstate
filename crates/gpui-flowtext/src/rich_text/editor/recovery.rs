@@ -178,24 +178,49 @@ impl RichTextEditor {
             editor.recovery_write_in_progress = false;
             RecoveryWriteDecision::Idle
           } else {
-            RecoveryWriteDecision::Write {
-              generation: editor.edit_generation,
-              document: Box::new(editor.document.clone()),
+            match editor
+              .authoritative_edit_controller
+              .as_ref()
+              .map(|controller| controller.borrow().native_snapshot_bytes())
+              .transpose()
+            {
+              Ok(bytes) => RecoveryWriteDecision::Write {
+                generation: editor.edit_generation,
+                document: Box::new(editor.document.clone()),
+                authoritative_bytes: bytes.flatten(),
+              },
+              Err(error) => RecoveryWriteDecision::Failed(error.to_string()),
             }
           }
         })
         .ok();
       log_timing("recovery snapshot", snapshot_timing, "");
-      let Some(RecoveryWriteDecision::Write { generation, document }) = decision else {
-        return;
+      let (generation, document, authoritative_bytes) = match decision {
+        Some(RecoveryWriteDecision::Write {
+          generation,
+          document,
+          authoritative_bytes,
+        }) => (generation, document, authoritative_bytes),
+        Some(RecoveryWriteDecision::Failed(error)) => {
+          eprintln!("failed to snapshot authoritative recovery source: {error}");
+          let _ = editor.update(cx, |editor, _| {
+            editor.recovery_write_in_progress = false;
+          });
+          return;
+        },
+        _ => return,
       };
       let write_timing = Instant::now();
       let paragraph_count = document.paragraphs.len();
       let write_result = cx
         .background_executor()
         .spawn(async move {
-          let document = detach_document_for_background_write(&document);
-          write_document(path, &document)
+          if let Some(bytes) = authoritative_bytes {
+            write_document_bytes_atomic(path, &bytes)
+          } else {
+            let document = detach_document_for_background_write(&document);
+            write_document(path, &document)
+          }
         })
         .await;
       log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));

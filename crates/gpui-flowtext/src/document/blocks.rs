@@ -77,6 +77,37 @@ pub struct TableBlock {
   pub style: TableStyle,
   pub version: u64,
 }
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RichBlockIdentity {
+  Image { caption: Option<ParagraphId> },
+  Equation { source: ParagraphId },
+  Table(TableIdentity),
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TableIdentity {
+  pub rows: Vec<TableRowIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableRowIdentity {
+  pub id: BlockId,
+  pub cells: Vec<TableCellIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableCellIdentity {
+  pub id: BlockId,
+  pub blocks: Vec<TableCellBlockIdentity>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TableCellBlockIdentity {
+  Paragraph(ParagraphId),
+  Table { id: BlockId, identity: TableIdentity },
+}
+
 impl TableBlock {
   #[must_use]
   pub fn row_record_id(&self, block_id: u128, row_ix: usize) -> u128 {

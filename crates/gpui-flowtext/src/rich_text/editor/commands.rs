@@ -189,6 +189,17 @@ impl RichTextEditor {
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
+    if let Some(controller) = self.authoritative_edit_controller.clone() {
+      let Some(selection_before) = self.authoritative_source_selection(&self.selection) else {
+        self.reject_projection_first_edit("Undo", cx);
+        return;
+      };
+      let response = controller.borrow_mut().undo(selection_before);
+      self.apply_authoritative_edit_response(response);
+      self.mark_remote_document_changed(cx);
+      self.after_history_restore(cx);
+      return;
+    }
     let Some(record) = self.undo_stack.pop() else {
       return;
     };
@@ -205,6 +216,17 @@ impl RichTextEditor {
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
+    if let Some(controller) = self.authoritative_edit_controller.clone() {
+      let Some(selection_before) = self.authoritative_source_selection(&self.selection) else {
+        self.reject_projection_first_edit("Redo", cx);
+        return;
+      };
+      let response = controller.borrow_mut().redo(selection_before);
+      self.apply_authoritative_edit_response(response);
+      self.mark_remote_document_changed(cx);
+      self.after_history_restore(cx);
+      return;
+    }
     let Some(record) = self.redo_stack.pop() else {
       return;
     };
@@ -344,6 +366,9 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
+    if self.insert_text_source_first(text, cx) {
+      return;
+    }
     if self.insert_single_grapheme_fast_path(text, cx) {
       return;
     }
@@ -359,6 +384,9 @@ impl RichTextEditor {
       let _ = self.delete_selection_with_document_snapshot(cx);
       return;
     }
+    if self.backspace_source_first(cx) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| editor.backspace(cx));
   }
 
@@ -371,10 +399,16 @@ impl RichTextEditor {
       let _ = self.delete_selection_with_document_snapshot(cx);
       return;
     }
+    if self.delete_forward_source_first(cx) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| editor.delete_forward(cx));
   }
 
   pub fn insert_paragraph_break_command(&mut self, cx: &mut Context<Self>) {
+    if self.insert_paragraph_break_source_first(cx) {
+      return;
+    }
     if !self.selection.is_caret() {
       self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
       return;
@@ -389,6 +423,16 @@ impl RichTextEditor {
   }
 
   pub fn delete_word_backward_command(&mut self, cx: &mut Context<Self>) {
+    if self.authoritative_edit_controller.is_some() && self.selected_block.is_none() {
+      let range = if self.selection.is_caret() {
+        self.word_left(self.selection.head)..self.selection.head
+      } else {
+        self.selection.normalized()
+      };
+      if self.delete_range_source_first(range, cx) {
+        return;
+      }
+    }
     self.apply_document_edit(cx, |editor, cx| {
       if editor.selection.is_caret() {
         let head = editor.selection.head;
@@ -401,6 +445,16 @@ impl RichTextEditor {
   }
 
   pub fn delete_word_forward_command(&mut self, cx: &mut Context<Self>) {
+    if self.authoritative_edit_controller.is_some() && self.selected_block.is_none() {
+      let range = if self.selection.is_caret() {
+        self.selection.head..self.word_right(self.selection.head)
+      } else {
+        self.selection.normalized()
+      };
+      if self.delete_range_source_first(range, cx) {
+        return;
+      }
+    }
     self.apply_document_edit(cx, |editor, cx| {
       if editor.selection.is_caret() {
         let anchor = editor.selection.head;
@@ -410,6 +464,235 @@ impl RichTextEditor {
       editor.delete_selection_internal();
       editor.after_text_mutation(cx);
     });
+  }
+
+  fn insert_text_source_first(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if text.is_empty() || self.authoritative_edit_controller.is_none() || self.selected_block.is_some() {
+      return false;
+    }
+    let range = self.selection.normalized();
+    if self.selection_crosses_object_blocks(range.clone()) {
+      return false;
+    }
+    let Some(start) = self.authoritative_source_position(range.start) else {
+      return false;
+    };
+    let Some(paragraph) = self.document.paragraphs.get(range.start.paragraph) else {
+      return false;
+    };
+    if range.start.byte > paragraph_text_len(paragraph) {
+      return false;
+    }
+    let styles = if let Some(styles) = self.pending_styles {
+      styles
+    } else {
+      let (run_ix, _) = run_containing(paragraph, range.start.byte);
+      paragraph
+        .runs
+        .get(run_ix)
+        .map(|run| run.styles)
+        .unwrap_or_default()
+    };
+    let mut operations = Vec::with_capacity(3);
+    if !self.selection.is_caret() {
+      let Some(end) = self.authoritative_source_position(range.end) else {
+        return false;
+      };
+      operations.push(AuthoritativeSourceOperation::DeleteText { start, end });
+    }
+    if self.invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
+      operations.push(AuthoritativeSourceOperation::SetParagraphStyle {
+        paragraph: start.paragraph,
+        style: ParagraphStyle::Custom(4),
+      });
+    }
+    operations.push(AuthoritativeSourceOperation::InsertText {
+      at: start,
+      text: text.to_string(),
+      styles,
+    });
+    let after = AuthoritativeSourcePosition {
+      paragraph: start.paragraph,
+      byte: start.byte + text.len(),
+    };
+    self.apply_authoritative_source_operations(
+      operations,
+      AuthoritativeSourceSelection {
+        anchor: after,
+        head: after,
+      },
+      cx,
+    )
+  }
+
+  fn delete_range_source_first(&mut self, range: Range<DocumentOffset>, cx: &mut Context<Self>) -> bool {
+    if range.is_empty()
+      || self.authoritative_edit_controller.is_none()
+      || self.selected_block.is_some()
+      || self.selection_crosses_object_blocks(range.clone())
+    {
+      return false;
+    }
+    let Some(start) = self.authoritative_source_position(range.start) else {
+      return false;
+    };
+    let Some(end) = self.authoritative_source_position(range.end) else {
+      return false;
+    };
+    self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::DeleteText { start, end }],
+      AuthoritativeSourceSelection {
+        anchor: start,
+        head: start,
+      },
+      cx,
+    )
+  }
+
+  fn backspace_source_first(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.authoritative_edit_controller.is_none() || self.selected_block.is_some() {
+      return false;
+    }
+    if !self.selection.is_caret() {
+      return self.delete_range_source_first(self.selection.normalized(), cx);
+    }
+    let caret = self.selection.head;
+    if caret.byte > 0 {
+      let previous = prev_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
+      return self.delete_range_source_first(
+        DocumentOffset {
+          paragraph: caret.paragraph,
+          byte: previous,
+        }..caret,
+        cx,
+      );
+    }
+    if caret.paragraph == 0 || self.immediate_object_before_paragraph(caret.paragraph).is_some() {
+      return false;
+    }
+    let previous_paragraph = caret.paragraph - 1;
+    let Some(previous_id) = paragraph_id_at(&self.document, previous_paragraph) else {
+      return false;
+    };
+    let Some(second_id) = paragraph_id_at(&self.document, caret.paragraph) else {
+      return false;
+    };
+    let previous_len = paragraph_text_len(&self.document.paragraphs[previous_paragraph]);
+    let after = AuthoritativeSourcePosition {
+      paragraph: previous_id,
+      byte: previous_len,
+    };
+    self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::JoinParagraph {
+        second_paragraph: second_id,
+      }],
+      AuthoritativeSourceSelection {
+        anchor: after,
+        head: after,
+      },
+      cx,
+    )
+  }
+
+  fn delete_forward_source_first(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.authoritative_edit_controller.is_none() || self.selected_block.is_some() {
+      return false;
+    }
+    if !self.selection.is_caret() {
+      return self.delete_range_source_first(self.selection.normalized(), cx);
+    }
+    let caret = self.selection.head;
+    let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
+      return false;
+    };
+    let paragraph_len = paragraph_text_len(paragraph);
+    if caret.byte < paragraph_len {
+      let next = next_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
+      return self.delete_range_source_first(
+        caret..DocumentOffset {
+          paragraph: caret.paragraph,
+          byte: next,
+        },
+        cx,
+      );
+    }
+    if caret.paragraph + 1 >= self.document.paragraphs.len() || self.immediate_object_after_paragraph(caret.paragraph).is_some() {
+      return false;
+    }
+    let Some(paragraph_id) = paragraph_id_at(&self.document, caret.paragraph) else {
+      return false;
+    };
+    let Some(second_id) = paragraph_id_at(&self.document, caret.paragraph + 1) else {
+      return false;
+    };
+    let after = AuthoritativeSourcePosition {
+      paragraph: paragraph_id,
+      byte: caret.byte,
+    };
+    self.apply_authoritative_source_operations(
+      vec![AuthoritativeSourceOperation::JoinParagraph {
+        second_paragraph: second_id,
+      }],
+      AuthoritativeSourceSelection {
+        anchor: after,
+        head: after,
+      },
+      cx,
+    )
+  }
+
+  fn insert_paragraph_break_source_first(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.authoritative_edit_controller.is_none() || self.selected_block.is_some() {
+      return false;
+    }
+    let range = self.selection.normalized();
+    if self.selection_crosses_object_blocks(range.clone()) {
+      return false;
+    }
+    let Some(at) = self.authoritative_source_position(range.start) else {
+      return false;
+    };
+    let Some(paragraph) = self.document.paragraphs.get(range.start.paragraph) else {
+      return false;
+    };
+    let resulting_len = if range.start.paragraph == range.end.paragraph {
+      paragraph_text_len(paragraph).saturating_sub(range.end.byte.saturating_sub(range.start.byte))
+    } else {
+      let Some(end_paragraph) = self.document.paragraphs.get(range.end.paragraph) else {
+        return false;
+      };
+      range.start.byte + paragraph_text_len(end_paragraph).saturating_sub(range.end.byte)
+    };
+    let new_paragraph = new_paragraph_id();
+    let style = if range.start.byte == resulting_len {
+      ParagraphStyle::Normal
+    } else {
+      paragraph.style
+    };
+    let mut operations = Vec::with_capacity(2);
+    if !self.selection.is_caret() {
+      let Some(end) = self.authoritative_source_position(range.end) else {
+        return false;
+      };
+      operations.push(AuthoritativeSourceOperation::DeleteText { start: at, end });
+    }
+    operations.push(AuthoritativeSourceOperation::SplitParagraph {
+      at,
+      new_paragraph,
+      style,
+    });
+    let after = AuthoritativeSourcePosition {
+      paragraph: new_paragraph,
+      byte: 0,
+    };
+    self.apply_authoritative_source_operations(
+      operations,
+      AuthoritativeSourceSelection {
+        anchor: after,
+        head: after,
+      },
+      cx,
+    )
   }
 
   pub fn copy(&mut self, cx: &mut Context<Self>) {
@@ -457,6 +740,9 @@ impl RichTextEditor {
       return;
     }
     if self.delete_selection_with_document_snapshot(cx) {
+      return;
+    }
+    if !self.selection.is_caret() && self.delete_range_source_first(self.selection.normalized(), cx) {
       return;
     }
     self.apply_document_edit(cx, |editor, cx| {

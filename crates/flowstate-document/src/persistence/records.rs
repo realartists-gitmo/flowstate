@@ -30,6 +30,10 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
   let paragraph_ids = read_paragraph_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_PARAGRAPH_IDS, "DB8 paragraph IDs chunk")?)?;
   let block_ids = read_block_ids_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_BLOCK_IDS, "DB8 block IDs chunk")?)?;
   let sections = read_sections_chunk(required_chunk(cursor.get_ref(), &chunks, CHUNK_SECTIONS, "DB8 sections chunk")?)?;
+  let theme = optional_chunk(cursor.get_ref(), &chunks, CHUNK_STYLE_MANIFEST, "DB8 style manifest chunk")?
+    .map(read_style_manifest_chunk)
+    .transpose()?
+    .unwrap_or_default();
   let document_id = read_document_meta_chunk(required_chunk(
     cursor.get_ref(),
     &chunks,
@@ -47,10 +51,11 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
       document_id,
       paragraph_ids,
       block_ids,
+      rich_block_ids: rustc_hash::FxHashMap::default(),
     },
     sections: Arc::new(sections),
     offset_index,
-    theme: DocumentTheme::default(),
+    theme,
   };
   reconcile_document_ids(&mut document);
   validate_or_rebuild_sections(&mut document);
@@ -69,10 +74,23 @@ fn read_db8_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Docu
 
 #[hotpath::measure]
 fn required_chunk<'bytes>(bytes: &'bytes [u8], chunks: &[Db8Chunk], kind: u8, label: &'static str) -> io::Result<&'bytes [u8]> {
-  let chunk = chunks
-    .iter()
-    .find(|chunk| chunk.kind == kind)
-    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} is missing")))?;
+  optional_chunk(bytes, chunks, kind, label)?.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("{label} is missing")))
+}
+
+#[hotpath::measure]
+fn optional_chunk<'bytes>(
+  bytes: &'bytes [u8],
+  chunks: &[Db8Chunk],
+  kind: u8,
+  label: &'static str,
+) -> io::Result<Option<&'bytes [u8]>> {
+  let mut matching = chunks.iter().filter(|chunk| chunk.kind == kind);
+  let Some(chunk) = matching.next() else {
+    return Ok(None);
+  };
+  if matching.next().is_some() {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, format!("{label} is duplicated")));
+  }
   let end = chunk
     .offset
     .checked_add(chunk.len)
@@ -80,7 +98,22 @@ fn required_chunk<'bytes>(bytes: &'bytes [u8], chunks: &[Db8Chunk], kind: u8, la
   if end > bytes.len() {
     return Err(io::Error::new(io::ErrorKind::UnexpectedEof, format!("{label} is truncated")));
   }
-  Ok(&bytes[chunk.offset..end])
+  Ok(Some(&bytes[chunk.offset..end]))
+}
+
+#[hotpath::measure]
+fn read_style_manifest_chunk(bytes: &[u8]) -> io::Result<DocumentTheme> {
+  let manifest = postcard::from_bytes::<DocumentStyleManifest>(bytes)
+    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("invalid DB8 style manifest chunk: {error}")))?;
+  if manifest.version != DocumentStyleManifest::VERSION {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      format!("unsupported DB8 style manifest version {}", manifest.version),
+    ));
+  }
+  let mut theme = DocumentTheme::default();
+  manifest.apply_to_theme(&mut theme);
+  Ok(theme)
 }
 
 #[hotpath::measure]

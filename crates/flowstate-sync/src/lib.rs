@@ -9,12 +9,13 @@ use std::{
 
 use anyhow::{Context as _, Result as AnyResult, bail, ensure};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-pub use flowstate_collab::{ActorId, DocumentId, FormatKind, Role, SessionId};
+pub use flowstate_collab::{ActorId, DocumentId, FormatKind, ReplicaId, Role, SessionId};
 use flowstate_collab::{
   AssetChunkMessage, AssetHaveMessage, AssetNeedMessage, AuthorizeMessage, COLLAB_SCHEMA_VERSION, CollabDocument, FLOWSTATE_ALPN,
+  FLOW_HISTORY_EPOCH, FLOW_SOURCE_SCHEMA_VERSION, FlowDocument, FlowImportPolicy, FlowSnapshotMessage, FlowUpdateMessage,
   GranularSourceMutation, HelloMessage, NativeAssetRecord, PeerEventKind, PeerEventMessage, PresenceMessage, SnapshotChunkMessage,
-  UpdateApplication, UpdateId, UpdateRecoveryAction, UpdateRejectionCode, WireMessage, blake3_hash, decode_wire_message,
-  encode_wire_message,
+  UpdateApplication, UpdateId, UpdateRecoveryAction, UpdateRejectionCode, WireMessage, blake3_hash, decode_wire_message, encode_wire_message,
+  loro_peer_id_for_replica,
 };
 use iroh::{
   Endpoint, EndpointAddr,
@@ -24,11 +25,17 @@ use iroh::{
 use tokio::runtime::Runtime;
 use tokio::sync::broadcast;
 mod assets;
+mod outbox;
 mod protocol;
+mod replica_lease;
 mod repair;
 mod session;
 mod transport;
+mod vnext;
+pub use outbox::{DurableFlowOutbox, FlowOutboxEntry, FlowOutboxKey};
+pub use replica_lease::ReplicaLease;
 pub(crate) use repair::{RepairAction, choose_repair_action};
+pub use vnext::FlowDocumentAuthority;
 
 pub const DEFAULT_MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 pub const DEFAULT_MAX_SNAPSHOT_BYTES: usize = 256 * 1024 * 1024;
@@ -39,7 +46,7 @@ pub const DEFAULT_MAX_PEER_COUNT: usize = 64;
 pub const DEFAULT_MAX_PRESENCE_MESSAGES_PER_MINUTE: usize = 600;
 pub const DEFAULT_MAX_ASSET_REQUESTS_PER_MINUTE: usize = 120;
 const RATE_LIMIT_WINDOW_MILLIS: u64 = 60_000;
-pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 3;
+pub const FLOWSTATE_PROTOCOL_VERSION: u32 = 4;
 pub const FLOWSTATE_INVITE_PREFIX: &str = "flowstate://collab/";
 
 static SYNC_RUNTIME: std::sync::LazyLock<Runtime> = std::sync::LazyLock::new(|| {
@@ -62,7 +69,10 @@ pub struct FlowstateSyncConfig {
   pub app_build_id: String,
   pub document_id: DocumentId,
   pub format_kind: FormatKind,
+  pub collab_schema: u32,
+  pub history_epoch: u64,
   pub actor_id: ActorId,
+  pub replica_id: ReplicaId,
   pub session_id: SessionId,
   pub role_request: Role,
   pub max_message_bytes: usize,
@@ -82,7 +92,10 @@ impl FlowstateSyncConfig {
       app_build_id: "flowstate-dev".to_string(),
       document_id,
       format_kind,
+      collab_schema: COLLAB_SCHEMA_VERSION,
+      history_epoch: FLOW_HISTORY_EPOCH,
       actor_id: ActorId::new(),
+      replica_id: ReplicaId::new(),
       session_id: SessionId::new(),
       role_request,
       max_message_bytes: DEFAULT_MAX_MESSAGE_BYTES,
@@ -97,15 +110,36 @@ impl FlowstateSyncConfig {
   }
 
   #[must_use]
+  pub const fn with_collab_schema(mut self, collab_schema: u32) -> Self {
+    self.collab_schema = collab_schema;
+    self
+  }
+
+  #[must_use]
+  pub const fn with_history_epoch(mut self, history_epoch: u64) -> Self {
+    self.history_epoch = history_epoch;
+    self
+  }
+
+  #[must_use]
+  pub const fn with_identity(mut self, actor_id: ActorId, replica_id: ReplicaId) -> Self {
+    self.actor_id = actor_id;
+    self.replica_id = replica_id;
+    self
+  }
+
+  #[must_use]
   pub fn hello(&self, known_frontier: Vec<u8>, invite_capability: Vec<u8>) -> HelloMessage {
     HelloMessage {
       protocol_version: FLOWSTATE_PROTOCOL_VERSION,
       app_build_id: self.app_build_id.clone(),
       document_id: self.document_id,
       format_kind: self.format_kind,
-      collab_schema: COLLAB_SCHEMA_VERSION,
+      collab_schema: self.collab_schema,
+      history_epoch: self.history_epoch,
       crdt_engine: "loro".to_string(),
       actor_id: self.actor_id,
+      replica_id: self.replica_id,
       session_id: self.session_id,
       role_request: self.role_request,
       known_frontier,
@@ -194,6 +228,7 @@ pub struct InviteTicket {
   pub endpoint_addr: EndpointAddr,
   pub document_id: DocumentId,
   pub format_kind: FormatKind,
+  pub collab_schema: u32,
   pub invited_role: Role,
   pub capability: Vec<u8>,
   pub expires_unix_secs: Option<u64>,
@@ -217,6 +252,29 @@ impl InviteTicket {
     label: Option<String>,
     multi_use: bool,
   ) -> Self {
+    Self::new_with_schema_options(
+      endpoint_addr,
+      document_id,
+      format_kind,
+      COLLAB_SCHEMA_VERSION,
+      invited_role,
+      expires_unix_secs,
+      label,
+      multi_use,
+    )
+  }
+
+  #[must_use]
+  pub fn new_with_schema_options(
+    endpoint_addr: EndpointAddr,
+    document_id: DocumentId,
+    format_kind: FormatKind,
+    collab_schema: u32,
+    invited_role: Role,
+    expires_unix_secs: Option<u64>,
+    label: Option<String>,
+    multi_use: bool,
+  ) -> Self {
     let mut seed = Vec::with_capacity(96);
     let first_nonce = ActorId::new();
     let second_nonce = ActorId::new();
@@ -224,11 +282,13 @@ impl InviteTicket {
     seed.extend_from_slice(first_nonce.0.as_bytes());
     seed.extend_from_slice(second_nonce.0.as_bytes());
     seed.extend_from_slice(&[format_kind.as_u8(), role_wire_code(invited_role)]);
+    seed.extend_from_slice(&collab_schema.to_le_bytes());
     let capability = blake3_hash(&seed).to_vec();
     Self {
       endpoint_addr,
       document_id,
       format_kind,
+      collab_schema,
       invited_role,
       capability,
       expires_unix_secs,
@@ -243,6 +303,7 @@ impl InviteTicket {
       endpoint_addr: self.endpoint_addr.clone(),
       document_id: self.document_id,
       format_kind: self.format_kind,
+      collab_schema: self.collab_schema,
       invited_role: self.invited_role,
       expires_unix_secs: self.expires_unix_secs,
       label: self.label.clone(),
@@ -257,6 +318,7 @@ pub struct RedactedInviteTicket {
   pub endpoint_addr: EndpointAddr,
   pub document_id: DocumentId,
   pub format_kind: FormatKind,
+  pub collab_schema: u32,
   pub invited_role: Role,
   pub expires_unix_secs: Option<u64>,
   pub label: Option<String>,
@@ -270,6 +332,7 @@ struct InviteLinkPayload {
   endpoint_addr: EndpointAddr,
   document_id: DocumentId,
   format_kind: FormatKind,
+  collab_schema: u32,
   invited_role: Role,
   capability: Vec<u8>,
   expires_unix_secs: Option<u64>,
@@ -284,6 +347,7 @@ impl From<&InviteTicket> for InviteLinkPayload {
       endpoint_addr: ticket.endpoint_addr.clone(),
       document_id: ticket.document_id,
       format_kind: ticket.format_kind,
+      collab_schema: ticket.collab_schema,
       invited_role: ticket.invited_role,
       capability: ticket.capability.clone(),
       expires_unix_secs: ticket.expires_unix_secs,
@@ -303,6 +367,7 @@ impl TryFrom<InviteLinkPayload> for InviteTicket {
       endpoint_addr: payload.endpoint_addr,
       document_id: payload.document_id,
       format_kind: payload.format_kind,
+      collab_schema: payload.collab_schema,
       invited_role: payload.invited_role,
       capability: payload.capability,
       expires_unix_secs: payload.expires_unix_secs,
@@ -345,12 +410,22 @@ impl InviteRegistry {
     endpoint_addr: EndpointAddr,
     document_id: DocumentId,
     format_kind: FormatKind,
+    collab_schema: u32,
     invited_role: Role,
     expires_unix_secs: Option<u64>,
     label: Option<String>,
     multi_use: bool,
   ) -> AnyResult<InviteTicket> {
-    let ticket = InviteTicket::new_with_options(endpoint_addr, document_id, format_kind, invited_role, expires_unix_secs, label, multi_use);
+    let ticket = InviteTicket::new_with_schema_options(
+      endpoint_addr,
+      document_id,
+      format_kind,
+      collab_schema,
+      invited_role,
+      expires_unix_secs,
+      label,
+      multi_use,
+    );
     self.insert(ticket.clone())?;
     Ok(ticket)
   }
@@ -611,6 +686,7 @@ impl LiveUpdate {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LivePeer {
   pub actor_id: ActorId,
+  pub replica_id: ReplicaId,
   pub session_id: SessionId,
   pub role: Role,
 }
@@ -808,6 +884,13 @@ pub struct LiveUpdateHub {
   peers: Arc<Mutex<HashMap<SessionId, LivePeer>>>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LivePeerReservation {
+  Reserved,
+  PeerLimit,
+  ReplicaInUse,
+}
+
 impl Default for LiveUpdateHub {
   fn default() -> Self {
     Self::new(1024)
@@ -828,13 +911,27 @@ impl LiveUpdateHub {
     self.sender.subscribe()
   }
 
-  pub fn upsert_peer(&self, peer: LivePeer) -> AnyResult<()> {
-    self
+  fn reserve_peer(&self, peer: LivePeer, max_peer_count: usize) -> AnyResult<LivePeerReservation> {
+    let mut peers = self
       .peers
       .lock()
-      .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?
-      .insert(peer.session_id, peer);
-    Ok(())
+      .map_err(|_| anyhow::anyhow!("Flowstate live peer roster lock is poisoned"))?;
+    if peers
+      .values()
+      .any(|existing| {
+        existing.session_id == peer.session_id
+          || existing.replica_id == peer.replica_id
+          || loro_peer_id_for_replica(existing.replica_id) == loro_peer_id_for_replica(peer.replica_id)
+      })
+    {
+      return Ok(LivePeerReservation::ReplicaInUse);
+    }
+    if peers.len() >= max_peer_count {
+      return Ok(LivePeerReservation::PeerLimit);
+    }
+    peers.insert(peer.session_id, peer);
+    drop(peers);
+    Ok(LivePeerReservation::Reserved)
   }
 
   #[allow(
@@ -933,45 +1030,74 @@ impl ProtocolHandler for FlowstateProtocol {
         reason: Some("protocol, schema, document, or format mismatch".to_string()),
       }
     };
+    let mut peer_reserved = false;
     if authorization.accepted
-      && let Some(hub) = &self.live_updates
-      && hub.peer_count().map_err(accept_error)? >= self.config.max_peer_count
+      && (hello.replica_id == self.config.replica_id
+        || loro_peer_id_for_replica(hello.replica_id) == loro_peer_id_for_replica(self.config.replica_id))
     {
       authorization = AuthorizeMessage {
         accepted: false,
         role: authorization.role,
-        reason: Some("peer limit reached".to_string()),
+        reason: Some("replica lineage or Loro peer ID is already active in the host session".to_string()),
       };
+    } else if authorization.accepted
+      && self.document_state.is_some()
+      && let Some(hub) = &self.live_updates
+    {
+      match hub
+        .reserve_peer(
+          LivePeer {
+            actor_id: hello.actor_id,
+            replica_id: hello.replica_id,
+            session_id: hello.session_id,
+            role: authorization.role,
+          },
+          self.config.max_peer_count,
+        )
+        .map_err(accept_error)?
+      {
+        LivePeerReservation::Reserved => peer_reserved = true,
+        LivePeerReservation::PeerLimit => {
+          authorization = AuthorizeMessage {
+            accepted: false,
+            role: authorization.role,
+            reason: Some("peer limit reached".to_string()),
+          };
+        },
+        LivePeerReservation::ReplicaInUse => {
+          authorization = AuthorizeMessage {
+            accepted: false,
+            role: authorization.role,
+            reason: Some("replica lineage or Loro peer ID is already active in another session".to_string()),
+          };
+        },
+      }
     }
-    write_wire_message(&mut send, &WireMessage::Authorize(authorization.clone()), self.config.max_message_bytes)
-      .await
-      .map_err(accept_error)?;
+    if let Err(error) = write_wire_message(&mut send, &WireMessage::Authorize(authorization.clone()), self.config.max_message_bytes).await {
+      if peer_reserved
+        && let Some(hub) = &self.live_updates
+      {
+        let _ = hub.remove_peer(hello.session_id);
+      }
+      return Err(accept_error(error));
+    }
 
     let mut send_finished = false;
     if authorization.accepted
       && let Some(state) = &self.document_state
     {
       let live_rx = self.live_updates.as_ref().map(LiveUpdateHub::subscribe);
-      if let Some(hub) = &self.live_updates {
-        hub
-          .upsert_peer(LivePeer {
-            actor_id: hello.actor_id,
-            session_id: hello.session_id,
-            role: authorization.role,
-          })
-          .map_err(accept_error)?;
-        hub
-          .publish(LiveUpdate::event(
+      let stream_result = async {
+        if let Some(hub) = &self.live_updates {
+          hub.publish(LiveUpdate::event(
             Some(hello.session_id),
             SessionEvent::PeerAuthorized {
               actor_id: hello.actor_id,
               session_id: hello.session_id,
               role: authorization.role,
             },
-          ))
-          .map_err(accept_error)?;
-      }
-      let stream_result = async {
+          ))?;
+        }
         let mut incremental_catchup = false;
         if !hello.known_frontier.is_empty() {
           let current_frontier = state.frontier()?;
@@ -1141,8 +1267,19 @@ impl HostedCollaborationPublisher {
     focus: Option<String>,
     viewport_hint: Option<String>,
   ) -> AnyResult<()> {
-    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish presence");
     let frontier = self.document_state.frontier()?;
+    self.publish_presence_at_frontier(user_label, cursor, focus, viewport_hint, frontier)
+  }
+
+  pub fn publish_presence_at_frontier(
+    &self,
+    user_label: impl Into<String>,
+    cursor: Option<String>,
+    focus: Option<String>,
+    viewport_hint: Option<String>,
+    frontier: Vec<u8>,
+  ) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish presence");
     let presence = PeerPresence {
       actor_id: self.config.actor_id,
       session_id: self.config.session_id,
@@ -1215,6 +1352,71 @@ impl HostedCollaborationPublisher {
       },
     ))
   }
+
+  pub fn publish_applied_flow_update(
+    &self,
+    peer_id: u64,
+    update: Vec<u8>,
+    base_frontier: Vec<u8>,
+    resulting_frontier: Vec<u8>,
+  ) -> AnyResult<()> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
+    ensure!(
+      peer_id == loro_peer_id_for_replica(self.config.replica_id),
+      "local vNext update peer does not match the configured replica"
+    );
+    ensure_update_size(&update, self.config.max_update_bytes)?;
+    let authority = self
+      .document_state
+      .flow_authority
+      .as_ref()
+      .context("host session does not have a vNext DB8 authority")?;
+    authority.import_update_checked_at_frontiers(
+      self.config.role_request,
+      peer_id,
+      update.clone(),
+      base_frontier.clone(),
+      resulting_frontier.clone(),
+    )?;
+    self.live_updates.publish(LiveUpdate::wire(
+      Some(self.config.session_id),
+      WireMessage::FlowUpdate(FlowUpdateMessage {
+        update_id: None,
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        peer_id,
+        schema_version: FLOW_SOURCE_SCHEMA_VERSION,
+        history_epoch: self.config.history_epoch,
+        base_frontier,
+        resulting_frontier,
+        hash: blake3_hash(&update),
+        bytes: update,
+      }),
+    ))
+  }
+
+  pub fn install_referenced_asset(&self, bytes: Vec<u8>) -> AnyResult<VerifiedAsset> {
+    ensure!(self.config.role_request.can_write(), "local role is not allowed to publish assets");
+    ensure!(!bytes.is_empty(), "empty collaborative assets are not supported");
+    let hash = blake3_hash(&bytes);
+    let reference = referenced_asset_record(&self.document_state, hash)?;
+    ensure!(reference.byte_len == bytes.len() as u64, "asset bytes do not match referenced byte length");
+    let verified = self
+      .document_state
+      .assets
+      .lock()
+      .map_err(|_| anyhow::anyhow!("Flowstate asset state lock is poisoned"))?
+      .insert_verified(bytes);
+    let assets = advertised_asset_hashes(&self.document_state)?;
+    self.live_updates.publish(LiveUpdate::wire(
+      Some(self.config.session_id),
+      WireMessage::AssetHave(AssetHaveMessage {
+        document_id: self.config.document_id,
+        assets,
+      }),
+    ))?;
+    Ok(verified)
+  }
 }
 
 impl HostedCollaboration {
@@ -1223,7 +1425,40 @@ impl HostedCollaboration {
     Self::start_with_config(document, assets, config).await
   }
 
+  pub async fn start_with_flow_snapshot(
+    document: CollabDocument,
+    assets: AssetStore,
+    flow_snapshot: Vec<u8>,
+    local_role: Role,
+  ) -> AnyResult<Self> {
+    let config =
+      FlowstateSyncConfig::new(document.document_id(), document.format_kind(), local_role).with_collab_schema(FLOW_SOURCE_SCHEMA_VERSION);
+    Self::start_with_flow_snapshot_config(document, assets, flow_snapshot, config).await
+  }
+
+  pub async fn start_with_flow_snapshot_config(
+    document: CollabDocument,
+    assets: AssetStore,
+    flow_snapshot: Vec<u8>,
+    config: FlowstateSyncConfig,
+  ) -> AnyResult<Self> {
+    ensure!(
+      config.collab_schema == FLOW_SOURCE_SCHEMA_VERSION,
+      "vNext flow snapshot host requires the vNext collaboration schema"
+    );
+    Self::start_with_config_and_flow_snapshot(document, assets, config, Some(flow_snapshot)).await
+  }
+
   pub async fn start_with_config(document: CollabDocument, assets: AssetStore, config: FlowstateSyncConfig) -> AnyResult<Self> {
+    Self::start_with_config_and_flow_snapshot(document, assets, config, None).await
+  }
+
+  async fn start_with_config_and_flow_snapshot(
+    document: CollabDocument,
+    assets: AssetStore,
+    config: FlowstateSyncConfig,
+    flow_snapshot: Option<Vec<u8>>,
+  ) -> AnyResult<Self> {
     ensure!(
       document.document_id() == config.document_id,
       "host document id does not match sync config"
@@ -1234,7 +1469,11 @@ impl HostedCollaboration {
     );
     let endpoint = bind_endpoint().await?;
     let registry = InviteRegistry::new();
-    let state = SessionDocumentState::new(document, assets);
+    let state = if let Some(snapshot) = flow_snapshot {
+      SessionDocumentState::with_flow_snapshot(document, assets, &snapshot)?
+    } else {
+      SessionDocumentState::new(document, assets)
+    };
     let live_updates = LiveUpdateHub::default();
     let router = router_with_live_updates(
       endpoint,
@@ -1282,6 +1521,7 @@ impl HostedCollaboration {
       self.router.endpoint().addr(),
       self.config.document_id,
       self.config.format_kind,
+      self.config.collab_schema,
       invited_role,
       None,
       label,
@@ -1404,6 +1644,10 @@ impl HostedCollaboration {
     self.publish_update_from_source(source, None)
   }
 
+  pub fn install_referenced_asset(&self, bytes: Vec<u8>) -> AnyResult<VerifiedAsset> {
+    self.publisher().install_referenced_asset(bytes)
+  }
+
   pub fn publish_update_from_source(&self, source: &CollabDocument, application: Option<UpdateApplication>) -> AnyResult<()> {
     ensure!(self.config.role_request.can_write(), "local role is not allowed to publish updates");
     ensure!(source.document_id() == self.config.document_id, "replacement source document mismatch");
@@ -1452,7 +1696,8 @@ impl HostedCollaboration {
 pub async fn join_invite_snapshot(link: &str) -> AnyResult<JoinedSnapshot> {
   let ticket = decode_invite_link(link)?;
   let endpoint = bind_endpoint().await?;
-  let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role);
+  let config =
+    FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role).with_collab_schema(ticket.collab_schema);
   let result = connect_and_receive_snapshot(&endpoint, &ticket, &config).await;
   endpoint.close().await;
   result
@@ -1590,6 +1835,7 @@ impl CollabDocumentAuthority {
 #[derive(Clone, Debug)]
 pub struct SessionDocumentState {
   pub authority: CollabDocumentAuthority,
+  pub flow_authority: Option<FlowDocumentAuthority>,
   pub assets: Arc<Mutex<AssetStore>>,
 }
 
@@ -1598,8 +1844,18 @@ impl SessionDocumentState {
   pub fn new(document: CollabDocument, assets: AssetStore) -> Self {
     Self {
       authority: CollabDocumentAuthority::new(document),
+      flow_authority: None,
       assets: Arc::new(Mutex::new(assets)),
     }
+  }
+
+  pub fn with_flow_snapshot(document: CollabDocument, assets: AssetStore, flow_snapshot: &[u8]) -> flowstate_collab::CollabResult<Self> {
+    let document_id = document.document_id();
+    Ok(Self {
+      authority: CollabDocumentAuthority::new(document),
+      flow_authority: Some(FlowDocumentAuthority::from_snapshot(flow_snapshot, document_id)?),
+      assets: Arc::new(Mutex::new(assets)),
+    })
   }
 
   pub fn snapshot_document(&self) -> flowstate_collab::CollabResult<CollabDocument> {
@@ -1749,7 +2005,15 @@ pub enum SessionEvent {
     document_id: DocumentId,
     hash: [u8; 32],
   },
+  FlowSnapshotApplied {
+    document_id: DocumentId,
+    hash: [u8; 32],
+  },
   UpdateApplied {
+    document_id: DocumentId,
+    hash: [u8; 32],
+  },
+  FlowUpdateApplied {
     document_id: DocumentId,
     hash: [u8; 32],
   },
@@ -1766,6 +2030,7 @@ pub enum SessionEvent {
   AssetReceived {
     document_id: DocumentId,
     hash: [u8; 32],
+    bytes: Vec<u8>,
   },
   AssetRejected {
     document_id: DocumentId,
@@ -1778,6 +2043,7 @@ pub enum SessionEvent {
 pub struct JoinedSnapshot {
   pub authorization: AuthorizeMessage,
   pub document: CollabDocument,
+  pub flow_snapshot: Option<Vec<u8>>,
   pub assets_available: Vec<[u8; 32]>,
 }
 
@@ -2036,6 +2302,8 @@ pub async fn connect_and_receive_snapshot(
   let mut assets_available = Vec::new();
   let mut saw_have = false;
   let mut pending_snapshot = None;
+  let mut pending_flow_snapshot = None;
+  let mut flow_snapshot = None;
   while document.is_none() || !saw_have {
     match read_wire_message(&mut recv, config.max_message_bytes).await? {
       WireMessage::Snapshot { document_id, bytes, hash } => {
@@ -2046,6 +2314,23 @@ pub async fn connect_and_receive_snapshot(
         if let Some((document_id, bytes, hash)) = receive_snapshot_chunk(&mut pending_snapshot, chunk, config)? {
           ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
           document = Some(collab_document_from_snapshot_bytes(bytes, hash, config)?);
+        }
+      },
+      WireMessage::FlowSnapshot(FlowSnapshotMessage {
+        document_id,
+        history_epoch,
+        bytes,
+        hash,
+      }) => {
+        ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure!(history_epoch == config.history_epoch, "vNext snapshot history epoch is incompatible");
+        ensure!(blake3_hash(&bytes) == hash, "vNext snapshot hash mismatch");
+        flow_snapshot = Some(bytes);
+      },
+      WireMessage::FlowSnapshotChunk(chunk) => {
+        if let Some((document_id, bytes, _)) = receive_snapshot_chunk(&mut pending_flow_snapshot, chunk, config)? {
+          ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+          flow_snapshot = Some(bytes);
         }
       },
       WireMessage::Have { document_id, assets, .. } => {
@@ -2074,6 +2359,7 @@ pub async fn connect_and_receive_snapshot(
   Ok(JoinedSnapshot {
     authorization,
     document,
+    flow_snapshot,
     assets_available,
   })
 }
@@ -2085,10 +2371,15 @@ pub struct LiveCollaborationClient {
   recv: RecvStream,
   pub authorization: AuthorizeMessage,
   pub document: CollabDocument,
+  pub flow_snapshot: Option<Vec<u8>>,
+  flow_document: Option<FlowDocument>,
+  pub last_flow_update: Option<FlowUpdateMessage>,
   pub assets_available: Vec<[u8; 32]>,
   pub assets: AssetStore,
+  assets_refresh_pending: bool,
   pending_events: VecDeque<(SessionEvent, Option<UpdateApplication>)>,
   pending_snapshot: Option<IncomingSnapshotChunks>,
+  pending_flow_snapshot: Option<IncomingSnapshotChunks>,
   recent_local_update_hashes: VecDeque<[u8; 32]>,
   next_update_id: UpdateId,
   wire_encode_buffer: Vec<u8>,
@@ -2122,11 +2413,15 @@ enum WirePriorityLane {
 fn wire_priority_lane(message: &WireMessage) -> WirePriorityLane {
   match message {
     WireMessage::Update { bytes, application, .. } if !bytes.is_empty() || application.is_some() => WirePriorityLane::LiveEdit,
-    WireMessage::Update { .. } => WirePriorityLane::LiveEdit,
+    WireMessage::Update { .. } | WireMessage::FlowUpdate(_) => WirePriorityLane::LiveEdit,
     WireMessage::Ack { .. } | WireMessage::UpdateRejected { .. } | WireMessage::PeerEvent(_) => WirePriorityLane::LiveEdit,
     WireMessage::Presence(_) => WirePriorityLane::Presence,
     WireMessage::AssetHave(_) | WireMessage::AssetNeed(_) | WireMessage::AssetChunk(_) => WirePriorityLane::Asset,
-    WireMessage::Snapshot { .. } | WireMessage::SnapshotChunk(_) | WireMessage::Need { .. } => WirePriorityLane::Repair,
+    WireMessage::Snapshot { .. }
+    | WireMessage::SnapshotChunk(_)
+    | WireMessage::FlowSnapshot(_)
+    | WireMessage::FlowSnapshotChunk(_)
+    | WireMessage::Need { .. } => WirePriorityLane::Repair,
     WireMessage::Hello(_) | WireMessage::Authorize(_) | WireMessage::Have { .. } | WireMessage::Error { .. } => WirePriorityLane::Repair,
   }
 }
@@ -2291,6 +2586,48 @@ impl LiveCollaborationClient {
     Ok(())
   }
 
+  pub async fn publish_applied_flow_update(
+    &mut self,
+    peer_id: u64,
+    bytes: Vec<u8>,
+    base_frontier: Vec<u8>,
+    resulting_frontier: Vec<u8>,
+  ) -> AnyResult<()> {
+    ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
+    ensure!(
+      peer_id == loro_peer_id_for_replica(self.config.replica_id),
+      "local vNext update peer does not match the configured replica"
+    );
+    ensure_update_size(&bytes, self.config.max_update_bytes)?;
+    let hash = blake3_hash(&bytes);
+    let accepted_bytes = bytes.clone();
+    let update_id = self.allocate_update_id();
+    self.remember_local_update_hash(hash);
+    write_wire_message_reusing_buffer(
+      &mut self.send,
+      &mut self.wire_encode_buffer,
+      &WireMessage::FlowUpdate(FlowUpdateMessage {
+        update_id: Some(update_id),
+        document_id: self.config.document_id,
+        actor_id: self.config.actor_id,
+        peer_id,
+        schema_version: FLOW_SOURCE_SCHEMA_VERSION,
+        history_epoch: self.config.history_epoch,
+        base_frontier,
+        resulting_frontier,
+        bytes,
+        hash,
+      }),
+      self.config.max_message_bytes,
+    )
+    .await?;
+    if let Some(flow_document) = &mut self.flow_document {
+      flow_document.import_update_checked(&accepted_bytes, &FlowImportPolicy::editor_from_peer(peer_id))?;
+    }
+    self.await_update_result(update_id).await?;
+    Ok(())
+  }
+
   pub async fn publish_granular_source_mutations(
     &mut self,
     mutations: Vec<GranularSourceMutation>,
@@ -2399,6 +2736,20 @@ impl LiveCollaborationClient {
     focus: Option<String>,
     viewport_hint: Option<String>,
   ) -> AnyResult<()> {
+    let frontier = self.document.frontier()?;
+    self
+      .publish_presence_at_frontier(user_label, cursor, focus, viewport_hint, frontier)
+      .await
+  }
+
+  pub async fn publish_presence_at_frontier(
+    &mut self,
+    user_label: impl Into<String>,
+    cursor: Option<String>,
+    focus: Option<String>,
+    viewport_hint: Option<String>,
+    frontier: Vec<u8>,
+  ) -> AnyResult<()> {
     let presence = PeerPresence {
       actor_id: self.config.actor_id,
       session_id: self.config.session_id,
@@ -2407,7 +2758,7 @@ impl LiveCollaborationClient {
       cursor,
       focus,
       viewport_hint,
-      last_known_frontier: self.document.frontier()?,
+      last_known_frontier: frontier,
       monotonic_millis: now_unix_millis(),
     };
     write_wire_message_reusing_buffer(
@@ -2420,6 +2771,7 @@ impl LiveCollaborationClient {
   }
 
   pub async fn receive_next_update(&mut self) -> AnyResult<Option<SessionEvent>> {
+    self.refresh_document_assets_if_needed().await?;
     if let Some((event, application)) = self.pending_events.pop_front() {
       if collab_canary_enabled() {
         collab_canary(
@@ -2446,9 +2798,25 @@ impl LiveCollaborationClient {
           self.last_application = application;
           return Ok(Some(event));
         },
-        LiveClientMessage::AssetChunk(_) | LiveClientMessage::Continue => {},
+        LiveClientMessage::AssetChunk(_) | LiveClientMessage::Continue => {
+          self.refresh_document_assets_if_needed().await?;
+          if let Some((event, application)) = self.pending_events.pop_front() {
+            self.last_application = application;
+            return Ok(Some(event));
+          }
+        },
       }
     }
+  }
+
+  async fn refresh_document_assets_if_needed(&mut self) -> AnyResult<()> {
+    if !self.assets_refresh_pending {
+      return Ok(());
+    }
+    self.assets_refresh_pending = false;
+    let assets = self.request_document_assets().await?;
+    self.queue_asset_received_events(assets);
+    Ok(())
   }
 
   async fn handle_live_message(&mut self, message: WireMessage) -> AnyResult<LiveClientMessage> {
@@ -2511,11 +2879,76 @@ impl LiveCollaborationClient {
         }
         Ok(LiveClientMessage::Event(SessionEvent::UpdateApplied { document_id, hash }, application))
       },
+      WireMessage::FlowUpdate(message) => {
+        ensure!(message.document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        ensure!(
+          message.schema_version == FLOW_SOURCE_SCHEMA_VERSION,
+          "vNext update schema version is incompatible"
+        );
+        ensure!(message.history_epoch == self.config.history_epoch, "vNext update history epoch is incompatible");
+        ensure_update_size(&message.bytes, self.config.max_update_bytes)?;
+        ensure!(blake3_hash(&message.bytes) == message.hash, "vNext update hash mismatch");
+        if let Some(flow_document) = &mut self.flow_document {
+          flow_document.import_update_checked(&message.bytes, &FlowImportPolicy::editor_from_peer(message.peer_id))?;
+        }
+        write_wire_message(
+          &mut self.send,
+          &WireMessage::Ack {
+            update_id: message.update_id,
+            document_id: message.document_id,
+            frontier: message.resulting_frontier.clone(),
+          },
+          self.config.max_message_bytes,
+        )
+        .await?;
+        if self.take_local_update_hash(message.hash) {
+          return Ok(LiveClientMessage::Event(
+            SessionEvent::UpdateHint {
+              document_id: message.document_id,
+              hash: message.hash,
+            },
+            None,
+          ));
+        }
+        let event = SessionEvent::FlowUpdateApplied {
+          document_id: message.document_id,
+          hash: message.hash,
+        };
+        self.last_flow_update = Some(message);
+        Ok(LiveClientMessage::Event(event, None))
+      },
       WireMessage::Snapshot { document_id, bytes, hash } => {
         ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
         self.document = collab_document_from_snapshot_bytes(bytes, hash, &self.config)?;
         self.document.set_local_actor(self.config.actor_id)?;
         Ok(LiveClientMessage::Event(SessionEvent::SnapshotApplied { document_id, hash }, None))
+      },
+      WireMessage::FlowSnapshot(FlowSnapshotMessage {
+        document_id,
+        history_epoch,
+        bytes,
+        hash,
+      }) => {
+        ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
+        ensure!(history_epoch == self.config.history_epoch, "vNext snapshot history epoch is incompatible");
+        ensure!(blake3_hash(&bytes) == hash, "vNext snapshot hash mismatch");
+        self.flow_document = Some(FlowDocument::from_snapshot(&bytes, Some(document_id), ReplicaId::new())?);
+        self.flow_snapshot = Some(bytes);
+        Ok(LiveClientMessage::Event(
+          SessionEvent::FlowSnapshotApplied { document_id, hash },
+          None,
+        ))
+      },
+      WireMessage::FlowSnapshotChunk(chunk) => {
+        let Some((document_id, bytes, hash)) = receive_snapshot_chunk(&mut self.pending_flow_snapshot, chunk, &self.config)? else {
+          return Ok(LiveClientMessage::Continue);
+        };
+        self.flow_document = Some(FlowDocument::from_snapshot(&bytes, Some(document_id), ReplicaId::new())?);
+        self.flow_snapshot = Some(bytes);
+        Ok(LiveClientMessage::Event(
+          SessionEvent::FlowSnapshotApplied { document_id, hash },
+          None,
+        ))
       },
       WireMessage::SnapshotChunk(chunk) => {
         let Some((document_id, bytes, hash)) = receive_snapshot_chunk(&mut self.pending_snapshot, chunk, &self.config)? else {
@@ -2525,8 +2958,10 @@ impl LiveCollaborationClient {
         self.document.set_local_actor(self.config.actor_id)?;
         Ok(LiveClientMessage::Event(SessionEvent::SnapshotApplied { document_id, hash }, None))
       },
-      WireMessage::Have { assets, .. } | WireMessage::AssetHave(AssetHaveMessage { assets, .. }) => {
+      WireMessage::Have { document_id, assets, .. } | WireMessage::AssetHave(AssetHaveMessage { document_id, assets }) => {
+        ensure!(document_id == self.config.document_id, SyncError::ProtocolMismatch);
         self.assets_available = assets;
+        self.assets_refresh_pending = true;
         Ok(LiveClientMessage::Continue)
       },
       WireMessage::AssetChunk(chunk) => {
@@ -2637,6 +3072,39 @@ impl LiveCollaborationClient {
     Ok(self.assets.insert_verified(bytes))
   }
 
+  pub async fn publish_referenced_asset(&mut self, bytes: Vec<u8>) -> AnyResult<VerifiedAsset> {
+    ensure!(self.authorization.role.can_write(), "local role is not allowed to publish assets");
+    ensure!(!bytes.is_empty(), "empty collaborative assets are not supported");
+    ensure!(bytes.len() <= self.config.max_snapshot_bytes, "asset exceeds the configured total byte limit");
+    let verified = self.assets.insert_verified(bytes);
+    for (chunk_ix, chunk) in verified.bytes.chunks(self.config.max_asset_chunk_bytes).enumerate() {
+      let offset = chunk_ix
+        .checked_mul(self.config.max_asset_chunk_bytes)
+        .context("asset upload offset overflows usize")?;
+      write_wire_message_reusing_buffer(
+        &mut self.send,
+        &mut self.wire_encode_buffer,
+        &WireMessage::AssetChunk(AssetChunkMessage {
+          document_id: self.config.document_id,
+          blake3_hash: verified.hash,
+          offset: offset as u64,
+          bytes: chunk.to_vec(),
+        }),
+        self.config.max_message_bytes,
+      )
+      .await?;
+    }
+    loop {
+      let message = read_wire_message(&mut self.recv, self.config.max_message_bytes).await?;
+      match self.handle_live_message(message).await? {
+        LiveClientMessage::Event(event, application) => self.pending_events.push_back((event, application)),
+        LiveClientMessage::AssetChunk(_) => {},
+        LiveClientMessage::Continue if self.assets_available.contains(&verified.hash) => return Ok(verified),
+        LiveClientMessage::Continue => {},
+      }
+    }
+  }
+
   pub async fn request_assets(&mut self, assets: impl IntoIterator<Item = ([u8; 32], u64)>) -> AnyResult<Vec<VerifiedAsset>> {
     let assets = assets.into_iter();
     let (lower_bound, _) = assets.size_hint();
@@ -2648,18 +3116,49 @@ impl LiveCollaborationClient {
   }
 
   pub async fn request_document_assets(&mut self) -> AnyResult<Vec<VerifiedAsset>> {
-    let manifest_bytes = self.document.asset_manifest_bytes()?;
-    if manifest_bytes.is_empty() {
-      return Ok(Vec::new());
-    }
-    let manifest: Vec<NativeAssetRecord> = postcard::from_bytes(&manifest_bytes).context("failed to decode Flowstate asset manifest")?;
-    self
-      .request_assets(
-        manifest
-          .into_iter()
-          .map(|asset| (asset.blake3_hash, asset.byte_len)),
+    let referenced = if let Some(flow_document) = &self.flow_document {
+      flow_document
+        .asset_references()?
+        .into_values()
+        .map(|asset| (asset.blake3_hash, asset.byte_len))
+        .collect::<Vec<_>>()
+    } else {
+      let manifest_bytes = self.document.asset_manifest_bytes()?;
+      if manifest_bytes.is_empty() {
+        return Ok(Vec::new());
+      }
+      let manifest: Vec<NativeAssetRecord> =
+        postcard::from_bytes(&manifest_bytes).context("failed to decode Flowstate asset manifest")?;
+      manifest
+        .into_iter()
+        .map(|asset| (asset.blake3_hash, asset.byte_len))
+        .collect()
+    };
+    let available = self.assets_available.iter().copied().collect::<HashSet<_>>();
+    let missing = referenced
+      .into_iter()
+      .filter(|(hash, _)| available.contains(hash) && !self.assets.contains(hash))
+      .collect::<Vec<_>>();
+    self.request_assets(missing).await
+  }
+
+  pub async fn prime_document_assets(&mut self) -> AnyResult<()> {
+    let assets = self.request_document_assets().await?;
+    self.queue_asset_received_events(assets);
+    Ok(())
+  }
+
+  fn queue_asset_received_events(&mut self, assets: Vec<VerifiedAsset>) {
+    self.pending_events.extend(assets.into_iter().map(|asset| {
+      (
+        SessionEvent::AssetReceived {
+          document_id: self.config.document_id,
+          hash: asset.hash,
+          bytes: asset.bytes,
+        },
+        None,
       )
-      .await
+    }));
   }
 
   pub async fn shutdown(mut self) -> AnyResult<()> {
@@ -2680,9 +3179,20 @@ pub async fn connect_live_invite_with_frontier(
   link: &str,
   known_frontier: Vec<u8>,
 ) -> AnyResult<LiveCollaborationClient> {
+  connect_live_invite_with_frontier_and_identity(link, known_frontier, ActorId::new(), ReplicaId::new()).await
+}
+
+pub async fn connect_live_invite_with_frontier_and_identity(
+  link: &str,
+  known_frontier: Vec<u8>,
+  actor_id: ActorId,
+  replica_id: ReplicaId,
+) -> AnyResult<LiveCollaborationClient> {
   let ticket = decode_invite_link(link)?;
   let endpoint = bind_endpoint().await?;
-  let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role);
+  let config = FlowstateSyncConfig::new(ticket.document_id, ticket.format_kind, ticket.invited_role)
+    .with_collab_schema(ticket.collab_schema)
+    .with_identity(actor_id, replica_id);
   let connection = endpoint
     .connect(ticket.endpoint_addr.clone(), FLOWSTATE_ALPN)
     .await
@@ -2718,6 +3228,8 @@ pub async fn connect_live_invite_with_frontier(
   let mut assets_available = Vec::new();
   let mut saw_have = false;
   let mut pending_snapshot = None;
+  let mut pending_flow_snapshot = None;
+  let mut flow_snapshot = None;
   while document.is_none() || !saw_have {
     let message = tokio::time::timeout(handshake_timeout, async {
       read_wire_message(&mut recv, config.max_message_bytes).await
@@ -2733,6 +3245,23 @@ pub async fn connect_live_invite_with_frontier(
         if let Some((document_id, bytes, hash)) = receive_snapshot_chunk(&mut pending_snapshot, chunk, &config)? {
           ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
           document = Some(collab_document_from_snapshot_bytes(bytes, hash, &config)?);
+        }
+      },
+      WireMessage::FlowSnapshot(FlowSnapshotMessage {
+        document_id,
+        history_epoch,
+        bytes,
+        hash,
+      }) => {
+        ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure!(history_epoch == config.history_epoch, "vNext snapshot history epoch is incompatible");
+        ensure!(blake3_hash(&bytes) == hash, "vNext snapshot hash mismatch");
+        flow_snapshot = Some(bytes);
+      },
+      WireMessage::FlowSnapshotChunk(chunk) => {
+        if let Some((document_id, bytes, _)) = receive_snapshot_chunk(&mut pending_flow_snapshot, chunk, &config)? {
+          ensure!(document_id == config.document_id, SyncError::ProtocolMismatch);
+          flow_snapshot = Some(bytes);
         }
       },
       WireMessage::Update { document_id, bytes, hash, .. } if document.is_some() => {
@@ -2759,6 +3288,10 @@ pub async fn connect_live_invite_with_frontier(
   }
   let document = document.expect("document checked above");
   document.set_local_actor(config.actor_id)?;
+  let flow_document = flow_snapshot
+    .as_deref()
+    .map(|snapshot| FlowDocument::from_snapshot(snapshot, Some(config.document_id), ReplicaId::new()))
+    .transpose()?;
   Ok(LiveCollaborationClient {
     endpoint,
     send,
@@ -2766,10 +3299,15 @@ pub async fn connect_live_invite_with_frontier(
     recv,
     authorization,
     document,
+    flow_snapshot,
+    flow_document,
+    last_flow_update: None,
     assets_available,
     assets: AssetStore::default(),
+    assets_refresh_pending: false,
     pending_events: VecDeque::new(),
     pending_snapshot: None,
+    pending_flow_snapshot: None,
     recent_local_update_hashes: VecDeque::new(),
     next_update_id: 1,
     wire_encode_buffer: Vec::with_capacity(1024),
@@ -2960,6 +3498,39 @@ async fn send_snapshot_chunks(
   Ok(())
 }
 
+async fn send_flow_snapshot_chunks(
+  send: &mut SendStream,
+  document_id: DocumentId,
+  snapshot: &[u8],
+  hash: [u8; 32],
+  config: &FlowstateSyncConfig,
+) -> AnyResult<()> {
+  let chunk_bytes = snapshot_chunk_payload_bytes(config)?;
+  let total_len = u64::try_from(snapshot.len()).context("Flowstate vNext snapshot length overflows u64")?;
+  for (chunk_ix, bytes) in snapshot.chunks(chunk_bytes).enumerate() {
+    let offset = u64::try_from(
+      chunk_ix
+        .checked_mul(chunk_bytes)
+        .context("Flowstate vNext snapshot chunk offset overflows usize")?,
+    )
+    .context("Flowstate vNext snapshot chunk offset overflows u64")?;
+    write_wire_message(
+      send,
+      &WireMessage::FlowSnapshotChunk(SnapshotChunkMessage {
+        document_id,
+        hash,
+        offset,
+        total_len,
+        bytes: bytes.to_vec(),
+      }),
+      config.max_message_bytes,
+    )
+    .await?;
+    tokio::task::yield_now().await;
+  }
+  Ok(())
+}
+
 async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentState, config: &FlowstateSyncConfig) -> AnyResult<()> {
   let (snapshot, frontier) = state.authority.export_snapshot_and_frontier()?;
   collab_canary(
@@ -2988,6 +3559,26 @@ async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentSt
     )
     .await?;
   }
+  if let Some(authority) = &state.flow_authority {
+    let (flow_snapshot, _) = authority.export_snapshot_and_frontier()?;
+    ensure_snapshot_size(&flow_snapshot, config.max_snapshot_bytes)?;
+    let hash = blake3_hash(&flow_snapshot);
+    if flow_snapshot.len() > snapshot_chunk_payload_bytes(config)? {
+      send_flow_snapshot_chunks(send, config.document_id, &flow_snapshot, hash, config).await?;
+    } else {
+      write_wire_message(
+        send,
+        &WireMessage::FlowSnapshot(FlowSnapshotMessage {
+          document_id: config.document_id,
+          history_epoch: config.history_epoch,
+          bytes: flow_snapshot,
+          hash,
+        }),
+        config.max_message_bytes,
+      )
+      .await?;
+    }
+  }
   let assets = advertised_asset_hashes(state)?;
   write_wire_message(
     send,
@@ -3002,11 +3593,36 @@ async fn send_snapshot_and_have(send: &mut SendStream, state: &SessionDocumentSt
 }
 
 fn document_asset_manifest_records(state: &SessionDocumentState) -> AnyResult<Vec<NativeAssetRecord>> {
+  if let Some(authority) = &state.flow_authority {
+    let created_by_actor = authority.created_by_actor()?;
+    return authority
+      .asset_references()?
+      .into_values()
+      .map(|asset| {
+        Ok(NativeAssetRecord {
+          asset_id: asset.id.0.as_u128(),
+          blake3_hash: asset.blake3_hash,
+          byte_len: asset.byte_len,
+          mime_type: asset.mime_type,
+          original_name: asset.original_name,
+          created_by_actor,
+          inline: false,
+        })
+      })
+      .collect();
+  }
   let manifest_bytes = state.authority.asset_manifest_bytes()?;
   if manifest_bytes.is_empty() {
     return Ok(Vec::new());
   }
   postcard::from_bytes(&manifest_bytes).context("failed to decode Flowstate asset manifest")
+}
+
+fn referenced_asset_record(state: &SessionDocumentState, hash: [u8; 32]) -> AnyResult<NativeAssetRecord> {
+  document_asset_manifest_records(state)?
+    .into_iter()
+    .find(|asset| asset.blake3_hash == hash)
+    .context("asset is not referenced by the authoritative document")
 }
 fn advertised_asset_hashes(state: &SessionDocumentState) -> AnyResult<Vec<[u8; 32]>> {
   let manifest = match document_asset_manifest_records(state) {
@@ -3034,13 +3650,7 @@ fn advertised_asset_hashes(state: &SessionDocumentState) -> AnyResult<Vec<[u8; 3
 }
 
 fn ensure_asset_referenced(state: &SessionDocumentState, hash: [u8; 32]) -> AnyResult<()> {
-  ensure!(
-    document_asset_manifest_records(state)?
-      .into_iter()
-      .any(|asset| asset.blake3_hash == hash),
-    "requested asset is not referenced by document manifest"
-  );
-  Ok(())
+  referenced_asset_record(state, hash).map(|_| ())
 }
 
 async fn send_peer_roster(
@@ -3088,8 +3698,12 @@ async fn serve_live_stream(
   let mut remote_role = remote_role;
   let mut presence_rate = RateWindow::new(config.max_presence_messages_per_minute, RATE_LIMIT_WINDOW_MILLIS);
   let mut asset_request_rate = RateWindow::new(config.max_asset_requests_per_minute, RATE_LIMIT_WINDOW_MILLIS);
+  let mut asset_upload_rate = RateWindow::new(config.max_asset_requests_per_minute, RATE_LIMIT_WINDOW_MILLIS);
+  let mut incoming_asset_uploads = HashMap::<[u8; 32], assets::IncomingAssetUpload>::new();
   let mut accepted_updates: HashMap<UpdateId, ([u8; 32], Vec<u8>)> = HashMap::new();
   let mut document_lane_blocked = false;
+  let mut authorized_flow_peer_id =
+    (config.collab_schema == FLOW_SOURCE_SCHEMA_VERSION).then(|| loro_peer_id_for_replica(hello.replica_id));
   loop {
     let message = if let Some(rx) = live_rx.as_mut() {
       tokio::select! {
@@ -3345,6 +3959,137 @@ async fn serve_live_stream(
         )
         .await?;
       },
+      WireMessage::FlowUpdate(mut message) => {
+        ensure!(message.document_id == config.document_id, SyncError::ProtocolMismatch);
+        ensure!(message.actor_id == hello.actor_id, "vNext update actor does not match authorized peer");
+        ensure!(
+          config.collab_schema == FLOW_SOURCE_SCHEMA_VERSION,
+          "vNext update is not allowed in a legacy collaboration session"
+        );
+        ensure!(
+          message.schema_version == FLOW_SOURCE_SCHEMA_VERSION,
+          "vNext update schema version is incompatible"
+        );
+        ensure!(message.history_epoch == config.history_epoch, "vNext update history epoch is incompatible");
+        if let Some(peer_id) = authorized_flow_peer_id {
+          ensure!(message.peer_id == peer_id, "vNext Loro peer changed within an authorized session");
+        } else {
+          authorized_flow_peer_id = Some(message.peer_id);
+        }
+        ensure_update_size(&message.bytes, config.max_update_bytes)?;
+        ensure!(blake3_hash(&message.bytes) == message.hash, "vNext update hash mismatch");
+        let Some(update_id) = message.update_id else {
+          write_wire_message(
+            send,
+            &WireMessage::Error {
+              document_id: Some(config.document_id),
+              message: "vNext document updates require an update id".to_string(),
+            },
+            config.max_message_bytes,
+          )
+          .await?;
+          continue;
+        };
+        if let Some((accepted_hash, frontier)) = accepted_updates.get(&update_id) {
+          if *accepted_hash == message.hash {
+            write_wire_message(
+              send,
+              &WireMessage::Ack {
+                update_id: Some(update_id),
+                document_id: config.document_id,
+                frontier: frontier.clone(),
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+          } else {
+            write_wire_message(
+              send,
+              &WireMessage::UpdateRejected {
+                update_id,
+                document_id: config.document_id,
+                hash: message.hash,
+                code: UpdateRejectionCode::MalformedUpdate,
+                reason: "update id was reused with different bytes".to_string(),
+                authoritative_frontier: frontier.clone(),
+                recovery: UpdateRecoveryAction::DoNotRetry,
+                host_state_changed: false,
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+          }
+          continue;
+        }
+        let Some(authority) = state.flow_authority.clone() else {
+          write_wire_message(
+            send,
+            &WireMessage::UpdateRejected {
+              update_id,
+              document_id: config.document_id,
+              hash: message.hash,
+              code: UpdateRejectionCode::SchemaViolation,
+              reason: "host session does not have a vNext DB8 authority".to_string(),
+              authoritative_frontier: Vec::new(),
+              recovery: UpdateRecoveryAction::RequestSnapshot,
+              host_state_changed: false,
+            },
+            config.max_message_bytes,
+          )
+          .await?;
+          continue;
+        };
+        let peer_id = message.peer_id;
+        let bytes = message.bytes.clone();
+        let base_frontier = message.base_frontier.clone();
+        let resulting_frontier = message.resulting_frontier.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+          authority.import_update_checked_at_frontiers(remote_role, peer_id, bytes, base_frontier, resulting_frontier)
+        })
+          .await
+          .map_err(|error| anyhow::anyhow!("Flowstate vNext import worker failed: {error}"))?;
+        let outcome = match outcome {
+          Ok(outcome) => outcome,
+          Err(error) => {
+            let frontier = state
+              .flow_authority
+              .as_ref()
+              .map_or_else(|| Ok(Vec::new()), FlowDocumentAuthority::frontier)?;
+            write_wire_message(
+              send,
+              &WireMessage::UpdateRejected {
+                update_id,
+                document_id: config.document_id,
+                hash: message.hash,
+                code: classify_update_rejection(&error),
+                reason: error.to_string(),
+                authoritative_frontier: frontier,
+                recovery: UpdateRecoveryAction::RequestSnapshot,
+                host_state_changed: false,
+              },
+              config.max_message_bytes,
+            )
+            .await?;
+            continue;
+          },
+        };
+        let hash = message.hash;
+        message.update_id = None;
+        if let Some(hub) = live_updates {
+          hub.publish(LiveUpdate::wire(Some(hello.session_id), WireMessage::FlowUpdate(message)))?;
+        }
+        accepted_updates.insert(update_id, (hash, outcome.frontier.clone()));
+        write_wire_message(
+          send,
+          &WireMessage::Ack {
+            update_id: Some(update_id),
+            document_id: config.document_id,
+            frontier: outcome.frontier,
+          },
+          config.max_message_bytes,
+        )
+        .await?;
+      },
       WireMessage::Need {
         document_id,
         frontier,
@@ -3389,6 +4134,38 @@ async fn serve_live_stream(
           .chunk(&request, config.max_asset_chunk_bytes)?;
         write_wire_message(send, &WireMessage::AssetChunk(chunk), config.max_message_bytes).await?;
       },
+      WireMessage::AssetChunk(chunk) => {
+        ensure!(asset_upload_rate.check(now_unix_millis()), "asset upload rate limit exceeded");
+        ensure!(remote_role.can_write(), "peer is not authorized to upload assets");
+        ensure!(chunk.document_id == config.document_id, SyncError::ProtocolMismatch);
+        let reference = referenced_asset_record(state, chunk.blake3_hash)?;
+        ensure!(
+          reference.byte_len <= config.max_snapshot_bytes as u64,
+          "asset exceeds the configured total byte limit"
+        );
+        let upload = match incoming_asset_uploads.entry(chunk.blake3_hash) {
+          std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+          std::collections::hash_map::Entry::Vacant(entry) => entry.insert(assets::IncomingAssetUpload::new(reference.byte_len)?),
+        };
+        let completed = upload.accept(&chunk, config.max_asset_chunk_bytes)?;
+        if let Some(bytes) = completed {
+          incoming_asset_uploads.remove(&chunk.blake3_hash);
+          state
+            .assets
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Flowstate asset state lock is poisoned"))?
+            .insert_verified(bytes);
+          let assets = advertised_asset_hashes(state)?;
+          let message = WireMessage::AssetHave(AssetHaveMessage {
+            document_id: config.document_id,
+            assets,
+          });
+          write_wire_message(send, &message, config.max_message_bytes).await?;
+          if let Some(hub) = live_updates {
+            hub.publish(LiveUpdate::wire(Some(hello.session_id), message))?;
+          }
+        }
+      },
       WireMessage::Presence(mut presence) => {
         if !presence_rate.check(now_unix_millis()) {
           eprintln!("[FLOWSTATE_COLLAB_CANARY sync::presence_rate_limit] dropping presence message");
@@ -3430,8 +4207,9 @@ async fn serve_live_stream(
       | WireMessage::Have { .. }
       | WireMessage::Snapshot { .. }
       | WireMessage::SnapshotChunk(_)
+      | WireMessage::FlowSnapshot(_)
+      | WireMessage::FlowSnapshotChunk(_)
       | WireMessage::AssetHave(_)
-      | WireMessage::AssetChunk(_)
       | WireMessage::PeerEvent(_)
       | WireMessage::Ack { .. }
       | WireMessage::UpdateRejected { .. }
@@ -3545,6 +4323,43 @@ mod tests {
     let authorization = policy.authorize(&hello);
     assert!(!authorization.accepted);
     assert_eq!(authorization.role, Role::Editor);
+  }
+
+  #[test]
+  fn hello_requires_the_host_collaboration_schema() {
+    let config =
+      FlowstateSyncConfig::new(DocumentId::new(), FormatKind::Db8, Role::Owner).with_collab_schema(FLOW_SOURCE_SCHEMA_VERSION);
+    let vnext_hello = config.hello(Vec::new(), Vec::new());
+    assert!(validate_hello(&vnext_hello, &config).is_ok());
+
+    let legacy_hello = FlowstateSyncConfig::new(config.document_id, config.format_kind, Role::Editor).hello(Vec::new(), Vec::new());
+    assert!(validate_hello(&legacy_hello, &config).is_err());
+  }
+
+  #[test]
+  fn hello_rejects_a_different_history_epoch() {
+    let config =
+      FlowstateSyncConfig::new(DocumentId::new(), FormatKind::Db8, Role::Owner).with_collab_schema(FLOW_SOURCE_SCHEMA_VERSION);
+    let incompatible =
+      FlowstateSyncConfig::new(config.document_id, config.format_kind, Role::Editor)
+        .with_collab_schema(FLOW_SOURCE_SCHEMA_VERSION)
+        .with_history_epoch(config.history_epoch + 1)
+        .hello(Vec::new(), Vec::new());
+
+    assert!(validate_hello(&incompatible, &config).is_err());
+  }
+
+  #[test]
+  fn sync_identity_binds_hello_to_the_configured_loro_replica() {
+    let actor_id = ActorId::new();
+    let replica_id = ReplicaId::new();
+    let config = FlowstateSyncConfig::new(DocumentId::new(), FormatKind::Db8, Role::Editor)
+      .with_collab_schema(FLOW_SOURCE_SCHEMA_VERSION)
+      .with_identity(actor_id, replica_id);
+    let hello = config.hello(Vec::new(), Vec::new());
+    assert_eq!(hello.actor_id, actor_id);
+    assert_eq!(hello.replica_id, replica_id);
+    assert_eq!(loro_peer_id_for_replica(hello.replica_id), loro_peer_id_for_replica(config.replica_id));
   }
 
   #[test]
@@ -3761,9 +4576,19 @@ mod tests {
   }
 
   #[test]
-  #[ignore = "target state"]
   fn empty_app_only_updates_must_not_be_acknowledged_as_durable_updates() {
-    todo!("app-only updates need durable-ack separation");
+    let mut queue = OutboundDurableUpdateQueue::new();
+    let hint = OutboundUpdate {
+      document_id: DocumentId::new(),
+      actor_id: ActorId::new(),
+      bytes: Vec::new(),
+      hash: blake3_hash(&[]),
+    };
+
+    assert!(!queue_durable_update(&mut queue, hint.clone(), 1, true));
+    assert_eq!(queue.durable_len(), 0);
+    assert_eq!(queue.pop_durable(), None);
+    assert_eq!(queue.pop_hint(), Some(hint));
   }
 
   #[test]
@@ -3831,6 +4656,38 @@ mod tests {
   }
 
   #[test]
+  fn live_update_hub_reserves_each_replica_for_one_session() {
+    let hub = LiveUpdateHub::new(1);
+    let actor_id = ActorId::new();
+    let replica_id = ReplicaId::new();
+    let first_session = SessionId::new();
+    let peer = |replica_id, session_id| LivePeer {
+      actor_id,
+      replica_id,
+      session_id,
+      role: Role::Editor,
+    };
+
+    assert_eq!(
+      hub.reserve_peer(peer(replica_id, first_session), 1).unwrap(),
+      LivePeerReservation::Reserved
+    );
+    assert_eq!(
+      hub.reserve_peer(peer(replica_id, SessionId::new()), 2).unwrap(),
+      LivePeerReservation::ReplicaInUse
+    );
+    assert_eq!(
+      hub.reserve_peer(peer(ReplicaId::new(), SessionId::new()), 1).unwrap(),
+      LivePeerReservation::PeerLimit
+    );
+    hub.remove_peer(first_session).unwrap();
+    assert_eq!(
+      hub.reserve_peer(peer(replica_id, SessionId::new()), 1).unwrap(),
+      LivePeerReservation::Reserved
+    );
+  }
+
+  #[test]
   fn rate_window_rejects_events_until_window_expires() {
     let mut window = RateWindow::new(2, 1_000);
 
@@ -3848,6 +4705,7 @@ mod tests {
     let decoded = decode_invite_link(&link).unwrap();
     assert_eq!(decoded.document_id, ticket.document_id);
     assert_eq!(decoded.format_kind, ticket.format_kind);
+    assert_eq!(decoded.collab_schema, ticket.collab_schema);
     assert_eq!(decoded.invited_role, ticket.invited_role);
     assert_eq!(decoded.capability, ticket.capability);
   }
@@ -3858,7 +4716,16 @@ mod tests {
     let document_id = DocumentId::new();
     let registry = InviteRegistry::new();
     let ticket = registry
-      .issue(endpoint_addr, document_id, FormatKind::Fl0, Role::Viewer, None, None, true)
+      .issue(
+        endpoint_addr,
+        document_id,
+        FormatKind::Fl0,
+        COLLAB_SCHEMA_VERSION,
+        Role::Viewer,
+        None,
+        None,
+        true,
+      )
       .unwrap();
     let config = FlowstateSyncConfig::new(document_id, FormatKind::Fl0, Role::Editor);
     let hello = config.hello(Vec::new(), ticket.capability);
@@ -4002,6 +4869,70 @@ mod tests {
     assert_eq!(received[0].bytes, asset_bytes);
     assert!(client.assets.contains(&asset.hash));
     client.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_vnext_client_uploads_referenced_asset_and_host_advertises_it() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let asset_bytes = (0..DEFAULT_MAX_ASSET_CHUNK_BYTES + 17)
+      .map(|index| (index % 251) as u8)
+      .collect::<Vec<_>>();
+    let asset_hash = blake3_hash(&asset_bytes);
+    let mut flow = flowstate_collab::FlowDocument::new(document_id, owner, ReplicaId::new(), b"normal").unwrap();
+    flow
+      .apply_edits(
+        Role::Owner,
+        &[flowstate_collab::FlowEdit::PutAssetReference {
+          asset: flowstate_collab::FlowAssetReference {
+            id: flowstate_collab::FlowAssetId(DocumentId::new().0),
+            blake3_hash: asset_hash,
+            byte_len: asset_bytes.len() as u64,
+            mime_type: "image/png".to_string(),
+            original_name: Some("uploaded.png".to_string()),
+          },
+        }],
+      )
+      .unwrap();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"projection", &[]).unwrap();
+    let host = HostedCollaboration::start_with_flow_snapshot(
+      host_doc,
+      AssetStore::default(),
+      flow.export_snapshot().unwrap(),
+      Role::Owner,
+    )
+    .await
+    .unwrap();
+    let editor_invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+    let mut editor = connect_live_invite(&editor_invite).await.unwrap();
+    assert!(!editor.assets_available.contains(&asset_hash));
+    let viewer_invite = host
+      .issue_invite_link(Role::Viewer, Some("viewer".to_string()), true)
+      .unwrap();
+    let mut viewer = connect_live_invite(&viewer_invite).await.unwrap();
+    assert!(!viewer.assets_available.contains(&asset_hash));
+
+    editor.publish_referenced_asset(asset_bytes.clone()).await.unwrap();
+    assert!(editor.assets_available.contains(&asset_hash));
+    let mut received_asset = false;
+    for _ in 0..4 {
+      let event = viewer.receive_next_update().await.unwrap().unwrap();
+      if matches!(
+        event,
+        SessionEvent::AssetReceived { hash, bytes, .. } if hash == asset_hash && bytes == asset_bytes
+      ) {
+        received_asset = true;
+        break;
+      }
+    }
+    assert!(received_asset);
+    assert!(viewer.assets.contains(&asset_hash));
+
+    viewer.shutdown().await.unwrap();
+    editor.shutdown().await.unwrap();
     host.shutdown().await.unwrap();
   }
 
@@ -4154,7 +5085,7 @@ mod tests {
     let source = flowstate_collab::GranularSource {
       metadata: Vec::new(),
       orders: vec![flowstate_collab::GranularOrderRecord {
-        name: "paragraphs".to_string(),
+        name: "paragraph_order".to_string(),
         ids: vec!["p1".to_string()],
       }],
       texts: vec![flowstate_collab::GranularTextRecord {
@@ -4313,7 +5244,7 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn live_host_subscriber_receives_peer_left_after_rejected_update() {
+  async fn live_viewer_receives_rejection_without_forced_disconnect() {
     let document_id = DocumentId::new();
     let owner = ActorId::new();
     let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
@@ -4325,7 +5256,6 @@ mod tests {
       .issue_invite_link(Role::Viewer, Some("viewer".to_string()), true)
       .unwrap();
     let mut client = connect_live_invite(&invite).await.unwrap();
-    let session_id = client.config.session_id;
     let actor_id = client.config.actor_id;
     let update = client
       .document
@@ -4347,31 +5277,42 @@ mod tests {
     )
     .await
     .unwrap();
-    let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    let rejection = tokio::time::timeout(std::time::Duration::from_secs(5), client.receive_next_update())
+      .await
+      .unwrap()
+      .unwrap_err();
+    assert!(rejection.to_string().contains("COLLAB_UPDATE_REJECTED"));
+    write_wire_message(
+      &mut client.send,
+      &WireMessage::Need {
+        document_id,
+        frontier: Vec::new(),
+        snapshot: true,
+      },
+      client.config.max_message_bytes,
+    )
+    .await
+    .unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
       loop {
-        let update = host_updates.recv().await.unwrap();
-        if let LiveUpdateKind::Event(
-          event @ SessionEvent::PeerLeft {
-            session_id: left_session_id, ..
-          },
-        ) = update.kind
-          && left_session_id == session_id
-        {
-          break event;
+        if matches!(client.receive_next_update().await.unwrap(), Some(SessionEvent::SnapshotApplied { .. })) {
+          break;
         }
       }
     })
     .await
     .unwrap();
-
-    assert!(matches!(
-      event,
-      SessionEvent::PeerLeft {
-        session_id: left_session_id,
-        ..
-      } if left_session_id == session_id
-    ));
-    let _ = client.shutdown().await;
+    client.shutdown().await.unwrap();
+    let peer_left = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+      loop {
+        let update = host_updates.recv().await.unwrap();
+        if matches!(update.kind, LiveUpdateKind::Event(SessionEvent::PeerLeft { .. })) {
+          break;
+        }
+      }
+    })
+    .await;
+    assert!(peer_left.is_ok(), "peer should leave only after the client explicitly shuts down");
     host.shutdown().await.unwrap();
   }
 
@@ -4471,6 +5412,26 @@ mod tests {
     .unwrap();
     let third = connect_live_invite(&invite).await.unwrap();
     third.shutdown().await.unwrap();
+    host.shutdown().await.unwrap();
+  }
+
+  #[tokio::test]
+  async fn live_host_rejects_a_second_session_for_an_active_replica() {
+    let document_id = DocumentId::new();
+    let owner = ActorId::new();
+    let replica = ReplicaId::new();
+    let host_doc = CollabDocument::from_projection_source(FormatKind::Db8, document_id, owner, b"one", &[]).unwrap();
+    let config = FlowstateSyncConfig::new(document_id, FormatKind::Db8, Role::Owner).with_identity(owner, replica);
+    let host = HostedCollaboration::start_with_config(host_doc, AssetStore::default(), config)
+      .await
+      .unwrap();
+    let invite = host
+      .issue_invite_link(Role::Editor, Some("editor".to_string()), true)
+      .unwrap();
+
+    let duplicate = connect_live_invite_with_frontier_and_identity(&invite, Vec::new(), owner, replica).await;
+    assert!(duplicate.is_err(), "a live host replica must not be shared by another session");
+
     host.shutdown().await.unwrap();
   }
 
@@ -4881,7 +5842,16 @@ mod tests {
     router.endpoint().online().await;
 
     let ticket = registry
-      .issue(router.endpoint().addr(), document_id, FormatKind::Fl0, Role::Editor, None, None, true)
+      .issue(
+        router.endpoint().addr(),
+        document_id,
+        FormatKind::Fl0,
+        COLLAB_SCHEMA_VERSION,
+        Role::Editor,
+        None,
+        None,
+        true,
+      )
       .unwrap();
     let client_endpoint = bind_endpoint().await.unwrap();
     let client_config = FlowstateSyncConfig::new(document_id, FormatKind::Fl0, Role::Editor);

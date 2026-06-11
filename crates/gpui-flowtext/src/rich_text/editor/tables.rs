@@ -37,6 +37,43 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { row_ix, .. }) => Some(row_ix),
       _ => None,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_ix) = self.selected_table_block_ix() else {
+        return;
+      };
+      let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+        return;
+      };
+      let Some((table_id, identity)) = self.table_identity(block_ix) else {
+        return;
+      };
+      let columns = table
+        .rows
+        .iter()
+        .map(|row| row.cells.len())
+        .max()
+        .unwrap_or(1)
+        .max(table.column_widths.len())
+        .max(1);
+      let insert_ix = target_row
+        .map(|row| row + 1)
+        .unwrap_or(identity.rows.len())
+        .min(identity.rows.len());
+      let after_row_id = insert_ix.checked_sub(1).map(|index| identity.rows[index].id);
+      let cells = (0..columns)
+        .map(|_| (new_block_id(), new_paragraph_id()))
+        .collect();
+      self.apply_authoritative_table_operations(
+        vec![AuthoritativeSourceOperation::InsertTableRow {
+          table_id,
+          after_row_id,
+          row_id: new_block_id(),
+          cells,
+        }],
+        cx,
+      );
+      return;
+    }
     self.edit_selected_table(cx, |table| {
       let columns = table
         .rows
@@ -59,6 +96,26 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { row_ix, .. }) => Some(row_ix),
       _ => None,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_ix) = self.selected_table_block_ix() else {
+        return;
+      };
+      let Some((_, identity)) = self.table_identity(block_ix) else {
+        return;
+      };
+      if identity.rows.len() > 1 {
+        let row_ix = target_row
+          .unwrap_or(identity.rows.len() - 1)
+          .min(identity.rows.len() - 1);
+        self.apply_authoritative_table_operations(
+          vec![AuthoritativeSourceOperation::DeleteTableRow {
+            row_id: identity.rows[row_ix].id,
+          }],
+          cx,
+        );
+      }
+      return;
+    }
     self.edit_selected_table(cx, |table| {
       if table.rows.len() > 1 {
         let row_ix = target_row
@@ -74,6 +131,40 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => Some(cell_ix),
       _ => None,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_ix) = self.selected_table_block_ix() else {
+        return;
+      };
+      let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+        return;
+      };
+      let Some((table_id, identity)) = self.table_identity(block_ix) else {
+        return;
+      };
+      let insert_ix = target_column
+        .map(|column| column + 1)
+        .unwrap_or(table.column_widths.len())
+        .min(table.column_widths.len());
+      let mut operations = identity
+        .rows
+        .iter()
+        .map(|row| AuthoritativeSourceOperation::InsertTableCell {
+          row_id: row.id,
+          after_cell_id: insert_ix.checked_sub(1).and_then(|index| row.cells.get(index).map(|cell| cell.id)),
+          cell_id: new_block_id(),
+          paragraph_id: new_paragraph_id(),
+        })
+        .collect::<Vec<_>>();
+      let mut column_widths = table.column_widths.clone();
+      column_widths.insert(insert_ix, TableColumnWidth::Fraction(1));
+      operations.push(AuthoritativeSourceOperation::SetTableProperties {
+        table_id,
+        column_widths,
+        style: table.style.clone(),
+      });
+      self.apply_authoritative_table_operations(operations, cx);
+      return;
+    }
     self.edit_selected_table(cx, |table| {
       let insert_ix = target_column
         .map(|column| column + 1)
@@ -94,6 +185,47 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => Some(cell_ix),
       _ => None,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_ix) = self.selected_table_block_ix() else {
+        return;
+      };
+      let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+        return;
+      };
+      let Some((table_id, identity)) = self.table_identity(block_ix) else {
+        return;
+      };
+      let mut operations = Vec::new();
+      let mut column_widths = table.column_widths.clone();
+      let column_ix = if column_widths.len() > 1 {
+        let column_ix = target_column
+          .unwrap_or(column_widths.len() - 1)
+          .min(column_widths.len() - 1);
+        column_widths.remove(column_ix);
+        Some(column_ix)
+      } else {
+        target_column
+      };
+      for row in &identity.rows {
+        if row.cells.len() > 1 {
+          let cell_ix = column_ix
+            .unwrap_or(row.cells.len() - 1)
+            .min(row.cells.len() - 1);
+          operations.push(AuthoritativeSourceOperation::DeleteTableCell {
+            cell_id: row.cells[cell_ix].id,
+          });
+        }
+      }
+      if column_widths != table.column_widths {
+        operations.push(AuthoritativeSourceOperation::SetTableProperties {
+          table_id,
+          column_widths,
+          style: table.style.clone(),
+        });
+      }
+      self.apply_authoritative_table_operations(operations, cx);
+      return;
+    }
     self.edit_selected_table(cx, |table| {
       if table.column_widths.len() > 1 {
         let column_ix = target_column
@@ -132,6 +264,35 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => cell_ix,
       _ => return,
     };
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_ix) = self.selected_table_block_ix() else {
+        return;
+      };
+      let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+        return;
+      };
+      if target_column >= table.column_widths.len() {
+        return;
+      }
+      let Some((table_id, _)) = self.table_identity(block_ix) else {
+        return;
+      };
+      let mut column_widths = table.column_widths.clone();
+      let current = match column_widths[target_column] {
+        TableColumnWidth::FixedPx(width) => width as i32,
+        TableColumnWidth::Fraction(_) | TableColumnWidth::Auto => 120,
+      };
+      column_widths[target_column] = TableColumnWidth::FixedPx((current + delta_px).clamp(32, 1600) as u32);
+      self.apply_authoritative_table_operations(
+        vec![AuthoritativeSourceOperation::SetTableProperties {
+          table_id,
+          column_widths,
+          style: table.style.clone(),
+        }],
+        cx,
+      );
+      return;
+    }
     self.edit_selected_table(cx, |table| {
       if target_column >= table.column_widths.len() {
         return;
@@ -145,6 +306,9 @@ impl RichTextEditor {
   }
 
   fn edit_selected_table(&mut self, cx: &mut Context<Self>, update: impl FnOnce(&mut TableBlock)) {
+    if self.reject_projection_first_edit("Table mutation", cx) {
+      return;
+    }
     let Some(block_ix) = self.selected_table_block_ix() else {
       return;
     };
@@ -178,6 +342,24 @@ impl RichTextEditor {
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
     self.mark_document_changed(after_generation, cx);
+  }
+
+  fn table_identity(&self, block_ix: usize) -> Option<(BlockId, TableIdentity)> {
+    let block_id = *self.document.ids.block_ids.get(block_ix)?;
+    let RichBlockIdentity::Table(identity) = self.document.ids.rich_block_ids.get(&block_id)? else {
+      return None;
+    };
+    Some((block_id, identity.clone()))
+  }
+
+  fn apply_authoritative_table_operations(&mut self, operations: Vec<AuthoritativeSourceOperation>, cx: &mut Context<Self>) {
+    if operations.is_empty() {
+      return;
+    }
+    let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+      return;
+    };
+    self.apply_authoritative_source_operations(operations, planned_selection, cx);
   }
 
   fn selected_table_block_ix(&self) -> Option<usize> {

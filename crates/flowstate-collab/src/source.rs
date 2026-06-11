@@ -275,11 +275,13 @@ impl GranularSource {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct SourceProvenance {
+  pub source_hash: [u8; 32],
   pub frontier: Vec<u8>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ProjectionCacheProvenance {
+  pub source_hash: [u8; 32],
   pub projection_cache_hash: [u8; 32],
   pub frontier: Vec<u8>,
 }
@@ -295,14 +297,15 @@ impl ProjectionCacheProvenance {
   #[must_use]
   pub fn new_v1(projection_cache_hash: [u8; 32], frontier: Vec<u8>) -> Self {
     Self {
+      source_hash: projection_cache_hash,
       projection_cache_hash,
       frontier,
     }
   }
 
   #[must_use]
-  pub fn can_reuse_for(&self, _source_hash: [u8; 32], frontier: &[u8]) -> bool {
-    self.frontier.as_slice() == frontier
+  pub fn can_reuse_for(&self, source_hash: [u8; 32], frontier: &[u8]) -> bool {
+    self.source_hash == source_hash && self.frontier.as_slice() == frontier
   }
 }
 
@@ -459,21 +462,41 @@ impl CollabDocument {
     root_hash(&self.doc, KEY_SOURCE_PAYLOAD_HASH).or_else(|_| root_hash(&self.doc, KEY_PROJECTION_HASH))
   }
 
+  pub fn source_hash(&self) -> CollabResult<[u8; 32]> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"flowstate-source-v1");
+    bytes.push(self.format_kind.as_u8());
+    bytes.extend_from_slice(self.document_id.0.as_bytes());
+    if let Some(granular) = self.granular_merkle_hash()? {
+      bytes.extend_from_slice(&granular.root_hash);
+    } else {
+      bytes.extend_from_slice(&self.projection_cache_hash()?);
+    }
+    bytes.extend_from_slice(&root_hash(&self.doc, KEY_ASSET_MANIFEST_HASH)?);
+    Ok(blake3_hash(&bytes))
+  }
+
+  pub fn projection_hash(&self) -> CollabResult<[u8; 32]> {
+    self.source_hash()
+  }
+
   pub fn source_provenance(&self) -> CollabResult<SourceProvenance> {
     Ok(SourceProvenance {
+      source_hash: self.source_hash()?,
       frontier: self.frontier()?,
     })
   }
 
   pub fn projection_cache_provenance(&self) -> CollabResult<ProjectionCacheProvenance> {
     Ok(ProjectionCacheProvenance {
+      source_hash: self.source_hash()?,
       projection_cache_hash: self.projection_cache_hash()?,
       frontier: self.frontier()?,
     })
   }
 
   pub fn can_reuse_projection_cache(&self, provenance: &ProjectionCacheProvenance) -> CollabResult<bool> {
-    Ok(provenance.frontier.as_slice() == self.frontier()?.as_slice())
+    Ok(provenance.can_reuse_for(self.source_hash()?, &self.frontier()?))
   }
 
   pub fn frontier(&self) -> CollabResult<Vec<u8>> {
@@ -1185,6 +1208,7 @@ impl CollabDocument {
     require_writer(remote_role)?;
 
     let before_frontier = self.frontier()?;
+    let before_hash = self.source_hash()?;
     let validation_doc = self.doc.fork();
     configure_granular_text_styles(&validation_doc);
     validation_doc
@@ -1197,9 +1221,10 @@ impl CollabDocument {
       .import(update)
       .map_err(|error| CollabError::Loro(error.to_string()))?;
     let after_frontier = self.frontier()?;
+    let after_hash = self.source_hash()?;
     let patch = (before_frontier != after_frontier).then_some(CollabProjectionPatch {
-      old_projection_hash: [0; 32],
-      new_projection_hash: [0; 32],
+      old_projection_hash: before_hash,
+      new_projection_hash: after_hash,
     });
     Ok(CollabImportOutcome {
       patch,

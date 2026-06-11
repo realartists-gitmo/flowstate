@@ -70,6 +70,22 @@ impl RichTextEditor {
     let range = self.selection.normalized();
     let direct = explicit_direct.unwrap_or_else(|| selection_prefers_direct_underline(&self.document, range.clone()));
     let all_selected = selection_all_underline_kind(&self.document, range.clone(), direct);
+    if self.apply_run_style_source_first(
+      |mut styles| {
+        if direct {
+          styles.direct_underline = !all_selected;
+        } else if all_selected {
+          styles.semantic = RunSemanticStyle::Plain;
+        } else {
+          styles.semantic = RunSemanticStyle::Custom(3);
+          styles.direct_underline = false;
+        }
+        styles
+      },
+      cx,
+    ) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| {
         if direct {
@@ -131,6 +147,15 @@ impl RichTextEditor {
 
     let range = self.selection.normalized();
     let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.semantic == semantic);
+    if self.apply_run_style_source_first(
+      |mut styles| {
+        styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
+        styles
+      },
+      cx,
+    ) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| {
         styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
@@ -184,6 +209,15 @@ impl RichTextEditor {
       false
     };
     let target_highlight = if all_selected { None } else { highlight };
+    if self.apply_run_style_source_first(
+      |mut styles| {
+        styles.highlight = target_highlight;
+        styles
+      },
+      cx,
+    ) {
+      return;
+    }
     self.apply_document_edit(cx, |editor, cx| {
       mutate_runs_in_range(&mut editor.document, range, |styles| styles.highlight = target_highlight);
       editor.after_formatting_mutation(cx);
@@ -194,6 +228,65 @@ impl RichTextEditor {
     self.pending_styles = Some(styles);
     self.reset_caret_blink(cx);
     cx.notify();
+  }
+
+  fn apply_run_style_source_first(
+    &mut self,
+    transform: impl Fn(RunStyles) -> RunStyles,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    if self.authoritative_edit_controller.is_none() || self.selected_block.is_some() || self.selection.is_caret() {
+      return false;
+    }
+    let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+      return false;
+    };
+    let range = self.selection.normalized();
+    let Some(operations) = self.run_style_source_operations(range, transform) else {
+      return false;
+    };
+    if operations.is_empty() {
+      return true;
+    }
+    self.apply_authoritative_source_operations(operations, planned_selection, cx)
+  }
+
+  fn run_style_source_operations(
+    &self,
+    range: Range<DocumentOffset>,
+    transform: impl Fn(RunStyles) -> RunStyles,
+  ) -> Option<Vec<AuthoritativeSourceOperation>> {
+    let mut operations = Vec::new();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+      let paragraph_id = paragraph_id_at(&self.document, paragraph_ix)?;
+      let selection_start = if paragraph_ix == range.start.paragraph {
+        range.start.byte
+      } else {
+        0
+      };
+      let selection_end = if paragraph_ix == range.end.paragraph {
+        range.end.byte
+      } else {
+        paragraph_text_len(paragraph)
+      };
+      let mut run_start = 0;
+      for run in &paragraph.runs {
+        let run_end = run_start + run.len;
+        let start = run_start.max(selection_start);
+        let end = run_end.min(selection_end);
+        let styles = transform(run.styles);
+        if start < end && styles != run.styles {
+          operations.push(AuthoritativeSourceOperation::SetRunStyles {
+            paragraph: paragraph_id,
+            range: start..end,
+            styles,
+          });
+        }
+        run_start = run_end;
+      }
+    }
+    Some(operations)
   }
 
 

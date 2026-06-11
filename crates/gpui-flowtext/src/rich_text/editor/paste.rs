@@ -1,19 +1,27 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn insert_plain_text_paste_at_caret(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-    if !self.selection.is_caret() || self.selected_block.is_some() || text.is_empty() || text.contains('\r') || text.contains('\n') {
+    if self.selected_block.is_some() || text.is_empty() {
       return false;
     }
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
     let fragment = RichClipboardFragment {
       format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
-      paragraphs: vec![InputParagraph {
-        style: paragraph_style,
-        runs: vec![InputRun {
-          text: text.to_string(),
-          styles: self.styles_at_caret(),
-        }],
-      }],
+      paragraphs: normalized
+        .split('\n')
+        .map(|text| InputParagraph {
+          style: paragraph_style,
+          runs: if text.is_empty() {
+            Vec::new()
+          } else {
+            vec![InputRun {
+                text: text.to_string(),
+                styles: self.styles_at_caret(),
+            }]
+          },
+        })
+        .collect(),
       blocks: Vec::new(),
       assets: Vec::new(),
     };
@@ -21,12 +29,70 @@ impl RichTextEditor {
   }
 
   fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
-    if !self.selection.is_caret()
-      || self.selected_block.is_some()
-      || !fragment.blocks.is_empty()
-      || !fragment.assets.is_empty()
-      || fragment.paragraphs.len() != 1
-    {
+    if self.selected_block.is_some() || !fragment.blocks.is_empty() || !fragment.assets.is_empty() || fragment.paragraphs.is_empty() {
+      return false;
+    }
+    if self.authoritative_edit_controller.is_some() {
+      let range = self.selection.normalized();
+      if self.selection_crosses_object_blocks(range.clone()) {
+        return false;
+      }
+      let Some(at) = self.authoritative_source_position(range.start) else {
+        return false;
+      };
+      let mut operations = Vec::with_capacity(2);
+      if !self.selection.is_caret() {
+        let Some(end) = self.authoritative_source_position(range.end) else {
+          return false;
+        };
+        operations.push(AuthoritativeSourceOperation::DeleteText { start: at, end });
+      }
+      let new_paragraphs = fragment
+        .paragraphs
+        .iter()
+        .skip(1)
+        .map(|_| new_paragraph_id())
+        .collect::<Vec<_>>();
+      let last_len = fragment
+        .paragraphs
+        .last()
+        .map(|paragraph| paragraph.runs.iter().map(|run| run.text.len()).sum())
+        .unwrap_or(0);
+      let after = if let Some(last) = new_paragraphs.last() {
+        AuthoritativeSourcePosition {
+          paragraph: *last,
+          byte: last_len,
+        }
+      } else {
+        AuthoritativeSourcePosition {
+          paragraph: at.paragraph,
+          byte: at.byte + last_len,
+        }
+      };
+      let contains_text = fragment
+        .paragraphs
+        .iter()
+        .any(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()));
+      if contains_text || !new_paragraphs.is_empty() {
+        operations.push(AuthoritativeSourceOperation::InsertParagraphFragment {
+          at,
+          paragraphs: fragment.paragraphs.clone(),
+          new_paragraphs,
+        });
+      }
+      if operations.is_empty() {
+        return true;
+      }
+      return self.apply_authoritative_source_operations(
+        operations,
+        AuthoritativeSourceSelection {
+          anchor: after,
+          head: after,
+        },
+        cx,
+      );
+    }
+    if !self.selection.is_caret() || fragment.paragraphs.len() != 1 {
       return false;
     }
     let Some(paragraph_id) = self
@@ -145,7 +211,7 @@ impl RichTextEditor {
 
   fn insert_paragraphs_into_selected_table_cell(&mut self, paragraphs: &[InputParagraph], cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell {
-      block_ix: _,
+      block_ix,
       row_ix,
       cell_ix,
     }) = self.selected_block
@@ -157,6 +223,63 @@ impl RichTextEditor {
     }
     let current_paragraph_ix = self.table_cell_block_ix;
     let caret = self.table_cell_caret;
+    if self.authoritative_edit_controller.is_some() {
+      let Some(paragraph) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, current_paragraph_ix) else {
+        return false;
+      };
+      let range = self.table_cell_selection_range();
+      let at = AuthoritativeSourcePosition {
+        paragraph,
+        byte: range.as_ref().map_or(caret, |range| range.start),
+      };
+      let mut operations = Vec::with_capacity(2);
+      if let Some(range) = range {
+        operations.push(AuthoritativeSourceOperation::DeleteText {
+          start: AuthoritativeSourcePosition {
+            paragraph,
+            byte: range.start,
+          },
+          end: AuthoritativeSourcePosition {
+            paragraph,
+            byte: range.end,
+          },
+        });
+      }
+      let new_paragraphs = paragraphs
+        .iter()
+        .skip(1)
+        .map(|_| new_paragraph_id())
+        .collect::<Vec<_>>();
+      let last_len = paragraphs
+        .last()
+        .map(|paragraph| paragraph.runs.iter().map(|run| run.text.len()).sum())
+        .unwrap_or(0);
+      let contains_text = paragraphs
+        .iter()
+        .any(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()));
+      if contains_text || !new_paragraphs.is_empty() {
+        operations.push(AuthoritativeSourceOperation::InsertParagraphFragment {
+          at,
+          paragraphs: paragraphs.to_vec(),
+          new_paragraphs,
+        });
+      }
+      if operations.is_empty() {
+        return true;
+      }
+      let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+        return false;
+      };
+      self.apply_authoritative_source_operations(operations, planned_selection, cx);
+      self.table_cell_block_ix = current_paragraph_ix + paragraphs.len().saturating_sub(1);
+      self.table_cell_caret = at.byte + usize::from(paragraphs.len() == 1) * last_len;
+      if paragraphs.len() > 1 {
+        self.table_cell_caret = last_len;
+      }
+      self.table_cell_anchor = self.table_cell_caret;
+      cx.notify();
+      return true;
+    }
     let mut new_caret = None;
     self.edit_selected_table(cx, |table| {
       let Some(cell) = table

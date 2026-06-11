@@ -59,6 +59,7 @@ fn read_document_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result
       document_id: 0,
       paragraph_ids,
       block_ids,
+      rich_block_ids: rustc_hash::FxHashMap::default(),
     },
     sections: Arc::new(sections),
     offset_index,

@@ -1,10 +1,10 @@
 use std::{
-  cell::Cell,
-  collections::{BTreeMap, HashMap, HashSet, VecDeque},
+  cell::{Cell, RefCell},
+  collections::{HashMap, HashSet, VecDeque},
   fs,
   path::{Path, PathBuf},
   rc::Rc,
-  sync::Arc,
+  sync::{Arc, Mutex},
   time::Duration,
 };
 
@@ -35,9 +35,9 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory, load_send_to_document_directory,
-  load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
-  save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  flowstate_data_dir, load_autosave, load_document_theme, load_or_create_collaboration_identity, load_recent_documents, load_send_custom_directory,
+  load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
+  save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::{COMMAND_SPECS, CommandId};
 use crate::docx_conversion::{convert_docx_to_document, convert_pdf_to_document};
@@ -55,15 +55,17 @@ use crate::workspace::file_management::{
 use crate::workspace::file_search_overlay::FileSearchOverlay;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_collab::{
-  ActorId, CollabDocument, DocumentId as CollabDocumentId, FormatKind, GranularSourceMutation, GranularValue, ParagraphDiffEntry,
-  UpdateApplication, WireMessage, decode_native_file, granular_record_id_to_u128,
+  ActorId, CollabDocument, DocumentId as CollabDocumentId, FLOW_SOURCE_SCHEMA_VERSION, FlowUpdateMessage, FormatKind, ParagraphDiffEntry,
+  ReplicaId, UpdateApplication, WireMessage, decode_native_file, granular_record_id_to_u128,
 };
 use flowstate_document::{
-  Db8CollabSourceMutation, Db8GranularValue, db8_collab_document_with_id, document_from_db8_collab_source, ensure_db8_document_id,
+  Db8CommitOutbox, Db8DocumentController, Db8EditorAuthority, db8_collab_document_with_id, document_from_db8_collab_source,
+  ensure_db8_document_id, parse_db8_anchored_selection, serialize_db8_anchored_selection,
 };
 use flowstate_sync::{
-  AssetStore, FLOWSTATE_INVITE_PREFIX, HostedCollaboration, HostedCollaborationPublisher, LiveUpdate, LiveUpdateKind, Role,
-  SessionDocumentState, SessionEvent, SessionId, SessionState, connect_live_invite, decode_invite_link, run_on_sync_runtime,
+  AssetStore, DurableFlowOutbox, FLOWSTATE_INVITE_PREFIX, FlowOutboxEntry, FlowOutboxKey, FlowstateSyncConfig, HostedCollaboration,
+  HostedCollaborationPublisher, LiveUpdate, LiveUpdateKind, ReplicaLease, Role, SessionDocumentState, SessionEvent, SessionId, SessionState,
+  connect_live_invite_with_frontier_and_identity, decode_invite_link, run_on_sync_runtime,
 };
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 use tokio::sync::{broadcast, mpsc};
@@ -73,6 +75,8 @@ const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
+mod collab_outbox;
+use collab_outbox::{Db8OutboxReceipt, acknowledge_db8_outbox};
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
@@ -103,6 +107,11 @@ pub struct Workspace {
   outline_active_paragraph: Option<usize>,
   outline_scrolled_paragraph: Option<usize>,
   editor_subscriptions: Vec<(Uuid, Subscription)>,
+  db8_authorities: HashMap<Uuid, Rc<RefCell<Db8EditorAuthority>>>,
+  db8_outboxes: HashMap<Uuid, Arc<Mutex<DurableFlowOutbox>>>,
+  db8_replica_leases: HashMap<Uuid, ReplicaLease>,
+  local_actor_id: ActorId,
+  local_replica_id: ReplicaId,
   collaboration_host: Option<HostedCollaboration>,
   collaboration_last_frontier: Vec<u8>,
   collaboration_client_updates: Option<mpsc::UnboundedSender<PendingCollaborationUpdate>>,
@@ -291,21 +300,22 @@ mod tests {
   use super::*;
 
   #[test]
-  fn pending_update_summary_includes_application_hints() {
+  fn pending_update_summary_distinguishes_durable_and_presence_lanes() {
     let mut queue = VecDeque::new();
-    queue.push_back(PendingCollaborationUpdate::GranularMutations {
-      mutations: vec![GranularSourceMutation::InsertText {
-        text_id: "p1".to_string(),
-        byte_offset: 0,
-        text: "x".to_string(),
-      }],
-      application: UpdateApplication::Db8CanonicalOperations(vec![0]),
+    queue.push_back(PendingCollaborationUpdate::FlowUpdate {
+      peer_id: 1,
+      update: vec![1],
+      base_frontier: vec![1],
+      resulting_frontier: vec![2],
+      hash: flowstate_collab::blake3_hash(&[1]),
+      outbox_receipt: None,
     });
     queue.push_back(PendingCollaborationUpdate::Presence {
       cursor: Some("db8:0:4".to_string()),
+      frontier: Vec::new(),
     });
     let summary = pending_collaboration_update_summary(&queue);
-    assert_eq!(summary, vec!["granular source mutations".to_string(), "presence hint".to_string()]);
+    assert_eq!(summary, vec!["exact vNext CRDT update".to_string(), "presence hint".to_string()]);
   }
 }
 

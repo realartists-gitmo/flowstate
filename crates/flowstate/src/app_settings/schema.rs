@@ -18,6 +18,14 @@ pub struct AppSettings {
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
+  pub collaboration_identity: CollaborationIdentitySettings,
+}
+
+#[derive(Clone, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CollaborationIdentitySettings {
+  pub actor_id: Option<uuid::Uuid>,
+  pub replica_id: Option<uuid::Uuid>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]

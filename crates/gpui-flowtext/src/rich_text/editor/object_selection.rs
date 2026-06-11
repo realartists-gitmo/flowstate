@@ -234,6 +234,32 @@ impl RichTextEditor {
       cx.notify();
       return true;
     }
+    if self.authoritative_edit_controller.is_some() {
+      let Some(block_id) = self.document.ids.block_ids.get(drag.block_ix).copied() else {
+        if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) {
+          *block = Block::Table(drag.before);
+        }
+        self.invalidate_document_layout_caches();
+        return self.reject_projection_first_edit("Table resize", cx);
+      };
+      let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+        if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) {
+          *block = Block::Table(drag.before);
+        }
+        self.invalidate_document_layout_caches();
+        return self.reject_projection_first_edit("Table resize", cx);
+      };
+      self.apply_authoritative_source_operations(
+        vec![AuthoritativeSourceOperation::SetTableProperties {
+          table_id: block_id,
+          column_widths: after.column_widths,
+          style: after.style,
+        }],
+        planned_selection,
+        cx,
+      );
+      return true;
+    }
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
@@ -431,6 +457,31 @@ impl RichTextEditor {
     if object_indices.is_empty() {
       return false;
     }
+    if self.authoritative_edit_controller.is_some() {
+      let Some(start) = self.authoritative_source_position(range.start) else {
+        return false;
+      };
+      let Some(end) = self.authoritative_source_position(range.end) else {
+        return false;
+      };
+      let mut operations = object_indices
+        .iter()
+        .filter_map(|block_ix| self.document.ids.block_ids.get(*block_ix).copied())
+        .map(|block_id| AuthoritativeSourceOperation::DeleteBlock { block_id })
+        .collect::<Vec<_>>();
+      if operations.len() != object_indices.len() {
+        return false;
+      }
+      operations.push(AuthoritativeSourceOperation::DeleteText { start, end });
+      return self.apply_authoritative_source_operations(
+        operations,
+        AuthoritativeSourceSelection {
+          anchor: start,
+          head: start,
+        },
+        cx,
+      );
+    }
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
     {
@@ -467,6 +518,27 @@ impl RichTextEditor {
   }
 
   fn delete_selected_block(&mut self, cx: &mut Context<Self>) -> bool {
+    if let Some(selection) = self.selected_block
+      && !matches!(selection, BlockSelection::TableCell { .. })
+      && self.authoritative_edit_controller.is_some()
+    {
+      let block_ix = match selection {
+        BlockSelection::Image(block_ix) | BlockSelection::Equation(block_ix) | BlockSelection::Table(block_ix) => block_ix,
+        BlockSelection::TableCell { .. } => unreachable!(),
+      };
+      let Some(block_id) = self.document.ids.block_ids.get(block_ix).copied() else {
+        return false;
+      };
+      let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+        return false;
+      };
+      self.selected_block = None;
+      return self.apply_authoritative_source_operations(
+        vec![AuthoritativeSourceOperation::DeleteBlock { block_id }],
+        planned_selection,
+        cx,
+      );
+    }
     let Some(selection) = self.selected_block.take() else {
       return false;
     };

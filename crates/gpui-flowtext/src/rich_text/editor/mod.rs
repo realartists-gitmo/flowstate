@@ -1,4 +1,5 @@
 use std::{
+  cell::RefCell,
   collections::{VecDeque, hash_map::DefaultHasher},
   fs,
   hash::{Hash, Hasher},
@@ -12,9 +13,11 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
-  ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-  Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
+  App, AnyElement, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Element, ElementId, ElementInputHandler, Entity,
+  EntityInputHandler, ExternalPaths, FocusHandle, Focusable, GlobalElementId, Image, ImageFormat, InspectorElementId, InteractiveElement,
+  IntoElement, KeyDownEvent, LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions, Pixels, Point, Render,
+  Position, SharedString, Size, Style, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point, prelude::*, px, relative,
+  rgb, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
@@ -756,7 +759,12 @@ impl RenderVirtualItems {
 }
 
 enum RecoveryWriteDecision {
-  Write { generation: u64, document: Box<Document> },
+  Write {
+    generation: u64,
+    document: Box<Document>,
+    authoritative_bytes: Option<Vec<u8>>,
+  },
+  Failed(String),
   Rescheduled,
   Idle,
 }
@@ -883,6 +891,9 @@ pub struct RichTextEditor {
   identity_map: DocumentIdentityMap,
   last_collaboration_edit: Option<CollaborationEdit>,
   collaboration_role: Option<CollaborationRole>,
+  authoritative_edit_controller: Option<Rc<RefCell<dyn AuthoritativeEditController>>>,
+  authoritative_edit_error: Option<String>,
+  ime_composition: Option<ImeComposition>,
   pub(super) local_caret_color_rgb: Option<u32>,
   recovery_write_in_progress: bool,
   recovery_write_pending: bool,
@@ -962,6 +973,8 @@ pub struct RichTextEditor {
   goal_x: Option<Pixels>,
 }
 
+include!("authoritative_projection.rs");
+include!("ime.rs");
 include!("lifecycle.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
@@ -993,7 +1006,6 @@ include!("hit_testing.rs");
 include!("mouse.rs");
 include!("drop_preview.rs");
 include!("traits.rs");
-include!("platform.rs");
 include!("virtual_helpers.rs");
 include!("table_helpers.rs");
 include!("block_helpers.rs");

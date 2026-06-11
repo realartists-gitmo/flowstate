@@ -16,6 +16,36 @@ impl RichTextEditor {
       .selected_table_cell_paragraph()
       .map(|paragraph| table_cell_styles_at(paragraph, insert_at))
       .unwrap_or_default();
+    if self.authoritative_edit_controller.is_some()
+      && let Some(paragraph) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, self.table_cell_block_ix)
+      && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+    {
+      let mut operations = Vec::with_capacity(2);
+      if let Some(range) = selection_range.clone() {
+        operations.push(AuthoritativeSourceOperation::DeleteText {
+          start: AuthoritativeSourcePosition {
+            paragraph,
+            byte: range.start,
+          },
+          end: AuthoritativeSourcePosition {
+            paragraph,
+            byte: range.end,
+          },
+        });
+      }
+      operations.push(AuthoritativeSourceOperation::InsertText {
+        at: AuthoritativeSourcePosition {
+          paragraph,
+          byte: insert_at,
+        },
+        text: text.to_string(),
+        styles,
+      });
+      self.apply_authoritative_source_operations(operations, planned_selection, cx);
+      self.table_cell_caret = insert_at.saturating_add(text.len());
+      self.table_cell_anchor = self.table_cell_caret;
+      return true;
+    }
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       if let Some(range) = selection_range.clone() {
         delete_range_in_table_cell_paragraph(paragraph, range);
@@ -51,6 +81,30 @@ impl RichTextEditor {
       return true;
     };
     if updated == table {
+      return true;
+    }
+    if self.authoritative_edit_controller.is_some() {
+      if let Some(paragraph) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, self.table_cell_block_ix)
+        && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+      {
+        self.apply_authoritative_source_operations(
+          vec![AuthoritativeSourceOperation::SplitParagraph {
+            at: AuthoritativeSourcePosition {
+              paragraph,
+              byte: self.table_cell_caret,
+            },
+            new_paragraph: new_paragraph_id(),
+            style: ParagraphStyle::Normal,
+          }],
+          planned_selection,
+          cx,
+        );
+        self.table_cell_block_ix = new_paragraph_ix;
+        self.table_cell_caret = 0;
+        self.table_cell_anchor = 0;
+        return true;
+      }
+      self.reject_projection_first_edit("Table-cell paragraph split", cx);
       return true;
     }
     updated.version = updated.version.wrapping_add(1);
@@ -121,6 +175,41 @@ impl RichTextEditor {
     };
     let caret = self.table_cell_caret;
     if caret == 0 {
+      if self.authoritative_edit_controller.is_some() {
+        let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+          return true;
+        };
+        let Some(cell) = table.rows.get(row_ix).and_then(|row| row.cells.get(cell_ix)) else {
+          return true;
+        };
+        let Some(current_ix) = table_cell_paragraph_block_ix(cell, self.table_cell_block_ix) else {
+          return true;
+        };
+        let Some(previous_ix) = previous_table_cell_paragraph_block_ix(cell, current_ix) else {
+          return true;
+        };
+        let Some(TableCellBlock::Paragraph(previous)) = cell.blocks.get(previous_ix) else {
+          return true;
+        };
+        let Some(current) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, current_ix) else {
+          return true;
+        };
+        let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+          return true;
+        };
+        let merged_caret = previous.text.len();
+        self.apply_authoritative_source_operations(
+          vec![AuthoritativeSourceOperation::JoinParagraph {
+            second_paragraph: current,
+          }],
+          planned_selection,
+          cx,
+        );
+        self.table_cell_block_ix = previous_ix;
+        self.table_cell_caret = merged_caret;
+        self.table_cell_anchor = merged_caret;
+        return true;
+      }
       let mut merged_caret = None;
       let current_paragraph_ix = self.table_cell_block_ix;
       self.edit_selected_table(cx, |table| {
@@ -153,6 +242,25 @@ impl RichTextEditor {
         })
       })
       .unwrap_or(caret);
+    if self.authoritative_edit_controller.is_some()
+      && let Some(paragraph) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, self.table_cell_block_ix)
+      && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+    {
+      self.apply_authoritative_source_operations(
+        vec![AuthoritativeSourceOperation::DeleteText {
+          start: AuthoritativeSourcePosition {
+            paragraph,
+            byte: new_caret,
+          },
+          end: AuthoritativeSourcePosition { paragraph, byte: caret },
+        }],
+        planned_selection,
+        cx,
+      );
+      self.table_cell_caret = new_caret;
+      self.table_cell_anchor = new_caret;
+      return true;
+    }
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       let caret = caret.min(paragraph.text.len());
       if caret == 0 {
@@ -187,10 +295,61 @@ impl RichTextEditor {
       caret
     };
     if next > caret {
+      if self.authoritative_edit_controller.is_some()
+        && let Some(paragraph) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, self.table_cell_block_ix)
+        && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+      {
+        self.apply_authoritative_source_operations(
+          vec![AuthoritativeSourceOperation::DeleteText {
+            start: AuthoritativeSourcePosition { paragraph, byte: caret },
+            end: AuthoritativeSourcePosition { paragraph, byte: next },
+          }],
+          planned_selection,
+          cx,
+        );
+        self.table_cell_caret = caret;
+        self.table_cell_anchor = caret;
+        return true;
+      }
       self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
         delete_range_in_table_cell_paragraph(paragraph, caret..next);
       });
     } else {
+      if self.authoritative_edit_controller.is_some() {
+        let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
+          return true;
+        };
+        let Some(cell) = table.rows.get(row_ix).and_then(|row| row.cells.get(cell_ix)) else {
+          return true;
+        };
+        let Some(current_ix) = table_cell_paragraph_block_ix(cell, self.table_cell_block_ix) else {
+          return true;
+        };
+        let Some(next_ix) = next_table_cell_paragraph_block_ix(cell, current_ix) else {
+          return true;
+        };
+        let Some(next) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, next_ix) else {
+          return true;
+        };
+        let Some(TableCellBlock::Paragraph(current)) = cell.blocks.get(current_ix) else {
+          return true;
+        };
+        let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+          return true;
+        };
+        let merged_caret = current.text.len();
+        self.apply_authoritative_source_operations(
+          vec![AuthoritativeSourceOperation::JoinParagraph {
+            second_paragraph: next,
+          }],
+          planned_selection,
+          cx,
+        );
+        self.table_cell_block_ix = current_ix;
+        self.table_cell_caret = merged_caret;
+        self.table_cell_anchor = merged_caret;
+        return true;
+      }
       let mut merged_caret = None;
       let current_paragraph_ix = self.table_cell_block_ix;
       self.edit_selected_table(cx, |table| {
@@ -272,6 +431,23 @@ impl RichTextEditor {
     if updated == equation {
       return;
     }
+    if self.authoritative_edit_controller.is_some() {
+      if updated.syntax == equation.syntax
+        && updated.display == equation.display
+        && let Some(block_id) = self.document.ids.block_ids.get(block_ix).copied()
+        && let Some(planned_selection) = self.authoritative_source_selection(&self.selection)
+      {
+        self.apply_authoritative_source_operations(
+          vec![AuthoritativeSourceOperation::SetEquationSource {
+            block_id,
+            source: updated.source.to_string(),
+          }],
+          planned_selection,
+          cx,
+        );
+      }
+      return;
+    }
     let before = Block::Equation(equation);
     let after = Block::Equation(updated);
     if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
@@ -332,6 +508,35 @@ impl RichTextEditor {
     if updated == table {
       return;
     }
+    if self.authoritative_edit_controller.is_some() {
+      let Some(TableCellBlock::Paragraph(before_paragraph)) = table
+        .rows
+        .get(row_ix)
+        .and_then(|row| row.cells.get(cell_ix))
+        .and_then(|cell| cell.blocks.get(paragraph_ix))
+      else {
+        return;
+      };
+      let Some(TableCellBlock::Paragraph(after_paragraph)) = updated
+        .rows
+        .get(row_ix)
+        .and_then(|row| row.cells.get(cell_ix))
+        .and_then(|cell| cell.blocks.get(paragraph_ix))
+      else {
+        return;
+      };
+      let Some(paragraph_id) = self.table_cell_paragraph_id(block_ix, row_ix, cell_ix, paragraph_ix) else {
+        return;
+      };
+      let Some(planned_selection) = self.authoritative_source_selection(&self.selection) else {
+        return;
+      };
+      let operations = table_cell_source_operations(paragraph_id, before_paragraph, after_paragraph);
+      if !operations.is_empty() {
+        self.apply_authoritative_source_operations(operations, planned_selection, cx);
+      }
+      return;
+    }
     updated.version = updated.version.wrapping_add(1);
     let before = Block::Table(table);
     let after = Block::Table(updated);
@@ -356,6 +561,108 @@ impl RichTextEditor {
     self.mark_document_changed(after_generation, cx);
   }
 
+  fn table_cell_paragraph_id(
+    &self,
+    block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    cell_block_ix: usize,
+  ) -> Option<ParagraphId> {
+    let block_id = *self.document.ids.block_ids.get(block_ix)?;
+    let RichBlockIdentity::Table(table) = self.document.ids.rich_block_ids.get(&block_id)? else {
+      return None;
+    };
+    let cell = table.rows.get(row_ix)?.cells.get(cell_ix)?;
+    match cell.blocks.get(cell_block_ix)? {
+      TableCellBlockIdentity::Paragraph(paragraph) => Some(*paragraph),
+      TableCellBlockIdentity::Table { .. } => None,
+    }
+  }
+
+}
+
+fn table_cell_source_operations(
+  paragraph: ParagraphId,
+  before: &TableCellParagraph,
+  after: &TableCellParagraph,
+) -> Vec<AuthoritativeSourceOperation> {
+  let mut operations = Vec::new();
+  if before.paragraph.style != after.paragraph.style {
+    operations.push(AuthoritativeSourceOperation::SetParagraphStyle {
+      paragraph,
+      style: after.paragraph.style,
+    });
+  }
+  if before.text != after.text {
+    let (prefix, before_end, after_end) = changed_text_span(&before.text, &after.text);
+    if prefix < before_end {
+      operations.push(AuthoritativeSourceOperation::DeleteText {
+        start: AuthoritativeSourcePosition {
+          paragraph,
+          byte: prefix,
+        },
+        end: AuthoritativeSourcePosition {
+          paragraph,
+          byte: before_end,
+        },
+      });
+    }
+    if prefix < after_end {
+      operations.push(AuthoritativeSourceOperation::InsertText {
+        at: AuthoritativeSourcePosition {
+          paragraph,
+          byte: prefix,
+        },
+        text: after.text[prefix..after_end].to_string(),
+        styles: table_cell_styles_at(after, prefix),
+      });
+    }
+  } else if before.paragraph.runs != after.paragraph.runs && !after.text.is_empty() {
+    if after.paragraph.runs.is_empty() {
+      operations.push(AuthoritativeSourceOperation::SetRunStyles {
+        paragraph,
+        range: 0..after.text.len(),
+        styles: RunStyles::default(),
+      });
+    } else {
+      let mut start = 0;
+      for run in &after.paragraph.runs {
+        let end = start + run.len;
+        operations.push(AuthoritativeSourceOperation::SetRunStyles {
+          paragraph,
+          range: start..end,
+          styles: run.styles,
+        });
+        start = end;
+      }
+    }
+  }
+  operations
+}
+
+fn changed_text_span(before: &str, after: &str) -> (usize, usize, usize) {
+  let mut prefix = before
+    .as_bytes()
+    .iter()
+    .zip(after.as_bytes())
+    .take_while(|(left, right)| left == right)
+    .count();
+  while prefix > 0 && (!before.is_char_boundary(prefix) || !after.is_char_boundary(prefix)) {
+    prefix -= 1;
+  }
+  let max_suffix = before.len().saturating_sub(prefix).min(after.len().saturating_sub(prefix));
+  let mut suffix = before
+    .as_bytes()
+    .iter()
+    .rev()
+    .zip(after.as_bytes().iter().rev())
+    .take(max_suffix)
+    .take_while(|(left, right)| left == right)
+    .count();
+  while suffix > 0 && (!before.is_char_boundary(before.len() - suffix) || !after.is_char_boundary(after.len() - suffix)) {
+    suffix -= 1;
+  }
+  (prefix, before.len() - suffix, after.len() - suffix)
 }
 
 #[cfg(test)]

@@ -3,7 +3,10 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Block, BlockId, Document, DocumentSpan, HighlightStyle, ParagraphId, ParagraphStyle, RunSemanticStyle, RunStyles, new_block_id, new_paragraph_id};
+use super::{
+  Block, BlockId, Document, DocumentSpan, HighlightStyle, ParagraphId, ParagraphStyle, RichBlockIdentity, RunSemanticStyle, RunStyles,
+  new_block_id, new_paragraph_id,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TableCellId(pub u128);
@@ -55,8 +58,8 @@ pub enum Db8PresenceTarget {
   },
   TableCell {
     block_id: BlockId,
-    row: usize,
-    cell: usize,
+    cell_id: TableCellId,
+    paragraph_id: ParagraphId,
     byte: usize,
   },
 }
@@ -80,8 +83,8 @@ enum WireDb8PresenceTarget {
   },
   TableCell {
     block_id: String,
-    row: usize,
-    cell: usize,
+    cell_id: String,
+    paragraph_id: String,
     byte: usize,
   },
 }
@@ -96,10 +99,15 @@ impl WireDb8PresenceTarget {
       Db8PresenceTarget::Block { block_id } => Self::Block {
         block_id: block_id.0.to_string(),
       },
-      Db8PresenceTarget::TableCell { block_id, row, cell, byte } => Self::TableCell {
+      Db8PresenceTarget::TableCell {
+        block_id,
+        cell_id,
+        paragraph_id,
+        byte,
+      } => Self::TableCell {
         block_id: block_id.0.to_string(),
-        row: *row,
-        cell: *cell,
+        cell_id: cell_id.0.to_string(),
+        paragraph_id: paragraph_id.0.to_string(),
         byte: *byte,
       },
     }
@@ -114,10 +122,15 @@ impl WireDb8PresenceTarget {
       Self::Block { block_id } => Some(Db8PresenceTarget::Block {
         block_id: BlockId(block_id.parse().ok()?),
       }),
-      Self::TableCell { block_id, row, cell, byte } => Some(Db8PresenceTarget::TableCell {
+      Self::TableCell {
+        block_id,
+        cell_id,
+        paragraph_id,
+        byte,
+      } => Some(Db8PresenceTarget::TableCell {
         block_id: BlockId(block_id.parse().ok()?),
-        row,
-        cell,
+        cell_id: TableCellId(cell_id.parse().ok()?),
+        paragraph_id: ParagraphId(paragraph_id.parse().ok()?),
         byte,
       }),
     }
@@ -211,7 +224,22 @@ impl DocumentIdentityMap {
       rows.resize_with(table.rows.len(), Vec::new);
       rows.truncate(table.rows.len());
       for (row_ix, row) in table.rows.iter().enumerate() {
-        resize_ids(&mut rows[row_ix], row.cells.len(), TableCellId);
+        let source_cells = document
+          .ids
+          .block_ids
+          .get(block_ix)
+          .and_then(|block_id| document.ids.rich_block_ids.get(block_id))
+          .and_then(|identity| match identity {
+            RichBlockIdentity::Table(table) => table.rows.get(row_ix),
+            RichBlockIdentity::Image { .. } | RichBlockIdentity::Equation { .. } => None,
+          });
+        if let Some(source_cells) = source_cells
+          && source_cells.cells.len() == row.cells.len()
+        {
+          rows[row_ix] = source_cells.cells.iter().map(|cell| TableCellId(cell.id.0)).collect();
+        } else {
+          resize_ids(&mut rows[row_ix], row.cells.len(), TableCellId);
+        }
       }
     }
     // Rebuild the index map
@@ -1190,6 +1218,7 @@ mod tests {
       vec![Db8CollabSourceMutation::InsertParagraph {
         text_id: granular_record_id_u128(10),
         after_text_id: Some(granular_record_id_u128(9)),
+        split_byte: Some(4),
       }]
     );
     assert!(decode_canonical_operations(&encode_canonical_operations(&operations).unwrap()).is_some());
@@ -1228,8 +1257,8 @@ mod tests {
     let cell = Db8PresencePayload::Caret {
       target: Db8PresenceTarget::TableCell {
         block_id: BlockId(7),
-        row: 2,
-        cell: 1,
+        cell_id: TableCellId(9),
+        paragraph_id: ParagraphId(11),
         byte: 4,
       },
     };
