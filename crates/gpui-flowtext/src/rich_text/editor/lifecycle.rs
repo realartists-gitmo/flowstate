@@ -117,6 +117,10 @@ impl RichTextEditor {
     &self.document
   }
 
+  pub fn validate_remote_projection_invariants(&self) -> Result<(), DocumentInvariantError> {
+    validate_document_invariants(&self.document)
+  }
+
   pub fn document_path(&self) -> Option<&PathBuf> {
     self.document_path.as_ref()
   }
@@ -293,16 +297,27 @@ impl RichTextEditor {
     if Self::collab_canary_enabled() {
       eprintln!("[FLOWSTATE_COLLAB_CANARY editor::apply_remote_operations] ops={}", operations.len());
     }
+    let backup_document = self.document.clone();
+    let backup_selection = self.selection.clone();
+    let backup_undo_stack = self.undo_stack.clone();
+    let backup_redo_stack = self.redo_stack.clone();
     let mut applied_any = false;
     let mut outcome = RemoteOperationOutcome::Applied;
     let mut selection = self.selection.clone();
+    let mut affected_range: Option<Range<usize>> = None;
     for operation in operations {
       let before_document = remote_selection_transform_needs_pre_edit_document(operation).then(|| self.document.clone());
+      let before_identity = self.identity_map.clone();
+      let before_paragraph_count = self.document.paragraphs.len();
+      let operation_range = remote_operation_affected_paragraph_range(operation, &before_identity, &self.document);
       let applied = self.apply_canonical_operation(operation);
       if matches!(applied, RemoteOperationOutcome::Applied) {
         let transform_document = before_document.as_ref().unwrap_or(&self.document);
-        transform_selection_for_remote_operation(&mut selection, operation, &self.identity_map, transform_document);
+        transform_selection_for_remote_operation(&mut selection, operation, &before_identity, transform_document);
+        transform_history_for_remote_operation(&mut self.undo_stack, operation, &before_identity, transform_document);
+        self.redo_stack.clear();
         self.identity_map.reconcile(&self.document);
+        merge_remote_range(&mut affected_range, operation_range.or_else(|| Some(0..before_paragraph_count.max(self.document.paragraphs.len()))));
       }
       applied_any |= matches!(applied, RemoteOperationOutcome::Applied);
       outcome = outcome.max(applied);
@@ -310,16 +325,27 @@ impl RichTextEditor {
     if Self::collab_canary_enabled() {
       eprintln!("[FLOWSTATE_COLLAB_CANARY editor::apply_remote_operations_result] applied_any={applied_any} outcome={outcome:?}");
     }
+    if !matches!(outcome, RemoteOperationOutcome::Applied) {
+      self.document = backup_document;
+      self.selection = backup_selection;
+      self.undo_stack = backup_undo_stack;
+      self.redo_stack = backup_redo_stack;
+      self.identity_map.reconcile(&self.document);
+      self.last_collaboration_edit = None;
+      cx.notify();
+      return false;
+    }
     self.identity_map.reconcile(&self.document);
     self.selection = selection;
     self.last_collaboration_edit = None;
     if applied_any {
+      if let Some(range) = affected_range {
+        self.note_remote_layout_invalidation(range);
+      }
       self.mark_remote_document_changed(cx);
       self.after_remote_text_mutation(cx);
-    } else if !matches!(outcome, RemoteOperationOutcome::Applied) {
-      cx.notify();
     }
-    matches!(outcome, RemoteOperationOutcome::Applied)
+    true
   }
 
   #[hotpath::measure]
@@ -362,6 +388,7 @@ impl RichTextEditor {
       self.remote_projection_dirty = false;
       rebuild_document_sections(&mut self.document);
       self.identity_map.reconcile(&self.document);
+      self.log_remote_projection_invariants("remote_projection_batch");
       self.clamp_selection_to_document();
       self.mark_remote_document_changed(cx);
       self.after_remote_text_mutation(cx);
@@ -382,6 +409,21 @@ impl RichTextEditor {
     self.clamp_selection_to_document();
     self.mark_remote_document_changed(cx);
     self.after_remote_text_mutation(cx);
+  }
+
+  fn note_remote_layout_invalidation(&mut self, range: Range<usize>) {
+    let paragraph_count = self.document.paragraphs.len();
+    if paragraph_count == 0 {
+      self.layout_invalidation_hint = None;
+      return;
+    }
+    let start = range.start.min(paragraph_count.saturating_sub(1));
+    let end = range.end.max(start + 1).min(paragraph_count);
+    let normalized = start..end;
+    self.layout_invalidation_hint = Some(match self.layout_invalidation_hint.take() {
+      Some(previous) => previous.start.min(normalized.start)..previous.end.max(normalized.end),
+      None => normalized,
+    });
   }
 
   /// Apply a remote text-content change to a single paragraph, bypassing
@@ -429,6 +471,7 @@ impl RichTextEditor {
       }
     }
 
+    self.note_remote_layout_invalidation(paragraph_ix..paragraph_ix + 1);
     self.finish_remote_projection_change(false, cx);
     true
   }
@@ -464,6 +507,7 @@ impl RichTextEditor {
     if crate::paragraph_text(&self.document, paragraph_ix) != new_text {
       return false;
     }
+    self.note_remote_layout_invalidation(paragraph_ix..paragraph_ix + 1);
     self.finish_remote_projection_change(false, cx);
     true
   }
@@ -484,6 +528,7 @@ impl RichTextEditor {
     p.style = style;
     bump_paragraph_version(p);
     update_paragraph_block(&mut self.document, paragraph_ix);
+    self.note_remote_layout_invalidation(paragraph_ix..paragraph_ix + 1);
     self.finish_remote_projection_change(false, cx);
     true
   }
@@ -508,6 +553,7 @@ impl RichTextEditor {
     p.runs = runs;
     bump_paragraph_version(p);
     update_paragraph_block(&mut self.document, paragraph_ix);
+    self.note_remote_layout_invalidation(paragraph_ix..paragraph_ix + 1);
     self.finish_remote_projection_change(false, cx);
     true
   }
@@ -555,6 +601,7 @@ impl RichTextEditor {
     paragraph.runs = runs;
     bump_paragraph_version(paragraph);
     update_paragraph_block(&mut self.document, new_ix);
+    self.note_remote_layout_invalidation(split_ix..new_ix + 1);
     self.finish_remote_projection_change(true, cx);
     true
   }
@@ -726,6 +773,7 @@ impl RichTextEditor {
       );
     }
 
+    self.note_remote_layout_invalidation(first_ix..first_ix + 1);
     self.finish_remote_projection_change(true, cx);
     if canary {
       eprintln!("[flowstate-collab] remote_join phase=finish_ok");
@@ -776,6 +824,16 @@ impl RichTextEditor {
     self.apply_remote_join_paragraphs_authoritative(first, paragraph, &merged_text, runs, cx)
   }
 
+  fn log_remote_projection_invariants(&self, phase: &str) {
+    if !Self::collab_canary_enabled() {
+      return;
+    }
+    match self.validate_remote_projection_invariants() {
+      Ok(()) => eprintln!("[FLOWSTATE_COLLAB_CANARY editor::document_invariants_ok] phase={phase}"),
+      Err(error) => eprintln!("[FLOWSTATE_COLLAB_CANARY editor::document_invariants_failed] phase={phase} error={error}"),
+    }
+  }
+
   fn mark_remote_document_changed(&mut self, cx: &mut Context<Self>) {
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
@@ -823,6 +881,9 @@ impl RichTextEditor {
         let Some(end_paragraph) = self.identity_map.paragraph_index(*end_paragraph) else {
           return RemoteOperationOutcome::RepairNeeded;
         };
+        if start_paragraph > end_paragraph || (start_paragraph == end_paragraph && start_byte > end_byte) {
+          return RemoteOperationOutcome::Conflict;
+        }
         if !paragraph_offset_in_bounds(
           &self.document,
           DocumentOffset {
@@ -870,7 +931,15 @@ impl RichTextEditor {
         ) {
           return RemoteOperationOutcome::Conflict;
         }
+        let split_at_paragraph_end = self
+          .document
+          .paragraphs
+          .get(paragraph_ix)
+          .is_some_and(|paragraph| *byte == paragraph_text_len(paragraph));
         if split_paragraph_at_with_id(&mut self.document, paragraph_ix, *byte, *new_paragraph) {
+          if split_at_paragraph_end {
+            clear_whole_paragraph_formatting(&mut self.document, paragraph_ix + 1);
+          }
           RemoteOperationOutcome::Applied
         } else {
           RemoteOperationOutcome::Conflict
@@ -913,6 +982,9 @@ impl RichTextEditor {
         let Some(paragraph_ix) = self.identity_map.paragraph_index(*paragraph) else {
           return RemoteOperationOutcome::RepairNeeded;
         };
+        if range.start > range.end {
+          return RemoteOperationOutcome::Conflict;
+        }
         if !paragraph_offset_in_bounds(
           &self.document,
           DocumentOffset {
@@ -1092,6 +1164,73 @@ fn table_cell_selection_exists(document: &Document, block_ix: usize, row_ix: usi
 
 fn paragraph_offset_in_bounds(document: &Document, offset: DocumentOffset) -> bool {
   paragraph_offset_is_char_boundary(document, offset.paragraph, offset.byte)
+}
+
+fn merge_remote_range(target: &mut Option<Range<usize>>, range: Option<Range<usize>>) {
+  let Some(range) = range else {
+    return;
+  };
+  if range.start >= range.end {
+    return;
+  }
+  *target = Some(match target.take() {
+    Some(previous) => previous.start.min(range.start)..previous.end.max(range.end),
+    None => range,
+  });
+}
+
+fn remote_operation_affected_paragraph_range(
+  operation: &CanonicalOperation,
+  identity_map: &DocumentIdentityMap,
+  document: &Document,
+) -> Option<Range<usize>> {
+  match operation {
+    CanonicalOperation::InsertText { paragraph, .. }
+    | CanonicalOperation::SetParagraphStyle { paragraph, .. }
+    | CanonicalOperation::SetRunStyles { paragraph, .. } => {
+      let paragraph_ix = identity_map.paragraph_index(*paragraph)?;
+      Some(paragraph_ix..paragraph_ix + 1)
+    },
+    CanonicalOperation::DeleteRange { start_paragraph, end_paragraph, .. } => {
+      let start = identity_map.paragraph_index(*start_paragraph)?;
+      let end = identity_map.paragraph_index(*end_paragraph)?;
+      Some(start.min(end)..start.max(end) + 1)
+    },
+    CanonicalOperation::SplitParagraph { paragraph, .. } => {
+      let paragraph_ix = identity_map.paragraph_index(*paragraph)?;
+      Some(paragraph_ix..(paragraph_ix + 2).min(document.paragraphs.len().saturating_add(1)))
+    },
+    CanonicalOperation::JoinParagraphs { first, second } => {
+      let first_ix = identity_map.paragraph_index(*first)?;
+      let second_ix = identity_map.paragraph_index(*second)?;
+      Some(first_ix.min(second_ix)..first_ix.max(second_ix) + 1)
+    },
+    CanonicalOperation::ReplaceParagraphSpan { start_paragraph, before, after } => {
+      let start = start_paragraph
+        .and_then(|id| identity_map.paragraph_index(id))
+        .unwrap_or(before.start_paragraph);
+      let old_end = start.saturating_add(before.paragraphs.len());
+      let new_end = start.saturating_add(after.paragraphs.len());
+      Some(start..old_end.max(new_end).max(start + 1))
+    },
+    CanonicalOperation::InsertBlock { .. }
+    | CanonicalOperation::DeleteBlock { .. }
+    | CanonicalOperation::MoveBlock { .. }
+    | CanonicalOperation::ReplaceBlock { .. }
+    | CanonicalOperation::ReplaceDocument => Some(0..document.paragraphs.len()),
+  }
+}
+
+fn transform_history_for_remote_operation(
+  stack: &mut [EditRecord],
+  operation: &CanonicalOperation,
+  identity_map: &DocumentIdentityMap,
+  before_document: &Document,
+) {
+  for record in stack {
+    transform_selection_for_remote_operation(&mut record.before_selection, operation, identity_map, before_document);
+    transform_selection_for_remote_operation(&mut record.after_selection, operation, identity_map, before_document);
+  }
 }
 
 fn remote_selection_transform_needs_pre_edit_document(operation: &CanonicalOperation) -> bool {

@@ -107,6 +107,7 @@ pub struct Workspace {
   collaboration_last_frontier: Vec<u8>,
   collaboration_client_updates: Option<mpsc::UnboundedSender<PendingCollaborationUpdate>>,
   collaboration_pending_updates: VecDeque<PendingCollaborationUpdate>,
+  collaboration_last_local_presence: Option<(Option<String>, Vec<u8>)>,
   collaboration_runtime_id: u64,
   collaboration_delta_updates_since_checkpoint: usize,
   collaboration: CollaborationUiState,

@@ -484,6 +484,11 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let before_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 1);
     let before_paragraph_id = paragraph_id_at(&self.document, caret.paragraph);
+    let split_at_paragraph_end = self
+      .document
+      .paragraphs
+      .get(caret.paragraph)
+      .is_some_and(|paragraph| caret.byte == paragraph_text_len(paragraph));
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.suppress_mutation_notify += 1;
     self.insert_paragraph_break(cx);
@@ -506,11 +511,24 @@ impl RichTextEditor {
         after: after_span.clone(),
       }],
       canonical_operations: match (before_paragraph_id, paragraph_id_at(&self.document, caret.paragraph + 1)) {
-        (Some(paragraph), Some(new_paragraph)) => vec![CanonicalOperation::SplitParagraph {
-          paragraph,
-          byte: caret.byte,
-          new_paragraph,
-        }],
+        (Some(paragraph), Some(new_paragraph)) => {
+          let mut operations = vec![CanonicalOperation::SplitParagraph {
+            paragraph,
+            byte: caret.byte,
+            new_paragraph,
+          }];
+          // Local Enter-at-end cleans the newly spawned paragraph in insert_paragraph_break.
+          // Carry that same semantic edit over collaboration; otherwise DB8 split insertion
+          // inherits source paragraph metadata and receivers render the new blank line with
+          // the parent paragraph style.
+          if split_at_paragraph_end {
+            operations.push(CanonicalOperation::SetParagraphStyle {
+              paragraph: new_paragraph,
+              style: ParagraphStyle::Normal,
+            });
+          }
+          operations
+        },
         _ => vec![CanonicalOperation::ReplaceParagraphSpan {
           start_paragraph: paragraph_id_at(&self.document, caret.paragraph),
           before: before_span,

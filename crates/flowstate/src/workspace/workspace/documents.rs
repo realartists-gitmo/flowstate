@@ -87,6 +87,7 @@ impl Workspace {
       collaboration_last_frontier: Vec::new(),
       collaboration_client_updates: None,
       collaboration_pending_updates: VecDeque::new(),
+      collaboration_last_local_presence: None,
       collaboration_runtime_id: 0,
       collaboration_delta_updates_since_checkpoint: 0,
       collaboration: CollaborationUiState::default(),
@@ -536,15 +537,14 @@ impl Workspace {
                   let mut force_reconnect = false;
                   let received = run_on_sync_runtime(async {
                     tokio::select! {
-                      update = client.receive_next_update() => update,
+                      biased;
                       update = update_rx.recv() => {
                         match update {
                           Some(update) => {
-                            // Collect one UI frame of adjacent edits before
-                            // preparing a CRDT transaction. This keeps typing
-                            // responsive while avoiding one network round trip
-                            // and one schema validation per key.
-                            tokio::time::sleep(Duration::from_millis(8)).await;
+                            let delay = outbound_collaboration_batch_delay(&update);
+                            if delay > Duration::ZERO {
+                              tokio::time::sleep(delay).await;
+                            }
                             let updates = collect_outbound_update_batch(update, &mut update_rx);
                             for update in updates {
                               if collab_canary_enabled() {
@@ -597,6 +597,7 @@ impl Workspace {
                           },
                         }
                       },
+                      update = client.receive_next_update() => update,
                     }
                   });
                   (client, update_rx, received, handled_local_update, disconnected, force_reconnect, update_error)
@@ -1969,6 +1970,7 @@ impl Workspace {
     }
     self.collaboration_client_updates = None;
     self.collaboration_delta_updates_since_checkpoint = 0;
+    self.collaboration_last_local_presence = None;
     self.collaboration.local_session_id = None;
     self.collaboration.pending_invite_copy_role = None;
     self.collaboration.clear_reconnect_diagnostics();
@@ -2149,7 +2151,6 @@ impl Workspace {
                 } else {
                   workspace.collaboration.last_error = None;
                 }
-                workspace.refresh_db8_remote_carets(cx);
                 cx.notify();
               });
             });
@@ -2171,7 +2172,10 @@ impl Workspace {
   ) {
     cx.spawn(async move |workspace, cx| {
       while let Some(first_update) = update_rx.recv().await {
-        cx.background_executor().timer(Duration::from_millis(8)).await;
+        let delay = outbound_collaboration_batch_delay(&first_update);
+        if delay > Duration::ZERO {
+          cx.background_executor().timer(delay).await;
+        }
         let updates = collect_outbound_update_batch(first_update, &mut update_rx);
         let publisher = publisher.clone();
         let result = cx
@@ -2234,11 +2238,13 @@ impl Workspace {
         self.collaboration.last_error = Some(reason);
       },
       SessionEvent::Presence(presence) => {
+        let mut caret_changed = false;
         self
           .collaboration
           .peers
           .entry(presence.session_id)
           .and_modify(|peer| {
+            caret_changed = peer.cursor != presence.cursor || peer.last_known_frontier != presence.last_known_frontier;
             peer.actor_id = presence.actor_id;
             peer.role = presence.role;
             peer.user_label = if presence.user_label.is_empty() {
@@ -2252,21 +2258,26 @@ impl Workspace {
             peer.last_known_frontier = presence.last_known_frontier.clone();
             peer.last_seen_millis = Some(presence.monotonic_millis);
           })
-          .or_insert(CollaborationPeerInfo {
-            actor_id: presence.actor_id,
-            role: presence.role,
-            user_label: if presence.user_label.is_empty() {
-              None
-            } else {
-              Some(presence.user_label)
-            },
-            cursor: presence.cursor,
-            focus: presence.focus,
-            viewport_hint: presence.viewport_hint,
-            last_known_frontier: presence.last_known_frontier,
-            last_seen_millis: Some(presence.monotonic_millis),
+          .or_insert_with(|| {
+            caret_changed = true;
+            CollaborationPeerInfo {
+              actor_id: presence.actor_id,
+              role: presence.role,
+              user_label: if presence.user_label.is_empty() {
+                None
+              } else {
+                Some(presence.user_label.clone())
+              },
+              cursor: presence.cursor.clone(),
+              focus: presence.focus.clone(),
+              viewport_hint: presence.viewport_hint.clone(),
+              last_known_frontier: presence.last_known_frontier.clone(),
+              last_seen_millis: Some(presence.monotonic_millis),
+            }
           });
-        self.refresh_db8_remote_carets(cx);
+        if caret_changed {
+          self.refresh_db8_remote_carets(cx);
+        }
       },
       SessionEvent::SnapshotApplied { .. }
       | SessionEvent::UpdateApplied { .. }
@@ -2281,6 +2292,11 @@ impl Workspace {
       return;
     }
     let cursor = editor.read_with(cx, |editor: &RichTextEditor, _| db8_presence_cursor(editor));
+    let presence_key = (cursor.clone(), self.collaboration_last_frontier.clone());
+    if self.collaboration_last_local_presence.as_ref() == Some(&presence_key) {
+      return;
+    }
+    self.collaboration_last_local_presence = Some(presence_key);
     if let Some(sender) = &self.collaboration_client_updates {
       let _ = sender.send(PendingCollaborationUpdate::Presence { cursor });
       return;
@@ -2292,6 +2308,9 @@ impl Workspace {
 
   fn refresh_db8_remote_carets(&mut self, cx: &mut Context<Self>) {
     if self.collaboration.format_kind != Some(FormatKind::Db8) {
+      return;
+    }
+    if self.collaboration.peers.is_empty() {
       return;
     }
     let Some(panel_id) = self.collaboration.panel_id else {
@@ -2405,27 +2424,24 @@ impl Workspace {
           }
           return Ok(());
         }
-        // Try incremental CRDT diff (O(changed paragraphs)).
-        // The CRDT is the single authority — no `UpdateApplication` fast path is used.
-        // Host-originated joins can crash inside DB8 paragraph-diff computation
-        // before editor projection begins. The wire application is the exact
-        // canonical operation payload for this update, so handle pure joins
-        // through the editor's canonical receiver path and skip the DB8 diff
-        // walker for this case.
+        // Try canonical semantic receiver path before DB8 paragraph-diff reconstruction.
+        // Pure structural updates already carry the exact operation payload from the
+        // origin, so applying it directly avoids the crash-prone DB8 join diff walker
+        // and keeps split/join behavior symmetrical for host and non-host origins.
         if !self.collaboration_last_frontier.is_empty()
           && let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
           && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
-          && !operations.is_empty()
-          && operations
-            .iter()
-            .all(|operation| matches!(operation, crate::rich_text_element::CanonicalOperation::JoinParagraphs { .. }))
+          && canonical_operations_are_remote_fast_path_safe(&operations)
         {
-          if collab_canary_enabled() {
-            collab_canary(
-              "apply_db8_application_join_fast_path",
-              format!("operations={} application={}", operations.len(), update_application_label(application.as_ref())),
-            );
-          }
+          let operation_class = canonical_operation_class_label(&operations);
+          collab_canary(
+            "apply_db8_application_canonical_fast_path",
+            format!(
+              "operations={} class={operation_class} application={}",
+              operations.len(),
+              update_application_label(application.as_ref())
+            ),
+          );
           let applied = editor.update(cx, |editor, cx| {
             editor.clear_collaboration_edit();
             let applied = editor.apply_remote_operations(&operations, cx);
@@ -2437,15 +2453,26 @@ impl Workspace {
             self.refresh_db8_remote_carets(cx);
             return Ok(());
           }
-          if collab_canary_enabled() {
-            collab_canary(
-              "apply_db8_application_join_fast_path_failed",
-              format!("operations={} application={}", operations.len(), update_application_label(application.as_ref())),
-            );
-          }
+          collab_canary(
+            "apply_db8_application_canonical_fast_path_failed",
+            format!(
+              "operations={} class={operation_class} application={}",
+              operations.len(),
+              update_application_label(application.as_ref())
+            ),
+          );
         }
         if !self.collaboration_last_frontier.is_empty() {
-          match source.compute_paragraph_changes(&self.collaboration_last_frontier) {
+          collab_canary(
+            "compute_paragraph_changes_enter",
+            format!("frontier_bytes={}", self.collaboration_last_frontier.len()),
+          );
+          let paragraph_changes = source.compute_paragraph_changes(&self.collaboration_last_frontier);
+          collab_canary(
+            "compute_paragraph_changes_exit",
+            format!("ok={}", paragraph_changes.is_ok()),
+          );
+          match paragraph_changes {
             Ok(changes) => {
               if changes.is_empty() {
                 collab_canary("apply_db8_incremental_empty_fallback", "frontier changed; replacing full projection");
@@ -2478,9 +2505,7 @@ impl Workspace {
               // below. Full DB8 materialization compares the new CRDT paragraph
               // order against the old projection shape and fails before those
               // handlers can run. Moves still require full projection.
-              let requires_structural_fallback = changes
-                .iter()
-                .any(|entry| matches!(entry, ParagraphDiffEntry::ParagraphMoved { .. }));
+              let requires_structural_fallback = false;
               if !inputs_valid || requires_structural_fallback {
                 collab_canary(
                   "apply_db8_incremental_validation_fallback",
@@ -2498,118 +2523,123 @@ impl Workspace {
                 self.refresh_db8_remote_carets(cx);
                 return Ok(());
               }
-              let authoritative_text_paragraphs = changes
-                .iter()
-                .filter_map(|entry| match entry {
-                  ParagraphDiffEntry::Text { text_id, .. } => granular_record_id_to_u128(text_id).ok().map(ParagraphId),
-                  _ => None,
-                })
-                .collect::<Vec<_>>();
+              let join_consumed_text_paragraphs = db8_join_consumed_text_paragraphs(&changes);
+              if !join_consumed_text_paragraphs.is_empty() {
+                collab_canary(
+                  "apply_db8_incremental_join_consumed_text",
+                  format!("paragraphs={}", join_consumed_text_paragraphs.len()),
+                );
+              }
               let incremental_ok = editor.update(cx, |editor, cx| {
                 editor.clear_collaboration_edit();
-                for entry in &changes {
-                  match entry {
-                    ParagraphDiffEntry::Text { text_id, new_text, marks } => {
-                      let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
-                      let paragraph_id = ParagraphId(id_u128);
-                      let runs = flowstate_document::db8_runs_from_marks(new_text.len(), marks);
-                      if !valid_remote_runs(new_text, &runs)
-                        || !editor.apply_remote_paragraph_state(paragraph_id, new_text, runs, cx)
-                      {
-                        return false;
-                      }
-                    },
-                    ParagraphDiffEntry::Metadata { text_id, metadata } => {
-                      let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
-                      let paragraph_id = ParagraphId(id_u128);
-                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
-                      if !editor.apply_remote_paragraph_style(paragraph_id, style, cx) {
-                        return false;
-                      }
-                    },
-                    ParagraphDiffEntry::ParagraphAdded { text_id, position, text, metadata, marks } => {
-                      let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
-                      let new_paragraph_id = ParagraphId(id_u128);
-                      let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else {
+                editor.apply_remote_projection_batch(cx, |editor, cx| {
+                  for entry in &changes {
+                    match entry {
+                      ParagraphDiffEntry::Text { text_id, new_text, marks } => {
+                        let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
+                        let paragraph_id = ParagraphId(id_u128);
+                        if join_consumed_text_paragraphs.contains(&paragraph_id) {
+                          continue;
+                        }
+                        let runs = flowstate_document::db8_runs_from_marks(new_text.len(), marks);
+                        if !valid_remote_runs(new_text, &runs)
+                          || !editor.apply_remote_paragraph_state(paragraph_id, new_text, runs, cx)
+                        {
+                          return false;
+                        }
+                      },
+                      ParagraphDiffEntry::Metadata { text_id, metadata } => {
+                        let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
+                        let paragraph_id = ParagraphId(id_u128);
+                        let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else { return false; };
+                        if !editor.apply_remote_paragraph_style(paragraph_id, style, cx) {
+                          return false;
+                        }
+                      },
+                      ParagraphDiffEntry::ParagraphAdded { text_id, position, text, metadata, marks } => {
+                        let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
+                        let new_paragraph_id = ParagraphId(id_u128);
+                        let Some((style, _legacy_runs)) = flowstate_document::deserialize_paragraph_metadata(metadata) else {
+                          if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                            eprintln!(
+                              "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=metadata_decode text_id={text_id} position={position} text_len={} metadata_len={} result=false",
+                              text.len(),
+                              metadata.len(),
+                            );
+                          }
+                          return false;
+                        };
+                        let runs = flowstate_document::db8_runs_from_marks(text.len(), marks);
+                        let run_count = runs.len();
+                        let run_total = runs.iter().map(|run| run.len).sum::<usize>();
+                        let runs_valid = valid_remote_runs(text, &runs);
                         if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
                           eprintln!(
-                            "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=metadata_decode text_id={text_id} position={position} text_len={} metadata_len={} result=false",
+                            "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=validate text_id={text_id} paragraph_id={} position={position} text_len={} marks={} runs={} run_total={} result={runs_valid}",
+                            new_paragraph_id.0,
                             text.len(),
-                            metadata.len(),
+                            marks.len(),
+                            run_count,
+                            run_total,
                           );
                         }
-                        return false;
-                      };
-                      let runs = flowstate_document::db8_runs_from_marks(text.len(), marks);
-                      let run_count = runs.len();
-                      let run_total = runs.iter().map(|run| run.len).sum::<usize>();
-                      let runs_valid = valid_remote_runs(text, &runs);
-                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
-                        eprintln!(
-                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=validate text_id={text_id} paragraph_id={} position={position} text_len={} marks={} runs={} run_total={} result={runs_valid}",
-                          new_paragraph_id.0,
-                          text.len(),
-                          marks.len(),
-                          run_count,
-                          run_total,
-                        );
-                      }
-                      if !runs_valid {
-                        return false;
-                      }
+                        if !runs_valid {
+                          return false;
+                        }
 
-                      let inserted = editor.apply_remote_insert_paragraph_authoritative(
-                        new_paragraph_id,
-                        *position,
-                        text,
-                        runs,
-                        style,
-                        cx,
-                      );
-                      if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
-                        eprintln!(
-                          "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=atomic_insert text_id={text_id} paragraph_id={} position={position} text_len={} runs={} run_total={} paragraph_count={} result={inserted}",
-                          new_paragraph_id.0,
-                          text.len(),
-                          run_count,
-                          run_total,
-                          editor.document().paragraphs.len(),
+                        let inserted = editor.apply_remote_insert_paragraph_authoritative(
+                          new_paragraph_id,
+                          *position,
+                          text,
+                          runs,
+                          style,
+                          cx,
                         );
-                      }
-                      if !inserted {
-                        return false;
-                      }
-                    },
-                    ParagraphDiffEntry::ParagraphMoved { .. } => return false,
-                    ParagraphDiffEntry::ParagraphRemoved { text_id } => {
-                      let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
-                      let paragraph_id = ParagraphId(id_u128);
-                      let join_text = changes.iter().find_map(|entry| match entry {
-                        ParagraphDiffEntry::Text { text_id, new_text, marks }
-                          if editor
-                            .previous_paragraph_id_for_remote_removal(paragraph_id)
-                            .is_some_and(|previous| granular_record_id_to_u128(text_id).ok().map(ParagraphId) == Some(previous)) =>
-                        {
-                          Some((new_text.as_str(), marks))
-                        },
-                        _ => None,
-                      });
-                      let removed = if let Some((merged_text, marks)) = join_text {
-                        let Some(first_id) = editor.previous_paragraph_id_for_remote_removal(paragraph_id) else { return false; };
-                        let runs = flowstate_document::db8_runs_from_marks(merged_text.len(), marks);
-                        valid_remote_runs(merged_text, &runs)
-                          && editor.apply_remote_join_paragraphs_authoritative(first_id, paragraph_id, merged_text, runs, cx)
-                      } else {
-                        editor.apply_remote_remove_paragraph(paragraph_id, cx)
-                      };
-                      if !removed {
-                        return false;
-                      }
-                    },
+                        if std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some() {
+                          eprintln!(
+                            "[FLOWSTATE_COLLAB_CANARY structural_insert] stage=atomic_insert text_id={text_id} paragraph_id={} position={position} text_len={} runs={} run_total={} paragraph_count={} result={inserted}",
+                            new_paragraph_id.0,
+                            text.len(),
+                            run_count,
+                            run_total,
+                            editor.document().paragraphs.len(),
+                          );
+                        }
+                        if !inserted {
+                          return false;
+                        }
+                      },
+                      ParagraphDiffEntry::ParagraphMoved { .. } => return false,
+                      ParagraphDiffEntry::ParagraphRemoved { text_id } => {
+                        let Ok(id_u128) = granular_record_id_to_u128(text_id) else { return false; };
+                        let paragraph_id = ParagraphId(id_u128);
+                        let join_text = changes.iter().find_map(|entry| match entry {
+                          ParagraphDiffEntry::Text { text_id, new_text, marks }
+                            if editor
+                              .previous_paragraph_id_for_remote_removal(paragraph_id)
+                              .is_some_and(|previous| granular_record_id_to_u128(text_id).ok().map(ParagraphId) == Some(previous)) =>
+                          {
+                            Some((new_text.as_str(), marks))
+                          },
+                          _ => None,
+                        });
+                        let removed = if let Some((merged_text, marks)) = join_text {
+                          let Some(first_id) = editor.previous_paragraph_id_for_remote_removal(paragraph_id) else { return false; };
+                          let runs = flowstate_document::db8_runs_from_marks(merged_text.len(), marks);
+                          valid_remote_runs(merged_text, &runs)
+                            && editor.apply_remote_join_paragraphs_authoritative(first_id, paragraph_id, merged_text, runs, cx)
+                        } else {
+                          editor.apply_remote_remove_paragraph(paragraph_id, cx)
+                        };
+                        if !removed {
+                          return false;
+                        }
+                      },
+                    }
                   }
-                }
-                editor.clear_collaboration_edit();
-                true
+                  editor.clear_collaboration_edit();
+                  true
+                })
               });
               if !incremental_ok {
                 collab_diagnostic("COLLAB_DB8_INCREMENTAL_FAILURE", "incremental DB8 projection failed; identity map may be inconsistent; replacing full projection");
@@ -3092,6 +3122,13 @@ fn coalesce_pending_collaboration_update(
     pending_cursor.clone_from(cursor);
     return true;
   }
+  if matches!(update.as_ref(), Some(PendingCollaborationUpdate::Source { .. })) {
+    // A full source replacement is authoritative for every queued durable edit
+    // before it. Drop older source/granular work and keep only the newest full
+    // projection plus latest presence.
+    queue.retain(|entry| matches!(entry, PendingCollaborationUpdate::Presence { .. }));
+    return false;
+  }
   let Some(PendingCollaborationUpdate::GranularMutations { mutations, application }) = update.as_mut() else {
     return false;
   };
@@ -3115,6 +3152,10 @@ fn merge_outbound_collaboration_update(
   next: PendingCollaborationUpdate,
 ) -> Result<(), PendingCollaborationUpdate> {
   match (current, next) {
+    (current @ PendingCollaborationUpdate::Source { .. }, PendingCollaborationUpdate::Source { source, application }) => {
+      *current = PendingCollaborationUpdate::Source { source, application };
+      Ok(())
+    },
     (
       PendingCollaborationUpdate::GranularMutations { mutations, application },
       PendingCollaborationUpdate::GranularMutations {
@@ -3221,6 +3262,14 @@ fn merge_update_application(current: &mut UpdateApplication, next: &UpdateApplic
   true
 }
 
+fn outbound_collaboration_batch_delay(update: &PendingCollaborationUpdate) -> Duration {
+  match update {
+    PendingCollaborationUpdate::Presence { .. } => Duration::from_millis(16),
+    PendingCollaborationUpdate::GranularMutations { .. } => Duration::ZERO,
+    PendingCollaborationUpdate::Source { .. } => Duration::ZERO,
+  }
+}
+
 fn collect_outbound_update_batch(
   first: PendingCollaborationUpdate,
   update_rx: &mut mpsc::UnboundedReceiver<PendingCollaborationUpdate>,
@@ -3238,14 +3287,19 @@ fn collect_outbound_update_batch(
     }
   }
 
-  // Presence is ephemeral. Keep only the newest value and send it after all
-  // durable updates so cursor traffic cannot stall document convergence.
+  // Presence is ephemeral. Full source replacements supersede all prior
+  // durable updates in this drain window; later granular updates are kept.
+  // Send durable work first so cursor traffic cannot stall convergence.
   let mut durable = Vec::with_capacity(updates.len());
   let mut latest_presence = None;
   for update in updates {
     match update {
       PendingCollaborationUpdate::Presence { .. } => latest_presence = Some(update),
-      _ => durable.push(update),
+      PendingCollaborationUpdate::Source { .. } => {
+        durable.clear();
+        durable.push(update);
+      },
+      update => durable.push(update),
     }
   }
   if let Some(presence) = latest_presence {
@@ -3291,10 +3345,78 @@ fn push_bounded_pending_collaboration_update(
     return true;
   }
   if queue.len() >= max_len {
+    if matches!(update, PendingCollaborationUpdate::Presence { .. }) {
+      queue.retain(|entry| !matches!(entry, PendingCollaborationUpdate::Presence { .. }));
+      if queue.len() < max_len {
+        queue.push_back(update);
+        return false;
+      }
+    }
     return true;
   }
   queue.push_back(update);
   false
+}
+
+fn canonical_operations_are_remote_fast_path_safe(operations: &[crate::rich_text_element::CanonicalOperation]) -> bool {
+  !operations.is_empty()
+    && operations.iter().all(|operation| {
+      matches!(
+        operation,
+        crate::rich_text_element::CanonicalOperation::InsertText { .. }
+          | crate::rich_text_element::CanonicalOperation::DeleteRange { .. }
+          | crate::rich_text_element::CanonicalOperation::SplitParagraph { .. }
+          | crate::rich_text_element::CanonicalOperation::JoinParagraphs { .. }
+          | crate::rich_text_element::CanonicalOperation::SetParagraphStyle { .. }
+          | crate::rich_text_element::CanonicalOperation::SetRunStyles { .. }
+          | crate::rich_text_element::CanonicalOperation::ReplaceParagraphSpan { .. }
+      )
+    })
+}
+
+fn canonical_operation_class_label(operations: &[crate::rich_text_element::CanonicalOperation]) -> &'static str {
+  use crate::rich_text_element::CanonicalOperation;
+  let mut class = None;
+  for operation in operations {
+    let next = match operation {
+      CanonicalOperation::InsertText { .. } => "text",
+      CanonicalOperation::DeleteRange { .. } => "delete",
+      CanonicalOperation::SplitParagraph { .. } => "split",
+      CanonicalOperation::JoinParagraphs { .. } => "join",
+      CanonicalOperation::SetParagraphStyle { .. } | CanonicalOperation::SetRunStyles { .. } => "style",
+      CanonicalOperation::ReplaceParagraphSpan { .. } => "span",
+      CanonicalOperation::InsertBlock { .. }
+      | CanonicalOperation::DeleteBlock { .. }
+      | CanonicalOperation::MoveBlock { .. }
+      | CanonicalOperation::ReplaceBlock { .. }
+      | CanonicalOperation::ReplaceDocument => "repair",
+    };
+    if class.is_some_and(|class| class != next) {
+      return "mixed";
+    }
+    class = Some(next);
+  }
+  class.unwrap_or("empty")
+}
+
+fn db8_join_consumed_text_paragraphs(changes: &[ParagraphDiffEntry]) -> HashSet<ParagraphId> {
+  let remove_count = changes
+    .iter()
+    .filter(|entry| matches!(entry, ParagraphDiffEntry::ParagraphRemoved { .. }))
+    .count();
+  let text_paragraphs = changes
+    .iter()
+    .filter_map(|entry| match entry {
+      ParagraphDiffEntry::Text { text_id, .. } => granular_record_id_to_u128(text_id).ok().map(ParagraphId),
+      _ => None,
+    })
+    .collect::<HashSet<_>>();
+
+  if remove_count == 1 && text_paragraphs.len() == 1 {
+    text_paragraphs
+  } else {
+    HashSet::new()
+  }
 }
 
 fn valid_remote_runs(text: &str, runs: &[flowstate_document::TextRun]) -> bool {

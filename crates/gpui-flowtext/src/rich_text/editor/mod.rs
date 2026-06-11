@@ -192,6 +192,7 @@ impl CollaborationRole {
   }
 }
 
+#[derive(Clone)]
 struct EditRecord {
   before_selection: EditorSelection,
   before_generation: u64,

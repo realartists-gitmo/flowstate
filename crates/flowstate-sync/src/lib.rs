@@ -4,7 +4,7 @@ use std::{
   future::Future,
   ops::Range,
   sync::{Arc, Mutex, mpsc},
-  time::{SystemTime, UNIX_EPOCH},
+  time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::{Context as _, Result as AnyResult, bail, ensure};
@@ -2163,6 +2163,11 @@ fn application_label(application: Option<&UpdateApplication>) -> String {
 
 const MAX_RECENT_LOCAL_UPDATE_HASHES: usize = 256;
 
+
+fn client_should_await_local_update_ack() -> bool {
+  std::env::var_os("FLOWSTATE_COLLAB_AWAIT_ACK").is_some()
+}
+
 impl LiveCollaborationClient {
   #[must_use]
   pub const fn local_session_id(&self) -> SessionId {
@@ -2249,8 +2254,10 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await?;
     self.document.import_update_checked(self.authorization.role, &accepted_bytes)?;
+    if client_should_await_local_update_ack() {
+      self.await_update_result(update_id).await?;
+    }
     Ok(())
   }
 
@@ -2278,7 +2285,10 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await
+    if client_should_await_local_update_ack() {
+      self.await_update_result(update_id).await?;
+    }
+    Ok(())
   }
 
   pub async fn publish_granular_source_mutations(
@@ -2287,9 +2297,11 @@ impl LiveCollaborationClient {
     application: UpdateApplication,
   ) -> AnyResult<()> {
     ensure!(self.authorization.role.can_write(), "local role is not allowed to publish updates");
+    let prepare_start = Instant::now();
     let update = self
       .document
       .prepare_granular_source_mutations(self.authorization.role, &mutations)?;
+    collab_canary("client_prepare_granular_source_mutations", format!("mutations={} elapsed_ms={}", mutations.len(), prepare_start.elapsed().as_millis()));
     ensure!(
       !update.is_empty(),
       "granular collaboration mutation batch did not produce a durable update"
@@ -2308,6 +2320,7 @@ impl LiveCollaborationClient {
         application_label(Some(&application))
       ),
     );
+    let write_start = Instant::now();
     write_wire_message_reusing_buffer(
       &mut self.send,
       &mut self.wire_encode_buffer,
@@ -2322,8 +2335,13 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await?;
+    collab_canary("client_write_granular_source_mutations", format!("update_id={update_id} elapsed_ms={}", write_start.elapsed().as_millis()));
+    let import_start = Instant::now();
     self.document.import_update_checked(self.authorization.role, &accepted_update)?;
+    collab_canary("client_import_optimistic_granular_source_mutations", format!("update_id={update_id} elapsed_ms={}", import_start.elapsed().as_millis()));
+    if client_should_await_local_update_ack() {
+      self.await_update_result(update_id).await?;
+    }
     Ok(())
   }
 
@@ -2367,8 +2385,10 @@ impl LiveCollaborationClient {
       self.config.max_message_bytes,
     )
     .await?;
-    self.await_update_result(update_id).await?;
     self.document.import_update_checked(self.authorization.role, &accepted_update)?;
+    if client_should_await_local_update_ack() {
+      self.await_update_result(update_id).await?;
+    }
     Ok(())
   }
 
@@ -2799,6 +2819,16 @@ fn receive_snapshot_chunk(
   let total_len = usize::try_from(chunk.total_len).context("Flowstate snapshot chunk total length overflows usize")?;
   ensure_snapshot_len(total_len, config.max_snapshot_bytes)?;
   let offset = usize::try_from(chunk.offset).context("Flowstate snapshot chunk offset overflows usize")?;
+  if pending
+    .as_ref()
+    .is_some_and(|state| offset == 0 && (state.hash != chunk.hash || state.total_len != total_len))
+  {
+    collab_canary(
+      "receive_snapshot_chunk_supersede",
+      format!("old_pending_bytes={} new_total_len={total_len}", pending.as_ref().map(|state| state.bytes.len()).unwrap_or(0)),
+    );
+    *pending = None;
+  }
   if pending.is_none() {
     ensure!(offset == 0, "Flowstate snapshot chunk starts at offset {offset}, expected 0");
     *pending = Some(IncomingSnapshotChunks {
@@ -2830,6 +2860,10 @@ fn receive_snapshot_chunk(
     .context("Flowstate snapshot chunk end offset overflows usize")?;
   ensure!(end <= state.total_len, "Flowstate snapshot chunk extends past declared snapshot length");
   state.bytes.extend_from_slice(&chunk.bytes);
+  collab_canary(
+    "receive_snapshot_chunk",
+    format!("offset={} end={} total_len={} bytes={}", offset, end, state.total_len, chunk.bytes.len()),
+  );
   if state.bytes.len() != state.total_len {
     return Ok(None);
   }
@@ -2897,6 +2931,7 @@ async fn send_snapshot_chunks(
       snapshot.len().div_ceil(chunk_bytes)
     ),
   );
+  let chunk_count = snapshot.len().div_ceil(chunk_bytes);
   for (chunk_ix, bytes) in snapshot.chunks(chunk_bytes).enumerate() {
     let offset = u64::try_from(
       chunk_ix
@@ -2904,6 +2939,10 @@ async fn send_snapshot_chunks(
         .context("Flowstate snapshot chunk offset overflows usize")?,
     )
     .context("Flowstate snapshot chunk offset overflows u64")?;
+    collab_canary(
+      "host_snapshot_chunk_send",
+      format!("chunk={}/{} offset={} bytes={}", chunk_ix + 1, chunk_count, offset, bytes.len()),
+    );
     write_wire_message(
       send,
       &WireMessage::SnapshotChunk(SnapshotChunkMessage {
@@ -2916,6 +2955,7 @@ async fn send_snapshot_chunks(
       config.max_message_bytes,
     )
     .await?;
+    tokio::task::yield_now().await;
   }
   Ok(())
 }

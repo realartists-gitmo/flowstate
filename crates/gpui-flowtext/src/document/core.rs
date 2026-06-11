@@ -51,6 +51,151 @@ pub struct Document {
   pub theme: DocumentTheme,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DocumentInvariantError {
+  ParagraphIdCount { paragraph_ids: usize, paragraphs: usize },
+  BlockIdCount { block_ids: usize, blocks: usize },
+  ParagraphBlockCount { paragraph_blocks: usize, paragraphs: usize },
+  OffsetWidthCount { widths: usize, paragraphs: usize },
+  OffsetTreeCount { tree: usize, expected: usize },
+  ParagraphRangeStart { paragraph: usize, start: usize, expected: usize },
+  ParagraphRangeInvalid { paragraph: usize, start: usize, end: usize, text_len: usize },
+  ParagraphRangeLen { paragraph: usize, range_len: usize, run_len: usize },
+  ParagraphRunZero { paragraph: usize, run: usize },
+  ParagraphRunBoundary { paragraph: usize, offset: usize },
+  OffsetWidthMismatch { paragraph: usize, width: Option<usize>, expected: usize },
+  TextEndMismatch { paragraph_text_end: usize, text_len: usize },
+  SectionStartMissing { paragraph: ParagraphId },
+  SectionHeadingMissing { paragraph: ParagraphId },
+  SectionEndMissing { paragraph: ParagraphId },
+}
+
+impl std::fmt::Display for DocumentInvariantError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::ParagraphIdCount { paragraph_ids, paragraphs } => write!(f, "paragraph_id_len={paragraph_ids} paragraph_len={paragraphs}"),
+      Self::BlockIdCount { block_ids, blocks } => write!(f, "block_id_len={block_ids} block_len={blocks}"),
+      Self::ParagraphBlockCount { paragraph_blocks, paragraphs } => write!(f, "paragraph_block_count={paragraph_blocks} paragraph_len={paragraphs}"),
+      Self::OffsetWidthCount { widths, paragraphs } => write!(f, "offset_width_len={widths} paragraph_len={paragraphs}"),
+      Self::OffsetTreeCount { tree, expected } => write!(f, "offset_tree_len={tree} expected={expected}"),
+      Self::ParagraphRangeStart { paragraph, start, expected } => write!(f, "paragraph={paragraph} range_start={start} expected={expected}"),
+      Self::ParagraphRangeInvalid { paragraph, start, end, text_len } => write!(f, "paragraph={paragraph} invalid_range={start}..{end} text_len={text_len}"),
+      Self::ParagraphRangeLen { paragraph, range_len, run_len } => write!(f, "paragraph={paragraph} run_len={run_len} byte_range_len={range_len}"),
+      Self::ParagraphRunZero { paragraph, run } => write!(f, "paragraph={paragraph} zero_run={run}"),
+      Self::ParagraphRunBoundary { paragraph, offset } => write!(f, "paragraph={paragraph} run_boundary_not_utf8={offset}"),
+      Self::OffsetWidthMismatch { paragraph, width, expected } => write!(f, "paragraph={paragraph} offset_width={width:?} paragraph_width={expected}"),
+      Self::TextEndMismatch { paragraph_text_end, text_len } => write!(f, "paragraph_text_end={paragraph_text_end} text_len={text_len}"),
+      Self::SectionStartMissing { paragraph } => write!(f, "section_start_missing={paragraph:?}"),
+      Self::SectionHeadingMissing { paragraph } => write!(f, "section_heading_missing={paragraph:?}"),
+      Self::SectionEndMissing { paragraph } => write!(f, "section_end_missing={paragraph:?}"),
+    }
+  }
+}
+
+impl std::error::Error for DocumentInvariantError {}
+
+#[hotpath::measure]
+pub fn validate_document_invariants(document: &Document) -> Result<(), DocumentInvariantError> {
+  if document.ids.paragraph_ids.len() != document.paragraphs.len() {
+    return Err(DocumentInvariantError::ParagraphIdCount {
+      paragraph_ids: document.ids.paragraph_ids.len(),
+      paragraphs: document.paragraphs.len(),
+    });
+  }
+  if document.ids.block_ids.len() != document.blocks.len() {
+    return Err(DocumentInvariantError::BlockIdCount {
+      block_ids: document.ids.block_ids.len(),
+      blocks: document.blocks.len(),
+    });
+  }
+  let paragraph_blocks = document.blocks.iter().filter(|block| matches!(block, Block::Paragraph(_))).count();
+  if paragraph_blocks != document.paragraphs.len() {
+    return Err(DocumentInvariantError::ParagraphBlockCount {
+      paragraph_blocks,
+      paragraphs: document.paragraphs.len(),
+    });
+  }
+  if document.offset_index.widths.len() != document.paragraphs.len() {
+    return Err(DocumentInvariantError::OffsetWidthCount {
+      widths: document.offset_index.widths.len(),
+      paragraphs: document.paragraphs.len(),
+    });
+  }
+  if document.offset_index.tree.len() != document.offset_index.widths.len() + 1 {
+    return Err(DocumentInvariantError::OffsetTreeCount {
+      tree: document.offset_index.tree.len(),
+      expected: document.offset_index.widths.len() + 1,
+    });
+  }
+
+  let full_text = document.text.to_string();
+  let text_len = full_text.len();
+  let mut previous_end = 0usize;
+  for (ix, paragraph) in document.paragraphs.iter().enumerate() {
+    if paragraph.byte_range.start != previous_end {
+      return Err(DocumentInvariantError::ParagraphRangeStart {
+        paragraph: ix,
+        start: paragraph.byte_range.start,
+        expected: previous_end,
+      });
+    }
+    if paragraph.byte_range.end < paragraph.byte_range.start || paragraph.byte_range.end > text_len {
+      return Err(DocumentInvariantError::ParagraphRangeInvalid {
+        paragraph: ix,
+        start: paragraph.byte_range.start,
+        end: paragraph.byte_range.end,
+        text_len,
+      });
+    }
+    let run_len = paragraph.runs.iter().map(|run| run.len).sum::<usize>();
+    let range_len = paragraph.byte_range.end - paragraph.byte_range.start;
+    if run_len != range_len {
+      return Err(DocumentInvariantError::ParagraphRangeLen { paragraph: ix, range_len, run_len });
+    }
+    let mut run_offset = paragraph.byte_range.start;
+    for (run_ix, run) in paragraph.runs.iter().enumerate() {
+      if run.len == 0 {
+        return Err(DocumentInvariantError::ParagraphRunZero { paragraph: ix, run: run_ix });
+      }
+      if !full_text.is_char_boundary(run_offset) {
+        return Err(DocumentInvariantError::ParagraphRunBoundary { paragraph: ix, offset: run_offset });
+      }
+      run_offset += run.len;
+    }
+    if !full_text.is_char_boundary(run_offset) {
+      return Err(DocumentInvariantError::ParagraphRunBoundary { paragraph: ix, offset: run_offset });
+    }
+    if document.offset_index.widths.get(ix).copied() != Some(paragraph_width(document.paragraphs.as_slice(), ix).unwrap_or(range_len)) {
+      return Err(DocumentInvariantError::OffsetWidthMismatch {
+        paragraph: ix,
+        width: document.offset_index.widths.get(ix).copied(),
+        expected: paragraph_width(document.paragraphs.as_slice(), ix).unwrap_or(range_len),
+      });
+    }
+    previous_end = paragraph.byte_range.end;
+  }
+  if previous_end != text_len {
+    return Err(DocumentInvariantError::TextEndMismatch { paragraph_text_end: previous_end, text_len });
+  }
+
+  for section in document.sections.iter() {
+    if !document.ids.paragraph_ids.contains(&section.start_paragraph) {
+      return Err(DocumentInvariantError::SectionStartMissing { paragraph: section.start_paragraph });
+    }
+    if let Some(paragraph) = section.heading_paragraph
+      && !document.ids.paragraph_ids.contains(&paragraph)
+    {
+      return Err(DocumentInvariantError::SectionHeadingMissing { paragraph });
+    }
+    if let Some(paragraph) = section.end_paragraph_exclusive
+      && !document.ids.paragraph_ids.contains(&paragraph)
+    {
+      return Err(DocumentInvariantError::SectionEndMissing { paragraph });
+    }
+  }
+  Ok(())
+}
+
 #[hotpath::measure]
 pub fn paragraphs_mut(document: &mut Document) -> &mut Vec<Paragraph> {
   Arc::make_mut(&mut document.paragraphs)
