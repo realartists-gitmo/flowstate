@@ -2407,6 +2407,43 @@ impl Workspace {
         }
         // Try incremental CRDT diff (O(changed paragraphs)).
         // The CRDT is the single authority — no `UpdateApplication` fast path is used.
+        // Host-originated joins can crash inside DB8 paragraph-diff computation
+        // before editor projection begins. The wire application is the exact
+        // canonical operation payload for this update, so handle pure joins
+        // through the editor's canonical receiver path and skip the DB8 diff
+        // walker for this case.
+        if !self.collaboration_last_frontier.is_empty()
+          && let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
+          && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
+          && !operations.is_empty()
+          && operations
+            .iter()
+            .all(|operation| matches!(operation, crate::rich_text_element::CanonicalOperation::JoinParagraphs { .. }))
+        {
+          if collab_canary_enabled() {
+            collab_canary(
+              "apply_db8_application_join_fast_path",
+              format!("operations={} application={}", operations.len(), update_application_label(application.as_ref())),
+            );
+          }
+          let applied = editor.update(cx, |editor, cx| {
+            editor.clear_collaboration_edit();
+            let applied = editor.apply_remote_operations(&operations, cx);
+            editor.clear_collaboration_edit();
+            applied
+          });
+          if applied {
+            self.collaboration_last_frontier = current_frontier;
+            self.refresh_db8_remote_carets(cx);
+            return Ok(());
+          }
+          if collab_canary_enabled() {
+            collab_canary(
+              "apply_db8_application_join_fast_path_failed",
+              format!("operations={} application={}", operations.len(), update_application_label(application.as_ref())),
+            );
+          }
+        }
         if !self.collaboration_last_frontier.is_empty() {
           match source.compute_paragraph_changes(&self.collaboration_last_frontier) {
             Ok(changes) => {

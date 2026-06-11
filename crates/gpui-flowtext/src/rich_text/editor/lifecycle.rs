@@ -593,23 +593,68 @@ impl RichTextEditor {
     runs: Vec<TextRun>,
     cx: &mut Context<Self>,
   ) -> bool {
+    let canary = std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some();
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=start first={first:?} second={second:?} merged_len={} run_count={} paragraphs={} blocks={} paragraph_ids={} block_ids={}",
+        merged_text.len(),
+        runs.len(),
+        self.document.paragraphs.len(),
+        self.document.blocks.len(),
+        self.document.ids.paragraph_ids.len(),
+        self.document.ids.block_ids.len(),
+      );
+    }
+
     let run_total: usize = runs.iter().map(|run| run.len).sum();
     if run_total != merged_text.len() || runs.iter().any(|run| run.len == 0) {
+      if canary {
+        eprintln!(
+          "[flowstate-collab] remote_join phase=reject_runs run_total={run_total} merged_len={} zero_run={}",
+          merged_text.len(),
+          runs.iter().any(|run| run.len == 0),
+        );
+      }
       return false;
     }
     let Some(first_ix) = self.identity_map.paragraph_index(first) else {
+      if canary {
+        eprintln!("[flowstate-collab] remote_join phase=reject_missing_first first={first:?}");
+      }
       return false;
     };
     let Some(second_ix) = self.identity_map.paragraph_index(second) else {
+      if canary {
+        eprintln!("[flowstate-collab] remote_join phase=reject_missing_second second={second:?}");
+      }
       return false;
     };
     if second_ix != first_ix + 1 {
+      if canary {
+        eprintln!(
+          "[flowstate-collab] remote_join phase=reject_not_adjacent first_ix={first_ix} second_ix={second_ix}"
+        );
+      }
       return false;
     }
 
     let first_range = paragraph_byte_range(&self.document, first_ix);
     let second_range = paragraph_byte_range(&self.document, second_ix);
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=ranges first_ix={first_ix} second_ix={second_ix} first_range={:?} second_range={:?}",
+        first_range,
+        second_range,
+      );
+    }
     if first_range.start > first_range.end || first_range.end > second_range.start || second_range.start > second_range.end {
+      if canary {
+        eprintln!(
+          "[flowstate-collab] remote_join phase=reject_bad_ranges first_range={:?} second_range={:?}",
+          first_range,
+          second_range,
+        );
+      }
       return false;
     }
 
@@ -621,11 +666,21 @@ impl RichTextEditor {
     if !merged_text.is_empty() {
       self.document.text.insert(first_range.start, merged_text);
     }
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=rope_replaced delete={:?} insert_len={}",
+        first_range.start..second_range.end,
+        merged_text.len(),
+      );
+    }
 
     let replacement = {
       let paragraphs = paragraphs_mut(&mut self.document);
       {
         let Some(first_paragraph) = paragraphs.get_mut(first_ix) else {
+          if canary {
+            eprintln!("[flowstate-collab] remote_join phase=reject_first_ix_missing_after_rope first_ix={first_ix}");
+          }
           return false;
         };
         first_paragraph.byte_range = first_range.start..first_range.start + merged_text.len();
@@ -636,11 +691,45 @@ impl RichTextEditor {
       paragraphs.drain(second_ix..second_ix + 1);
       replacement
     };
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=paragraphs_rewritten paragraphs={}",
+        self.document.paragraphs.len(),
+      );
+    }
 
     remove_paragraph_ids(&mut self.document, second_ix..second_ix + 1);
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=paragraph_id_removed paragraph_ids={}",
+        self.document.ids.paragraph_ids.len(),
+      );
+    }
+
     replace_paragraph_blocks(&mut self.document, first_ix, 2, &[replacement]);
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=blocks_replaced blocks={} block_ids={}",
+        self.document.blocks.len(),
+        self.document.ids.block_ids.len(),
+      );
+    }
+
     rebuild_document_offset_index(&mut self.document);
+    if canary {
+      eprintln!(
+        "[flowstate-collab] remote_join phase=offsets_rebuilt paragraphs={} blocks={} paragraph_ids={} block_ids={}",
+        self.document.paragraphs.len(),
+        self.document.blocks.len(),
+        self.document.ids.paragraph_ids.len(),
+        self.document.ids.block_ids.len(),
+      );
+    }
+
     self.finish_remote_projection_change(true, cx);
+    if canary {
+      eprintln!("[flowstate-collab] remote_join phase=finish_ok");
+    }
     true
   }
   /// Remove a paragraph after its predecessor has already been replaced with
