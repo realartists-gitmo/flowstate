@@ -181,13 +181,16 @@ impl RichTextEditor {
             match editor
               .authoritative_edit_controller
               .as_ref()
-              .map(|controller| controller.borrow().native_snapshot_bytes())
+              .map(|controller| controller.borrow().native_snapshot_job())
               .transpose()
             {
-              Ok(bytes) => RecoveryWriteDecision::Write {
-                generation: editor.edit_generation,
-                document: Box::new(editor.document.clone()),
-                authoritative_bytes: bytes.flatten(),
+              Ok(job) => {
+                let authoritative_job = job.flatten();
+                RecoveryWriteDecision::Write {
+                  generation: editor.edit_generation,
+                  document: authoritative_job.is_none().then(|| Box::new(editor.document.clone())),
+                  authoritative_job,
+                }
               },
               Err(error) => RecoveryWriteDecision::Failed(error.to_string()),
             }
@@ -195,12 +198,12 @@ impl RichTextEditor {
         })
         .ok();
       log_timing("recovery snapshot", snapshot_timing, "");
-      let (generation, document, authoritative_bytes) = match decision {
+      let (generation, document, authoritative_job) = match decision {
         Some(RecoveryWriteDecision::Write {
           generation,
           document,
-          authoritative_bytes,
-        }) => (generation, document, authoritative_bytes),
+          authoritative_job,
+        }) => (generation, document, authoritative_job),
         Some(RecoveryWriteDecision::Failed(error)) => {
           eprintln!("failed to snapshot authoritative recovery source: {error}");
           let _ = editor.update(cx, |editor, _| {
@@ -211,15 +214,18 @@ impl RichTextEditor {
         _ => return,
       };
       let write_timing = Instant::now();
-      let paragraph_count = document.paragraphs.len();
+      let paragraph_count = document.as_ref().map_or(0, |document| document.paragraphs.len());
       let write_result = cx
         .background_executor()
         .spawn(async move {
-          if let Some(bytes) = authoritative_bytes {
+          if let Some(job) = authoritative_job {
+            let bytes = job()?;
             write_document_bytes_atomic(path, &bytes)
-          } else {
+          } else if let Some(document) = document {
             let document = detach_document_for_background_write(&document);
             write_document(path, &document)
+          } else {
+            Err(std::io::Error::other("recovery write has neither authoritative bytes nor a document snapshot"))
           }
         })
         .await;

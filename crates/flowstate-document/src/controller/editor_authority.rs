@@ -5,18 +5,20 @@ use std::io;
 use flowstate_collab::{AnchoredSelection, DocumentId, FlowCommit, FlowImportPolicy, ReplicaId, Role};
 use loro::PeerID;
 
-use super::{Db8ControllerCommit, Db8DocumentController, Db8EditIntent, Db8SourcePosition};
+use super::{Db8ControllerCommit, Db8DocumentController, Db8EditIntent, Db8SourcePosition, projection_index::RetainedUpdatePolicy};
 use crate::{
   AssetStore, AuthoritativeEditController, AuthoritativeEditResponse, AuthoritativeProjectionOrigin, AuthoritativeProjectionUpdate,
   AuthoritativeSourceEditRequest, AuthoritativeSourceOperation, AuthoritativeSourceSelection, Document, DocumentOffset, EditorSelection,
-  ParagraphId, paragraph_text_len,
+  NativeSnapshotJob, ParagraphId, paragraph_text_len,
 };
 
-pub trait Db8CommitOutbox: std::fmt::Debug {
+pub trait Db8CommitOutbox: std::fmt::Debug + Send {
   fn accept(&mut self, commit: &FlowCommit) -> io::Result<()>;
 
-  fn retained_updates(&self) -> io::Result<Vec<Vec<u8>>> {
-    Ok(Vec::new())
+  /// Compact retained update journal, dropping entries that have been
+  /// acknowledged by all peers or written to a snapshot checkpoint.
+  fn compact(&mut self) -> io::Result<()> {
+    Ok(())
   }
 }
 
@@ -24,8 +26,10 @@ pub struct Db8EditorAuthority {
   controller: Db8DocumentController,
   role: Role,
   pending_commits: VecDeque<Db8ControllerCommit>,
-  commit_outbox: Option<Box<dyn Db8CommitOutbox>>,
+  commit_outbox: Option<Box<dyn Db8CommitOutbox + Send>>,
   commit_outbox_error: Option<String>,
+  retained_update_policy: RetainedUpdatePolicy,
+  edit_count_since_checkpoint: usize,
 }
 
 impl std::fmt::Debug for Db8EditorAuthority {
@@ -36,6 +40,8 @@ impl std::fmt::Debug for Db8EditorAuthority {
       .field("pending_commits", &self.pending_commits.len())
       .field("commit_outbox", &self.commit_outbox)
       .field("commit_outbox_error", &self.commit_outbox_error)
+      .field("retained_update_policy", &self.retained_update_policy)
+      .field("edit_count_since_checkpoint", &self.edit_count_since_checkpoint)
       .finish()
   }
 }
@@ -49,7 +55,16 @@ impl Db8EditorAuthority {
       pending_commits: VecDeque::new(),
       commit_outbox: None,
       commit_outbox_error: None,
+      retained_update_policy: RetainedUpdatePolicy::default(),
+      edit_count_since_checkpoint: 0,
     }
+  }
+
+  /// Set the retained update policy for controlling checkpoint and compaction
+  /// thresholds. The default policy limits retained updates to 5,000 entries
+  /// or 32 MB, with a checkpoint every 500 edits.
+  pub fn set_retained_update_policy(&mut self, policy: RetainedUpdatePolicy) {
+    self.retained_update_policy = policy;
   }
 
   #[must_use]
@@ -66,6 +81,44 @@ impl Db8EditorAuthority {
   ) -> io::Result<Self> {
     Ok(Self::new(
       Db8DocumentController::from_snapshot(snapshot, document_id, replica_id, assets)?,
+      role,
+    ))
+  }
+
+  pub fn from_snapshot_with_projection(
+    snapshot: &[u8],
+    document_id: DocumentId,
+    replica_id: ReplicaId,
+    projection: Document,
+    role: Role,
+  ) -> io::Result<Self> {
+    Ok(Self::new(
+      Db8DocumentController::from_snapshot_with_projection(snapshot, document_id, replica_id, projection)?,
+      role,
+    ))
+  }
+
+  pub fn from_existing_projection(document: &Document, actor_id: flowstate_collab::ActorId, replica_id: ReplicaId, role: Role) -> io::Result<Self> {
+    Ok(Self::new(
+      Db8DocumentController::from_existing_projection(document, actor_id, replica_id)?,
+      role,
+    ))
+  }
+
+  /// Create an authority from a projection Document, optionally using a
+  /// pre-existing CRDT snapshot. When `snapshot` is `Some`, the CRDT source
+  /// is loaded directly via `from_snapshot_with_projection` (fast path — no
+  /// per-paragraph seed reconstruction). For new/untitled documents without
+  /// a snapshot, falls back to `from_existing_projection`.
+  pub fn from_document_or_snapshot(
+    document: &Document,
+    snapshot: Option<&[u8]>,
+    actor_id: flowstate_collab::ActorId,
+    replica_id: ReplicaId,
+    role: Role,
+  ) -> io::Result<Self> {
+    Ok(Self::new(
+      Db8DocumentController::from_document_or_snapshot(document, snapshot, actor_id, replica_id)?,
       role,
     ))
   }
@@ -106,11 +159,13 @@ impl Db8EditorAuthority {
       .map(|delta| delta.into_editor_update(AuthoritativeProjectionOrigin::Remote, None))
   }
 
+  /// Replay retained causal updates from a durable outbox.
   pub fn replay_retained_updates(&mut self, peer_id: PeerID, updates: &[Vec<u8>]) -> io::Result<()> {
-    for update in updates {
+    if !updates.is_empty() {
+      let updates = updates.iter().map(Vec::as_slice).collect::<Vec<_>>();
       self
         .controller
-        .apply_remote_update(update, &FlowImportPolicy::from_peer(Role::Owner, peer_id))?;
+        .apply_remote_updates(&updates, &FlowImportPolicy::from_peer(Role::Owner, peer_id))?;
     }
     self.controller.reset_undo_lineage();
     Ok(())
@@ -121,6 +176,7 @@ impl Db8EditorAuthority {
     let document = self.controller.install_verified_asset_bytes(hash, bytes)?;
     Ok(AuthoritativeProjectionUpdate {
       document,
+      patch: None,
       affected_paragraphs_before: 0..paragraph_count,
       affected_paragraphs_after: 0..paragraph_count,
       selection: None,
@@ -132,13 +188,28 @@ impl Db8EditorAuthority {
     self.role = role;
   }
 
-  pub fn set_commit_outbox(&mut self, outbox: Box<dyn Db8CommitOutbox>) {
+  pub fn set_commit_outbox(&mut self, outbox: Box<dyn Db8CommitOutbox + Send>) {
     self.commit_outbox = Some(outbox);
     self.commit_outbox_error = None;
   }
 
   pub fn clear_commit_outbox(&mut self) {
     self.commit_outbox = None;
+  }
+
+  /// Reset the edit count since last checkpoint (called after taking a snapshot).
+  pub fn reset_checkpoint_count(&mut self) {
+    self.edit_count_since_checkpoint = 0;
+  }
+
+  /// Called after a successful snapshot export to compact the retained
+  /// update outbox and reset the checkpoint counter. This ensures the
+  /// journal does not accumulate updates already captured by the snapshot.
+  pub fn after_snapshot_export(&mut self) {
+    self.edit_count_since_checkpoint = 0;
+    if let Some(outbox) = &mut self.commit_outbox {
+      let _ = outbox.compact();
+    }
   }
 
   pub fn block_local_edits(&mut self, reason: impl Into<String>) {
@@ -157,7 +228,8 @@ impl Db8EditorAuthority {
 
   fn apply_source_request(&mut self, request: AuthoritativeSourceEditRequest) -> Result<AuthoritativeEditResponse, String> {
     if let Some(error) = &self.commit_outbox_error {
-      return Ok(self.recovery_response(Some(format!("local source edits are blocked because durable outbox acceptance failed: {error}"))));
+      eprintln!("[db8-canary] authoritative_edit_rejected_source_error reason={error}");
+      return Ok(self.error_response(format!("local source edits are blocked because durable outbox acceptance failed: {error}")));
     }
     let intents = intents_from_source_operations(&request.operations)?;
     let undo_selection = self
@@ -169,11 +241,11 @@ impl Db8EditorAuthority {
       .apply_intents_with_undo_selection(self.role, &intents, Some(undo_selection))
       .map_err(|error| error.to_string())?;
     let resolved_selection = resolve_source_selection(self.controller.projection(), request.planned_selection);
+    // Phase 2: Db8ProjectionDelta no longer carries a full Document clone;
+    // extract it before building the response since it is consumed.
+    let delta = commit.projection.clone();
     let mut response = AuthoritativeEditResponse {
-      projection: commit
-        .projection
-        .clone()
-        .into_editor_update(AuthoritativeProjectionOrigin::LocalInput, resolved_selection),
+      projection: delta.into_editor_update(AuthoritativeProjectionOrigin::LocalInput, resolved_selection),
       error: None,
     };
     if let Err(error) = self.accept_commit(&commit) {
@@ -181,6 +253,15 @@ impl Db8EditorAuthority {
       self.commit_outbox_error = Some(error.clone());
       response.error = Some(format!("durable outbox acceptance failed; further local source edits are blocked: {error}"));
     } else {
+      self.edit_count_since_checkpoint += 1;
+      if self.retained_update_policy.should_compact_on_edit_count(self.edit_count_since_checkpoint) {
+        // Phase 5: Edit count exceeds checkpoint threshold. Compact the
+        // retained update outbox to free journal space and reset the counter.
+        if let Some(outbox) = &mut self.commit_outbox {
+          let _ = outbox.compact();
+        }
+        self.edit_count_since_checkpoint = 0;
+      }
       self.pending_commits.push_back(commit);
     }
     Ok(response)
@@ -192,7 +273,7 @@ impl Db8EditorAuthority {
     selection_before: AuthoritativeSourceSelection,
   ) -> Result<AuthoritativeEditResponse, String> {
     if let Some(error) = &self.commit_outbox_error {
-      return Ok(self.recovery_response(Some(format!("local source history edits are blocked because durable outbox acceptance failed: {error}"))));
+      return Ok(self.error_response(format!("local source history edits are blocked because durable outbox acceptance failed: {error}")));
     }
     let selection_before = self
       .controller
@@ -205,18 +286,19 @@ impl Db8EditorAuthority {
     }
     .map_err(|error| error.to_string())?;
     let Some(commit) = commit else {
-      return Ok(self.recovery_response(None));
+      return Ok(self.noop_response(None));
     };
     let origin = if undo {
       AuthoritativeProjectionOrigin::Undo
     } else {
       AuthoritativeProjectionOrigin::Redo
     };
+    // Phase 2: Db8ProjectionDelta no longer carries a full Document clone;
+    // extract it before building the response since it is consumed.
+    let delta = commit.projection.clone();
+    let selection = commit.selection.clone();
     let mut response = AuthoritativeEditResponse {
-      projection: commit
-        .projection
-        .clone()
-        .into_editor_update(origin, commit.selection.clone()),
+      projection: delta.into_editor_update(origin, selection),
       error: None,
     };
     if let Err(error) = self.accept_commit(&commit) {
@@ -236,18 +318,34 @@ impl Db8EditorAuthority {
     Ok(())
   }
 
-  fn recovery_response(&self, error: Option<String>) -> AuthoritativeEditResponse {
-    let paragraph_count = self.controller.projection().paragraphs.len();
+  fn noop_response(&self, error: Option<String>) -> AuthoritativeEditResponse {
     AuthoritativeEditResponse {
       projection: AuthoritativeProjectionUpdate {
         document: self.controller.projection().clone(),
-        affected_paragraphs_before: 0..paragraph_count,
-        affected_paragraphs_after: 0..paragraph_count,
+        patch: Some(crate::ProjectionPatch {
+          expected_blocks: self.controller.projection().blocks.len(),
+          expected_paragraphs: self.controller.projection().paragraphs.len(),
+          expected_text_bytes: self.controller.projection().text.byte_len(),
+          replaced_blocks_before: 0..0,
+          replacement_blocks: Vec::new(),
+          replacement_block_ids: Vec::new(),
+          affected_paragraphs_before: 0..0,
+          replacement_paragraphs: Vec::new(),
+          replacement_paragraph_ids: Vec::new(),
+          replaced_byte_range: 0..0,
+          replacement_text: String::new(),
+        }),
+        affected_paragraphs_before: 0..0,
+        affected_paragraphs_after: 0..0,
         selection: None,
-        origin: AuthoritativeProjectionOrigin::Recovery,
+        origin: AuthoritativeProjectionOrigin::LocalInput,
       },
       error,
     }
+  }
+
+  fn error_response(&self, error: String) -> AuthoritativeEditResponse {
+    self.noop_response(Some(error))
   }
 }
 
@@ -311,11 +409,11 @@ fn intents_from_source_operations(operations: &[AuthoritativeSourceOperation]) -
       AuthoritativeSourceOperation::SetRunStyles {
         paragraph,
         range,
-        styles,
+        patch,
       } => Ok(Db8EditIntent::SetRunStyles {
         paragraph_id: *paragraph,
         range: range.clone(),
-        styles: *styles,
+        patch: *patch,
       }),
       AuthoritativeSourceOperation::InsertBlock {
         block_id,
@@ -372,27 +470,90 @@ fn intents_from_source_operations(operations: &[AuthoritativeSourceOperation]) -
     .collect()
 }
 
+#[derive(Debug)]
+pub struct PreparingDb8EditorAuthority {
+  projection: Document,
+  reason: String,
+}
+
+impl PreparingDb8EditorAuthority {
+  #[must_use]
+  pub fn new(projection: Document, reason: impl Into<String>) -> Self {
+    Self {
+      projection,
+      reason: reason.into(),
+    }
+  }
+
+  fn response(&self, action: &str) -> AuthoritativeEditResponse {
+    eprintln!("[db8-canary] authoritative_edit_rejected_preparing action={action} reason={}", self.reason);
+    let paragraph_count = self.projection.paragraphs.len();
+    AuthoritativeEditResponse {
+      projection: AuthoritativeProjectionUpdate {
+        document: self.projection.clone(),
+        patch: None,
+        affected_paragraphs_before: 0..paragraph_count,
+        affected_paragraphs_after: 0..paragraph_count,
+        selection: None,
+        origin: AuthoritativeProjectionOrigin::Recovery,
+      },
+      error: Some(format!("{action} is temporarily unavailable: CRDT source still preparing — {}", self.reason)),
+    }
+  }
+}
+
+impl AuthoritativeEditController for PreparingDb8EditorAuthority {
+  fn apply_source(&mut self, _request: AuthoritativeSourceEditRequest) -> AuthoritativeEditResponse {
+    self.response("DB8 source edit")
+  }
+
+  fn undo(&mut self, _selection_before: AuthoritativeSourceSelection) -> AuthoritativeEditResponse {
+    self.response("DB8 undo")
+  }
+
+  fn redo(&mut self, _selection_before: AuthoritativeSourceSelection) -> AuthoritativeEditResponse {
+    self.response("DB8 redo")
+  }
+
+  fn recover_projection(&mut self, error: String) -> AuthoritativeEditResponse {
+    self.reason = error;
+    self.response("DB8 projection recovery")
+  }
+
+  fn capture_source_selection_anchor(&self, _selection: AuthoritativeSourceSelection) -> io::Result<Option<Vec<u8>>> {
+    Ok(None)
+  }
+
+  fn resolve_source_selection_anchor(&self, _anchor: &[u8]) -> io::Result<Option<AuthoritativeSourceSelection>> {
+    Ok(None)
+  }
+
+  fn native_snapshot_job(&self) -> io::Result<Option<NativeSnapshotJob>> {
+    Ok(None)
+  }
+}
+
 impl AuthoritativeEditController for Db8EditorAuthority {
   fn apply_source(&mut self, request: AuthoritativeSourceEditRequest) -> AuthoritativeEditResponse {
     self
       .apply_source_request(request)
-      .unwrap_or_else(|error| self.recovery_response(Some(error)))
+      .unwrap_or_else(|error| self.error_response(error))
   }
 
   fn undo(&mut self, selection_before: AuthoritativeSourceSelection) -> AuthoritativeEditResponse {
     self
       .history_response(true, selection_before)
-      .unwrap_or_else(|error| self.recovery_response(Some(error)))
+      .unwrap_or_else(|error| self.error_response(error))
   }
 
   fn redo(&mut self, selection_before: AuthoritativeSourceSelection) -> AuthoritativeEditResponse {
     self
       .history_response(false, selection_before)
-      .unwrap_or_else(|error| self.recovery_response(Some(error)))
+      .unwrap_or_else(|error| self.error_response(error))
   }
 
   fn recover_projection(&mut self, error: String) -> AuthoritativeEditResponse {
-    self.recovery_response(Some(error))
+    self.error_response(error)
   }
 
   fn capture_source_selection_anchor(&self, selection: AuthoritativeSourceSelection) -> io::Result<Option<Vec<u8>>> {
@@ -409,19 +570,17 @@ impl AuthoritativeEditController for Db8EditorAuthority {
     self.controller.resolve_source_selection(&selection).map(Some)
   }
 
-  fn native_snapshot_bytes(&self) -> io::Result<Option<Vec<u8>>> {
+  fn native_snapshot_job(&self) -> io::Result<Option<NativeSnapshotJob>> {
     let source = self.controller.source();
     let created_by_actor = source
       .created_by_actor()
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let snapshot = source
-      .export_snapshot()
-      .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
-    let recent_updates = self
-      .commit_outbox
-      .as_ref()
-      .map_or_else(|| Ok(Vec::new()), |outbox| outbox.retained_updates())?;
-    crate::db8_vnext_bytes_with_updates(self.controller.projection(), snapshot, recent_updates, created_by_actor).map(Some)
+    let snapshot_job = source.snapshot_job();
+    let projection = self.controller.projection().clone();
+    Ok(Some(Box::new(move || {
+      let snapshot = snapshot_job().map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error.to_string()))?;
+      crate::db8_vnext_bytes(&projection, snapshot, created_by_actor)
+    })))
   }
 }
 

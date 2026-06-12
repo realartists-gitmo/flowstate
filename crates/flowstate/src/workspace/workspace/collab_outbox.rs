@@ -38,13 +38,12 @@ impl Db8CommitOutbox for WorkspaceDb8CommitOutbox {
     Ok(())
   }
 
-  fn retained_updates(&self) -> std::io::Result<Vec<Vec<u8>>> {
-    let outbox = self
+  fn compact(&mut self) -> std::io::Result<()> {
+    let mut outbox = self
       .outbox
       .lock()
       .map_err(|_| std::io::Error::other("DB8 durable outbox lock is poisoned"))?;
-    outbox.sync_data()?;
-    Ok(outbox.pending().iter().map(|entry| entry.update.clone()).collect())
+    outbox.compact()
   }
 }
 

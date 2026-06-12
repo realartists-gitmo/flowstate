@@ -19,11 +19,12 @@ use tempfile::NamedTempFile;
 use crate::{
   AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, Document, DocumentIds, DocumentSection, DocumentStyleManifest,
   DocumentTheme, EquationBlock, EquationDisplay, EquationSyntax, HIGHLIGHT_ALTERNATIVE, HIGHLIGHT_INSERT, HIGHLIGHT_SPOKEN, HighlightStyle,
-  ImageBlock, ImageSizing, PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT, PARAGRAPH_POCKET, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, Paragraph,
-  ParagraphId, ParagraphOffsetIndex, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE, SEMANTIC_CONDENSED, SEMANTIC_EMPHASIS,
-  SEMANTIC_ULTRACONDENSED, SEMANTIC_UNDERLINE, SectionId, SectionKind, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
-  TableColumnWidth, TableRow, TableStyle, TextRun, demo_document, document_text_slice, merge_adjacent_runs, paragraph_byte_range,
-  paragraph_index_for_id, rebuild_document_offset_index, rebuild_document_sections, reconcile_document_ids,
+  ImageBlock, ImageSizing, InputParagraph, InputRun, PARAGRAPH_ANALYTIC, PARAGRAPH_BLOCK, PARAGRAPH_HAT, PARAGRAPH_POCKET, PARAGRAPH_TAG,
+  PARAGRAPH_UNDERTAG, Paragraph, ParagraphId, ParagraphOffsetIndex, ParagraphStyle, RunSemanticStyle, RunStyles, SEMANTIC_CITE,
+  SEMANTIC_CONDENSED, SEMANTIC_EMPHASIS, SEMANTIC_ULTRACONDENSED, SEMANTIC_UNDERLINE, SectionId, SectionKind, TableBlock, TableCell,
+  TableCellBlock, TableCellParagraph, TableColumnWidth, TableRow, TableStyle, TextRun, demo_document, document_from_input,
+  document_text_slice, merge_adjacent_runs, paragraph_byte_range, paragraph_index_for_id, rebuild_document_offset_index,
+  rebuild_document_sections, reconcile_document_ids,
 };
 
 fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
@@ -214,17 +215,19 @@ struct Db8GranularParagraphMetadata {
   runs: Vec<TextRun>,
 }
 
-pub fn deserialize_paragraph_metadata(bytes: &[u8]) -> Option<(ParagraphStyle, Vec<TextRun>)> {
-  postcard::from_bytes::<Db8GranularParagraphMetadata>(bytes)
-    .ok()
-    .map(|m| (m.style, m.runs))
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
+struct Db8FlowParagraphMetadata {
+  style: ParagraphStyle,
 }
 
-pub fn serialize_paragraph_metadata(style: ParagraphStyle, runs: &[TextRun]) -> io::Result<Vec<u8>> {
-  postcard::to_stdvec(&Db8GranularParagraphMetadata {
-    style,
-    runs: runs.to_vec(),
-  })
+pub fn deserialize_paragraph_metadata(bytes: &[u8]) -> Option<(ParagraphStyle, Vec<TextRun>)> {
+  postcard::from_bytes::<Db8FlowParagraphMetadata>(bytes)
+    .ok()
+    .map(|m| (m.style, Vec::new()))
+}
+
+pub fn serialize_paragraph_metadata(style: ParagraphStyle, _runs: &[TextRun]) -> io::Result<Vec<u8>> {
+  postcard::to_stdvec(&Db8FlowParagraphMetadata { style })
   .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
@@ -290,13 +293,24 @@ pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<Document> {
 }
 
 #[hotpath::measure]
-fn read_db8_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<Document> {
+/// Read a DB8 file and return both the projection Document and the embedded
+/// CRDT snapshot (if the file uses the vNext collab schema). This avoids the
+/// double-decode pattern of calling `read_db8_bytes` then separately calling
+/// `db8_flow_snapshot_from_bytes` on the same bytes.
+pub fn read_db8_file_bytes_with_snapshot(bytes: &[u8]) -> io::Result<(Document, Option<Vec<u8>>)> {
+  let timing = Instant::now();
   let decoded = decode_native_file(bytes, FormatKind::Db8).map_err(collab_to_io_error)?;
   let document = read_db8_projection_bytes_with_timing(&decoded.projection_cache, timing)?;
   if decoded.manifest.document_id.0.as_u128() != document.ids.document_id {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "DB8 document ID mismatch"));
   }
   validate_native_asset_manifest(&document, &decoded.asset_manifest)?;
+  let snapshot = (decoded.manifest.collab_schema == FLOW_SOURCE_SCHEMA_VERSION).then_some(decoded.snapshot);
+  Ok((document, snapshot))
+}
+
+fn read_db8_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<Document> {
+  let (document, _snapshot) = read_db8_file_bytes_with_snapshot(bytes)?;
   Ok(document)
 }
 
@@ -1407,6 +1421,82 @@ mod collab_source_tests {
       db8_table_row_order_ids(&table, block_id)[0],
       db8_table_cell_order_ids(&table, block_id, 0)[0]
     );
+  }
+
+  #[test]
+  fn db8_truncated_binary_triggers_projection_cache_rebuild() {
+    let document = demo_document();
+    let bytes = db8_bytes(&document).unwrap();
+    let truncated = &bytes[..bytes.len() / 2];
+    let result = read_db8_bytes(truncated);
+    assert!(result.is_err());
+  }
+
+  #[test]
+  fn db8_corrupt_projection_hash_triggers_recovery() {
+    let document = demo_document();
+    let source = db8_collab_document(&document, ActorId::new()).unwrap();
+    let snapshot = source.inner().export_snapshot().unwrap();
+    let mut bytes = db8_vnext_bytes_with_updates(&document, snapshot, Vec::new(), ActorId::new()).unwrap();
+    if let Some(pos) = bytes.windows(4).position(|w| w == b"prjh") {
+      let corrupt_at = pos + 4;
+      if corrupt_at + 4 < bytes.len() {
+        bytes[corrupt_at] = bytes[corrupt_at].wrapping_add(1);
+      }
+    }
+    let result = read_db8_bytes(&bytes);
+    if let Ok(recovered_doc) = result {
+      assert_eq!(recovered_doc.paragraphs.len(), document.paragraphs.len());
+    }
+  }
+
+  #[test]
+  fn db8_large_document_roundtrips_through_persistence() {
+    let theme = DocumentTheme::default();
+    let inputs = (0..1000)
+      .map(|i| InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: format!("paragraph {i} with some text content that is long enough to be interesting for memory testing purposes"),
+          styles: RunStyles::default(),
+        }],
+      })
+      .collect();
+    let document = document_from_input(theme, inputs);
+    let bytes = db8_bytes(&document).unwrap();
+    let reread = read_db8_bytes(&bytes).unwrap();
+    assert_eq!(reread.ids.document_id, document.ids.document_id);
+    assert_eq!(reread.paragraphs.len(), 1000);
+    assert_eq!(
+      crate::full_document_text(&reread),
+      crate::full_document_text(&document),
+    );
+  }
+
+  #[test]
+  fn db8_large_document_with_styles_roundtrips() {
+    let theme = DocumentTheme::default();
+    let inputs = (0..500)
+      .map(|i| InputParagraph {
+        style: ParagraphStyle::Custom((i % 5) as u8),
+        runs: (0..10)
+          .map(|j| InputRun {
+            text: format!("run{j} "),
+            styles: RunStyles {
+              semantic: crate::RunSemanticStyle::Custom((j % 4) as u8),
+              direct_underline: j % 3 == 0,
+              strikethrough: j % 5 == 0,
+              highlight: if j % 7 < 2 { Some(crate::HighlightStyle::Custom(1)) } else { None },
+            },
+          })
+          .collect(),
+      })
+      .collect();
+    let document = document_from_input(theme, inputs);
+    let bytes = db8_bytes(&document).unwrap();
+    let reread = read_db8_bytes(&bytes).unwrap();
+    assert_eq!(reread.paragraphs.len(), 500);
+    assert_eq!(reread.paragraphs, document.paragraphs);
   }
 
   #[test]

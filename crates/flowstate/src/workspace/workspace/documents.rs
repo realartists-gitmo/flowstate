@@ -103,6 +103,7 @@ impl Workspace {
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),
       autosave_document_generations: HashMap::new(),
+      autosave_document_in_flight: HashSet::new(),
       autosave_flow_in_flight: HashSet::new(),
       file_search_overlay: None,
       tub_root: None,
@@ -148,7 +149,9 @@ impl Workspace {
       cx.on_next_frame(window, move |workspace, window, cx| {
         workspace.open_document_path(path, window, cx);
       });
-    } else if let Some(session) = load_temporary_workspace_session() {
+    } else if std::env::var_os("FLOWSTATE_DISABLE_SESSION_RESTORE").is_none()
+      && let Some(session) = load_temporary_workspace_session()
+    {
       cx.on_next_frame(window, move |workspace, window, cx| {
         workspace.restore_temporary_workspace_session(session, window, cx);
       });
@@ -1136,27 +1139,47 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
+    self.create_document_panel_with_snapshot(document, None, path, title, window, cx)
+  }
+
+  /// Create a document panel, optionally seeding the CRDT source from an
+  /// existing snapshot. When `snapshot` is `Some`, the background authority
+  /// build uses `from_snapshot_with_projection` (O(1) snapshot deserialize)
+  /// instead of the wasteful `from_existing_projection` (O(n) per-paragraph
+  /// Loro CRDT reconstruction). This is the primary entry point for opening
+  /// files that contain a vNext CRDT snapshot.
+  fn create_document_panel_with_snapshot(
+    &mut self,
+    mut document: Document,
+    snapshot: Option<Vec<u8>>,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<DocumentPanel> {
     // DB8 stores style assignments, not style appearance. The render theme is
-    // local user preference loaded from app settings.
+    // local user preference loaded from app settings. Do not expose a panel
+    // until its real CRDT authority exists: a visible editor with a placeholder
+    // authority creates a period where input is rejected and projection state
+    // can diverge before the source is installed.
+    let _ = ensure_db8_document_id(&mut document);
     document.theme = load_document_theme();
-    let controller = Db8DocumentController::from_document(&document, self.local_actor_id, self.local_replica_id)
-      .expect("validated DB8 document must initialize its authoritative Loro controller");
-    let document_id = controller.source().document_id();
+    let authority = Db8EditorAuthority::from_document_or_snapshot(
+      &document,
+      snapshot.as_deref(),
+      self.local_actor_id,
+      self.local_replica_id,
+      Role::Owner,
+    )
+    .expect("validated DB8 document must initialize its authoritative Loro controller");
+    let document_id = authority.controller().source().document_id();
     let lease_path = flowstate_data_dir()
       .join("collaboration-leases")
       .join(document_id.0.to_string())
       .join(format!("{}.lock", self.local_replica_id.0));
     let replica_lease = ReplicaLease::try_acquire(&lease_path);
-    let mut authority = Db8EditorAuthority::new(controller, Role::Owner);
-    if let Err(error) = &replica_lease {
-      let reason = format!(
-        "this document/replica lineage is already active; local source edits are read-only until the other editor closes: {error}"
-      );
-      authority.block_local_edits(reason.clone());
-      show_collaboration_prompt(window, cx, PromptLevel::Critical, "Document opened read-only", &reason);
-    }
     let authority = Rc::new(RefCell::new(authority));
-    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     let smart_word_selection = load_smart_word_selection();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);
@@ -1179,8 +1202,15 @@ impl Workspace {
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
     self.db8_authorities.insert(id, authority);
-    if let Ok(replica_lease) = replica_lease {
-      self.db8_replica_leases.insert(id, replica_lease);
+    match replica_lease {
+      Ok(replica_lease) => {
+        self.db8_replica_leases.insert(id, replica_lease);
+      },
+      Err(error) => {
+        self.collaboration.last_error = Some(format!(
+          "durable outbox unavailable: this document/replica lineage is already active in another editor instance: {error}"
+        ));
+      },
     }
     self.editor_subscriptions.push((
       id,
@@ -1200,6 +1230,66 @@ impl Workspace {
     self.active_flow = None;
     self.document_panels.push(panel.clone());
     panel
+  }
+
+  fn install_db8_authority_result(
+    &mut self,
+    panel_id: Uuid,
+    result: anyhow::Result<(Db8EditorAuthority, Result<ReplicaLease, std::io::Error>)>,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(editor) = self.document_editor_for_panel(panel_id, cx) else {
+      return;
+    };
+    let (authority, replica_lease) = match result {
+      Ok(result) => result,
+      Err(error) => {
+        let reason = format!("failed to initialize DB8 CRDT source: {error:#}");
+        eprintln!("[db8-canary] db8_authority_init_failed panel={panel_id} reason={reason}");
+        self.collaboration.last_error = Some(reason.clone());
+        editor.update(cx, |editor, cx| {
+          editor.set_authoritative_edit_controller(
+            Some(Rc::new(RefCell::new(PreparingDb8EditorAuthority::new(
+              editor.document().clone(),
+              reason,
+            )))),
+            cx,
+          );
+        });
+        cx.notify();
+        return;
+      },
+    };
+    match replica_lease {
+      Ok(replica_lease) => {
+        self.db8_replica_leases.insert(panel_id, replica_lease);
+      },
+      Err(error) => {
+        // Phase 1 fix: Lease failure no longer blocks local CRDT editing.
+        // It only disables durable outbox/sync publishing. The user can still
+        // edit locally; changes just won't be persisted to the durable outbox
+        // until the other editor instance closes.
+        let reason = format!(
+          "durable outbox unavailable: this document/replica lineage is already active in another editor instance: {error}"
+        );
+        eprintln!("[db8-canary] durable_outbox_unavailable panel={panel_id} reason={reason}");
+        // Do NOT call authority.block_local_edits(). Local CRDT edits remain possible.
+        self.collaboration.last_error = Some(reason);
+      },
+    }
+    eprintln!("[db8-canary] db8_authority_installed panel={panel_id}");
+    let authority = Rc::new(RefCell::new(authority));
+    editor.update(cx, |editor, cx| {
+      editor.set_authoritative_edit_controller(Some(authority.clone()), cx);
+    });
+    self.db8_authorities.insert(panel_id, authority);
+    if self.db8_outboxes.contains_key(&panel_id)
+      && let Err(error) = self.attach_db8_durable_outbox(panel_id, cx)
+    {
+      self.collaboration.last_error = Some(format!("failed to attach DB8 durable outbox: {error:#}"));
+    }
+    self.refresh_db8_remote_carets(cx);
+    cx.notify();
   }
 
   pub fn set_active_document(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
@@ -1340,12 +1430,12 @@ impl Workspace {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.record_recent_document(path_for_recent.clone(), cx);
-              let panel = workspace.add_document_panel_with_title(*document, path, title, window, cx);
-              if let Some(snapshot) = flow_snapshot.as_deref()
-                && let Err(error) = workspace.replace_db8_flow_snapshot_in_panel(panel.read(cx).id(), snapshot, Role::Owner, cx)
-              {
-                workspace.collaboration.last_error = Some(format!("failed to restore vNext DB8 source: {error:#}"));
-              }
+              // Pass the CRDT snapshot directly to panel creation so the
+              // background authority build uses `from_snapshot_with_projection`
+              // (fast path) instead of reconstructing the CRDT from the
+              // projection seed (slow path). Eliminates the wasteful double
+              // init that previously raced a seed build with a snapshot import.
+              let panel = workspace.add_document_panel_with_snapshot(*document, flow_snapshot, path, title, window, cx);
               if let Some(paragraph_ix) = target_paragraph_ix {
                 workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
                 cx.on_next_frame(window, move |workspace, window, cx| {
@@ -1455,12 +1545,7 @@ impl Workspace {
           path,
           title,
         } => {
-          let panel = self.create_document_panel(*document, path, title, window, cx);
-          if let Some(snapshot) = flow_snapshot.as_deref()
-            && let Err(error) = self.replace_db8_flow_snapshot_in_panel(panel.read(cx).id(), snapshot, Role::Owner, cx)
-          {
-            self.collaboration.last_error = Some(format!("failed to restore vNext DB8 source: {error:#}"));
-          }
+          let panel = self.create_document_panel_with_snapshot(*document, flow_snapshot, path, title, window, cx);
           panel.read(cx).id()
         },
         LoadedWorkspaceDocument::Flow { document, path } => {
@@ -1579,7 +1664,19 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
-    let panel = self.create_document_panel(document, path, title, window, cx);
+    self.add_document_panel_with_snapshot(document, None, path, title, window, cx)
+  }
+
+  fn add_document_panel_with_snapshot(
+    &mut self,
+    document: Document,
+    snapshot: Option<Vec<u8>>,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<DocumentPanel> {
+    let panel = self.create_document_panel_with_snapshot(document, snapshot, path, title, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
     panel
@@ -1842,18 +1939,33 @@ impl Workspace {
     if self.autosave_document_generations.get(&panel_id) == Some(&generation) {
       return;
     }
-    self
-      .autosave_document_generations
-      .insert(panel_id, generation);
-    let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+    self.autosave_document_generations.insert(panel_id, generation);
     cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
+      cx.background_executor().timer(Duration::from_millis(750)).await;
+      let should_save = workspace
+        .update(cx, |workspace, _| {
+          workspace.autosave_document_generations.get(&panel_id) == Some(&generation)
+            && workspace.autosave_document_in_flight.insert(panel_id)
+        })
+        .unwrap_or(false);
+      if !should_save {
+        return;
+      }
+      let result = match editor.update(cx, |editor, cx| editor.save(cx)) {
+        Ok(save_task) => save_task.await,
+        Err(error) => Err(std::io::Error::other(error.to_string())),
+      };
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.autosave_document_in_flight.remove(&panel_id);
+        if workspace.autosave_document_generations.get(&panel_id) == Some(&generation) {
+          workspace.autosave_document_generations.remove(&panel_id);
+        } else if workspace.autosave_document_generations.contains_key(&panel_id) {
+          workspace.autosave_document_generations.remove(&panel_id);
+          workspace.maybe_autosave_document(panel_id, editor.clone(), cx);
+        }
+      });
+      if let Err(error) = result {
         eprintln!("autosave failed: {error}");
-        let _ = workspace.update(cx, |workspace, _| {
-          if workspace.autosave_document_generations.get(&panel_id) == Some(&generation) {
-            workspace.autosave_document_generations.remove(&panel_id);
-          }
-        });
       }
     })
     .detach();
@@ -2609,30 +2721,39 @@ impl Workspace {
     let editor = self
       .document_editor_for_panel(panel_id, cx)
       .ok_or_else(|| anyhow::anyhow!("collaboration DB8 panel is no longer open"))?;
+    let projection = editor.read(cx).document().clone();
     let document_id = self.collaboration.document_id.unwrap_or_else(|| {
-      CollabDocumentId(uuid::Uuid::from_u128(
-        editor.read(cx).document().ids.document_id,
-      ))
+      CollabDocumentId(uuid::Uuid::from_u128(projection.ids.document_id))
     });
-    let assets = editor.read(cx).document().assets.clone();
-    let authority = Rc::new(RefCell::new(Db8EditorAuthority::from_snapshot(
-      snapshot,
-      document_id,
-      self.local_replica_id,
-      assets,
-      role,
-    )?));
-    let projection = authority.borrow().controller().projection().clone();
-    self.collaboration_last_frontier = authority.borrow().frontier()?;
     editor.update(cx, |editor, cx| {
-      editor.replace_document_from_collaboration(projection, cx);
-      editor.set_authoritative_edit_controller(Some(authority.clone()), cx);
+      editor.set_authoritative_edit_controller(
+        Some(Rc::new(RefCell::new(PreparingDb8EditorAuthority::new(
+          projection.clone(),
+          "remote CRDT snapshot is being imported",
+        )))),
+        cx,
+      );
     });
-    self.db8_authorities.insert(panel_id, authority);
-    if self.db8_outboxes.contains_key(&panel_id) {
-      self.attach_db8_durable_outbox(panel_id, cx)?;
-    }
-    self.refresh_db8_remote_carets(cx);
+    self.db8_authorities.remove(&panel_id);
+    self.db8_replica_leases.remove(&panel_id);
+    let snapshot = snapshot.to_vec();
+    let local_replica_id = self.local_replica_id;
+    let build_authority = cx.background_executor().spawn(async move {
+      let authority = Db8EditorAuthority::from_snapshot_with_projection(&snapshot, document_id, local_replica_id, projection, role)?;
+      let lease_path = flowstate_data_dir()
+        .join("collaboration-leases")
+        .join(document_id.0.to_string())
+        .join(format!("{}.lock", local_replica_id.0));
+      let replica_lease = ReplicaLease::try_acquire(&lease_path);
+      Ok::<_, anyhow::Error>((authority, replica_lease))
+    });
+    cx.spawn(async move |workspace, cx| {
+      let result = build_authority.await;
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.install_db8_authority_result(panel_id, result, cx);
+      });
+    })
+    .detach();
     Ok(())
   }
 

@@ -9,6 +9,16 @@ use crate::{
   TextRun, document_from_paragraphs,
 };
 
+fn controller_with_full_materialization(document: &Document) -> Db8DocumentController {
+  let actor_id = ActorId::new();
+  let replica_id = ReplicaId::new();
+  let serialized = crate::persistence::io::document_for_serialization(document);
+  let seed = db8_flow_seed(&serialized).unwrap();
+  let document_id = CollabDocumentId(uuid::Uuid::from_u128(serialized.ids.document_id));
+  let source = FlowDocument::from_seed(document_id, actor_id, replica_id, &seed).unwrap();
+  Db8DocumentController::from_source(source, serialized.assets.clone()).unwrap()
+}
+
 #[test]
 fn rich_child_changes_use_incremental_projection_and_match_full_rebuild() {
   let mut document = document_from_paragraphs(
@@ -47,7 +57,7 @@ fn rich_child_changes_use_incremental_projection_and_match_full_rebuild() {
   }));
   document.ids.block_ids.push(table_id);
 
-  let mut controller = Db8DocumentController::from_document(&document, ActorId::new(), ReplicaId::new()).unwrap();
+  let mut controller = controller_with_full_materialization(&document);
   let RichBlockIdentity::Table(identity) = &controller.projection.ids.rich_block_ids[&table_id] else {
     panic!("table identity missing");
   };
@@ -68,7 +78,9 @@ fn rich_child_changes_use_incremental_projection_and_match_full_rebuild() {
     })
     .unwrap();
   let commit = controller.source.apply_edits(Role::Owner, &[edit]).unwrap();
-  let (incremental, impact) = materialize_incremental_root_projection(&controller.source, &before, &commit.changes).unwrap();
+  let mut incremental = before.clone();
+  let index = Db8ProjectionIndex::build(&incremental);
+  let impact = patch_projection_incremental(&controller.source, &mut incremental, &index, &commit.changes).unwrap();
   let rebuilt = materialize_db8_flow_document(&controller.source, AssetStore::default()).unwrap();
   assert_projection_eq(&incremental, &rebuilt);
   assert_eq!(impact.replaced_blocks_before, 1..2);
@@ -88,7 +100,9 @@ fn rich_child_changes_use_incremental_projection_and_match_full_rebuild() {
     })
     .unwrap();
   let commit = controller.source.apply_edits(Role::Owner, &[edit]).unwrap();
-  let (incremental, impact) = materialize_incremental_root_projection(&controller.source, &before, &commit.changes).unwrap();
+  let mut incremental = before.clone();
+  let index = Db8ProjectionIndex::build(&incremental);
+  let impact = patch_projection_incremental(&controller.source, &mut incremental, &index, &commit.changes).unwrap();
   let rebuilt = materialize_db8_flow_document(&controller.source, AssetStore::default()).unwrap();
   assert_projection_eq(&incremental, &rebuilt);
   assert_eq!(impact.replaced_blocks_before, 1..2);

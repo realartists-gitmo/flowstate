@@ -264,10 +264,10 @@ impl RichTextEditor {
     }
     let generation = self.edit_generation;
     let document = self.document.clone();
-    let authoritative_bytes = match self
+    let authoritative_job = match self
       .authoritative_edit_controller
       .as_ref()
-      .map(|controller| controller.borrow().native_snapshot_bytes())
+      .map(|controller| controller.borrow().native_snapshot_job())
       .transpose()
     {
       Ok(bytes) => bytes.flatten(),
@@ -284,7 +284,8 @@ impl RichTextEditor {
       let write_result = cx
         .background_executor()
         .spawn(async move {
-          let result = if let Some(bytes) = authoritative_bytes {
+          let result = if let Some(job) = authoritative_job {
+            let bytes = job()?;
             write_document_bytes_atomic(&path, &bytes)
           } else {
             let document = detach_document_for_background_write(&document);

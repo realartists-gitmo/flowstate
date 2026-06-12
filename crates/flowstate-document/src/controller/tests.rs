@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
   AuthoritativeEditController, AuthoritativeSourceEditRequest, AuthoritativeSourceOperation, AuthoritativeSourcePosition,
-  AuthoritativeSourceSelection, DocumentTheme, InputRun, document_from_paragraphs,
+  AuthoritativeSourceSelection, DocumentTheme, InputParagraph, InputRun, document_from_input,
 };
 
 #[test]
@@ -201,10 +201,10 @@ fn source_request_inserts_styled_fragment_and_resolves_selection() {
   });
 
   assert!(response.error.is_none());
-  assert_eq!(paragraph_text(&response.projection.document, 0), "styled");
-  assert_eq!(response.projection.document.paragraphs[0].runs[0].styles, styles);
-  assert_eq!(paragraph_text(&response.projection.document, 1), "nexttail");
-  assert_eq!(response.projection.document.paragraphs[1].style, ParagraphStyle::Custom(3));
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "styled");
+  assert_eq!(authority.controller().projection().paragraphs[0].runs[0].styles, styles);
+  assert_eq!(paragraph_text(authority.controller().projection(), 1), "nexttail");
+  assert_eq!(authority.controller().projection().paragraphs[1].style, ParagraphStyle::Custom(3));
   assert_eq!(
     response.projection.selection.unwrap().head,
     DocumentOffset {
@@ -443,7 +443,7 @@ fn editor_authority_replays_retained_local_lineage_after_snapshot_recovery() {
   let peer_id = origin.source().peer_id();
   let snapshot = origin.source().export_snapshot().unwrap();
   let paragraph_id = origin.projection().ids.paragraph_ids[0];
-  let commit = origin
+  let first_commit = origin
     .apply_intent(
       Role::Owner,
       Db8EditIntent::InsertText {
@@ -456,26 +456,39 @@ fn editor_authority_replays_retained_local_lineage_after_snapshot_recovery() {
       },
     )
     .unwrap();
+  let second_commit = origin
+    .apply_intent(
+      Role::Owner,
+      Db8EditIntent::InsertText {
+        at: Db8SourcePosition {
+          paragraph_id,
+          byte: 2,
+        },
+        text: "c".to_string(),
+        styles: RunStyles::default(),
+      },
+    )
+    .unwrap();
   let mut recovered = Db8EditorAuthority::from_snapshot(&snapshot, document_id, replica, AssetStore::default(), Role::Owner).unwrap();
 
   recovered
-    .replay_retained_updates(peer_id, &[commit.source.update])
+    .replay_retained_updates(peer_id, &[first_commit.source.update, second_commit.source.update])
     .unwrap();
 
-  assert_eq!(paragraph_text(recovered.controller().projection(), 0), "ab");
+  assert_eq!(paragraph_text(recovered.controller().projection(), 0), "abc");
   assert_eq!(recovered.controller().source().source_hash().unwrap(), origin.source().source_hash().unwrap());
   let selection = AuthoritativeSourceSelection {
     anchor: AuthoritativeSourcePosition {
       paragraph: paragraph_id,
-      byte: 2,
+      byte: 3,
     },
     head: AuthoritativeSourcePosition {
       paragraph: paragraph_id,
-      byte: 2,
+      byte: 3,
     },
   };
-  let response = recovered.undo(selection);
-  assert_eq!(paragraph_text(&response.projection.document, 0), "ab");
+  let _response = recovered.undo(selection);
+  assert_eq!(paragraph_text(recovered.controller().projection(), 0), "abc");
   assert_eq!(recovered.drain_commits().count(), 0);
 }
 
@@ -1211,9 +1224,9 @@ fn stable_source_request_places_selection_after_split_and_cross_paragraph_delete
     }],
   });
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 1, byte: 0 });
-  assert_eq!(paragraph_text(&response.projection.document, 0), "ab");
-  assert_eq!(paragraph_text(&response.projection.document, 1), "cd");
-  assert_eq!(response.projection.document.paragraphs[1].style, ParagraphStyle::Custom(2));
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "ab");
+  assert_eq!(paragraph_text(authority.controller().projection(), 1), "cd");
+  assert_eq!(authority.controller().projection().paragraphs[1].style, ParagraphStyle::Custom(2));
 
   let response = authority.apply_source(AuthoritativeSourceEditRequest {
     selection_before: AuthoritativeSourceSelection {
@@ -1248,6 +1261,147 @@ fn stable_source_request_places_selection_after_split_and_cross_paragraph_delete
     }],
   });
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 1 });
-  assert_eq!(response.projection.document.paragraphs.len(), 1);
-  assert_eq!(paragraph_text(&response.projection.document, 0), "ad");
+  assert_eq!(authority.controller().projection().paragraphs.len(), 1);
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "ad");
+}
+
+#[test]
+fn large_document_edit_with_patch_roundtrips() {
+  let theme = DocumentTheme::default();
+  let inputs = (0..500)
+    .map(|i| InputParagraph {
+      style: ParagraphStyle::Custom((i % 8) as u8),
+      runs: vec![InputRun {
+        text: format!("paragraph {i} with some text content for the large doc edit test"),
+        styles: RunStyles::default(),
+      }],
+    })
+    .collect();
+  let document = document_from_input(theme, inputs);
+  let controller = Db8DocumentController::from_document(&document, ActorId::new(), ReplicaId::new()).unwrap();
+  let first = controller.projection().ids.paragraph_ids[0];
+  let mut authority = Db8EditorAuthority::new(controller, Role::Owner);
+
+  let response = authority.apply_source(AuthoritativeSourceEditRequest {
+    selection_before: AuthoritativeSourceSelection {
+      anchor: AuthoritativeSourcePosition { paragraph: first, byte: 0 },
+      head: AuthoritativeSourcePosition { paragraph: first, byte: 0 },
+    },
+    planned_selection: AuthoritativeSourceSelection {
+      anchor: AuthoritativeSourcePosition { paragraph: first, byte: 10 },
+      head: AuthoritativeSourcePosition { paragraph: first, byte: 10 },
+    },
+    operations: vec![AuthoritativeSourceOperation::InsertText {
+      at: AuthoritativeSourcePosition { paragraph: first, byte: 0 },
+      text: "EDIT ".to_string(),
+      styles: RunStyles::default(),
+    }],
+  });
+  assert!(response.error.is_none());
+  assert!(authority.controller().projection().paragraphs.len() >= 500);
+  let first_text = paragraph_text(authority.controller().projection(), 0);
+  assert!(first_text.starts_with("EDIT "));
+}
+
+#[test]
+fn patch_projection_in_place_rejects_unrepresentable_change_without_mutating_projection() {
+  use flowstate_collab::{FlowChangeSummary, FlowId};
+  let mut controller = Db8DocumentController::from_document(
+    &document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "hello world".to_string(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    ),
+    ActorId::new(),
+    ReplicaId::new(),
+  )
+  .unwrap();
+  // A changeset referencing a non-existent flow is a projection correctness
+  // failure. It must not silently trigger full materialization.
+  let unknown_flow = FlowId(uuid::Uuid::nil());
+  let unknown_changes = FlowChangeSummary {
+    touched_flows: [unknown_flow].into(),
+    touched_nodes: Default::default(),
+    flow_text_changes: Default::default(),
+  };
+  // Split borrows: source() and projection are separate fields, but the
+  // borrow checker cannot see through the method call. Use a raw pointer to
+  // express that they do not alias — sound because patch_projection_in_place
+  // takes `&FlowDocument` and `&mut Document` on non-overlapping memory.
+  let source_ref: *const FlowDocument = controller.source();
+  let projection_index = Db8ProjectionIndex::build(&controller.projection);
+  let result = patch_projection_in_place(unsafe { &*source_ref }, &mut controller.projection, &projection_index, &unknown_changes);
+  assert!(result.is_err(), "unrepresentable projection change must fail explicitly");
+  assert_eq!(paragraph_text(&controller.projection, 0), "hello world");
+}
+
+#[test]
+fn concurrent_independent_run_style_properties_merge() {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![InputRun {
+        text: "styled".to_string(),
+        styles: RunStyles::default(),
+      }],
+    }],
+  );
+  let document_id = CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id));
+  let mut left = Db8DocumentController::from_document(&document, ActorId::new(), ReplicaId::new()).unwrap();
+  let snapshot = left.source().export_snapshot().unwrap();
+  let mut right =
+    Db8DocumentController::from_snapshot_with_projection(&snapshot, document_id, ReplicaId::new(), document.clone()).unwrap();
+  let paragraph_id = document.ids.paragraph_ids[0];
+
+  let underline = left
+    .apply_intent(
+      Role::Editor,
+      Db8EditIntent::SetRunStyles {
+        paragraph_id,
+        range: 0.."styled".len(),
+        patch: crate::RunStylePatch {
+          direct_underline: Some(true),
+          ..crate::RunStylePatch::default()
+        },
+      },
+    )
+    .unwrap();
+  let highlight = right
+    .apply_intent(
+      Role::Editor,
+      Db8EditIntent::SetRunStyles {
+        paragraph_id,
+        range: 0.."styled".len(),
+        patch: crate::RunStylePatch {
+          highlight: Some(Some(crate::HighlightStyle::Custom(2))),
+          ..crate::RunStylePatch::default()
+        },
+      },
+    )
+    .unwrap();
+
+  left
+    .apply_remote_update(
+      &highlight.source.update,
+      &FlowImportPolicy::editor_from_peer(right.source().peer_id()),
+    )
+    .unwrap();
+  right
+    .apply_remote_update(
+      &underline.source.update,
+      &FlowImportPolicy::editor_from_peer(left.source().peer_id()),
+    )
+    .unwrap();
+
+  for controller in [&left, &right] {
+    let styles = controller.projection().paragraphs[0].runs[0].styles;
+    assert!(styles.direct_underline);
+    assert_eq!(styles.highlight, Some(crate::HighlightStyle::Custom(2)));
+  }
 }

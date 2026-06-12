@@ -589,6 +589,7 @@ fn update_autosave(cx: &mut App, workspace: &WeakEntity<Workspace>, enabled: boo
     workspace.autosave_enabled = enabled;
     if !enabled {
       workspace.autosave_document_generations.clear();
+      workspace.autosave_document_in_flight.clear();
       workspace.autosave_flow_in_flight.clear();
     }
     cx.notify();

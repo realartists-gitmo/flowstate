@@ -280,7 +280,7 @@ impl RichTextEditor {
           operations.push(AuthoritativeSourceOperation::SetRunStyles {
             paragraph: paragraph_id,
             range: start..end,
-            styles,
+            patch: RunStylePatch::between(run.styles, styles),
           });
         }
         run_start = run_end;

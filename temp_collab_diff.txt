@@ -1,0 +1,1244 @@
+commit d28be2becc8d9c65aca3e72d0802c70d32e503db
+Author: Adam D. Humphrey <adam.humphrey44@gmail.com>
+Date:   Fri Jun 5 04:56:35 2026 -0400
+
+    Colossal fucking fixes
+
+diff --git a/crates/flowstate/src/workspace/workspace/documents.rs b/crates/flowstate/src/workspace/workspace/documents.rs
+index 1f473b6..3526596 100644
+--- a/crates/flowstate/src/workspace/workspace/documents.rs
++++ b/crates/flowstate/src/workspace/workspace/documents.rs
+@@ -321,18 +321,13 @@ impl Workspace {
+     match host.revoke_all_invites() {
+       Ok(count) => {
+         self.collaboration.last_error = None;
+-        show_collaboration_prompt(
+-          window,
+-          cx,
+-          PromptLevel::Info,
+-          "Invites revoked",
+-          &format!("Revoked {count} active collaboration invite(s). Connected peers remain in the session."),
+-        );
++        let message = format!("Revoked {count} active collaboration invite(s). Connected peers remain in the session.");
++        show_collaboration_prompt(window, cx, PromptLevel::Info, "Invites revoked", &message);
+       },
+       Err(error) => {
+         let detail = format!("{error:#}");
+-        self.collaboration.last_error = Some(detail.clone());
+         show_collaboration_prompt(window, cx, PromptLevel::Critical, "Invite revoke failed", &detail);
++        self.collaboration.last_error = Some(detail);
+       },
+     }
+     cx.notify();
+@@ -435,23 +430,27 @@ impl Workspace {
+         match client {
+           Ok(mut client) => {
+             let (update_tx, mut update_rx) = mpsc::unbounded_channel::<PendingCollaborationUpdate>();
+-            let authorized_role = client.authorization.role;
+             let joined_document_id = client.document.document_id();
+             let joined_format_kind = client.document.format_kind();
++            let authorized_role = client.authorization.role;
+             let joined_hash = client.document.projection_hash().ok();
++            let joined_frontier = client.document.frontier().ok();
+             let initial = collab_document_to_workspace_document(client.document.clone());
+             let collaboration_panel_id = window_handle
+               .update(cx, |_, window, cx| {
+                 workspace
+                   .update(cx, |workspace, cx| {
+-                    let had_pending_updates = !workspace.collaboration_pending_updates.is_empty();
++                    workspace.collaboration.set_reconnect_diagnostics(
++                      if target_panel_id.is_some() { "reconnect" } else { "join" },
++                      joined_frontier.clone(),
++                      pending_collaboration_update_summary(&workspace.collaboration_pending_updates),
++                    );
+                     let panel_id = if let Some(panel_id) = target_panel_id {
+                       if workspace.collaboration.panel_id != Some(panel_id) {
+                         return None;
+                       }
+-                      if !had_pending_updates
+-                        && let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, client.document.clone(), None, cx)
+-                      {
++                      if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, client.document.clone(), None, cx) {
++                        workspace.collaboration.reconnect_rejected_update = Some(format!("host snapshot import failed: {error:#}"));
+                         workspace.collaboration.state = SessionState::Failed;
+                         workspace.collaboration.last_error = Some(format!("{error:#}"));
+                         cx.notify();
+@@ -470,6 +469,7 @@ impl Workspace {
+                           panel.read(cx).id()
+                         },
+                         Err(error) => {
++                          workspace.collaboration.reconnect_rejected_update = Some(format!("snapshot materialization failed: {error:#}"));
+                           workspace.collaboration.state = SessionState::Failed;
+                           workspace.collaboration.last_error = Some(format!("{error:#}"));
+                           cx.notify();
+@@ -518,17 +518,33 @@ impl Workspace {
+                       update = update_rx.recv() => {
+                         match update {
+                           Some(update) => {
+-                            let result = match update {
+-                              PendingCollaborationUpdate::Source { source, application, .. } => {
+-                                client.replace_source_from(&source, application).await
+-                              },
+-                              PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
+-                              PendingCollaborationUpdate::Presence { cursor } => {
+-                                client.publish_presence("", cursor, None, None).await
+-                              },
+-                            };
+-                            if let Err(error) = result {
+-                              update_error = Some(format!("{error:#}"));
++                            let updates = collect_outbound_update_batch(update, &mut update_rx);
++                            for update in updates {
++                              if collab_canary_enabled() {
++                                collab_canary("client_local_update_dequeue", update.diagnostic_label());
++                              }
++                              let result = match update {
++                                PendingCollaborationUpdate::Source { source, application, .. } => {
++                                  client.replace_source_from(&source, application).await
++                                },
++                                PendingCollaborationUpdate::GranularMutations { mutations, application } => {
++                                  client.publish_granular_source_mutations(mutations, application).await
++                                },
++                                PendingCollaborationUpdate::Application { application } => client.publish_application_update(application).await,
++                                PendingCollaborationUpdate::Presence { cursor } => {
++                                  client.publish_presence("", cursor, None, None).await
++                                },
++                              };
++                              if let Err(error) = result {
++                                if collab_canary_enabled() {
++                                  collab_canary("client_local_update_error", format!("{error:#}"));
++                                }
++                                update_error = Some(format!("{error:#}"));
++                                break;
++                              }
++                            }
++                            if collab_canary_enabled() {
++                              collab_canary("client_local_update_handled", "handled local outbound update batch");
+                             }
+                             handled_local_update = true;
+                             Ok(None)
+@@ -567,10 +583,25 @@ impl Workspace {
+               };
+               match event {
+                 SessionEvent::SnapshotApplied { .. } | SessionEvent::UpdateApplied { .. } => {
++                  collab_canary(
++                    "client_remote_event",
++                    format!(
++                      "event={:?} application={}",
++                      event,
++                      update_application_label(client.last_application.as_ref())
++                    ),
++                  );
+                   let application = client.last_application.clone();
+                   let source = client.document.clone();
+                   let _ = window_handle.update(cx, |_, _, cx| {
+                     let _ = workspace.update(cx, |workspace, cx| {
++                      collab_canary(
++                        "client_apply_to_panel",
++                        format!(
++                          "panel={collaboration_panel_id} application={}",
++                          update_application_label(application.as_ref())
++                        ),
++                      );
+                       if let Err(error) = workspace.apply_collaboration_source_to_panel(collaboration_panel_id, source, application, cx) {
+                         workspace.collaboration.last_error = Some(format!("{error:#}"));
+                       } else {
+@@ -580,6 +611,7 @@ impl Workspace {
+                     });
+                   });
+                 },
++                SessionEvent::UpdateHint { .. } => {},
+                 event => {
+                   let _ = window_handle.update(cx, |_, _, cx| {
+                     let _ = workspace.update(cx, |workspace, cx| {
+@@ -876,8 +908,14 @@ impl Workspace {
+       .document_id
+       .map(|id| id.0.to_string())
+       .unwrap_or_else(|| "none".to_string());
++    let source_hash = self
++      .collaboration_last_published_hash
++      .as_ref()
++      .map(short_hash_hex)
++      .unwrap_or_else(|| "none".to_string());
+     let peer_count = self.collaboration.peers.len();
+     let pending_updates = self.collaboration_pending_updates.len();
++    let lag = self.collaboration_delta_updates_since_checkpoint;
+     let peer_details = if self.collaboration.peers.is_empty() {
+       "none".to_string()
+     } else {
+@@ -899,11 +937,31 @@ impl Workspace {
+         .collect::<Vec<_>>()
+         .join("\n")
+     };
++    let reconnect_reason = self
++      .collaboration
++      .reconnect_reason
++      .as_deref()
++      .unwrap_or("none");
++    let reconnect_frontier = self
++      .collaboration
++      .reconnect_frontier
++      .as_ref()
++      .map(|frontier| format!("{} bytes", frontier.len()))
++      .unwrap_or_else(|| "none".to_string());
++    let reconnect_pending_queue = if self.collaboration.reconnect_pending_queue.is_empty() {
++      "none".to_string()
++    } else {
++      self.collaboration.reconnect_pending_queue.join("\n")
++    };
++    let reconnect_rejected_update = self
++      .collaboration
++      .reconnect_rejected_update
++      .as_deref()
++      .unwrap_or("none");
++    let last_error = self.collaboration.last_error.as_deref().unwrap_or("None");
+     let detail = format!(
+-      "State: {:?}\nRole: {role}\nOwner host: {owner_host}\nPeers: {peer_count}\nQueued local updates: {pending_updates}\nPeer details:\n{peer_details}\nPanel: {panel}\nDocument: {document}\nFormat: {:?}\nPending join invite: {pending_invite}\nPending invite copy: {pending_invite_copy}\nLast error: {}",
+-      self.collaboration.state,
+-      self.collaboration.format_kind,
+-      self.collaboration.last_error.as_deref().unwrap_or("None"),
++      "State: {:?}\nRole: {role}\nOwner host: {owner_host}\nPeers: {peer_count}\nPending durable queue: {pending_updates}\nLag/repair count: {lag}\nLast source hash: {source_hash}\nReconnect reason: {reconnect_reason}\nReconnect frontier: {reconnect_frontier}\nReconnect pending queue:\n{reconnect_pending_queue}\nReconnect rejected update: {reconnect_rejected_update}\nPeer details:\n{peer_details}\nPanel: {panel}\nDocument: {document}\nFormat: {:?}\nPending join invite: {pending_invite}\nPending invite copy: {pending_invite_copy}\nLast error: {last_error}",
++      self.collaboration.state, self.collaboration.format_kind,
+     );
+     show_collaboration_prompt(window, cx, PromptLevel::Info, "Collaboration diagnostics", &detail);
+   }
+@@ -943,6 +1001,9 @@ impl Workspace {
+     self.editor_subscriptions.push((
+       id,
+       cx.observe(&editor, move |workspace, editor, cx| {
++        if workspace.active_document_id == Some(id) {
++          workspace.refresh_outline_tree(cx);
++        }
+         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
+         if workspace.outline_viewport_paragraph != viewport_paragraph {
+           workspace.outline_viewport_paragraph = viewport_paragraph;
+@@ -1578,9 +1639,9 @@ impl PanelKind {
+   async fn save(&self, window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp) -> PanelSaveOutcome {
+     match self {
+       PanelKind::Document { panel, editor } => {
+-        let needs_save_as = match editor.update(cx, |editor, _| editor.document_path().is_none()) {
++        let needs_save_as = match panel.update(cx, |panel, _| panel.path().is_none()) {
+           Ok(needs_save_as) => needs_save_as,
+-          Err(error) => return PanelSaveOutcome::Failed(format!("failed to access editor before save: {error}")),
++          Err(error) => return PanelSaveOutcome::Failed(format!("failed to access document panel before save: {error}")),
+         };
+         if needs_save_as {
+           let path = match prompt_for_panel_save_path(window_handle, cx, UNTITLED_DOCUMENT_NAME).await {
+@@ -1678,6 +1739,7 @@ impl Workspace {
+     self.collaboration_last_published_hash = None;
+     self.collaboration_delta_updates_since_checkpoint = 0;
+     self.collaboration.pending_invite_copy_role = None;
++    self.collaboration.clear_reconnect_diagnostics();
+     if !preserve_pending_updates {
+       self.collaboration_pending_updates.clear();
+     }
+@@ -1773,7 +1835,10 @@ impl Workspace {
+       loop {
+         let update = match updates.recv().await {
+           Ok(update) => update,
+-          Err(broadcast::error::RecvError::Lagged(_)) => continue,
++          Err(broadcast::error::RecvError::Lagged(count)) => {
++            collab_canary("host_subscriber_lagged", format!("missed={count}"));
++            continue;
++          },
+           Err(broadcast::error::RecvError::Closed) => break,
+         };
+         match update.kind {
+@@ -1785,31 +1850,89 @@ impl Workspace {
+             });
+           },
+           LiveUpdateKind::Wire(WireMessage::Update { application, .. }) if update.source_session_id.is_some() => {
+-            let source = match document_state.document.lock() {
+-              Ok(document) => document.clone(),
+-              Err(_) => {
+-                let _ = window_handle.update(cx, |_, _, cx| {
+-                  let _ = workspace.update(cx, |workspace, cx| {
+-                    if workspace.collaboration.panel_id == Some(panel_id) {
+-                      workspace.collaboration.state = SessionState::Failed;
+-                      workspace.collaboration.last_error = Some("Flowstate document state lock is poisoned".to_string());
+-                      cx.notify();
+-                    }
++            if collab_canary_enabled() {
++              collab_canary(
++                "host_remote_wire_update",
++                format!(
++                  "panel={panel_id} source_session={:?} application={}",
++                  update.source_session_id,
++                  update_application_label(application.as_ref())
++                ),
++              );
++            }
++            let mut optimistically_applied = false;
++            if let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
++              && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
++            {
++              let _ = window_handle.update(cx, |_, _, cx| {
++                let _ = workspace.update(cx, |workspace, cx| {
++                  if workspace.collaboration.panel_id == Some(panel_id)
++                    && let Some(editor) = workspace.document_editor_for_panel(panel_id, cx)
++                  {
++                    optimistically_applied = editor.update(cx, |editor, cx| {
++                      editor.clear_collaboration_edit();
++                      let applied = editor.apply_remote_operations(&operations, cx);
++                      editor.clear_collaboration_edit();
++                      applied
++                    });
++                  }
++                });
++              });
++            }
++            if optimistically_applied {
++              let _ = window_handle.update(cx, |_, _, cx| {
++                let _ = workspace.update(cx, |workspace, cx| {
++                  if workspace.collaboration.panel_id == Some(panel_id) {
++                    workspace.collaboration.last_error = None;
++                    cx.notify();
++                  }
++                });
++              });
++            } else {
++              let source = match document_state.document.lock() {
++                Ok(document) => document.clone(),
++                Err(_) => {
++                  let _ = window_handle.update(cx, |_, _, cx| {
++                    let _ = workspace.update(cx, |workspace, cx| {
++                      if workspace.collaboration.panel_id == Some(panel_id) {
++                        workspace.collaboration.state = SessionState::Failed;
++                        workspace.collaboration.last_error = Some("Flowstate document state lock is poisoned".to_string());
++                        cx.notify();
++                      }
++                    });
+                   });
++                  break;
++                },
++              };
++              let _ = window_handle.update(cx, |_, _, cx| {
++                let _ = workspace.update(cx, |workspace, cx| {
++                  if collab_canary_enabled() {
++                    collab_canary(
++                      "host_apply_to_panel",
++                      format!("panel={panel_id} application={}", update_application_label(application.as_ref())),
++                    );
++                  }
++                  if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, source, application, cx) {
++                    workspace.collaboration.last_error = Some(format!("{error:#}"));
++                  } else {
++                    workspace.collaboration.last_error = None;
++                  }
++                  cx.notify();
+                 });
+-                break;
+-              },
+-            };
+-            let _ = window_handle.update(cx, |_, _, cx| {
+-              let _ = workspace.update(cx, |workspace, cx| {
+-                if let Err(error) = workspace.apply_collaboration_source_to_panel(panel_id, source, application, cx) {
+-                  workspace.collaboration.last_error = Some(format!("{error:#}"));
+-                } else {
+-                  workspace.collaboration.last_error = None;
+-                }
+-                cx.notify();
+               });
+-            });
++            }
++          },
++          LiveUpdateKind::Wire(WireMessage::Update { application, .. }) => {
++            if collab_canary_enabled() {
++              collab_canary(
++                "host_ignored_local_or_unscoped_update",
++                format!(
++                  "source_session={:?} application={}",
++                  update.source_session_id,
++                  update_application_label(application.as_ref())
++                ),
++              );
++            }
+           },
+           LiveUpdateKind::Wire(_) => {},
+         }
+@@ -1848,10 +1971,7 @@ impl Workspace {
+       SessionEvent::StateChanged(state) => {
+         self.collaboration.state = state;
+       },
+-      SessionEvent::UpdateRejected { reason, .. }
+-      | SessionEvent::AssetTransferFailed { reason, .. }
+-      | SessionEvent::FatalError(reason)
+-      | SessionEvent::Error(reason) => {
++      SessionEvent::UpdateRejected { reason, .. } | SessionEvent::AssetRejected { reason, .. } => {
+         self.collaboration.last_error = Some(reason);
+       },
+       SessionEvent::Presence(presence) => {
+@@ -1889,8 +2009,8 @@ impl Workspace {
+       },
+       SessionEvent::SnapshotApplied { .. }
+       | SessionEvent::UpdateApplied { .. }
+-      | SessionEvent::AssetReceived { .. }
+-      | SessionEvent::Reconnecting => {},
++      | SessionEvent::UpdateHint { .. }
++      | SessionEvent::AssetReceived { .. } => {},
+     }
+     cx.notify();
+   }
+@@ -1919,12 +2039,13 @@ impl Workspace {
+     let Some(editor) = self.document_editor_for_panel(panel_id, cx) else {
+       return;
+     };
++    let document = editor.read(cx).document().clone();
+     let remote_carets = self
+       .collaboration
+       .peers
+       .iter()
+       .filter_map(|(session_id, peer)| {
+-        let offset = parse_db8_presence_cursor(peer.cursor.as_deref()?)?;
++        let offset = resolve_db8_presence_cursor(peer.cursor.as_deref()?, &document)?;
+         Some(ExternalCaret {
+           offset,
+           color_rgb: remote_caret_color(session_id),
+@@ -1941,6 +2062,17 @@ impl Workspace {
+     application: Option<UpdateApplication>,
+     cx: &mut Context<Self>,
+   ) -> anyhow::Result<()> {
++    if collab_canary_enabled() {
++      collab_canary(
++        "apply_source_enter",
++        format!(
++          "panel={panel_id} source_format={:?} source_doc={:?} application={}",
++          source.format_kind(),
++          source.document_id(),
++          update_application_label(application.as_ref())
++        ),
++      );
++    }
+     if self.collaboration.panel_id != Some(panel_id) {
+       return Ok(());
+     }
+@@ -1958,7 +2090,6 @@ impl Workspace {
+     {
+       anyhow::bail!("remote collaboration update targets a different format");
+     }
+-    self.collaboration_last_published_hash = source.projection_hash().ok();
+     match source.format_kind() {
+       FormatKind::Db8 => {
+         let Some(editor) = self.document_editor_for_panel(panel_id, cx) else {
+@@ -1967,13 +2098,37 @@ impl Workspace {
+         if let Some(UpdateApplication::Db8CanonicalOperations(bytes)) = application.as_ref()
+           && let Some(operations) = crate::rich_text_element::decode_canonical_operations(bytes)
+         {
+-          editor.update(cx, |editor, cx| {
++          if collab_canary_enabled() {
++            collab_canary("apply_db8_ops", format!("ops={} bytes={}", operations.len(), bytes.len()));
++          }
++          let applied = editor.update(cx, |editor, cx| {
+             editor.clear_collaboration_edit();
+-            editor.apply_remote_operations(&operations, cx);
++            let applied = editor.apply_remote_operations(&operations, cx);
+             editor.clear_collaboration_edit();
++            applied
+           });
+-          return Ok(());
++          if applied {
++            return Ok(());
++          }
++          if collab_canary_enabled() {
++            collab_canary(
++              "apply_db8_ops_fallback",
++              format!(
++                "ops={} bytes={} application={}",
++                operations.len(),
++                bytes.len(),
++                update_application_label(application.as_ref())
++              ),
++            );
++          }
+         }
++        if collab_canary_enabled() {
++          collab_canary(
++            "apply_db8_replace",
++            format!("application={}", update_application_label(application.as_ref())),
++          );
++        }
++        self.collaboration_last_published_hash = source.projection_hash().ok();
+         let JoinedWorkspaceDocument::Document(document) = collab_document_to_workspace_document(source)? else {
+           anyhow::bail!("remote DB8 update materialized as a different document kind");
+         };
+@@ -1990,9 +2145,19 @@ impl Workspace {
+         if let Some(UpdateApplication::Fl0ActionBundle(bytes)) = application.as_ref()
+           && let Ok(actions) = postcard::from_bytes::<Vec<flowstate_flow::Action>>(bytes)
+         {
++          if collab_canary_enabled() {
++            collab_canary("apply_fl0_actions", format!("actions={} bytes={}", actions.len(), bytes.len()));
++          }
+           editor.update(cx, |editor, cx| editor.apply_remote_actions_from_collaboration(&actions, cx));
+           return Ok(());
+         }
++        if collab_canary_enabled() {
++          collab_canary(
++            "apply_fl0_replace",
++            format!("application={}", update_application_label(application.as_ref())),
++          );
++        }
++        self.collaboration_last_published_hash = source.projection_hash().ok();
+         let JoinedWorkspaceDocument::Flow(document) = collab_document_to_workspace_document(source)? else {
+           anyhow::bail!("remote FL0 update materialized as a different document kind");
+         };
+@@ -2011,55 +2176,70 @@ impl Workspace {
+     if self.collaboration.panel_id != Some(panel_id) {
+       return;
+     }
+-    let application = editor
+-      .read(cx)
+-      .last_collaboration_operation_bytes()
+-      .map(UpdateApplication::Db8CanonicalOperations);
+-    if let Some(application) = application
+-      && self.publish_collaboration_application_update(application, "DB8")
++    let (has_collaboration_edit, repair_required, application, source_mutations) = {
++      let editor = editor.read(cx);
++      let collaboration_edit = editor.last_collaboration_edit();
++      (
++        collaboration_edit.is_some(),
++        collaboration_edit.is_some_and(|edit| edit.repair_required),
++        editor
++          .last_collaboration_operation_bytes()
++          .map(UpdateApplication::Db8CanonicalOperations),
++        editor
++          .last_collaboration_source_mutations()
++          .map(<[Db8CollabSourceMutation]>::to_vec)
++          .unwrap_or_default(),
++      )
++    };
++    if !has_collaboration_edit {
++      if collab_canary_enabled() {
++        collab_canary("publish_db8_skip_no_local_edit", "no collaboration edit captured");
++      }
++      return;
++    }
++    if collab_canary_enabled() {
++      collab_canary(
++        "publish_db8_edit",
++        format!(
++          "application={} source_mutations={} repair_required={}",
++          update_application_label(application.as_ref()),
++          source_mutations.len(),
++          repair_required
++        ),
++      );
++    }
++    editor.update(cx, |editor, _| editor.clear_collaboration_edit());
++    if !repair_required
++      && let Some(application) = application.as_ref()
++      && self.publish_db8_granular_collaboration_update(&source_mutations, application.clone())
+     {
+-      self.schedule_db8_collaboration_checkpoint(panel_id, editor, cx);
++      if collab_canary_enabled() {
++        collab_canary("publish_db8_granular_taken", format!("source_mutations={}", source_mutations.len()));
++      }
++      self.collaboration_delta_updates_since_checkpoint = 0;
+       return;
+     }
+-    let document = editor.read(cx).document().clone();
++
++    if collab_canary_enabled() {
++      collab_canary(
++        "publish_db8_source_fallback",
++        format!(
++          "application={} source_mutations={}",
++          update_application_label(application.as_ref()),
++          source_mutations.len()
++        ),
++      );
++    }
++    let mut document = editor.read(cx).document().clone();
+     let document_id = self
+       .collaboration
+       .document_id
+-      .unwrap_or(CollabDocumentId(panel_id));
+-    let source = db8_collaboration_source(&document, document_id).map(|(source, _)| source);
+-    self.publish_collaboration_source(source, "DB8", None);
++      .unwrap_or_else(|| ensure_db8_document_id(&mut document));
++    let source = db8_collaboration_source(&mut document, document_id).map(|(source, _)| source);
++    self.publish_collaboration_source(source, "DB8", application);
+     self.collaboration_delta_updates_since_checkpoint = 0;
+   }
+ 
+-  fn schedule_db8_collaboration_checkpoint(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+-    self.collaboration_delta_updates_since_checkpoint = self
+-      .collaboration_delta_updates_since_checkpoint
+-      .saturating_add(1);
+-    if self.collaboration_delta_updates_since_checkpoint < Self::COLLABORATION_CHECKPOINT_DELTA_INTERVAL {
+-      return;
+-    }
+-    self.collaboration_delta_updates_since_checkpoint = 0;
+-    let Some(document_id) = self.collaboration.document_id else {
+-      return;
+-    };
+-    let runtime_id = self.collaboration_runtime_id;
+-    let document = editor.read(cx).document().clone();
+-    let build_source = cx
+-      .background_executor()
+-      .spawn(async move { db8_collaboration_source(&document, document_id).map(|(source, _)| source) });
+-    cx.spawn(async move |workspace, cx| {
+-      let source = build_source.await;
+-      workspace.update(cx, |workspace, cx| {
+-        if workspace.collaboration_runtime_id != runtime_id || workspace.collaboration.panel_id != Some(panel_id) {
+-          return;
+-        }
+-        workspace.publish_collaboration_source(source, "DB8 checkpoint", None);
+-        cx.notify();
+-      })
+-    })
+-    .detach();
+-  }
+-
+   fn publish_fl0_collaboration_edit(&mut self, panel_id: Uuid, editor: Entity<FlowEditor>, cx: &mut Context<Self>) {
+     if self.collaboration_host.is_none() && self.collaboration_client_updates.is_none() && !self.can_queue_collaboration_update(panel_id) {
+       return;
+@@ -2113,8 +2293,91 @@ impl Workspace {
+     .detach();
+   }
+ 
++  fn publish_db8_granular_collaboration_update(&mut self, mutations: &[Db8CollabSourceMutation], application: UpdateApplication) -> bool {
++    if mutations.is_empty() {
++      return false;
++    }
++    let granular_mutations = db8_source_mutations_to_granular(mutations);
++    collab_canary(
++      "publish_db8_granular_enter",
++      format!(
++        "mutations={} kinds={} application={}",
++        mutations.len(),
++        db8_mutation_labels(mutations),
++        update_application_label(Some(&application))
++      ),
++    );
++    if let Some(sender) = &self.collaboration_client_updates {
++      collab_canary(
++        "publish_db8_granular_client_queue",
++        format!(
++          "mutations={} application={}",
++          granular_mutations.len(),
++          update_application_label(Some(&application))
++        ),
++      );
++      if let Err(error) = sender.send(PendingCollaborationUpdate::GranularMutations {
++        mutations: granular_mutations,
++        application,
++      }) {
++        self.collaboration_client_updates = None;
++        let dropped_oldest =
++          push_bounded_pending_collaboration_update(&mut self.collaboration_pending_updates, error.0, Self::MAX_PENDING_COLLABORATION_UPDATES);
++        if dropped_oldest {
++          self
++            .collaboration
++            .last_error
++            .replace("DB8 collaboration update queue is full; dropped the oldest pending granular mutation batch.".to_string());
++        }
++      }
++      return true;
++    }
++    if let Some(host) = self.collaboration_host.as_ref() {
++      collab_canary(
++        "publish_db8_granular_host_apply",
++        format!("mutations={} kinds={}", mutations.len(), db8_mutation_labels(mutations)),
++      );
++      let result = publish_granular_source_mutations_to_host(host, &granular_mutations, application);
++      if let Err(error) = result {
++        collab_canary("publish_db8_granular_host_error", format!("{error:#}"));
++        return false;
++      }
++      return true;
++    }
++    if self.can_queue_collaboration_update_for_active_panel() {
++      collab_canary(
++        "publish_db8_granular_pending_queue",
++        format!(
++          "mutations={} application={}",
++          granular_mutations.len(),
++          update_application_label(Some(&application))
++        ),
++      );
++      let dropped_oldest = push_bounded_pending_collaboration_update(
++        &mut self.collaboration_pending_updates,
++        PendingCollaborationUpdate::GranularMutations {
++          mutations: granular_mutations,
++          application,
++        },
++        Self::MAX_PENDING_COLLABORATION_UPDATES,
++      );
++      if dropped_oldest {
++        self
++          .collaboration
++          .last_error
++          .replace("DB8 collaboration update queue is full; dropped the oldest pending granular mutation batch.".to_string());
++      }
++      return true;
++    }
++    false
++  }
++
+   fn publish_collaboration_application_update(&mut self, application: UpdateApplication, label: &str) -> bool {
+     if let Some(sender) = &self.collaboration_client_updates {
++      collab_canary(
++        "publish_application_client_queue",
++        format!("label={label} application={}", update_application_label(Some(&application))),
++      );
+       if let Err(error) = sender.send(PendingCollaborationUpdate::Application { application }) {
+         self.collaboration_client_updates = None;
+         let update = error.0;
+@@ -2129,6 +2392,10 @@ impl Workspace {
+       return true;
+     }
+     if let Some(host) = self.collaboration_host.as_ref() {
++      collab_canary(
++        "publish_application_host",
++        format!("label={label} application={}", update_application_label(Some(&application))),
++      );
+       if let Err(error) = host.publish_application_update(application) {
+         self.collaboration.last_error = Some(format!("{error:#}"));
+       }
+@@ -2149,6 +2416,7 @@ impl Workspace {
+     }
+     false
+   }
++
+   fn publish_collaboration_source(&mut self, source: Option<CollabDocument>, label: &str, application: Option<UpdateApplication>) {
+     let Some(source) = source else {
+       self
+@@ -2170,7 +2438,20 @@ impl Workspace {
+         let update = error.0;
+         self.collaboration_client_updates = None;
+         match update {
+-          PendingCollaborationUpdate::Source { source, hash, .. } => self.queue_pending_collaboration_update(source, label, hash),
++          PendingCollaborationUpdate::Source { source, application, hash } => {
++            self.queue_pending_collaboration_update(source, label, application, hash);
++          },
++          update @ PendingCollaborationUpdate::GranularMutations { .. } => {
++            let dropped_oldest = push_bounded_pending_collaboration_update(
++              &mut self.collaboration_pending_updates,
++              update,
++              Self::MAX_PENDING_COLLABORATION_UPDATES,
++            );
++            if dropped_oldest {
++              let message = format!("{label} collaboration update queue is full; dropped the oldest pending granular mutation batch.");
++              self.collaboration.last_error.replace(message);
++            }
++          },
+           update @ PendingCollaborationUpdate::Application { .. } => {
+             let dropped_oldest = push_bounded_pending_collaboration_update(
+               &mut self.collaboration_pending_updates,
+@@ -2178,9 +2459,10 @@ impl Workspace {
+               Self::MAX_PENDING_COLLABORATION_UPDATES,
+             );
+             if dropped_oldest {
+-              self.collaboration.last_error.replace(format!(
+-                "{label} collaboration update queue is full; dropped the oldest pending application update."
+-              ));
++              self
++                .collaboration
++                .last_error
++                .replace(format!("{label} collaboration update queue is full; dropped the oldest pending update."));
+             }
+           },
+           PendingCollaborationUpdate::Presence { .. } => {},
+@@ -2201,7 +2483,7 @@ impl Workspace {
+       return;
+     }
+     if self.can_queue_collaboration_update_for_active_panel() {
+-      self.queue_pending_collaboration_update(source, label, hash);
++      self.queue_pending_collaboration_update(source, label, application, hash);
+     }
+   }
+ 
+@@ -2214,14 +2496,16 @@ impl Workspace {
+       && self.collaboration.role.is_some_and(|role| role != "Viewer")
+   }
+ 
+-  fn queue_pending_collaboration_update(&mut self, source: CollabDocument, label: &str, hash: Option<[u8; 32]>) {
++  fn queue_pending_collaboration_update(
++    &mut self,
++    source: CollabDocument,
++    label: &str,
++    application: Option<UpdateApplication>,
++    hash: Option<[u8; 32]>,
++  ) {
+     let dropped_oldest = push_bounded_pending_collaboration_update(
+       &mut self.collaboration_pending_updates,
+-      PendingCollaborationUpdate::Source {
+-        source,
+-        application: None,
+-        hash,
+-      },
++      PendingCollaborationUpdate::Source { source, application, hash },
+       Self::MAX_PENDING_COLLABORATION_UPDATES,
+     );
+     if dropped_oldest {
+@@ -2236,12 +2520,14 @@ impl Workspace {
+     let mut drained = 0;
+     while let Some(update) = self.collaboration_pending_updates.pop_front() {
+       let hash = update.hash();
++      let rejected_label = update.diagnostic_label().to_string();
+       if let Err(error) = sender.send(update) {
+         self.collaboration_pending_updates.push_front(error.0);
+         self
+           .collaboration
+           .last_error
+           .replace("Failed to replay queued collaboration updates after reconnect.".to_string());
++        self.collaboration.reconnect_rejected_update = Some(rejected_label);
+         break;
+       }
+       self.collaboration_last_published_hash = hash;
+@@ -2257,14 +2543,19 @@ impl Workspace {
+     let mut drained = 0;
+     while let Some(update) = self.collaboration_pending_updates.pop_front() {
+       let hash = update.hash();
++      let rejected_label = update.diagnostic_label().to_string();
+       let result = match &update {
+         PendingCollaborationUpdate::Source { source, application, .. } => host.publish_update_from_source(source, application.clone()),
++        PendingCollaborationUpdate::GranularMutations { mutations, application } => {
++          publish_granular_source_mutations_to_host(host, mutations, application.clone())
++        },
+         PendingCollaborationUpdate::Application { application } => host.publish_application_update(application.clone()),
+         PendingCollaborationUpdate::Presence { cursor } => host.publish_presence("", cursor.clone(), None, None),
+       };
+       if let Err(error) = result {
+         self.collaboration_pending_updates.push_front(update);
+         self.collaboration.last_error = Some(format!("{error:#}"));
++        self.collaboration.reconnect_rejected_update = Some(rejected_label);
+         break;
+       }
+       self.collaboration_last_published_hash = hash;
+@@ -2283,6 +2574,7 @@ struct CollaborationHostInput {
+ enum CollaborationHostSnapshot {
+   Db8 {
+     panel_id: Uuid,
++    document_id: CollabDocumentId,
+     document: Box<Document>,
+   },
+   Fl0 {
+@@ -2299,7 +2591,10 @@ impl CollaborationHostSnapshot {
+   }
+ 
+   const fn document_id(&self) -> CollabDocumentId {
+-    CollabDocumentId(self.panel_id())
++    match self {
++      Self::Db8 { document_id, .. } => *document_id,
++      Self::Fl0 { panel_id, .. } => CollabDocumentId(*panel_id),
++    }
+   }
+ 
+   const fn format_kind(&self) -> FormatKind {
+@@ -2311,15 +2606,17 @@ impl CollaborationHostSnapshot {
+ 
+   fn into_host_input(self) -> Option<CollaborationHostInput> {
+     match self {
+-      Self::Db8 { panel_id, document } => {
+-        let (document, assets) = db8_collaboration_source(&document, CollabDocumentId(panel_id))?;
++      Self::Db8 {
++        document_id, mut document, ..
++      } => {
++        let (document, assets) = db8_collaboration_source(&mut document, document_id)?;
+         Some(CollaborationHostInput {
+           source_hash: document.projection_hash().ok(),
+           assets,
+           document,
+         })
+       },
+-      Self::Fl0 { panel_id: _, document } => {
++      Self::Fl0 { document, .. } => {
+         collaboration_document_from_native_bytes(flowstate_flow::fl0_bytes(&document).ok()?, FormatKind::Fl0).map(|document| {
+           CollaborationHostInput {
+             source_hash: document.projection_hash().ok(),
+@@ -2341,9 +2638,12 @@ impl Workspace {
+   fn active_collaboration_host_snapshot(&self, cx: &App) -> Option<CollaborationHostSnapshot> {
+     let panel_id = self.active_document_id?;
+     if let Some(editor) = self.active_editor.as_ref() {
++      let mut document = editor.read(cx).document().clone();
++      let document_id = ensure_db8_document_id(&mut document);
+       return Some(CollaborationHostSnapshot::Db8 {
+         panel_id,
+-        document: Box::new(editor.read(cx).document().clone()),
++        document_id,
++        document: Box::new(document),
+       });
+     }
+     let editor = self.active_flow.as_ref()?;
+@@ -2355,9 +2655,12 @@ impl Workspace {
+ 
+   fn collaboration_host_snapshot_for_panel(&self, panel_id: Uuid, cx: &App) -> Option<CollaborationHostSnapshot> {
+     if let Some(editor) = self.document_editor_for_panel(panel_id, cx) {
++      let mut document = editor.read(cx).document().clone();
++      let document_id = ensure_db8_document_id(&mut document);
+       return Some(CollaborationHostSnapshot::Db8 {
+         panel_id,
+-        document: Box::new(editor.read(cx).document().clone()),
++        document_id,
++        document: Box::new(document),
+       });
+     }
+     let editor = self.flow_editor_for_panel(panel_id, cx)?;
+@@ -2374,6 +2677,10 @@ enum PendingCollaborationUpdate {
+     application: Option<UpdateApplication>,
+     hash: Option<[u8; 32]>,
+   },
++  GranularMutations {
++    mutations: Vec<GranularSourceMutation>,
++    application: UpdateApplication,
++  },
+   Application {
+     application: UpdateApplication,
+   },
+@@ -2386,9 +2693,77 @@ impl PendingCollaborationUpdate {
+   const fn hash(&self) -> Option<[u8; 32]> {
+     match self {
+       Self::Source { hash, .. } => *hash,
+-      Self::Application { .. } | Self::Presence { .. } => None,
++      Self::GranularMutations { .. } | Self::Application { .. } | Self::Presence { .. } => None,
++    }
++  }
++
++  fn diagnostic_label(&self) -> &'static str {
++    match self {
++      Self::Source { .. } => "durable source update",
++      Self::GranularMutations { .. } => "granular source mutations",
++      Self::Application { .. } => "application hint",
++      Self::Presence { .. } => "presence hint",
++    }
++  }
++}
++
++fn coalesce_pending_collaboration_update(
++  queue: &mut VecDeque<PendingCollaborationUpdate>,
++  update: &mut Option<PendingCollaborationUpdate>,
++) -> bool {
++  let Some(PendingCollaborationUpdate::GranularMutations { mutations, application }) = update.as_mut() else {
++    return false;
++  };
++  let Some(PendingCollaborationUpdate::GranularMutations {
++    mutations: pending_mutations,
++    application: pending_application,
++  }) = queue.back_mut()
++  else {
++    return false;
++  };
++  if pending_application != application {
++    return false;
++  }
++  pending_mutations.append(mutations);
++  true
++}
++
++fn merge_outbound_collaboration_update(
++  current: &mut PendingCollaborationUpdate,
++  next: PendingCollaborationUpdate,
++) -> Result<(), PendingCollaborationUpdate> {
++  match (current, next) {
++    (
++      PendingCollaborationUpdate::GranularMutations { mutations, application },
++      PendingCollaborationUpdate::GranularMutations {
++        mutations: mut next_mutations,
++        application: next_application,
++      },
++    ) if *application == next_application => {
++      mutations.append(&mut next_mutations);
++      Ok(())
++    },
++    (_, next) => Err(next),
++  }
++}
++
++fn collect_outbound_update_batch(
++  first: PendingCollaborationUpdate,
++  update_rx: &mut mpsc::UnboundedReceiver<PendingCollaborationUpdate>,
++) -> Vec<PendingCollaborationUpdate> {
++  let mut updates = vec![first];
++  for _ in 0..8 {
++    let Ok(next) = update_rx.try_recv() else {
++      break;
++    };
++    if let Some(last) = updates.last_mut() {
++      match merge_outbound_collaboration_update(last, next) {
++        Ok(()) => continue,
++        Err(next) => updates.push(next),
++      }
+     }
+   }
++  updates
+ }
+ 
+ fn push_bounded_pending_collaboration_update(
+@@ -2396,6 +2771,13 @@ fn push_bounded_pending_collaboration_update(
+   update: PendingCollaborationUpdate,
+   max_len: usize,
+ ) -> bool {
++  let mut update = Some(update);
++  if coalesce_pending_collaboration_update(queue, &mut update) {
++    return false;
++  }
++  let Some(update) = update else {
++    return false;
++  };
+   if max_len == 0 {
+     queue.clear();
+     return true;
+@@ -2408,12 +2790,147 @@ fn push_bounded_pending_collaboration_update(
+   dropped_oldest
+ }
+ 
++fn collab_canary_enabled() -> bool {
++  std::env::var_os("FLOWSTATE_COLLAB_CANARY").is_some()
++}
++
++fn collab_canary(event: &str, detail: impl std::fmt::Display) {
++  if collab_canary_enabled() {
++    eprintln!("[FLOWSTATE_COLLAB_CANARY workspace::{event}] {detail}");
++  }
++}
++
++fn update_application_label(application: Option<&UpdateApplication>) -> String {
++  match application {
++    Some(UpdateApplication::Db8CanonicalOperations(bytes)) => format!("db8_ops:{}b", bytes.len()),
++    Some(UpdateApplication::Fl0ActionBundle(bytes)) => format!("fl0_actions:{}b", bytes.len()),
++    None => "none".to_string(),
++  }
++}
++
++fn short_hash_hex(hash: &[u8; 32]) -> String {
++  const HEX: &[u8; 16] = b"0123456789abcdef";
++  let mut output = String::with_capacity(16);
++  for byte in &hash[..8] {
++    output.push(HEX[(byte >> 4) as usize] as char);
++    output.push(HEX[(byte & 0x0f) as usize] as char);
++  }
++  output
++}
++
++fn db8_mutation_label(mutation: &Db8CollabSourceMutation) -> &'static str {
++  match mutation {
++    Db8CollabSourceMutation::InsertText { .. } => "insert_text",
++    Db8CollabSourceMutation::DeleteText { .. } => "delete_text",
++    Db8CollabSourceMutation::MarkText { .. } => "mark_text",
++    Db8CollabSourceMutation::UnmarkText { .. } => "unmark_text",
++    Db8CollabSourceMutation::SetTextMetadata { .. } => "set_text_metadata",
++    Db8CollabSourceMutation::ClearTextMetadata { .. } => "clear_text_metadata",
++  }
++}
++
++fn db8_mutation_labels(mutations: &[Db8CollabSourceMutation]) -> String {
++  let mut label = String::new();
++  for (ix, mutation) in mutations.iter().enumerate() {
++    if ix > 0 {
++      label.push(',');
++    }
++    label.push_str(db8_mutation_label(mutation));
++  }
++  label
++}
++
++fn db8_source_mutations_to_granular(mutations: &[Db8CollabSourceMutation]) -> Vec<GranularSourceMutation> {
++  let mut text_ids: BTreeMap<String, String> = BTreeMap::new();
++  let mut mark_keys: BTreeMap<String, String> = BTreeMap::new();
++  mutations
++    .iter()
++    .map(|mutation| db8_source_mutation_to_granular_interned(mutation, &mut text_ids, &mut mark_keys))
++    .collect()
++}
++
++fn intern_string(pool: &mut BTreeMap<String, String>, value: &str) -> String {
++  if let Some(interned) = pool.get(value) {
++    return interned.clone();
++  }
++  let owned = value.to_string();
++  pool.insert(owned.clone(), owned.clone());
++  owned
++}
++
++fn db8_source_mutation_to_granular_interned(
++  mutation: &Db8CollabSourceMutation,
++  text_ids: &mut BTreeMap<String, String>,
++  mark_keys: &mut BTreeMap<String, String>,
++) -> GranularSourceMutation {
++  match mutation {
++    Db8CollabSourceMutation::InsertText { text_id, byte_offset, text } => GranularSourceMutation::InsertText {
++      text_id: intern_string(text_ids, text_id),
++      byte_offset: *byte_offset,
++      text: text.clone(),
++    },
++    Db8CollabSourceMutation::DeleteText {
++      text_id,
++      byte_offset,
++      byte_len,
++    } => GranularSourceMutation::DeleteText {
++      text_id: intern_string(text_ids, text_id),
++      byte_offset: *byte_offset,
++      byte_len: *byte_len,
++    },
++    Db8CollabSourceMutation::MarkText { text_id, range, key, value } => GranularSourceMutation::MarkText {
++      text_id: intern_string(text_ids, text_id),
++      range: range.clone(),
++      key: intern_string(mark_keys, key),
++      value: db8_granular_value(value),
++    },
++    Db8CollabSourceMutation::UnmarkText { text_id, range, key } => GranularSourceMutation::UnmarkText {
++      text_id: intern_string(text_ids, text_id),
++      range: range.clone(),
++      key: intern_string(mark_keys, key),
++    },
++    Db8CollabSourceMutation::SetTextMetadata { text_id, metadata } => GranularSourceMutation::SetTextMetadata {
++      text_id: intern_string(text_ids, text_id),
++      metadata: metadata.clone(),
++    },
++    Db8CollabSourceMutation::ClearTextMetadata { text_id } => GranularSourceMutation::ClearTextMetadata {
++      text_id: intern_string(text_ids, text_id),
++    },
++  }
++}
++
++fn publish_granular_source_mutations_to_host(
++  host: &HostedCollaboration,
++  mutations: &[GranularSourceMutation],
++  application: UpdateApplication,
++) -> anyhow::Result<()> {
++  let bytes = host
++    .document_state()
++    .document
++    .lock()
++    .map_err(|_| anyhow::anyhow!("Flowstate document state lock is poisoned"))?
++    .apply_granular_source_mutations(Role::Owner, mutations)?;
++  if bytes.is_empty() {
++    anyhow::bail!("granular collaboration mutation batch did not produce a durable update");
++  }
++  host.publish_update(bytes, Some(application))
++}
++
++fn db8_granular_value(value: &Db8GranularValue) -> GranularValue {
++  match value {
++    Db8GranularValue::Bool(value) => GranularValue::Bool(*value),
++    Db8GranularValue::String(value) => GranularValue::String(value.clone()),
++  }
++}
++
++// Workspace document ops flow through flowstate-document / gpui-flowtext before collab durability and sync transport.
++// The rich_text_element/editor path in this crate is legacy compatibility glue; keep collaboration fixes upstream in gpui-flowtext.
+ fn collaboration_document_from_native_bytes(bytes: Vec<u8>, format_kind: FormatKind) -> Option<CollabDocument> {
+   let decoded = decode_native_file(&bytes, format_kind).ok()?;
+   CollabDocument::from_snapshot(&decoded.snapshot, Some(format_kind), Some(decoded.manifest.document_id)).ok()
+ }
+ 
+-fn db8_collaboration_source(document: &Document, document_id: CollabDocumentId) -> Option<(CollabDocument, AssetStore)> {
++fn db8_collaboration_source(document: &mut Document, document_id: CollabDocumentId) -> Option<(CollabDocument, AssetStore)> {
+   let created_by_actor = ActorId::new();
+   let source = db8_collab_document_with_id(document, document_id, created_by_actor)
+     .ok()?
+@@ -2503,11 +3020,61 @@ fn show_save_failed(window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, det
+   });
+ }
+ fn db8_presence_cursor(editor: &RichTextEditor) -> Option<String> {
++  let document = editor.document().clone();
++  if let Some(payload) = db8_presence_payload(editor, &document) {
++    return flowstate_document::serialize_db8_presence_payload(&payload);
++  }
+   let selection = editor.selection();
+   (selection.anchor == selection.head).then(|| format!("db8:{}:{}", selection.head.paragraph, selection.head.byte))
+ }
+ 
+-fn parse_db8_presence_cursor(cursor: &str) -> Option<DocumentOffset> {
++fn db8_presence_payload(editor: &RichTextEditor, document: &Document) -> Option<flowstate_document::Db8PresencePayload> {
++  let selection = editor.selection();
++  if let Some(target) = db8_presence_target(editor, document) {
++    if selection.anchor == selection.head {
++      return Some(flowstate_document::Db8PresencePayload::Caret { target });
++    }
++    let anchor = db8_presence_target_for_offset(document, selection.anchor)?;
++    let head = db8_presence_target_for_offset(document, selection.head)?;
++    return Some(flowstate_document::Db8PresencePayload::Range { anchor, head });
++  }
++  None
++}
++
++fn db8_presence_target(editor: &RichTextEditor, document: &Document) -> Option<flowstate_document::Db8PresenceTarget> {
++  let selection = editor.selection();
++  if selection.anchor != selection.head {
++    return None;
++  }
++  editor
++    .selected_block_kind()
++    .and_then(|kind| db8_presence_block_target(kind, document, selection.head.paragraph))
++    .or_else(|| db8_presence_target_for_offset(document, selection.head))
++}
++
++fn db8_presence_target_for_offset(document: &Document, offset: DocumentOffset) -> Option<flowstate_document::Db8PresenceTarget> {
++  Some(flowstate_document::Db8PresenceTarget::Paragraph {
++    paragraph_id: document.ids.paragraph_ids.get(offset.paragraph).copied()?,
++    byte: offset.byte,
++  })
++}
++
++fn db8_presence_block_target(kind: &str, document: &Document, paragraph_ix: usize) -> Option<flowstate_document::Db8PresenceTarget> {
++  let block_ix = flowstate_document::block_ix_for_paragraph(document, paragraph_ix)?;
++  let block_id = document.ids.block_ids.get(block_ix).copied()?;
++  match kind {
++    "table" | "table-cell" | "image" | "equation" => Some(flowstate_document::Db8PresenceTarget::Block { block_id }),
++    _ => None,
++  }
++}
++
++fn resolve_db8_presence_cursor(cursor: &str, document: &Document) -> Option<DocumentOffset> {
++  if let Some(payload) = flowstate_document::parse_db8_presence_payload(cursor) {
++    return match payload {
++      flowstate_document::Db8PresencePayload::Caret { target } => resolve_db8_presence_target(&target, document),
++      flowstate_document::Db8PresencePayload::Range { anchor, .. } => resolve_db8_presence_target(&anchor, document),
++    };
++  }
+   let mut parts = cursor.split(':');
+   if parts.next()? != "db8" {
+     return None;
+@@ -2520,6 +3087,20 @@ fn parse_db8_presence_cursor(cursor: &str) -> Option<DocumentOffset> {
+   Some(DocumentOffset { paragraph, byte })
+ }
+ 
++fn resolve_db8_presence_target(target: &flowstate_document::Db8PresenceTarget, document: &Document) -> Option<DocumentOffset> {
++  match target {
++    flowstate_document::Db8PresenceTarget::Paragraph { paragraph_id, byte } => Some(DocumentOffset {
++      paragraph: document
++        .ids
++        .paragraph_ids
++        .iter()
++        .position(|candidate| candidate == paragraph_id)?,
++      byte: *byte,
++    }),
++    flowstate_document::Db8PresenceTarget::Block { .. } | flowstate_document::Db8PresenceTarget::TableCell { .. } => None,
++  }
++}
++
+ fn remote_caret_color(session_id: &SessionId) -> u32 {
+   let bytes = session_id.0.as_bytes();
+   let hue = bytes
+@@ -2582,3 +3163,30 @@ fn is_flow_path(path: &Path) -> bool {
+     .and_then(|extension| extension.to_str())
+     .is_some_and(|extension| extension.eq_ignore_ascii_case("fl0"))
+ }
++#[cfg(test)]
++mod documents_collaboration_tests {
++  use super::*;
++
++  #[test]
++  fn db8_collaboration_source_keeps_a_stable_document_id() {
++    let mut document = crate::rich_text_element::document_from_paragraphs(
++      DocumentTheme::default(),
++      vec![crate::rich_text_element::DocumentParagraphInput {
++        style: ParagraphStyle::Normal,
++        runs: vec![crate::rich_text_element::DocumentRunInput {
++          text: "alpha".to_string(),
++          styles: crate::rich_text_element::RunStyles::default(),
++        }],
++      }],
++    );
++    document.ids.document_id = 0;
++
++    let document_id = ensure_db8_document_id(&mut document);
++    let (source, _) = db8_collaboration_source(&mut document, document_id).expect("stable DB8 source");
++    let (source_again, _) = db8_collaboration_source(&mut document, document_id).expect("stable DB8 source");
++
++    assert_eq!(source.document_id(), document_id);
++    assert_eq!(source_again.document_id(), document_id);
++    assert_eq!(document.ids.document_id, document_id.0.as_u128());
++  }
++}

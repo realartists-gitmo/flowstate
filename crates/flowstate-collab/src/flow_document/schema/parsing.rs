@@ -42,9 +42,10 @@ pub(super) fn parse_flow(doc: &LoroDoc, flow_id: FlowId, limits: &FlowSourceLimi
     return Err(CollabError::InvalidSchema("empty vNext flow"));
   }
   let raw_marks = raw_marks(&text)?;
+  let mut mark_cursor = MarkSweep::new(&raw_marks);
   let mut token_specs = Vec::new();
   for (unicode_pos, (byte_pos, ch)) in raw_text.char_indices().enumerate() {
-    let attrs = marks_at(&raw_marks, byte_pos);
+    mark_cursor.advance(byte_pos);
     match ch {
       PARAGRAPH_TOKEN | OBJECT_TOKEN => {
         let kind = if ch == PARAGRAPH_TOKEN {
@@ -52,8 +53,8 @@ pub(super) fn parse_flow(doc: &LoroDoc, flow_id: FlowId, limits: &FlowSourceLimi
         } else {
           FlowNodeKind::Object
         };
-        let structural = attrs
-          .iter()
+        let structural = mark_cursor
+          .active()
           .filter(|mark| is_structural_key(&mark.key))
           .collect::<Vec<_>>();
         // Concurrent inline marks may causally span a structural token that
@@ -69,7 +70,7 @@ pub(super) fn parse_flow(doc: &LoroDoc, flow_id: FlowId, limits: &FlowSourceLimi
         token_specs.push((byte_pos, unicode_pos, kind, parse_node_id(id)?));
       },
       _ => {
-        if attrs.iter().any(|mark| is_structural_key(&mark.key)) {
+        if mark_cursor.active().any(|mark| is_structural_key(&mark.key)) {
           return Err(CollabError::InvalidSchema("vNext structural mark on user text"));
         }
       },
@@ -149,17 +150,18 @@ pub(super) fn materialize_flow_window(
     .slice_delta(start, end, loro::cursor::PosType::Unicode)
     .map_err(loro_error)?;
   let (raw_text, raw_marks) = raw_text_and_marks_from_delta(&delta)?;
+  let mut mark_cursor = MarkSweep::new(&raw_marks);
   let mut token_specs = Vec::new();
   for (local_unicode, (byte, ch)) in raw_text.char_indices().enumerate() {
-    let attrs = marks_at(&raw_marks, byte);
+    mark_cursor.advance(byte);
     let kind = match ch {
       PARAGRAPH_TOKEN => Some(FlowNodeKind::Paragraph),
       OBJECT_TOKEN => Some(FlowNodeKind::Object),
       _ => None,
     };
     if let Some(kind) = kind {
-      let FlowMarkValue::String(id) = attrs
-        .iter()
+      let FlowMarkValue::String(id) = mark_cursor
+        .active()
         .find(|mark| mark.key == kind.mark_key())
         .map(|mark| &mark.value)
         .ok_or(CollabError::InvalidSchema("vNext structural token mark missing"))?
@@ -239,6 +241,7 @@ fn raw_text_and_marks_from_delta(delta: &[loro::TextDelta]) -> CollabResult<(Str
       }
     }
   }
+  marks.sort_by_key(|mark| (mark.range_utf8.start, mark.range_utf8.end));
   Ok((raw_text, marks))
 }
 
@@ -268,9 +271,45 @@ pub(super) fn raw_marks(text: &LoroText) -> CollabResult<Vec<RawMark>> {
       }
     }
   }
+  marks.sort_by_key(|mark| (mark.range_utf8.start, mark.range_utf8.end));
   Ok(marks)
 }
 
+struct MarkSweep<'a> {
+  marks: &'a [RawMark],
+  next: usize,
+  active: Vec<usize>,
+}
+
+impl<'a> MarkSweep<'a> {
+  fn new(marks: &'a [RawMark]) -> Self {
+    Self {
+      marks,
+      next: 0,
+      active: Vec::new(),
+    }
+  }
+
+  fn advance(&mut self, byte_pos: usize) {
+    self.active.retain(|index| byte_pos < self.marks[*index].range_utf8.end);
+    while self
+      .marks
+      .get(self.next)
+      .is_some_and(|mark| mark.range_utf8.start <= byte_pos)
+    {
+      if byte_pos < self.marks[self.next].range_utf8.end {
+        self.active.push(self.next);
+      }
+      self.next += 1;
+    }
+  }
+
+  fn active(&self) -> impl Iterator<Item = &'a RawMark> + '_ {
+    self.active.iter().map(|index| &self.marks[*index])
+  }
+}
+
+#[allow(dead_code, reason = "available for future use by windowed mark utilities")]
 pub(super) fn marks_at(marks: &[RawMark], byte_pos: usize) -> Vec<&RawMark> {
   marks
     .iter()

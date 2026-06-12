@@ -165,6 +165,9 @@ fn benchmark_document(
   let edit_rows = benchmark_edit_paths(document, stats, iterations);
   write_operation_table(&mut out, "Edit And Clipboard Benchmarks", &edit_rows);
 
+  let style_rows = benchmark_styles(document, stats, iterations);
+  write_operation_table(&mut out, "Style-Heavy Benchmarks", &style_rows);
+
   let layout_rows = benchmark_layout_paths(document, widths, iterations, include_paint, window, cx);
   write_layout_table(&mut out, &layout_rows);
 

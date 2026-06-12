@@ -761,8 +761,8 @@ impl RenderVirtualItems {
 enum RecoveryWriteDecision {
   Write {
     generation: u64,
-    document: Box<Document>,
-    authoritative_bytes: Option<Vec<u8>>,
+    document: Option<Box<Document>>,
+    authoritative_job: Option<NativeSnapshotJob>,
   },
   Failed(String),
   Rescheduled,

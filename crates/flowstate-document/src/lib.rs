@@ -52,6 +52,14 @@ pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<Document> {
   persistence::io::read_db8_bytes(bytes)
 }
 
+/// Read a DB8 file and return both the projection Document and the embedded
+/// CRDT snapshot (always `Some` for vNext schema files, `None` for legacy).
+/// Prefer this over `read_db8_bytes` when you need the CRDT source snapshot
+/// for direct import, avoiding a second file decode.
+pub fn read_db8_file_bytes_with_snapshot(bytes: &[u8]) -> io::Result<(Document, Option<Vec<u8>>)> {
+  persistence::io::read_db8_file_bytes_with_snapshot(bytes)
+}
+
 pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
   persistence::io::write_db8(path, document)
 }

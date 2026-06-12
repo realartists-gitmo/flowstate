@@ -232,6 +232,8 @@ pub struct FlowDocument {
   node_tokens: RwLock<HashMap<FlowNodeId, (FlowId, Cursor)>>,
 }
 
+pub type FlowSnapshotJob = Box<dyn FnOnce() -> CollabResult<Vec<u8>> + Send>;
+
 impl FlowDocument {
   pub fn new(document_id: DocumentId, created_by_actor: ActorId, replica_id: ReplicaId, paragraph_metadata: &[u8]) -> CollabResult<Self> {
     let doc = LoroDoc::new();
@@ -317,6 +319,12 @@ impl FlowDocument {
 
   pub fn export_snapshot(&self) -> CollabResult<Vec<u8>> {
     self.doc.export(ExportMode::Snapshot).map_err(loro_error)
+  }
+
+  pub fn snapshot_job(&self) -> FlowSnapshotJob {
+    self.doc.commit();
+    let snapshot_source = self.doc.fork();
+    Box::new(move || snapshot_source.export(ExportMode::Snapshot).map_err(loro_error))
   }
 
   pub fn export_update_since(&self, encoded_frontier: &[u8]) -> CollabResult<Vec<u8>> {
@@ -638,8 +646,12 @@ impl FlowDocument {
   }
 
   pub fn import_update_checked(&mut self, update: &[u8], policy: &FlowImportPolicy) -> CollabResult<FlowImportOutcome> {
+    self.import_updates_checked(std::slice::from_ref(&update), policy)
+  }
+
+  pub fn import_updates_checked(&mut self, updates: &[&[u8]], policy: &FlowImportPolicy) -> CollabResult<FlowImportOutcome> {
     require_writer(policy.role)?;
-    if update.len() > policy.limits.max_update_bytes {
+    if updates.iter().any(|update| update.len() > policy.limits.max_update_bytes) {
       return Err(CollabError::InvalidSchema("vNext update exceeds byte limit"));
     }
     let validation_started = Instant::now();
@@ -649,7 +661,10 @@ impl FlowDocument {
     let protected_before = schema::protected_state(&self.doc)?;
     let working = self.doc.fork();
     schema::configure(&working);
-    working.import_with(update, "flowstate:remote").map_err(loro_error)?;
+    for update in updates {
+      working.import_with(update, "flowstate:remote").map_err(loro_error)?;
+      ensure_validation_budget(validation_started, &policy.limits)?;
+    }
     ensure_validation_budget(validation_started, &policy.limits)?;
     if working.len_ops().saturating_sub(before_ops) > policy.limits.max_update_ops {
       return Err(CollabError::InvalidSchema("vNext update operation limit"));
@@ -662,7 +677,9 @@ impl FlowDocument {
     validate_update_peers(&before, &working.oplog_vv(), &policy.allowed_peer_ids)?;
     ensure_validation_budget(validation_started, &policy.limits)?;
 
-    self.doc.import_with(update, "flowstate:remote").map_err(loro_error)?;
+    for update in updates {
+      self.doc.import_with(update, "flowstate:remote").map_err(loro_error)?;
+    }
     let changes = schema::summarize_changes(&self.doc, &before)?;
     self.refresh_node_token_cache(&changes);
     Ok(FlowImportOutcome {
@@ -760,6 +777,7 @@ impl FlowDocument {
     if !changed {
       return Ok(None);
     }
+    self.doc.commit_with(CommitOptions::new().origin(origin.as_str()));
     let changes = schema::summarize_changes(&self.doc, &before)?;
     self.refresh_node_token_cache(&changes);
     Ok(Some(FlowCommit {

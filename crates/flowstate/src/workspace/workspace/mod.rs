@@ -59,8 +59,8 @@ use flowstate_collab::{
   ReplicaId, UpdateApplication, WireMessage, decode_native_file, granular_record_id_to_u128,
 };
 use flowstate_document::{
-  Db8CommitOutbox, Db8DocumentController, Db8EditorAuthority, db8_collab_document_with_id, document_from_db8_collab_source,
-  ensure_db8_document_id, parse_db8_anchored_selection, serialize_db8_anchored_selection,
+  Db8CommitOutbox, Db8EditorAuthority, PreparingDb8EditorAuthority, db8_collab_document_with_id,
+  document_from_db8_collab_source, ensure_db8_document_id, parse_db8_anchored_selection, serialize_db8_anchored_selection,
 };
 use flowstate_sync::{
   AssetStore, DurableFlowOutbox, FLOWSTATE_INVITE_PREFIX, FlowOutboxEntry, FlowOutboxKey, FlowstateSyncConfig, HostedCollaboration,
@@ -126,6 +126,7 @@ pub struct Workspace {
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,
   autosave_document_generations: HashMap<Uuid, u64>,
+  autosave_document_in_flight: HashSet<Uuid>,
   autosave_flow_in_flight: HashSet<Uuid>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   tub_root: Option<PathBuf>,

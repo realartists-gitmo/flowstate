@@ -38,15 +38,28 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
     }
   }
 
-  load_or_create_document(path).map(|document| {
-    let flow_snapshot = fs::read(path)
-      .ok()
-      .and_then(|bytes| flowstate_document::db8_flow_snapshot_from_bytes(&bytes).ok().flatten());
-    LoadedDocumentForOpen {
-      document,
-      flow_snapshot,
-      path: Some(path.clone()),
-      title: None,
-    }
-  })
+  match fs::read(path) {
+    Ok(bytes) => {
+      let (document, flow_snapshot) = flowstate_document::read_db8_file_bytes_with_snapshot(&bytes)?;
+      Ok(LoadedDocumentForOpen {
+        document,
+        flow_snapshot,
+        path: Some(path.to_path_buf()),
+        title: None,
+      })
+    },
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+      let document = crate::workspace::file_management::new_blank_document();
+      // Best-effort write: if the path is in a read-only directory we still
+      // open the document in memory rather than crashing.
+      let _ = flowstate_document::write_db8(path, &document);
+      Ok(LoadedDocumentForOpen {
+        document,
+        flow_snapshot: None,
+        path: Some(path.to_path_buf()),
+        title: None,
+      })
+    },
+    Err(error) => Err(error),
+  }
 }

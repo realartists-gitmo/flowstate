@@ -2,20 +2,23 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io;
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use flowstate_collab::{
-  ActorId, AnchoredPosition, AnchoredSelection, DocumentId as CollabDocumentId, FlowAssetId, FlowAssetReference, FlowChangeSummary, FlowCommit,
-  FlowDocument, FlowDocumentSeed, FlowEdit, FlowId, FlowImportOutcome, FlowImportPolicy, FlowInlineMark, FlowMarkValue, FlowNode, FlowNodeId,
-  FlowNodeKind, FlowNodeRecord, FlowParagraphInsert, FlowSeedFlow, FlowSeedNode, FlowTextInsert, FlowUndoManager, MaterializedFlowWindow,
-  ReplicaId, Role, blake3_hash,
+  ActorId, AnchoredPosition, AnchoredSelection, CollabError, DocumentId as CollabDocumentId, FlowAssetId, FlowAssetReference,
+  FlowChangeSummary, FlowCommit, FlowDocument, FlowDocumentSeed, FlowEdit, FlowId, FlowImportOutcome, FlowImportPolicy, FlowInlineMark,
+  FlowMarkValue, FlowNode, FlowNodeId, FlowNodeKind, FlowNodeRecord, FlowParagraphInsert, FlowSeedFlow, FlowSeedNode, FlowTextInsert,
+  FlowUndoManager, MaterializedFlowWindow, ReplicaId, Role, blake3_hash,
 };
 use loro::cursor::Side;
 use serde::{Deserialize, Serialize};
 
+mod projection_index;
 mod rich_blocks;
 mod editor_authority;
 
-pub use editor_authority::{Db8CommitOutbox, Db8EditorAuthority};
+pub use editor_authority::{Db8CommitOutbox, Db8EditorAuthority, PreparingDb8EditorAuthority};
+use projection_index::Db8ProjectionIndex;
 
 use crate::{
   AssetStore, AuthoritativeSourcePosition, AuthoritativeSourceSelection, Block, BlockId, Document, DocumentIds, DocumentOffset,
@@ -30,6 +33,14 @@ const MARK_DIRECT_UNDERLINE: &str = "direct_underline";
 const MARK_STRIKETHROUGH: &str = "strikethrough";
 const MARK_HIGHLIGHT: &str = "highlight";
 const ANCHORED_SELECTION_PREFIX: &str = "db8-loro-selection-v1:";
+const DB8_VNEXT_TIMING_ENV: &str = "FLOWSTATE_DB8_VNEXT_TIMING";
+
+fn db8_vnext_timing(label: &str, start: Instant, detail: impl FnOnce() -> String) {
+  if std::env::var_os(DB8_VNEXT_TIMING_ENV).is_some() {
+    eprintln!("[db8-vnext] {label}: {:?} {}", start.elapsed(), detail());
+  }
+}
+
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Db8SourcePosition {
@@ -76,7 +87,7 @@ pub enum Db8EditIntent {
   SetRunStyles {
     paragraph_id: ParagraphId,
     range: Range<usize>,
-    styles: RunStyles,
+    patch: crate::RunStylePatch,
   },
   InsertBlock {
     block_id: BlockId,
@@ -121,6 +132,9 @@ pub enum Db8EditIntent {
 
 #[derive(Clone, Debug)]
 pub struct Db8ProjectionDelta {
+  pub expected_blocks: usize,
+  pub expected_paragraphs: usize,
+  pub expected_text_bytes: usize,
   pub before_frontier: Vec<u8>,
   pub after_frontier: Vec<u8>,
   pub source_hash: Option<[u8; 32]>,
@@ -129,7 +143,14 @@ pub struct Db8ProjectionDelta {
   pub replacement_blocks_after: Range<usize>,
   pub affected_paragraphs_before: Range<usize>,
   pub affected_paragraphs_after: Range<usize>,
-  pub projection: Document,
+  // Phase 4: Replacement content for patch-based editor updates.
+  // These are populated from the patched projection after the edit is applied.
+  pub replaced_byte_range: Range<usize>,
+  pub replacement_text: String,
+  pub replacement_blocks: Vec<Block>,
+  pub replacement_block_ids: Vec<BlockId>,
+  pub replacement_paragraphs: Vec<crate::Paragraph>,
+  pub replacement_paragraph_ids: Vec<ParagraphId>,
 }
 
 impl Db8ProjectionDelta {
@@ -139,8 +160,31 @@ impl Db8ProjectionDelta {
     origin: crate::AuthoritativeProjectionOrigin,
     selection: Option<EditorSelection>,
   ) -> crate::AuthoritativeProjectionUpdate {
+    let patch = Some(crate::ProjectionPatch {
+      expected_blocks: self.expected_blocks,
+      expected_paragraphs: self.expected_paragraphs,
+      expected_text_bytes: self.expected_text_bytes,
+      replaced_blocks_before: self.replaced_blocks_before.clone(),
+      replacement_blocks: self.replacement_blocks,
+      replacement_block_ids: self.replacement_block_ids,
+      affected_paragraphs_before: self.affected_paragraphs_before.clone(),
+      replacement_paragraphs: self.replacement_paragraphs,
+      replacement_paragraph_ids: self.replacement_paragraph_ids,
+      replaced_byte_range: self.replaced_byte_range.clone(),
+      replacement_text: self.replacement_text,
+    });
     crate::AuthoritativeProjectionUpdate {
-      document: self.projection,
+      document: crate::Document {
+        text: crop::Rope::default(),
+        paragraphs: std::sync::Arc::new(Vec::new()),
+        blocks: std::sync::Arc::new(Vec::new()),
+        assets: crate::AssetStore::default(),
+        ids: crate::DocumentIds::default(),
+        sections: std::sync::Arc::new(Vec::new()),
+        offset_index: crate::ParagraphOffsetIndex { widths: Vec::new(), tree: Vec::new() },
+        theme: crate::DocumentTheme::default(),
+      },
+      patch,
       affected_paragraphs_before: self.affected_paragraphs_before,
       affected_paragraphs_after: self.affected_paragraphs_after,
       selection,
@@ -163,6 +207,8 @@ struct ProjectionImpact {
   replacement_blocks_after: Range<usize>,
   affected_paragraphs_before: Range<usize>,
   affected_paragraphs_after: Range<usize>,
+  // Phase 4: Byte range in the text rope that was replaced (computed before mutation).
+  replaced_byte_range: Range<usize>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -176,33 +222,113 @@ struct TypingBurst {
 pub struct Db8DocumentController {
   source: FlowDocument,
   projection: Document,
+  projection_index: Db8ProjectionIndex,
   undo: FlowUndoManager,
   typing_burst: Option<TypingBurst>,
+  /// Phase 6, Item 4: Hydration watermark tracking for progressive hydration.
+  /// Tracks how many paragraphs have been fully hydrated (text+runs+layout).
+  /// Paragraphs beyond this watermark are skeleton-only (have IDs but no content).
+  /// Set to the full paragraph count after initial materialization or recovery.
+  hydration_watermark: usize,
 }
 
 impl Db8DocumentController {
   pub fn from_document(document: &Document, actor_id: ActorId, replica_id: ReplicaId) -> io::Result<Self> {
+    Self::from_existing_projection(document, actor_id, replica_id)
+  }
+
+  /// Create a controller from a projection Document, optionally using a
+  /// pre-existing CRDT snapshot for a fast-path load. When `snapshot` is
+  /// `Some`, the CRDT source is loaded directly via `from_snapshot_with_projection`
+  /// (O(1) deserialize) instead of reconstructing from the projection seed
+  /// (O(n) per-paragraph Loro operations). For new/untitled documents without
+  /// a snapshot, falls back to `from_existing_projection`.
+  pub fn from_document_or_snapshot(
+    document: &Document,
+    snapshot: Option<&[u8]>,
+    actor_id: ActorId,
+    replica_id: ReplicaId,
+  ) -> io::Result<Self> {
+    if let Some(snapshot) = snapshot {
+      let document_id = CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id));
+      let started = Instant::now();
+      let source = FlowDocument::from_snapshot(snapshot, Some(document_id), replica_id).map_err(collab_to_io)?;
+      db8_vnext_timing("from_snapshot_preserve_projection", started, || {
+        format!("snapshot_bytes={} paragraphs={} blocks={}", snapshot.len(), document.paragraphs.len(), document.blocks.len())
+      });
+      Self::from_source_and_projection(source, document.clone())
+    } else {
+      Self::from_existing_projection(document, actor_id, replica_id)
+    }
+  }
+
+  pub fn from_existing_projection(document: &Document, actor_id: ActorId, replica_id: ReplicaId) -> io::Result<Self> {
+    let started = Instant::now();
     let document = crate::persistence::io::document_for_serialization(document);
+    db8_vnext_timing("from_existing_projection_serialize", started, || {
+      format!("paragraphs={} blocks={} bytes={}", document.paragraphs.len(), document.blocks.len(), document.text.byte_len())
+    });
+    let seed_started = Instant::now();
     let seed = db8_flow_seed(&document)?;
+    db8_vnext_timing("from_existing_projection_seed", seed_started, || {
+      format!("flows={} blocks={}", seed.flows.len(), document.blocks.len())
+    });
+    let source_started = Instant::now();
     let document_id = CollabDocumentId(uuid::Uuid::from_u128(document.ids.document_id));
     let source = FlowDocument::from_seed(document_id, actor_id, replica_id, &seed).map_err(collab_to_io)?;
-    Self::from_source(source, document.assets.clone())
+    db8_vnext_timing("from_existing_projection_source", source_started, || {
+      String::from("snapshot_projection_preserved=true")
+    });
+    Self::from_source_and_projection(source, document)
   }
 
   pub fn from_source(source: FlowDocument, assets: AssetStore) -> io::Result<Self> {
+    let started = Instant::now();
     let projection = materialize_db8_flow_document(&source, assets)?;
+    db8_vnext_timing("from_source_materialize_projection", started, || {
+      format!("paragraphs={} blocks={} bytes={}", projection.paragraphs.len(), projection.blocks.len(), projection.text.byte_len())
+    });
+    Self::from_source_and_projection(source, projection)
+  }
+
+  pub fn from_source_and_projection(source: FlowDocument, projection: Document) -> io::Result<Self> {
+    let projection_index = Db8ProjectionIndex::build(&projection);
     let undo = source.new_undo_manager();
+    let mut projection = projection;
+    // Phase 2: Rebuild rich block identities from the CRDT source when the
+    // projection was loaded from cache (e.g. via from_existing_projection).
+    // Full materialization paths already populate this, so we skip if non-empty.
+    if projection.ids.rich_block_ids.is_empty() {
+      rebuild_rich_block_ids(&source, &mut projection)?;
+    }
+    let hydration_watermark = projection.paragraphs.len();
     Ok(Self {
       source,
       projection,
+      projection_index,
       undo,
       typing_burst: None,
+      hydration_watermark,
     })
   }
 
   pub fn from_snapshot(snapshot: &[u8], expected_document_id: CollabDocumentId, replica_id: ReplicaId, assets: AssetStore) -> io::Result<Self> {
     let source = FlowDocument::from_snapshot(snapshot, Some(expected_document_id), replica_id).map_err(collab_to_io)?;
     Self::from_source(source, assets)
+  }
+
+  pub fn from_snapshot_with_projection(
+    snapshot: &[u8],
+    expected_document_id: CollabDocumentId,
+    replica_id: ReplicaId,
+    projection: Document,
+  ) -> io::Result<Self> {
+    let started = Instant::now();
+    let source = FlowDocument::from_snapshot(snapshot, Some(expected_document_id), replica_id).map_err(collab_to_io)?;
+    db8_vnext_timing("from_snapshot_preserve_projection", started, || {
+      format!("snapshot_bytes={} paragraphs={} blocks={}", snapshot.len(), projection.paragraphs.len(), projection.blocks.len())
+    });
+    Self::from_source_and_projection(source, projection)
   }
 
   #[must_use]
@@ -213,6 +339,63 @@ impl Db8DocumentController {
   #[must_use]
   pub const fn projection(&self) -> &Document {
     &self.projection
+  }
+
+  /// Phase 6, Item 4: Return the current hydration watermark — the number of
+  /// paragraphs from the start that are fully hydrated. Paragraphs at or beyond
+  /// this index may be skeleton-only.
+  #[must_use]
+  pub const fn hydration_watermark(&self) -> usize {
+    self.hydration_watermark
+  }
+
+  /// Phase 6, Item 4: Hydrate a range of paragraphs from the CRDT source.
+  /// This is used by progressive hydration to lazy-load viewport paragraphs
+  /// that were previously skeleton-only. The projection index remains valid
+  /// because paragraph IDs are always present.
+  pub fn hydrate_paragraph_range(&mut self, start_paragraph: usize, end_paragraph: usize) -> io::Result<()> {
+    if start_paragraph >= end_paragraph || end_paragraph > self.projection.paragraphs.len() {
+      return Ok(());
+    }
+    if end_paragraph <= self.hydration_watermark {
+      return Ok(());
+    }
+    let hydrate_end = end_paragraph.min(self.projection.paragraphs.len());
+    let start_id = self.projection.ids.paragraph_ids.get(start_paragraph).copied();
+    let end_id = self.projection.ids.paragraph_ids.get(hydrate_end.saturating_sub(1)).copied();
+    if let (Some(start_id_val), Some(end_id_val)) = (start_id, end_id) {
+      let start_node_id = FlowNodeId(uuid::Uuid::from_u128(start_id_val.0));
+      let end_node_id = FlowNodeId(uuid::Uuid::from_u128(end_id_val.0));
+      for node_id in [start_node_id, end_node_id] {
+        if let Ok(window) = self.source.materialize_node_window(node_id) {
+          for node in &window.nodes {
+            if let FlowNode::Paragraph { record, text, marks } = node {
+              let paragraph_id = ParagraphId(node.record().id.0.as_u128());
+              let block_id = BlockId(paragraph_id.0);
+              if self.projection_index.block_index(block_id).is_some()
+                && let Some((style, _)) = deserialize_paragraph_metadata(&record.metadata)
+              {
+                let runs = db8_runs_from_marks(text.len(), &granular_marks(marks));
+                if let Some(paragraph_ix) = self.projection_index.paragraph_index(paragraph_id)
+                  && paragraph_ix < self.projection.paragraphs.len()
+                {
+                  let paragraphs = std::sync::Arc::make_mut(&mut self.projection.paragraphs);
+                  if let Some(p) = paragraphs.get_mut(paragraph_ix) {
+                    p.style = style;
+                    p.runs = runs;
+                    p.version = p.version.wrapping_add(1);
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+    if hydrate_end > self.hydration_watermark {
+      self.hydration_watermark = hydrate_end;
+    }
+    Ok(())
   }
 
   pub fn apply_intent(&mut self, role: Role, intent: Db8EditIntent) -> io::Result<Db8ControllerCommit> {
@@ -358,7 +541,7 @@ impl Db8DocumentController {
       Db8EditIntent::SetRunStyles {
         paragraph_id,
         range,
-        styles,
+        patch,
       } => {
         let start = self.anchor_for_source_position(
           Db8SourcePosition {
@@ -377,8 +560,8 @@ impl Db8DocumentController {
         Ok(FlowEdit::SetTextMarks {
           start,
           end,
-          clear_keys: flow_style_keys(),
-          marks: flow_marks_for_styles(*styles),
+          clear_keys: flow_style_patch_clear_keys(*patch),
+          marks: flow_marks_for_style_patch(*patch),
         })
       },
       Db8EditIntent::InsertBlock {
@@ -556,24 +739,51 @@ impl Db8DocumentController {
   }
 
   pub fn apply_remote_update(&mut self, update: &[u8], policy: &FlowImportPolicy) -> io::Result<Db8ProjectionDelta> {
+    self.apply_remote_updates(std::slice::from_ref(&update), policy)
+  }
+
+  pub fn apply_remote_updates(&mut self, updates: &[&[u8]], policy: &FlowImportPolicy) -> io::Result<Db8ProjectionDelta> {
     self.typing_burst = None;
+    let expected_blocks = self.projection.blocks.len();
+    let expected_paragraphs = self.projection.paragraphs.len();
+    let expected_text_bytes = self.projection.text.byte_len();
     let before_frontier = self.source.frontier().map_err(collab_to_io)?;
-    let before_projection = self.projection.clone();
     let FlowImportOutcome { frontier, changes } = self
       .source
-      .import_update_checked(update, policy)
+      .import_updates_checked(updates, policy)
       .map_err(collab_to_io)?;
-    let (projection, impact) = materialize_db8_projection_for_changes(&self.source, &self.projection, &changes)?;
-    self.projection = projection.clone();
-    build_projection_delta(
+    let impact = patch_projection_in_place(&self.source, &mut self.projection, &self.projection_index, &changes)?;
+    self.projection_index.apply_patch(&self.projection, &impact);
+    let replacement_blocks = self.projection.blocks[impact.replacement_blocks_after.clone()].to_vec();
+    let replacement_block_ids = self.projection.ids.block_ids[impact.replacement_blocks_after.clone()].to_vec();
+    let replacement_paragraphs = self.projection.paragraphs[impact.affected_paragraphs_after.clone()].to_vec();
+    let replacement_paragraph_ids = self.projection.ids.paragraph_ids[impact.affected_paragraphs_after.clone()].to_vec();
+    let replacement_text = if impact.affected_paragraphs_after.is_empty() {
+      String::new()
+    } else {
+      let first = &self.projection.paragraphs[impact.affected_paragraphs_after.start];
+      let last = &self.projection.paragraphs[impact.affected_paragraphs_after.end.saturating_sub(1)];
+      self.projection.text.byte_slice(first.byte_range.start..last.byte_range.end).to_string()
+    };
+    Ok(Db8ProjectionDelta {
+      expected_blocks,
+      expected_paragraphs,
+      expected_text_bytes,
       before_frontier,
-      frontier,
+      after_frontier: frontier,
+      source_hash: None,
       changes,
-      None,
-      impact,
-      &before_projection,
-      projection,
-    )
+      replaced_blocks_before: impact.replaced_blocks_before,
+      replacement_blocks_after: impact.replacement_blocks_after,
+      affected_paragraphs_before: impact.affected_paragraphs_before,
+      affected_paragraphs_after: impact.affected_paragraphs_after,
+      replaced_byte_range: impact.replaced_byte_range,
+      replacement_text,
+      replacement_blocks,
+      replacement_block_ids,
+      replacement_paragraphs,
+      replacement_paragraph_ids,
+    })
   }
 
   fn reset_undo_lineage(&mut self) {
@@ -712,11 +922,8 @@ impl Db8DocumentController {
 
   fn anchor_for_offset_with_side(&self, offset: DocumentOffset, side: Side) -> io::Result<AnchoredPosition> {
     let paragraph_id = self
-      .projection
-      .ids
-      .paragraph_ids
-      .get(offset.paragraph)
-      .copied()
+      .projection_index
+      .paragraph_index_to_id(offset.paragraph)
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "DB8 paragraph offset is not in projection"))?;
     self
       .source
@@ -730,12 +937,10 @@ impl Db8DocumentController {
       .resolve_anchor_in_paragraph_utf8(position)
       .map_err(collab_to_io)?;
     let paragraph_id = paragraph_id(resolved.node_id);
+    // Phase 2: Use projection index for O(1) lookup instead of O(n) scan.
     let paragraph = self
-      .projection
-      .ids
-      .paragraph_ids
-      .iter()
-      .position(|candidate| *candidate == paragraph_id)
+      .projection_index
+      .paragraph_index(paragraph_id)
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "anchored DB8 paragraph is not visible in projection"))?;
     Ok(DocumentOffset {
       paragraph,
@@ -744,19 +949,45 @@ impl Db8DocumentController {
   }
 
   fn finish_source_commit(&mut self, before_frontier: Vec<u8>, source: FlowCommit) -> io::Result<Db8ControllerCommit> {
-    let before_projection = self.projection.clone();
-    let (projection, impact) = materialize_db8_projection_for_changes(&self.source, &self.projection, &source.changes)?;
-    self.projection = projection.clone();
+    let expected_blocks = self.projection.blocks.len();
+    let expected_paragraphs = self.projection.paragraphs.len();
+    let expected_text_bytes = self.projection.text.byte_len();
+    // Phase 2: Mutate projection in place. No full clone for before/after comparison.
+    let impact = patch_projection_in_place(&self.source, &mut self.projection, &self.projection_index, &source.changes)?;
+    self.projection_index.apply_patch(&self.projection, &impact);
+    // Phase 4: Extract replacement content from the patched projection for the
+    // editor patch, avoiding a full Document clone in the edit response.
+    let replacement_blocks = self.projection.blocks[impact.replacement_blocks_after.clone()].to_vec();
+    let replacement_block_ids = self.projection.ids.block_ids[impact.replacement_blocks_after.clone()].to_vec();
+    let replacement_paragraphs = self.projection.paragraphs[impact.affected_paragraphs_after.clone()].to_vec();
+    let replacement_paragraph_ids = self.projection.ids.paragraph_ids[impact.affected_paragraphs_after.clone()].to_vec();
+    let replacement_text = if impact.affected_paragraphs_after.is_empty() {
+      String::new()
+    } else {
+      let first = &self.projection.paragraphs[impact.affected_paragraphs_after.start];
+      let last = &self.projection.paragraphs[impact.affected_paragraphs_after.end.saturating_sub(1)];
+      self.projection.text.byte_slice(first.byte_range.start..last.byte_range.end).to_string()
+    };
     Ok(Db8ControllerCommit {
-      projection: build_projection_delta(
+      projection: Db8ProjectionDelta {
+        expected_blocks,
+        expected_paragraphs,
+        expected_text_bytes,
         before_frontier,
-        source.resulting_frontier.clone(),
-        source.changes.clone(),
-        None,
-        impact,
-        &before_projection,
-        projection,
-      )?,
+        after_frontier: source.resulting_frontier.clone(),
+        source_hash: None,
+        changes: source.changes.clone(),
+        replaced_blocks_before: impact.replaced_blocks_before.clone(),
+        replacement_blocks_after: impact.replacement_blocks_after.clone(),
+        affected_paragraphs_before: impact.affected_paragraphs_before.clone(),
+        affected_paragraphs_after: impact.affected_paragraphs_after.clone(),
+        replaced_byte_range: impact.replaced_byte_range.clone(),
+        replacement_text,
+        replacement_blocks,
+        replacement_block_ids,
+        replacement_paragraphs,
+        replacement_paragraph_ids,
+      },
       source,
       registered_assets: Vec::new(),
       selection: None,
@@ -779,37 +1010,9 @@ enum ProjectionNodeSignature {
   },
 }
 
-fn build_projection_delta(
-  before_frontier: Vec<u8>,
-  after_frontier: Vec<u8>,
-  changes: FlowChangeSummary,
-  source_hash: Option<[u8; 32]>,
-  impact: Option<ProjectionImpact>,
-  before: &Document,
-  projection: Document,
-) -> io::Result<Db8ProjectionDelta> {
-  let ProjectionImpact {
-    replaced_blocks_before,
-    replacement_blocks_after,
-    affected_paragraphs_before,
-    affected_paragraphs_after,
-  } = match impact {
-    Some(impact) => impact,
-    None => projection_impact_from_full_comparison(before, &projection)?,
-  };
-  Ok(Db8ProjectionDelta {
-    before_frontier,
-    after_frontier,
-    source_hash,
-    changes,
-    replaced_blocks_before,
-    replacement_blocks_after,
-    affected_paragraphs_before,
-    affected_paragraphs_after,
-    projection,
-  })
-}
-
+/// Compares two projection snapshots to determine which blocks/paragraphs differ.
+/// Used only in recovery/diagnostic paths (not the normal edit hot path).
+#[allow(dead_code, reason = "reserved for recovery/diagnostic use when explicit projection comparison is needed")]
 fn projection_impact_from_full_comparison(before: &Document, after: &Document) -> io::Result<ProjectionImpact> {
   let before_nodes = projection_node_signatures(before)?;
   let after_nodes = projection_node_signatures(after)?;
@@ -833,6 +1036,7 @@ fn projection_impact_from_full_comparison(before: &Document, after: &Document) -
     replacement_blocks_after,
     affected_paragraphs_before,
     affected_paragraphs_after,
+    replaced_byte_range: 0..0,
   })
 }
 
@@ -989,32 +1193,62 @@ pub fn db8_flow_seed(document: &Document) -> io::Result<FlowDocumentSeed> {
   })
 }
 
-fn materialize_db8_projection_for_changes(
-  source: &FlowDocument,
-  current: &Document,
-  changes: &FlowChangeSummary,
-) -> io::Result<(Document, Option<ProjectionImpact>)> {
-  if let Ok((projection, impact)) = materialize_incremental_root_projection(source, current, changes) {
-    return Ok((projection, Some(impact)));
+/// Rebuild rich block identities (table, image, equation) from the CRDT source
+/// for a projection that was loaded from cache. This is a targeted operation
+/// that only traverses the object graph for rich blocks, not the entire document.
+fn rebuild_rich_block_ids(source: &FlowDocument, projection: &mut Document) -> io::Result<()> {
+  for (block_ix, block) in projection.blocks.iter().enumerate() {
+    let is_rich = matches!(block, Block::Table(_) | Block::Image(_) | Block::Equation(_));
+    if !is_rich {
+      continue;
+    }
+    let Some(block_id) = projection.ids.block_ids.get(block_ix).copied() else {
+      continue;
+    };
+    let flow_node_id = flow_node_id_from_block(block_id);
+    let materialized = source.materialize_object_graph(flow_node_id).map_err(collab_to_io)?;
+    let identity = rich_blocks::materialize_object_graph_identity(&materialized)?;
+    projection.ids.rich_block_ids.insert(block_id, identity);
   }
-  materialize_db8_flow_document(source, current.assets.clone()).map(|projection| (projection, None))
+  Ok(())
 }
 
-fn materialize_incremental_root_projection(
+/// Patch the projection in place from the committed source change.
+///
+/// Projection failures are correctness failures. They must surface to the
+/// caller instead of silently replacing the projection from a full source
+/// materialization.
+fn patch_projection_in_place(
   source: &FlowDocument,
-  current: &Document,
+  projection: &mut Document,
+  projection_index: &Db8ProjectionIndex,
   changes: &FlowChangeSummary,
-) -> io::Result<(Document, ProjectionImpact)> {
+) -> io::Result<ProjectionImpact> {
+  patch_projection_incremental(source, projection, projection_index, changes)
+}
+
+/// Incremental in-place patching. Modifies `projection` directly and returns impact.
+fn patch_projection_incremental(
+  source: &FlowDocument,
+  projection: &mut Document,
+  projection_index: &Db8ProjectionIndex,
+  changes: &FlowChangeSummary,
+) -> io::Result<ProjectionImpact> {
   let root_flow_id = source.root_flow_id();
-  let mut projection = current.clone();
   let mut impacts = Vec::new();
+  // Preserve the pre-mutation shape so a transaction touching multiple
+  // projection windows can be emitted as one atomic full-projection patch.
+  // Merging independently computed pre/post ranges is not generally valid.
+  let before_blocks = projection.blocks.len();
+  let before_paragraphs = projection.paragraphs.len();
+  let before_bytes = projection.text.byte_len();
   if let Some(change) = changes.flow_text_changes.get(&root_flow_id) {
     let window = source
       .materialize_flow_window(root_flow_id, change.after_unicode.clone())
       .map_err(collab_to_io)?;
     impacts.push(patch_root_projection_window(
       source,
-      &mut projection,
+      projection,
       &window,
       change.before_unicode.clone(),
       change.before_unicode.len() > change.after_unicode.len(),
@@ -1031,30 +1265,66 @@ fn materialize_incremental_root_projection(
     let window = source.materialize_node_window(node_id).map_err(collab_to_io)?;
     impacts.push(patch_root_projection_window(
       source,
-      &mut projection,
+      projection,
       &window,
       window.unicode_range.clone(),
       false,
     )?);
   }
-  for block_id in affected_root_rich_objects(source, current, &projection, changes)? {
-    impacts.push(patch_root_rich_object(source, &mut projection, block_id)?);
+  for block_id in affected_root_rich_objects(source, projection_index, changes)? {
+    impacts.push(patch_root_rich_object(source, projection, block_id)?);
   }
-  if changes.flow_text_changes.is_empty() && changes.touched_nodes.is_empty() {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "change has no incremental root projection"));
+  if impacts.is_empty() {
+    for flow_id in &changes.touched_flows {
+      source.materialize_flow(*flow_id).map_err(collab_to_io)?;
+    }
+    for node_id in &changes.touched_nodes {
+      match source.node_record(*node_id) {
+        Ok(_) | Err(CollabError::MissingRootValue("vNext node")) => {}
+        Err(error) => return Err(collab_to_io(error)),
+      }
+    }
+    return Ok(ProjectionImpact {
+      replaced_blocks_before: 0..0,
+      replacement_blocks_after: 0..0,
+      affected_paragraphs_before: 0..0,
+      affected_paragraphs_after: 0..0,
+      replaced_byte_range: 0..0,
+    });
   }
-  validate_document_invariants(&projection).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-  let impact = if let [impact] = impacts.as_slice() {
+  // Phase 1: Windowed validation over the affected paragraphs/blocks from
+  // each individual patch impact, rather than scanning the whole document.
+  // Full validation still runs in debug builds via `validate_document_invariants`.
+  for single_impact in &impacts {
+    if !single_impact.affected_paragraphs_after.is_empty() {
+      validate_projection_window(projection, single_impact.affected_paragraphs_after.clone(), single_impact.replacement_blocks_after.clone())?;
+    }
+  }
+  #[cfg(debug_assertions)]
+  validate_document_invariants(projection).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+  let structural_shape_changed = impacts.iter().any(|impact| {
+    impact.replaced_blocks_before.len() != impact.replacement_blocks_after.len()
+      || impact.affected_paragraphs_before.len() != impact.affected_paragraphs_after.len()
+  });
+  let impact = if let [impact] = impacts.as_slice()
+    && !structural_shape_changed
+  {
     impact.clone()
   } else {
+    // Multiple independently materialized windows can overlap or shift one
+    // another under concurrent structural edits. Until structural delta
+    // composition has a proof-backed representation, rebuild deterministically
+    // from the committed source for this explicit structural case.
+    *projection = materialize_db8_flow_document(source, projection.assets.clone())?;
     ProjectionImpact {
-      replaced_blocks_before: 0..current.blocks.len(),
+      replaced_blocks_before: 0..before_blocks,
       replacement_blocks_after: 0..projection.blocks.len(),
-      affected_paragraphs_before: 0..current.paragraphs.len(),
+      affected_paragraphs_before: 0..before_paragraphs,
       affected_paragraphs_after: 0..projection.paragraphs.len(),
+      replaced_byte_range: 0..before_bytes,
     }
   };
-  Ok((projection, impact))
+  Ok(impact)
 }
 
 fn patch_root_projection_window(
@@ -1201,13 +1471,13 @@ fn patch_root_projection_window(
     replacement_blocks_after: replacement_block_start..replacement_block_start + replacement_block_count,
     affected_paragraphs_before: paragraph_start..paragraph_end,
     affected_paragraphs_after: paragraph_start..paragraph_start + replacement_paragraph_count,
+    replaced_byte_range: byte_range,
   })
 }
 
 fn affected_root_rich_objects(
   source: &FlowDocument,
-  before: &Document,
-  after: &Document,
+  projection_index: &Db8ProjectionIndex,
   changes: &FlowChangeSummary,
 ) -> io::Result<Vec<BlockId>> {
   let mut candidates = changes.touched_nodes.clone();
@@ -1225,73 +1495,39 @@ fn affected_root_rich_objects(
   let mut unresolved = false;
   for candidate in candidates {
     let raw = candidate.0.as_u128();
-    if after.ids.paragraph_ids.contains(&ParagraphId(raw)) || before.ids.paragraph_ids.contains(&ParagraphId(raw)) {
+    if projection_index.paragraph_index(ParagraphId(raw)).is_some() {
       continue;
     }
     let candidate_block = BlockId(raw);
-    if after.ids.rich_block_ids.contains_key(&candidate_block) {
-      if !roots.contains(&candidate_block) {
-        roots.push(candidate_block);
-      }
-      continue;
-    }
-    let root = after
-      .ids
-      .rich_block_ids
-      .iter()
-      .chain(before.ids.rich_block_ids.iter())
-      .find_map(|(block_id, identity)| rich_identity_contains_node(identity, raw).then_some(*block_id));
-    if let Some(root) = root {
+    if let Some(root) = projection_index.rich_root_for_node(raw) {
       if !roots.contains(&root) {
         roots.push(root);
       }
       continue;
     }
-    if after.ids.block_ids.contains(&candidate_block) || before.ids.block_ids.contains(&candidate_block) {
+    if projection_index.block_index(candidate_block).is_some() {
       return Err(io::Error::new(
         io::ErrorKind::InvalidData,
         "root rich object is missing its stable identity graph",
       ));
     }
+    match source.node_record(candidate) {
+      Err(CollabError::MissingRootValue("vNext node")) => continue,
+      Err(error) => return Err(collab_to_io(error)),
+      Ok(_) => {}
+    }
+    if source.node_owner_flow(candidate).map_err(collab_to_io)? == source.root_flow_id() {
+      continue;
+    }
     unresolved = true;
   }
-  if unresolved && roots.is_empty() {
+  if unresolved && roots.is_empty() && !changes.flow_text_changes.contains_key(&source.root_flow_id()) {
     return Err(io::Error::new(
       io::ErrorKind::InvalidData,
       "changed rich child is not reachable from a projected root object",
     ));
   }
   Ok(roots)
-}
-
-fn rich_identity_contains_node(identity: &crate::RichBlockIdentity, raw: u128) -> bool {
-  match identity {
-    crate::RichBlockIdentity::Image { caption } => caption.is_some_and(|paragraph| paragraph.0 == raw),
-    crate::RichBlockIdentity::Equation { source } => source.0 == raw,
-    crate::RichBlockIdentity::Table(table) => table.rows.iter().any(|row| {
-      row.id.0 == raw
-        || row.cells.iter().any(|cell| {
-          cell.id.0 == raw
-            || cell.blocks.iter().any(|block| match block {
-              crate::TableCellBlockIdentity::Paragraph(paragraph) => paragraph.0 == raw,
-              crate::TableCellBlockIdentity::Table { id, identity } => id.0 == raw || rich_table_identity_contains_node(identity, raw),
-            })
-        })
-    }),
-  }
-}
-
-fn rich_table_identity_contains_node(identity: &crate::TableIdentity, raw: u128) -> bool {
-  identity.rows.iter().any(|row| {
-    row.id.0 == raw
-      || row.cells.iter().any(|cell| {
-        cell.id.0 == raw
-          || cell.blocks.iter().any(|block| match block {
-            crate::TableCellBlockIdentity::Paragraph(paragraph) => paragraph.0 == raw,
-            crate::TableCellBlockIdentity::Table { id, identity } => id.0 == raw || rich_table_identity_contains_node(identity, raw),
-          })
-      })
-  })
 }
 
 fn patch_root_rich_object(source: &FlowDocument, document: &mut Document, block_id: BlockId) -> io::Result<ProjectionImpact> {
@@ -1317,6 +1553,7 @@ fn patch_root_rich_object(source: &FlowDocument, document: &mut Document, block_
     replacement_blocks_after: block_ix..block_ix + 1,
     affected_paragraphs_before: paragraph..paragraph,
     affected_paragraphs_after: paragraph..paragraph,
+    replaced_byte_range: 0..0,
   })
 }
 
@@ -1469,11 +1706,43 @@ fn flow_text_inserts(paragraph: &InputParagraph) -> Vec<FlowTextInsert> {
     .collect()
 }
 
-fn flow_style_keys() -> Vec<String> {
-  [MARK_SEMANTIC, MARK_DIRECT_UNDERLINE, MARK_STRIKETHROUGH, MARK_HIGHLIGHT]
-    .into_iter()
-    .map(str::to_string)
-    .collect()
+fn flow_style_patch_clear_keys(patch: crate::RunStylePatch) -> Vec<String> {
+  let mut keys = Vec::with_capacity(4);
+  if patch.semantic.is_some() {
+    keys.push(MARK_SEMANTIC.to_string());
+  }
+  if patch.direct_underline.is_some() {
+    keys.push(MARK_DIRECT_UNDERLINE.to_string());
+  }
+  if patch.strikethrough.is_some() {
+    keys.push(MARK_STRIKETHROUGH.to_string());
+  }
+  if patch.highlight.is_some() {
+    keys.push(MARK_HIGHLIGHT.to_string());
+  }
+  keys
+}
+
+fn flow_marks_for_style_patch(patch: crate::RunStylePatch) -> Vec<(String, FlowMarkValue)> {
+  let mut marks = Vec::with_capacity(4);
+  if let Some(semantic) = patch.semantic
+    && semantic != RunSemanticStyle::Plain
+  {
+    marks.push((MARK_SEMANTIC.to_string(), FlowMarkValue::I64(semantic_code(semantic))));
+  }
+  if patch.direct_underline == Some(true) {
+    marks.push((MARK_DIRECT_UNDERLINE.to_string(), FlowMarkValue::Bool(true)));
+  }
+  if patch.strikethrough == Some(true) {
+    marks.push((MARK_STRIKETHROUGH.to_string(), FlowMarkValue::Bool(true)));
+  }
+  if let Some(Some(highlight)) = patch.highlight {
+    marks.push((
+      MARK_HIGHLIGHT.to_string(),
+      FlowMarkValue::I64(i64::from(highlight_code(highlight))),
+    ));
+  }
+  marks
 }
 
 fn granular_marks(marks: &[FlowInlineMark]) -> Vec<flowstate_collab::GranularTextMark> {
@@ -1543,6 +1812,76 @@ const fn highlight_code(style: crate::HighlightStyle) -> u8 {
   match style {
     crate::HighlightStyle::Custom(value) => value,
   }
+}
+
+/// Validate only the window of the projection affected by the latest edit,
+/// rather than scanning the entire document. This is the production validation
+/// for the hot edit path — bounded cost proportional to the changed range.
+fn validate_projection_window(
+  projection: &Document,
+  affected_paragraphs: Range<usize>,
+  affected_blocks: Range<usize>,
+) -> io::Result<()> {
+  let paragraph_ids = &projection.ids.paragraph_ids;
+  let paragraphs = &projection.paragraphs;
+  let blocks = &projection.blocks;
+  let block_ids = &projection.ids.block_ids;
+
+  // Validate block ID – block count consistency in the affected range.
+  let block_count = affected_blocks.len();
+  for offset in 0..block_count {
+    let block_ix = affected_blocks.start + offset;
+    if block_ix >= blocks.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: block index out of range"));
+    }
+    if block_ix >= block_ids.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: block ID index out of range"));
+    }
+  }
+
+  // Validate paragraph ID – paragraph count consistency in the affected range.
+  let paragraph_count = affected_paragraphs.len();
+  for offset in 0..paragraph_count {
+    let para_ix = affected_paragraphs.start + offset;
+    if para_ix >= paragraphs.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: paragraph index out of range"));
+    }
+    if para_ix >= paragraph_ids.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: paragraph ID index out of range"));
+    }
+  }
+
+  // Validate paragraph byte ranges for affected paragraphs.
+  let full_text = projection.text.to_string();
+  let text_len = full_text.len();
+  for offset in 0..paragraph_count {
+    let para_ix = affected_paragraphs.start + offset;
+    let paragraph = &paragraphs[para_ix];
+    if paragraph.byte_range.start > paragraph.byte_range.end || paragraph.byte_range.end > text_len {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: paragraph byte range invalid"));
+    }
+    let run_len: usize = paragraph.runs.iter().map(|run| run.len).sum();
+    let range_len = paragraph.byte_range.end - paragraph.byte_range.start;
+    if run_len != range_len {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: paragraph run length mismatch"));
+    }
+    // Validate run UTF-8 boundaries within the affected paragraph.
+    let mut run_offset = paragraph.byte_range.start;
+    for run in &paragraph.runs {
+      if run.len == 0 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: zero-length run"));
+      }
+      if !full_text.is_char_boundary(run_offset) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: run not at char boundary"));
+      }
+      run_offset += run.len;
+    }
+    if !full_text.is_char_boundary(run_offset) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "windowed: run end not at char boundary"));
+    }
+  }
+
+  Ok(())
 }
 
 fn collab_to_io(error: flowstate_collab::CollabError) -> io::Error {

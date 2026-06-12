@@ -119,11 +119,11 @@ fn authoritative_undo_and_redo_restore_anchored_selections() {
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 3 });
 
   let response = authority.undo(after);
-  assert_eq!(paragraph_text(&response.projection.document, 0), "abcd");
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "abcd");
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 2 });
 
   let response = authority.redo(before);
-  assert_eq!(paragraph_text(&response.projection.document, 0), "abXcd");
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "abXcd");
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 3 });
 }
 
@@ -146,11 +146,11 @@ fn grouped_typing_restores_the_burst_boundary_selections() {
   }
 
   let response = authority.undo(collapsed_selection(paragraph, 3));
-  assert_eq!(paragraph_text(&response.projection.document, 0), "");
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "");
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 0 });
 
   let response = authority.redo(collapsed_selection(paragraph, 0));
-  assert_eq!(paragraph_text(&response.projection.document, 0), "abc");
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "abc");
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 3 });
 }
 
@@ -192,7 +192,7 @@ fn undo_selection_cursors_track_concurrent_remote_edits() {
     .unwrap();
 
   let response = authority.undo(collapsed_selection(paragraph, 4));
-  assert_eq!(paragraph_text(&response.projection.document, 0), "Rabcd");
+  assert_eq!(paragraph_text(authority.controller().projection(), 0), "Rabcd");
   assert_eq!(response.projection.selection.unwrap().head, DocumentOffset { paragraph: 0, byte: 3 });
 }
 

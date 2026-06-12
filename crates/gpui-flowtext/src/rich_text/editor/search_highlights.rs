@@ -80,7 +80,12 @@ impl RichTextEditor {
     }
     let ranges = non_overlapping;
     let count = ranges.len();
-    if self.authoritative_edit_controller.is_some() {
+    // Phase 6, Item 3: If the number of replacement sites exceeds the threshold,
+    // use a bulk fallback that rebuilds the affected document range as a single
+    // CRDT transaction, avoiding thousands of individual DeleteText+InsertText pairs
+    // whose combined change summary would make windowed patching ineffective.
+    const REPLACE_FALLBACK_THRESHOLD: usize = 500;
+    if self.authoritative_edit_controller.is_some() && count <= REPLACE_FALLBACK_THRESHOLD {
       let mut operations = Vec::with_capacity(ranges.len().saturating_mul(2));
       for range in ranges.iter().rev() {
         if self.selection_crosses_object_blocks(range.clone()) {
@@ -144,6 +149,95 @@ impl RichTextEditor {
       self.active_search_highlight = None;
       cx.notify();
       return count;
+    }
+    // Phase 6, Item 3: Bulk fallback for large replacement sets (>threshold).
+    // Instead of thousands of individual DeleteText+InsertText pairs, rebuild
+    // the entire affected region by reading the full text, applying all
+    // replacements, and issuing a single DeleteText+InsertParagraphFragment pair.
+    // This keeps the CRDT change summary small enough for efficient windowed
+    // patching.
+    if self.authoritative_edit_controller.is_some() {
+      let first = &ranges[0];
+      let last = &ranges[ranges.len() - 1];
+      let Some(first_start) = self.authoritative_source_position(first.start) else {
+        self.search_highlights = ranges;
+        self.active_search_highlight = None;
+        cx.notify();
+        return 0;
+      };
+      let Some(last_end) = self.authoritative_source_position(last.end) else {
+        self.search_highlights = ranges;
+        self.active_search_highlight = None;
+        cx.notify();
+        return 0;
+      };
+      let full_text = full_document_text(&self.document);
+      let mut new_text = full_text.clone();
+      let mut replacements: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+      for range in &ranges {
+        let start = paragraph_byte_range(&self.document, range.start.paragraph).start + range.start.byte;
+        let end = paragraph_byte_range(&self.document, range.end.paragraph).start + range.end.byte;
+        replacements.push((start, end));
+      }
+      for &(start, end) in replacements.iter().rev() {
+        if start <= end && end <= new_text.len() {
+          new_text.replace_range(start..end, replacement);
+        }
+      }
+      let replacement_paragraphs: Vec<InputParagraph> = new_text
+        .split('\n')
+        .map(|text| InputParagraph {
+          style: self.document.paragraphs
+            .get(first.start.paragraph.min(self.document.paragraphs.len().saturating_sub(1)))
+            .map(|p| p.style)
+            .unwrap_or(ParagraphStyle::Normal),
+          runs: if text.is_empty() {
+            Vec::new()
+          } else {
+            vec![InputRun {
+              text: text.to_string(),
+              styles: styles_at_byte(
+                &self.document.paragraphs[first.start.paragraph.min(self.document.paragraphs.len().saturating_sub(1))],
+                0,
+              ),
+            }]
+          },
+        })
+        .collect();
+      let new_paragraph_ids: Vec<ParagraphId> = replacement_paragraphs
+        .iter()
+        .skip(1)
+        .map(|_| new_paragraph_id())
+        .collect();
+      let last_len = replacement_paragraphs
+        .last()
+        .map(|p| p.runs.iter().map(|r| r.text.len()).sum())
+        .unwrap_or(0);
+      let after = new_paragraph_ids
+        .last()
+        .map(|&last_id| AuthoritativeSourcePosition { paragraph: last_id, byte: last_len })
+        .unwrap_or(AuthoritativeSourcePosition { paragraph: first_start.paragraph, byte: first_start.byte + last_len });
+      if self.apply_authoritative_source_operations(
+        vec![
+          AuthoritativeSourceOperation::DeleteText { start: first_start, end: last_end },
+          AuthoritativeSourceOperation::InsertParagraphFragment {
+            at: first_start,
+            paragraphs: replacement_paragraphs,
+            new_paragraphs: new_paragraph_ids,
+          },
+        ],
+        AuthoritativeSourceSelection { anchor: after, head: after },
+        cx,
+      ) {
+        self.search_highlights.clear();
+        self.active_search_highlight = None;
+        cx.notify();
+        return count;
+      }
+      self.search_highlights = ranges;
+      self.active_search_highlight = None;
+      cx.notify();
+      return 0;
     }
     let paragraph_count = self.document.paragraphs.len();
     self.apply_document_edit_with_capture_range(cx, Some(0..paragraph_count), |editor, cx| {

@@ -193,7 +193,7 @@ fn encode_run_semantic_style(style: RunSemanticStyle) -> u8 {
   } else if style == SEMANTIC_ULTRACONDENSED {
     5
   } else if let RunSemanticStyle::Custom(slot) = style {
-    slot
+    slot.wrapping_add(6)
   } else {
     0
   }
@@ -208,7 +208,7 @@ fn decode_run_semantic_style(value: u8) -> io::Result<RunSemanticStyle> {
     3 => SEMANTIC_UNDERLINE,
     4 => SEMANTIC_CONDENSED,
     5 => SEMANTIC_ULTRACONDENSED,
-    slot => RunSemanticStyle::Custom(slot),
+    slot => RunSemanticStyle::Custom(slot.wrapping_sub(6)),
   })
 }
 

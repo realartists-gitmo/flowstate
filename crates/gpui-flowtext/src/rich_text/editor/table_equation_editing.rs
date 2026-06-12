@@ -622,7 +622,7 @@ fn table_cell_source_operations(
       operations.push(AuthoritativeSourceOperation::SetRunStyles {
         paragraph,
         range: 0..after.text.len(),
-        styles: RunStyles::default(),
+        patch: RunStylePatch::replace(RunStyles::default()),
       });
     } else {
       let mut start = 0;
@@ -631,7 +631,7 @@ fn table_cell_source_operations(
         operations.push(AuthoritativeSourceOperation::SetRunStyles {
           paragraph,
           range: start..end,
-          styles: run.styles,
+          patch: RunStylePatch::replace(run.styles),
         });
         start = end;
       }
