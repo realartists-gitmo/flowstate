@@ -132,23 +132,23 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
       },
       NetCommand::PullUpdates {
         session,
-        from,
+        candidates,
         our_vv,
         reply,
       } => {
-        let result = direct::pull_with_fallback(DirectRequest::Updates { session, have_vv: our_vv }, vec![from], DIRECT_PULL_TIMEOUT).await;
+        let result = direct::pull_with_fallback(DirectRequest::Updates { session, have_vv: our_vv }, candidates, DIRECT_PULL_TIMEOUT).await;
         let _ = reply.send(result).await;
       },
-      NetCommand::PullSnapshot { session, from, reply } => {
-        let result = direct::pull_with_fallback(DirectRequest::Snapshot { session }, vec![from], DIRECT_PULL_TIMEOUT).await;
+      NetCommand::PullSnapshot { session, candidates, reply } => {
+        let result = direct::pull_with_fallback(DirectRequest::Snapshot { session }, candidates, DIRECT_PULL_TIMEOUT).await;
         let _ = reply.send(result).await;
       },
-      NetCommand::PullBlob { session, from, blob, reply } => {
-        let result = direct::pull_with_fallback(DirectRequest::Blob { session, blob }, vec![from], DIRECT_PULL_TIMEOUT).await;
+      NetCommand::PullBlob { session, candidates, blob, reply } => {
+        let result = direct::pull_with_fallback(DirectRequest::Blob { session, blob }, candidates, DIRECT_PULL_TIMEOUT).await;
         let _ = reply.send(result).await;
       },
-      NetCommand::PullAsset { session, from, asset, reply } => {
-        let result = direct::pull_with_fallback(DirectRequest::Asset { session, asset }, vec![from], DIRECT_PULL_TIMEOUT)
+      NetCommand::PullAsset { session, candidates, asset, reply } => {
+        let result = direct::pull_with_fallback(DirectRequest::Asset { session, asset }, candidates, DIRECT_PULL_TIMEOUT)
           .await
           .map(|bytes| AssetBytes { bytes });
         let _ = reply.send(result).await;

@@ -13,6 +13,7 @@ use crate::{ids::{BlobId, SessionId}, proto_direct::AssetBytes, proto_gossip::Go
 use self::direct::DirectSessionHandler;
 
 pub type Reply<T> = Sender<T>;
+pub type PeerAddr = EndpointAddr;
 
 #[derive(Clone, Debug)]
 pub enum PublishPayload {
@@ -29,10 +30,10 @@ pub enum NetCommand {
   JoinSession { session: SessionId, bootstrap: Vec<EndpointAddr> },
   LeaveSession { session: SessionId },
   Publish { session: SessionId, payload: PublishPayload },
-  PullUpdates { session: SessionId, from: EndpointId, our_vv: Vec<u8>, reply: Reply<Result<Vec<u8>>> },
-  PullSnapshot { session: SessionId, from: EndpointId, reply: Reply<Result<Vec<u8>>> },
-  PullBlob { session: SessionId, from: EndpointId, blob: BlobId, reply: Reply<Result<Vec<u8>>> },
-  PullAsset { session: SessionId, from: EndpointId, asset: u128, reply: Reply<Result<AssetBytes>> },
+  PullUpdates { session: SessionId, candidates: Vec<EndpointId>, our_vv: Vec<u8>, reply: Reply<Result<Vec<u8>>> },
+  PullSnapshot { session: SessionId, candidates: Vec<EndpointId>, reply: Reply<Result<Vec<u8>>> },
+  PullBlob { session: SessionId, candidates: Vec<EndpointId>, blob: BlobId, reply: Reply<Result<Vec<u8>>> },
+  PullAsset { session: SessionId, candidates: Vec<EndpointId>, asset: u128, reply: Reply<Result<AssetBytes>> },
   MintTicketAddr { reply: Reply<EndpointAddr> },
   Shutdown,
 }

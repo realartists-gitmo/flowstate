@@ -49,6 +49,11 @@ impl AntiEntropyState {
     now >= self.next_digest
   }
 
+  #[must_use]
+  pub fn duration_until_digest(&self, now: Instant) -> Duration {
+    self.next_digest.saturating_duration_since(now)
+  }
+
   pub fn mark_digest_sent(&mut self, now: Instant) {
     self.next_digest = next_jittered_deadline(now);
   }

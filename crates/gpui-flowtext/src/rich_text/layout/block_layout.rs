@@ -274,6 +274,14 @@ fn structural_block_bounds(document: &Document, width: Pixels, y: Pixels, height
 
 #[hotpath::measure]
 fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
+  if document
+    .assets
+    .assets
+    .get(&image.asset_id)
+    .is_some_and(AssetRecord::is_loading_placeholder)
+  {
+    return px(IMAGE_LOADING_PLACEHOLDER_HEIGHT_PX);
+  }
   let available_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_intrinsic_size(document, image);
   match image.sizing {
@@ -295,6 +303,9 @@ pub(super) fn image_layout_height_for_test(document: &Document, image: &ImageBlo
 #[hotpath::measure]
 fn image_intrinsic_size(document: &Document, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
   let asset = document.assets.assets.get(&image.asset_id)?;
+  if asset.is_loading_placeholder() {
+    return None;
+  }
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
   if size.width == 0 || size.height == 0 {
     return None;

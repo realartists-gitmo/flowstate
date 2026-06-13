@@ -1,8 +1,42 @@
 #[hotpath::measure_all]
 impl Workspace {
+  pub fn open_collaboration_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_collaboration_dialog_with_mode(crate::collab::share_dialog::CollabDialogMode::Share, window, cx);
+  }
+
+  pub fn open_join_collaboration_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    self.open_collaboration_dialog_with_mode(crate::collab::share_dialog::CollabDialogMode::Join, window, cx);
+  }
+
+  pub fn close_collaboration_dialog(&mut self, cx: &mut Context<Self>) {
+    self.collaboration_dialog = None;
+    cx.notify();
+  }
+
+  fn open_collaboration_dialog_with_mode(
+    &mut self,
+    mode: crate::collab::share_dialog::CollabDialogMode,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) {
+    let workspace = cx.entity().downgrade();
+    let panel_id = self.active_editor.as_ref().and(self.active_document_id);
+    let dialog = cx.new(|cx| crate::collab::share_dialog::CollabShareDialog::new(workspace, panel_id, mode, window, cx));
+    dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
+    self.collaboration_dialog = Some(dialog);
+    cx.notify();
+  }
+
   pub fn start_collaboration_on_active_document(&mut self, cx: &mut Context<Self>) -> Option<flowstate_collab::SessionId> {
-    let panel_id = self.active_document_id?;
-    let editor = self.active_editor.clone()?;
+    self.start_collaboration_on_document(self.active_document_id?, cx)
+  }
+
+  pub fn start_collaboration_on_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<flowstate_collab::SessionId> {
+    let panel = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)?;
+    let editor = panel.read(cx).editor();
     let title = self
       .document_panels
       .iter()
@@ -116,6 +150,51 @@ impl Workspace {
     self.join_collaboration_session(ticket, window, cx).is_some()
   }
 
+  pub fn confirm_leave_collaboration_on_active_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    self
+      .active_document_id
+      .is_some_and(|panel_id| self.confirm_leave_collaboration_on_panel(panel_id, window, cx))
+  }
+
+  pub fn confirm_leave_collaboration_on_panel(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    let phase = crate::collab::phase_for_panel(panel_id, cx);
+    if !collaboration_phase_blocks_close(phase.as_ref()) {
+      return false;
+    }
+    let detail = format!("{} Your copy of the document stays open.", collaboration_leave_detail(phase.as_ref()));
+    let answer = window.prompt(
+      PromptLevel::Warning,
+      "Leave this session?",
+      Some(&detail),
+      &[PromptButton::ok("Leave"), PromptButton::cancel("Cancel")],
+      cx,
+    );
+    let window_handle = window.window_handle();
+    cx.spawn(async move |workspace, cx| {
+      if !matches!(answer.await, Ok(0)) {
+        return;
+      }
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.leave_collaboration_on_panel(panel_id, cx);
+      });
+      let _ = window_handle.update(cx, |_, window, cx| {
+        std::mem::drop(window.prompt(
+          PromptLevel::Info,
+          "Left session",
+          Some("Left session - this copy is now local."),
+          &[PromptButton::ok("Ok")],
+          cx,
+        ));
+      });
+    })
+    .detach();
+    true
+  }
+
+  pub fn leave_collaboration_on_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> bool {
+    crate::collab::leave_session_for_panel(panel_id, cx)
+  }
+
   pub fn join_collaboration_session(
     &mut self,
     ticket: flowstate_collab::ticket::SessionTicket,
@@ -198,7 +277,7 @@ impl Workspace {
   pub fn leave_collaboration_on_active_document(&mut self, cx: &mut Context<Self>) -> bool {
     self
       .active_document_id
-      .is_some_and(|panel_id| crate::collab::leave_session_for_panel(panel_id, cx))
+      .is_some_and(|panel_id| self.leave_collaboration_on_panel(panel_id, cx))
   }
 
   pub fn leave_all_collaboration_sessions(&mut self, cx: &mut Context<Self>) {

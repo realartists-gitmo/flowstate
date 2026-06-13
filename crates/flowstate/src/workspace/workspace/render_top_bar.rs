@@ -2,6 +2,10 @@
 impl Workspace {
   fn render_top_bar(&mut self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
     let workspace = cx.entity().downgrade();
+    let active_collaborating = self
+      .active_document_id
+      .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx))
+      .is_some_and(|phase| !matches!(phase, crate::collab::SessionPhase::Detached(_)));
     TitleBar::new()
       .on_close_window(move |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| workspace.request_close_window(window, cx));
@@ -23,6 +27,8 @@ impl Workspace {
             !self.ribbon_collapsed,
             !self.toolkit_collapsed,
           ))
+          .child(div().flex_1())
+          .child(share_top_bar_button(cx, self.active_editor.is_some(), active_collaborating))
           .child(settings_top_bar_button(cx)),
       )
   }

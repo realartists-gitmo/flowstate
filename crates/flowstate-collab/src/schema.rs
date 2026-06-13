@@ -59,6 +59,10 @@ pub enum BlockPayload {
   Table(InputTableBlock),
 }
 
+pub fn decode_block_payload(bytes: &[u8]) -> Result<BlockPayload> {
+  Ok(postcard::from_bytes(bytes)?)
+}
+
 #[must_use]
 pub fn payload_from_block(block: &Block, assets: &AssetStore) -> Option<BlockPayload> {
   match input_block_from_block(block) {

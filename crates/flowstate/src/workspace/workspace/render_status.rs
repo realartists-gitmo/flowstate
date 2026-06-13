@@ -284,7 +284,13 @@ impl Workspace {
         if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
           this
         } else {
-          this.child(crate::collab::status::status_pill(&phase, cx))
+          this.child(
+            Button::new("collaboration-status-pill")
+              .text()
+              .compact()
+              .child(crate::collab::status::status_pill(&phase, cx))
+              .on_click(cx.listener(|workspace, _, window, cx| workspace.open_collaboration_dialog(window, cx))),
+          )
         }
       })
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))

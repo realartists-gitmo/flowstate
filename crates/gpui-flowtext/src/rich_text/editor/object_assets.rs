@@ -19,12 +19,17 @@ fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: 
 fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let available_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_asset_intrinsic_size(asset);
-  let object_width = match image.sizing {
-    ImageSizing::Fixed { width_px, .. } => px(width_px as f32).min(available_width),
-    ImageSizing::FitWidth => available_width,
-    ImageSizing::Intrinsic => intrinsic
-      .map(|(width, _)| width.min(available_width))
-      .unwrap_or(available_width),
+  let loading = asset.is_loading_placeholder();
+  let object_width = if loading {
+    px(IMAGE_LOADING_PLACEHOLDER_WIDTH_PX).min(available_width)
+  } else {
+    match image.sizing {
+      ImageSizing::Fixed { width_px, .. } => px(width_px as f32).min(available_width),
+      ImageSizing::FitWidth => available_width,
+      ImageSizing::Intrinsic => intrinsic
+        .map(|(width, _)| width.min(available_width))
+        .unwrap_or(available_width),
+    }
   };
   let object_height = (row_size.height - document.theme.paragraph_after).max(px(1.0));
   let left_margin = document.theme.pageless_inset_x
@@ -41,13 +46,22 @@ fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetReco
     .mr(document.theme.pageless_inset_x)
     .mb(document.theme.paragraph_after)
     .overflow_hidden()
-    .bg(rgb(0xffffff))
+    .bg(if loading { rgb(0xf3f4f6) } else { rgb(0xffffff) })
     .border_1()
-    .border_color(if selected { rgb(0x0969da) } else { rgb(0xffffff) })
+    .border_color(if selected {
+      rgb(0x0969da)
+    } else if loading {
+      rgb(0xd0d7de)
+    } else {
+      rgb(0xffffff)
+    })
 }
 
 #[hotpath::measure]
 fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
+  if asset.is_loading_placeholder() {
+    return None;
+  }
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
   if size.width == 0 || size.height == 0 {
     return None;
