@@ -136,143 +136,21 @@ impl Workspace {
   }
 
   fn render_flow_nav(&mut self, cx: &mut Context<Self>) -> AnyElement {
-    let workspace = cx.entity().downgrade();
-    let items = self
-      .active_flow
-      .as_ref()
-      .map(|editor| editor.read(cx).outline_items())
-      .unwrap_or_default();
-    let len = items.len();
-
     v_flex()
       .size_full()
       .h_full()
-      .gap_1()
       .p_2()
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
       .child(
         div()
           .w_full()
+          .h_full()
           .flex()
-          .flex_row()
           .items_center()
-          .justify_between()
-          .child(
-            div()
-              .text_sm()
-              .font_weight(gpui::FontWeight::SEMIBOLD)
-              .text_color(cx.theme().sidebar_primary)
-              .child("Flows"),
-          )
-          .child(
-            Button::new("collapse-flow-outline-panel")
-              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Collapse outline")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_outline(cx);
-              })),
-          ),
-      )
-      .child(
-        v_flex()
-          .flex_1()
-          .w_full()
-          .gap_1()
-          .overflow_y_scrollbar()
-          .children(items.into_iter().map(|item| {
-            let flow_id = item.id.clone();
-            let label = item.label.clone();
-            let selected = item.selected;
-            let source_index = item.index;
-            let target_index = item.index;
-            let colors = crate::flow::editor::affirmative_flow_colors(cx);
-            let workspace_for_click = workspace.clone();
-            div()
-              .id(("flow-outline-drop-row", source_index))
-              .w_full()
-              .on_drag(
-                FlowOutlineDrag {
-                  flow_id: flow_id.clone(),
-                  label: label.clone(),
-                  source_index,
-                },
-                |drag, _, _, cx| {
-                  cx.stop_propagation();
-                  cx.new(|_| drag.clone())
-                },
-              )
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_t_2().border_color(cx.theme().drag_border))
-              .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
-                let new_index = flow_drop_index(drag.source_index, target_index);
-                if let Some(editor) = workspace.active_flow.clone() {
-                  editor.update(cx, |editor, cx| editor.move_flow_to_index(drag.flow_id.clone(), new_index, window, cx));
-                }
-                cx.notify();
-              }))
-              .child(
-                ListItem::new(("flow-outline-item", source_index))
-                  .selected(selected)
-                  .rounded(cx.theme().radius)
-                  .on_click(move |_, window, cx| {
-                    let _ = workspace_for_click.update(cx, |workspace, cx| {
-                      if let Some(editor) = workspace.active_flow.clone() {
-                        editor.update(cx, |editor, cx| editor.select_flow(flow_id.clone(), window, cx));
-                      }
-                    });
-                  })
-                  .child(
-                    h_flex()
-                      .w_full()
-                      .min_w_0()
-                      .items_center()
-                      .gap_2()
-                      .child(
-                        div()
-                          .w(px(3.0))
-                          .h(px(20.0))
-                          .rounded(px(2.0))
-                          .bg(colors.border),
-                      )
-                      .child(
-                        div()
-                          .flex_1()
-                          .min_w_0()
-                          .text_xs()
-                          .truncate()
-                          .text_color(if selected {
-                            cx.theme().sidebar_foreground
-                          } else {
-                            cx.theme().muted_foreground
-                          })
-                          .child(label),
-                      )
-                      .child(
-                        Icon::new(IconName::Menu)
-                          .xsmall()
-                          .text_color(cx.theme().muted_foreground),
-                      ),
-                  ),
-              )
-              .into_any_element()
-          }))
-          .child(
-            div()
-              .id("flow-outline-drop-end")
-              .h(px(22.0))
-              .rounded(cx.theme().radius)
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_1().border_color(cx.theme().drag_border))
-              .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
-                if len > 0
-                  && let Some(editor) = workspace.active_flow.clone()
-                {
-                  editor.update(cx, |editor, cx| editor.move_flow_to_index(drag.flow_id.clone(), usize::MAX, window, cx));
-                  cx.notify();
-                }
-              })),
-          ),
+          .justify_center()
+          .text_sm()
+          .child("Flow"),
       )
       .into_any_element()
   }
@@ -503,33 +381,7 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
     )
 }
 
-#[derive(Clone)]
-struct FlowOutlineDrag {
-  flow_id: String,
-  label: String,
-  source_index: usize,
-}
 
-#[hotpath::measure_all]
-impl Render for FlowOutlineDrag {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    h_flex()
-      .id("flow-outline-drag")
-      .w(px(180.0))
-      .items_center()
-      .gap_2()
-      .rounded(cx.theme().radius)
-      .border_1()
-      .border_color(cx.theme().drag_border)
-      .bg(cx.theme().popover.opacity(0.92))
-      .px_2()
-      .py_1()
-      .text_xs()
-      .text_color(cx.theme().popover_foreground)
-      .child(Icon::new(IconName::Menu).xsmall())
-      .child(div().flex_1().truncate().child(self.label.clone()))
-  }
-}
 
 #[hotpath::measure]
 fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
@@ -543,11 +395,4 @@ fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
   }
 }
 
-#[hotpath::measure]
-fn flow_drop_index(source_index: usize, target_index: usize) -> usize {
-  if source_index < target_index {
-    target_index.saturating_sub(1)
-  } else {
-    target_index
-  }
-}
+

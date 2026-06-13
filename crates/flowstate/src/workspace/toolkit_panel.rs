@@ -492,8 +492,8 @@ impl Workspace {
       editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
       return;
     }
-    if let Some(editor) = self.active_flow.clone() {
-      editor.update(cx, |editor, cx| editor.insert_toolkit_text(&hit.title, &hit.insert_text, window, cx));
+    if self.active_flow.is_some() {
+      // Flow toolkit text insertion is not yet supported.
     }
   }
 
@@ -690,7 +690,7 @@ impl Workspace {
       .justify_center()
       .child(
         Button::new(id)
-          .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().primary_foreground))
+          .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().secondary_foreground))
           .label(label)
           .small()
           .tooltip("Select debate tub folder")

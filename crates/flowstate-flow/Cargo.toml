@@ -9,13 +9,3 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-hotpath = { workspace = true }
-rustc-hash = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-uuid = { workspace = true }
-
-[features]
-hotpath = ["hotpath/hotpath"]
-hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc"]
