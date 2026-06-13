@@ -115,6 +115,7 @@ impl RichTextEditor {
     let _ = self.paragraph_item_sizes(window, cx);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 
@@ -199,6 +200,7 @@ impl RichTextEditor {
     self.goal_x = Some(used_goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 
@@ -256,6 +258,7 @@ impl RichTextEditor {
     self.goal_x = Some(goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 

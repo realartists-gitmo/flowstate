@@ -262,8 +262,14 @@ impl RichTextEditor {
     self.collab_undo_redirect = hook;
   }
 
-  pub fn set_recovery_path(&mut self, path: Option<PathBuf>) {
+  pub fn clear_collab_history(&mut self) {
+    self.undo_stack.clear();
+    self.redo_stack.clear();
+  }
+
+  pub fn set_recovery_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
     self.recovery_path = path;
+    self.schedule_recovery_write(cx);
   }
 
   pub fn collaboration_role(&self) -> Option<CollaborationRole> {

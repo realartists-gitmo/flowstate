@@ -13,6 +13,9 @@ fn render_image_block(
       .child("Missing image")
       .into_any_element();
   };
+  if asset.is_loading_placeholder() {
+    return render_loading_image_placeholder(document, image, asset, row_size, selected, editor, block_ix);
+  }
   let Some(format) = ImageFormat::from_mime_type(asset.mime_type.as_ref()) else {
     return reserved_object_frame(document, row_size, selected)
       .child("Unsupported image")
@@ -32,6 +35,34 @@ fn render_image_block(
             .child("Image unavailable")
             .into_any_element()
         }),
+    )
+    .when(selected, |this| this.children(image_resize_handles(editor, block_ix)))
+    .into_any_element()
+}
+
+#[hotpath::measure]
+fn render_loading_image_placeholder(
+  document: &Document,
+  image: &ImageBlock,
+  asset: &AssetRecord,
+  row_size: Size<Pixels>,
+  selected: bool,
+  editor: Entity<RichTextEditor>,
+  block_ix: usize,
+) -> gpui::AnyElement {
+  image_object_frame(document, image, asset, row_size, selected)
+    .child(
+      div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .text_sm()
+        .text_color(rgb(0x6b7280))
+        .child(div().text_xs().text_color(rgb(0x9ca3af)).child("..."))
+        .child("Loading image"),
     )
     .when(selected, |this| this.children(image_resize_handles(editor, block_ix)))
     .into_any_element()
@@ -254,4 +285,3 @@ type EquationRenderCache = FxHashMap<EquationCacheKey, Result<Arc<Vec<u8>>, Stri
 
 static EQUATION_SVG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
 static EQUATION_PNG_CACHE: OnceLock<Mutex<EquationRenderCache>> = OnceLock::new();
-

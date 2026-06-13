@@ -1,5 +1,7 @@
 mod session;
 mod presence_view;
+pub mod share_dialog;
+mod shutdown;
 pub mod status;
 
 use std::collections::HashMap;
@@ -16,7 +18,8 @@ use uuid::Uuid;
 
 use crate::rich_text_element::RichTextEditor;
 
-pub use session::{Attachment, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionPhase};
+pub use session::{Attachment, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionPhase, SessionRosterEntry};
+pub use shutdown::shutdown;
 
 pub struct JoinRequest {
   pub session: SessionId,
@@ -92,7 +95,7 @@ impl CollabManager {
     let commands = self.ensure_runtime(cx)?;
     let session = ticket.session;
     let inviter = ticket.inviter.id;
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone());
+    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), vec![ticket.inviter.clone()]);
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
 
@@ -194,6 +197,12 @@ impl CollabManager {
     self
       .session_for_panel(panel_id)
       .map(|session| session.read(cx).phase().clone())
+  }
+
+  pub fn roster_for_panel(&self, panel_id: Uuid, cx: &App) -> Vec<SessionRosterEntry> {
+    self
+      .session_for_panel(panel_id)
+      .map_or_else(Vec::new, |session| session.read(cx).roster())
   }
 
   fn register_session<T>(&mut self, session: Entity<CollabSession>, cx: &mut Context<T>) {
@@ -393,4 +402,8 @@ where
 
 pub fn phase_for_panel(panel_id: Uuid, cx: &App) -> Option<SessionPhase> {
   CollabManager::global(cx).phase_for_panel(panel_id, cx)
+}
+
+pub fn roster_for_panel(panel_id: Uuid, cx: &App) -> Vec<SessionRosterEntry> {
+  CollabManager::global(cx).roster_for_panel(panel_id, cx)
 }

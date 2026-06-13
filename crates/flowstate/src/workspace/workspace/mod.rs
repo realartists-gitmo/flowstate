@@ -103,6 +103,7 @@ pub struct Workspace {
   autosave_enabled: bool,
   autosave_document_generations: HashMap<Uuid, u64>,
   autosave_flow_in_flight: HashSet<Uuid>,
+  collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,
@@ -261,6 +262,7 @@ impl DocumentStyleSection {
 }
 
 include!("documents.rs");
+include!("collab_prompts.rs");
 include!("collab.rs");
 include!("workspace_state.rs");
 include!("load.rs");

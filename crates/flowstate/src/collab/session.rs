@@ -1,8 +1,6 @@
 use std::{
-  cmp::Ordering,
   collections::HashSet,
   rc::Rc,
-  sync::{Arc, Mutex},
   time::Instant,
 };
 
@@ -11,22 +9,29 @@ use flowstate_collab::{
   SessionId,
   binding::DocBinding,
   local_apply::LocalApplier,
-  net::{NetCommand, PublishPayload, runtime::CommandSender, direct::{DirectServeRequest, DirectSessionHandler}},
-  presence::{PresenceSelection, PresenceState, PresenceStore},
+  net::{NetCommand, PeerAddr, PublishPayload, anti_entropy::AntiEntropyState, direct::{DirectServeRequest, DirectSessionHandler}, runtime::CommandSender},
+  presence::PresenceStore,
   projection,
-  proto_direct::AssetBytes,
   proto_gossip::GossipMsg,
-  remote_apply::RemoteApplier,
   schema,
 };
 use gpui::{Context, Entity, Subscription};
-use loro::{ExportMode, LoroDoc, Subscription as LoroSubscription, VersionVector, event::Subscriber};
+use loro::{LoroDoc, Subscription as LoroSubscription, UndoManager};
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
 use crate::rich_text_element::{AssetId, CollabPatch, Document, EditorEvent, RichTextEditor, UndoRedirect};
 
 use super::presence_view;
+
+#[path = "asset_transfer.rs"]
+mod asset_transfer;
+#[path = "session_io.rs"]
+mod session_io;
+#[path = "session_presence.rs"]
+mod session_presence;
+#[path = "session_timers.rs"]
+mod session_timers;
 
 #[derive(Clone, Debug)]
 pub enum SessionPhase {
@@ -69,6 +74,13 @@ pub struct JoinedDocument {
   pub document: Document,
 }
 
+#[derive(Clone, Debug)]
+pub struct SessionRosterEntry {
+  pub name: String,
+  pub color_rgb: u32,
+  pub is_self: bool,
+}
+
 pub struct CollabSession {
   session: SessionId,
   title: String,
@@ -83,12 +95,25 @@ pub struct CollabSession {
   net_tx: CommandSender,
   direct_tx: async_channel::Sender<DirectServeRequest>,
   direct_rx: async_channel::Receiver<DirectServeRequest>,
+  undo_tx: async_channel::Sender<UndoRedirect>,
+  undo_rx: async_channel::Receiver<UndoRedirect>,
   editor_subscriptions: Vec<Subscription>,
   loro_subscriptions: Vec<LoroSubscription>,
   neighbors: HashSet<flowstate_collab::ids::PeerId>,
-  update_pull_in_flight: bool,
+  bootstrap_addrs: Vec<PeerAddr>,
+  asset_pulls_in_flight: HashSet<AssetId>,
+  anti_entropy: AntiEntropyState,
+  undo_manager: Option<UndoManager>,
   direct_pump_started: bool,
+  undo_pump_started: bool,
   local_update_publish_attached: bool,
+  timers_started: bool,
+  endpoint_online: bool,
+  zero_neighbors_since: Option<Instant>,
+  inbound_since_last_digest: bool,
+  quiet_digest_rounds: u8,
+  next_recovery_at: Option<Instant>,
+  last_document_activity: Instant,
 }
 
 impl CollabSession {
@@ -104,6 +129,8 @@ impl CollabSession {
     projection::populate_from_document(&doc, session, &title, &document)?;
     let binding = DocBinding::build(&doc, &document)?;
     let (direct_tx, direct_rx) = async_channel::unbounded();
+    let (undo_tx, undo_rx) = async_channel::unbounded();
+    let now = Instant::now();
 
     Ok(Self {
       session,
@@ -119,17 +146,32 @@ impl CollabSession {
       net_tx,
       direct_tx,
       direct_rx,
+      undo_tx,
+      undo_rx,
       editor_subscriptions: Vec::new(),
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
-      update_pull_in_flight: false,
+      bootstrap_addrs: Vec::new(),
+      asset_pulls_in_flight: HashSet::new(),
+      anti_entropy: AntiEntropyState::new(session, now),
+      undo_manager: None,
       direct_pump_started: false,
+      undo_pump_started: false,
       local_update_publish_attached: false,
+      timers_started: false,
+      endpoint_online: true,
+      zero_neighbors_since: Some(now),
+      inbound_since_last_digest: false,
+      quiet_digest_rounds: 0,
+      next_recovery_at: None,
+      last_document_activity: now,
     })
   }
 
-  pub fn joining(session: SessionId, title: String, net_tx: CommandSender) -> Self {
+  pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>) -> Self {
     let (direct_tx, direct_rx) = async_channel::unbounded();
+    let (undo_tx, undo_rx) = async_channel::unbounded();
+    let now = Instant::now();
     Self {
       session,
       title,
@@ -144,12 +186,25 @@ impl CollabSession {
       net_tx,
       direct_tx,
       direct_rx,
+      undo_tx,
+      undo_rx,
       editor_subscriptions: Vec::new(),
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
-      update_pull_in_flight: false,
+      bootstrap_addrs,
+      asset_pulls_in_flight: HashSet::new(),
+      anti_entropy: AntiEntropyState::new(session, now),
+      undo_manager: None,
       direct_pump_started: false,
+      undo_pump_started: false,
       local_update_publish_attached: false,
+      timers_started: false,
+      endpoint_online: true,
+      zero_neighbors_since: Some(now),
+      inbound_since_last_digest: false,
+      quiet_digest_rounds: 0,
+      next_recovery_at: None,
+      last_document_activity: now,
     }
   }
 
@@ -169,8 +224,33 @@ impl CollabSession {
     &self.phase
   }
 
+  pub fn roster(&self) -> Vec<SessionRosterEntry> {
+    let Some(presence) = &self.presence else {
+      return Vec::new();
+    };
+    let self_key = presence.self_key().to_string();
+    presence
+      .roster()
+      .into_iter()
+      .map(|entry| SessionRosterEntry {
+        is_self: entry.key == self_key,
+        name: entry.name,
+        color_rgb: entry.color_rgb,
+      })
+      .collect()
+  }
+
   pub fn direct_handler(&self) -> DirectSessionHandler {
     DirectSessionHandler::new(self.direct_tx.clone())
+  }
+
+  pub(super) fn pull_candidates(&self, preferred: Option<flowstate_collab::ids::PeerId>) -> Vec<flowstate_collab::ids::PeerId> {
+    let mut candidates = Vec::with_capacity(self.neighbors.len() + usize::from(preferred.is_some()));
+    if let Some(peer) = preferred {
+      candidates.push(peer);
+    }
+    candidates.extend(self.neighbors.iter().copied().filter(|peer| Some(*peer) != preferred));
+    candidates
   }
 
   pub fn set_join_stage(&mut self, stage: JoinStage, cx: &mut Context<Self>) {
@@ -190,7 +270,7 @@ impl CollabSession {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if let Err(error) = self.net_tx.try_send(NetCommand::PullSnapshot {
       session: self.session,
-      from: inviter,
+      candidates: self.pull_candidates(Some(inviter)),
       reply: reply_tx,
     }) {
       let detail = format!("requesting collaboration snapshot failed: {error}");
@@ -252,15 +332,19 @@ impl CollabSession {
       self.import_update_bytes(&update, cx)?;
     }
     self.flush_pending_remote_patches(cx);
+    asset_transfer::schedule_missing_assets(self, None, cx);
     self.publish_digest();
     cx.notify();
     Ok(())
   }
 
   pub fn attach(&mut self, cx: &mut Context<Self>) {
+    self.attach_undo_manager();
     self.attach_editor_hooks(cx);
     self.attach_loro_publish_hook();
     self.attach_direct_request_pump(cx);
+    self.attach_undo_request_pump(cx);
+    self.attach_timers(cx);
   }
 
   pub fn establish_local_peer(&mut self, peer: &flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
@@ -278,12 +362,14 @@ impl CollabSession {
       self.presence = Some(presence);
     }
     self.refresh_own_presence(cx);
+    self.endpoint_online = true;
     self.phase = SessionPhase::Attached(Attachment {
       connectivity: Connectivity::Online,
       peers_present: self.peers_present(),
     });
     self.publish_presence_snapshot();
     self.publish_digest();
+    asset_transfer::schedule_missing_assets(self, None, cx);
     cx.notify();
   }
 
@@ -324,6 +410,7 @@ impl CollabSession {
       editor.update(cx, |editor, cx| {
         editor.set_collab_undo_redirect(None);
         editor.set_collab_capture(false);
+        editor.clear_collab_history();
         let _ = editor.take_pending_collab_edits();
         editor.set_external_carets(Vec::new(), cx);
       });
@@ -331,12 +418,18 @@ impl CollabSession {
 
     self.editor_subscriptions.clear();
     self.loro_subscriptions.clear();
+    self.undo_manager = None;
     self.presence = None;
     self.binding = None;
     self.doc = None;
     self.pending_remote_patches.clear();
     self.pending_remote_updates.clear();
     self.neighbors.clear();
+    self.asset_pulls_in_flight.clear();
+    self.zero_neighbors_since = Some(Instant::now());
+    self.inbound_since_last_digest = false;
+    self.quiet_digest_rounds = 0;
+    self.next_recovery_at = None;
     self.local_update_publish_attached = false;
     self.phase = SessionPhase::Detached(reason);
     cx.notify();
@@ -349,7 +442,11 @@ impl CollabSession {
     }
 
     let document = editor.read(cx).document().clone();
-    let edits = editor.update(cx, |editor, _| editor.take_pending_collab_edits());
+    let edits = editor.update(cx, |editor, _| {
+      let edits = editor.take_pending_collab_edits();
+      editor.clear_collab_history();
+      edits
+    });
     let Some(doc) = &self.doc else {
       return Ok(());
     };
@@ -357,18 +454,26 @@ impl CollabSession {
       return Ok(());
     };
 
+    let mut applied = false;
     for edit in edits {
       if edit.operations.is_empty() {
         continue;
       }
       LocalApplier { doc, binding }.apply(&document, &edit.operations)?;
+      applied = true;
+    }
+    if applied {
+      self.last_document_activity = Instant::now();
     }
     Ok(())
   }
 
   pub fn handle_gossip(&mut self, from: flowstate_collab::ids::PeerId, msg: GossipMsg, cx: &mut Context<Self>) {
+    self.note_inbound_traffic(cx);
     let result = match msg {
-      GossipMsg::Update(bytes) => self.import_update_bytes(&bytes, cx),
+      GossipMsg::Update(bytes) => self
+        .import_update_bytes(&bytes, cx)
+        .map(|()| asset_transfer::schedule_missing_assets(self, Some(from), cx)),
       GossipMsg::UpdateAvailable { blob, .. } => {
         self.pull_blob(from, blob, cx);
         Ok(())
@@ -386,58 +491,41 @@ impl CollabSession {
 
   pub fn neighbor_up(&mut self, peer: flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     self.neighbors.insert(peer);
-    if let SessionPhase::Attached(attachment) = &mut self.phase {
-      attachment.connectivity = Connectivity::Online;
-    }
+    self.zero_neighbors_since = None;
+    self.anti_entropy.on_neighbor_up();
+    self.mark_online(cx);
     self.publish_digest();
+    asset_transfer::schedule_missing_assets(self, Some(peer), cx);
     cx.notify();
   }
 
   pub fn neighbor_down(&mut self, peer: flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     self.neighbors.remove(&peer);
+    if self.neighbors.is_empty() && self.zero_neighbors_since.is_none() {
+      self.zero_neighbors_since = Some(Instant::now());
+    }
+    self.evaluate_connectivity(cx);
     cx.notify();
   }
 
   pub fn handle_gossip_lagged(&mut self, cx: &mut Context<Self>) {
     self.publish_digest();
-    if let Some(peer) = self.neighbors.iter().next().copied() {
-      let vv = self.doc.as_ref().map(|doc| doc.oplog_vv().encode()).unwrap_or_default();
-      self.pull_updates(peer, vv, cx);
-    }
+    let peer = self.neighbors.iter().next().copied();
+    let vv = self.doc.as_ref().map(|doc| doc.oplog_vv().encode()).unwrap_or_default();
+    let action = self.anti_entropy.on_lagged(peer, vv);
+    self.handle_gap_action(action, cx);
   }
 
   pub fn set_endpoint_online(&mut self, online: bool, cx: &mut Context<Self>) {
-    if let SessionPhase::Attached(attachment) = &mut self.phase {
-      attachment.connectivity = if online {
-        Connectivity::Online
-      } else {
-        Connectivity::Offline { since: Instant::now(), retries: 0 }
-      };
-      cx.notify();
+    self.endpoint_online = online;
+    if online {
+      if self.peers_present() == 0 || !self.neighbors.is_empty() {
+        self.mark_online(cx);
+      }
+    } else {
+      self.evaluate_connectivity(cx);
     }
-  }
-
-  pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.binding.is_none() || self.editor.is_none() {
-      self.pending_remote_updates.push(bytes.to_vec());
-      return Ok(());
-    }
-
-    let editor = self.editor.clone().context("collaboration session has no editor")?;
-    let document = Arc::new(editor.read(cx).document().clone());
-    let doc = self.doc.clone().context("collaboration session has no Loro document")?;
-    let binding = self.binding.take().context("collaboration session has no document binding")?;
-    let binding = Arc::new(Mutex::new(binding));
-    let patches = Arc::new(Mutex::new(Vec::<CollabPatch>::new()));
-    let sub = self.diff_subscription(doc.clone(), document, binding.clone(), patches.clone());
-
-    let import_result = doc.import_with(bytes, "remote");
-    drop(sub);
-    self.binding = Some(take_mutex_value(binding, "document binding")?);
-    let patches = take_mutex_value(patches, "remote patches")?;
-    import_result.context("importing collaboration update failed")?;
-    self.apply_or_queue_patches(patches, cx);
-    Ok(())
+    cx.notify();
   }
 
   fn attach_editor_hooks(&mut self, cx: &mut Context<Self>) {
@@ -448,13 +536,15 @@ impl CollabSession {
       return;
     };
 
-    editor.update(cx, |editor, _| {
+    editor.update(cx, |editor, cx| {
       if editor.document_path().is_none() {
-        editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)));
+        editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)), cx);
       }
+      editor.clear_collab_history();
       editor.set_collab_capture(true);
-      editor.set_collab_undo_redirect(Some(Rc::new(|_redirect: UndoRedirect| {
-        // TODO(Flowstate P2P §8/M3): replace this guard with Loro UndoManager undo/redo routing.
+      let undo_tx = self.undo_tx.clone();
+      editor.set_collab_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
+        let _ = undo_tx.try_send(redirect);
       })));
     });
 
@@ -492,15 +582,35 @@ impl CollabSession {
     self.local_update_publish_attached = true;
   }
 
-  fn attach_direct_request_pump(&mut self, cx: &mut Context<Self>) {
-    if self.direct_pump_started {
+  fn attach_undo_manager(&mut self) {
+    if self.undo_manager.is_some() {
       return;
     }
-    self.direct_pump_started = true;
-    let requests = self.direct_rx.clone();
+    let Some(doc) = &self.doc else {
+      return;
+    };
+    let mut undo_manager = UndoManager::new(doc);
+    undo_manager.set_merge_interval(500);
+    undo_manager.set_max_undo_steps(300);
+    self.undo_manager = Some(undo_manager);
+  }
+
+  fn attach_undo_request_pump(&mut self, cx: &mut Context<Self>) {
+    if self.undo_pump_started {
+      return;
+    }
+    self.undo_pump_started = true;
+    let requests = self.undo_rx.clone();
     cx.spawn(async move |session, cx| {
-      while let Ok(request) = requests.recv().await {
-        if session.update(cx, |session, cx| session.handle_direct_request(request, cx)).is_err() {
+      while let Ok(redirect) = requests.recv().await {
+        if session
+          .update(cx, |session, cx| {
+            if let Err(error) = session.apply_loro_undo_redirect(redirect, cx) {
+              session.detach(DetachReason::Fatal(format!("collaboration undo failed: {error:#}")), cx);
+            }
+          })
+          .is_err()
+        {
           break;
         }
       }
@@ -508,291 +618,4 @@ impl CollabSession {
     .detach();
   }
 
-  fn handle_direct_request(&mut self, request: DirectServeRequest, cx: &mut Context<Self>) {
-    match request {
-      DirectServeRequest::Snapshot { reply } => {
-        let _ = reply.try_send(self.snapshot_bytes());
-      },
-      DirectServeRequest::Updates { have_vv, reply } => {
-        let _ = reply.try_send(self.update_bytes(&have_vv));
-      },
-      DirectServeRequest::Asset { asset, reply } => {
-        let _ = reply.try_send(self.asset_bytes(asset, cx));
-      },
-    }
-  }
-
-  fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-    self
-      .doc
-      .as_ref()
-      .context("collaboration session is not attached")?
-      .export(ExportMode::Snapshot)
-      .context("exporting collaboration snapshot failed")
-  }
-
-  fn update_bytes(&self, have_vv: &[u8]) -> Result<Vec<u8>> {
-    let vv = VersionVector::decode(have_vv).context("decoding collaboration version vector failed")?;
-    self
-      .doc
-      .as_ref()
-      .context("collaboration session is not attached")?
-      .export(ExportMode::updates(&vv))
-      .context("exporting collaboration updates failed")
-  }
-
-  fn asset_bytes(&self, asset: u128, cx: &mut Context<Self>) -> Result<AssetBytes> {
-    let editor = self.editor.as_ref().context("collaboration session has no editor")?;
-    let bytes = editor
-      .read(cx)
-      .document()
-      .assets
-      .assets
-      .get(&AssetId(asset))
-      .map(|record| record.bytes.as_ref().clone())
-      .ok_or_else(|| anyhow!("collaboration asset {asset} is not available"))?;
-    Ok(AssetBytes { bytes })
-  }
-
-  fn diff_subscription(
-    &self,
-    doc: LoroDoc,
-    document: Arc<Document>,
-    binding: Arc<Mutex<DocBinding>>,
-    patches: Arc<Mutex<Vec<CollabPatch>>>,
-  ) -> LoroSubscription {
-    let subscribed_doc = doc.clone();
-    let callback: Subscriber = Arc::new(move |event| {
-      let produced = {
-        let mut binding = match binding.lock() {
-          Ok(binding) => binding,
-          Err(error) => {
-            eprintln!("flowstate collab binding lock failed: {error}");
-            return;
-          },
-        };
-        let result = {
-          let mut applier = RemoteApplier {
-            doc: &doc,
-            binding: &mut binding,
-          };
-          applier.apply_event(&document, &event)
-        };
-        drop(binding);
-        result
-      };
-      match produced {
-        Ok(mut produced) => {
-          if let Ok(mut patches) = patches.lock() {
-            patches.append(&mut produced);
-          }
-        },
-        Err(error) => eprintln!("flowstate collab remote apply failed: {error:#}"),
-      }
-    });
-    subscribed_doc.subscribe_root(callback)
-  }
-
-  fn apply_or_queue_patches(&mut self, mut patches: Vec<CollabPatch>, cx: &mut Context<Self>) {
-    if patches.is_empty() {
-      return;
-    }
-    self.pending_remote_patches.append(&mut patches);
-    self.flush_pending_remote_patches(cx);
-  }
-
-  fn flush_pending_remote_patches(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(editor) = self.editor.clone() else {
-      return false;
-    };
-    if self.pending_remote_patches.is_empty() || editor.read(cx).collab_apply_deferred() {
-      return false;
-    }
-    let patches = std::mem::take(&mut self.pending_remote_patches);
-    editor.update(cx, |editor, cx| editor.apply_collab_patches(&patches, cx));
-    self.refresh_external_carets(cx);
-    true
-  }
-
-  fn handle_digest(
-    &mut self,
-    from: flowstate_collab::ids::PeerId,
-    digest_session: SessionId,
-    vv: &[u8],
-    cx: &mut Context<Self>,
-  ) -> Result<()> {
-    if digest_session != self.session {
-      bail!("received a collaboration digest for a different session");
-    }
-    let Some(doc) = &self.doc else {
-      return Ok(());
-    };
-    let sender_vv = VersionVector::decode(vv).context("decoding collaboration digest failed")?;
-    let our_vv = doc.oplog_vv();
-    match sender_vv.partial_cmp(&our_vv) {
-      Some(Ordering::Greater) | None => self.pull_updates(from, our_vv.encode(), cx),
-      Some(Ordering::Equal | Ordering::Less) => {},
-    }
-    Ok(())
-  }
-
-  fn pull_updates(&mut self, from: flowstate_collab::ids::PeerId, our_vv: Vec<u8>, cx: &mut Context<Self>) {
-    if self.update_pull_in_flight {
-      return;
-    }
-    self.update_pull_in_flight = true;
-    let (reply_tx, reply_rx) = async_channel::bounded(1);
-    let send_result = self.net_tx.try_send(NetCommand::PullUpdates {
-      session: self.session,
-      from,
-      our_vv,
-      reply: reply_tx,
-    });
-    if send_result.is_err() {
-      self.update_pull_in_flight = false;
-      return;
-    }
-    cx.spawn(async move |session, cx| {
-      let result = reply_rx.recv().await;
-      let _ = session.update(cx, |session, cx| {
-        session.update_pull_in_flight = false;
-        if let Ok(Ok(bytes)) = result
-          && let Err(error) = session.import_update_bytes(&bytes, cx)
-        {
-          session.detach(DetachReason::Fatal(format!("pulling collaboration updates failed: {error:#}")), cx);
-        }
-      });
-    })
-    .detach();
-  }
-
-  fn pull_blob(&mut self, from: flowstate_collab::ids::PeerId, blob: flowstate_collab::BlobId, cx: &mut Context<Self>) {
-    let (reply_tx, reply_rx) = async_channel::bounded(1);
-    if self
-      .net_tx
-      .try_send(NetCommand::PullBlob {
-        session: self.session,
-        from,
-        blob,
-        reply: reply_tx,
-      })
-      .is_err()
-    {
-      return;
-    }
-    cx.spawn(async move |session, cx| {
-      let result = reply_rx.recv().await;
-      let _ = session.update(cx, |session, cx| {
-        if let Ok(Ok(bytes)) = result
-          && let Err(error) = session.import_update_bytes(&bytes, cx)
-        {
-          session.detach(DetachReason::Fatal(format!("pulling collaboration blob failed: {error:#}")), cx);
-        }
-      });
-    })
-    .detach();
-  }
-
-  fn publish_digest(&self) {
-    if let Some(doc) = &self.doc {
-      let _ = self.net_tx.try_send(NetCommand::Publish {
-        session: self.session,
-        payload: PublishPayload::Digest { vv: doc.oplog_vv().encode() },
-      });
-    }
-  }
-
-  fn apply_presence(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
-    if let Some(presence) = &self.presence {
-      if let Err(error) = presence.apply(bytes) {
-        eprintln!("flowstate collab presence update failed: {error:#}");
-      }
-      self.refresh_peer_count();
-      self.refresh_external_carets(cx);
-      cx.notify();
-    }
-  }
-
-  fn refresh_own_presence(&mut self, cx: &mut Context<Self>) {
-    let Some(presence) = &self.presence else {
-      return;
-    };
-    let state = PresenceState {
-      name: default_presence_name(),
-      selection: self.own_presence_selection(cx),
-    };
-    if let Err(error) = presence.set_self(&state) {
-      eprintln!("flowstate collab presence encode failed: {error:#}");
-    }
-    self.refresh_peer_count();
-  }
-
-  fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
-    let editor = self.editor.as_ref()?.read(cx);
-    let binding = self.binding.as_ref()?;
-    presence_view::selection_for_editor(editor, binding)
-  }
-
-  fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
-    let Some(presence) = &self.presence else {
-      return;
-    };
-    let Some(doc) = &self.doc else {
-      return;
-    };
-    let Some(binding) = &self.binding else {
-      return;
-    };
-    let Some(editor) = self.editor.clone() else {
-      return;
-    };
-    let carets = presence_view::external_carets(doc, binding, presence);
-    editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
-  }
-
-  fn publish_presence_snapshot(&self) {
-    if let Some(presence) = &self.presence {
-      self.publish_presence_bytes(presence.encode_all());
-    }
-  }
-
-  fn publish_presence_bytes(&self, bytes: Vec<u8>) {
-    if bytes.is_empty() {
-      return;
-    }
-    let _ = self.net_tx.try_send(NetCommand::Publish {
-      session: self.session,
-      payload: PublishPayload::Presence(bytes),
-    });
-  }
-
-  fn refresh_peer_count(&mut self) {
-    let peers_present = self.peers_present();
-    if let SessionPhase::Attached(attachment) = &mut self.phase {
-      attachment.peers_present = peers_present;
-    }
-  }
-
-  fn peers_present(&self) -> usize {
-    self
-      .presence
-      .as_ref()
-      .map_or(0, |presence| presence.roster().len().saturating_sub(1))
-  }
-}
-
-fn take_mutex_value<T>(value: Arc<Mutex<T>>, label: &str) -> Result<T> {
-  match Arc::try_unwrap(value) {
-    Ok(mutex) => mutex
-      .into_inner()
-      .map_err(|error| anyhow!("collaboration {label} lock was poisoned: {error}")),
-    Err(_) => Err(anyhow!("collaboration {label} is still referenced")),
-  }
-}
-
-fn default_presence_name() -> String {
-  std::env::var("FLOWSTATE_COLLAB_NAME")
-    .or_else(|_| std::env::var("USER"))
-    .or_else(|_| std::env::var("USERNAME"))
-    .unwrap_or_else(|_| "Flowstate user".to_string())
 }

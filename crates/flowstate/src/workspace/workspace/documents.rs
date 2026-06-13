@@ -89,6 +89,7 @@ impl Workspace {
       autosave_enabled: load_autosave(),
       autosave_document_generations: HashMap::new(),
       autosave_flow_in_flight: HashSet::new(),
+      collaboration_dialog: None,
       file_search_overlay: None,
       tub_root: None,
       tub_index: None,
@@ -694,6 +695,9 @@ impl Workspace {
     else {
       return;
     };
+    if self.close_collaboration_document_panel(panel_id, panel_kind.clone(), window, cx) {
+      return;
+    }
     if !panel_kind.is_dirty(cx) {
       self.remove_document_panel(panel_id, window, cx);
       return;
@@ -734,6 +738,9 @@ impl Workspace {
   }
 
   fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.request_close_window_with_collaboration(window, cx) {
+      return;
+    }
     let dirty_panels = self.dirty_panels(cx);
     if dirty_panels.is_empty() {
       self.leave_all_collaboration_sessions(cx);

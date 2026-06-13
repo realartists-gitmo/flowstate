@@ -24,6 +24,16 @@ pub struct AssetRecord {
   pub bytes: Arc<Vec<u8>>,
 }
 
+pub const IMAGE_LOADING_PLACEHOLDER_WIDTH_PX: f32 = 240.0;
+pub const IMAGE_LOADING_PLACEHOLDER_HEIGHT_PX: f32 = 160.0;
+
+impl AssetRecord {
+  #[must_use]
+  pub fn is_loading_placeholder(&self) -> bool {
+    self.bytes.is_empty()
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageBlock {
   pub asset_id: AssetId,

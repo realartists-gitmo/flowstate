@@ -47,22 +47,33 @@ impl RichTextEditor {
       CollabPatch::ReplaceObjectBlock { row, block } => {
         let mut blocks = collab_structural_blocks_from_document(&self.document);
         if *row < blocks.len() {
+          if selected_block_in_range(self.selected_block, *row..row.saturating_add(1)) {
+            self.clear_remote_object_editing_state();
+          }
           blocks[*row] = block.clone();
           rebuild_document_from_collab_structural_blocks(&mut self.document, blocks);
+          clamp_selection_to_document(&self.document, &mut self.selection);
           extend_invalidation(invalidation, 0..self.document.paragraphs.len());
         }
       },
       CollabPatch::InsertBlocks { row, blocks: inserted } => {
         let mut blocks = collab_structural_blocks_from_document(&self.document);
         let row = (*row).min(blocks.len());
+        if selected_block_ix(self.selected_block).is_some_and(|block_ix| block_ix >= row) {
+          self.clear_remote_object_editing_state();
+        }
         blocks.splice(row..row, inserted.iter().cloned());
         rebuild_document_from_collab_structural_blocks(&mut self.document, blocks);
+        clamp_selection_to_document(&self.document, &mut self.selection);
         extend_invalidation(invalidation, 0..self.document.paragraphs.len());
       },
       CollabPatch::DeleteBlocks { row, count } => {
         let mut blocks = collab_structural_blocks_from_document(&self.document);
         let start = (*row).min(blocks.len());
         let end = start.saturating_add(*count).min(blocks.len());
+        if selected_block_ix(self.selected_block).is_some_and(|block_ix| block_ix >= start) {
+          self.clear_remote_object_editing_state();
+        }
         blocks.drain(start..end);
         rebuild_document_from_collab_structural_blocks(&mut self.document, blocks);
         clamp_selection_to_document(&self.document, &mut self.selection);
@@ -71,6 +82,11 @@ impl RichTextEditor {
       CollabPatch::MoveBlock { from, to } => {
         let mut blocks = collab_structural_blocks_from_document(&self.document);
         if *from < blocks.len() {
+          let first = (*from).min(*to);
+          let last = (*from).max(*to);
+          if selected_block_ix(self.selected_block).is_some_and(|block_ix| (first..=last).contains(&block_ix)) {
+            self.clear_remote_object_editing_state();
+          }
           let block = blocks.remove(*from);
           blocks.insert((*to).min(blocks.len()), block);
           rebuild_document_from_collab_structural_blocks(&mut self.document, blocks);
@@ -83,6 +99,33 @@ impl RichTextEditor {
       },
     }
   }
+
+  fn clear_remote_object_editing_state(&mut self) {
+    self.selected_block = None;
+    self.image_resize_drag = None;
+    self.table_column_resize_drag = None;
+    self.table_cell_block_ix = 0;
+    self.table_cell_anchor = 0;
+    self.table_cell_caret = 0;
+    self.equation_source_anchor = 0;
+    self.equation_source_caret = 0;
+  }
+}
+
+#[hotpath::measure]
+fn selected_block_ix(selection: Option<BlockSelection>) -> Option<usize> {
+  match selection {
+    Some(BlockSelection::Image(block_ix)
+    | BlockSelection::Equation(block_ix)
+    | BlockSelection::Table(block_ix)
+    | BlockSelection::TableCell { block_ix, .. }) => Some(block_ix),
+    None => None,
+  }
+}
+
+#[hotpath::measure]
+fn selected_block_in_range(selection: Option<BlockSelection>, range: Range<usize>) -> bool {
+  selected_block_ix(selection).is_some_and(|block_ix| range.contains(&block_ix))
 }
 
 #[hotpath::measure]

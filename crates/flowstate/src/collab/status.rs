@@ -30,6 +30,42 @@ pub fn status_pill(phase: &SessionPhase, cx: &App) -> AnyElement {
     .into_any_element()
 }
 
+pub fn tab_badge(phase: &SessionPhase, cx: &App) -> Option<AnyElement> {
+  let (count, color) = match phase {
+    SessionPhase::Attached(attachment) => {
+      let color = match &attachment.connectivity {
+        Connectivity::Online => cx.theme().success,
+        Connectivity::Offline { .. } => cx.theme().muted_foreground,
+      };
+      (Some(attachment.peers_present + 1), color)
+    },
+    SessionPhase::Creating | SessionPhase::Joining(_) => (None, cx.theme().info),
+    SessionPhase::Detached(_) => return None,
+  };
+
+  Some(
+    h_flex()
+      .items_center()
+      .gap_0p5()
+      .child(
+        div()
+          .size(px(6.0))
+          .rounded_full()
+          .bg(color),
+      )
+      .when_some(count, |this, count| {
+        this.child(
+          div()
+            .text_size(px(9.0))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(color)
+            .child(count.to_string()),
+        )
+      })
+      .into_any_element(),
+  )
+}
+
 fn status_label_and_color(phase: &SessionPhase, cx: &App) -> (String, gpui::Hsla) {
   match phase {
     SessionPhase::Creating => ("Starting share".to_string(), cx.theme().info),
@@ -52,7 +88,7 @@ fn join_label(stage: &JoinStage) -> String {
 }
 
 fn attached_label_and_color(attachment: &Attachment, cx: &App) -> (String, gpui::Hsla) {
-  match attachment.connectivity {
+  match &attachment.connectivity {
     Connectivity::Online => {
       let participants = attachment.peers_present + 1;
       if attachment.peers_present == 0 {
