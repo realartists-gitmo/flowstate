@@ -189,6 +189,10 @@ impl RichTextEditor {
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
+    if let Some(hook) = self.collab_undo_redirect.clone() {
+      hook(UndoRedirect::Undo);
+      return;
+    }
     let Some(record) = self.undo_stack.pop() else {
       return;
     };
@@ -197,12 +201,17 @@ impl RichTextEditor {
       operation.undo(&mut self.document);
     }
     self.selection = record.before_selection.clone();
+    self.emit_selection_changed(cx);
     self.edit_generation = restored_generation;
     self.redo_stack.push(record);
     self.after_history_restore(cx);
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
+    if let Some(hook) = self.collab_undo_redirect.clone() {
+      hook(UndoRedirect::Redo);
+      return;
+    }
     let Some(record) = self.redo_stack.pop() else {
       return;
     };
@@ -211,6 +220,7 @@ impl RichTextEditor {
       operation.redo(&mut self.document);
     }
     self.selection = record.after_selection.clone();
+    self.emit_selection_changed(cx);
     self.edit_generation = restored_generation;
     self.undo_stack.push(record);
     self.after_history_restore(cx);

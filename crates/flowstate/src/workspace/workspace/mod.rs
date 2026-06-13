@@ -261,6 +261,7 @@ impl DocumentStyleSection {
 }
 
 include!("documents.rs");
+include!("collab.rs");
 include!("workspace_state.rs");
 include!("load.rs");
 include!("traits.rs");

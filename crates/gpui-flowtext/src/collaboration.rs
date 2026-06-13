@@ -2,7 +2,10 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use super::{Block, BlockId, Document, DocumentSpan, ParagraphId, ParagraphStyle, RunStyles, new_block_id, new_paragraph_id};
+use super::{
+  AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles,
+  new_block_id, new_paragraph_id,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct TableCellId(pub u128);
@@ -302,4 +305,51 @@ pub fn decode_canonical_operations(bytes: &[u8]) -> Option<Vec<CanonicalOperatio
 #[derive(Clone, Debug, Default)]
 pub struct CollaborationEdit {
   pub operations: Vec<CanonicalOperation>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CollabTextDelta {
+  Retain(usize),
+  Insert(usize),
+  Delete(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct CollabStructuralBlock {
+  pub block_id: BlockId,
+  pub paragraph_id: Option<ParagraphId>,
+  pub block: InputBlock,
+}
+
+#[derive(Clone, Debug)]
+pub enum CollabPatch {
+  ParagraphText {
+    row: usize,
+    new: InputParagraph,
+    delta_utf8: Vec<CollabTextDelta>,
+  },
+  ParagraphStyle {
+    row: usize,
+    style: ParagraphStyle,
+  },
+  ReplaceObjectBlock {
+    row: usize,
+    block: CollabStructuralBlock,
+  },
+  InsertBlocks {
+    row: usize,
+    blocks: Vec<CollabStructuralBlock>,
+  },
+  DeleteBlocks {
+    row: usize,
+    count: usize,
+  },
+  MoveBlock {
+    from: usize,
+    to: usize,
+  },
+  AssetArrived {
+    id: AssetId,
+    record: AssetRecord,
+  },
 }

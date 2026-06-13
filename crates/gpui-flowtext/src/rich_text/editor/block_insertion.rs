@@ -50,6 +50,7 @@ impl RichTextEditor {
     }
     let caret = insert_rich_fragment_at(&mut self.document, self.selection.head, &fragment);
     self.selection = EditorSelection { anchor: caret, head: caret };
+    self.emit_selection_changed(cx);
     self.after_text_mutation(cx);
   }
 
@@ -71,12 +72,12 @@ impl RichTextEditor {
         },
       );
     }
-    self.insert_ordered_block_fragment_after_caret(&fragment.blocks);
+    self.insert_ordered_block_fragment_after_caret(&fragment.blocks, cx);
     self.push_replace_document_history(before_document, before_selection, cx);
   }
 
-  fn insert_ordered_block_fragment_after_caret(&mut self, input_blocks: &[InputBlock]) {
-    let insert_ix = self.prepare_block_insertion_index();
+  fn insert_ordered_block_fragment_after_caret(&mut self, input_blocks: &[InputBlock], cx: &mut Context<Self>) {
+    let insert_ix = self.prepare_block_insertion_index(cx);
     let insert_paragraph_ix = self
       .document
       .blocks
@@ -155,15 +156,15 @@ impl RichTextEditor {
     }
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
-    self.insert_blocks_after_caret_without_history(blocks);
+    self.insert_blocks_after_caret_without_history(blocks, cx);
     self.push_replace_document_history(before_document, before_selection, cx);
   }
 
-  fn insert_blocks_after_caret_without_history(&mut self, blocks: Vec<Block>) {
+  fn insert_blocks_after_caret_without_history(&mut self, blocks: Vec<Block>, cx: &mut Context<Self>) {
     if blocks.is_empty() {
       return;
     }
-    let insert_ix = self.prepare_block_insertion_index();
+    let insert_ix = self.prepare_block_insertion_index(cx);
     let inserted_count = blocks.len();
     Arc::make_mut(&mut self.document.blocks).splice(insert_ix..insert_ix, blocks);
     for relative_ix in 0..inserted_count {
@@ -177,7 +178,7 @@ impl RichTextEditor {
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
   }
 
-  fn prepare_block_insertion_index(&mut self) -> usize {
+  fn prepare_block_insertion_index(&mut self, cx: &mut Context<Self>) -> usize {
     if let Some(
       BlockSelection::Image(block_ix)
       | BlockSelection::Equation(block_ix)
@@ -188,7 +189,7 @@ impl RichTextEditor {
       return (block_ix + 1).min(self.document.blocks.len());
     }
 
-    if let Some(insert_ix) = self.remove_empty_caret_paragraph_for_block_insertion() {
+    if let Some(insert_ix) = self.remove_empty_caret_paragraph_for_block_insertion(cx) {
       return insert_ix;
     }
 
@@ -220,7 +221,7 @@ impl RichTextEditor {
     self.document.blocks.len()
   }
 
-  fn remove_empty_caret_paragraph_for_block_insertion(&mut self) -> Option<usize> {
+  fn remove_empty_caret_paragraph_for_block_insertion(&mut self, cx: &mut Context<Self>) -> Option<usize> {
     if !self.selection.is_caret() {
       return None;
     }
@@ -261,6 +262,7 @@ impl RichTextEditor {
           byte: 0,
         },
       };
+      self.emit_selection_changed(cx);
     }
     Some(block_ix)
   }
@@ -297,6 +299,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let canonical_operations = vec![CanonicalOperation::ReplaceDocument];
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
@@ -306,11 +309,11 @@ impl RichTextEditor {
         before: Box::new(before_document),
         after: Box::new(self.document.clone()),
       }],
-      canonical_operations: vec![CanonicalOperation::ReplaceDocument],
+      canonical_operations: canonical_operations.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
   }
 
   fn insert_plain_text_fragment(&mut self, text: &str, cx: &mut Context<Self>) {

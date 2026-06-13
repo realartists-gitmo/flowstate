@@ -52,6 +52,10 @@ impl Workspace {
         self.close_active_document(window, cx);
         true
       },
+      CommandId::StartCollaboration => self.start_collaboration_on_active_document(cx).is_some(),
+      CommandId::CopyCollaborationTicket => self.copy_active_collaboration_ticket(window, cx),
+      CommandId::JoinCollaborationFromClipboard => self.join_collaboration_from_clipboard(window, cx),
+      CommandId::LeaveCollaboration => self.leave_collaboration_on_active_document(cx),
       CommandId::FindInDocument => self.open_active_document_search_bar(window, cx),
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {

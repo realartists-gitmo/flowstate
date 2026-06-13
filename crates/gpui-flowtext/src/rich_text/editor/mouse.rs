@@ -275,6 +275,17 @@ impl RichTextEditor {
       anchor: inserted_end,
       head: inserted_end,
     };
+    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
+      start_paragraph: self.identity_map.paragraph_id(inserted_start.paragraph),
+      before: capture_document_span(
+        &self.document,
+        inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len()),
+      ),
+      after: capture_document_span(
+        &self.document,
+        inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len()),
+      ),
+    }];
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
@@ -286,21 +297,11 @@ impl RichTextEditor {
         inserted_range: inserted_start..inserted_end,
         fragment: drag.fragment,
       }],
-      canonical_operations: vec![CanonicalOperation::ReplaceParagraphSpan {
-        start_paragraph: self.identity_map.paragraph_id(inserted_start.paragraph),
-        before: capture_document_span(
-          &self.document,
-          inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len()),
-        ),
-        after: capture_document_span(
-          &self.document,
-          inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len()),
-        ),
-      }],
+      canonical_operations: canonical_operations.clone(),
     });
     self.redo_stack.clear();
     self.after_text_mutation(cx);
-    self.mark_document_changed(after_generation, cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
     self.clear_drop_preview();
   }
 

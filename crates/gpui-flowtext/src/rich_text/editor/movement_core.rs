@@ -8,6 +8,7 @@ impl RichTextEditor {
       return;
     }
     self.selection = selection;
+    self.emit_selection_changed(cx);
     self.goal_x = None;
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);

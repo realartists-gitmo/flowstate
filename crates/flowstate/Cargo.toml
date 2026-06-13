@@ -10,17 +10,20 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-channel = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 fff-search = { workspace = true }
 flowstate-document = { workspace = true }
 flowstate-docx = { workspace = true }
+flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
+loro = { workspace = true }
 memchr = "2.8.1"
 mimalloc = { workspace = true }
 rustc-hash = { workspace = true }

@@ -1,22 +1,4 @@
 #[hotpath::measure]
-fn canonical_insert_text_operations(paragraph_id: ParagraphId, start_byte: usize, paragraph: &InputParagraph) -> Vec<CanonicalOperation> {
-  let mut byte = start_byte;
-  let mut operations = Vec::with_capacity(paragraph.runs.len());
-  for run in &paragraph.runs {
-    if !run.text.is_empty() {
-      operations.push(CanonicalOperation::InsertText {
-        paragraph: paragraph_id,
-        byte,
-        text: run.text.clone(),
-        styles: run.styles,
-      });
-    }
-    byte += run.text.len();
-  }
-  operations
-}
-
-#[hotpath::measure]
 pub(super) fn input_paragraph_text(paragraph: &InputParagraph) -> String {
   paragraph.runs.iter().map(|run| run.text.as_str()).collect()
 }
@@ -51,7 +33,7 @@ fn collect_block_assets(block: &Block, assets: &AssetStore, output: &mut Vec<Inp
 }
 
 #[hotpath::measure]
-fn input_block_from_block(block: &Block) -> InputBlock {
+pub fn input_block_from_block(block: &Block) -> InputBlock {
   match block {
     Block::Paragraph(paragraph) => InputBlock::Paragraph(input_paragraph_from_paragraph(paragraph)),
     Block::Image(image) => InputBlock::Image(InputImageBlock {
@@ -78,7 +60,7 @@ fn input_block_from_block(block: &Block) -> InputBlock {
 }
 
 #[hotpath::measure]
-fn block_from_input_block(block: &InputBlock) -> Block {
+pub fn block_from_input_block(block: &InputBlock) -> Block {
   match block {
     InputBlock::Paragraph(paragraph) => Block::Paragraph(paragraph_from_input_paragraph(paragraph)),
     InputBlock::Image(image) => Block::Image(ImageBlock {
@@ -104,6 +86,61 @@ fn block_from_input_block(block: &InputBlock) -> Block {
     }),
     InputBlock::Table(table) => Block::Table(table_from_input_table(table)),
   }
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputBlock>) -> Document {
+  let mut text = String::new();
+  let mut paragraphs = Vec::new();
+  let mut blocks = Vec::with_capacity(input_blocks.len());
+
+  for input_block in input_blocks {
+    match input_block {
+      InputBlock::Paragraph(paragraph) => {
+        if !paragraphs.is_empty() {
+          text.push('\n');
+        }
+        let start = text.len();
+        text.push_str(&input_paragraph_text(&paragraph));
+        let mut paragraph = paragraph_from_input_paragraph(&paragraph);
+        paragraph.byte_range = start..text.len();
+        paragraphs.push(paragraph.clone());
+        blocks.push(Block::Paragraph(paragraph));
+      },
+      InputBlock::Image(image) => blocks.push(block_from_input_block(&InputBlock::Image(image))),
+      InputBlock::Equation(equation) => blocks.push(block_from_input_block(&InputBlock::Equation(equation))),
+      InputBlock::Table(table) => blocks.push(block_from_input_block(&InputBlock::Table(table))),
+    }
+  }
+
+  if paragraphs.is_empty() {
+    let paragraph = Paragraph {
+      style: ParagraphStyle::Normal,
+      byte_range: 0..0,
+      runs: Vec::new(),
+      version: 0,
+    };
+    paragraphs.push(paragraph.clone());
+    blocks.push(Block::Paragraph(paragraph));
+  }
+
+  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
+  let paragraph_count = paragraphs.len();
+  let block_count = blocks.len();
+  let mut document = Document {
+    text: Rope::from(text),
+    paragraphs: Arc::new(paragraphs),
+    blocks: Arc::new(blocks),
+    assets: AssetStore::default(),
+    ids: document_ids_for_shape(paragraph_count, block_count),
+    sections: Arc::new(Vec::new()),
+    offset_index,
+    theme,
+  };
+  reconcile_document_ids(&mut document);
+  rebuild_document_sections(&mut document);
+  document
 }
 
 #[hotpath::measure]

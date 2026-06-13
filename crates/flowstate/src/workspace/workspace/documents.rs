@@ -1,6 +1,7 @@
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    crate::collab::init(cx);
     let zoom_slider = cx.new(|_| {
       SliderState::new()
         .min(25.0)
@@ -214,6 +215,7 @@ impl Workspace {
   }
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
+    crate::collab::leave_session_for_panel(panel_id, cx);
     let closing_active_document = self.active_document_id == Some(panel_id);
     if let Some(panel) = self
       .document_panels
@@ -734,6 +736,7 @@ impl Workspace {
   fn request_close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let dirty_panels = self.dirty_panels(cx);
     if dirty_panels.is_empty() {
+      self.leave_all_collaboration_sessions(cx);
       window.remove_window();
       return;
     }
@@ -752,7 +755,7 @@ impl Workspace {
     );
     let window_handle = window.window_handle();
 
-    cx.spawn(async move |_, cx| {
+    cx.spawn(async move |workspace, cx| {
       let should_close = match answer.await {
         Ok(0) => {
           let mut ok = true;
@@ -782,7 +785,10 @@ impl Workspace {
       };
 
       if should_close {
-        let _ = window_handle.update(cx, |_, window, _| window.remove_window());
+        let _ = window_handle.update(cx, |_, window, cx| {
+          let _ = workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
+          window.remove_window();
+        });
       }
     })
     .detach();

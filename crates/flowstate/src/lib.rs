@@ -6,6 +6,7 @@
 
 pub mod app;
 pub mod app_settings;
+pub mod collab;
 pub mod commands;
 pub mod docx_conversion;
 pub mod file_search;

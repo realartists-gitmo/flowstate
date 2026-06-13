@@ -1,6 +1,6 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+  pub(super) fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     if !is_single_grapheme_text_insert(text) || !self.selection.is_caret() || self.selected_block.is_some() {
       return false;
     }
@@ -39,6 +39,7 @@ impl RichTextEditor {
       byte: caret.byte + text.len(),
     };
     self.selection = EditorSelection { anchor: after, head: after };
+    self.emit_selection_changed(cx);
 
     let mut merged_into_previous = false;
     if let Some(record) = self.undo_stack.last_mut()
@@ -92,12 +93,22 @@ impl RichTextEditor {
         }],
       });
     }
+    if self.collab_capture && self.suppress_collab_capture == 0 {
+      self.pending_collab_edits.push(CollaborationEdit {
+        operations: vec![CanonicalOperation::InsertText {
+          paragraph: paragraph_id,
+          byte: caret.byte,
+          text: text.to_string(),
+          styles,
+        }],
+      });
+    }
     self.redo_stack.clear();
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.suppress_mutation_notify += 1;
     self.after_text_mutation(cx);
     self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
-    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    self.mark_document_changed_with_ops(after_generation, false, None, cx);
     true
   }
 
@@ -169,6 +180,7 @@ impl RichTextEditor {
       before: before_span.clone(),
       after: after_span.clone(),
     }];
+    let collab_operations = canonical_operations.clone();
     let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len() || before_block_count != self.document.blocks.len();
     let record = EditRecord {
       before_selection,
@@ -183,7 +195,7 @@ impl RichTextEditor {
     };
     self.undo_stack.push(record);
     self.redo_stack.clear();
-    self.mark_document_changed_with_reconcile(after_generation, identity_shape_changed, cx);
+    self.mark_document_changed_with_ops(after_generation, identity_shape_changed, Some(&collab_operations), cx);
   }
 
   fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, block_ix: usize, cx: &mut Context<Self>) {
@@ -206,6 +218,11 @@ impl RichTextEditor {
       return;
     }
 
+    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
+      start_paragraph: self.identity_map.paragraph_id(caret.paragraph),
+      before: before_span.clone(),
+      after: after_span.clone(),
+    }];
     let record = EditRecord {
       before_selection,
       before_generation,
@@ -215,29 +232,33 @@ impl RichTextEditor {
         before: before_span.clone(),
         after: after_span.clone(),
       }],
-      canonical_operations: vec![CanonicalOperation::ReplaceParagraphSpan {
-        start_paragraph: self.identity_map.paragraph_id(caret.paragraph),
-        before: before_span,
-        after: after_span,
-      }],
+      canonical_operations,
     };
+    let collab_operations = record.canonical_operations.clone();
     self.undo_stack.push(record);
     self.redo_stack.clear();
-    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    self.mark_document_changed_with_ops(after_generation, false, Some(&collab_operations), cx);
   }
 
-  fn mark_document_changed(&mut self, generation: u64, cx: &mut Context<Self>) {
-    self.mark_document_changed_with_reconcile(generation, true, cx);
-  }
-
-  fn mark_document_changed_with_reconcile(&mut self, generation: u64, reconcile_identity: bool, cx: &mut Context<Self>) {
+  fn mark_document_changed_with_ops(
+    &mut self,
+    generation: u64,
+    reconcile_identity: bool,
+    operations: Option<&[CanonicalOperation]>,
+    cx: &mut Context<Self>,
+  ) {
     self.edit_generation = generation;
     if reconcile_identity {
       self.identity_map.reconcile(&self.document);
     }
-    self.last_collaboration_edit = self.undo_stack.last().map(|record| CollaborationEdit {
-      operations: record.canonical_operations.clone(),
-    });
+    self.last_collaboration_edit = operations.map(|operations| CollaborationEdit { operations: operations.to_vec() });
+    if self.collab_capture
+      && self.suppress_collab_capture == 0
+      && let Some(operations) = operations
+      && !operations.is_empty()
+    {
+      self.pending_collab_edits.push(CollaborationEdit { operations: operations.to_vec() });
+    }
     self.refresh_save_status();
     self.schedule_recovery_write(cx);
     cx.notify();

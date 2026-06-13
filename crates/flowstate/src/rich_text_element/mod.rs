@@ -64,6 +64,10 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::OpenDocument
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
+    | CommandId::StartCollaboration
+    | CommandId::CopyCollaborationTicket
+    | CommandId::JoinCollaborationFromClipboard
+    | CommandId::LeaveCollaboration
     | CommandId::FindInDocument
     | CommandId::ToggleRibbon
     | CommandId::NextTab

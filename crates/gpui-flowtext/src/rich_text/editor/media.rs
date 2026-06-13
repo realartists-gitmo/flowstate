@@ -151,6 +151,9 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let canonical_operations = vec![CanonicalOperation::ReplaceBlock {
+      block: self.identity_map.block_id(drag.block_ix),
+    }];
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
@@ -161,13 +164,11 @@ impl RichTextEditor {
         before: Block::Image(drag.before),
         after: Block::Image(after),
       }],
-      canonical_operations: vec![CanonicalOperation::ReplaceBlock {
-        block: self.identity_map.block_id(drag.block_ix),
-      }],
+      canonical_operations: canonical_operations.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
     true
   }
 
@@ -215,19 +216,20 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    let canonical_operations = vec![CanonicalOperation::ReplaceBlock {
+      block: self.identity_map.block_id(block_ix),
+    }];
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
       operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      canonical_operations: vec![CanonicalOperation::ReplaceBlock {
-        block: self.identity_map.block_id(block_ix),
-      }],
+      canonical_operations: canonical_operations.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
   }
 
   pub fn insert_equation(&mut self, source: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -265,7 +267,7 @@ impl RichTextEditor {
         version: 0,
       }));
     }
-    self.insert_blocks_after_caret_without_history(blocks);
+    self.insert_blocks_after_caret_without_history(blocks, cx);
     self.push_replace_document_history(before_document, before_selection, cx);
   }
 

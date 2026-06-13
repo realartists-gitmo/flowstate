@@ -11,6 +11,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
 
     let dirty_panels = workspace.read(cx).dirty_panels(cx);
     if dirty_panels.is_empty() {
+      workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
       return true;
     }
 
@@ -33,6 +34,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
     );
     let prompt_open = prompt_open.clone();
     let allow_close = allow_close.clone();
+    let workspace = workspace.clone();
 
     cx.spawn(async move |cx| {
       let should_close = match answer.await {
@@ -65,6 +67,7 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
 
       prompt_open.set(false);
       if should_close {
+        let _ = workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
         allow_close.set(true);
         let _ = window_handle.update(cx, |_, window, _| window.remove_window());
       }

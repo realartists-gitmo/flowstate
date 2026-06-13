@@ -106,6 +106,39 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
+fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> impl IntoElement {
+  let workspace = cx.entity().downgrade();
+  div()
+    .h_full()
+    .flex_none()
+    .flex()
+    .items_center()
+    .justify_center()
+    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+    .child(
+      Button::new("top-collaborate")
+        .label("Collaborate")
+        .xsmall()
+        .ghost()
+        .dropdown_menu(move |menu, _, _| {
+          menu
+            .item(file_menu_item(workspace.clone(), "Start Sharing", !has_document, |workspace, _, cx| {
+              let _ = workspace.start_collaboration_on_active_document(cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Copy Invite Ticket", !has_document, |workspace, window, cx| {
+              workspace.copy_active_collaboration_ticket(window, cx);
+            }))
+            .separator()
+            .item(file_menu_item(workspace.clone(), "Join from Clipboard", false, |workspace, window, cx| {
+              workspace.join_collaboration_from_clipboard(window, cx);
+            }))
+            .item(file_menu_item(workspace.clone(), "Leave Shared Session", !has_document, |workspace, _, cx| {
+              workspace.leave_collaboration_on_active_document(cx);
+            }))
+        }),
+    )
+}
+
 #[hotpath::measure]
 fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl IntoElement {
   let workspace = cx.entity().downgrade();

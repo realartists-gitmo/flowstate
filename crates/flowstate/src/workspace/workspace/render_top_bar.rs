@@ -16,6 +16,7 @@ impl Workspace {
           .child(file_top_bar_button(self.active_document_id.is_some(), cx))
           .child(insert_top_bar_button(cx, self.active_editor.is_some()))
           .child(document_top_bar_button(cx))
+          .child(collaboration_top_bar_button(cx, self.active_document_id.is_some()))
           .child(view_top_bar_button(
             cx,
             !self.outline_collapsed,

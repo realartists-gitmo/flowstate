@@ -38,6 +38,10 @@ impl RichTextEditor {
       redo_stack: Vec::new(),
       identity_map,
       last_collaboration_edit: None,
+      pending_collab_edits: Vec::new(),
+      collab_capture: false,
+      suppress_collab_capture: 0,
+      collab_undo_redirect: None,
       collaboration_role: None,
       recovery_write_in_progress: false,
       recovery_write_pending: false,
@@ -114,6 +118,12 @@ impl RichTextEditor {
     &self.document
   }
 
+  fn emit_selection_changed(&self, cx: &mut Context<Self>) {
+    cx.emit(EditorEvent::SelectionChanged {
+      selection: self.selection.clone(),
+    });
+  }
+
   pub fn dispose_for_close(&mut self) {
     if self.disposed {
       return;
@@ -146,6 +156,10 @@ impl RichTextEditor {
     self.undo_stack = Vec::new();
     self.redo_stack = Vec::new();
     self.last_collaboration_edit = None;
+    self.pending_collab_edits.clear();
+    self.collab_capture = false;
+    self.suppress_collab_capture = 0;
+    self.collab_undo_redirect = None;
     self.collaboration_role = None;
     self.recovery_write_in_progress = false;
     self.recovery_write_pending = false;
@@ -232,6 +246,26 @@ impl RichTextEditor {
   pub fn clear_collaboration_edit(&mut self) {
     self.last_collaboration_edit = None;
   }
+
+  pub fn take_pending_collab_edits(&mut self) -> Vec<CollaborationEdit> {
+    std::mem::take(&mut self.pending_collab_edits)
+  }
+
+  pub fn set_collab_capture(&mut self, on: bool) {
+    self.collab_capture = on;
+    if !on {
+      self.pending_collab_edits.clear();
+    }
+  }
+
+  pub fn set_collab_undo_redirect(&mut self, hook: Option<Rc<dyn Fn(UndoRedirect)>>) {
+    self.collab_undo_redirect = hook;
+  }
+
+  pub fn set_recovery_path(&mut self, path: Option<PathBuf>) {
+    self.recovery_path = path;
+  }
+
   pub fn collaboration_role(&self) -> Option<CollaborationRole> {
     self.collaboration_role
   }

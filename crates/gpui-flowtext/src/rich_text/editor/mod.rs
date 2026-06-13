@@ -185,6 +185,12 @@ pub enum CollaborationRole {
   Viewer,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UndoRedirect {
+  Undo,
+  Redo,
+}
+
 impl CollaborationRole {
   #[must_use]
   pub const fn can_write(self) -> bool {
@@ -868,6 +874,10 @@ pub struct RichTextEditor {
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
   last_collaboration_edit: Option<CollaborationEdit>,
+  pending_collab_edits: Vec<CollaborationEdit>,
+  collab_capture: bool,
+  suppress_collab_capture: u32,
+  collab_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
   collaboration_role: Option<CollaborationRole>,
   recovery_write_in_progress: bool,
   recovery_write_pending: bool,
@@ -944,7 +954,10 @@ pub struct RichTextEditor {
   goal_x: Option<Pixels>,
 }
 
+impl gpui::EventEmitter<EditorEvent> for RichTextEditor {}
+
 include!("lifecycle.rs");
+include!("collab_apply.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
 include!("search_highlights.rs");

@@ -20,7 +20,7 @@ impl RichTextEditor {
     self.insert_rich_fragment_paste_at_caret(&fragment, cx)
   }
 
-  fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+  pub(super) fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
     if !self.selection.is_caret()
       || self.selected_block.is_some()
       || !fragment.blocks.is_empty()
@@ -45,11 +45,19 @@ impl RichTextEditor {
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let offset = self.selection.head;
+    let before_span = capture_document_span(&self.document, offset.paragraph..offset.paragraph + 1);
     let inserted_end = insert_rich_fragment_at(&mut self.document, offset, fragment);
+    let after_span = capture_document_span(&self.document, offset.paragraph..inserted_end.paragraph + 1);
     self.selection = EditorSelection {
       anchor: inserted_end,
       head: inserted_end,
     };
+    self.emit_selection_changed(cx);
+    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
+      start_paragraph: Some(paragraph_id),
+      before: before_span.clone(),
+      after: after_span.clone(),
+    }];
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
@@ -60,12 +68,12 @@ impl RichTextEditor {
         inserted_end,
         fragment: fragment.clone(),
       }],
-      canonical_operations: canonical_insert_text_operations(paragraph_id, offset.byte, paragraph),
+      canonical_operations: canonical_operations.clone(),
     });
     self.redo_stack.clear();
     self.layout_invalidation_hint = Some(offset.paragraph..offset.paragraph + 1);
     self.after_text_mutation(cx);
-    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+    self.mark_document_changed_with_ops(after_generation, false, Some(&canonical_operations), cx);
     true
   }
 
