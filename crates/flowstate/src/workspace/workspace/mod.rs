@@ -40,7 +40,7 @@ use crate::app_settings::{
   load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
   save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
-use crate::commands::CommandId;
+use crate::commands::{context_for, CommandId};
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
@@ -70,7 +70,6 @@ pub struct Workspace {
   active_flow: Option<Entity<FlowEditor>>,
   ribbon_collapsed: bool,
   outline_collapsed: bool,
-  toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, Document>,

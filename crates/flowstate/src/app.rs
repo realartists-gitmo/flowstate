@@ -361,6 +361,7 @@ impl AssetSource for AppAssets {
       "icons/letter-case.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/letter-case.svg")))),
       "icons/text-box-edit.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-box-edit.svg")))),
       "icons/replace.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace.svg")))),
+      "icons/replace-all.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace-all.svg")))),
       "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pin.svg")))),
       "icons/paragraph-break-two.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/paragraph-break-two.svg")))),
       "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
@@ -370,6 +371,7 @@ impl AssetSource for AppAssets {
       "icons/send-horizontal.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-horizontal.svg")))),
       "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
       "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
+      "icons/text-search.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-search.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -434,6 +436,9 @@ impl AssetSource for AppAssets {
     if "icons/replace.svg".starts_with(path) {
       assets.push("icons/replace.svg".into());
     }
+    if "icons/replace-all.svg".starts_with(path) {
+      assets.push("icons/replace-all.svg".into());
+    }
     if "icons/pin.svg".starts_with(path) {
       assets.push("icons/pin.svg".into());
     }
@@ -460,6 +465,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/docx.svg".starts_with(path) {
       assets.push("icons/docx.svg".into());
+    }
+    if "icons/text-search.svg".starts_with(path) {
+      assets.push("icons/text-search.svg".into());
     }
     Ok(assets)
   }

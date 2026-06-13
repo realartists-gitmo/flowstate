@@ -40,6 +40,8 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
                   menu.item(
                     PopupMenuItem::new(label)
                       .checked(selected)
+                      .keep_open(true)
+                      .radio(true)
                       .on_hover({
                         let committed = committed.clone();
                         move |hovered, window, cx| {
@@ -273,7 +275,7 @@ fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
 }
 
 #[hotpath::measure]
-fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_open: bool, toolkit_open: bool) -> impl IntoElement {
+fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_open: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
     .h_full()
@@ -290,11 +292,11 @@ fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_o
         .dropdown_menu(move |menu, _, _| {
           let outline_workspace = workspace.clone();
           let ribbon_workspace = workspace.clone();
-          let toolkit_workspace = workspace.clone();
           menu
             .item(
               PopupMenuItem::new("Outline")
                 .checked(outline_open)
+                .keep_open(true)
                 .on_click(move |_, _, cx| {
                   let _ = outline_workspace.update(cx, |workspace, cx| workspace.toggle_outline(cx));
                 }),
@@ -302,15 +304,9 @@ fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_o
             .item(
               PopupMenuItem::new("Ribbon")
                 .checked(ribbon_open)
+                .keep_open(true)
                 .on_click(move |_, _, cx| {
                   let _ = ribbon_workspace.update(cx, |workspace, cx| workspace.toggle_ribbon(cx));
-                }),
-            )
-            .item(
-          PopupMenuItem::new("Toolkit")
-                .checked(toolkit_open)
-                .on_click(move |_, _, cx| {
-                  let _ = toolkit_workspace.update(cx, |workspace, cx| workspace.toggle_toolkit(cx));
                 }),
             )
         }),

@@ -20,7 +20,6 @@ impl Workspace {
             cx,
             !self.outline_collapsed,
             !self.ribbon_collapsed,
-            !self.toolkit_collapsed,
           ))
           .child(settings_top_bar_button(cx)),
       )

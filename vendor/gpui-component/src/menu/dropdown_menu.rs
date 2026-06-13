@@ -5,7 +5,12 @@ use gpui::{
     RenderOnce, SharedString, StyleRefinement, Styled, Window,
 };
 
-use crate::{button::Button, menu::PopupMenu, popover::Popover, Selectable};
+use crate::{
+    button::Button,
+    menu::{MenuChangedEvent, PopupMenu},
+    popover::Popover,
+    Selectable,
+};
 
 /// A dropdown menu trait for buttons and other interactive elements
 pub trait DropdownMenu: Styled + Selectable + InteractiveElement + IntoElement + 'static {
@@ -121,6 +126,17 @@ where
                                     popover_state.update(cx, |state, cx| {
                                         state.dismiss(window, cx);
                                     });
+                                    menu_state.update(cx, |state, _| {
+                                        state.menu = None;
+                                    });
+                                }
+                            })
+                            .detach();
+
+                        window
+                            .subscribe(&menu, cx, {
+                                let menu_state = menu_state.clone();
+                                move |_, _: &MenuChangedEvent, _window, cx| {
                                     menu_state.update(cx, |state, _| {
                                         state.menu = None;
                                     });

@@ -25,33 +25,7 @@ impl Workspace {
     cx.notify();
   }
 
-  pub fn toggle_toolkit(&mut self, cx: &mut Context<Self>) {
-    let width = self
-      .content_resizable_state
-      .read(cx)
-      .sizes()
-      .get(1)
-      .copied()
-      .unwrap_or(px(300.0));
-    let delta = if self.toolkit_collapsed {
-      SIDE_PANEL_COLLAPSED_WIDTH - width
-    } else {
-      width - SIDE_PANEL_COLLAPSED_WIDTH
-    };
-    self.prepare_active_editor_for_width_delta(delta, cx);
-    self.toolkit_collapsed = !self.toolkit_collapsed;
-    if self.toolkit_collapsed {
-      self.active_toolkit_tool = None;
-    }
-    self.persist_temporary_workspace_session(cx);
-    cx.notify();
-  }
-
   fn toggle_toolkit_tool(&mut self, tool: ToolkitTool, cx: &mut Context<Self>) {
-    if self.toolkit_collapsed {
-      self.toolkit_collapsed = false;
-    }
-
     let was_expanded = self.active_toolkit_tool.is_some();
     self.active_toolkit_tool = if self.active_toolkit_tool == Some(tool) { None } else { Some(tool) };
 

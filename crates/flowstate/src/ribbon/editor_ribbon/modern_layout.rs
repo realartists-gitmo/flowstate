@@ -193,11 +193,22 @@ fn modern_command_chip(
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let command_id = command.id;
-  let tooltip = command_tooltip(command);
   let shortcut = command.shortcut.clone();
   let label = RibbonLabel::for_command(command);
   let icon_path = label.prefers_icon().then_some(label.icon_path).flatten();
   let command_color = ribbon_command_color(command, cx);
+
+  let tooltip_label = match command.id {
+    RibbonCommandId::SendToSpeechDocument | RibbonCommandId::SendToSpeechDocumentEnd => {
+      "Send to speech"
+    }
+    _ => command.label,
+  };
+  let tooltip_action = command
+    .command_id
+    .and_then(action_for_command)
+    .map(|action| (action, command.command_id.and_then(context_for)));
+  let has_tooltip_action = tooltip_action.is_some();
 
   Button::new(("modern-ribbon-command", ribbon_command_key(command_id)))
     .xsmall()
@@ -210,7 +221,10 @@ fn modern_command_chip(
     .selected(command.selected)
     .disabled(command.disabled)
     .text_color(command_color)
-    .tooltip(tooltip)
+    .when_some(tooltip_action, |this, (action_box, ctx)| {
+      this.tooltip_with_action(tooltip_label, &*action_box, ctx)
+    })
+    .when(!has_tooltip_action, |this| this.tooltip(tooltip_label))
     .when(command.selected, |this| {
       this
         .border_color(command_color)

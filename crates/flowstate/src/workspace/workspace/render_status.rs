@@ -48,7 +48,7 @@ impl Workspace {
       )
       .child(
         icon_button("tab-bar-save-file", AppIcon::SaveFile)
-          .tooltip("Save current file")
+          .tooltip_with_action("Save current file", &Save, context_for(CommandId::Save))
           .on_click(cx.listener(|workspace, _, window, cx| {
             workspace.save_active(window, cx);
           })),

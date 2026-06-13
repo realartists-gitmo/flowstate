@@ -55,7 +55,6 @@ impl Workspace {
       active_flow: None,
       ribbon_collapsed: false,
       outline_collapsed: false,
-      toolkit_collapsed: false,
       active_toolkit_tool: None,
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
@@ -411,7 +410,6 @@ impl Workspace {
       active_index,
       ribbon_collapsed: self.ribbon_collapsed,
       outline_collapsed: self.outline_collapsed,
-      toolkit_collapsed: self.toolkit_collapsed,
       pinned_entry_indices,
       speech_entry_index,
     });
@@ -500,7 +498,6 @@ impl Workspace {
     }
     self.ribbon_collapsed = session.ribbon_collapsed;
     self.outline_collapsed = session.outline_collapsed;
-    self.toolkit_collapsed = session.toolkit_collapsed;
     self.pinned_document_ids = pinned_ids;
     self.speech_document_id = speech_id;
 
@@ -1189,8 +1186,6 @@ struct TemporaryWorkspaceSession {
   ribbon_collapsed: bool,
   #[serde(default)]
   outline_collapsed: bool,
-  #[serde(default)]
-  toolkit_collapsed: bool,
   #[serde(default)]
   pinned_entry_indices: Vec<usize>,
   #[serde(default)]

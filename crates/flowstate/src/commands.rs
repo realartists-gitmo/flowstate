@@ -2,6 +2,7 @@ mod keymap;
 
 use gpui::actions;
 
+pub(crate) use keymap::action_for_command;
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
 actions!(flowstate_workspace, [FindInDocumentAction]);
@@ -172,8 +173,8 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::Cut, "Cut", EDITOR, &["cmd-x", "ctrl-x"]),
   CommandSpec::new(CommandId::Paste, "Paste", EDITOR, &["cmd-v", "ctrl-v"]),
   CommandSpec::new(CommandId::Save, "Save", EDITOR, &["cmd-s", "ctrl-s"]),
-  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["ctrl-z", "cmd-z"]),
-  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["ctrl-y", "cmd-shift-z", "ctrl-shift-z"]),
+  CommandSpec::new(CommandId::Undo, "Undo", EDITOR, &["cmd-z", "ctrl-z"]),
+  CommandSpec::new(CommandId::Redo, "Redo", EDITOR, &["cmd-shift-z", "ctrl-shift-z", "ctrl-y"]),
   CommandSpec::new(CommandId::SetParagraphPocket, "Set Paragraph: Pocket", EDITOR, &["f4"]),
   CommandSpec::new(CommandId::SetParagraphHat, "Set Paragraph: Hat", EDITOR, &["f5"]),
   CommandSpec::new(CommandId::SetParagraphBlock, "Set Paragraph: Block", EDITOR, &["f6"]),
@@ -281,4 +282,9 @@ pub fn label_for(id: CommandId) -> &'static str {
   command_spec(id)
     .map(|spec| spec.label)
     .unwrap_or("Unknown Command")
+}
+
+#[hotpath::measure]
+pub fn context_for(id: CommandId) -> Option<&'static str> {
+  command_spec(id).and_then(|spec| spec.context)
 }
