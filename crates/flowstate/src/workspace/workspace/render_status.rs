@@ -264,6 +264,9 @@ impl Workspace {
       None
     };
     let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    let collab_phase = self
+      .active_document_id
+      .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
@@ -277,6 +280,13 @@ impl Workspace {
       .border_color(cx.theme().border)
       .bg(cx.theme().background)
       .child(div().flex_1())
+      .when_some(collab_phase, |this, phase| {
+        if matches!(phase, crate::collab::SessionPhase::Detached(_)) {
+          this
+        } else {
+          this.child(crate::collab::status::status_pill(&phase, cx))
+        }
+      })
       .when_some(zoom, |this, percent| this.child(self.render_zoom_slider(percent, cx)))
       .when_some(speech_word_count, |this, count| {
         this.child(

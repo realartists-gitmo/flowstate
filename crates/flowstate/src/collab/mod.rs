@@ -1,4 +1,6 @@
 mod session;
+mod presence_view;
+pub mod status;
 
 use std::collections::HashMap;
 
@@ -9,7 +11,7 @@ use flowstate_collab::{
   net::{NetCommand, NetEvent, TicketSeed, runtime::{self, CommandSender}},
   ticket::SessionTicket,
 };
-use gpui::{App, AppContext, BorrowAppContext, Context, Entity, Global};
+use gpui::{App, AppContext, BorrowAppContext, Context, Entity, Global, ReadGlobal};
 use uuid::Uuid;
 
 use crate::rich_text_element::RichTextEditor;
@@ -387,4 +389,8 @@ where
   T: 'static,
 {
   cx.update_default_global::<CollabManager, _>(|manager, cx| manager.request_ticket_for_panel(panel_id, cx))
+}
+
+pub fn phase_for_panel(panel_id: Uuid, cx: &App) -> Option<SessionPhase> {
+  CollabManager::global(cx).phase_for_panel(panel_id, cx)
 }

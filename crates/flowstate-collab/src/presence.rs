@@ -17,9 +17,7 @@ pub struct PresenceState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PresenceSelection {
-  pub head_container: String,
   pub head: Vec<u8>,
-  pub anchor_container: String,
   pub anchor: Vec<u8>,
 }
 
