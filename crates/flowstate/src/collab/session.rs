@@ -12,7 +12,7 @@ use flowstate_collab::{
   binding::DocBinding,
   local_apply::LocalApplier,
   net::{NetCommand, PublishPayload, runtime::CommandSender, direct::{DirectServeRequest, DirectSessionHandler}},
-  presence::{PresenceState, PresenceStore},
+  presence::{PresenceSelection, PresenceState, PresenceStore},
   projection,
   proto_direct::AssetBytes,
   proto_gossip::GossipMsg,
@@ -25,6 +25,8 @@ use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
 use crate::rich_text_element::{AssetId, CollabPatch, Document, EditorEvent, RichTextEditor, UndoRedirect};
+
+use super::presence_view;
 
 #[derive(Clone, Debug)]
 pub enum SessionPhase {
@@ -447,6 +449,9 @@ impl CollabSession {
     };
 
     editor.update(cx, |editor, _| {
+      if editor.document_path().is_none() {
+        editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)));
+      }
       editor.set_collab_capture(true);
       editor.set_collab_undo_redirect(Some(Rc::new(|_redirect: UndoRedirect| {
         // TODO(Flowstate P2P §8/M3): replace this guard with Loro UndoManager undo/redo routing.
@@ -605,6 +610,7 @@ impl CollabSession {
     }
     let patches = std::mem::take(&mut self.pending_remote_patches);
     editor.update(cx, |editor, cx| editor.apply_collab_patches(&patches, cx));
+    self.refresh_external_carets(cx);
     true
   }
 
@@ -702,22 +708,46 @@ impl CollabSession {
         eprintln!("flowstate collab presence update failed: {error:#}");
       }
       self.refresh_peer_count();
+      self.refresh_external_carets(cx);
       cx.notify();
     }
   }
 
-  fn refresh_own_presence(&mut self, _cx: &mut Context<Self>) {
+  fn refresh_own_presence(&mut self, cx: &mut Context<Self>) {
     let Some(presence) = &self.presence else {
       return;
     };
     let state = PresenceState {
       name: default_presence_name(),
-      selection: None,
+      selection: self.own_presence_selection(cx),
     };
     if let Err(error) = presence.set_self(&state) {
       eprintln!("flowstate collab presence encode failed: {error:#}");
     }
     self.refresh_peer_count();
+  }
+
+  fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
+    let editor = self.editor.as_ref()?.read(cx);
+    let binding = self.binding.as_ref()?;
+    presence_view::selection_for_editor(editor, binding)
+  }
+
+  fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
+    let Some(presence) = &self.presence else {
+      return;
+    };
+    let Some(doc) = &self.doc else {
+      return;
+    };
+    let Some(binding) = &self.binding else {
+      return;
+    };
+    let Some(editor) = self.editor.clone() else {
+      return;
+    };
+    let carets = presence_view::external_carets(doc, binding, presence);
+    editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
   }
 
   fn publish_presence_snapshot(&self) {
