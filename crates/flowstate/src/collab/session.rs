@@ -1,15 +1,16 @@
-use std::{
-  collections::HashSet,
-  rc::Rc,
-  time::Instant,
-};
+use std::{collections::HashSet, rc::Rc, time::Instant};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
   SessionId,
   binding::DocBinding,
   local_apply::LocalApplier,
-  net::{NetCommand, PeerAddr, PublishPayload, anti_entropy::AntiEntropyState, direct::{DirectServeRequest, DirectSessionHandler}, runtime::CommandSender},
+  net::{
+    NetCommand, PeerAddr, PublishPayload,
+    anti_entropy::AntiEntropyState,
+    direct::{DirectServeRequest, DirectSessionHandler},
+    runtime::CommandSender,
+  },
   presence::PresenceStore,
   projection,
   proto_gossip::GossipMsg,
@@ -249,7 +250,13 @@ impl CollabSession {
     if let Some(peer) = preferred {
       candidates.push(peer);
     }
-    candidates.extend(self.neighbors.iter().copied().filter(|peer| Some(*peer) != preferred));
+    candidates.extend(
+      self
+        .neighbors
+        .iter()
+        .copied()
+        .filter(|peer| Some(*peer) != preferred),
+    );
     candidates
   }
 
@@ -313,12 +320,7 @@ impl CollabSession {
     result_rx
   }
 
-  pub fn attach_joined_editor(
-    &mut self,
-    panel_id: Uuid,
-    editor: Entity<RichTextEditor>,
-    cx: &mut Context<Self>,
-  ) -> Result<()> {
+  pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
     if self.doc.is_none() || self.binding.is_none() {
       bail!("collaboration snapshot has not finished loading");
     }
@@ -352,13 +354,15 @@ impl CollabSession {
       let presence = PresenceStore::new(peer);
       let session = self.session;
       let net_tx = self.net_tx.clone();
-      self.loro_subscriptions.push(presence.subscribe_local_updates(move |bytes| {
-        let _ = net_tx.try_send(NetCommand::Publish {
-          session,
-          payload: PublishPayload::Presence(bytes.clone()),
-        });
-        true
-      }));
+      self
+        .loro_subscriptions
+        .push(presence.subscribe_local_updates(move |bytes| {
+          let _ = net_tx.try_send(NetCommand::Publish {
+            session,
+            payload: PublishPayload::Presence(bytes.clone()),
+          });
+          true
+        }));
       self.presence = Some(presence);
     }
     self.refresh_own_presence(cx);
@@ -403,7 +407,9 @@ impl CollabSession {
       presence.delete_self();
       self.publish_presence_bytes(presence.encode_self());
     }
-    let _ = self.net_tx.try_send(NetCommand::LeaveSession { session: self.session });
+    let _ = self
+      .net_tx
+      .try_send(NetCommand::LeaveSession { session: self.session });
     self.flush_pending_remote_patches(cx);
 
     if let Some(editor) = self.editor.clone() {
@@ -511,7 +517,11 @@ impl CollabSession {
   pub fn handle_gossip_lagged(&mut self, cx: &mut Context<Self>) {
     self.publish_digest();
     let peer = self.neighbors.iter().next().copied();
-    let vv = self.doc.as_ref().map(|doc| doc.oplog_vv().encode()).unwrap_or_default();
+    let vv = self
+      .doc
+      .as_ref()
+      .map(|doc| doc.oplog_vv().encode())
+      .unwrap_or_default();
     let action = self.anti_entropy.on_lagged(peer, vv);
     self.handle_gap_action(action, cx);
   }
@@ -548,19 +558,23 @@ impl CollabSession {
       })));
     });
 
-    self.editor_subscriptions.push(cx.observe(&editor, |session, editor, cx| {
-      if let Err(error) = session.flush_local_edits(editor.clone(), cx) {
-        session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
-        return;
-      }
-      session.flush_pending_remote_patches(cx);
-    }));
+    self
+      .editor_subscriptions
+      .push(cx.observe(&editor, |session, editor, cx| {
+        if let Err(error) = session.flush_local_edits(editor.clone(), cx) {
+          session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
+          return;
+        }
+        session.flush_pending_remote_patches(cx);
+      }));
 
-    self.editor_subscriptions.push(cx.subscribe(&editor, |session, _, event: &EditorEvent, cx| {
-      if matches!(event, EditorEvent::SelectionChanged { .. }) {
-        session.refresh_own_presence(cx);
-      }
-    }));
+    self
+      .editor_subscriptions
+      .push(cx.subscribe(&editor, |session, _, event: &EditorEvent, cx| {
+        if matches!(event, EditorEvent::SelectionChanged { .. }) {
+          session.refresh_own_presence(cx);
+        }
+      }));
   }
 
   fn attach_loro_publish_hook(&mut self) {
@@ -572,13 +586,15 @@ impl CollabSession {
     };
     let session = self.session;
     let net_tx = self.net_tx.clone();
-    self.loro_subscriptions.push(doc.subscribe_local_update(Box::new(move |bytes| {
-      let _ = net_tx.try_send(NetCommand::Publish {
-        session,
-        payload: PublishPayload::Update(bytes.clone()),
-      });
-      true
-    })));
+    self
+      .loro_subscriptions
+      .push(doc.subscribe_local_update(Box::new(move |bytes| {
+        let _ = net_tx.try_send(NetCommand::Publish {
+          session,
+          payload: PublishPayload::Update(bytes.clone()),
+        });
+        true
+      })));
     self.local_update_publish_attached = true;
   }
 
@@ -617,5 +633,4 @@ impl CollabSession {
     })
     .detach();
   }
-
 }

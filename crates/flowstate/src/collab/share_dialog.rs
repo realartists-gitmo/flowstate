@@ -1,7 +1,7 @@
 use flowstate_collab::ticket::SessionTicket;
 use gpui::{
-  AnyElement, AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement,
-  KeyDownEvent, MouseButton, ParentElement, Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px, relative, rgb,
+  AnyElement, AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+  MouseButton, ParentElement, Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px, relative, rgb,
 };
 use gpui_component::{
   ActiveTheme as _, Disableable, IconName, Sizable,
@@ -77,7 +77,9 @@ impl CollabShareDialog {
   }
 
   fn close(&mut self, cx: &mut Context<Self>) {
-    let _ = self.workspace.update(cx, |workspace, cx| workspace.close_collaboration_dialog(cx));
+    let _ = self
+      .workspace
+      .update(cx, |workspace, cx| workspace.close_collaboration_dialog(cx));
   }
 
   fn set_mode(&mut self, mode: CollabDialogMode, cx: &mut Context<Self>) {
@@ -281,7 +283,13 @@ impl CollabShareDialog {
       .map_or_else(Vec::new, |panel_id| crate::collab::roster_for_panel(panel_id, cx));
     v_flex()
       .gap_3()
-      .child(h_flex().items_center().justify_between().child(section_title("Invite people", cx)).child(status::status_pill(phase, cx)))
+      .child(
+        h_flex()
+          .items_center()
+          .justify_between()
+          .child(section_title("Invite people", cx))
+          .child(status::status_pill(phase, cx)),
+      )
       .child(helper_text(connectivity_text(phase).as_str(), cx))
       .child(roster_list(roster, cx))
       .child(ticket_box(self.ticket_text.clone(), self.ticket_loading, cx))
@@ -320,22 +328,22 @@ impl CollabShareDialog {
     v_flex()
       .gap_3()
       .child(section_title("Join a session", cx))
-      .child(helper_text("Paste an invite ticket. Joining opens the shared document as a new tab and never merges into your existing files.", cx))
+      .child(helper_text(
+        "Paste an invite ticket. Joining opens the shared document as a new tab and never merges into your existing files.",
+        cx,
+      ))
       .child(Input::new(&self.join_input).w_full().cleanable(true))
       .when_some(parsed.as_ref().map(|ticket| ticket.title.clone()), |this, title| {
         this.child(success_text(format!("Invite for: {title}").into(), cx))
       })
       .when_some(self.join_error.clone(), |this, error| this.child(error_text(error, cx)))
       .child(
-        h_flex()
-          .justify_end()
-          .gap_2()
-          .child(
-            Button::new("join-collaboration-session")
-              .label("Join")
-              .primary()
-              .on_click(cx.listener(|dialog, _, window, cx| dialog.join_session(window, cx))),
-          ),
+        h_flex().justify_end().gap_2().child(
+          Button::new("join-collaboration-session")
+            .label("Join")
+            .primary()
+            .on_click(cx.listener(|dialog, _, window, cx| dialog.join_session(window, cx))),
+        ),
       )
       .into_any_element()
   }
@@ -351,7 +359,9 @@ impl Focusable for CollabShareDialog {
 #[hotpath::measure_all]
 impl Render for CollabShareDialog {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let phase = self.panel_id.and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
+    let phase = self
+      .panel_id
+      .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
 
     div()
       .absolute()
@@ -365,10 +375,13 @@ impl Render for CollabShareDialog {
       .justify_center()
       .occlude()
       .on_key_down(cx.listener(Self::on_key_down))
-      .on_mouse_down(MouseButton::Left, cx.listener(|dialog, _, _, cx| {
-        dialog.close(cx);
-        cx.stop_propagation();
-      }))
+      .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|dialog, _, _, cx| {
+          dialog.close(cx);
+          cx.stop_propagation();
+        }),
+      )
       .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
         v_flex()
@@ -390,7 +403,11 @@ impl Render for CollabShareDialog {
               .px_4()
               .border_b_1()
               .border_color(cx.theme().border)
-              .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Share / Collaborate"))
+              .child(
+                div()
+                  .font_weight(gpui::FontWeight::SEMIBOLD)
+                  .child("Share / Collaborate"),
+              )
               .child(
                 Button::new("close-collaboration-dialog")
                   .icon(IconName::Close)
@@ -405,13 +422,17 @@ impl Render for CollabShareDialog {
               .gap_2()
               .px_4()
               .pt_4()
-              .child(tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
-                dialog.set_mode(CollabDialogMode::Share, cx);
-              })))
-              .child(tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
-                dialog.set_mode(CollabDialogMode::Join, cx);
-                dialog.focus(window, cx);
-              }))),
+              .child(
+                tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
+                  dialog.set_mode(CollabDialogMode::Share, cx);
+                })),
+              )
+              .child(
+                tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
+                  dialog.set_mode(CollabDialogMode::Join, cx);
+                  dialog.focus(window, cx);
+                })),
+              ),
           )
           .child(
             div()
@@ -470,17 +491,11 @@ fn ticket_box(ticket: Option<SharedString>, loading: bool, cx: &App) -> impl Int
 }
 
 fn error_text(text: SharedString, cx: &App) -> impl IntoElement {
-  div()
-    .text_sm()
-    .text_color(cx.theme().danger)
-    .child(text)
+  div().text_sm().text_color(cx.theme().danger).child(text)
 }
 
 fn success_text(text: SharedString, cx: &App) -> impl IntoElement {
-  div()
-    .text_sm()
-    .text_color(cx.theme().success)
-    .child(text)
+  div().text_sm().text_color(cx.theme().success).child(text)
 }
 
 fn roster_list(entries: Vec<crate::collab::SessionRosterEntry>, cx: &App) -> AnyElement {
@@ -491,26 +506,37 @@ fn roster_list(entries: Vec<crate::collab::SessionRosterEntry>, cx: &App) -> Any
     .border_color(cx.theme().border)
     .bg(cx.theme().background)
     .p_3()
-    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Participants"));
+    .child(
+      div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child("Participants"),
+    );
 
   if entries.is_empty() {
     return list
-      .child(div().text_sm().text_color(cx.theme().muted_foreground).child("Presence is starting..."))
+      .child(
+        div()
+          .text_sm()
+          .text_color(cx.theme().muted_foreground)
+          .child("Presence is starting..."),
+      )
       .into_any_element();
   }
 
   for entry in entries {
-    let label = if entry.is_self {
-      format!("{} (you)", entry.name)
-    } else {
-      entry.name
-    };
+    let label = if entry.is_self { format!("{} (you)", entry.name) } else { entry.name };
     list = list.child(
       h_flex()
         .items_center()
         .gap_2()
         .child(div().size(px(8.0)).rounded_full().bg(rgb(entry.color_rgb)))
-        .child(div().text_sm().text_color(cx.theme().foreground).child(label)),
+        .child(
+          div()
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .child(label),
+        ),
     );
   }
   list.into_any_element()

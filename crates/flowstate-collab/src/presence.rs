@@ -1,7 +1,10 @@
 //! Presence state and roster derivation.
 
 use anyhow::{Context as _, Result};
-use loro::{LoroValue, Subscription, awareness::{EphemeralStore, EphemeralStoreEvent}};
+use loro::{
+  LoroValue, Subscription,
+  awareness::{EphemeralStore, EphemeralStoreEvent},
+};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{PALETTE, PeerId, SessionId};
@@ -97,7 +100,12 @@ impl PresenceStore {
       .into_iter()
       .filter_map(|(key, value)| roster_entry_from_value(key, value))
       .collect::<Vec<_>>();
-    entries.sort_by(|left, right| left.name.cmp(&right.name).then_with(|| left.key.cmp(&right.key)));
+    entries.sort_by(|left, right| {
+      left
+        .name
+        .cmp(&right.name)
+        .then_with(|| left.key.cmp(&right.key))
+    });
     entries
   }
 

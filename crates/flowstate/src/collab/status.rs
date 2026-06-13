@@ -1,4 +1,4 @@
-use gpui::{AnyElement, App, IntoElement, div, px, prelude::*};
+use gpui::{AnyElement, App, IntoElement, div, prelude::*, px};
 use gpui_component::{ActiveTheme as _, h_flex};
 
 use super::{Attachment, Connectivity, JoinStage, SessionPhase};
@@ -15,18 +15,8 @@ pub fn status_pill(phase: &SessionPhase, cx: &App) -> AnyElement {
     .border_1()
     .border_color(color.opacity(0.38))
     .bg(color.opacity(0.10))
-    .child(
-      div()
-        .size(px(6.0))
-        .rounded_full()
-        .bg(color),
-    )
-    .child(
-      div()
-        .text_size(px(10.0))
-        .text_color(color)
-        .child(label),
-    )
+    .child(div().size(px(6.0)).rounded_full().bg(color))
+    .child(div().text_size(px(10.0)).text_color(color).child(label))
     .into_any_element()
 }
 
@@ -47,12 +37,7 @@ pub fn tab_badge(phase: &SessionPhase, cx: &App) -> Option<AnyElement> {
     h_flex()
       .items_center()
       .gap_0p5()
-      .child(
-        div()
-          .size(px(6.0))
-          .rounded_full()
-          .bg(color),
-      )
+      .child(div().size(px(6.0)).rounded_full().bg(color))
       .when_some(count, |this, count| {
         this.child(
           div()

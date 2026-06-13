@@ -43,13 +43,7 @@ impl RemoteApplier<'_> {
     Ok(patches)
   }
 
-  fn apply_text_diff(
-    &self,
-    document: &Document,
-    target: &ContainerID,
-    delta: &[TextDelta],
-    patches: &mut Vec<CollabPatch>,
-  ) -> Result<()> {
+  fn apply_text_diff(&self, document: &Document, target: &ContainerID, delta: &[TextDelta], patches: &mut Vec<CollabPatch>) -> Result<()> {
     let Some(row_ix) = self.binding.by_container.get(target).copied() else {
       return Ok(());
     };
@@ -235,12 +229,7 @@ fn structural_block_for_insert(input: &InputBlock) -> CollabStructuralBlock {
   }
 }
 
-fn binding_row_from_insert(
-  map: LoroMap,
-  input: &InputBlock,
-  block_id: BlockId,
-  paragraph_id: Option<ParagraphId>,
-) -> Result<BindingRow> {
+fn binding_row_from_insert(map: LoroMap, input: &InputBlock, block_id: BlockId, paragraph_id: Option<ParagraphId>) -> Result<BindingRow> {
   let text = if matches!(input, InputBlock::Paragraph(_)) {
     Some(text_child(&map)?)
   } else {

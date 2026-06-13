@@ -19,20 +19,25 @@ mod tests {
     projection::populate_from_document(&loro, SessionId::from_bytes([9; 32]), "local-apply", &document).expect("populate should succeed");
     let mut binding = DocBinding::build(&loro, &document).expect("binding should build");
     let paragraph = document.ids.paragraph_ids[0];
-    let styles = RunStyles::default().with(RunStyle::Semantic(4)).with_strikethrough();
+    let styles = RunStyles::default()
+      .with(RunStyle::Semantic(4))
+      .with_strikethrough();
 
     insert_text_at(&mut document, 0, "a".len(), "Z", styles);
-    LocalApplier { doc: &loro, binding: &mut binding }
-      .apply(
-        &document,
-        &[CanonicalOperation::InsertText {
-          paragraph,
-          byte: "a".len(),
-          text: "Z".to_string(),
-          styles,
-        }],
-      )
-      .expect("local apply should succeed");
+    LocalApplier {
+      doc: &loro,
+      binding: &mut binding,
+    }
+    .apply(
+      &document,
+      &[CanonicalOperation::InsertText {
+        paragraph,
+        byte: "a".len(),
+        text: "Z".to_string(),
+        styles,
+      }],
+    )
+    .expect("local apply should succeed");
 
     let projected = projection::document_from_loro(&loro, DocumentTheme::default()).expect("projection should succeed");
     assert_document_text_and_runs_eq(&document, &projected);

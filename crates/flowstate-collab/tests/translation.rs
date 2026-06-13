@@ -6,8 +6,8 @@ mod tests {
   use gpui_flowtext::{
     Block, CanonicalOperation, Document, DocumentOffset, DocumentTheme, InputBlock, InputEquationBlock, InputEquationDisplay,
     InputEquationSyntax, InputParagraph, ParagraphStyle, RunStyle, RunStyles, block_from_input_block, capture_document_span,
-    delete_cross_paragraph_range, delete_range_in_paragraph, document_from_input_blocks, insert_block_id, insert_text_at,
-    mutate_runs_in_range, paragraph_text, paragraphs_mut, plain, remove_block_ids, run, split_paragraph_at, update_paragraph_block,
+    delete_cross_paragraph_range, delete_range_in_paragraph, document_from_input_blocks, insert_block_id, insert_text_at, mutate_runs_in_range,
+    paragraph_text, paragraphs_mut, plain, remove_block_ids, run, split_paragraph_at, update_paragraph_block,
   };
   use loro::LoroDoc;
 
@@ -36,7 +36,9 @@ mod tests {
 
   #[test]
   fn split_and_join_paragraphs_preserve_multibyte_text_and_styles() {
-    let semantic = RunStyles::default().with(RunStyle::Semantic(2)).with_direct_underline();
+    let semantic = RunStyles::default()
+      .with(RunStyle::Semantic(2))
+      .with_direct_underline();
     let (mut document, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![plain("aé"), run("🌍\u{2028}x", semantic)])]);
     let original = document.ids.paragraph_ids[0];
     let split_byte = "aé".len();
@@ -75,7 +77,9 @@ mod tests {
 
   #[test]
   fn paragraph_and_run_style_updates_match_flowtext_runs() {
-    let base_style = RunStyles::default().with(RunStyle::Semantic(1)).with_strikethrough();
+    let base_style = RunStyles::default()
+      .with(RunStyle::Semantic(1))
+      .with_strikethrough();
     let (mut document, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![run(MULTIBYTE, base_style)])]);
     let paragraph = document.ids.paragraph_ids[0];
 
@@ -145,13 +149,13 @@ mod tests {
 
   #[test]
   fn replace_paragraph_span_refreshes_text_runs_and_styles() {
-    let (mut document, loro, mut binding) = collab_fixture(vec![
-      paragraph_block(vec![plain(MULTIBYTE)]),
-      paragraph_block(vec![plain("second aé")]),
-    ]);
+    let (mut document, loro, mut binding) =
+      collab_fixture(vec![paragraph_block(vec![plain(MULTIBYTE)]), paragraph_block(vec![plain("second aé")])]);
     let start_paragraph = document.ids.paragraph_ids[0];
     let before = capture_document_span(&document, 0..2);
-    let inserted_styles = RunStyles::default().with(RunStyle::Semantic(5)).with_direct_underline();
+    let inserted_styles = RunStyles::default()
+      .with(RunStyle::Semantic(5))
+      .with_direct_underline();
 
     insert_text_at(&mut document, 0, "a".len(), "Zé", inserted_styles);
     paragraphs_mut(&mut document)[1].style = ParagraphStyle::Custom(2);
@@ -172,10 +176,7 @@ mod tests {
 
   #[test]
   fn insert_move_replace_and_delete_object_blocks_match_flowtext_document() {
-    let (mut document, loro, mut binding) = collab_fixture(vec![
-      paragraph_block(vec![plain("one aé")]),
-      paragraph_block(vec![plain("two 🌍")]),
-    ]);
+    let (mut document, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![plain("one aé")]), paragraph_block(vec![plain("two 🌍")])]);
     let equation = equation_block("x = aé + 🌍");
 
     let equation_id = insert_object_block(&mut document, 1, equation);
@@ -209,20 +210,12 @@ mod tests {
     );
 
     delete_object_block(&mut document, 2);
-    apply_and_assert_projection(
-      &document,
-      &loro,
-      &mut binding,
-      &[CanonicalOperation::DeleteBlock { block: equation_id }],
-    );
+    apply_and_assert_projection(&document, &loro, &mut binding, &[CanonicalOperation::DeleteBlock { block: equation_id }]);
   }
 
   #[test]
   fn replace_document_rebuilds_the_loro_projection() {
-    let (_, loro, mut binding) = collab_fixture(vec![
-      paragraph_block(vec![plain("old")]),
-      equation_block("old = 1"),
-    ]);
+    let (_, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![plain("old")]), equation_block("old = 1")]);
     let document = document_from_input_blocks(
       DocumentTheme::default(),
       vec![
@@ -238,8 +231,7 @@ mod tests {
   fn collab_fixture(blocks: Vec<InputBlock>) -> (Document, LoroDoc, DocBinding) {
     let document = document_from_input_blocks(DocumentTheme::default(), blocks);
     let loro = schema::new_configured_doc();
-    projection::populate_from_document(&loro, SessionId::from_bytes([42; 32]), "translation", &document)
-      .expect("populate should succeed");
+    projection::populate_from_document(&loro, SessionId::from_bytes([42; 32]), "translation", &document).expect("populate should succeed");
     let binding = DocBinding::build(&loro, &document).expect("binding should build");
     (document, loro, binding)
   }
@@ -277,7 +269,10 @@ mod tests {
     let block = blocks.remove(from);
     blocks.insert(to.min(blocks.len()), block);
     let block_id = document.ids.block_ids.remove(from);
-    document.ids.block_ids.insert(to.min(document.ids.block_ids.len()), block_id);
+    document
+      .ids
+      .block_ids
+      .insert(to.min(document.ids.block_ids.len()), block_id);
   }
 
   fn replace_object_block(document: &mut Document, block_ix: usize, input: InputBlock) {

@@ -1,7 +1,14 @@
 use std::path::PathBuf;
 
-use flowstate_collab::{SessionId, binding::DocBinding, presence::{PresenceSelection, PresenceStore}};
-use loro::{LoroDoc, cursor::{Cursor, PosType, Side}};
+use flowstate_collab::{
+  SessionId,
+  binding::DocBinding,
+  presence::{PresenceSelection, PresenceStore},
+};
+use loro::{
+  LoroDoc,
+  cursor::{Cursor, PosType, Side},
+};
 
 use crate::rich_text_element::{DocumentOffset, ExternalCaret, ParagraphId, RichTextEditor};
 
@@ -44,15 +51,12 @@ fn cursor_bytes_for_offset(binding: &DocBinding, paragraph: ParagraphId, byte: u
   let text = row.text.as_ref()?;
   let byte = byte.min(text.len_utf8());
   let pos = text.convert_pos(byte, PosType::Bytes, PosType::Unicode)?;
-  text.get_cursor(pos, Side::Middle).map(|cursor| cursor.encode())
+  text
+    .get_cursor(pos, Side::Middle)
+    .map(|cursor| cursor.encode())
 }
 
-fn external_caret_for_presence(
-  doc: &LoroDoc,
-  binding: &DocBinding,
-  selection: &PresenceSelection,
-  color_rgb: u32,
-) -> Option<ExternalCaret> {
+fn external_caret_for_presence(doc: &LoroDoc, binding: &DocBinding, selection: &PresenceSelection, color_rgb: u32) -> Option<ExternalCaret> {
   let cursor = Cursor::decode(&selection.head).ok()?;
   let row_ix = binding.by_container.get(&cursor.container).copied()?;
   let row = binding.rows.get(row_ix)?;
@@ -92,9 +96,5 @@ fn sanitized_recovery_title(title: &str) -> String {
     }
   }
   let trimmed = out.trim_matches(['_', '.']).to_string();
-  if trimmed.is_empty() {
-    "shared-document".to_string()
-  } else {
-    trimmed
-  }
+  if trimmed.is_empty() { "shared-document".to_string() } else { trimmed }
 }

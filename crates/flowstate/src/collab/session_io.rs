@@ -26,10 +26,19 @@ impl CollabSession {
       return Ok(());
     }
 
-    let editor = self.editor.clone().context("collaboration session has no editor")?;
+    let editor = self
+      .editor
+      .clone()
+      .context("collaboration session has no editor")?;
     let document = Arc::new(editor.read(cx).document().clone());
-    let doc = self.doc.clone().context("collaboration session has no Loro document")?;
-    let binding = self.binding.take().context("collaboration session has no document binding")?;
+    let doc = self
+      .doc
+      .clone()
+      .context("collaboration session has no Loro document")?;
+    let binding = self
+      .binding
+      .take()
+      .context("collaboration session has no document binding")?;
     let binding = Arc::new(Mutex::new(binding));
     let patches = Arc::new(Mutex::new(Vec::<CollabPatch>::new()));
     let sub = self.diff_subscription(doc.clone(), document, binding.clone(), patches.clone());
@@ -51,7 +60,10 @@ impl CollabSession {
     let requests = self.direct_rx.clone();
     cx.spawn(async move |session, cx| {
       while let Ok(request) = requests.recv().await {
-        if session.update(cx, |session, cx| session.handle_direct_request(request, cx)).is_err() {
+        if session
+          .update(cx, |session, cx| session.handle_direct_request(request, cx))
+          .is_err()
+        {
           break;
         }
       }
@@ -142,10 +154,19 @@ impl CollabSession {
       return Ok(());
     }
 
-    let editor = self.editor.clone().context("collaboration session has no editor")?;
+    let editor = self
+      .editor
+      .clone()
+      .context("collaboration session has no editor")?;
     let document = Arc::new(editor.read(cx).document().clone());
-    let doc = self.doc.clone().context("collaboration session has no Loro document")?;
-    let binding = self.binding.take().context("collaboration session has no document binding")?;
+    let doc = self
+      .doc
+      .clone()
+      .context("collaboration session has no Loro document")?;
+    let binding = self
+      .binding
+      .take()
+      .context("collaboration session has no document binding")?;
     let binding = Arc::new(Mutex::new(binding));
     let patches = Arc::new(Mutex::new(Vec::<CollabPatch>::new()));
     let sub = self.diff_subscription(doc, document, binding.clone(), patches.clone());
@@ -217,7 +238,10 @@ impl CollabSession {
   }
 
   fn asset_bytes(&self, asset: u128, cx: &mut Context<Self>) -> Result<AssetBytes> {
-    let editor = self.editor.as_ref().context("collaboration session has no editor")?;
+    let editor = self
+      .editor
+      .as_ref()
+      .context("collaboration session has no editor")?;
     let bytes = editor
       .read(cx)
       .document()

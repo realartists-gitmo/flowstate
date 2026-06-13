@@ -202,7 +202,10 @@ pub fn input_runs_from_delta(delta: &[TextDelta]) -> Vec<InputRun> {
       last.text.push_str(insert);
       continue;
     }
-    runs.push(InputRun { text: insert.clone(), styles });
+    runs.push(InputRun {
+      text: insert.clone(),
+      styles,
+    });
   }
   runs
 }

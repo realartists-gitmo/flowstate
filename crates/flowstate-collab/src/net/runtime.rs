@@ -31,9 +31,7 @@ pub fn start() -> Result<(CommandSender, EventReceiver)> {
 
   let runtime = spawn_runtime()?;
   let set_failed = RUNTIME.set(runtime.clone()).is_err();
-  if set_failed
-    && let Some(runtime) = RUNTIME.get()
-  {
+  if set_failed && let Some(runtime) = RUNTIME.get() {
     return Ok((runtime.commands.clone(), runtime.events.clone()));
   }
   Ok((runtime.commands, runtime.events))
@@ -102,7 +100,14 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         direct_state.attach_session(session).await;
         replace_swarm(
           &mut swarms,
-          SwarmHandle::spawn(endpoint.clone(), gossip.clone(), direct_state.clone(), session, Vec::new(), evt_tx.clone())?,
+          SwarmHandle::spawn(
+            endpoint.clone(),
+            gossip.clone(),
+            direct_state.clone(),
+            session,
+            Vec::new(),
+            evt_tx.clone(),
+          )?,
         )
         .await;
         let _ = reply
@@ -143,11 +148,21 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         let result = direct::pull_with_fallback(DirectRequest::Snapshot { session }, candidates, DIRECT_PULL_TIMEOUT).await;
         let _ = reply.send(result).await;
       },
-      NetCommand::PullBlob { session, candidates, blob, reply } => {
+      NetCommand::PullBlob {
+        session,
+        candidates,
+        blob,
+        reply,
+      } => {
         let result = direct::pull_with_fallback(DirectRequest::Blob { session, blob }, candidates, DIRECT_PULL_TIMEOUT).await;
         let _ = reply.send(result).await;
       },
-      NetCommand::PullAsset { session, candidates, asset, reply } => {
+      NetCommand::PullAsset {
+        session,
+        candidates,
+        asset,
+        reply,
+      } => {
         let result = direct::pull_with_fallback(DirectRequest::Asset { session, asset }, candidates, DIRECT_PULL_TIMEOUT)
           .await
           .map(|bytes| AssetBytes { bytes });

@@ -17,7 +17,12 @@ mod tests {
         style: ParagraphStyle::Custom(2),
         runs: vec![
           plain("aé"),
-          run("🌍\u{2028}x", RunStyles::default().with(RunStyle::Semantic(3)).with_direct_underline()),
+          run(
+            "🌍\u{2028}x",
+            RunStyles::default()
+              .with(RunStyle::Semantic(3))
+              .with_direct_underline(),
+          ),
         ],
       }),
       InputBlock::Equation(InputEquationBlock {
@@ -65,8 +70,18 @@ mod tests {
     let loro = schema::new_configured_doc();
     projection::populate_from_document(&loro, SessionId::from_bytes([8; 32]), "offsets", &original).expect("populate should succeed");
     let binding = DocBinding::build(&loro, &original).expect("binding should build");
-    let text = binding.rows[0].text.as_ref().expect("first row should be paragraph text");
-    let byte_to_unicode = [(0, 0), ("a".len(), 1), ("aé".len(), 2), ("aé🌍".len(), 3), ("aé🌍\u{2028}".len(), 4), (MULTIBYTE.len(), 5)];
+    let text = binding.rows[0]
+      .text
+      .as_ref()
+      .expect("first row should be paragraph text");
+    let byte_to_unicode = [
+      (0, 0),
+      ("a".len(), 1),
+      ("aé".len(), 2),
+      ("aé🌍".len(), 3),
+      ("aé🌍\u{2028}".len(), 4),
+      (MULTIBYTE.len(), 5),
+    ];
 
     assert_eq!(text.len_utf8(), MULTIBYTE.len());
     for (byte, unicode) in byte_to_unicode {

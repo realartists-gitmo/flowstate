@@ -6,9 +6,7 @@ pub type PeerId = iroh::EndpointId;
 
 pub const SESSION_ID_LEN: usize = 32;
 
-pub const PALETTE: [u32; 8] = [
-  0x3b82f6, 0xef4444, 0x22c55e, 0xf59e0b, 0x8b5cf6, 0x06b6d4, 0xec4899, 0x84cc16,
-];
+pub const PALETTE: [u32; 8] = [0x3b82f6, 0xef4444, 0x22c55e, 0xf59e0b, 0x8b5cf6, 0x06b6d4, 0xec4899, 0x84cc16];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct SessionId([u8; SESSION_ID_LEN]);

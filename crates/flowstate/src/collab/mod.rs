@@ -1,5 +1,5 @@
-mod session;
 mod presence_view;
+mod session;
 pub mod share_dialog;
 mod shutdown;
 pub mod status;
@@ -10,7 +10,10 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::Receiver;
 use flowstate_collab::{
   SessionId,
-  net::{NetCommand, NetEvent, TicketSeed, runtime::{self, CommandSender}},
+  net::{
+    NetCommand, NetEvent, TicketSeed,
+    runtime::{self, CommandSender},
+  },
   ticket::SessionTicket,
 };
 use gpui::{App, AppContext, BorrowAppContext, Context, Entity, Global, ReadGlobal};
@@ -74,7 +77,10 @@ impl CollabManager {
 
     self.register_session(entity.clone(), cx);
     commands
-      .try_send(NetCommand::RegisterDirectHandler { session, handler: direct_handler })
+      .try_send(NetCommand::RegisterDirectHandler {
+        session,
+        handler: direct_handler,
+      })
       .context("registering collaboration direct handler failed")?;
 
     let (reply_tx, reply_rx) = async_channel::bounded(1);
@@ -90,7 +96,10 @@ impl CollabManager {
     T: 'static,
   {
     ensure!(ticket.is_supported_version(), "unsupported collaboration protocol version");
-    ensure!(!self.sessions_by_id.contains_key(&ticket.session), "collaboration session is already open");
+    ensure!(
+      !self.sessions_by_id.contains_key(&ticket.session),
+      "collaboration session is already open"
+    );
 
     let commands = self.ensure_runtime(cx)?;
     let session = ticket.session;
@@ -104,7 +113,10 @@ impl CollabManager {
       bootstrap: vec![ticket.inviter],
     }) {
       entity.update(cx, |session, cx| {
-        session.detach(DetachReason::JoinFailed(format!("joining collaboration network session failed: {error}")), cx);
+        session.detach(
+          DetachReason::JoinFailed(format!("joining collaboration network session failed: {error}")),
+          cx,
+        );
       });
       self.unregister_session(session);
       return Err(error).context("joining collaboration network session failed");
@@ -172,7 +184,9 @@ impl CollabManager {
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    commands.try_send(NetCommand::MintTicketAddr { reply: reply_tx }).ok()?;
+    commands
+      .try_send(NetCommand::MintTicketAddr { reply: reply_tx })
+      .ok()?;
 
     cx.spawn(async move |_, _| {
       let ticket = match reply_rx.recv().await {
@@ -227,9 +241,7 @@ impl CollabManager {
     }
 
     let (commands, events) = runtime::start()?;
-    self.runtime = Some(CollabRuntime {
-      commands: commands.clone(),
-    });
+    self.runtime = Some(CollabRuntime { commands: commands.clone() });
     self.start_event_pump(events, cx);
     Ok(commands)
   }
@@ -276,9 +288,7 @@ impl CollabManager {
         self.update_session(session, cx, |session, cx| session.handle_gossip_lagged(cx));
       },
       NetEvent::SubscribeFailed { session, error } => {
-        let detached = self.update_session(session, cx, |session, cx| {
-          session.detach(DetachReason::Fatal(error), cx)
-        });
+        let detached = self.update_session(session, cx, |session, cx| session.detach(DetachReason::Fatal(error), cx));
         if detached.unwrap_or(false) {
           self.unregister_session(session);
         }
@@ -303,22 +313,20 @@ impl CollabManager {
   where
     T: 'static,
   {
-    cx.spawn(async move |_, cx| {
-      match reply_rx.recv().await {
-        Ok(Ok(seed)) => {
-          let _ = session.update(cx, |session, cx| session.establish_local_peer(&seed.inviter.id, cx));
-        },
-        Ok(Err(error)) => {
-          let _ = session.update(cx, |session, cx| {
-            session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error:#}")), cx);
-          });
-        },
-        Err(error) => {
-          let _ = session.update(cx, |session, cx| {
-            session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error}")), cx);
-          });
-        },
-      }
+    cx.spawn(async move |_, cx| match reply_rx.recv().await {
+      Ok(Ok(seed)) => {
+        let _ = session.update(cx, |session, cx| session.establish_local_peer(&seed.inviter.id, cx));
+      },
+      Ok(Err(error)) => {
+        let _ = session.update(cx, |session, cx| {
+          session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error:#}")), cx);
+        });
+      },
+      Err(error) => {
+        let _ = session.update(cx, |session, cx| {
+          session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error}")), cx);
+        });
+      },
     })
     .detach();
   }
@@ -331,17 +339,15 @@ impl CollabManager {
     commands
       .try_send(NetCommand::MintTicketAddr { reply: reply_tx })
       .context("requesting collaboration endpoint address failed")?;
-    cx.spawn(async move |_, cx| {
-      match reply_rx.recv().await {
-        Ok(addr) => {
-          let _ = session.update(cx, |session, cx| session.establish_local_peer(&addr.id, cx));
-        },
-        Err(error) => {
-          let _ = session.update(cx, |session, cx| {
-            session.detach(DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error}")), cx);
-          });
-        },
-      }
+    cx.spawn(async move |_, cx| match reply_rx.recv().await {
+      Ok(addr) => {
+        let _ = session.update(cx, |session, cx| session.establish_local_peer(&addr.id, cx));
+      },
+      Err(error) => {
+        let _ = session.update(cx, |session, cx| {
+          session.detach(DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error}")), cx);
+        });
+      },
     })
     .detach();
     Ok(())
@@ -355,12 +361,7 @@ where
   CollabManager::init(cx);
 }
 
-pub fn start_session_for_panel<T>(
-  panel_id: Uuid,
-  editor: Entity<RichTextEditor>,
-  title: String,
-  cx: &mut Context<T>,
-) -> Result<SessionId>
+pub fn start_session_for_panel<T>(panel_id: Uuid, editor: Entity<RichTextEditor>, title: String, cx: &mut Context<T>) -> Result<SessionId>
 where
   T: 'static,
 {
@@ -374,12 +375,7 @@ where
   cx.update_default_global::<CollabManager, _>(|manager, cx| manager.join_session(ticket, cx))
 }
 
-pub fn attach_joined_session<T>(
-  session_id: SessionId,
-  panel_id: Uuid,
-  editor: Entity<RichTextEditor>,
-  cx: &mut Context<T>,
-) -> Result<()>
+pub fn attach_joined_session<T>(session_id: SessionId, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<T>) -> Result<()>
 where
   T: 'static,
 {

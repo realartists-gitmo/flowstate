@@ -1,12 +1,7 @@
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, Result};
-use flowstate_collab::{
-  binding::DocBinding,
-  net::NetCommand,
-  presence::PRESENCE_KEEPALIVE_SECS,
-  projection, self_check,
-};
+use flowstate_collab::{binding::DocBinding, net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, projection, self_check};
 use gpui::{Context, Timer};
 
 use crate::{app_settings::load_document_theme, rich_text_element::Document};
@@ -117,7 +112,9 @@ impl CollabSession {
   }
 
   fn next_digest_delay(&self) -> Option<Duration> {
-    self.timer_live().then(|| self.anti_entropy.duration_until_digest(Instant::now()))
+    self
+      .timer_live()
+      .then(|| self.anti_entropy.duration_until_digest(Instant::now()))
   }
 
   fn run_digest_tick(&mut self, cx: &mut Context<Self>) -> bool {
@@ -267,6 +264,8 @@ impl CollabSession {
 
 fn recovery_delay(retries: u32) -> Duration {
   let shift = retries.min(5);
-  let secs = 1_u64.checked_shl(shift).unwrap_or(RECOVERY_MAX_BACKOFF.as_secs());
+  let secs = 1_u64
+    .checked_shl(shift)
+    .unwrap_or(RECOVERY_MAX_BACKOFF.as_secs());
   Duration::from_secs(secs).min(RECOVERY_MAX_BACKOFF)
 }

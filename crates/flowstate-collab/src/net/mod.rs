@@ -8,7 +8,11 @@ use anyhow::Result;
 use async_channel::Sender;
 use iroh::{EndpointAddr, EndpointId};
 
-use crate::{ids::{BlobId, SessionId}, proto_direct::AssetBytes, proto_gossip::GossipMsg};
+use crate::{
+  ids::{BlobId, SessionId},
+  proto_direct::AssetBytes,
+  proto_gossip::GossipMsg,
+};
 
 use self::direct::DirectSessionHandler;
 
@@ -25,16 +29,51 @@ pub enum PublishPayload {
 #[derive(Debug)]
 pub enum NetCommand {
   EnsureUp,
-  RegisterDirectHandler { session: SessionId, handler: DirectSessionHandler },
-  CreateSession { session: SessionId, reply: Reply<Result<TicketSeed>> },
-  JoinSession { session: SessionId, bootstrap: Vec<EndpointAddr> },
-  LeaveSession { session: SessionId },
-  Publish { session: SessionId, payload: PublishPayload },
-  PullUpdates { session: SessionId, candidates: Vec<EndpointId>, our_vv: Vec<u8>, reply: Reply<Result<Vec<u8>>> },
-  PullSnapshot { session: SessionId, candidates: Vec<EndpointId>, reply: Reply<Result<Vec<u8>>> },
-  PullBlob { session: SessionId, candidates: Vec<EndpointId>, blob: BlobId, reply: Reply<Result<Vec<u8>>> },
-  PullAsset { session: SessionId, candidates: Vec<EndpointId>, asset: u128, reply: Reply<Result<AssetBytes>> },
-  MintTicketAddr { reply: Reply<EndpointAddr> },
+  RegisterDirectHandler {
+    session: SessionId,
+    handler: DirectSessionHandler,
+  },
+  CreateSession {
+    session: SessionId,
+    reply: Reply<Result<TicketSeed>>,
+  },
+  JoinSession {
+    session: SessionId,
+    bootstrap: Vec<EndpointAddr>,
+  },
+  LeaveSession {
+    session: SessionId,
+  },
+  Publish {
+    session: SessionId,
+    payload: PublishPayload,
+  },
+  PullUpdates {
+    session: SessionId,
+    candidates: Vec<EndpointId>,
+    our_vv: Vec<u8>,
+    reply: Reply<Result<Vec<u8>>>,
+  },
+  PullSnapshot {
+    session: SessionId,
+    candidates: Vec<EndpointId>,
+    reply: Reply<Result<Vec<u8>>>,
+  },
+  PullBlob {
+    session: SessionId,
+    candidates: Vec<EndpointId>,
+    blob: BlobId,
+    reply: Reply<Result<Vec<u8>>>,
+  },
+  PullAsset {
+    session: SessionId,
+    candidates: Vec<EndpointId>,
+    asset: u128,
+    reply: Reply<Result<AssetBytes>>,
+  },
+  MintTicketAddr {
+    reply: Reply<EndpointAddr>,
+  },
   Shutdown,
 }
 

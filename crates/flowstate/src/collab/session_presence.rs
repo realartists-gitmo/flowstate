@@ -57,10 +57,12 @@ impl CollabSession {
     if bytes.is_empty() {
       return;
     }
-    let _ = self.net_tx.try_send(flowstate_collab::net::NetCommand::Publish {
-      session: self.session,
-      payload: flowstate_collab::net::PublishPayload::Presence(bytes),
-    });
+    let _ = self
+      .net_tx
+      .try_send(flowstate_collab::net::NetCommand::Publish {
+        session: self.session,
+        payload: flowstate_collab::net::PublishPayload::Presence(bytes),
+      });
   }
 
   pub(super) fn refresh_peer_count(&mut self) {

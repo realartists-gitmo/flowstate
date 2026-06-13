@@ -35,7 +35,9 @@ mod tests {
     peer_a.set_run_styles(
       0,
       "a".len().."a".len() + inserted,
-      RunStyles::default().with(RunStyle::Highlight(4)).with_direct_underline(),
+      RunStyles::default()
+        .with(RunStyle::Highlight(4))
+        .with_direct_underline(),
     );
     peer_b.insert_text(1, "second ".len(), "Bé", RunStyles::default().with_strikethrough());
 
@@ -72,7 +74,9 @@ mod tests {
 
     fn from_snapshot(session: SessionId, snapshot: &[u8]) -> Self {
       let loro = schema::new_configured_doc();
-      loro.import(snapshot).expect("snapshot import should succeed");
+      loro
+        .import(snapshot)
+        .expect("snapshot import should succeed");
       projection::verify_lineage(&loro, session).expect("lineage should match");
       let document = projection::document_from_loro(&loro, DocumentTheme::default()).expect("projection should succeed");
       let binding = DocBinding::build(&loro, &document).expect("binding should build");
@@ -83,7 +87,10 @@ mod tests {
       let updates = Arc::new(Mutex::new(Vec::new()));
       let captured = updates.clone();
       let subscription = loro.subscribe_local_update(Box::new(move |bytes| {
-        captured.lock().expect("update capture lock should not be poisoned").push(bytes.clone());
+        captured
+          .lock()
+          .expect("update capture lock should not be poisoned")
+          .push(bytes.clone());
         true
       }));
       Self {
@@ -96,11 +103,18 @@ mod tests {
     }
 
     fn snapshot(&self) -> Vec<u8> {
-      self.loro.export(ExportMode::Snapshot).expect("snapshot export should succeed")
+      self
+        .loro
+        .export(ExportMode::Snapshot)
+        .expect("snapshot export should succeed")
     }
 
     fn updates(&self) -> Vec<Vec<u8>> {
-      self.updates.lock().expect("update capture lock should not be poisoned").clone()
+      self
+        .updates
+        .lock()
+        .expect("update capture lock should not be poisoned")
+        .clone()
     }
 
     fn insert_text(&mut self, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {

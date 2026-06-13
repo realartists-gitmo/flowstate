@@ -97,12 +97,7 @@ async fn run_session(
   Ok(())
 }
 
-async fn publish(
-  sender: &GossipSender,
-  direct_state: &DirectServeState,
-  session: SessionId,
-  payload: PublishPayload,
-) -> Result<()> {
+async fn publish(sender: &GossipSender, direct_state: &DirectServeState, session: SessionId, payload: PublishPayload) -> Result<()> {
   let (message, neighbors_only) = match payload {
     PublishPayload::Update(bytes) => (update_message(direct_state, session, bytes).await?, false),
     PublishPayload::Presence(bytes) => (GossipMsg::Presence(bytes), false),

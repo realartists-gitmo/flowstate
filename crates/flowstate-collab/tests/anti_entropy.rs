@@ -29,10 +29,7 @@ mod tests {
     state.finish_pull();
     assert_eq!(
       state.consider_digest(peer, session, VersionVectorRelation::Concurrent, vec![6]),
-      GapAction::Pull {
-        from: peer,
-        our_vv: vec![6],
-      }
+      GapAction::Pull { from: peer, our_vv: vec![6] }
     );
   }
 
@@ -69,10 +66,7 @@ mod tests {
     );
     assert_eq!(
       state.consider_digest(peer, session, VersionVectorRelation::SenderHasMissingOps, vec![2]),
-      GapAction::Pull {
-        from: peer,
-        our_vv: vec![2],
-      }
+      GapAction::Pull { from: peer, our_vv: vec![2] }
     );
   }
 
@@ -83,13 +77,7 @@ mod tests {
     let mut state = AntiEntropyState::new(session, Instant::now());
 
     assert_eq!(state.on_lagged(None, vec![1]), GapAction::None);
-    assert_eq!(
-      state.on_lagged(Some(peer), vec![2]),
-      GapAction::Pull {
-        from: peer,
-        our_vv: vec![2],
-      }
-    );
+    assert_eq!(state.on_lagged(Some(peer), vec![2]), GapAction::Pull { from: peer, our_vv: vec![2] });
     assert_eq!(state.on_lagged(Some(peer), vec![3]), GapAction::None);
   }
 
