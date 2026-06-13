@@ -881,6 +881,8 @@ impl Workspace {
           has_search_match: false,
           guide,
           hierarchy_color: None,
+          label_color: None,
+          interaction_palette: None,
           guide_colors: None,
           incoming_branch: None,
           icon: Some(icon),

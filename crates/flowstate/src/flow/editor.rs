@@ -13,7 +13,7 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::PixelsExt as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
 
-use crate::rich_text_element::RichTextEditor;
+use crate::{flow::flow_side_palette, rich_text_element::RichTextEditor};
 
 #[derive(Clone, Debug)]
 pub enum FlowEditorEvent {
@@ -774,10 +774,8 @@ impl FlowEditor {
       .gap(px(12.0))
       .p(px(16.0))
       .children(definition.columns.iter().map(|column| {
-        let side_color = match column.side {
-          flowstate_flow::ArgumentSide::One => cx.theme().primary,
-          flowstate_flow::ArgumentSide::Two => cx.theme().info,
-        };
+        let side_palette = flow_side_palette(column.side, cx);
+        let side_color = side_palette.base;
         div()
           .w(px(280.0))
           .flex_none()
@@ -813,11 +811,16 @@ impl FlowEditor {
               .rounded(px(6.0))
               .border_1()
               .border_color(if active == Some(id) {
-                cx.theme().primary
+                side_palette.active
               } else {
                 side_color.opacity(0.56)
               })
-              .bg(cx.theme().background)
+              .bg(if active == Some(id) {
+                side_palette.active.opacity(0.14)
+              } else {
+                cx.theme().background
+              })
+              .hover(|style| style.bg(side_palette.hover.opacity(0.12)))
               .cursor_pointer()
               .on_click(cx.listener(move |editor, _, _, cx| editor.activate_cell(id, cx)))
               .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, _, cx| {
@@ -833,10 +836,10 @@ impl FlowEditor {
                   .absolute()
                   .inset_0()
                   .invisible()
-                  .group_drag_over::<FlowCellDrag>("", |this| this.visible().border_2().border_color(cx.theme().primary))
+                  .group_drag_over::<FlowCellDrag>("", |this| this.visible().border_2().border_color(side_palette.hover))
                   .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| editor.finish_cell_drop(drag.cell_id, cx))),
               )
-              .when(is_drop_target, |this| this.border_2().border_color(cx.theme().primary))
+              .when(is_drop_target, |this| this.border_2().border_color(side_palette.active))
               .child(
                 canvas(
                   {
@@ -880,10 +883,7 @@ impl FlowEditor {
               let Some(child) = connector_bounds.get(child_id) else {
                 continue;
               };
-              let color = match side {
-                flowstate_flow::ArgumentSide::One => cx.theme().primary,
-                flowstate_flow::ArgumentSide::Two => cx.theme().info,
-              };
+              let color = flow_side_palette(*side, cx).base;
               let start = point(parent.right() - bounds.origin.x, parent.center().y - bounds.origin.y);
               let end = point(child.left() - bounds.origin.x, child.center().y - bounds.origin.y);
               let midpoint = start.x + (end.x - start.x) / 2.0;

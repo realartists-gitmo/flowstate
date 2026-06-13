@@ -95,6 +95,8 @@ impl Workspace {
                 has_search_match,
                 guide,
                 hierarchy_color: None,
+                label_color: None,
+                interaction_palette: None,
                 guide_colors: None,
                 incoming_branch: None,
                 icon: None,
@@ -149,6 +151,16 @@ impl Workspace {
     for sheet in &projection.sheets {
       let sheet_id = sheet.id;
       let sheet_expanded = editor.read(cx).outline_item_expanded(sheet_id);
+      let sheet_palette = projection.format.sheet_type(sheet.sheet_type_id).and_then(|definition| definition.columns.first()).map(|column| {
+        let side = crate::flow::flow_side_palette(column.side, cx);
+        crate::flow::FlowSidePalette {
+          base: sheet_type_color(side.base, cx.theme().sidebar),
+          foreground: cx.theme().sidebar_accent_foreground,
+          hover: side.hover.opacity(0.16),
+          active: cx.theme().sidebar_accent.mix(side.active, 0.36),
+        }
+      });
+      let sheet_color = sheet_palette.map(|palette| palette.base);
       let toggle_editor = editor.clone();
       let activate_editor = editor.clone();
       let key = sheet_id.as_u128() as usize;
@@ -166,7 +178,9 @@ impl Workspace {
             is_active: active_sheet == Some(sheet_id) && active_cell.is_none(),
             has_search_match: false,
             guide: OutlineRowGuides::default(),
-            hierarchy_color: None,
+            hierarchy_color: sheet_color,
+            label_color: None,
+            interaction_palette: sheet_palette,
             guide_colors: None,
             incoming_branch: None,
             icon: None,
@@ -201,6 +215,7 @@ impl Workspace {
           nav_width,
           window,
           &[0],
+          sheet_color,
           true,
           cx,
           &mut rows,
@@ -210,6 +225,7 @@ impl Workspace {
     v_flex()
       .size_full()
       .h_full()
+      .gap_1()
       .p_2()
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
@@ -228,6 +244,7 @@ fn append_flow_outline_cell_rows(
   nav_width: Pixels,
   window: &mut Window,
   ancestor_depths: &[usize],
+  sheet_color: Option<Hsla>,
   is_final_child: bool,
   cx: &mut Context<Workspace>,
   rows: &mut Vec<AnyElement>,
@@ -246,19 +263,14 @@ fn append_flow_outline_cell_rows(
     .map(|candidate| candidate.id)
     .collect();
   let expanded = editor.read(cx).outline_item_expanded(cell_id);
-  let side_color = match definition.columns[column_depth].side {
-    flowstate_flow::ArgumentSide::One => cx.theme().primary,
-    flowstate_flow::ArgumentSide::Two => cx.theme().info,
-  };
+  let side_palette = crate::flow::flow_side_palette(definition.columns[column_depth].side, cx);
+  let side_color = side_palette.base;
   let guide_colors = (0..depth)
     .map(|guide_depth| {
       if guide_depth == 0 {
-        outline_hierarchy_color(0, cx)
+        sheet_color.unwrap_or_else(|| outline_hierarchy_color(0, cx))
       } else {
-        match definition.columns[guide_depth - 1].side {
-          flowstate_flow::ArgumentSide::One => cx.theme().primary,
-          flowstate_flow::ArgumentSide::Two => cx.theme().info,
-        }
+        crate::flow::flow_side_palette(definition.columns[guide_depth - 1].side, cx).base
       }
     })
     .collect();
@@ -295,6 +307,8 @@ fn append_flow_outline_cell_rows(
         has_search_match: false,
         guide,
         hierarchy_color: Some(side_color),
+        label_color: None,
+        interaction_palette: Some(side_palette),
         guide_colors: Some(guide_colors),
         incoming_branch,
         icon: None,
@@ -327,6 +341,7 @@ fn append_flow_outline_cell_rows(
         nav_width,
         window,
         &child_ancestors,
+        sheet_color,
         index + 1 == children.len(),
         cx,
         rows,
@@ -351,6 +366,8 @@ struct SidebarTreeRow {
   has_search_match: bool,
   guide: OutlineRowGuides,
   hierarchy_color: Option<Hsla>,
+  label_color: Option<Hsla>,
+  interaction_palette: Option<crate::flow::FlowSidePalette>,
   guide_colors: Option<Vec<Hsla>>,
   incoming_branch: Option<IncomingBranch>,
   icon: Option<IconName>,
@@ -370,6 +387,8 @@ struct IncomingBranch {
 
 fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut App) -> ListItem {
   let hierarchy_color = row.hierarchy_color.unwrap_or_else(|| outline_hierarchy_color(row.depth, cx));
+  let label_color = row.label_color.unwrap_or(hierarchy_color);
+  let interaction_palette = row.interaction_palette;
   let guide_colors = row.guide_colors;
   let guide_depths = row.guide.ancestor_depths;
   let incoming_branch = row.incoming_branch;
@@ -555,9 +574,9 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
             .px_1()
             .overflow_hidden()
             .text_color(if row.is_active {
-              cx.theme().sidebar_accent_foreground
+              interaction_palette.map_or(cx.theme().sidebar_accent_foreground, |palette| palette.foreground)
             } else {
-              hierarchy_color
+              label_color
             })
             .whitespace_nowrap()
             .rounded(cx.theme().radius)
@@ -581,18 +600,20 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                   .left_0()
                   .right_0()
                   .bottom_0()
-                  .bg(
-                    cx.theme()
-                      .sidebar_accent
-                      .opacity(if row.has_search_match { 0.55 } else { 1.0 }),
-                  )
+                  .bg(interaction_palette.map_or(cx.theme().sidebar_accent, |palette| palette.active).opacity(if row.has_search_match {
+                    0.55
+                  } else {
+                    1.0
+                  }))
                   .border_1()
                   .border_color(hierarchy_color)
                   .rounded(cx.theme().radius),
               )
             })
             .when(!row.is_active && !row.has_search_match, |this| {
-              this.hover(|style| style.bg(cx.theme().list_hover))
+              this.hover(|style| {
+                style.bg(interaction_palette.map_or(cx.theme().list_hover, |palette| palette.hover.opacity(0.14)))
+              })
             })
             .child(label)
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -627,6 +648,39 @@ fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
     3 => anchor.mix(cx.theme().accent_foreground, 0.76),
     _ => anchor.mix(cx.theme().foreground, 0.82),
   }
+}
+
+fn sheet_type_color(side: Hsla, background: Hsla) -> Hsla {
+  let mut color = Hsla {
+    s: (side.s * 0.70).clamp(0.46, 0.78),
+    l: if background.l < 0.5 {
+      (side.l + 0.18).clamp(0.52, 0.78)
+    } else {
+      (side.l - 0.18).clamp(0.22, 0.48)
+    },
+    ..side
+  };
+  if contrast_ratio(color, background) < 3.0 {
+    color.l = if background.l < 0.5 { 0.72 } else { 0.28 };
+  }
+  color
+}
+
+fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
+  let luminance = |color: Hsla| {
+    let rgb = color.to_rgb();
+    let linear = |channel: f32| {
+      if channel <= 0.04045 {
+        channel / 12.92
+      } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+      }
+    };
+    0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+  };
+  let foreground = luminance(foreground);
+  let background = luminance(background);
+  (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
 }
 
 
