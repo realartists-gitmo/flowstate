@@ -41,7 +41,7 @@ fn modern_group(
             } else if matches!(command.id, RibbonCommandId::CondenseMenu) {
               modern_condense_menu(command, editor.clone(), metrics, options, cx)
             } else if matches!(command.id, RibbonCommandId::CondensedMenu) {
-              modern_condensed_menu(command, editor.clone(), metrics, cx)
+              modern_condensed_menu(command, editor.clone(), metrics, options, cx)
             } else if matches!(command.id, RibbonCommandId::Undo) {
               modern_undo_button(command, editor.clone(), metrics, cx)
             } else if matches!(command.id, RibbonCommandId::Redo) {

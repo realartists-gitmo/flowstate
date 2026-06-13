@@ -178,6 +178,9 @@ impl RichTextEditor {
     self.delete_forward_command(cx);
   }
   fn on_insert_newline(&mut self, _: &InsertNewline, _: &mut Window, cx: &mut Context<Self>) {
+    if !self.config.allow_paragraph_breaks {
+      return;
+    }
     if self.split_selected_table_cell_paragraph(cx) {
       return;
     }

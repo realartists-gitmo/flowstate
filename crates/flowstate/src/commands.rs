@@ -102,6 +102,9 @@ pub enum CommandId {
   SwitchToTab9,
   SwitchToTab10,
   ScrollToParagraph,
+  FlowAddSiblingAbove,
+  FlowDeleteSelected,
+  FlowStrike,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -211,7 +214,7 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::SendToSpeechDocumentEnd, "Send to Speech Document End", APP, &["alt-`"]),
   CommandSpec::new(CommandId::CondenseSelection, "Condense Selection", APP, &["f3"]),
   CommandSpec::new(CommandId::MarkCard, "Mark Card", APP, &["ctrl-m"]),
-  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &[]),
+  CommandSpec::new(CommandId::CondensedSelection, "Shrink", APP, &["ctrl-8"]),
   CommandSpec::new(CommandId::ToggleSpeechDocument, "Toggle Speech Document", APP, &[]),
   CommandSpec::new(CommandId::ExportFormat, "Export Format", APP, &[]),
   CommandSpec::new(CommandId::ExportSend, "Export Send", APP, &[]),
@@ -227,6 +230,9 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::SwitchToTab9, "Switch to Tab 9", APP, &["alt-9"]),
   CommandSpec::new(CommandId::SwitchToTab10, "Switch to Tab 10", APP, &["alt-0"]),
   CommandSpec::new(CommandId::ScrollToParagraph, "Scroll to Paragraph", APP, &[]),
+  CommandSpec::new(CommandId::FlowAddSiblingAbove, "Flow: Add Sibling Above", APP, &["alt-enter"]),
+  CommandSpec::new(CommandId::FlowDeleteSelected, "Flow: Delete Selected", APP, &["cmd-delete"]),
+  CommandSpec::new(CommandId::FlowStrike, "Flow: Strike", APP, &["cmd-shift-x", "ctrl-shift-x"]),
 ];
 
 #[hotpath::measure]

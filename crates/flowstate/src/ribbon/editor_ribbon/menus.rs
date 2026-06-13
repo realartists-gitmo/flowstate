@@ -194,6 +194,7 @@ fn modern_condensed_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
+  options: ModernRibbonOptions,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let mode_active = command.selected;
@@ -201,6 +202,7 @@ fn modern_condensed_menu(
   let chip_height = metrics.chip_height;
   let label = RibbonLabel::for_command(command);
   let command_color = ribbon_command_color(command, cx);
+  let shortcut = command.shortcut.clone();
 
   DropdownButton::new("modern-ribbon-condensed-dropdown")
     .with_size(Size::Size(chip_height))
@@ -238,6 +240,9 @@ fn modern_condensed_menu(
               .text_color(command_color)
               .child(label.text),
           )
+        })
+        .when(show_shortcut(options), |this| {
+          this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
         })
         .on_click({
           let editor = editor.clone();

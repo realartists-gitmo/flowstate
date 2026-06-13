@@ -345,6 +345,7 @@ impl AssetSource for AppAssets {
       "icons/save.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/save.svg")))),
       "icons/bold.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/bold.svg")))),
       "icons/eraser.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/eraser.svg")))),
+      "icons/remove-formatting.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/remove-formatting.svg")))),
       "icons/highlighter.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/highlighter.svg")))),
       "icons/mark-card.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/mark-card.svg")))),
       "icons/shrink.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/shrink.svg")))),
@@ -387,6 +388,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/eraser.svg".starts_with(path) {
       assets.push("icons/eraser.svg".into());
+    }
+    if "icons/remove-formatting.svg".starts_with(path) {
+      assets.push("icons/remove-formatting.svg".into());
     }
     if "icons/highlighter.svg".starts_with(path) {
       assets.push("icons/highlighter.svg".into());

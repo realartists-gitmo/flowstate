@@ -448,12 +448,16 @@ pub struct RichTextEditorStyleState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
+  pub allow_paragraph_breaks: bool,
 }
 
 #[hotpath::measure_all]
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
-    Self { smart_word_selection: true }
+    Self {
+      smart_word_selection: true,
+      allow_paragraph_breaks: true,
+    }
   }
 }
 

@@ -35,6 +35,46 @@ impl Workspace {
     if self.non_document_keybinding_surface_is_open() || self.focused_workspace_input_is_focused(window, cx) {
       return false;
     }
+    if let Some(flow) = self.active_flow.clone() {
+      let handled = match command {
+        CommandId::Undo => {
+          flow.update(cx, |editor, cx| editor.undo(cx));
+          true
+        },
+        CommandId::Redo => {
+          flow.update(cx, |editor, cx| editor.redo(cx));
+          true
+        },
+        CommandId::InsertNewline => {
+          flow.update(cx, |editor, cx| editor.add_sibling(flowstate_flow::RelativePosition::After, cx));
+          true
+        },
+        CommandId::InsertSoftLineBreak => {
+          flow.update(cx, |editor, cx| editor.add_response(cx));
+          true
+        },
+        CommandId::FlowAddSiblingAbove => {
+          flow.update(cx, |editor, cx| editor.add_sibling(flowstate_flow::RelativePosition::Before, cx));
+          true
+        },
+        CommandId::Backspace if flow.read(cx).active_cell_is_empty() => {
+          flow.update(cx, |editor, cx| editor.delete_selected(window, cx));
+          true
+        },
+        CommandId::DeleteWordForward | CommandId::FlowDeleteSelected => {
+          flow.update(cx, |editor, cx| editor.delete_selected(window, cx));
+          true
+        },
+        CommandId::ToggleStrikethrough | CommandId::FlowStrike => {
+          flow.update(cx, |editor, cx| editor.strike_selected(cx));
+          true
+        },
+        _ => false,
+      };
+      if handled {
+        return true;
+      }
+    }
     match command {
       CommandId::Save => {
         self.save_active(window, cx);
@@ -165,6 +205,7 @@ impl Workspace {
         true
       },
       CommandId::ScrollToParagraph => false,
+      CommandId::FlowAddSiblingAbove | CommandId::FlowDeleteSelected | CommandId::FlowStrike => false,
       command => {
         if let Some(editor) = self.active_editor.clone() {
           if let Some(command) = crate::rich_text_element::flowstate_command_to_rich_text(command) {

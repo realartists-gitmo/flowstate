@@ -37,7 +37,7 @@ impl Render for Workspace {
               .flex_1()
               .min_h_0()
               .overflow_hidden()
-              .child(self.render_resizable_workspace(cx)),
+              .child(self.render_resizable_workspace(window, cx)),
           )
           .child(self.render_status_bar(window, cx)),
       )

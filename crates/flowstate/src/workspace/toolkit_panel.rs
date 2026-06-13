@@ -465,17 +465,13 @@ impl Workspace {
     cx.notify();
   }
 
-  fn insert_toolkit_hit(&mut self, hit_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+  fn insert_toolkit_hit(&mut self, hit_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
     if let Some(editor) = self.active_editor.clone() {
       let paragraphs = toolkit_hit_insert_paragraphs(&hit);
       editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
-      return;
-    }
-    if self.active_flow.is_some() {
-      // Flow toolkit text insertion is not yet supported.
     }
   }
 
@@ -884,6 +880,9 @@ impl Workspace {
           is_active,
           has_search_match: false,
           guide,
+          hierarchy_color: None,
+          guide_colors: None,
+          incoming_branch: None,
           icon: Some(icon),
           icon_color: Some(icon_color),
           toggle_action: Some(toggle_action),

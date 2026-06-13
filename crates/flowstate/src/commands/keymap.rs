@@ -175,6 +175,7 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::SwitchToTab9
     | CommandId::SwitchToTab10
     | CommandId::ScrollToParagraph => return None,
+    CommandId::FlowAddSiblingAbove | CommandId::FlowDeleteSelected | CommandId::FlowStrike => return None,
   };
   Some(action)
 }

@@ -449,10 +449,12 @@ impl Workspace {
         continue;
       }
       let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
-        Some(LoadedWorkspaceDocument::Flow {
-          document: flowstate_flow::load_flow_document_or_new(&entry.path),
-          path: entry.path,
-        })
+        flowstate_flow::load_flow_document(&entry.path)
+          .ok()
+          .map(|document| LoadedWorkspaceDocument::Flow {
+            document,
+            path: entry.path,
+          })
       } else {
         load_workspace_document(entry.path).ok()
       };
@@ -1164,10 +1166,8 @@ enum LoadedWorkspaceDocument {
 #[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
   if is_flow_path(&path) {
-    return Ok(LoadedWorkspaceDocument::Flow {
-      document: flowstate_flow::load_flow_document_or_new(&path),
-      path,
-    });
+    let document = flowstate_flow::load_flow_document(&path).map_err(|error| error.to_string())?;
+    return Ok(LoadedWorkspaceDocument::Flow { document, path });
   }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {
