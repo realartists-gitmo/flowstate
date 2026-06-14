@@ -45,10 +45,9 @@ impl FlowEditor {
   }
 
   fn annotation_point(&self, position: Point<Pixels>) -> BoardPoint {
-    let offset = self.board_scroll.offset();
     BoardPoint {
-      x: (position.x.as_f32() - self.viewport_origin.x) / self.board_zoom - offset.x.as_f32(),
-      y: (position.y.as_f32() - self.viewport_origin.y) / self.board_zoom - offset.y.as_f32(),
+      x: (position.x.as_f32() - self.viewport_origin.x) / self.board_zoom,
+      y: (position.y.as_f32() - self.viewport_origin.y) / self.board_zoom,
     }
   }
 

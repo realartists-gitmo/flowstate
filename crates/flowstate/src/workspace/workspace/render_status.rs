@@ -263,7 +263,11 @@ impl Workspace {
     } else {
       None
     };
-    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    let zoom = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).zoom_percent())
+      .or_else(|| self.active_flow.as_ref().map(|flow| flow.read(cx).zoom_percent()));
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }

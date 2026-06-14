@@ -12,24 +12,33 @@ pub(super) struct CellLayout {
   pub height: f32,
 }
 
-pub(super) fn sheet_cell_layout(sheet: &Sheet, bounds: &HashMap<CellId, Bounds<Pixels>>) -> HashMap<CellId, CellLayout> {
+pub(super) fn sheet_cell_layout(sheet: &Sheet, bounds: &HashMap<CellId, Bounds<Pixels>>, zoom: f32) -> HashMap<CellId, CellLayout> {
+  let cells = sheet.cells.iter().map(|cell| (cell.id, cell)).collect::<HashMap<_, _>>();
+  let mut children: HashMap<CellId, Vec<CellId>> = HashMap::new();
+  for cell in &sheet.cells {
+    if let Some(parent) = cell.parent_id {
+      children.entry(parent).or_default().push(cell.id);
+    }
+  }
   let mut layout = HashMap::with_capacity(sheet.cells.len());
   let mut top = 0.0;
   for root in sheet.cells.iter().filter(|cell| cell.parent_id.is_none()) {
-    let family_height = layout_family(sheet, root.id, top, bounds, &mut layout);
-    top += family_height + CELL_GAP;
+    let family_height = layout_family(root.id, top, &cells, &children, bounds, zoom, &mut layout);
+    top += family_height + CELL_GAP * zoom;
   }
   layout
 }
 
 fn layout_family(
-  sheet: &Sheet,
   cell_id: CellId,
   top: f32,
+  cells: &HashMap<CellId, &Cell>,
+  children: &HashMap<CellId, Vec<CellId>>,
   bounds: &HashMap<CellId, Bounds<Pixels>>,
+  zoom: f32,
   layout: &mut HashMap<CellId, CellLayout>,
 ) -> f32 {
-  let Some(cell) = sheet.cells.iter().find(|cell| cell.id == cell_id) else {
+  let Some(cell) = cells.get(&cell_id) else {
     return 0.0;
   };
   let cell_height = measured_cell_height(cell, bounds);
@@ -37,13 +46,13 @@ fn layout_family(
 
   let mut children_top = top;
   let mut children_height = 0.0;
-  for child in sheet.cells.iter().filter(|child| child.parent_id == Some(cell_id)) {
-    let child_height = layout_family(sheet, child.id, children_top, bounds, layout);
-    children_top += child_height + CELL_GAP;
-    children_height += child_height + CELL_GAP;
+  for child_id in children.get(&cell_id).into_iter().flatten() {
+    let child_height = layout_family(*child_id, children_top, cells, children, bounds, zoom, layout);
+    children_top += child_height + CELL_GAP * zoom;
+    children_height += child_height + CELL_GAP * zoom;
   }
   if children_height > 0.0 {
-    children_height -= CELL_GAP;
+    children_height -= CELL_GAP * zoom;
   }
   cell_height.max(children_height)
 }
@@ -87,7 +96,7 @@ mod tests {
       annotations: Vec::new(),
     };
 
-    let layout = sheet_cell_layout(&sheet, &HashMap::new());
+    let layout = sheet_cell_layout(&sheet, &HashMap::new(), 1.0);
 
     assert_eq!(layout[&root.id].top, 0.0);
     assert_eq!(layout[&orphan.id].top, 2.0 * 54.0 + 2.0 * CELL_GAP);

@@ -16,6 +16,8 @@ impl Workspace {
         editor.update(cx, |editor, cx| {
           editor.set_zoom_percent(*percent, cx);
         });
+      } else if let Some(flow) = workspace.active_flow.clone() {
+        flow.update(cx, |flow, cx| flow.set_zoom_percent(*percent, cx));
       }
     });
     let workspace = cx.entity().downgrade();

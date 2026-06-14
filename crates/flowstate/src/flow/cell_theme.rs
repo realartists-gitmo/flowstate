@@ -2,8 +2,9 @@ use flowstate_document::{Document, DocumentTheme};
 use gpui::{Hsla, transparent_black};
 use palette::{FromColor as _, LinSrgb, Oklch, Srgb};
 
-pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &DocumentTheme, foreground: Hsla, background: Hsla) {
+pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &DocumentTheme, foreground: Hsla, background: Hsla, zoom: f32) {
   document.theme = client_theme.clone();
+  document.theme.zoom_factor *= zoom;
   let source_default = document.theme.default_text_color;
   document.theme.default_text_color = foreground;
   document.theme.document_background_color = transparent_black();

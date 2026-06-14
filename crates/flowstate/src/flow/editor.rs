@@ -44,6 +44,13 @@ pub enum AnnotationTool {
   Eraser,
 }
 
+struct PanDragState {
+  pointer_anchor: gpui::Point<gpui::Pixels>,
+  scroll_anchor: gpui::Point<gpui::Pixels>,
+  pending_position: gpui::Point<gpui::Pixels>,
+  frame_scheduled: bool,
+}
+
 pub struct FlowEditor {
   document: FlowDocument,
   path: Option<PathBuf>,
@@ -57,7 +64,7 @@ pub struct FlowEditor {
   local_annotation_originator: AnnotationOriginator,
   drawing_points: Vec<BoardPoint>,
   cell_editors: std::collections::HashMap<CellId, Entity<RichTextEditor>>,
-  cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla)>,
+  cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla, u32)>,
   cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
   pending_cell_drop: Option<CellDropDestination>,
   cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
@@ -65,7 +72,7 @@ pub struct FlowEditor {
   board_zoom: f32,
   viewport_origin: BoardPoint,
   space_pan_armed: bool,
-  pan_drag_anchor: Option<(gpui::Point<gpui::Pixels>, gpui::Point<gpui::Pixels>)>,
+  pan_drag: Option<PanDragState>,
   focus_handle: FocusHandle,
 }
 
@@ -101,7 +108,7 @@ impl FlowEditor {
       board_zoom: 1.0,
       viewport_origin: BoardPoint::default(),
       space_pan_armed: false,
-      pan_drag_anchor: None,
+      pan_drag: None,
       focus_handle: cx.focus_handle(),
     }
   }
@@ -159,11 +166,25 @@ impl FlowEditor {
     self.board_zoom
   }
 
-  /// suggestion: wire future zoom controls here. Annotation and board-space
-  /// transforms already consume this value even though no zoom UI exists yet.
   pub fn set_board_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
     self.board_zoom = zoom.clamp(0.25, 4.0);
     cx.notify();
+  }
+
+  pub fn zoom_percent(&self) -> f32 {
+    self.board_zoom * 100.0
+  }
+
+  pub fn set_zoom_percent(&mut self, percent: f32, cx: &mut Context<Self>) {
+    self.set_board_zoom(percent / 100.0, cx);
+  }
+
+  pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
+    self.set_zoom_percent(self.zoom_percent() + 10.0, cx);
+  }
+
+  pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
+    self.set_zoom_percent(self.zoom_percent() - 10.0, cx);
   }
 
   pub fn visible_board_rect(&self) -> BoardRect {
@@ -350,8 +371,9 @@ impl FlowEditor {
   }
 
   fn set_cell_bounds(&mut self, cell_id: CellId, bounds: Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
-    if self.cell_bounds.get(&cell_id) != Some(&bounds) {
-      self.cell_bounds.insert(cell_id, bounds);
+    let size_changed = self.cell_bounds.get(&cell_id).is_none_or(|previous| previous.size != bounds.size);
+    self.cell_bounds.insert(cell_id, bounds);
+    if size_changed {
       cx.notify();
     }
   }
@@ -397,21 +419,39 @@ impl FlowEditor {
       .unwrap_or(cx.theme().foreground)
   }
 
-  fn begin_space_pan(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
-    if self.space_pan_armed {
-      self.pan_drag_anchor = Some((position, self.board_scroll.offset()));
-      cx.notify();
-    }
+  fn begin_pan(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    self.pan_drag = Some(PanDragState {
+      pointer_anchor: position,
+      scroll_anchor: self.board_scroll.offset(),
+      pending_position: position,
+      frame_scheduled: false,
+    });
+    cx.notify();
   }
 
-  fn continue_space_pan(&mut self, position: gpui::Point<gpui::Pixels>) {
-    if let Some((start, offset)) = self.pan_drag_anchor {
-      self.board_scroll.set_offset(offset + (position - start));
+  fn queue_pan(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(pan_drag) = self.pan_drag.as_mut() else {
+      return;
+    };
+    pan_drag.pending_position = position;
+    if pan_drag.frame_scheduled {
+      return;
     }
+    pan_drag.frame_scheduled = true;
+    cx.on_next_frame(window, |editor, _, cx| {
+      let Some(pan_drag) = editor.pan_drag.as_mut() else {
+        return;
+      };
+      pan_drag.frame_scheduled = false;
+      editor
+        .board_scroll
+        .set_offset(pan_drag.scroll_anchor + (pan_drag.pending_position - pan_drag.pointer_anchor));
+      cx.notify();
+    });
   }
 
   fn finish_space_pan(&mut self, cx: &mut Context<Self>) {
-    self.pan_drag_anchor = None;
+    self.pan_drag = None;
     cx.notify();
   }
 
@@ -554,19 +594,11 @@ impl FlowEditor {
       return div().child("Invalid sheet type").into_any_element();
     };
     let active = self.active_cell;
-    let visible_rect = self.visible_board_rect();
-    let inflation = 32.0 / self.board_zoom;
     let strokes: Vec<_> = if !self.hidden_annotation_sheets.contains(&sheet_id) {
       sheet
         .annotations
         .iter()
-        .filter(|stroke| {
-          !self.hidden_annotation_originators.contains(&stroke.originator)
-            && stroke.bbox.max.x >= visible_rect.min.x - inflation
-            && stroke.bbox.min.x <= visible_rect.max.x + inflation
-            && stroke.bbox.max.y >= visible_rect.min.y - inflation
-            && stroke.bbox.min.y <= visible_rect.max.y + inflation
-        })
+        .filter(|stroke| !self.hidden_annotation_originators.contains(&stroke.originator))
         .cloned()
         .collect()
     } else {
@@ -574,20 +606,21 @@ impl FlowEditor {
     };
     let draft = self.drawing_points.clone();
     let client_document_theme = load_document_theme();
-    let cell_layout = sheet_cell_layout(sheet, &self.cell_bounds);
-    let board_width = px(32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0);
+    let zoom = self.board_zoom;
+    let cell_layout = sheet_cell_layout(sheet, &self.cell_bounds, zoom);
+    let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
+    let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
+    for cell in &sheet.cells {
+      if let Some(parent) = cell.parent_id {
+        children_by_parent.entry(parent).or_default().push(cell.id);
+      }
+    }
     let connector_families = sheet
       .cells
       .iter()
-      .filter(|cell| sheet.cells.iter().any(|child| child.parent_id == Some(cell.id)))
-      .map(|parent| {
-        (
-          parent.id,
-          sheet.cells.iter().filter(|child| child.parent_id == Some(parent.id)).map(|child| child.id).collect::<Vec<_>>(),
-        )
-      })
+      .filter_map(|parent| children_by_parent.remove(&parent.id).map(|children| (parent.id, children)))
       .collect::<Vec<_>>();
     div()
       .id("flow-columns")
@@ -596,15 +629,15 @@ impl FlowEditor {
       .min_h_full()
       .w(board_width)
       .flex()
-      .gap(px(16.0))
-      .p(px(16.0))
+      .gap(px(16.0 * zoom))
+      .p(px(16.0 * zoom))
       .children(definition.columns.iter().enumerate().map(|(column_index, column)| {
         let side_palette = flow_side_palette(column.side, cx);
         let side_color = side_palette.base;
         let can_receive_child = column_index + 1 < definition.columns.len();
         let add_editor = cx.entity().clone();
         div()
-          .w(px(280.0))
+          .w(px(280.0 * zoom))
           .flex_none()
           .flex_col()
           .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, _, cx| {
@@ -649,7 +682,7 @@ impl FlowEditor {
                   ),
               ),
           )
-          .child(div().h(px(12.0)).flex_none())
+          .child(div().h(px(12.0 * zoom)).flex_none())
           .children({
             let mut previous_bottom = 0.0;
             sheet.cells.iter().filter(|cell| cell.column_id == column.id).map(|cell| {
@@ -671,7 +704,7 @@ impl FlowEditor {
                 document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
                 uses_summary_projection = true;
               }
-              apply_flow_cell_theme(document, &client_document_theme, side_color, cx.theme().background);
+              apply_flow_cell_theme(document, &client_document_theme, side_color, cx.theme().background, self.board_zoom);
             }
             let cell_editor = self.cell_editors.get(&id).cloned();
             let reply_editor = cx.entity().clone();
@@ -695,9 +728,9 @@ impl FlowEditor {
                 .id(("flow-cell", id.as_u128() as u64))
                 .relative()
                 .w_full()
-                .min_h(px(54.0))
-                .p(px(10.0))
-                .rounded(px(6.0))
+                .min_h(px(54.0 * zoom))
+                .p(px(10.0 * zoom))
+                .rounded(px(6.0 * zoom))
                 .border_1()
                 .border_color(if active == Some(id) {
                   side_palette.active
@@ -714,8 +747,8 @@ impl FlowEditor {
                 .on_mouse_down(MouseButton::Left, cx.listener(|editor, _, _, cx| {
                   if editor.annotation_tool != AnnotationTool::None {
                     editor.set_annotation_tool(AnnotationTool::None, cx);
-                    cx.stop_propagation();
                   }
+                  cx.stop_propagation();
                 }))
                 .on_click(cx.listener(move |editor, _, window, cx| {
                   editor.activate_cell(id, cx);
@@ -762,11 +795,14 @@ impl FlowEditor {
                       .ghost()
                       .tooltip("Add first reply")
                       .child(Icon::default().path("icons/message-square-reply.svg").xsmall())
-                      .on_click(move |_, window, cx| reply_editor.update(cx, |editor, cx| {
-                        editor.set_annotation_tool(AnnotationTool::None, cx);
-                        editor.add_first_response_to(id, cx);
-                        editor.focus_active_cell(window, cx);
-                      })),
+                      .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        reply_editor.update(cx, |editor, cx| {
+                          editor.set_annotation_tool(AnnotationTool::None, cx);
+                          editor.add_first_response_to(id, cx);
+                          editor.focus_active_cell(window, cx);
+                        });
+                      }),
                   )
                 })
                 .child(if active == Some(id) {
@@ -796,20 +832,38 @@ impl FlowEditor {
               let Some(first_child) = children.first() else {
                 continue;
               };
-              let start = point(parent.right(), parent.center().y);
-              let midpoint = start.x + (first_child.left() - start.x) / 2.0;
-              let lowest_y = children.iter().map(|child| child.center().y).max().unwrap_or(start.y);
-              let mut path = PathBuilder::stroke(px(1.5));
+              let scale = window.scale_factor();
+              let snap = |value: gpui::Pixels| px(((value.as_f32() * scale).floor() + 0.5) / scale);
+              let start = point(snap(parent.right()), snap(parent.center().y));
+              let midpoint = snap(start.x + (first_child.left() - start.x) / 2.0);
+              let first_left = snap(first_child.left());
+              if children.len() == 1 {
+                let mut path = PathBuilder::stroke(px(1.0));
+                path.move_to(start);
+                path.line_to(point(first_left, start.y));
+                if let Ok(path) = path.build() {
+                  window.paint_path(path, cx.theme().foreground);
+                }
+                continue;
+              }
+              let lowest_y = children.iter().skip(1).map(|child| snap(child.center().y)).max().unwrap_or(start.y);
+              let radius = cx.theme().radius.min(px(10.0)).min((lowest_y - start.y).abs()).min((first_child.left() - midpoint).abs());
+              let mut path = PathBuilder::stroke(px(1.0));
               path.move_to(start);
-              path.line_to(point(midpoint, start.y));
-              path.line_to(point(midpoint, lowest_y));
-              for child in children {
-                let end = point(child.left(), child.center().y);
-                path.move_to(point(midpoint, end.y));
-                path.line_to(end);
+              path.line_to(point(first_left, start.y));
+              path.move_to(point(midpoint, start.y));
+              path.line_to(point(midpoint, lowest_y - radius));
+              path.curve_to(point(midpoint + radius, lowest_y), point(midpoint, lowest_y));
+              path.line_to(point(snap(children.last().unwrap().left()), lowest_y));
+              for child in children.iter().skip(1) {
+                let child_y = snap(child.center().y);
+                if child_y != lowest_y {
+                  path.move_to(point(midpoint, child_y));
+                  path.line_to(point(snap(child.left()), child_y));
+                }
               }
               if let Ok(path) = path.build() {
-                window.paint_path(path, cx.theme().secondary);
+                window.paint_path(path, cx.theme().foreground);
               }
             }
           },
@@ -831,13 +885,14 @@ impl FlowEditor {
                   paint_stroke(
                     bounds.origin,
                     &stroke.points,
-                    px(stroke.style.width),
+                    px(stroke.style.width * zoom),
                     color.opacity(color.a * stroke.style.opacity),
+                    zoom,
                     window,
                   );
                 }
                 if !draft.is_empty() {
-                  paint_stroke(bounds.origin, &draft, px(4.0), gpui::Hsla::from(rgba(0xf59e_0bff)).opacity(0.55), window);
+                  paint_stroke(bounds.origin, &draft, px(4.0 * zoom), gpui::Hsla::from(rgba(0xf59e_0bff)).opacity(0.55), zoom, window);
                 }
               },
             )
@@ -849,14 +904,21 @@ impl FlowEditor {
   }
 }
 
-fn paint_stroke(origin: gpui::Point<gpui::Pixels>, points: &[BoardPoint], width: gpui::Pixels, color: gpui::Hsla, window: &mut Window) {
+fn paint_stroke(
+  origin: gpui::Point<gpui::Pixels>,
+  points: &[BoardPoint],
+  width: gpui::Pixels,
+  color: gpui::Hsla,
+  zoom: f32,
+  window: &mut Window,
+) {
   let Some(first) = points.first() else {
     return;
   };
   let mut path = PathBuilder::stroke(width);
-  path.move_to(point(origin.x + px(first.x), origin.y + px(first.y)));
+  path.move_to(point(origin.x + px(first.x * zoom), origin.y + px(first.y * zoom)));
   for point_value in &points[1..] {
-    path.line_to(point(origin.x + px(point_value.x), origin.y + px(point_value.y)));
+    path.line_to(point(origin.x + px(point_value.x * zoom), origin.y + px(point_value.y * zoom)));
   }
   if let Ok(path) = path.build() {
     window.paint_path(path, color);
@@ -872,8 +934,16 @@ impl Focusable for FlowEditor {
 }
 
 impl Render for FlowEditor {
-  fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+  fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.refresh_active_cell_theme(cx);
+    if self.pan_drag.is_some() {
+      let editor = cx.entity();
+      window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase.bubble() && event.button == MouseButton::Left {
+          editor.update(cx, |editor, cx| editor.finish_space_pan(cx));
+        }
+      });
+    }
     let grid_scroll = self.board_scroll.clone();
     let board_zoom = self.board_zoom;
     div()
@@ -897,11 +967,11 @@ impl Render for FlowEditor {
       }))
       .on_mouse_down(MouseButton::Left, cx.listener(|editor, event: &MouseDownEvent, _, cx| {
         if editor.space_pan_armed {
-          editor.begin_space_pan(event.position, cx);
+          editor.begin_pan(event.position, cx);
           cx.stop_propagation();
         }
       }))
-      .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, _, _| editor.continue_space_pan(event.position)))
+      .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| editor.queue_pan(event.position, window, cx)))
       .on_mouse_up(MouseButton::Left, cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)))
       .child(
         canvas(
@@ -934,6 +1004,17 @@ impl Render for FlowEditor {
           .size_full()
           .overflow_scroll()
           .track_scroll(&self.board_scroll)
+          .cursor(if self.pan_drag.is_some() {
+            gpui::CursorStyle::ClosedHand
+          } else {
+            gpui::CursorStyle::OpenHand
+          })
+          .when(self.annotation_tool == AnnotationTool::None && !self.space_pan_armed, |this| {
+            this.on_mouse_down(MouseButton::Left, cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+              editor.begin_pan(event.position, cx);
+              cx.stop_propagation();
+            }))
+          })
           .on_scroll_wheel(cx.listener(|editor, event: &ScrollWheelEvent, window, cx| {
             if event.modifiers.shift {
               let delta = event.delta.pixel_delta(window.line_height());

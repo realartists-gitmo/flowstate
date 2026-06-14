@@ -106,6 +106,9 @@ impl Workspace {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_in(cx));
           true
+        } else if let Some(flow) = self.active_flow.clone() {
+          flow.update(cx, |flow, cx| flow.zoom_in(cx));
+          true
         } else {
           false
         }
@@ -113,6 +116,9 @@ impl Workspace {
       CommandId::ZoomOut => {
         if let Some(editor) = self.active_editor.clone() {
           editor.update(cx, |editor, cx| editor.zoom_out(cx));
+          true
+        } else if let Some(flow) = self.active_flow.clone() {
+          flow.update(cx, |flow, cx| flow.zoom_out(cx));
           true
         } else {
           false

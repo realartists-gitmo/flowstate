@@ -22,7 +22,7 @@ impl FlowEditor {
       return;
     };
     let text_color = self.cell_text_color(cell_id, cx);
-    apply_flow_cell_theme(&mut document, &load_document_theme(), text_color, cx.theme().background);
+    apply_flow_cell_theme(&mut document, &load_document_theme(), text_color, cx.theme().background, self.board_zoom());
     let editor = cx.new(|cx| {
       let mut editor = RichTextEditor::new_with_path(document, None, cx);
       editor.set_invisibility_mode(uses_summary_projection, cx);
@@ -72,7 +72,7 @@ impl FlowEditor {
       }
     });
     self.cell_editors.insert(cell_id, editor);
-    self.cell_editor_themes.insert(cell_id, (text_color, cx.theme().background));
+    self.cell_editor_themes.insert(cell_id, (text_color, cx.theme().background, self.board_zoom().to_bits()));
     self.cell_editor_subscriptions.insert(cell_id, subscription);
   }
 
@@ -93,11 +93,11 @@ impl FlowEditor {
         let current = flowstate_document::db8_bytes(editor.read(cx).document()).ok();
         let mut themed_document = document.clone();
         let text_color = self.cell_text_color(*cell_id, cx);
-        apply_flow_cell_theme(&mut themed_document, &client_theme, text_color, cx.theme().background);
+        apply_flow_cell_theme(&mut themed_document, &client_theme, text_color, cx.theme().background, self.board_zoom());
         let desired = flowstate_document::db8_bytes(&themed_document).ok();
         if current != desired {
           editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(themed_document, cx));
-          self.cell_editor_themes.insert(*cell_id, (text_color, cx.theme().background));
+          self.cell_editor_themes.insert(*cell_id, (text_color, cx.theme().background, self.board_zoom().to_bits()));
         }
       }
     }
@@ -116,7 +116,7 @@ impl FlowEditor {
       return;
     };
     let text_color = self.cell_text_color(cell_id, cx);
-    let signature = (text_color, cx.theme().background);
+    let signature = (text_color, cx.theme().background, self.board_zoom().to_bits());
     if self.cell_editor_themes.get(&cell_id) == Some(&signature) {
       return;
     }
@@ -131,7 +131,7 @@ impl FlowEditor {
     else {
       return;
     };
-    apply_flow_cell_theme(&mut document, &load_document_theme(), text_color, cx.theme().background);
+    apply_flow_cell_theme(&mut document, &load_document_theme(), text_color, cx.theme().background, self.board_zoom());
     editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(document, cx));
     self.cell_editor_themes.insert(cell_id, signature);
   }
