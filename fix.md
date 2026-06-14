@@ -336,6 +336,299 @@ view + `share_dialog_state.rs` logic). Keep <1000 hard cap; aim for the §3.1 ca
 | §7.2 / §5.5 | hash order; len_utf8 assert | D3 |
 | §3.1 | LOC caps: mod.rs 409, share_dialog.rs 530 | U4, V1 |
 
+In addition to things that are left to implement, there are bugs found in existing implementation - fix these after the above implementations if they still exist. Before fixing  - verify that they actually are bugs (is what is being said true or not, and then fix them.
+
+Verify each finding against current code. Fix only still-valid issues, skip the
+rest with a brief reason, keep changes minimal, and validate.
+
+Inline comments:
+In `@crates/flowstate-collab/src/ids.rs`:
+- Around line 18-20: `SessionId::new` currently uses `rand::random()`, but
+session IDs need a stronger entropy source; update the constructor in
+`crates/flowstate-collab/src/ids.rs` to generate the ID with `rand::rngs::OsRng`
+(or `SysRng`) instead of `rand::random()`, and keep the change localized to the
+`SessionId`/ID generation path so all session IDs come from a cryptographically
+secure source.
+
+In `@crates/flowstate-collab/src/local_apply.rs`:
+- Around line 148-164: In local_apply.rs inside the split/row insertion logic,
+validate the new row metadata first before mutating the source LoroText: fetch
+the inserted block id and version (the lookups around block_ids.get(insert_ix)
+and blocks.get(insert_ix)) before calling delete_utf8 on the original paragraph,
+and only truncate text once those checks succeed so a failed split cannot leave
+the document partially edited.
+
+In `@crates/flowstate-collab/src/net/blobs.rs`:
+- Around line 45-57: In `BlobStore::insert_with_id`, reinserting an existing
+`BlobId` currently leaves the old payload in `entries`, and `BlobStore::get`
+returns that stale first match. Update `insert_with_id` to remove or overwrite
+any existing entry with the same `BlobId` before pushing the new bytes, while
+keeping `total_bytes` consistent with the replacement logic.
+
+In `@crates/flowstate-collab/src/net/direct.rs`:
+- Around line 138-146: The semaphore permit is being acquired after reading the
+request frame, which allows unbounded task spawning and request buffering before
+the concurrency limit is checked. Move the
+self.permits.clone().try_acquire_owned() check to occur before the read_frame
+call in handle_stream() to ensure the concurrency limit gates network work. This
+issue applies at two locations: the primary site in handle_stream (lines
+138-146) and a sibling location (lines 152-160). Additionally, consider gating
+the permit acquisition even earlier, before tokio::spawn invokes handle_stream
+in the accept() method, to limit task creation itself.
+
+In `@crates/flowstate-collab/src/net/runtime.rs`:
+- Around line 18-40: `start()` leaves `RUNTIME` pointing at dead channels after
+`net_main()` shuts down, so future calls reuse a stopped bridge; change
+`RuntimeBridge`/`start()` so a failed or exited runtime can be detected and
+replaced with a fresh `spawn_runtime()` result instead of returning the cached
+pair. Also update the `direct.rs` endpoint cache (the `OnceLock` around the
+client endpoint) so it is invalidated or refreshed when the runtime restarts,
+otherwise the new bridge will still use a stale endpoint.
+- Around line 101-107: Contain per-command failures inside net_main so a bad
+join/publish does not exit the runtime or skip responses. In
+NetCommand::CreateSession, catch SwarmHandle::spawn errors locally, reply to the
+caller with the failure, and keep the loop running; in the publish path around
+handle.publish(payload).await, handle the error locally instead of propagating
+it. Apply the same error containment at
+crates/flowstate-collab/src/net/runtime.rs:101-107,
+crates/flowstate-collab/src/net/runtime.rs:116-120, and
+crates/flowstate-collab/src/net/runtime.rs:128-130, using the existing net_main
+/ replace_swarm / handle.publish flow as the anchor points.
+
+In `@crates/flowstate-collab/src/projection.rs`:
+- Around line 169-175: `verify_lineage` in
+`crates/flowstate-collab/src/projection.rs` only validates `META_SESSION`, so
+add a `META_SCHEMA` check against `SCHEMA_VERSION` before returning success.
+Update the `verify_lineage` path to fail fast with an error when the stored
+schema is missing or does not match the current version, alongside the existing
+session check, so snapshot projection never reaches `document_from_loro` with an
+incompatible layout.
+
+In `@crates/flowstate-collab/src/remote_apply.rs`:
+- Around line 34-37: In remote_apply.rs, the Diff::Map handling in
+remote_apply::apply should emit only one object-replacement patch per map diff
+instead of calling apply_map_diff once per updated key; update the logic so
+ReplaceObjectBlock is generated once per affected row even when replace_block_at
+changes KIND, DATA, and REV together. Use the apply_map_diff path and its
+related map-diff dispatch to dedupe by row/target before applying patches, and
+ensure the same fix covers the other map-diff site referenced by the comment.
+
+In `@crates/flowstate/src/collab/asset_transfer.rs`:
+- Around line 142-147: In record_from_bytes, replace the use of DefaultHasher
+with a stable, deterministic wire hash for cross-peer verification so identical
+bytes always produce the same content_hash across platforms and Rust versions.
+Update the content_hash computation to use a portable algorithm such as SHA-256
+or xxHash, and keep the existing byte_len and content_hash validation logic in
+AssetRecord unchanged except for comparing against the new stable hash value.
+
+In `@crates/flowstate/src/collab/mod.rs`:
+- Around line 119-146: The `session_by_panel` mapping is being inserted on line
+137 before two fallible operations execute: the `try_send` call for
+RegisterDirectHandler and the `establish_joined_peer` call. If either operation
+fails, the function returns an error but leaves the mapping in place, causing
+subsequent attach attempts to incorrectly think the panel is already attached.
+Move the `self.session_by_panel.insert(panel_id, session_id)` statement to after
+the `Self::establish_joined_peer(session, commands, cx)?` call succeeds,
+ensuring the mapping is only recorded when the entire attachment operation
+completes successfully.
+- Around line 53-86: The `start_session_for_panel` function registers a session
+at line 75 via `self.register_session(entity.clone(), cx)`, but if either the
+`RegisterDirectHandler` command send (line 77) or the `CreateSession` command
+send (line 82) fails, the function returns an error without cleaning up the
+registered session. This creates a resource leak where the session ID remains
+registered but the network layer never received the commands. To fix this, when
+either `try_send` call fails, detach the session from its context and unregister
+it before returning the error. Reference the correct cleanup pattern used in the
+`join_session` method at lines 106-110, which properly calls detach and
+unregister before returning errors, and apply the same approach to both error
+paths in `start_session_for_panel`.
+
+In `@crates/flowstate/src/collab/presence_view.rs`:
+- Around line 33-39: The directory creation in collaboration_recovery_path
+currently ignores failures from create_dir_all, so update this function to
+handle that error instead of discarding it. Either change
+collaboration_recovery_path to return a Result<PathBuf> and propagate the
+std::fs::create_dir_all error to callers, or at minimum log/return a failure
+when the temp recovery directory cannot be created; keep the rest of the
+path-building logic with SessionId and sanitized_recovery_title unchanged.
+
+In `@crates/flowstate/src/collab/session_timers.rs`:
+- Around line 238-249: When `rebuild_from_projection` rebuilds the document
+after a self-check by calling `replace_document_from_collaboration()`, any
+deferred remote patches stored in `session_io.rs` become stale since they
+describe edits already present in the rebuilt projection. These stale patches
+would then be incorrectly re-applied on the next flush. Clear the
+`pending_remote_patches` from `session_io.rs` within the
+`rebuild_from_projection` method after the document has been rebuilt to prevent
+this re-application of already-synchronized edits.
+
+In `@crates/flowstate/src/collab/session.rs`:
+- Around line 131-132: Switch the session request channels in `Session` setup
+from unbounded to bounded to apply backpressure and avoid memory growth; update
+the `direct_tx/direct_rx` and `undo_tx/undo_rx` creation in `collab/session.rs`
+to use `async_channel::bounded` with a justified capacity, and make sure the
+downstream direct request pump and undo request pump code paths still handle
+send/receive behavior correctly. If keeping unbounded is intentional, document
+that decision near the channel setup.
+
+In `@crates/flowstate/src/workspace/workspace/collab.rs`:
+- Around line 204-208: In join_collaboration_from_clipboard’s synchronous error
+path around crate::collab::join_session, don’t just log and return None; surface
+a user-visible error prompt before exiting the branch. Update the error handling
+in workspace/collab.rs so the failure is reported through the existing UI/error
+notification mechanism used by this flow, while still returning None after the
+prompt is shown.
+
+In `@crates/flowstate/src/workspace/workspace/top_bar.rs`:
+- Around line 109-143: Update collaboration_top_bar_button in
+workspace/top_bar.rs so the “Leave Shared Session” menu item is disabled unless
+the active document actually has an attached collaboration session, not just
+when has_document is true. Use the same workspace/session state used by
+confirm_leave_collaboration_on_active_document to compute the enabled flag, and
+pass that into file_menu_item for the “Leave Shared Session” entry so local tabs
+don’t show a no-op action.
+
+In `@crates/flowstate/src/workspace/workspace/window.rs`:
+- Around line 84-87: `window.rs` is shutting down the global collaboration
+runtime too early, which breaks other open windows; change the
+`window_handle.update` close path so
+`workspace.leave_all_collaboration_sessions(cx)` only affects the current
+workspace and `crate::collab::shutdown(cx)` is deferred until the last
+workspace/window is gone or behind a shared reference count. Also audit the
+collaboration close/leave flow in `collab_prompts.rs` so it does not trigger a
+global shutdown from a single workspace path, and route any such teardown
+through the same last-window guard.
+
+In `@crates/gpui-flowtext/src/rich_text/editor/block_insertion.rs`:
+- Around line 79-80: Update prepare_block_insertion_index and
+insert_ordered_block_fragment_after_caret so the placeholder caret paragraph is
+only removed when the insertion does not include InputBlock::Paragraph; preserve
+the lone empty paragraph for paragraph-block inserts to keep
+self.document.paragraphs and self.document.blocks aligned. Use the existing
+block-rebuild logic in insert_ordered_block_fragment_after_caret and the caret
+cleanup in prepare_block_insertion_index to gate the removal instead of
+unconditionally stripping the paragraph.
+
+---
+
+Outside diff comments:
+In `@crates/gpui-flowtext/src/rich_text/editor/mouse.rs`:
+- Around line 278-304: Build the `ReplaceParagraphSpan` canonical op from the
+pre-edit state in `mouse.rs` so it reflects the drag/drop before any mutation is
+applied; capture the source-side deleted paragraph span as part of the same
+canonical operation, not just the inserted drop range. Update the
+`EditRecord`/`mark_document_changed_with_ops` path around `canonical_operations`
+so the payload uses the pre-delete document contents and includes both source
+and destination paragraph ranges when the drag crosses paragraphs.
+
+In `@crates/gpui-flowtext/src/rich_text/editor/object_selection.rs`:
+- Around line 492-500: The block identifier is being resolved after the block
+and id vectors have been mutated, causing the lookup to fail and fall back to a
+fabricated BlockId(0), which can delete the wrong remote block in collaboration
+mode. Capture the block identifier by calling
+self.identity_map.block_id(block_ix) BEFORE removing the block from the vectors
+using blocks.remove() and remove_block_ids(). Use the captured block id in the
+CanonicalOperation for DeleteBlock. If the block id cannot be captured (when the
+lookup fails), replace the DeleteBlock operation with a broader operation like
+ReplaceDocument instead of using a fake BlockId(0). Apply this same fix to all
+locations where blocks are deleted and canonical operations are created.
+
+---
+
+Nitpick comments:
+In `@crates/flowstate-collab/src/binding.rs`:
+- Around line 148-167: In the rebuild_indexes method, remove the unnecessary
+clone operation on line 153 where each BindingRow is being cloned. Since the
+index_row method only requires a reference to the BindingRow (as seen in its
+signature), pass a direct reference to self.rows[ix] to index_row instead of
+creating a clone first. This eliminates wasteful O(n) allocations that occur
+every time indexes are rebuilt after insert/remove/move operations.
+
+In `@crates/flowstate-collab/src/net/swarm.rs`:
+- Around line 137-162: Replace the eprintln! call in the handle_event function's
+error handling branch (where proto_gossip::decode fails) with a structured
+logging call using tracing::warn!. This will allow production deployments to
+configure log levels and get structured output instead of relying on stderr
+output, enabling better observability and log aggregation.
+
+In `@crates/flowstate-collab/src/proto_direct.rs`:
+- Around line 31-38: Simplify encode_frame in proto_direct.rs by removing the
+redundant u32::try_from(payload.len())? conversion after the MAX_FRAME_LEN
+check; since payload.len() is already bounded below u32::MAX, compute the length
+directly as a u32 and keep the rest of the frame assembly unchanged.
+
+In `@crates/flowstate-collab/src/proto_gossip.rs`:
+- Line 7: Move the DIRECT_ALPN constant out of proto_gossip.rs and into
+proto_direct.rs so it lives with the other direct-protocol constants like
+MAX_FRAME_LEN and MAX_PAYLOAD_CHUNK_LEN. Update any direct-protocol code that
+references DIRECT_ALPN, especially net/direct.rs and net/runtime.rs, to import
+it from proto_direct.rs instead of proto_gossip.rs, and leave proto_gossip.rs
+containing only gossip-related constants such as PROTOCOL_VERSION and
+GOSSIP_INLINE_LIMIT.
+- Around line 30-32: The encoded_len function allocates the full message buffer
+by calling encode(msg)? just to measure its length, which is inefficient even
+though the practical impact is minimal with the current 2KB size bound. Either
+implement a size-counting approach that avoids the full buffer allocation (such
+as using a custom serializer that only counts bytes without storing them), or if
+accepting the allocation as reasonable, add a comment in the function explaining
+why the current approach is acceptable given the bounded message size and single
+call site.
+
+In `@crates/flowstate-collab/src/ticket.rs`:
+- Around line 46-48: The encode_bytes method in the Ticket trait implementation
+uses expect() which can panic on serialization failure. First, check the Ticket
+trait definition to see if the return type can be changed from Vec<u8> to a
+Result type. If the trait signature is flexible, update encode_bytes to return
+Result<Vec<u8>, Box<dyn std::error::Error>> and use the ? operator instead of
+expect(). If the trait signature is fixed and requires Vec<u8>, then keep the
+current approach but add a doc comment above the method explaining why postcard
+serialization of SessionTicket cannot fail and the panic is justified as a last
+resort safeguard.
+
+In `@crates/flowstate-collab/tests/convergence.rs`:
+- Around line 14-55: The test
+`two_peers_converge_with_reordered_and_duplicated_update_imports` currently
+validates convergence for paragraph text and style operations but does not cover
+structural block operations. Add new convergence test functions that exercise
+insert, move, replace, and delete operations on structural blocks (such as
+images, equations, and tables) between two peers with reordered and duplicated
+imports, following the same test pattern used for the existing paragraph-focused
+test to ensure these operations also converge correctly.
+
+In `@crates/flowstate/src/collab/session_presence.rs`:
+- Around line 9-11: The code currently uses eprintln! macro for logging error
+messages when presence updates fail. Replace the eprintln! calls with a
+structured logging framework such as tracing or log to enable better
+observability, filtering, and production-grade log management. Update all
+occurrences where eprintln! is used for the flowstate collab presence update
+error message (in the error handling block for presence.apply() and any similar
+error logging) to use the appropriate logging macro from your chosen framework
+instead, ensuring consistent structured logging throughout the module.
+
+In `@crates/flowstate/src/collab/session.rs`:
+- Around line 592-595: The UndoManager setup in session.rs uses magic numbers
+for merge_interval and max_undo_steps; extract the 500 and 300 values into named
+constants or a session/undo configuration near UndoManager::new,
+set_merge_interval, and set_max_undo_steps so the defaults are easy to find and
+adjust.
+
+In `@crates/flowstate/src/collab/share_dialog.rs`:
+- Around line 146-151: The `window_handle.update()` call that writes to the
+clipboard is silently discarding any errors with the `let _ =` pattern. Replace
+this pattern by capturing the Result returned from the update call and logging
+any failures using an appropriate logger (such as error or warn level). Keep the
+operation as best-effort by not propagating or panicking on the error, but
+ensure that clipboard write failures are logged to help with debugging
+clipboard-related issues.
+
+In `@crates/gpui-flowtext/src/rich_text/editor/lifecycle.rs`:
+- Around line 265-268: The method `clear_collab_history` has a misleading name
+since it clears both the `undo_stack` and `redo_stack` entirely, affecting all
+editor history rather than just collaboration-specific history. Rename this
+method to `clear_undo_redo_stacks` or `clear_all_history` to accurately reflect
+that it clears all undo and redo history, not just collaboration-related
+history. Be sure to update all call sites that reference this method name.
+
 **Recommended order if serializing:** D1 first (it's the gate that surfaces latent
 remote-path bugs), then everything else; D1/D2/D3, E1/E2, N1/N2/N3 are safe to run
 concurrently in Wave 1.
