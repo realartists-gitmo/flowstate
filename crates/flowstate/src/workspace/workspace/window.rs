@@ -83,7 +83,6 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
           allow_close.set(true);
           let _ = window_handle.update(cx, |_, window, cx| {
             workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
-            crate::collab::shutdown(cx);
             window.remove_window();
           });
         }

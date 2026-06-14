@@ -57,6 +57,7 @@ pub enum NetCommand {
   PullSnapshot {
     session: SessionId,
     candidates: Vec<EndpointId>,
+    progress: Option<Reply<PullProgress>>,
     reply: Reply<Result<Vec<u8>>>,
   },
   PullBlob {
@@ -77,6 +78,12 @@ pub enum NetCommand {
   Shutdown,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct PullProgress {
+  pub got: u64,
+  pub total: u64,
+}
+
 #[derive(Clone, Debug)]
 pub struct TicketSeed {
   pub inviter: EndpointAddr,
@@ -85,6 +92,7 @@ pub struct TicketSeed {
 #[derive(Clone, Debug)]
 pub enum NetEvent {
   Gossip { session: SessionId, from: EndpointId, msg: GossipMsg },
+  IncompatibleVersion { session: SessionId, peer: EndpointId },
   NeighborUp { session: SessionId, peer: EndpointId },
   NeighborDown { session: SessionId, peer: EndpointId },
   GossipLagged { session: SessionId },

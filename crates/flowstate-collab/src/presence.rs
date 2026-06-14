@@ -146,18 +146,24 @@ fn roster_entry_from_value(key: String, value: LoroValue) -> Option<RosterEntry>
     return None;
   };
   let state = decode_state(bytes.as_ref()).ok()?;
+  let color_rgb = color_for_peer_key(&key)?;
   Some(RosterEntry {
-    color_rgb: color_for_key(&key),
+    color_rgb,
     key,
     name: state.name,
     selection: state.selection,
   })
 }
 
-fn color_for_key(key: &str) -> u32 {
-  let mut hash = 0usize;
-  for byte in key.as_bytes().iter().take(16) {
-    hash = hash.wrapping_mul(257).wrapping_add(usize::from(*byte));
+fn color_for_peer_key(key: &str) -> Option<u32> {
+  let mut bytes = Vec::with_capacity(key.len() / 2);
+  let mut chunks = key.as_bytes().chunks_exact(2);
+  if !chunks.remainder().is_empty() {
+    return None;
   }
-  PALETTE[hash % PALETTE.len()]
+  for chunk in &mut chunks {
+    let text = std::str::from_utf8(chunk).ok()?;
+    bytes.push(u8::from_str_radix(text, 16).ok()?);
+  }
+  Some(PALETTE[SessionId::color_index_for_peer_bytes(&bytes)])
 }

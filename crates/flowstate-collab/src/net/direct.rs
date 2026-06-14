@@ -1,6 +1,6 @@
 use std::{
   collections::{HashMap, HashSet},
-  sync::{Arc, OnceLock},
+  sync::{Arc, OnceLock, RwLock as StdRwLock},
   time::Duration,
 };
 
@@ -12,20 +12,22 @@ use iroh::{
   protocol::{AcceptError, ProtocolHandler},
 };
 use tokio::{
-  sync::{RwLock, Semaphore},
+  sync::{OwnedSemaphorePermit, RwLock, Semaphore},
   time::timeout,
 };
 
 use crate::{
   ids::{BlobId, SessionId},
-  proto_direct::{AssetBytes, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame, encode_frame},
-  proto_gossip::DIRECT_ALPN,
+  proto_direct::{
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame,
+    encode_frame,
+  },
 };
 
-use super::blobs::BlobOutbox;
+use super::{PullProgress, blobs::BlobOutbox};
 
 const DIRECT_SERVE_CONCURRENCY: usize = 4;
-static CLIENT_ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
+static CLIENT_ENDPOINT: OnceLock<StdRwLock<Option<Endpoint>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct DirectSessionHandler {
@@ -135,16 +137,10 @@ impl DirectProto {
     }
   }
 
-  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, _permit: OwnedSemaphorePermit) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
-    let Ok(permit) = self.permits.clone().try_acquire_owned() else {
-      write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await?;
-      return Ok(());
-    };
-
     let outcome = self.state.serve(request).await;
     write_response(&mut send, outcome).await?;
-    drop(permit);
     Ok(())
   }
 }
@@ -152,10 +148,17 @@ impl DirectProto {
 impl ProtocolHandler for DirectProto {
   async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
     while let Ok((send, recv)) = connection.accept_bi().await {
+      let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+        let mut send = send;
+        if let Err(error) = write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await {
+          tracing::warn!("flowstate collab direct busy response failed: {error:#}");
+        }
+        continue;
+      };
       let proto = self.clone();
       tokio::spawn(async move {
-        if let Err(error) = proto.handle_stream(send, recv).await {
-          eprintln!("flowstate collab direct stream failed: {error:#}");
+        if let Err(error) = proto.handle_stream(send, recv, permit).await {
+          tracing::warn!("flowstate collab direct stream failed: {error:#}");
         }
       });
     }
@@ -164,15 +167,28 @@ impl ProtocolHandler for DirectProto {
 }
 
 pub(crate) fn install_endpoint(endpoint: Endpoint) {
-  let _ = CLIENT_ENDPOINT.set(endpoint);
+  let cache = CLIENT_ENDPOINT.get_or_init(|| StdRwLock::new(None));
+  if let Ok(mut cached) = cache.write() {
+    *cached = Some(endpoint);
+  }
 }
 
 pub async fn pull_with_fallback(req: DirectRequest, candidates: Vec<EndpointId>, per_peer_timeout: Duration) -> Result<Vec<u8>> {
+  pull_with_fallback_progress(req, candidates, per_peer_timeout, None).await
+}
+
+pub async fn pull_with_fallback_progress(
+  req: DirectRequest,
+  candidates: Vec<EndpointId>,
+  per_peer_timeout: Duration,
+  progress: Option<Sender<PullProgress>>,
+) -> Result<Vec<u8>> {
   let endpoint = CLIENT_ENDPOINT
     .get()
-    .cloned()
+    .and_then(|cache| cache.read().ok().and_then(|cached| cached.clone()))
     .ok_or_else(|| anyhow!("collaboration direct client endpoint is not running"))?;
-  pull_with_endpoint(&endpoint, req, candidates, per_peer_timeout).await
+  ensure!(!endpoint.is_closed(), "collaboration direct client endpoint is not running");
+  pull_with_endpoint_progress(&endpoint, req, candidates, per_peer_timeout, progress).await
 }
 
 pub async fn pull_with_endpoint(
@@ -181,11 +197,21 @@ pub async fn pull_with_endpoint(
   candidates: Vec<EndpointId>,
   per_peer_timeout: Duration,
 ) -> Result<Vec<u8>> {
+  pull_with_endpoint_progress(endpoint, req, candidates, per_peer_timeout, None).await
+}
+
+pub async fn pull_with_endpoint_progress(
+  endpoint: &Endpoint,
+  req: DirectRequest,
+  candidates: Vec<EndpointId>,
+  per_peer_timeout: Duration,
+  progress: Option<Sender<PullProgress>>,
+) -> Result<Vec<u8>> {
   ensure!(!candidates.is_empty(), "direct pull has no candidate peers");
 
   let mut errors = Vec::new();
   for peer in candidates {
-    match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone())).await {
+    match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone(), progress.as_ref())).await {
       Ok(Ok(bytes)) => return Ok(bytes),
       Ok(Err(error)) => errors.push(format!("{peer}: {error:#}")),
       Err(_) => errors.push(format!("{peer}: timed out after {per_peer_timeout:?}")),
@@ -195,7 +221,7 @@ pub async fn pull_with_endpoint(
   Err(anyhow!("direct pull failed for all candidates: {}", errors.join("; ")))
 }
 
-async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest) -> Result<Vec<u8>> {
+async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let connection = endpoint
     .connect(peer, DIRECT_ALPN)
     .await
@@ -209,7 +235,7 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest) ->
 
   let header = read_frame::<DirectResponseHeader>(&mut recv).await?;
   match header {
-    DirectResponseHeader::Ok { total_len } => read_payload(&mut recv, total_len).await,
+    DirectResponseHeader::Ok { total_len } => read_payload(&mut recv, total_len, progress).await,
     DirectResponseHeader::NotAttached => Err(anyhow!("peer is not attached to this session")),
     DirectResponseHeader::NotFound => Err(anyhow!("peer does not have the requested collaboration data")),
     DirectResponseHeader::Busy => Err(anyhow!("peer is busy serving collaboration data")),
@@ -286,14 +312,20 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
   Ok(())
 }
 
-async fn read_payload(recv: &mut RecvStream, total_len: u64) -> Result<Vec<u8>> {
-  let total_len = usize::try_from(total_len).context("direct payload is too large for this platform")?;
-  let mut payload = vec![0; total_len];
+async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
+  let total_len_usize = usize::try_from(total_len).context("direct payload is too large for this platform")?;
+  let mut payload = vec![0; total_len_usize];
   let mut offset = 0;
-  while offset < total_len {
-    let next = (offset + MAX_PAYLOAD_CHUNK_LEN).min(total_len);
+  if let Some(progress) = progress {
+    let _ = progress.try_send(PullProgress { got: 0, total: total_len });
+  }
+  while offset < total_len_usize {
+    let next = (offset + MAX_PAYLOAD_CHUNK_LEN).min(total_len_usize);
     recv.read_exact(&mut payload[offset..next]).await?;
     offset = next;
+    if let Some(progress) = progress {
+      let _ = progress.try_send(PullProgress { got: offset as u64, total: total_len });
+    }
   }
   Ok(payload)
 }

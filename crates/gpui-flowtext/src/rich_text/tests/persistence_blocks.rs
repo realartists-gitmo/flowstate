@@ -133,15 +133,14 @@ fn document_v4_round_trip_preserves_mixed_block_order_and_assets() {
   );
   let asset_id = AssetId(42);
   let asset_bytes = vec![1, 2, 3, 4];
-  let mut hasher = DefaultHasher::new();
-  asset_bytes.hash(&mut hasher);
+  let content_hash = AssetRecord::stable_content_hash(&asset_bytes);
   document.assets.assets.insert(
     asset_id,
     AssetRecord {
       id: asset_id,
       mime_type: "image/png".into(),
       original_name: Some("figure.png".into()),
-      content_hash: hasher.finish(),
+      content_hash,
       bytes: std::sync::Arc::new(asset_bytes),
     },
   );

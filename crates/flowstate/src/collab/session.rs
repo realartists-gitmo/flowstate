@@ -1,9 +1,10 @@
-use std::{collections::HashSet, rc::Rc, time::Instant};
+use std::{collections::HashSet, rc::Rc, time::{Duration, Instant}};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
   SessionId,
   binding::DocBinding,
+  ids::PeerId,
   local_apply::LocalApplier,
   net::{
     NetCommand, PeerAddr, PublishPayload,
@@ -16,7 +17,7 @@ use flowstate_collab::{
   proto_gossip::GossipMsg,
   schema,
 };
-use gpui::{Context, Entity, Subscription};
+use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::{LoroDoc, Subscription as LoroSubscription, UndoManager};
 use uuid::Uuid;
 
@@ -69,6 +70,22 @@ pub enum DetachReason {
   Fatal(String),
 }
 
+#[derive(Clone, Debug)]
+pub enum SessionNotice {
+  PeerJoined(String),
+  PeerLeft(String),
+  LeftSession,
+  ViewRebuilt,
+  IncompatibleVersion(String),
+}
+
+impl EventEmitter<SessionNotice> for CollabSession {}
+
+pub(super) enum JoinNeighborSignal {
+  NeighborUp,
+  TimedOut,
+}
+
 pub struct JoinedDocument {
   pub session: SessionId,
   pub title: String,
@@ -107,6 +124,7 @@ pub struct CollabSession {
   undo_manager: Option<UndoManager>,
   direct_pump_started: bool,
   undo_pump_started: bool,
+  presence_refresh_pending: bool,
   local_update_publish_attached: bool,
   timers_started: bool,
   endpoint_online: bool,
@@ -114,8 +132,21 @@ pub struct CollabSession {
   inbound_since_last_digest: bool,
   quiet_digest_rounds: u8,
   next_recovery_at: Option<Instant>,
+  awaiting_recovery_neighbor_until: Option<Instant>,
+  known_peers: HashSet<PeerId>,
+  probe_pending: bool,
+  last_probe_failed: bool,
+  join_neighbor_tx: Option<async_channel::Sender<JoinNeighborSignal>>,
+  incompatible_version_peers: HashSet<PeerId>,
   last_document_activity: Instant,
 }
+
+const DIRECT_REQUEST_CHANNEL_CAPACITY: usize = 32;
+const UNDO_REQUEST_CHANNEL_CAPACITY: usize = 128;
+const UNDO_MERGE_INTERVAL_MS: i64 = 500;
+const UNDO_MAX_STEPS: usize = 300;
+const JOIN_FIRST_NEIGHBOR_TIMEOUT: Duration = Duration::from_secs(15);
+const JOIN_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
 
 impl CollabSession {
   pub fn from_local_document(
@@ -129,8 +160,10 @@ impl CollabSession {
     let doc = schema::new_configured_doc();
     projection::populate_from_document(&doc, session, &title, &document)?;
     let binding = DocBinding::build(&doc, &document)?;
-    let (direct_tx, direct_rx) = async_channel::unbounded();
-    let (undo_tx, undo_rx) = async_channel::unbounded();
+    // Direct serving is network-bound and should backpressure rather than grow without limit.
+    let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
+    // Undo redirects can burst under key-repeat, but a stuck pump should not retain unbounded UI events.
+    let (undo_tx, undo_rx) = async_channel::bounded(UNDO_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
 
     Ok(Self {
@@ -158,6 +191,7 @@ impl CollabSession {
       undo_manager: None,
       direct_pump_started: false,
       undo_pump_started: false,
+      presence_refresh_pending: false,
       local_update_publish_attached: false,
       timers_started: false,
       endpoint_online: true,
@@ -165,13 +199,19 @@ impl CollabSession {
       inbound_since_last_digest: false,
       quiet_digest_rounds: 0,
       next_recovery_at: None,
+      awaiting_recovery_neighbor_until: None,
+      known_peers: HashSet::new(),
+      probe_pending: false,
+      last_probe_failed: false,
+      join_neighbor_tx: None,
+      incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
     })
   }
 
   pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>) -> Self {
-    let (direct_tx, direct_rx) = async_channel::unbounded();
-    let (undo_tx, undo_rx) = async_channel::unbounded();
+    let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
+    let (undo_tx, undo_rx) = async_channel::bounded(UNDO_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
     Self {
       session,
@@ -198,6 +238,7 @@ impl CollabSession {
       undo_manager: None,
       direct_pump_started: false,
       undo_pump_started: false,
+      presence_refresh_pending: false,
       local_update_publish_attached: false,
       timers_started: false,
       endpoint_online: true,
@@ -205,6 +246,12 @@ impl CollabSession {
       inbound_since_last_digest: false,
       quiet_digest_rounds: 0,
       next_recovery_at: None,
+      awaiting_recovery_neighbor_until: None,
+      known_peers: HashSet::new(),
+      probe_pending: false,
+      last_probe_failed: false,
+      join_neighbor_tx: None,
+      incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
     }
   }
@@ -265,28 +312,50 @@ impl CollabSession {
     cx.notify();
   }
 
-  pub fn begin_join_bootstrap(
+  pub(super) fn prepare_join_neighbor_wait(&mut self, cx: &mut Context<Self>) -> async_channel::Receiver<JoinNeighborSignal> {
+    let (neighbor_tx, neighbor_rx) = async_channel::bounded(1);
+    self.join_neighbor_tx = Some(neighbor_tx.clone());
+    self.phase = SessionPhase::Joining(JoinStage::Subscribing);
+    cx.spawn(async move |_, _| {
+      Timer::after(JOIN_FIRST_NEIGHBOR_TIMEOUT).await;
+      let _ = neighbor_tx.try_send(JoinNeighborSignal::TimedOut);
+    })
+    .detach();
+    cx.notify();
+    neighbor_rx
+  }
+
+  pub(super) fn begin_join_bootstrap(
     &mut self,
-    inviter: flowstate_collab::ids::PeerId,
+    inviter: PeerId,
+    neighbor_rx: async_channel::Receiver<JoinNeighborSignal>,
     cx: &mut Context<Self>,
   ) -> async_channel::Receiver<Result<JoinedDocument>> {
     let (result_tx, result_rx) = async_channel::bounded(1);
-    self.phase = SessionPhase::Joining(JoinStage::FetchingSnapshot { got: 0, total: None });
-    cx.notify();
-
-    let (reply_tx, reply_rx) = async_channel::bounded(1);
-    if let Err(error) = self.net_tx.try_send(NetCommand::PullSnapshot {
-      session: self.session,
-      candidates: self.pull_candidates(Some(inviter)),
-      reply: reply_tx,
-    }) {
-      let detail = format!("requesting collaboration snapshot failed: {error}");
-      self.detach(DetachReason::JoinFailed(detail.clone()), cx);
-      let _ = result_tx.try_send(Err(anyhow!(detail)));
-      return result_rx;
-    }
 
     cx.spawn(async move |session, cx| {
+      match neighbor_rx.recv().await {
+        Ok(JoinNeighborSignal::NeighborUp) => {},
+        Ok(JoinNeighborSignal::TimedOut) | Err(_) => {
+          let detail = "Couldn't reach anyone in this session. Make sure the inviter is online and the invite is current, then try again.".to_string();
+          let _ = session.update(cx, |session, cx| {
+            session.detach(DetachReason::JoinFailed(detail.clone()), cx);
+          });
+          let _ = result_tx.try_send(Err(anyhow!(detail)));
+          return;
+        },
+      }
+
+      let reply_rx = match session.update(cx, |session, cx| session.start_join_snapshot_pull(inviter, result_tx.clone(), cx)) {
+        Ok(Ok(reply_rx)) => reply_rx,
+        Ok(Err(_)) => return,
+        Err(error) => {
+          let detail = format!("collaboration join session disappeared: {error}");
+          let _ = result_tx.try_send(Err(anyhow!(detail)));
+          return;
+        },
+      };
+
       let joined = match reply_rx.recv().await {
         Ok(Ok(bytes)) => session
           .update(cx, |session, cx| match session.finish_join_snapshot(&bytes, cx) {
@@ -313,11 +382,77 @@ impl CollabSession {
           Err(anyhow!(detail))
         },
       };
-      let _ = result_tx.send(joined).await;
+      let _ = result_tx.try_send(joined);
     })
     .detach();
 
     result_rx
+  }
+
+  fn start_join_snapshot_pull(
+    &mut self,
+    inviter: PeerId,
+    result_tx: async_channel::Sender<Result<JoinedDocument>>,
+    cx: &mut Context<Self>,
+  ) -> Result<async_channel::Receiver<Result<Vec<u8>>>> {
+    self.join_neighbor_tx = None;
+    self.phase = SessionPhase::Joining(JoinStage::FetchingSnapshot { got: 0, total: None });
+    cx.notify();
+
+    let (reply_tx, reply_rx) = async_channel::bounded(1);
+    let (progress_tx, progress_rx) = async_channel::bounded(8);
+    if let Err(error) = self.net_tx.try_send(NetCommand::PullSnapshot {
+      session: self.session,
+      candidates: self.pull_candidates(Some(inviter)),
+      progress: Some(progress_tx),
+      reply: reply_tx,
+    }) {
+      let detail = format!("requesting collaboration snapshot failed: {error}");
+      self.detach(DetachReason::JoinFailed(detail.clone()), cx);
+      let _ = result_tx.try_send(Err(anyhow!(detail.clone())));
+      bail!(detail);
+    }
+
+    cx.spawn(async move |session, cx| {
+      while let Ok(progress) = progress_rx.recv().await {
+        if session
+          .update(cx, |session, cx| {
+            if matches!(session.phase, SessionPhase::Joining(JoinStage::FetchingSnapshot { .. })) {
+              session.phase = SessionPhase::Joining(JoinStage::FetchingSnapshot {
+                got: progress.got,
+                total: Some(progress.total),
+              });
+              cx.notify();
+            }
+          })
+          .is_err()
+        {
+          break;
+        }
+      }
+    })
+    .detach();
+
+    cx.spawn(async move |session, cx| {
+      Timer::after(JOIN_SNAPSHOT_TIMEOUT).await;
+      let detail = "Joining this session timed out while fetching the document snapshot. Check your connection and try again.".to_string();
+      let timed_out = session
+        .update(cx, |session, cx| {
+          if matches!(session.phase, SessionPhase::Joining(JoinStage::FetchingSnapshot { .. })) {
+            session.detach(DetachReason::JoinFailed(detail.clone()), cx);
+            true
+          } else {
+            false
+          }
+        })
+        .unwrap_or(false);
+      if timed_out {
+        let _ = result_tx.try_send(Err(anyhow!(detail)));
+      }
+    })
+    .detach();
+
+    Ok(reply_rx)
   }
 
   pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
@@ -378,6 +513,15 @@ impl CollabSession {
   }
 
   fn finish_join_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) -> Result<JoinedDocument> {
+    if matches!(self.phase, SessionPhase::Detached(_)) {
+      bail!("collaboration join is no longer active");
+    }
+    let total = snapshot.len() as u64;
+    self.phase = SessionPhase::Joining(JoinStage::FetchingSnapshot {
+      got: total,
+      total: Some(total),
+    });
+    cx.notify();
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
 
@@ -393,7 +537,7 @@ impl CollabSession {
     self.binding = Some(binding);
     Ok(JoinedDocument {
       session: self.session,
-      title: self.title.clone(),
+      title: format!("{} (shared)", self.title),
       document,
     })
   }
@@ -403,6 +547,7 @@ impl CollabSession {
       return false;
     }
 
+    let user_left = matches!(reason, DetachReason::UserLeft);
     if let Some(presence) = &self.presence {
       presence.delete_self();
       self.publish_presence_bytes(presence.encode_self());
@@ -416,7 +561,7 @@ impl CollabSession {
       editor.update(cx, |editor, cx| {
         editor.set_collab_undo_redirect(None);
         editor.set_collab_capture(false);
-        editor.clear_collab_history();
+        editor.clear_undo_redo_stacks();
         let _ = editor.take_pending_collab_edits();
         editor.set_external_carets(Vec::new(), cx);
       });
@@ -436,8 +581,16 @@ impl CollabSession {
     self.inbound_since_last_digest = false;
     self.quiet_digest_rounds = 0;
     self.next_recovery_at = None;
+    self.awaiting_recovery_neighbor_until = None;
+    self.probe_pending = false;
+    self.last_probe_failed = false;
+    self.join_neighbor_tx = None;
+    self.presence_refresh_pending = false;
     self.local_update_publish_attached = false;
     self.phase = SessionPhase::Detached(reason);
+    if user_left {
+      cx.emit(SessionNotice::LeftSession);
+    }
     cx.notify();
     true
   }
@@ -450,7 +603,7 @@ impl CollabSession {
     let document = editor.read(cx).document().clone();
     let edits = editor.update(cx, |editor, _| {
       let edits = editor.take_pending_collab_edits();
-      editor.clear_collab_history();
+      editor.clear_undo_redo_stacks();
       edits
     });
     let Some(doc) = &self.doc else {
@@ -475,6 +628,7 @@ impl CollabSession {
   }
 
   pub fn handle_gossip(&mut self, from: flowstate_collab::ids::PeerId, msg: GossipMsg, cx: &mut Context<Self>) {
+    self.known_peers.insert(from);
     self.note_inbound_traffic(cx);
     let result = match msg {
       GossipMsg::Update(bytes) => self
@@ -497,7 +651,12 @@ impl CollabSession {
 
   pub fn neighbor_up(&mut self, peer: flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     self.neighbors.insert(peer);
+    self.known_peers.insert(peer);
     self.zero_neighbors_since = None;
+    self.last_probe_failed = false;
+    if let Some(join_neighbor_tx) = self.join_neighbor_tx.take() {
+      let _ = join_neighbor_tx.try_send(JoinNeighborSignal::NeighborUp);
+    }
     self.anti_entropy.on_neighbor_up();
     self.mark_online(cx);
     self.publish_digest();
@@ -529,6 +688,9 @@ impl CollabSession {
   pub fn set_endpoint_online(&mut self, online: bool, cx: &mut Context<Self>) {
     self.endpoint_online = online;
     if online {
+      self.last_probe_failed = false;
+    }
+    if online {
       if self.peers_present() == 0 || !self.neighbors.is_empty() {
         self.mark_online(cx);
       }
@@ -536,6 +698,12 @@ impl CollabSession {
       self.evaluate_connectivity(cx);
     }
     cx.notify();
+  }
+
+  pub fn handle_incompatible_version(&mut self, peer: PeerId, cx: &mut Context<Self>) {
+    if self.incompatible_version_peers.insert(peer) {
+      cx.emit(SessionNotice::IncompatibleVersion(peer.to_string()));
+    }
   }
 
   fn attach_editor_hooks(&mut self, cx: &mut Context<Self>) {
@@ -550,7 +718,7 @@ impl CollabSession {
       if editor.document_path().is_none() {
         editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)), cx);
       }
-      editor.clear_collab_history();
+      editor.clear_undo_redo_stacks();
       editor.set_collab_capture(true);
       let undo_tx = self.undo_tx.clone();
       editor.set_collab_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
@@ -572,7 +740,7 @@ impl CollabSession {
       .editor_subscriptions
       .push(cx.subscribe(&editor, |session, _, event: &EditorEvent, cx| {
         if matches!(event, EditorEvent::SelectionChanged { .. }) {
-          session.refresh_own_presence(cx);
+          session.schedule_own_presence_refresh(cx);
         }
       }));
   }
@@ -606,8 +774,8 @@ impl CollabSession {
       return;
     };
     let mut undo_manager = UndoManager::new(doc);
-    undo_manager.set_merge_interval(500);
-    undo_manager.set_max_undo_steps(300);
+    undo_manager.set_merge_interval(UNDO_MERGE_INTERVAL_MS);
+    undo_manager.set_max_undo_steps(UNDO_MAX_STEPS);
     self.undo_manager = Some(undo_manager);
   }
 

@@ -54,13 +54,13 @@ pub fn tab_badge(phase: &SessionPhase, cx: &App) -> Option<AnyElement> {
 fn status_label_and_color(phase: &SessionPhase, cx: &App) -> (String, gpui::Hsla) {
   match phase {
     SessionPhase::Creating => ("Starting share".to_string(), cx.theme().info),
-    SessionPhase::Joining(stage) => (join_label(stage), cx.theme().info),
+    SessionPhase::Joining(stage) => (join_stage_label(stage), cx.theme().info),
     SessionPhase::Attached(attachment) => attached_label_and_color(attachment, cx),
     SessionPhase::Detached(_) => ("Not shared".to_string(), cx.theme().muted_foreground),
   }
 }
 
-fn join_label(stage: &JoinStage) -> String {
+pub fn join_stage_label(stage: &JoinStage) -> String {
   match stage {
     JoinStage::Resolving => "Resolving invite".to_string(),
     JoinStage::Subscribing => "Joining session".to_string(),

@@ -43,6 +43,13 @@ impl BlobOutbox {
   }
 
   pub fn insert_with_id(&mut self, id: BlobId, bytes: Vec<u8>) {
+    if let Some((_, existing)) = self.entries.iter_mut().find(|(candidate, _)| *candidate == id) {
+      self.total_bytes = self.total_bytes.saturating_sub(existing.len()).saturating_add(bytes.len());
+      *existing = bytes;
+      self.trim();
+      return;
+    }
+
     self.total_bytes = self.total_bytes.saturating_add(bytes.len());
     self.entries.push_back((id, bytes));
     self.trim();
@@ -79,5 +86,27 @@ impl BlobOutbox {
       };
       self.total_bytes = self.total_bytes.saturating_sub(bytes.len());
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use std::num::NonZeroUsize;
+
+  use crate::BlobId;
+
+  use super::BlobOutbox;
+
+  #[test]
+  fn insert_with_id_replaces_existing_payload_and_total() {
+    let mut outbox = BlobOutbox::new(NonZeroUsize::new(4).expect("non-zero max blobs"), 1024);
+    let id = BlobId(7);
+
+    outbox.insert_with_id(id, vec![1, 2, 3]);
+    outbox.insert_with_id(id, vec![4, 5]);
+
+    assert_eq!(outbox.len(), 1);
+    assert_eq!(outbox.total_bytes(), 2);
+    assert_eq!(outbox.get(id), Some([4, 5].as_slice()));
   }
 }

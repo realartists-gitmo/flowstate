@@ -7,6 +7,7 @@ use iroh_gossip::{
   proto::TopicId,
 };
 use n0_future::StreamExt as _;
+use tracing::warn;
 
 use crate::{
   ids::SessionId,
@@ -141,7 +142,15 @@ async fn handle_event(event: Event, session: SessionId, evt_tx: &Sender<NetEvent
           })
           .await;
       },
-      Err(error) => eprintln!("flowstate collab ignored gossip frame: {error:#}"),
+      Err(error) if proto_gossip::is_protocol_version_mismatch(&error) => {
+        let _ = evt_tx
+          .send(NetEvent::IncompatibleVersion {
+            session,
+            peer: message.delivered_from,
+          })
+          .await;
+      },
+      Err(error) => warn!("flowstate collab ignored gossip frame: {error:#}"),
     },
     Event::NeighborUp(peer) => {
       let _ = evt_tx.send(NetEvent::NeighborUp { session, peer }).await;
@@ -172,4 +181,51 @@ fn endpoint_id(addr: &EndpointAddr) -> EndpointId {
 
 fn topic_id(session: SessionId) -> TopicId {
   TopicId::from_bytes(*session.as_bytes())
+}
+
+#[cfg(test)]
+mod tests {
+  use iroh::SecretKey;
+  use iroh_gossip::{
+    api::{Event, Message},
+    proto::DeliveryScope,
+  };
+
+  use crate::{
+    net::NetEvent,
+    proto_gossip::{self, GossipMsg},
+    SessionId,
+  };
+
+  use super::handle_event;
+
+  #[tokio::test]
+  async fn version_mismatch_emits_incompatible_version_once() {
+    let session = SessionId::new();
+    let peer = SecretKey::generate().public();
+    let mut frame = proto_gossip::encode(&GossipMsg::Presence(Vec::new())).expect("valid gossip frame");
+    frame[0] = frame[0].wrapping_add(1);
+
+    let (evt_tx, evt_rx) = async_channel::unbounded();
+    handle_event(
+      Event::Received(Message {
+        content: frame.into(),
+        scope: DeliveryScope::Neighbors,
+        delivered_from: peer,
+      }),
+      session,
+      &evt_tx,
+    )
+    .await
+    .expect("gossip event handling should ignore mismatches");
+
+    match evt_rx.recv().await.expect("incompatible-version event") {
+      NetEvent::IncompatibleVersion { session: event_session, peer: event_peer } => {
+        assert_eq!(event_session, session);
+        assert_eq!(event_peer, peer);
+      },
+      event => panic!("unexpected event: {event:?}"),
+    }
+    assert!(evt_rx.try_recv().is_err());
+  }
 }

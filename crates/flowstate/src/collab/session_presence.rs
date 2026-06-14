@@ -1,14 +1,22 @@
-use flowstate_collab::presence::{PresenceSelection, PresenceState};
-use gpui::Context;
+use std::{collections::HashMap, time::Duration};
 
-use super::{CollabSession, presence_view};
+use flowstate_collab::presence::{PresenceSelection, PresenceState, PresenceStore};
+use gpui::{Context, Timer};
+use tracing::warn;
+
+use super::{CollabSession, SessionNotice, presence_view};
+
+const PRESENCE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 
 impl CollabSession {
   pub(super) fn apply_presence(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
     if let Some(presence) = &self.presence {
+      let before = remote_roster(presence);
       if let Err(error) = presence.apply(bytes) {
-        eprintln!("flowstate collab presence update failed: {error:#}");
+        warn!(error = %error, "flowstate collab presence update failed");
+        return;
       }
+      self.emit_presence_roster_diff(before, cx);
       self.refresh_peer_count();
       self.evaluate_connectivity(cx);
       self.refresh_external_carets(cx);
@@ -25,9 +33,33 @@ impl CollabSession {
       selection: self.own_presence_selection(cx),
     };
     if let Err(error) = presence.set_self(&state) {
-      eprintln!("flowstate collab presence encode failed: {error:#}");
+      warn!(error = %error, "flowstate collab presence encode failed");
     }
     self.refresh_peer_count();
+  }
+
+  pub(super) fn schedule_own_presence_refresh(&mut self, cx: &mut Context<Self>) {
+    if self.presence.is_none() || self.presence_refresh_pending {
+      return;
+    }
+    self.presence_refresh_pending = true;
+    cx.spawn(async move |session, cx| {
+      Timer::after(PRESENCE_REFRESH_DEBOUNCE).await;
+      let _ = session.update(cx, |session, cx| {
+        session.presence_refresh_pending = false;
+        session.refresh_own_presence(cx);
+      });
+    })
+    .detach();
+  }
+
+  pub(super) fn remove_outdated_presence(&mut self, cx: &mut Context<Self>) {
+    let Some(presence) = &self.presence else {
+      return;
+    };
+    let before = remote_roster(presence);
+    presence.remove_outdated();
+    self.emit_presence_roster_diff(before, cx);
   }
 
   pub(super) fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
@@ -84,6 +116,33 @@ impl CollabSession {
     let binding = self.binding.as_ref()?;
     presence_view::selection_for_editor(editor, binding)
   }
+
+  fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) {
+    let Some(presence) = &self.presence else {
+      return;
+    };
+    let after = remote_roster(presence);
+    for (key, name) in &after {
+      if !before.contains_key(key) {
+        cx.emit(SessionNotice::PeerJoined(name.clone()));
+      }
+    }
+    for (key, name) in before {
+      if !after.contains_key(&key) {
+        cx.emit(SessionNotice::PeerLeft(name));
+      }
+    }
+  }
+}
+
+fn remote_roster(presence: &PresenceStore) -> HashMap<String, String> {
+  let self_key = presence.self_key().to_string();
+  presence
+    .roster()
+    .into_iter()
+    .filter(|entry| entry.key != self_key)
+    .map(|entry| (entry.key, entry.name))
+    .collect()
 }
 
 fn default_presence_name() -> String {

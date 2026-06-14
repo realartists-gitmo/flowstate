@@ -21,12 +21,17 @@ impl RichTextEditor {
   }
 
   pub fn collab_apply_deferred(&self) -> bool {
-    self.selecting || self.active_text_drag.is_some() || self.image_resize_drag.is_some() || self.table_column_resize_drag.is_some()
+    self.selecting
+      || self.active_text_drag.is_some()
+      || self.image_resize_drag.is_some()
+      || self.table_column_resize_drag.is_some()
+      || self.ime_composition_active()
   }
 
   fn apply_one_collab_patch(&mut self, patch: &CollabPatch, invalidation: &mut Option<Range<usize>>) {
     match patch {
       CollabPatch::ParagraphText { row, new, delta_utf8 } => {
+        self.remap_object_text_selection_for_delta(*row, delta_utf8);
         if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row) {
           remap_selection_for_text_delta(&mut self.selection, paragraph_ix, delta_utf8);
           replace_paragraph_content(&mut self.document, paragraph_ix, new);
@@ -109,6 +114,20 @@ impl RichTextEditor {
     self.table_cell_caret = 0;
     self.equation_source_anchor = 0;
     self.equation_source_caret = 0;
+  }
+
+  fn remap_object_text_selection_for_delta(&mut self, row: usize, delta: &[CollabTextDelta]) {
+    match self.selected_block {
+      Some(BlockSelection::TableCell { block_ix, .. }) if block_ix == row => {
+        self.table_cell_anchor = remap_byte(self.table_cell_anchor, delta);
+        self.table_cell_caret = remap_byte(self.table_cell_caret, delta);
+      },
+      Some(BlockSelection::Equation(block_ix)) if block_ix == row => {
+        self.equation_source_anchor = remap_byte(self.equation_source_anchor, delta);
+        self.equation_source_caret = remap_byte(self.equation_source_caret, delta);
+      },
+      Some(BlockSelection::Image(_) | BlockSelection::Equation(_) | BlockSelection::Table(_) | BlockSelection::TableCell { .. }) | None => {},
+    }
   }
 }
 

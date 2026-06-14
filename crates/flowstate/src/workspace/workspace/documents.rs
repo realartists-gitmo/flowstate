@@ -90,6 +90,8 @@ impl Workspace {
       autosave_document_generations: HashMap::new(),
       autosave_flow_in_flight: HashSet::new(),
       collaboration_dialog: None,
+      collab_notice_subscriptions: HashMap::new(),
+      collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
       tub_root: None,
       tub_index: None,

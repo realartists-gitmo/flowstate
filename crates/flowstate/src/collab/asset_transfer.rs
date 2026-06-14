@@ -1,8 +1,4 @@
-use std::{
-  collections::hash_map::DefaultHasher,
-  hash::{Hash, Hasher},
-  sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use flowstate_collab::{
@@ -31,7 +27,7 @@ pub(super) fn schedule_missing_assets(
   let assets = match image_assets_in_loro(doc) {
     Ok(assets) => assets,
     Err(error) => {
-      eprintln!("flowstate collab asset scan failed: {error:#}");
+      tracing::warn!("flowstate collab asset scan failed: {error:#}");
       return;
     },
   };
@@ -113,10 +109,10 @@ fn start_asset_pull(
           Ok(record) => {
             session.apply_or_queue_patches(vec![CollabPatch::AssetArrived { id, record }], cx);
           },
-          Err(error) => eprintln!("flowstate collab rejected fetched asset {id:?}: {error:#}"),
+          Err(error) => tracing::warn!("flowstate collab rejected fetched asset {id:?}: {error:#}"),
         },
-        Ok(Err(error)) => eprintln!("flowstate collab asset pull failed for {id:?}: {error:#}"),
-        Err(error) => eprintln!("flowstate collab asset pull channel closed for {id:?}: {error}"),
+        Ok(Err(error)) => tracing::warn!("flowstate collab asset pull failed for {id:?}: {error:#}"),
+        Err(error) => tracing::warn!("flowstate collab asset pull channel closed for {id:?}: {error}"),
       }
     });
   })
@@ -145,9 +141,7 @@ impl ImageAssetMeta {
 
   fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<AssetRecord> {
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let content_hash = hasher.finish();
+    let content_hash = AssetRecord::stable_content_hash(&bytes);
     ensure!(content_hash == self.content_hash, "asset content hash mismatch");
     Ok(AssetRecord {
       id: AssetId(self.asset_id),

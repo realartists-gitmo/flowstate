@@ -14,6 +14,7 @@ use flowstate_collab::{
 };
 use gpui::Context;
 use loro::{ExportMode, LoroDoc, Subscription as LoroSubscription, VersionVector, event::Subscriber};
+use tracing::warn;
 
 use crate::rich_text_element::{AssetId, CollabPatch, Document, UndoRedirect};
 
@@ -141,7 +142,7 @@ impl CollabSession {
     }
     let patches = std::mem::take(&mut self.pending_remote_patches);
     editor.update(cx, |editor, cx| {
-      editor.clear_collab_history();
+      editor.clear_undo_redo_stacks();
       editor.apply_collab_patches(&patches, cx);
     });
     self.last_document_activity = std::time::Instant::now();
@@ -199,7 +200,7 @@ impl CollabSession {
       GapAction::None => {},
       GapAction::Pull { from, our_vv } => self.start_update_pull(from, our_vv, cx),
       GapAction::LineageMismatch { from, expected, got } => {
-        eprintln!("flowstate collab ignored mismatched digest from {from}: expected session {expected}, got {got}");
+        warn!("flowstate collab ignored mismatched digest from {from}: expected session {expected}, got {got}");
       },
     }
   }
@@ -266,7 +267,7 @@ impl CollabSession {
         let mut binding = match binding.lock() {
           Ok(binding) => binding,
           Err(error) => {
-            eprintln!("flowstate collab binding lock failed: {error}");
+            tracing::warn!("flowstate collab binding lock failed: {error}");
             return;
           },
         };
@@ -286,7 +287,7 @@ impl CollabSession {
             patches.append(&mut produced);
           }
         },
-        Err(error) => eprintln!("flowstate collab remote apply failed: {error:#}"),
+        Err(error) => tracing::warn!("flowstate collab remote apply failed: {error:#}"),
       }
     });
     subscribed_doc.subscribe_root(callback)

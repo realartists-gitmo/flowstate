@@ -106,7 +106,7 @@ fn document_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     )
 }
 
-fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool) -> impl IntoElement {
+fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool, active_collaborating: bool) -> impl IntoElement {
   let workspace = cx.entity().downgrade();
   div()
     .h_full()
@@ -135,7 +135,7 @@ fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool)
             .item(file_menu_item(workspace.clone(), "Join from Clipboard", false, |workspace, window, cx| {
               workspace.join_collaboration_from_clipboard(window, cx);
             }))
-            .item(file_menu_item(workspace.clone(), "Leave Shared Session", !has_document, |workspace, window, cx| {
+            .item(file_menu_item(workspace.clone(), "Leave Shared Session", !active_collaborating, |workspace, window, cx| {
               workspace.confirm_leave_collaboration_on_active_document(window, cx);
             }))
         }),

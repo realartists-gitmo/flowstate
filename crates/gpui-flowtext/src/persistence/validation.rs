@@ -161,12 +161,11 @@ fn validate_image_payload(image: &ImageBlock, document: &Document) -> io::Result
   {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "image caption run lengths are invalid"));
   }
-  if let Some(asset) = document.assets.assets.get(&image.asset_id) {
-    let mut hasher = DefaultHasher::new();
-    asset.bytes.hash(&mut hasher);
-    if asset.content_hash != hasher.finish() {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "image asset content hash mismatch"));
-    }
+  if let Some(asset) = document.assets.assets.get(&image.asset_id)
+    && !asset.is_loading_placeholder()
+    && asset.content_hash != AssetRecord::stable_content_hash(asset.bytes.as_ref())
+  {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "image asset content hash mismatch"));
   }
   Ok(())
 }

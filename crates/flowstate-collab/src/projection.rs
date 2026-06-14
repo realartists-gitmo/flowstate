@@ -168,6 +168,10 @@ fn map_binary(map: &LoroMap, key: &str) -> Result<Vec<u8>> {
 
 pub fn verify_lineage(doc: &LoroDoc, session: SessionId) -> Result<()> {
   let meta = doc.get_map(META);
+  let schema = map_i64(&meta, META_SCHEMA).context("collaboration document has no schema version")?;
+  if schema != SCHEMA_VERSION {
+    bail!("collaboration document schema version {schema} is not supported")
+  }
   let stored = map_string(&meta, META_SESSION).context("collaboration document has no session lineage")?;
   if stored != session.to_string() {
     bail!("collaboration document lineage does not match the ticket session")

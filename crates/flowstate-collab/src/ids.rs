@@ -1,5 +1,6 @@
 use std::{fmt, str::FromStr};
 
+use rand::{TryRngCore as _, rngs::OsRng};
 use serde::{Deserialize, Serialize};
 
 pub type PeerId = iroh::EndpointId;
@@ -14,7 +15,11 @@ pub struct SessionId([u8; SESSION_ID_LEN]);
 impl SessionId {
   #[must_use]
   pub fn new() -> Self {
-    Self(rand::random())
+    let mut bytes = [0; SESSION_ID_LEN];
+    OsRng
+      .try_fill_bytes(&mut bytes)
+      .expect("OS randomness must be available to create collaboration session IDs");
+    Self(bytes)
   }
 
   #[must_use]
@@ -29,7 +34,11 @@ impl SessionId {
 
   #[must_use]
   pub fn color_index_for_peer(peer: &PeerId) -> usize {
-    let bytes = peer.as_bytes();
+    Self::color_index_for_peer_bytes(peer.as_bytes())
+  }
+
+  #[must_use]
+  pub fn color_index_for_peer_bytes(bytes: &[u8]) -> usize {
     let mut hash = 0usize;
     for byte in bytes.iter().take(8) {
       hash = hash.wrapping_mul(257).wrapping_add(usize::from(*byte));

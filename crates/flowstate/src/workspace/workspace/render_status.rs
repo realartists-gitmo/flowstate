@@ -232,6 +232,8 @@ impl Workspace {
   }
 
   fn render_status_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    self.sync_collab_notice_subscriptions(window, cx);
+
     let speech_word_count = if let (Some(document_id), Some(editor)) = (self.active_document_id, self.active_editor.as_ref()) {
       let editor = editor.read(cx);
       let generation = editor.edit_generation();
@@ -304,6 +306,43 @@ impl Workspace {
             .child(format!("Speech: {count} words")),
         )
       })
+  }
+
+  fn sync_collab_notice_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let mut active_sessions = HashSet::new();
+    let window_handle = window.window_handle();
+
+    for panel in &self.document_panels {
+      let panel_id = panel.read(cx).id();
+      let Some(session) = crate::collab::session_for_panel(panel_id, cx) else {
+        continue;
+      };
+      let session_id = session.read(cx).session_id();
+      active_sessions.insert(session_id);
+      if self.collab_notice_subscriptions.contains_key(&session_id) {
+        continue;
+      }
+
+      let notice_window_handle = window_handle;
+      let subscription = cx.subscribe(&session, move |workspace, _, notice: &crate::collab::SessionNotice, cx| {
+        let notice = notice.clone();
+        if let crate::collab::SessionNotice::IncompatibleVersion(peer) = &notice
+          && !workspace.collab_incompatible_version_notices.insert(peer.clone())
+        {
+          return;
+        }
+        if let Err(error) = notice_window_handle.update(cx, |_, window, cx| {
+          crate::collab::notify::show_session_notice(&notice, window, cx);
+        }) {
+          tracing::warn!("showing collaboration notification failed: {error}");
+        }
+      });
+      self.collab_notice_subscriptions.insert(session_id, subscription);
+    }
+
+    self
+      .collab_notice_subscriptions
+      .retain(|session_id, _| active_sessions.contains(session_id));
   }
 }
 

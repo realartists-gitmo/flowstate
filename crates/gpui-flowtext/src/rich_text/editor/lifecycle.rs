@@ -75,6 +75,7 @@ impl RichTextEditor {
       search_highlights: Vec::new(),
       active_search_highlight: None,
       last_text_input_at: None,
+      ime_marked_range: None,
       pending_typing_prefetch_resume: false,
       resume_chunk_prefetch_after_typing: false,
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
@@ -190,6 +191,7 @@ impl RichTextEditor {
     self.caret_blink_active = false;
     self.external_carets.clear();
     self.last_text_input_at = None;
+    self.ime_marked_range = None;
     self.pending_typing_prefetch_resume = false;
     self.resume_chunk_prefetch_after_typing = false;
     self.paragraph_chunk_layout_cache = Vec::new();
@@ -262,7 +264,7 @@ impl RichTextEditor {
     self.collab_undo_redirect = hook;
   }
 
-  pub fn clear_collab_history(&mut self) {
+  pub fn clear_undo_redo_stacks(&mut self) {
     self.undo_stack.clear();
     self.redo_stack.clear();
   }

@@ -29,10 +29,14 @@ impl RichTextEditor {
       return false;
     };
 
+    let before_selection = self.selection.clone();
     self.selection = EditorSelection {
       anchor: range.start,
       head: range.end,
     };
+    if self.selection != before_selection {
+      self.emit_selection_changed(cx);
+    }
     self.apply_document_edit(cx, |editor, cx| {
       editor.insert_text(replacement, cx);
     });

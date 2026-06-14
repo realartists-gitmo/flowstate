@@ -14,13 +14,13 @@ pub fn projection_hash(document: &Document) -> u64 {
   for block in document.blocks.iter() {
     match block {
       Block::Paragraph(paragraph) => {
-        "p".hash(&mut hasher);
         paragraph.style.hash(&mut hasher);
-        paragraph_text(document, paragraph_ix).hash(&mut hasher);
         for run in &paragraph.runs {
           run.len.hash(&mut hasher);
           run.styles.hash(&mut hasher);
         }
+        paragraph_text(document, paragraph_ix).as_bytes().hash(&mut hasher);
+        "p".hash(&mut hasher);
         paragraph_ix += 1;
       },
       Block::Image(_) | Block::Equation(_) | Block::Table(_) => {

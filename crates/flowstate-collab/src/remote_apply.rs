@@ -6,7 +6,7 @@ use gpui_flowtext::{
   paragraph_text,
 };
 use loro::{
-  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroText, LoroValue, TextDelta, ValueOrContainer,
+  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, TextDelta, ValueOrContainer,
   event::{Diff, DiffEvent, ListDiffItem},
 };
 
@@ -27,15 +27,13 @@ impl RemoteApplier<'_> {
       return Ok(Vec::new());
     }
 
+    let pre_event_binding = self.binding.clone();
+    let inserted_containers = inserted_container_ids(self.doc, event)?;
     let mut patches = Vec::new();
     for diff in &event.events {
       match &diff.diff {
-        Diff::Text(delta) => self.apply_text_diff(document, diff.target, delta, &mut patches)?,
-        Diff::Map(delta) => {
-          for key in delta.updated.keys() {
-            self.apply_map_diff(diff.target, key.as_ref(), &mut patches)?;
-          }
-        },
+        Diff::Text(delta) => self.apply_text_diff(document, &pre_event_binding, &inserted_containers, diff.target, delta, &mut patches)?,
+        Diff::Map(delta) => self.apply_map_diff(diff.target, delta.updated.keys().map(|key| key.as_ref()), &inserted_containers, &mut patches)?,
         Diff::List(delta) => self.apply_list_diff(diff.target, delta, &mut patches)?,
         Diff::Tree(_) | Diff::Counter(_) | Diff::Unknown => {},
       }
@@ -43,7 +41,18 @@ impl RemoteApplier<'_> {
     Ok(patches)
   }
 
-  fn apply_text_diff(&self, document: &Document, target: &ContainerID, delta: &[TextDelta], patches: &mut Vec<CollabPatch>) -> Result<()> {
+  fn apply_text_diff(
+    &self,
+    document: &Document,
+    pre_event_binding: &DocBinding,
+    inserted_containers: &[ContainerID],
+    target: &ContainerID,
+    delta: &[TextDelta],
+    patches: &mut Vec<CollabPatch>,
+  ) -> Result<()> {
+    if inserted_containers.contains(target) {
+      return Ok(());
+    }
     let Some(row_ix) = self.binding.by_container.get(target).copied() else {
       return Ok(());
     };
@@ -60,8 +69,18 @@ impl RemoteApplier<'_> {
       .as_ref()
       .context("paragraph diff row is missing its LoroText")?;
     let style = decode_paragraph_style(map_i64(&row.map, STYLE)?);
-    let paragraph_ix = paragraph_ordinal_for_row(self.binding, row_ix).context("paragraph diff row has no paragraph ordinal")?;
-    let old_text = paragraph_text(document, paragraph_ix);
+    let old_paragraph_ix = pre_event_binding
+      .by_container
+      .get(target)
+      .copied()
+      .and_then(|old_row_ix| paragraph_ordinal_for_row(pre_event_binding, old_row_ix));
+    let old_text = if let Some(paragraph_ix) = old_paragraph_ix
+      && paragraph_ix < document.paragraphs.len()
+    {
+      paragraph_text(document, paragraph_ix)
+    } else {
+      String::new()
+    };
     patches.push(CollabPatch::ParagraphText {
       row: row_ix,
       new: crate::schema::input_paragraph_from_text(text, style),
@@ -70,38 +89,53 @@ impl RemoteApplier<'_> {
     Ok(())
   }
 
-  fn apply_map_diff(&mut self, target: &ContainerID, key: &str, patches: &mut Vec<CollabPatch>) -> Result<()> {
+  fn apply_map_diff<'a>(
+    &mut self,
+    target: &ContainerID,
+    keys: impl IntoIterator<Item = &'a str>,
+    inserted_containers: &[ContainerID],
+    patches: &mut Vec<CollabPatch>,
+  ) -> Result<()> {
+    if inserted_containers.contains(target) {
+      return Ok(());
+    }
     let Some(row_ix) = self.binding.by_container.get(target).copied() else {
       return Ok(());
     };
+    let mut style_changed = false;
+    let mut object_changed = false;
+    for key in keys {
+      match key {
+        STYLE => style_changed = true,
+        DATA | REV => object_changed = true,
+        _ => {},
+      }
+    }
     let row = self
       .binding
       .rows
       .get_mut(row_ix)
       .context("map diff row is outside DocBinding")?;
-    match key {
-      STYLE if matches!(row.kind, BlockKind::Paragraph) => {
-        patches.push(CollabPatch::ParagraphStyle {
-          row: row_ix,
-          style: decode_paragraph_style(map_i64(&row.map, STYLE)?),
-        });
-      },
-      DATA | REV => {
-        let input = input_block_from_container(&row.map)?;
-        row.kind = block_kind_for_input(&input);
-        row.text = None;
-        row.paragraph_id = None;
-        row.version = 0;
-        patches.push(CollabPatch::ReplaceObjectBlock {
-          row: row_ix,
-          block: CollabStructuralBlock {
-            block_id: row.block_id,
-            paragraph_id: None,
-            block: input,
-          },
-        });
-      },
-      _ => {},
+    if style_changed && matches!(row.kind, BlockKind::Paragraph) {
+      patches.push(CollabPatch::ParagraphStyle {
+        row: row_ix,
+        style: decode_paragraph_style(map_i64(&row.map, STYLE)?),
+      });
+    }
+    if object_changed {
+      let input = input_block_from_container(&row.map)?;
+      row.kind = block_kind_for_input(&input);
+      row.text = None;
+      row.paragraph_id = None;
+      row.version = 0;
+      patches.push(CollabPatch::ReplaceObjectBlock {
+        row: row_ix,
+        block: CollabStructuralBlock {
+          block_id: row.block_id,
+          paragraph_id: None,
+          block: input,
+        },
+      });
     }
     self.binding.rebuild_indexes();
     Ok(())
@@ -114,28 +148,43 @@ impl RemoteApplier<'_> {
     }
 
     let mut row_ix = 0usize;
+    let final_block_ids = block_container_ids(&blocks)?;
     for item in delta {
       match item {
         ListDiffItem::Retain { retain } => row_ix = row_ix.saturating_add(*retain),
         ListDiffItem::Delete { delete } => {
-          let count = (*delete).min(self.binding.rows.len().saturating_sub(row_ix));
-          if count == 0 {
-            continue;
-          }
-          for _ in 0..count {
+          let mut delete_start = None;
+          let mut delete_count = 0usize;
+          for _ in 0..*delete {
+            let Some(row) = self.binding.rows.get(row_ix) else {
+              break;
+            };
+            if final_block_ids.contains(&row.map.id()) {
+              if let Some(start) = delete_start.take() {
+                patches.push(CollabPatch::DeleteBlocks { row: start, count: delete_count });
+                delete_count = 0;
+              }
+              row_ix += 1;
+              continue;
+            }
+            delete_start.get_or_insert(row_ix);
             self
               .binding
               .remove_row(row_ix)
               .context("DocBinding row disappeared during remote block delete")?;
+            delete_count += 1;
           }
-          patches.push(CollabPatch::DeleteBlocks { row: row_ix, count });
+          if let Some(start) = delete_start {
+            patches.push(CollabPatch::DeleteBlocks { row: start, count: delete_count });
+          }
         },
         ListDiffItem::Insert { insert, is_move } => {
           for value in insert {
             let map = map_from_insert(value)?;
             if *is_move && let Some(from) = self.binding.by_container.get(&map.id()).copied() {
-              patches.push(CollabPatch::MoveBlock { from, to: row_ix });
-              self.binding.move_row(from, row_ix);
+              let to = if from < row_ix { row_ix - 1 } else { row_ix };
+              patches.push(CollabPatch::MoveBlock { from, to });
+              self.binding.move_row(from, to);
               row_ix += 1;
               continue;
             }
@@ -153,6 +202,7 @@ impl RemoteApplier<'_> {
         },
       }
     }
+    reconcile_binding_to_match_blocks(self.binding, &blocks, patches)?;
     Ok(())
   }
 }
@@ -218,6 +268,114 @@ fn map_from_insert(value: &ValueOrContainer) -> Result<LoroMap> {
   match value {
     ValueOrContainer::Container(Container::Map(map)) => Ok(map.clone()),
     ValueOrContainer::Value(_) | ValueOrContainer::Container(_) => bail!("remote block insert is not a map container"),
+  }
+}
+
+fn inserted_container_ids(doc: &LoroDoc, event: &DiffEvent<'_>) -> Result<Vec<ContainerID>> {
+  let blocks_id = doc.get_movable_list(BLOCKS).id();
+  let mut ids = Vec::new();
+  for diff in &event.events {
+    let Diff::List(delta) = &diff.diff else {
+      continue;
+    };
+    if *diff.target != blocks_id {
+      continue;
+    }
+    for item in delta {
+      let ListDiffItem::Insert { insert, is_move } = item else {
+        continue;
+      };
+      if *is_move {
+        continue;
+      }
+      for value in insert {
+        let map = map_from_insert(value)?;
+        ids.push(map.id());
+        if let Some(ValueOrContainer::Container(Container::Text(text))) = map.get(TEXT) {
+          ids.push(text.id());
+        }
+      }
+    }
+  }
+  Ok(ids)
+}
+
+fn block_container_ids(blocks: &LoroMovableList) -> Result<Vec<ContainerID>> {
+  let mut ids = Vec::with_capacity(blocks.len());
+  for ix in 0..blocks.len() {
+    ids.push(map_from_list(blocks, ix)?.id());
+  }
+  Ok(ids)
+}
+
+fn reconcile_binding_to_match_blocks(binding: &mut DocBinding, blocks: &LoroMovableList, patches: &mut Vec<CollabPatch>) -> Result<()> {
+  let final_ids = block_container_ids(blocks)?;
+  remove_stale_binding_rows(binding, &final_ids, patches);
+  insert_missing_binding_rows(binding, blocks, &final_ids, patches)?;
+  for to in (0..final_ids.len()).rev() {
+    if binding
+      .rows
+      .get(to)
+      .is_some_and(|row| row.map.id() == final_ids[to])
+    {
+      continue;
+    }
+    let from = binding
+      .by_container
+      .get(&final_ids[to])
+      .copied()
+      .context("final Loro block row is missing from DocBinding")?;
+    patches.push(CollabPatch::MoveBlock { from, to });
+    binding.move_row(from, to);
+  }
+  Ok(())
+}
+
+fn remove_stale_binding_rows(binding: &mut DocBinding, final_ids: &[ContainerID], patches: &mut Vec<CollabPatch>) {
+  let mut retained_ids = Vec::new();
+  let mut delete_rows = Vec::new();
+  for (row_ix, row) in binding.rows.iter().enumerate() {
+    let id = row.map.id();
+    if !final_ids.contains(&id) || retained_ids.contains(&id) {
+      delete_rows.push(row_ix);
+    } else {
+      retained_ids.push(id);
+    }
+  }
+
+  for row_ix in delete_rows.into_iter().rev() {
+    let _ = binding.remove_row(row_ix);
+    patches.push(CollabPatch::DeleteBlocks { row: row_ix, count: 1 });
+  }
+}
+
+fn insert_missing_binding_rows(
+  binding: &mut DocBinding,
+  blocks: &LoroMovableList,
+  final_ids: &[ContainerID],
+  patches: &mut Vec<CollabPatch>,
+) -> Result<()> {
+  for (row_ix, id) in final_ids.iter().enumerate() {
+    if binding.by_container.contains_key(id) {
+      continue;
+    }
+    let map = map_from_list(blocks, row_ix)?;
+    let input = input_block_from_container(&map)?;
+    let structural = structural_block_for_insert(&input);
+    let row = binding_row_from_insert(map, &input, structural.block_id, structural.paragraph_id)?;
+    binding.insert_row(row_ix, row);
+    patches.push(CollabPatch::InsertBlocks {
+      row: row_ix,
+      blocks: vec![structural],
+    });
+  }
+  Ok(())
+}
+
+fn map_from_list(blocks: &LoroMovableList, ix: usize) -> Result<LoroMap> {
+  match blocks.get(ix) {
+    Some(ValueOrContainer::Container(Container::Map(map))) => Ok(map),
+    Some(ValueOrContainer::Value(_)) | Some(ValueOrContainer::Container(_)) | None => bail!("remote block row {ix} is not a map container"),
   }
 }
 
