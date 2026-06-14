@@ -89,6 +89,7 @@ impl RichTextEditor {
       sizes: sizes.clone(),
     });
     self.restore_scroll_anchor(scroll_anchor);
+    self.apply_pending_zoom_center();
     if schedule_prefetch {
       self.schedule_chunk_prefetch(width, window, cx);
     }
@@ -180,6 +181,7 @@ impl RichTextEditor {
     }
     self.pending_item_sizes_patch_range = None;
     self.restore_scroll_anchor(scroll_anchor);
+    self.apply_pending_zoom_center();
     self.schedule_chunk_prefetch(width, window, cx);
     Some(patched_sizes)
   }

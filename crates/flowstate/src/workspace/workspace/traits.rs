@@ -13,6 +13,12 @@ impl Render for Workspace {
               } else {
                 editor.update(cx, |editor, cx| editor.zoom_out(cx));
               }
+            } else if let Some(flow) = workspace.active_flow.clone() {
+              if delta.y < px(0.0) {
+                flow.update(cx, |flow, cx| flow.zoom_in(cx));
+              } else {
+                flow.update(cx, |flow, cx| flow.zoom_out(cx));
+              }
             }
           });
         }

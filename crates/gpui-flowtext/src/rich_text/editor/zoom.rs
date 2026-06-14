@@ -13,10 +13,28 @@ impl RichTextEditor {
     if (self.zoom_percent - percent).abs() < f32::EPSILON {
       return;
     }
+    if self.zoom_scroll_anchor.is_none() {
+      self.zoom_scroll_anchor = self.capture_scroll_anchor();
+    }
     self.zoom_percent = percent;
     self.document.theme.zoom_factor = percent / 100.0;
+    self.zoom_anchor_apply_pending = true;
     self.invalidate_document_layout_caches();
     cx.notify();
+  }
+
+  pub(super) fn apply_pending_zoom_center(&mut self) {
+    if !self.zoom_anchor_apply_pending {
+      return;
+    }
+    self.restore_scroll_anchor(self.zoom_scroll_anchor.clone());
+    self.zoom_anchor_apply_pending = false;
+    self.zoom_scroll_anchor = None;
+  }
+
+  pub(super) fn sync_camera_center_from_scroll(&mut self) {
+    self.zoom_scroll_anchor = None;
+    self.zoom_anchor_apply_pending = false;
   }
 
   fn zoom_by(&mut self, delta_percent: f32, cx: &mut Context<Self>) {

@@ -70,6 +70,9 @@ pub struct FlowEditor {
   cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
   board_scroll: ScrollHandle,
   board_zoom: f32,
+  camera_center: Option<BoardPoint>,
+  camera_apply_pending: bool,
+  board_content_width: gpui::Pixels,
   viewport_origin: BoardPoint,
   space_pan_armed: bool,
   pan_drag: Option<PanDragState>,
@@ -106,6 +109,9 @@ impl FlowEditor {
       cell_bounds: std::collections::HashMap::new(),
       board_scroll: ScrollHandle::new(),
       board_zoom: 1.0,
+      camera_center: None,
+      camera_apply_pending: false,
+      board_content_width: px(0.0),
       viewport_origin: BoardPoint::default(),
       space_pan_armed: false,
       pan_drag: None,
@@ -167,8 +173,54 @@ impl FlowEditor {
   }
 
   pub fn set_board_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-    self.board_zoom = zoom.clamp(0.25, 4.0);
+    let zoom = zoom.clamp(0.25, 4.0);
+    if (self.board_zoom - zoom).abs() < f32::EPSILON {
+      return;
+    }
+    let viewport = self.board_scroll.bounds().size;
+    let offset = self.board_scroll.offset();
+    let center = self.camera_center.unwrap_or(BoardPoint {
+      x: (-offset.x.as_f32() + viewport.width.as_f32() / 2.0) / self.board_zoom,
+      y: (-offset.y.as_f32() + viewport.height.as_f32() / 2.0) / self.board_zoom,
+    });
+    self.board_zoom = zoom;
+    self.camera_center = Some(center);
+    self.camera_apply_pending = true;
     cx.notify();
+  }
+
+  fn apply_camera_center(&mut self) {
+    if !self.camera_apply_pending {
+      self.sync_camera_center_from_scroll();
+      return;
+    }
+    let Some(center) = self.camera_center else {
+      return;
+    };
+    let viewport = self.board_scroll.bounds().size;
+    let max_offset = self.board_scroll.max_offset();
+    let max_x = (self.board_content_width - viewport.width).max(px(0.0));
+    let x = px(-(center.x * self.board_zoom - viewport.width.as_f32() / 2.0))
+      .min(px(0.0))
+      .max(-max_x);
+    let y = px(-(center.y * self.board_zoom - viewport.height.as_f32() / 2.0))
+      .min(px(0.0))
+      .max(-max_offset.height);
+    if self.board_scroll.offset() != point(x, y) {
+      self.board_scroll.set_offset(point(x, y));
+    }
+    self.camera_apply_pending = false;
+    self.sync_camera_center_from_scroll();
+    self.camera_center = None;
+  }
+
+  fn sync_camera_center_from_scroll(&mut self) {
+    let viewport = self.board_scroll.bounds().size;
+    let offset = self.board_scroll.offset();
+    self.camera_center = Some(BoardPoint {
+      x: (-offset.x.as_f32() + viewport.width.as_f32() / 2.0) / self.board_zoom,
+      y: (-offset.y.as_f32() + viewport.height.as_f32() / 2.0) / self.board_zoom,
+    });
   }
 
   pub fn zoom_percent(&self) -> f32 {
@@ -446,6 +498,7 @@ impl FlowEditor {
       editor
         .board_scroll
         .set_offset(pan_drag.scroll_anchor + (pan_drag.pending_position - pan_drag.pointer_anchor));
+      editor.sync_camera_center_from_scroll();
       cx.notify();
     });
   }
@@ -607,8 +660,11 @@ impl FlowEditor {
     let draft = self.drawing_points.clone();
     let client_document_theme = load_document_theme();
     let zoom = self.board_zoom;
+    let control_size = px(20.0 * zoom);
+    let control_icon_size = px(12.0 * zoom);
     let cell_layout = sheet_cell_layout(sheet, &self.cell_bounds, zoom);
     let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
+    let measured_board_width = board_width;
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
     let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
@@ -623,6 +679,15 @@ impl FlowEditor {
       .filter_map(|parent| children_by_parent.remove(&parent.id).map(|children| (parent.id, children)))
       .collect::<Vec<_>>();
     div()
+      .on_children_prepainted({
+        let weak_editor = weak_editor.clone();
+        move |_, _, cx| {
+          let _ = weak_editor.update(cx, |editor, _| {
+            editor.board_content_width = measured_board_width;
+            editor.apply_camera_center();
+          });
+        }
+      })
       .id("flow-columns")
       .relative()
       .min_w_full()
@@ -650,6 +715,7 @@ impl FlowEditor {
               .items_center()
               .justify_between()
               .font_weight(gpui::FontWeight::BOLD)
+              .text_size(px(14.0 * zoom))
               .text_color(side_color)
               .border_b_2()
               .border_color(side_color)
@@ -657,18 +723,18 @@ impl FlowEditor {
               .child(
                 div()
                   .flex()
-                  .gap_1()
+                  .gap(px(4.0 * zoom))
                   .child(
                     Button::new(("flow-send-to-document", column_index))
-                      .xsmall()
+                      .with_size(control_size)
                       .ghost()
                       .tooltip("Send to document")
-                      .child(Icon::default().path("icons/file-input.svg").xsmall())
+                      .child(Icon::default().path("icons/file-input.svg").with_size(control_icon_size))
                       .on_click(|_, _, _| {}),
                   )
                   .child(
                     Button::new(("flow-add-column-orphan", column_index))
-                      .xsmall()
+                      .with_size(control_size)
                       .ghost()
                       .tooltip("Add orphan at top")
                       .icon(IconName::Plus)
@@ -777,8 +843,9 @@ impl FlowEditor {
                   div()
                     .id(("flow-cell-drag-handle", id.as_u128() as u64))
                     .absolute()
-                    .top(px(2.0))
-                    .right(px(4.0))
+                    .top(px(2.0 * zoom))
+                    .right(px(4.0 * zoom))
+                    .text_size(px(14.0 * zoom))
                     .cursor_move()
                     .text_color(cx.theme().muted_foreground)
                     .child("⠿")
@@ -789,12 +856,12 @@ impl FlowEditor {
                   this.child(
                     Button::new(("flow-cell-reply", id.as_u128() as u64))
                       .absolute()
-                      .top(px(24.0))
-                      .right(px(2.0))
-                      .xsmall()
+                      .top(px(24.0 * zoom))
+                      .right(px(2.0 * zoom))
+                      .with_size(control_size)
                       .ghost()
                       .tooltip("Add first reply")
-                      .child(Icon::default().path("icons/message-square-reply.svg").xsmall())
+                      .child(Icon::default().path("icons/message-square-reply.svg").with_size(control_icon_size))
                       .on_click(move |_, window, cx| {
                         cx.stop_propagation();
                         reply_editor.update(cx, |editor, cx| {
@@ -978,6 +1045,7 @@ impl Render for FlowEditor {
           |_, _, _| {},
           move |bounds, _, window, cx| {
             let spacing = px(24.0 * board_zoom);
+            let dot_size = px(1.5 * board_zoom);
             let offset = grid_scroll.offset();
             let mut x = offset.x % spacing;
             let color = cx.theme().border.opacity(0.56);
@@ -985,7 +1053,7 @@ impl Render for FlowEditor {
               let mut y = offset.y % spacing;
               while y < bounds.size.height {
                 window.paint_quad(gpui::fill(
-                  gpui::Bounds::new(bounds.origin + point(x, y), gpui::size(px(1.5), px(1.5))),
+                  gpui::Bounds::new(bounds.origin + point(x, y), gpui::size(dot_size, dot_size)),
                   color,
                 ));
                 y += spacing;
@@ -1021,8 +1089,12 @@ impl Render for FlowEditor {
               let mut offset = editor.board_scroll.offset();
               offset.x += delta.y + delta.x;
               editor.board_scroll.set_offset(offset);
+              editor.sync_camera_center_from_scroll();
               cx.stop_propagation();
               cx.notify();
+            } else if !event.modifiers.control {
+              editor.camera_center = None;
+              cx.on_next_frame(window, |editor, _, _| editor.sync_camera_center_from_scroll());
             }
           }))
           .when(self.annotation_tool != AnnotationTool::None && !self.space_pan_armed, |this| {
