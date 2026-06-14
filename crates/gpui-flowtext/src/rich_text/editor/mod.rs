@@ -445,10 +445,13 @@ pub struct RichTextEditorStyleState {
 ///
 /// This is intentionally separate from document data. Future settings UI can
 /// edit this object without changing saved document content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
   pub allow_paragraph_breaks: bool,
+  pub flow_cell_surface: bool,
+  pub show_section_collapse_controls: bool,
+  pub caret_color: Option<gpui::Hsla>,
 }
 
 #[hotpath::measure_all]
@@ -457,6 +460,9 @@ impl Default for RichTextEditorConfig {
     Self {
       smart_word_selection: true,
       allow_paragraph_breaks: true,
+      flow_cell_surface: false,
+      show_section_collapse_controls: true,
+      caret_color: None,
     }
   }
 }

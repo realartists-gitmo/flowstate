@@ -2663,6 +2663,7 @@ dependencies = [
  "hotpath",
  "memchr",
  "mimalloc",
+ "palette",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -6301,6 +6302,7 @@ dependencies = [
  "fast-srgb8",
  "libm",
  "palette_derive",
+ "phf 0.11.3",
 ]
 
 [[package]]

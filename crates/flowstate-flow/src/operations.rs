@@ -10,6 +10,28 @@ pub enum RelativePosition {
 }
 
 impl FlowDocument {
+  pub fn child_append_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
+    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+    let parent_index = sheet.cells.iter().position(|cell| cell.id == parent_id).context("unknown cell")?;
+    Ok(
+      sheet
+        .cells
+        .iter()
+        .enumerate()
+        .filter(|(_, cell)| is_descendant_of(sheet, cell.id, parent_id))
+        .map(|(index, _)| index)
+        .max()
+        .unwrap_or(parent_index)
+        + 1,
+    )
+  }
+
+  pub fn child_prepend_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
+    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+    let parent_index = sheet.cells.iter().position(|cell| cell.id == parent_id).context("unknown cell")?;
+    Ok(parent_index + 1)
+  }
+
   pub fn deletion_fallback(&self, sheet_id: SheetId, cell_id: CellId) -> Option<CellId> {
     let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id)?;
     let definition = self.projection().format.sheet_type(sheet.sheet_type_id)?;
@@ -108,6 +130,10 @@ impl FlowDocument {
     Ok(id)
   }
 
+  pub fn add_orphan_at_column_top(&mut self, sheet_id: SheetId, column_index: usize) -> anyhow::Result<CellId> {
+    self.add_plain_cell(sheet_id, column_index, None, Some(0))
+  }
+
   pub fn add_sibling(&mut self, sheet_id: SheetId, cell_id: CellId, position: RelativePosition) -> anyhow::Result<CellId> {
     let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
     let index = sheet.cells.iter().position(|cell| cell.id == cell_id).context("unknown cell")?;
@@ -130,11 +156,20 @@ impl FlowDocument {
     if child_column >= definition.columns.len() {
       bail!("rightmost cells cannot receive responses");
     }
-    let insertion = sheet
-      .cells
-      .iter()
-      .position(|cell| cell.parent_id == Some(parent_id))
-      .unwrap_or(sheet.cells.len());
+    let insertion = self.child_append_index(sheet_id, parent_id)?;
+    self.add_plain_cell(sheet_id, child_column, Some(parent_id), Some(insertion))
+  }
+
+  pub fn add_first_response(&mut self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<CellId> {
+    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+    let parent = sheet.cells.iter().find(|cell| cell.id == parent_id).context("unknown cell")?;
+    let definition = self.projection().format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
+    let parent_column = definition.columns.iter().position(|column| column.id == parent.column_id).context("unknown column")?;
+    let child_column = parent_column + 1;
+    if child_column >= definition.columns.len() {
+      bail!("rightmost cells cannot receive responses");
+    }
+    let insertion = self.child_prepend_index(sheet_id, parent_id)?;
     self.add_plain_cell(sheet_id, child_column, Some(parent_id), Some(insertion))
   }
 
@@ -168,11 +203,14 @@ impl FlowDocument {
         .context("unknown cell")?;
       let mut document = cell.document()?;
       let paragraphs = std::sync::Arc::make_mut(&mut document.paragraphs);
+      let struck = paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.styles.strikethrough);
       for paragraph in paragraphs {
         for run in &mut paragraph.runs {
-          run.styles.strikethrough = true;
+          run.styles.strikethrough = !struck;
         }
+        paragraph.version = paragraph.version.wrapping_add(1);
       }
+      document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
       cell.document_bytes = flowstate_document::db8_bytes(&document)?;
       Ok(())
     })
@@ -200,6 +238,42 @@ impl FlowDocument {
     })
   }
 
+  pub fn ensure_cell_editable_projection(&mut self, sheet_id: SheetId, cell_id: CellId) -> anyhow::Result<bool> {
+    let cell = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?
+      .cells
+      .iter()
+      .find(|cell| cell.id == cell_id)
+      .context("unknown cell")?;
+    if cell.uses_summary_projection()? {
+      return Ok(false);
+    }
+    self.update(|projection| {
+      let cell = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?
+        .cells
+        .iter_mut()
+        .find(|cell| cell.id == cell_id)
+        .context("unknown cell")?;
+      let mut document = cell.document()?;
+      let paragraphs = std::sync::Arc::make_mut(&mut document.paragraphs);
+      let paragraph = paragraphs.first_mut().context("cell document has no paragraph")?;
+      paragraph.style = flowstate_document::PARAGRAPH_TAG;
+      paragraph.version = paragraph.version.wrapping_add(1);
+      document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
+      cell.document_bytes = flowstate_document::db8_bytes(&document)?;
+      Ok(())
+    })?;
+    Ok(true)
+  }
+
   pub fn move_cell(
     &mut self,
     sheet_id: SheetId,
@@ -214,40 +288,14 @@ impl FlowDocument {
       let column_id = definition.columns.get(target_column).context("column index out of range")?.id;
       let source = sheet.cells.iter().position(|cell| cell.id == cell_id).context("unknown cell")?;
       let mut cell = sheet.cells.remove(source);
-      let source_column = definition
-        .columns
-        .iter()
-        .position(|column| column.id == cell.column_id)
-        .context("unknown source column")?;
-      let delta = target_column as isize - source_column as isize;
       cell.column_id = column_id;
       cell.parent_id = new_parent;
-      let mut moving_parents = vec![cell_id];
-      while let Some(parent_id) = moving_parents.pop() {
-        let child_ids: Vec<_> = sheet
-          .cells
-          .iter()
-          .filter(|descendant| descendant.parent_id == Some(parent_id))
-          .map(|descendant| descendant.id)
-          .collect();
-        for child_id in child_ids {
-          let descendant = sheet.cells.iter_mut().find(|candidate| candidate.id == child_id).context("missing descendant")?;
-          let descendant_column = definition
-            .columns
-            .iter()
-            .position(|column| column.id == descendant.column_id)
-            .context("unknown descendant column")?;
-          let destination = descendant_column as isize + delta;
-          if let Ok(destination) = usize::try_from(destination)
-            && let Some(column) = definition.columns.get(destination)
-          {
-            descendant.column_id = column.id;
-            moving_parents.push(child_id);
-          } else {
-            descendant.parent_id = None;
-          }
+      for child in &mut sheet.cells {
+        if child.parent_id == Some(cell_id) {
+          child.parent_id = None;
         }
       }
+      let target_index = target_index.saturating_sub(usize::from(source < target_index));
       sheet.cells.insert(target_index.min(sheet.cells.len()), cell);
       Ok(())
     })
@@ -277,6 +325,15 @@ impl FlowDocument {
     })
   }
 
+  pub fn clear_all_annotations(&mut self, originator: &AnnotationOriginator) -> anyhow::Result<()> {
+    self.update(|projection| {
+      for sheet in &mut projection.sheets {
+        sheet.annotations.retain(|stroke| &stroke.originator != originator);
+      }
+      Ok(())
+    })
+  }
+
   pub fn delete_annotation(&mut self, sheet_id: SheetId, stroke_id: uuid::Uuid, originator: &AnnotationOriginator) -> anyhow::Result<bool> {
     let mut removed = false;
     self.update(|projection| {
@@ -288,6 +345,17 @@ impl FlowDocument {
     })?;
     Ok(removed)
   }
+}
+
+fn is_descendant_of(sheet: &Sheet, cell_id: CellId, ancestor_id: CellId) -> bool {
+  let mut parent = sheet.cells.iter().find(|cell| cell.id == cell_id).and_then(|cell| cell.parent_id);
+  while let Some(parent_id) = parent {
+    if parent_id == ancestor_id {
+      return true;
+    }
+    parent = sheet.cells.iter().find(|cell| cell.id == parent_id).and_then(|cell| cell.parent_id);
+  }
+  false
 }
 
 #[cfg(test)]
@@ -309,6 +377,53 @@ mod tests {
     let child = document.add_response(sheet, parent).unwrap();
     document.delete_cell(sheet, parent).unwrap();
     assert_eq!(document.projection().sheets[0].cells.iter().find(|cell| cell.id == child).unwrap().parent_id, None);
+  }
+
+  #[test]
+  fn moving_cell_down_uses_pre_removal_insertion_index() {
+    let (mut document, sheet_id) = document_with_sheet();
+    let first = document.add_plain_cell(sheet_id, 0, None, None).unwrap();
+    let second = document.add_plain_cell(sheet_id, 0, None, None).unwrap();
+    let third = document.add_plain_cell(sheet_id, 0, None, None).unwrap();
+
+    document.move_cell(sheet_id, first, 0, 2, None).unwrap();
+
+    let ids: Vec<_> = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    assert_eq!(ids, vec![second, first, third]);
+  }
+
+  #[test]
+  fn unsupported_cell_content_becomes_an_editable_tag_without_losing_text() {
+    let (mut document, sheet_id) = document_with_sheet();
+    let cell_id = document.add_plain_cell(sheet_id, 0, None, None).unwrap();
+    let source = flowstate_document::document_from_input(
+      flowstate_document::flowstate_document_theme(),
+      vec![flowstate_document::InputParagraph {
+        style: flowstate_document::ParagraphStyle::Normal,
+        runs: vec![flowstate_document::InputRun {
+          text: "Preserve me".into(),
+          styles: flowstate_document::RunStyles::default(),
+        }],
+      }],
+    );
+    document.replace_cell_document(sheet_id, cell_id, &source).unwrap();
+
+    assert!(document.ensure_cell_editable_projection(sheet_id, cell_id).unwrap());
+    let cell = &document.projection().sheets[0].cells[0];
+    assert_eq!(cell.summary_text().unwrap(), "Preserve me");
+    assert_eq!(cell.document().unwrap().paragraphs[0].style, flowstate_document::PARAGRAPH_TAG);
+  }
+
+  #[test]
+  fn quick_responses_append_after_existing_children() {
+    let (mut document, sheet_id) = document_with_sheet();
+    let parent = document.add_plain_cell(sheet_id, 0, None, None).unwrap();
+    let first = document.add_response(sheet_id, parent).unwrap();
+    let grandchild = document.add_response(sheet_id, first).unwrap();
+    let second = document.add_response(sheet_id, parent).unwrap();
+
+    let ids: Vec<_> = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    assert_eq!(ids, vec![parent, first, grandchild, second]);
   }
 
   #[test]
@@ -343,14 +458,21 @@ mod tests {
   }
 
   #[test]
-  fn moving_parent_carries_valid_descendants() {
+  fn moving_parent_orphans_children_and_leaves_them_in_place() {
     let (mut document, sheet) = document_with_sheet();
     let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
     let child = document.add_response(sheet, parent).unwrap();
+    let grandchild = document.add_response(sheet, child).unwrap();
+    let child_column = document.projection().sheets[0].cells.iter().find(|cell| cell.id == child).unwrap().column_id;
+    let grandchild_column = document.projection().sheets[0].cells.iter().find(|cell| cell.id == grandchild).unwrap().column_id;
     document.move_cell(sheet, parent, 1, 0, None).unwrap();
     let sheet = &document.projection().sheets[0];
-    let definition = &document.projection().format.sheet_types[0];
-    assert_eq!(sheet.cells.iter().find(|cell| cell.id == child).unwrap().column_id, definition.columns[2].id);
+    let child = sheet.cells.iter().find(|cell| cell.id == child).unwrap();
+    let grandchild = sheet.cells.iter().find(|cell| cell.id == grandchild).unwrap();
+    assert_eq!(child.column_id, child_column);
+    assert_eq!(child.parent_id, None);
+    assert_eq!(grandchild.column_id, grandchild_column);
+    assert_eq!(grandchild.parent_id, Some(child.id));
   }
 
   #[test]
@@ -362,6 +484,44 @@ mod tests {
     assert!(document.projection().sheets[0].cells.is_empty());
     assert!(document.redo().unwrap());
     assert_eq!(document.projection().sheets[0].cells.len(), 1);
+  }
+
+  #[test]
+  fn newly_added_top_orphan_precedes_every_existing_run() {
+    let (mut document, sheet) = document_with_sheet();
+    let first = document.add_plain_cell(sheet, 0, None, None).unwrap();
+    let second = document.add_plain_cell(sheet, 0, None, None).unwrap();
+    let newest = document.add_orphan_at_column_top(sheet, 1).unwrap();
+    let cells = &document.projection().sheets[0].cells;
+    assert_eq!(cells.iter().map(|cell| cell.id).collect::<Vec<_>>(), vec![newest, first, second]);
+  }
+
+  #[test]
+  fn striking_cell_updates_all_serialized_paragraph_runs() {
+    let (mut document, sheet) = document_with_sheet();
+    let cell = document.add_plain_cell(sheet, 0, None, None).unwrap();
+    document.strike_cell(sheet, cell).unwrap();
+    let cell = &document.projection().sheets[0].cells[0];
+    let rich_text = cell.document().unwrap();
+    assert!(rich_text.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.styles.strikethrough));
+    assert!(rich_text.blocks.iter().all(|block| match block {
+      flowstate_document::Block::Paragraph(paragraph) => paragraph.runs.iter().all(|run| run.styles.strikethrough),
+      _ => true,
+    }));
+    document.strike_cell(sheet, cell.id).unwrap();
+    let rich_text = document.projection().sheets[0].cells[0].document().unwrap();
+    assert!(rich_text.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| !run.styles.strikethrough));
+  }
+
+  #[test]
+  fn first_response_precedes_existing_child_subtrees() {
+    let (mut document, sheet) = document_with_sheet();
+    let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
+    let existing = document.add_response(sheet, parent).unwrap();
+    let grandchild = document.add_response(sheet, existing).unwrap();
+    let first = document.add_first_response(sheet, parent).unwrap();
+    let ids = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect::<Vec<_>>();
+    assert_eq!(ids, vec![parent, first, existing, grandchild]);
   }
 
   #[test]
@@ -378,6 +538,23 @@ mod tests {
     two.import_updates(&one_updates).unwrap();
     assert_eq!(one.projection().sheets[0].annotations.len(), 2);
     assert_eq!(two.projection().sheets[0].annotations.len(), 2);
+  }
+
+  #[test]
+  fn clearing_annotations_removes_only_originators_own_strokes_across_sheets() {
+    let (mut document, first_sheet) = document_with_sheet();
+    let sheet_type = document.projection().format.sheet_types[0].id;
+    let second_sheet = document.create_sheet("Other", sheet_type).unwrap();
+    for sheet in [first_sheet, second_sheet] {
+      document.add_annotation(sheet, test_stroke(sheet, "local")).unwrap();
+      document.add_annotation(sheet, test_stroke(sheet, "collaborator")).unwrap();
+    }
+
+    document.clear_all_annotations(&AnnotationOriginator("local".into())).unwrap();
+
+    assert!(document.projection().sheets.iter().all(|sheet| {
+      sheet.annotations.len() == 1 && sheet.annotations[0].originator == AnnotationOriginator("collaborator".into())
+    }));
   }
 
   #[test]
@@ -407,7 +584,7 @@ mod tests {
       originator: AnnotationOriginator(originator.into()),
       points: vec![BoardPoint { x: 0.0, y: 0.0 }, BoardPoint { x: 2.0, y: 2.0 }],
       style: StrokeStyle {
-        color_rgba: 0xff00_0000,
+        color_rgba: 0xff00_00ff,
         width: 2.0,
         opacity: 0.5,
       },

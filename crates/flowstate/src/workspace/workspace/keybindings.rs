@@ -46,15 +46,24 @@ impl Workspace {
           true
         },
         CommandId::InsertNewline => {
-          flow.update(cx, |editor, cx| editor.add_sibling(flowstate_flow::RelativePosition::After, cx));
+          flow.update(cx, |editor, cx| {
+            editor.add_sibling(flowstate_flow::RelativePosition::After, cx);
+            editor.focus_active_cell(window, cx);
+          });
           true
         },
         CommandId::InsertSoftLineBreak => {
-          flow.update(cx, |editor, cx| editor.add_response(cx));
+          flow.update(cx, |editor, cx| {
+            editor.add_response(cx);
+            editor.focus_active_cell(window, cx);
+          });
           true
         },
         CommandId::FlowAddSiblingAbove => {
-          flow.update(cx, |editor, cx| editor.add_sibling(flowstate_flow::RelativePosition::Before, cx));
+          flow.update(cx, |editor, cx| {
+            editor.add_sibling(flowstate_flow::RelativePosition::Before, cx);
+            editor.focus_active_cell(window, cx);
+          });
           true
         },
         CommandId::Backspace if flow.read(cx).active_cell_is_empty() => {

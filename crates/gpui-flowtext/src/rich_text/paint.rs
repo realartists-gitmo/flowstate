@@ -12,6 +12,7 @@ pub(super) fn paint_layout(
   drag_selection: Option<&EditorSelection>,
   show_caret: bool,
   caret_width: Pixels,
+  caret_color: Option<gpui::Hsla>,
   external_carets: &[ExternalCaret],
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
@@ -103,7 +104,7 @@ pub(super) fn paint_layout(
     && caret.intersects(&content_mask)
   {
     caret.size.width = caret_width;
-    window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), black()));
+    window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color.unwrap_or_else(black)));
   }
   for external_caret in external_carets {
     if let Some(mut caret) = caret_bounds(layout, external_caret.offset, bounds.origin)

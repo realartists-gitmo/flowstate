@@ -1,3 +1,4 @@
+mod cell_theme;
 pub mod editor;
 pub mod panel;
 pub mod ribbon;

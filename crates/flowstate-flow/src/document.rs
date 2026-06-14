@@ -113,7 +113,7 @@ impl Cell {
     let document = flowstate_document::document_from_input(
       flowstate_document::flowstate_document_theme(),
       vec![flowstate_document::InputParagraph {
-        style: flowstate_document::ParagraphStyle::Normal,
+        style: flowstate_document::PARAGRAPH_TAG,
         runs: vec![flowstate_document::InputRun {
           text: String::new(),
           styles: flowstate_document::RunStyles::default(),
@@ -139,61 +139,51 @@ impl Cell {
 
   pub fn summary_text(&self) -> std::io::Result<String> {
     let document = self.document()?;
-    if let Some((index, _)) = document
-      .paragraphs
-      .iter()
-      .enumerate()
-      .find(|(_, paragraph)| paragraph.style == flowstate_document::PARAGRAPH_ANALYTIC)
-    {
-      return Ok(paragraph_text(&document, index));
-    }
-    if let Some((tag_index, _)) = document
-      .paragraphs
-      .iter()
-      .enumerate()
-      .find(|(_, paragraph)| paragraph.style == flowstate_document::PARAGRAPH_TAG)
-    {
-      let mut summary = paragraph_text(&document, tag_index);
-      for (index, paragraph) in document.paragraphs.iter().enumerate().skip(tag_index + 1) {
-        if matches!(
-          paragraph.style,
-          flowstate_document::PARAGRAPH_TAG
-            | flowstate_document::PARAGRAPH_ANALYTIC
-            | flowstate_document::PARAGRAPH_BLOCK
-            | flowstate_document::PARAGRAPH_HAT
-            | flowstate_document::PARAGRAPH_POCKET
-        ) {
-          break;
-        }
-        let text = paragraph_text(&document, index);
-        let mut offset = 0;
-        for run in &paragraph.runs {
-          let end = offset + run.len;
-          if run.styles.semantic == flowstate_document::SEMANTIC_CITE {
-            if !summary.is_empty() {
-              summary.push('\n');
-            }
-            summary.push_str(&text[offset..end]);
-          }
-          offset = end;
-        }
-        if summary.contains('\n') {
-          break;
-        }
+    let mut projection = Vec::new();
+    for (index, paragraph) in document.paragraphs.iter().enumerate() {
+      if matches!(
+        paragraph.style,
+        flowstate_document::PARAGRAPH_TAG
+          | flowstate_document::PARAGRAPH_UNDERTAG
+          | flowstate_document::PARAGRAPH_ANALYTIC
+      ) {
+        projection.push(paragraph_text(&document, index));
+        continue;
       }
-      return Ok(summary);
+
+      let text = paragraph_text(&document, index);
+      let mut cite_text = String::new();
+      let mut offset = 0;
+      for run in &paragraph.runs {
+        let end = offset + run.len;
+        if run.styles.semantic == flowstate_document::SEMANTIC_CITE {
+          cite_text.push_str(&text[offset..end]);
+        }
+        offset = end;
+      }
+      if !cite_text.is_empty() {
+        projection.push(cite_text);
+      }
+    }
+    if !projection.is_empty() {
+      return Ok(projection.join("\n"));
     }
     Ok(document.text.to_string())
   }
 
   pub fn uses_summary_projection(&self) -> std::io::Result<bool> {
     let document = self.document()?;
-    Ok(
-      document
-        .paragraphs
+    Ok(document.paragraphs.iter().any(|paragraph| {
+      matches!(
+        paragraph.style,
+        flowstate_document::PARAGRAPH_TAG
+          | flowstate_document::PARAGRAPH_UNDERTAG
+          | flowstate_document::PARAGRAPH_ANALYTIC
+      ) || paragraph
+        .runs
         .iter()
-        .any(|paragraph| matches!(paragraph.style, flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_ANALYTIC)),
-    )
+        .any(|run| run.styles.semantic == flowstate_document::SEMANTIC_CITE)
+    }))
   }
 }
 
@@ -700,6 +690,54 @@ fn merge_annotations_from_loro(projection: &mut FlowProjection, loro: &LoroDoc) 
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn cell_with_paragraphs(paragraphs: Vec<flowstate_document::InputParagraph>) -> Cell {
+    let document = flowstate_document::document_from_input(flowstate_document::flowstate_document_theme(), paragraphs);
+    Cell {
+      id: Uuid::new_v4(),
+      column_id: Uuid::new_v4(),
+      parent_id: None,
+      document_bytes: flowstate_document::db8_bytes(&document).unwrap(),
+    }
+  }
+
+  fn run(text: &str) -> flowstate_document::InputRun {
+    flowstate_document::InputRun {
+      text: text.into(),
+      styles: flowstate_document::RunStyles::default(),
+    }
+  }
+
+  fn cite(text: &str) -> flowstate_document::InputRun {
+    let mut run = run(text);
+    run.styles.semantic = flowstate_document::SEMANTIC_CITE;
+    run
+  }
+
+  #[test]
+  fn summary_projects_mixed_card_and_analytic_content_in_document_order() {
+    let cell = cell_with_paragraphs(vec![
+      flowstate_document::InputParagraph {
+        style: flowstate_document::PARAGRAPH_TAG,
+        runs: vec![run("Tag")],
+      },
+      flowstate_document::InputParagraph {
+        style: flowstate_document::ParagraphStyle::Normal,
+        runs: vec![run("hidden before "), cite("Cite"), run(" hidden after")],
+      },
+      flowstate_document::InputParagraph {
+        style: flowstate_document::PARAGRAPH_UNDERTAG,
+        runs: vec![run("Undertag")],
+      },
+      flowstate_document::InputParagraph {
+        style: flowstate_document::PARAGRAPH_ANALYTIC,
+        runs: vec![run("Analytic")],
+      },
+    ]);
+
+    assert_eq!(cell.summary_text().unwrap(), "Tag\nCite\nUndertag\nAnalytic");
+    assert!(cell.uses_summary_projection().unwrap());
+  }
 
   #[test]
   fn round_trips_loro_snapshot() {

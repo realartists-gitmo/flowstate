@@ -1,8 +1,8 @@
 use flowstate_flow::RelativePosition;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, Render, Subscription, Window, div, prelude::*, px};
+use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*, px};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::{ActiveTheme as _, Disableable as _, Sizable as _};
+use gpui_component::{ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _};
 
 use crate::flow::{AnnotationTool, FlowEditor};
 
@@ -51,8 +51,6 @@ impl Render for FlowRibbon {
     let editor = self.editor.clone();
     let undo_editor = editor.clone();
     let redo_editor = editor.clone();
-    let create_aff_editor = editor.clone();
-    let create_neg_editor = editor.clone();
     let response_editor = editor.clone();
     let first_argument_editor = editor.clone();
     let previous_sheet_editor = editor.clone();
@@ -68,6 +66,17 @@ impl Render for FlowRibbon {
     let clear_editor = self.editor.clone();
     let has_active_sheet = self.editor.read(cx).active_sheet().is_some();
     let has_active_cell = self.editor.read(cx).active_cell().is_some();
+    #[allow(clippy::needless_collect, reason = "Release the editor read guard before constructing buttons that clone the editor entity.")]
+    let sheet_types: Vec<_> = self
+      .editor
+      .read(cx)
+      .document()
+      .projection()
+      .format
+      .sheet_types
+      .iter()
+      .map(|sheet_type| sheet_type.name.clone())
+      .collect();
     let sheet_name_input = self.editor.read(cx).active_sheet().and_then(|sheet_id| {
       let sheet_name = self
         .editor
@@ -103,6 +112,10 @@ impl Render for FlowRibbon {
       .gap(px(8.0))
       .px(px(12.0))
       .bg(cx.theme().secondary)
+      .on_mouse_down(MouseButton::Left, {
+        let editor = self.editor.clone();
+        move |_: &MouseDownEvent, _, cx| editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::None, cx))
+      })
       .when_some(sheet_name_input, |this, input| this.child(div().w(px(180.0)).child(Input::new(&input).w_full())))
       .child(
         Button::new("flow-undo")
@@ -118,18 +131,13 @@ impl Render for FlowRibbon {
           .disabled(!self.editor.read(cx).can_redo())
           .on_click(move |_, _, cx| redo_editor.update(cx, |editor, cx| editor.redo(cx))),
       )
-      .child(
-        Button::new("flow-create-aff-sheet")
-          .label("New affirmative")
+      .children(sheet_types.into_iter().enumerate().map(|(index, name)| {
+        let editor = self.editor.clone();
+        Button::new(("flow-create-sheet-type", index))
+          .label(format!("New {name}"))
           .small()
-          .on_click(move |_, _, cx| create_aff_editor.update(cx, |editor, cx| editor.create_sheet_of_type(0, cx))),
-      )
-      .child(
-        Button::new("flow-create-neg-sheet")
-          .label("New negative")
-          .small()
-          .on_click(move |_, _, cx| create_neg_editor.update(cx, |editor, cx| editor.create_sheet_of_type(1, cx))),
-      )
+          .on_click(move |_, _, cx| editor.update(cx, |editor, cx| editor.create_sheet_of_type(index, cx)))
+      }))
       .child(
         Button::new("flow-move-sheet-left")
           .label("Move sheet left")
@@ -157,28 +165,40 @@ impl Render for FlowRibbon {
           .label("Add argument")
           .small()
           .disabled(!has_active_sheet)
-          .on_click(move |_, _, cx| first_argument_editor.update(cx, |editor, cx| editor.add_first_argument(cx))),
+          .on_click(move |_, window, cx| first_argument_editor.update(cx, |editor, cx| {
+            editor.add_first_argument(cx);
+            editor.focus_active_cell(window, cx);
+          })),
       )
       .child(
         Button::new("flow-add-response")
           .label("Add response")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, _, cx| response_editor.update(cx, |editor, cx| editor.add_response(cx))),
+          .on_click(move |_, window, cx| response_editor.update(cx, |editor, cx| {
+            editor.add_response(cx);
+            editor.focus_active_cell(window, cx);
+          })),
       )
       .child(
         Button::new("flow-add-sibling-above")
           .label("Sibling above")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, _, cx| above_editor.update(cx, |editor, cx| editor.add_sibling(RelativePosition::Before, cx))),
+          .on_click(move |_, window, cx| above_editor.update(cx, |editor, cx| {
+            editor.add_sibling(RelativePosition::Before, cx);
+            editor.focus_active_cell(window, cx);
+          })),
       )
       .child(
         Button::new("flow-add-sibling")
           .label("Add sibling")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, _, cx| below_editor.update(cx, |editor, cx| editor.add_sibling(RelativePosition::After, cx))),
+          .on_click(move |_, window, cx| below_editor.update(cx, |editor, cx| {
+            editor.add_sibling(RelativePosition::After, cx);
+            editor.focus_active_cell(window, cx);
+          })),
       )
       .child(
         Button::new("flow-delete-selected")
@@ -192,6 +212,7 @@ impl Render for FlowRibbon {
         Button::new("flow-strike-selected")
           .label("Strike")
           .small()
+          .selected(self.editor.read(cx).active_cell_is_struck())
           .disabled(!has_active_cell)
           .on_click(move |_, _, cx| strike_editor.update(cx, |editor, cx| editor.strike_selected(cx))),
       )
@@ -199,13 +220,15 @@ impl Render for FlowRibbon {
         Button::new("flow-arm-marker")
           .label("Marker")
           .small()
-          .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::Marker, cx))),
+          .selected(self.editor.read(cx).annotation_tool() == AnnotationTool::Marker)
+          .on_click(move |_, _, cx| marker_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Marker, cx))),
       )
       .child(
         Button::new("flow-arm-eraser")
           .label("Eraser")
           .small()
-          .on_click(move |_, _, cx| eraser_editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::Eraser, cx))),
+          .selected(self.editor.read(cx).annotation_tool() == AnnotationTool::Eraser)
+          .on_click(move |_, _, cx| eraser_editor.update(cx, |editor, cx| editor.toggle_annotation_tool(AnnotationTool::Eraser, cx))),
       )
       .child(
         Button::new("flow-toggle-annotations")

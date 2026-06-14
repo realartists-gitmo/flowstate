@@ -353,6 +353,8 @@ impl AssetSource for AppAssets {
       "icons/underline.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/underline.svg")))),
       "icons/archive.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/archive.svg")))),
       "icons/file-search-corner.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/file-search-corner.svg")))),
+      "icons/file-input.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/file-input.svg")))),
+      "icons/message-square-reply.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/message-square-reply.svg")))),
       "icons/notebook-text.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/notebook-text.svg")))),
       "icons/table-of-contents.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/table-of-contents.svg")))),
       "icons/panel-top-open.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-open.svg")))),
@@ -412,6 +414,12 @@ impl AssetSource for AppAssets {
     }
     if "icons/file-search-corner.svg".starts_with(path) {
       assets.push("icons/file-search-corner.svg".into());
+    }
+    if "icons/file-input.svg".starts_with(path) {
+      assets.push("icons/file-input.svg".into());
+    }
+    if "icons/message-square-reply.svg".starts_with(path) {
+      assets.push("icons/message-square-reply.svg".into());
     }
     if "icons/notebook-text.svg".starts_with(path) {
       assets.push("icons/notebook-text.svg".into());
