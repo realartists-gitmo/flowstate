@@ -1,5 +1,5 @@
 use flowstate_flow::{AnnotationOriginator, AnnotationStroke, BoardPoint, BoardRect, StrokeStyle};
-use gpui::{Context, Pixels, Point};
+use gpui::{Context, Hsla, PathBuilder, Pixels, Point, Window, point, px};
 use gpui_component::PixelsExt as _;
 
 use super::{AnnotationTool, FlowEditor};
@@ -49,6 +49,13 @@ impl FlowEditor {
       x: (position.x.as_f32() - self.viewport_origin.x) / self.board_zoom,
       y: (position.y.as_f32() - self.viewport_origin.y) / self.board_zoom,
     }
+  }
+
+  pub(super) fn set_viewport_origin(&mut self, origin: Point<Pixels>) {
+    self.viewport_origin = BoardPoint {
+      x: origin.x.as_f32(),
+      y: origin.y.as_f32(),
+    };
   }
 
   pub(super) fn begin_annotation(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
@@ -192,4 +199,18 @@ fn segment_distance(point: BoardPoint, start: BoardPoint, end: BoardPoint) -> f3
   let nearest_x = start.x + t * dx;
   let nearest_y = start.y + t * dy;
   (point.x - nearest_x).hypot(point.y - nearest_y)
+}
+
+pub(super) fn paint_stroke(origin: Point<Pixels>, points: &[BoardPoint], width: Pixels, color: Hsla, zoom: f32, window: &mut Window) {
+  let Some(first) = points.first() else {
+    return;
+  };
+  let mut path = PathBuilder::stroke(width);
+  path.move_to(point(origin.x + px(first.x * zoom), origin.y + px(first.y * zoom)));
+  for point_value in &points[1..] {
+    path.line_to(point(origin.x + px(point_value.x * zoom), origin.y + px(point_value.y * zoom)));
+  }
+  if let Ok(path) = path.build() {
+    window.paint_path(path, color);
+  }
 }

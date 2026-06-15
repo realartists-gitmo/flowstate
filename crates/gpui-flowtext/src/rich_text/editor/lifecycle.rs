@@ -33,7 +33,7 @@ impl RichTextEditor {
       last_send_document_generation: None,
       last_format_export_generation: None,
       zoom_percent: 100.0,
-      zoom_scroll_anchor: None,
+      zoom_anchor: None,
       zoom_anchor_apply_pending: false,
       save_status: SaveStatus::Saved,
       undo_stack: Vec::new(),
@@ -137,6 +137,8 @@ impl RichTextEditor {
     self.last_send_document_generation = None;
     self.last_format_export_generation = None;
     self.zoom_percent = 100.0;
+    self.zoom_anchor = None;
+    self.zoom_anchor_apply_pending = false;
     self.collapsed_section_ids.clear();
     self.hovered_collapse_paragraph = None;
     self.document.theme.zoom_factor = 1.0;

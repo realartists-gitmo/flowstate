@@ -873,7 +873,7 @@ pub struct RichTextEditor {
   last_send_document_generation: Option<u64>,
   last_format_export_generation: Option<u64>,
   zoom_percent: f32,
-  zoom_scroll_anchor: Option<ScrollAnchorSnapshot>,
+  zoom_anchor: Option<ZoomAnchorSnapshot>,
   zoom_anchor_apply_pending: bool,
   save_status: SaveStatus,
   undo_stack: Vec<EditRecord>,

@@ -5,6 +5,7 @@ use palette::{FromColor as _, LinSrgb, Oklch, Srgb};
 pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &DocumentTheme, foreground: Hsla, background: Hsla, zoom: f32) {
   document.theme = client_theme.clone();
   document.theme.zoom_factor *= zoom;
+  scale_flow_layout_metrics(&mut document.theme, zoom);
   let source_default = document.theme.default_text_color;
   document.theme.default_text_color = foreground;
   document.theme.document_background_color = transparent_black();
@@ -30,6 +31,19 @@ pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &Docu
   }
   for style in document.theme.custom_highlight_styles.values_mut() {
     style.color = transform_color(style.color, source_default, foreground, background, false);
+  }
+}
+
+fn scale_flow_layout_metrics(theme: &mut DocumentTheme, zoom: f32) {
+  theme.paragraph_after *= zoom;
+  for style in theme.custom_paragraph_styles.values_mut() {
+    style.spacing_before *= zoom;
+    style.spacing_after *= zoom;
+    if let Some(border) = style.border.as_mut() {
+      border.width *= zoom;
+      border.space_x *= zoom;
+      border.space_y *= zoom;
+    }
   }
 }
 
@@ -116,7 +130,19 @@ fn ensure_contrast(color: Hsla, background: Hsla, minimum_ratio: f32) -> Hsla {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use gpui::rgba;
+  use gpui::{px, rgba};
+
+  #[test]
+  fn flow_layout_metrics_scale_with_board_zoom() {
+    let mut theme = DocumentTheme {
+      paragraph_after: px(12.0),
+      ..DocumentTheme::default()
+    };
+
+    scale_flow_layout_metrics(&mut theme, 0.25);
+
+    assert_eq!(theme.paragraph_after, px(3.0));
+  }
 
   #[test]
   fn transformed_style_colors_preserve_alpha() {

@@ -1,12 +1,10 @@
 use std::path::PathBuf;
 use std::collections::HashSet;
 
-use flowstate_flow::{
-  AnnotationOriginator, BoardPoint, BoardRect, CellId, FlowDocument, RelativePosition, SheetId, VersionVector,
-};
+use flowstate_flow::{AnnotationOriginator, BoardPoint, CellId, FlowDocument, RelativePosition, SheetId, VersionVector};
 use gpui::{
   AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent,
-  KeyDownEvent, KeyUpEvent, MouseMoveEvent, MouseUpEvent, PathBuilder, Render, SharedString, Subscription, Task, Window, canvas, div, point,
+  KeyDownEvent, KeyUpEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Subscription, Task, Window, canvas, div, point,
   prelude::*, px, rgba, ScrollHandle, ScrollWheelEvent,
 };
 use gpui_component::{Icon, IconName, Sizable as _};
@@ -23,11 +21,16 @@ use crate::{
 
 mod annotation;
 mod cell_editing;
+mod connector;
 mod drag_drop;
 mod layout;
+mod zoom;
 
+use annotation::paint_stroke;
+use connector::paint_connector_family;
 use drag_drop::{CellDropDestination, FlowCellDrag, FlowCellDragPreview};
-use layout::sheet_cell_layout;
+use layout::{CellMeasurement, sheet_cell_layout};
+use zoom::grid_dot_metrics;
 
 #[derive(Clone, Debug)]
 pub enum FlowEditorEvent {
@@ -68,11 +71,11 @@ pub struct FlowEditor {
   cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
   pending_cell_drop: Option<CellDropDestination>,
   cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
+  cell_measurements: std::collections::HashMap<CellId, CellMeasurement>,
   board_scroll: ScrollHandle,
   board_zoom: f32,
   camera_center: Option<BoardPoint>,
   camera_apply_pending: bool,
-  board_content_width: gpui::Pixels,
   viewport_origin: BoardPoint,
   space_pan_armed: bool,
   pan_drag: Option<PanDragState>,
@@ -107,11 +110,11 @@ impl FlowEditor {
       cell_editor_subscriptions: std::collections::HashMap::new(),
       pending_cell_drop: None,
       cell_bounds: std::collections::HashMap::new(),
+      cell_measurements: std::collections::HashMap::new(),
       board_scroll: ScrollHandle::new(),
       board_zoom: 1.0,
       camera_center: None,
       camera_apply_pending: false,
-      board_content_width: px(0.0),
       viewport_origin: BoardPoint::default(),
       space_pan_armed: false,
       pan_drag: None,
@@ -166,94 +169,6 @@ impl FlowEditor {
 
   pub fn annotations_visible(&self) -> bool {
     self.active_sheet.is_some_and(|sheet| !self.hidden_annotation_sheets.contains(&sheet))
-  }
-
-  pub fn board_zoom(&self) -> f32 {
-    self.board_zoom
-  }
-
-  pub fn set_board_zoom(&mut self, zoom: f32, cx: &mut Context<Self>) {
-    let zoom = zoom.clamp(0.25, 4.0);
-    if (self.board_zoom - zoom).abs() < f32::EPSILON {
-      return;
-    }
-    let viewport = self.board_scroll.bounds().size;
-    let offset = self.board_scroll.offset();
-    let center = self.camera_center.unwrap_or(BoardPoint {
-      x: (-offset.x.as_f32() + viewport.width.as_f32() / 2.0) / self.board_zoom,
-      y: (-offset.y.as_f32() + viewport.height.as_f32() / 2.0) / self.board_zoom,
-    });
-    self.board_zoom = zoom;
-    self.camera_center = Some(center);
-    self.camera_apply_pending = true;
-    cx.notify();
-  }
-
-  fn apply_camera_center(&mut self) {
-    if !self.camera_apply_pending {
-      self.sync_camera_center_from_scroll();
-      return;
-    }
-    let Some(center) = self.camera_center else {
-      return;
-    };
-    let viewport = self.board_scroll.bounds().size;
-    let max_offset = self.board_scroll.max_offset();
-    let max_x = (self.board_content_width - viewport.width).max(px(0.0));
-    let x = px(-(center.x * self.board_zoom - viewport.width.as_f32() / 2.0))
-      .min(px(0.0))
-      .max(-max_x);
-    let y = px(-(center.y * self.board_zoom - viewport.height.as_f32() / 2.0))
-      .min(px(0.0))
-      .max(-max_offset.height);
-    if self.board_scroll.offset() != point(x, y) {
-      self.board_scroll.set_offset(point(x, y));
-    }
-    self.camera_apply_pending = false;
-    self.sync_camera_center_from_scroll();
-    self.camera_center = None;
-  }
-
-  fn sync_camera_center_from_scroll(&mut self) {
-    let viewport = self.board_scroll.bounds().size;
-    let offset = self.board_scroll.offset();
-    self.camera_center = Some(BoardPoint {
-      x: (-offset.x.as_f32() + viewport.width.as_f32() / 2.0) / self.board_zoom,
-      y: (-offset.y.as_f32() + viewport.height.as_f32() / 2.0) / self.board_zoom,
-    });
-  }
-
-  pub fn zoom_percent(&self) -> f32 {
-    self.board_zoom * 100.0
-  }
-
-  pub fn set_zoom_percent(&mut self, percent: f32, cx: &mut Context<Self>) {
-    self.set_board_zoom(percent / 100.0, cx);
-  }
-
-  pub fn zoom_in(&mut self, cx: &mut Context<Self>) {
-    self.set_zoom_percent(self.zoom_percent() + 10.0, cx);
-  }
-
-  pub fn zoom_out(&mut self, cx: &mut Context<Self>) {
-    self.set_zoom_percent(self.zoom_percent() - 10.0, cx);
-  }
-
-  pub fn visible_board_rect(&self) -> BoardRect {
-    let bounds = self.board_scroll.bounds();
-    let offset = self.board_scroll.offset();
-    let scroll_x = -offset.x.as_f32();
-    let scroll_y = -offset.y.as_f32();
-    BoardRect {
-      min: BoardPoint {
-        x: scroll_x,
-        y: scroll_y,
-      },
-      max: BoardPoint {
-        x: scroll_x + bounds.size.width.as_f32() / self.board_zoom,
-        y: scroll_y + bounds.size.height.as_f32() / self.board_zoom,
-      },
-    }
   }
 
   pub fn document_path(&self) -> Option<&PathBuf> {
@@ -423,14 +338,21 @@ impl FlowEditor {
   }
 
   fn set_cell_bounds(&mut self, cell_id: CellId, bounds: Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
-    let size_changed = self.cell_bounds.get(&cell_id).is_none_or(|previous| previous.size != bounds.size);
     self.cell_bounds.insert(cell_id, bounds);
-    if size_changed {
+    let screen_height = bounds.size.height.as_f32();
+    let model_height_changed = match self.cell_measurements.entry(cell_id) {
+      std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().update(screen_height, self.board_zoom),
+      std::collections::hash_map::Entry::Vacant(entry) => {
+        entry.insert(CellMeasurement::new(screen_height, self.board_zoom));
+        true
+      },
+    };
+    if model_height_changed {
       cx.notify();
     }
   }
 
-  fn scroll_cell_into_view(&self, cell_id: CellId) {
+  fn scroll_cell_into_view(&mut self, cell_id: CellId) {
     let Some(cell) = self.cell_bounds.get(&cell_id) else {
       return;
     };
@@ -447,13 +369,7 @@ impl FlowEditor {
       offset.y -= cell.bottom() - viewport.bottom();
     }
     self.board_scroll.set_offset(offset);
-  }
-
-  fn set_viewport_origin(&mut self, origin: gpui::Point<gpui::Pixels>) {
-    self.viewport_origin = BoardPoint {
-      x: origin.x.as_f32(),
-      y: origin.y.as_f32(),
-    };
+    self.sync_camera_center_from_scroll();
   }
 
   fn cell_text_color(&self, cell_id: CellId, cx: &App) -> gpui::Hsla {
@@ -662,9 +578,8 @@ impl FlowEditor {
     let zoom = self.board_zoom;
     let control_size = px(20.0 * zoom);
     let control_icon_size = px(12.0 * zoom);
-    let cell_layout = sheet_cell_layout(sheet, &self.cell_bounds, zoom);
+    let cell_layout = sheet_cell_layout(sheet, &self.cell_measurements, zoom);
     let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
-    let measured_board_width = board_width;
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
     let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
@@ -679,15 +594,6 @@ impl FlowEditor {
       .filter_map(|parent| children_by_parent.remove(&parent.id).map(|children| (parent.id, children)))
       .collect::<Vec<_>>();
     div()
-      .on_children_prepainted({
-        let weak_editor = weak_editor.clone();
-        move |_, _, cx| {
-          let _ = weak_editor.update(cx, |editor, _| {
-            editor.board_content_width = measured_board_width;
-            editor.apply_camera_center();
-          });
-        }
-      })
       .id("flow-columns")
       .relative()
       .min_w_full()
@@ -717,7 +623,7 @@ impl FlowEditor {
               .font_weight(gpui::FontWeight::BOLD)
               .text_size(px(14.0 * zoom))
               .text_color(side_color)
-              .border_b_2()
+              .border_b(px(2.0 * zoom))
               .border_color(side_color)
               .child(column.label.clone())
               .child(
@@ -797,7 +703,7 @@ impl FlowEditor {
                 .min_h(px(54.0 * zoom))
                 .p(px(10.0 * zoom))
                 .rounded(px(6.0 * zoom))
-                .border_1()
+                .border(px(1.0 * zoom))
                 .border_color(if active == Some(id) {
                   side_palette.active
                 } else {
@@ -838,7 +744,7 @@ impl FlowEditor {
                   editor.finish_cell_drop(drag.cell_id, cx);
                   cx.stop_propagation();
                 }))
-                .when(is_drop_target, |this| this.border_2().border_color(side_palette.active))
+                .when(is_drop_target, |this| this.border(px(2.0 * zoom)).border_color(side_palette.active))
                 .child(
                   div()
                     .id(("flow-cell-drag-handle", id.as_u128() as u64))
@@ -895,43 +801,11 @@ impl FlowEditor {
               let Some(parent) = connector_bounds.get(parent_id) else {
                 continue;
               };
-              let children = child_ids.iter().filter_map(|id| connector_bounds.get(id)).collect::<Vec<_>>();
-              let Some(first_child) = children.first() else {
-                continue;
-              };
-              let scale = window.scale_factor();
-              let snap = |value: gpui::Pixels| px(((value.as_f32() * scale).floor() + 0.5) / scale);
-              let start = point(snap(parent.right()), snap(parent.center().y));
-              let midpoint = snap(start.x + (first_child.left() - start.x) / 2.0);
-              let first_left = snap(first_child.left());
-              if children.len() == 1 {
-                let mut path = PathBuilder::stroke(px(1.0));
-                path.move_to(start);
-                path.line_to(point(first_left, start.y));
-                if let Ok(path) = path.build() {
-                  window.paint_path(path, cx.theme().foreground);
-                }
-                continue;
-              }
-              let lowest_y = children.iter().skip(1).map(|child| snap(child.center().y)).max().unwrap_or(start.y);
-              let radius = cx.theme().radius.min(px(10.0)).min((lowest_y - start.y).abs()).min((first_child.left() - midpoint).abs());
-              let mut path = PathBuilder::stroke(px(1.0));
-              path.move_to(start);
-              path.line_to(point(first_left, start.y));
-              path.move_to(point(midpoint, start.y));
-              path.line_to(point(midpoint, lowest_y - radius));
-              path.curve_to(point(midpoint + radius, lowest_y), point(midpoint, lowest_y));
-              path.line_to(point(snap(children.last().unwrap().left()), lowest_y));
-              for child in children.iter().skip(1) {
-                let child_y = snap(child.center().y);
-                if child_y != lowest_y {
-                  path.move_to(point(midpoint, child_y));
-                  path.line_to(point(snap(child.left()), child_y));
-                }
-              }
-              if let Ok(path) = path.build() {
-                window.paint_path(path, cx.theme().foreground);
-              }
+              let children = child_ids
+                .iter()
+                .filter_map(|id| connector_bounds.get(id).copied())
+                .collect::<Vec<_>>();
+              paint_connector_family(*parent, &children, cx.theme().foreground, window);
             }
           },
         )
@@ -971,27 +845,6 @@ impl FlowEditor {
   }
 }
 
-fn paint_stroke(
-  origin: gpui::Point<gpui::Pixels>,
-  points: &[BoardPoint],
-  width: gpui::Pixels,
-  color: gpui::Hsla,
-  zoom: f32,
-  window: &mut Window,
-) {
-  let Some(first) = points.first() else {
-    return;
-  };
-  let mut path = PathBuilder::stroke(width);
-  path.move_to(point(origin.x + px(first.x * zoom), origin.y + px(first.y * zoom)));
-  for point_value in &points[1..] {
-    path.line_to(point(origin.x + px(point_value.x * zoom), origin.y + px(point_value.y * zoom)));
-  }
-  if let Ok(path) = path.build() {
-    window.paint_path(path, color);
-  }
-}
-
 impl EventEmitter<FlowEditorEvent> for FlowEditor {}
 
 impl Focusable for FlowEditor {
@@ -1002,6 +855,7 @@ impl Focusable for FlowEditor {
 
 impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    self.apply_pending_camera_center();
     self.refresh_active_cell_theme(cx);
     if self.pan_drag.is_some() {
       let editor = cx.entity();
@@ -1045,15 +899,17 @@ impl Render for FlowEditor {
           |_, _, _| {},
           move |bounds, _, window, cx| {
             let spacing = px(24.0 * board_zoom);
-            let dot_size = px(1.5 * board_zoom);
+            let scale = window.scale_factor();
+            let (dot_size, dot_opacity) = grid_dot_metrics(board_zoom, scale);
             let offset = grid_scroll.offset();
             let mut x = offset.x % spacing;
-            let color = cx.theme().border.opacity(0.56);
+            let color = cx.theme().border.opacity(0.56 * dot_opacity);
+            let snap = |value: gpui::Pixels| px((value.as_f32() * scale).round() / scale);
             while x < bounds.size.width {
               let mut y = offset.y % spacing;
               while y < bounds.size.height {
                 window.paint_quad(gpui::fill(
-                  gpui::Bounds::new(bounds.origin + point(x, y), gpui::size(dot_size, dot_size)),
+                  gpui::Bounds::new(bounds.origin + point(snap(x), snap(y)), gpui::size(dot_size, dot_size)),
                   color,
                 ));
                 y += spacing;

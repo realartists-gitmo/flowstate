@@ -1,10 +1,39 @@
 use std::collections::HashMap;
 
 use flowstate_flow::{Cell, CellId, Sheet};
-use gpui::{Bounds, Pixels};
-use gpui_component::PixelsExt as _;
 
 pub(super) const CELL_GAP: f32 = 16.0;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) struct CellMeasurement {
+  pub model_height: f32,
+  screen_height: f32,
+  zoom: f32,
+}
+
+impl CellMeasurement {
+  pub fn new(screen_height: f32, zoom: f32) -> Self {
+    Self {
+      model_height: screen_height / zoom.max(0.01),
+      screen_height,
+      zoom,
+    }
+  }
+
+  pub fn update(&mut self, screen_height: f32, zoom: f32) -> bool {
+    if (self.zoom - zoom).abs() > f32::EPSILON {
+      self.screen_height = screen_height;
+      self.zoom = zoom;
+      return false;
+    }
+    if (self.screen_height - screen_height).abs() <= 0.5 {
+      return false;
+    }
+    self.screen_height = screen_height;
+    self.model_height = screen_height / zoom.max(0.01);
+    true
+  }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct CellLayout {
@@ -12,7 +41,7 @@ pub(super) struct CellLayout {
   pub height: f32,
 }
 
-pub(super) fn sheet_cell_layout(sheet: &Sheet, bounds: &HashMap<CellId, Bounds<Pixels>>, zoom: f32) -> HashMap<CellId, CellLayout> {
+pub(super) fn sheet_cell_layout(sheet: &Sheet, measurements: &HashMap<CellId, CellMeasurement>, zoom: f32) -> HashMap<CellId, CellLayout> {
   let cells = sheet.cells.iter().map(|cell| (cell.id, cell)).collect::<HashMap<_, _>>();
   let mut children: HashMap<CellId, Vec<CellId>> = HashMap::new();
   for cell in &sheet.cells {
@@ -23,7 +52,7 @@ pub(super) fn sheet_cell_layout(sheet: &Sheet, bounds: &HashMap<CellId, Bounds<P
   let mut layout = HashMap::with_capacity(sheet.cells.len());
   let mut top = 0.0;
   for root in sheet.cells.iter().filter(|cell| cell.parent_id.is_none()) {
-    let family_height = layout_family(root.id, top, &cells, &children, bounds, zoom, &mut layout);
+    let family_height = layout_family(root.id, top, &cells, &children, measurements, zoom, &mut layout);
     top += family_height + CELL_GAP * zoom;
   }
   layout
@@ -34,20 +63,20 @@ fn layout_family(
   top: f32,
   cells: &HashMap<CellId, &Cell>,
   children: &HashMap<CellId, Vec<CellId>>,
-  bounds: &HashMap<CellId, Bounds<Pixels>>,
+  measurements: &HashMap<CellId, CellMeasurement>,
   zoom: f32,
   layout: &mut HashMap<CellId, CellLayout>,
 ) -> f32 {
   let Some(cell) = cells.get(&cell_id) else {
     return 0.0;
   };
-  let cell_height = measured_cell_height(cell, bounds);
+  let cell_height = measured_cell_height(cell, measurements) * zoom;
   layout.insert(cell_id, CellLayout { top, height: cell_height });
 
   let mut children_top = top;
   let mut children_height = 0.0;
   for child_id in children.get(&cell_id).into_iter().flatten() {
-    let child_height = layout_family(*child_id, children_top, cells, children, bounds, zoom, layout);
+    let child_height = layout_family(*child_id, children_top, cells, children, measurements, zoom, layout);
     children_top += child_height + CELL_GAP * zoom;
     children_height += child_height + CELL_GAP * zoom;
   }
@@ -57,8 +86,11 @@ fn layout_family(
   cell_height.max(children_height)
 }
 
-fn measured_cell_height(cell: &Cell, bounds: &HashMap<CellId, Bounds<Pixels>>) -> f32 {
-  bounds.get(&cell.id).map_or_else(|| estimated_cell_height(cell), |bounds| bounds.size.height.as_f32())
+fn measured_cell_height(cell: &Cell, measurements: &HashMap<CellId, CellMeasurement>) -> f32 {
+  measurements
+    .get(&cell.id)
+    .map(|measurement| measurement.model_height)
+    .unwrap_or_else(|| estimated_cell_height(cell))
 }
 
 fn estimated_cell_height(cell: &Cell) -> f32 {
@@ -100,5 +132,47 @@ mod tests {
 
     assert_eq!(layout[&root.id].top, 0.0);
     assert_eq!(layout[&orphan.id].top, 2.0 * 54.0 + 2.0 * CELL_GAP);
+  }
+
+  #[test]
+  fn layout_scales_homogeneously_across_zoom_levels() {
+    let root = cell(None);
+    let child = cell(Some(root.id));
+    let sheet = Sheet {
+      id: flowstate_flow::SheetId::new_v4(),
+      sheet_type_id: flowstate_flow::SheetTypeId::new_v4(),
+      name: String::new(),
+      cells: vec![root.clone(), child.clone()],
+      annotations: Vec::new(),
+    };
+    let heights = HashMap::from([
+      (root.id, CellMeasurement::new(80.0, 1.0)),
+      (child.id, CellMeasurement::new(120.0, 1.0)),
+    ]);
+
+    let small = sheet_cell_layout(&sheet, &heights, 0.25);
+    let large = sheet_cell_layout(&sheet, &heights, 4.0);
+
+    assert_eq!(large[&root.id].height, small[&root.id].height * 16.0);
+    assert_eq!(large[&child.id].top, small[&child.id].top * 16.0);
+    assert_eq!(large[&child.id].height, small[&child.id].height * 16.0);
+  }
+
+  #[test]
+  fn zoom_measurements_do_not_redefine_intrinsic_cell_height() {
+    let mut measurement = CellMeasurement::new(80.0, 1.0);
+
+    assert!(!measurement.update(24.0, 0.25));
+    assert_eq!(measurement.model_height, 80.0);
+    assert!(!measurement.update(322.0, 4.0));
+    assert_eq!(measurement.model_height, 80.0);
+  }
+
+  #[test]
+  fn same_zoom_content_changes_update_intrinsic_cell_height() {
+    let mut measurement = CellMeasurement::new(80.0, 1.0);
+
+    assert!(measurement.update(120.0, 1.0));
+    assert_eq!(measurement.model_height, 120.0);
   }
 }

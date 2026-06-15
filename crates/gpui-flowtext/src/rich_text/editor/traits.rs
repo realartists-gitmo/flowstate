@@ -121,9 +121,8 @@ impl Render for RichTextEditor {
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_scroll_wheel(cx.listener(|editor, event: &gpui::ScrollWheelEvent, window, cx| {
         if !event.modifiers.control {
-          editor.zoom_scroll_anchor = None;
-          editor.zoom_anchor_apply_pending = false;
-          cx.on_next_frame(window, |editor, _, _| editor.sync_camera_center_from_scroll());
+          editor.reset_zoom_anchor();
+          cx.on_next_frame(window, |editor, _, _| editor.reset_zoom_anchor());
         }
       }))
       .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))

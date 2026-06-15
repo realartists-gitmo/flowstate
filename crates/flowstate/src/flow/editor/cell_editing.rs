@@ -88,6 +88,8 @@ impl FlowEditor {
     self.cell_editors.retain(|id, _| cells.contains_key(id));
     self.cell_editor_themes.retain(|id, _| cells.contains_key(id));
     self.cell_editor_subscriptions.retain(|id, _| cells.contains_key(id));
+    self.cell_bounds.retain(|id, _| cells.contains_key(id));
+    self.cell_measurements.retain(|id, _| cells.contains_key(id));
     for (cell_id, editor) in &self.cell_editors {
       if let Some(document) = cells.get(cell_id) {
         let current = flowstate_document::db8_bytes(editor.read(cx).document()).ok();
