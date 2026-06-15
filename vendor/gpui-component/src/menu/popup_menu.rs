@@ -1078,22 +1078,6 @@ impl PopupMenu {
     }
 
     pub(crate) fn keep_open_confirmed(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        let any_checked = self.menu_items.iter().any(|i| i.is_checked());
-        if let Some(parent_entity) = self.parent_menu.as_ref().and_then(|p| p.upgrade()) {
-            let current = cx.entity().downgrade();
-            parent_entity.update(cx, |parent, cx| {
-                if let Some(current_entity) = current.upgrade() {
-                    for item in parent.menu_items.iter_mut() {
-                        if let PopupMenuItem::Submenu { checked, menu, .. } = item {
-                            if menu.entity_id() == current_entity.entity_id() {
-                                *checked = any_checked;
-                            }
-                        }
-                    }
-                }
-                cx.notify();
-            });
-        }
         cx.notify();
     }
 

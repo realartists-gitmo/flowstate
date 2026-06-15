@@ -368,8 +368,7 @@ impl FlowEditor {
     } else if cell.bottom() > viewport.bottom() {
       offset.y -= cell.bottom() - viewport.bottom();
     }
-    self.board_scroll.set_offset(offset);
-    self.sync_camera_center_from_scroll();
+    self.set_user_scroll_offset(offset);
   }
 
   fn cell_text_color(&self, cell_id: CellId, cx: &App) -> gpui::Hsla {
@@ -407,14 +406,14 @@ impl FlowEditor {
     }
     pan_drag.frame_scheduled = true;
     cx.on_next_frame(window, |editor, _, cx| {
-      let Some(pan_drag) = editor.pan_drag.as_mut() else {
-        return;
+      let offset = {
+        let Some(pan_drag) = editor.pan_drag.as_mut() else {
+          return;
+        };
+        pan_drag.frame_scheduled = false;
+        pan_drag.scroll_anchor + (pan_drag.pending_position - pan_drag.pointer_anchor)
       };
-      pan_drag.frame_scheduled = false;
-      editor
-        .board_scroll
-        .set_offset(pan_drag.scroll_anchor + (pan_drag.pending_position - pan_drag.pointer_anchor));
-      editor.sync_camera_center_from_scroll();
+      editor.set_user_scroll_offset(offset);
       cx.notify();
     });
   }
@@ -944,8 +943,7 @@ impl Render for FlowEditor {
               let delta = event.delta.pixel_delta(window.line_height());
               let mut offset = editor.board_scroll.offset();
               offset.x += delta.y + delta.x;
-              editor.board_scroll.set_offset(offset);
-              editor.sync_camera_center_from_scroll();
+              editor.set_user_scroll_offset(offset);
               cx.stop_propagation();
               cx.notify();
             } else if !event.modifiers.control {

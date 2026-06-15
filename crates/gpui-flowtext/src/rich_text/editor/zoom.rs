@@ -6,6 +6,7 @@ const ZOOM_STEP_PERCENT: f32 = 5.0;
 struct ZoomAnchorSnapshot {
   target: ZoomAnchorTarget,
   viewport_y_ratio: f32,
+  viewport_size: Size<Pixels>,
   scroll_y: Pixels,
   edit_generation: u64,
   invisibility_mode: bool,
@@ -95,6 +96,7 @@ impl RichTextEditor {
   fn zoom_anchor_is_current(&self, anchor: ZoomAnchorSnapshot) -> bool {
     anchor.edit_generation == self.edit_generation
       && anchor.invisibility_mode == self.invisibility_mode
+      && sizes_are_close(anchor.viewport_size, self.scroll_handle.bounds().size, px(0.5))
       && (anchor.scroll_y - self.scroll_handle.offset().y).abs() <= px(0.5)
   }
 
@@ -120,6 +122,7 @@ impl RichTextEditor {
       return Some(ZoomAnchorSnapshot {
         target: document_target,
         viewport_y_ratio,
+        viewport_size: viewport.size,
         scroll_y: self.scroll_handle.offset().y,
         edit_generation: self.edit_generation,
         invisibility_mode: self.invisibility_mode,
@@ -154,6 +157,7 @@ impl RichTextEditor {
     Some(ZoomAnchorSnapshot {
       target,
       viewport_y_ratio,
+      viewport_size: viewport.size,
       scroll_y: self.scroll_handle.offset().y,
       edit_generation: self.edit_generation,
       invisibility_mode: self.invisibility_mode,
@@ -243,6 +247,10 @@ fn line_y_from_relative(line_top: Pixels, line_height: Pixels, relative_y: f32) 
   line_top + line_height.max(px(1.0)) * relative_y
 }
 
+fn sizes_are_close(left: Size<Pixels>, right: Size<Pixels>, tolerance: Pixels) -> bool {
+  (left.width - right.width).abs() <= tolerance && (left.height - right.height).abs() <= tolerance
+}
+
 #[cfg(test)]
 mod zoom_tests {
   use super::*;
@@ -282,5 +290,19 @@ mod zoom_tests {
       let relative_y = relative_line_y(content_y, line_top, line_height);
       assert_eq!(line_y_from_relative(line_top, line_height, relative_y), content_y);
     }
+  }
+
+  #[test]
+  fn semantic_anchor_is_invalidated_when_viewport_geometry_changes() {
+    assert!(sizes_are_close(
+      size(px(900.0), px(600.0)),
+      size(px(900.25), px(599.75)),
+      px(0.5),
+    ));
+    assert!(!sizes_are_close(
+      size(px(900.0), px(600.0)),
+      size(px(1100.0), px(600.0)),
+      px(0.5),
+    ));
   }
 }

@@ -20,7 +20,7 @@ impl FlowEditor {
     if (self.board_zoom - zoom).abs() < f32::EPSILON {
       return;
     }
-    if self.camera_center.is_none() {
+    if !self.camera_apply_pending && self.camera_center.is_none_or(|center| !self.camera_center_is_current(center)) {
       self.sync_camera_center_from_scroll();
     }
     self.board_zoom = zoom;
@@ -46,10 +46,32 @@ impl FlowEditor {
       return;
     }
     self.camera_center = Some(camera_center_for_offset(
-      self.board_scroll.offset(),
+      clamp_scroll_offset(self.board_scroll.offset(), self.board_scroll.max_offset()),
       viewport,
       self.board_zoom,
     ));
+  }
+
+  pub(super) fn set_user_scroll_offset(&mut self, offset: Point<Pixels>) {
+    self
+      .board_scroll
+      .set_offset(clamp_scroll_offset(offset, self.board_scroll.max_offset()));
+    self.sync_camera_center_from_scroll();
+  }
+
+  fn camera_center_is_current(&self, center: BoardPoint) -> bool {
+    let viewport = self.board_scroll.bounds().size;
+    if viewport.width <= px(1.0) || viewport.height <= px(1.0) {
+      return false;
+    }
+    camera_center_matches_offset(
+      center,
+      self.board_scroll.offset(),
+      viewport,
+      self.board_scroll.max_offset(),
+      self.board_zoom,
+      px(0.5),
+    )
   }
 
   pub fn zoom_percent(&self) -> f32 {
@@ -100,6 +122,28 @@ fn offset_for_camera_center(center: BoardPoint, viewport: Size<Pixels>, zoom: f3
   )
 }
 
+fn clamp_scroll_offset(mut offset: Point<Pixels>, max_offset: Size<Pixels>) -> Point<Pixels> {
+  offset.x = offset.x.clamp(-max_offset.width, px(0.0));
+  offset.y = offset.y.clamp(-max_offset.height, px(0.0));
+  offset
+}
+
+fn points_are_close(left: Point<Pixels>, right: Point<Pixels>, tolerance: Pixels) -> bool {
+  (left.x - right.x).abs() <= tolerance && (left.y - right.y).abs() <= tolerance
+}
+
+fn camera_center_matches_offset(
+  center: BoardPoint,
+  offset: Point<Pixels>,
+  viewport: Size<Pixels>,
+  max_offset: Size<Pixels>,
+  zoom: f32,
+  tolerance: Pixels,
+) -> bool {
+  let expected = clamp_scroll_offset(offset_for_camera_center(center, viewport, zoom), max_offset);
+  points_are_close(expected, offset, tolerance)
+}
+
 pub(super) fn grid_dot_metrics(zoom: f32, device_scale: f32) -> (Pixels, f32) {
   let target_size = 1.5 * zoom;
   let target_device_size = target_size * device_scale;
@@ -127,6 +171,61 @@ mod tests {
         assert_eq!(offset, original);
       }
     }
+  }
+
+  #[test]
+  fn stale_camera_center_is_detected_after_user_scroll() {
+    let viewport = size(px(900.0), px(600.0));
+    let max_offset = size(px(1800.0), px(1200.0));
+    let center = camera_center_for_offset(point(px(-400.0), px(-300.0)), viewport, 1.0);
+
+    assert!(camera_center_matches_offset(
+      center,
+      point(px(-400.0), px(-300.0)),
+      viewport,
+      max_offset,
+      1.0,
+      px(0.5),
+    ));
+    assert!(!camera_center_matches_offset(
+      center,
+      point(px(-900.0), px(-300.0)),
+      viewport,
+      max_offset,
+      1.0,
+      px(0.5),
+    ));
+  }
+
+  #[test]
+  fn clamped_camera_center_remains_valid_for_round_trip_zoom() {
+    let viewport = size(px(900.0), px(600.0));
+    let center = BoardPoint { x: 1400.0, y: 900.0 };
+
+    assert!(camera_center_matches_offset(
+      center,
+      point(px(0.0), px(0.0)),
+      viewport,
+      size(px(0.0), px(0.0)),
+      0.25,
+      px(0.5),
+    ));
+  }
+
+  #[test]
+  fn camera_center_is_invalidated_when_viewport_geometry_changes() {
+    let original_viewport = size(px(900.0), px(600.0));
+    let offset = point(px(-400.0), px(-300.0));
+    let center = camera_center_for_offset(offset, original_viewport, 1.0);
+
+    assert!(!camera_center_matches_offset(
+      center,
+      offset,
+      size(px(1100.0), px(600.0)),
+      size(px(1800.0), px(1200.0)),
+      1.0,
+      px(0.5),
+    ));
   }
 
   #[test]
