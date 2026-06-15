@@ -22,7 +22,7 @@ gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
 memchr = "2.8.1"
-mimalloc = { workspace = true }
+rimalloc = { workspace = true }
 palette = "0.7.6"
 rustc-hash = { workspace = true }
 serde = { workspace = true }

@@ -1,0 +1,23 @@
+[package]
+name = "rimalloc"
+description = "A pure-Rust port of mimalloc: a compact, fast general-purpose allocator"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/moggedhedien/rimalloc"
+
+[dependencies]
+libc = { version = "0.2", default-features = false }
+ctor = { version = "1.0.7", default-features = false, features = ["proc_macro", "std"] }
+
+[features]
+default = []
+stats = []
+secure = []
+debug-fill = []
+nightly = []
+
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "allow"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)', 'cfg(fuzzing)'] }
