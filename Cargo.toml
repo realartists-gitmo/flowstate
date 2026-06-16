@@ -60,6 +60,9 @@ tantivy = "0.26.1"
 tempfile = "3"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 toml = "1.1.2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 twox-hash = "2"
 typst = "0.14"
 typst-assets = "0.14"

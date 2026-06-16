@@ -60,33 +60,58 @@ struct DirectServeInner {
 
 impl DirectServeState {
   pub async fn attach_session(&self, session: SessionId) {
-    self.inner.write().await.attached.insert(session);
+    let mut inner = self.inner.write().await;
+    let inserted = inner.attached.insert(session);
+    tracing::debug!(%session, inserted, attached_sessions = inner.attached.len(), "attached collaboration direct session");
   }
 
   pub async fn detach_session(&self, session: SessionId) {
     let mut inner = self.inner.write().await;
-    inner.attached.remove(&session);
-    inner.blobs.remove(&session);
-    inner.handlers.remove(&session);
+    let removed = inner.attached.remove(&session);
+    let blob_count = inner.blobs.remove(&session).map_or(0, |outbox| outbox.len());
+    let handler_removed = inner.handlers.remove(&session).is_some();
+    tracing::debug!(%session, removed, blob_count, handler_removed, attached_sessions = inner.attached.len(), "detached collaboration direct session");
   }
 
   pub async fn register_handler(&self, session: SessionId, handler: DirectSessionHandler) {
     let mut inner = self.inner.write().await;
     inner.attached.insert(session);
-    inner.handlers.insert(session, handler);
+    let replaced = inner.handlers.insert(session, handler).is_some();
+    tracing::debug!(%session, replaced, handler_count = inner.handlers.len(), "registered collaboration direct session handler");
   }
 
   pub async fn insert_blob(&self, session: SessionId, bytes: Vec<u8>) -> BlobId {
-    let mut inner = self.inner.write().await;
-    inner.attached.insert(session);
-    inner.blobs.entry(session).or_default().insert(bytes)
+    let byte_len = bytes.len();
+    let (blob, outbox_len, outbox_bytes) = {
+      let mut inner = self.inner.write().await;
+      inner.attached.insert(session);
+      let outbox = inner.blobs.entry(session).or_default();
+      let blob = outbox.insert(bytes);
+      let outbox_len = outbox.len();
+      let outbox_bytes = outbox.total_bytes();
+      drop(inner);
+      (blob, outbox_len, outbox_bytes)
+    };
+    tracing::debug!(
+      %session,
+      ?blob,
+      byte_len,
+      outbox_len,
+      outbox_bytes,
+      "stored collaboration direct blob for peer pull",
+    );
+    blob
   }
 
   async fn serve(&self, request: DirectRequest) -> ServeOutcome {
     let session = request.session();
+    let request_kind = direct_request_kind(&request);
+    let request_detail_bytes = direct_request_detail_bytes(&request);
+    tracing::trace!(%session, request_kind, request_detail_bytes, "serving collaboration direct request");
     let handler = {
       let inner = self.inner.read().await;
       if !inner.attached.contains(&session) {
+        tracing::warn!(%session, request_kind, "collaboration direct request rejected because session is not attached");
         return ServeOutcome::Header(DirectResponseHeader::NotAttached);
       }
       if let DirectRequest::Blob { blob, .. } = request {
@@ -94,7 +119,11 @@ impl DirectServeState {
           .blobs
           .get(&session)
           .and_then(|outbox| outbox.get(blob))
-          .map_or(ServeOutcome::Header(DirectResponseHeader::NotFound), |bytes| {
+          .map_or_else(|| {
+            tracing::warn!(%session, ?blob, "collaboration direct blob request missed outbox");
+            ServeOutcome::Header(DirectResponseHeader::NotFound)
+          }, |bytes| {
+            tracing::debug!(%session, ?blob, bytes = bytes.len(), "collaboration direct blob request hit outbox");
             ServeOutcome::Payload(bytes.to_vec())
           });
       }
@@ -102,13 +131,17 @@ impl DirectServeState {
     };
 
     let Some(handler) = handler else {
+      tracing::warn!(%session, request_kind, "collaboration direct request rejected because handler is missing");
       return ServeOutcome::Header(DirectResponseHeader::NotFound);
     };
 
     match request {
-      DirectRequest::Snapshot { .. } => request_payload(handler.requests, |reply| DirectServeRequest::Snapshot { reply }).await,
-      DirectRequest::Updates { have_vv, .. } => request_payload(handler.requests, |reply| DirectServeRequest::Updates { have_vv, reply }).await,
-      DirectRequest::Asset { asset, .. } => request_asset(handler.requests, asset).await,
+      DirectRequest::Snapshot { .. } => request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await,
+      DirectRequest::Updates { have_vv, .. } => {
+        tracing::trace!(%session, have_vv_bytes = have_vv.len(), "forwarding collaboration direct updates request to session");
+        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates { have_vv, reply }).await
+      },
+      DirectRequest::Asset { asset, .. } => request_asset(handler.requests, session, asset).await,
       DirectRequest::Blob { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
     }
   }
@@ -118,6 +151,22 @@ impl DirectServeState {
 enum ServeOutcome {
   Header(DirectResponseHeader),
   Payload(Vec<u8>),
+}
+
+impl ServeOutcome {
+  fn kind(&self) -> &'static str {
+    match self {
+      Self::Header(header) => direct_response_header_kind(header),
+      Self::Payload(_) => "ok",
+    }
+  }
+
+  fn payload_len(&self) -> usize {
+    match self {
+      Self::Header(_) => 0,
+      Self::Payload(payload) => payload.len(),
+    }
+  }
 }
 
 #[derive(Clone, Debug)]
@@ -137,12 +186,17 @@ impl DirectProto {
 
   async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
+    let session = request.session();
+    let request_kind = direct_request_kind(&request);
+    tracing::debug!(%session, request_kind, "received collaboration direct stream request");
     let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+      tracing::warn!(%session, request_kind, "collaboration direct server is busy");
       write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await?;
       return Ok(());
     };
 
     let outcome = self.state.serve(request).await;
+    tracing::debug!(%session, request_kind, outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "collaboration direct request served");
     write_response(&mut send, outcome).await?;
     drop(permit);
     Ok(())
@@ -151,20 +205,23 @@ impl DirectProto {
 
 impl ProtocolHandler for DirectProto {
   async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
+    tracing::trace!("accepted collaboration direct connection");
     while let Ok((send, recv)) = connection.accept_bi().await {
       let proto = self.clone();
       tokio::spawn(async move {
         if let Err(error) = proto.handle_stream(send, recv).await {
-          eprintln!("flowstate collab direct stream failed: {error:#}");
+          tracing::error!(error = %format_args!("{error:#}"), "collaboration direct stream failed");
         }
       });
     }
+    tracing::trace!("collaboration direct connection closed");
     Ok(())
   }
 }
 
 pub(crate) fn install_endpoint(endpoint: Endpoint) {
-  let _ = CLIENT_ENDPOINT.set(endpoint);
+  let installed = CLIENT_ENDPOINT.set(endpoint).is_ok();
+  tracing::debug!(installed, "installed collaboration direct client endpoint");
 }
 
 pub async fn pull_with_fallback(req: DirectRequest, candidates: Vec<EndpointId>, per_peer_timeout: Duration) -> Result<Vec<u8>> {
@@ -181,67 +238,118 @@ pub async fn pull_with_endpoint(
   candidates: Vec<EndpointId>,
   per_peer_timeout: Duration,
 ) -> Result<Vec<u8>> {
+  let session = req.session();
+  let request_kind = direct_request_kind(&req);
+  let candidate_count = candidates.len();
+  if candidates.is_empty() {
+    tracing::warn!(%session, request_kind, "collaboration direct pull has no candidate peers");
+  }
   ensure!(!candidates.is_empty(), "direct pull has no candidate peers");
+  tracing::debug!(%session, request_kind, candidate_count, ?per_peer_timeout, "starting collaboration direct pull");
 
   let mut errors = Vec::new();
   for peer in candidates {
+    tracing::trace!(%session, request_kind, peer = %peer, "attempting collaboration direct pull peer");
     match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone())).await {
-      Ok(Ok(bytes)) => return Ok(bytes),
-      Ok(Err(error)) => errors.push(format!("{peer}: {error:#}")),
-      Err(_) => errors.push(format!("{peer}: timed out after {per_peer_timeout:?}")),
+      Ok(Ok(bytes)) => {
+        tracing::debug!(%session, request_kind, peer = %peer, bytes = bytes.len(), "collaboration direct pull peer succeeded");
+        return Ok(bytes);
+      },
+      Ok(Err(error)) => {
+        tracing::warn!(%session, request_kind, peer = %peer, error = %format_args!("{error:#}"), "collaboration direct pull peer failed");
+        errors.push(format!("{peer}: {error:#}"));
+      },
+      Err(_) => {
+        tracing::warn!(%session, request_kind, peer = %peer, ?per_peer_timeout, "collaboration direct pull peer timed out");
+        errors.push(format!("{peer}: timed out after {per_peer_timeout:?}"));
+      },
     }
   }
 
+  tracing::error!(%session, request_kind, candidate_count, "collaboration direct pull failed for all candidates");
   Err(anyhow!("direct pull failed for all candidates: {}", errors.join("; ")))
 }
 
 async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest) -> Result<Vec<u8>> {
+  let session = req.session();
+  let request_kind = direct_request_kind(&req);
+  tracing::trace!(%session, request_kind, peer = %peer, "dialing collaboration direct peer");
   let connection = endpoint
     .connect(peer, DIRECT_ALPN)
     .await
     .context("direct dial failed")?;
+  tracing::trace!(%session, request_kind, peer = %peer, "opening collaboration direct stream");
   let (mut send, mut recv) = connection
     .open_bi()
     .await
     .context("opening direct request stream failed")?;
-  write_frame(&mut send, &encode_frame(&req)?).await?;
+  let frame = encode_frame(&req)?;
+  tracing::trace!(%session, request_kind, peer = %peer, frame_bytes = frame.len(), "sending collaboration direct request frame");
+  write_frame(&mut send, &frame).await?;
   send.finish()?;
 
   let header = read_frame::<DirectResponseHeader>(&mut recv).await?;
+  tracing::trace!(%session, request_kind, peer = %peer, response = direct_response_header_kind(&header), "received collaboration direct response header");
   match header {
-    DirectResponseHeader::Ok { total_len } => read_payload(&mut recv, total_len).await,
+    DirectResponseHeader::Ok { total_len } => {
+      let payload = read_payload(&mut recv, total_len).await?;
+      tracing::trace!(%session, request_kind, peer = %peer, bytes = payload.len(), "read collaboration direct response payload");
+      Ok(payload)
+    },
     DirectResponseHeader::NotAttached => Err(anyhow!("peer is not attached to this session")),
     DirectResponseHeader::NotFound => Err(anyhow!("peer does not have the requested collaboration data")),
     DirectResponseHeader::Busy => Err(anyhow!("peer is busy serving collaboration data")),
   }
 }
 
-async fn request_payload<F>(requests: Sender<DirectServeRequest>, make_request: F) -> ServeOutcome
+async fn request_payload<F>(requests: Sender<DirectServeRequest>, session: SessionId, request_kind: &'static str, make_request: F) -> ServeOutcome
 where
   F: FnOnce(Sender<Result<Vec<u8>>>) -> DirectServeRequest,
 {
   let (reply_tx, reply_rx) = async_channel::bounded(1);
   if requests.send(make_request(reply_tx)).await.is_err() {
+    tracing::warn!(%session, request_kind, "collaboration direct session request channel closed");
     return ServeOutcome::Header(DirectResponseHeader::NotAttached);
   }
   match reply_rx.recv().await {
-    Ok(Ok(bytes)) => ServeOutcome::Payload(bytes),
-    Ok(Err(_)) | Err(_) => ServeOutcome::Header(DirectResponseHeader::NotFound),
+    Ok(Ok(bytes)) => {
+      tracing::trace!(%session, request_kind, bytes = bytes.len(), "collaboration direct session returned payload");
+      ServeOutcome::Payload(bytes)
+    },
+    Ok(Err(error)) => {
+      tracing::warn!(%session, request_kind, error = %format_args!("{error:#}"), "collaboration direct session failed to produce payload");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(error) => {
+      tracing::warn!(%session, request_kind, error = %error, "collaboration direct session payload reply channel closed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
   }
 }
 
-async fn request_asset(requests: Sender<DirectServeRequest>, asset: u128) -> ServeOutcome {
+async fn request_asset(requests: Sender<DirectServeRequest>, session: SessionId, asset: u128) -> ServeOutcome {
   let (reply_tx, reply_rx) = async_channel::bounded(1);
   if requests
     .send(DirectServeRequest::Asset { asset, reply: reply_tx })
     .await
     .is_err()
   {
+    tracing::warn!(%session, asset, "collaboration direct asset request channel closed");
     return ServeOutcome::Header(DirectResponseHeader::NotAttached);
   }
   match reply_rx.recv().await {
-    Ok(Ok(asset)) => ServeOutcome::Payload(asset.bytes),
-    Ok(Err(_)) | Err(_) => ServeOutcome::Header(DirectResponseHeader::NotFound),
+    Ok(Ok(asset_bytes)) => {
+      tracing::trace!(%session, asset, bytes = asset_bytes.bytes.len(), "collaboration direct session returned asset");
+      ServeOutcome::Payload(asset_bytes.bytes)
+    },
+    Ok(Err(error)) => {
+      tracing::warn!(%session, asset, error = %format_args!("{error:#}"), "collaboration direct session failed to produce asset");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(error) => {
+      tracing::warn!(%session, asset, error = %error, "collaboration direct asset reply channel closed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
   }
 }
 
@@ -260,6 +368,7 @@ where
 }
 
 async fn write_response(send: &mut SendStream, outcome: ServeOutcome) -> Result<()> {
+  tracing::trace!(outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "writing collaboration direct response");
   match outcome {
     ServeOutcome::Header(header) => write_frame(send, &encode_frame(&header)?).await?,
     ServeOutcome::Payload(payload) => {
@@ -275,11 +384,13 @@ async fn write_response(send: &mut SendStream, outcome: ServeOutcome) -> Result<
 }
 
 async fn write_frame(send: &mut SendStream, frame: &[u8]) -> Result<()> {
+  tracing::trace!(frame_bytes = frame.len(), "writing collaboration direct frame");
   send.write_all(frame).await?;
   Ok(())
 }
 
 async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
+  tracing::trace!(payload_bytes = payload.len(), chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "writing collaboration direct payload");
   for chunk in payload.chunks(MAX_PAYLOAD_CHUNK_LEN) {
     send.write_all(chunk).await?;
   }
@@ -288,6 +399,7 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
 
 async fn read_payload(recv: &mut RecvStream, total_len: u64) -> Result<Vec<u8>> {
   let total_len = usize::try_from(total_len).context("direct payload is too large for this platform")?;
+  tracing::trace!(payload_bytes = total_len, chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "reading collaboration direct payload");
   let mut payload = vec![0; total_len];
   let mut offset = 0;
   while offset < total_len {
@@ -296,6 +408,31 @@ async fn read_payload(recv: &mut RecvStream, total_len: u64) -> Result<Vec<u8>> 
     offset = next;
   }
   Ok(payload)
+}
+
+fn direct_request_kind(request: &DirectRequest) -> &'static str {
+  match request {
+    DirectRequest::Snapshot { .. } => "snapshot",
+    DirectRequest::Updates { .. } => "updates",
+    DirectRequest::Blob { .. } => "blob",
+    DirectRequest::Asset { .. } => "asset",
+  }
+}
+
+fn direct_request_detail_bytes(request: &DirectRequest) -> usize {
+  match request {
+    DirectRequest::Updates { have_vv, .. } => have_vv.len(),
+    DirectRequest::Snapshot { .. } | DirectRequest::Blob { .. } | DirectRequest::Asset { .. } => 0,
+  }
+}
+
+fn direct_response_header_kind(header: &DirectResponseHeader) -> &'static str {
+  match header {
+    DirectResponseHeader::Ok { .. } => "ok",
+    DirectResponseHeader::NotAttached => "not_attached",
+    DirectResponseHeader::NotFound => "not_found",
+    DirectResponseHeader::Busy => "busy",
+  }
 }
 
 impl DirectRequest {

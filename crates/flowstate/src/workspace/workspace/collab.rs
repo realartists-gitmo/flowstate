@@ -44,10 +44,14 @@ impl Workspace {
       .map(|panel| panel.read(cx).title_text().to_string())
       .unwrap_or_else(|| "Shared document".to_string());
 
+    tracing::info!(%panel_id, title = %title, "workspace starting collaboration on document");
     match crate::collab::start_session_for_panel(panel_id, editor, title, cx) {
-      Ok(session) => Some(session),
+      Ok(session) => {
+        tracing::info!(%panel_id, %session, "workspace started collaboration on document");
+        Some(session)
+      },
       Err(error) => {
-        eprintln!("starting collaboration session failed: {error:#}");
+        tracing::error!(%panel_id, error = %format_args!("{error:#}"), "starting collaboration session failed");
         None
       },
     }
@@ -95,6 +99,7 @@ impl Workspace {
       let result = ticket_rx.recv().await;
       let _ = window_handle.update(cx, |_, window, cx| match result {
         Ok(Ok(ticket)) => {
+          tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "copied collaboration invite ticket to clipboard");
           cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.encode_text()));
           std::mem::drop(window.prompt(
             PromptLevel::Info,
@@ -105,10 +110,12 @@ impl Workspace {
           ));
         },
         Ok(Err(error)) => {
+          tracing::error!(error = %format_args!("{error:#}"), "creating collaboration invite failed");
           let detail = format!("Creating collaboration invite failed: {error:#}");
           std::mem::drop(window.prompt(PromptLevel::Critical, "Share failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
         },
         Err(error) => {
+          tracing::error!(error = %error, "collaboration invite receiver closed");
           let detail = format!("Creating collaboration invite failed: {error}");
           std::mem::drop(window.prompt(PromptLevel::Critical, "Share failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
         },
@@ -120,6 +127,7 @@ impl Workspace {
 
   pub fn join_collaboration_from_clipboard(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(item) = cx.read_from_clipboard() else {
+      tracing::warn!("join collaboration from clipboard failed because clipboard is empty");
       std::mem::drop(window.prompt(
         PromptLevel::Critical,
         "Join failed",
@@ -130,6 +138,7 @@ impl Workspace {
       return true;
     };
     let Some(text) = item.text() else {
+      tracing::warn!("join collaboration from clipboard failed because clipboard has no text");
       std::mem::drop(window.prompt(
         PromptLevel::Critical,
         "Join failed",
@@ -142,11 +151,13 @@ impl Workspace {
     let ticket = match flowstate_collab::ticket::SessionTicket::decode_text(&text) {
       Ok(ticket) => ticket,
       Err(error) => {
+        tracing::warn!(bytes = text.len(), error = %format_args!("{error:#}"), "clipboard collaboration invite decode failed");
         let detail = format!("The clipboard text is not a valid collaboration invite: {error:#}");
         std::mem::drop(window.prompt(PromptLevel::Critical, "Join failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
         return true;
       },
     };
+    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "joining collaboration session from clipboard");
     self.join_collaboration_session(ticket, window, cx).is_some()
   }
 
@@ -192,7 +203,9 @@ impl Workspace {
   }
 
   pub fn leave_collaboration_on_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> bool {
-    crate::collab::leave_session_for_panel(panel_id, cx)
+    let left = crate::collab::leave_session_for_panel(panel_id, cx);
+    tracing::info!(%panel_id, left, "workspace leave collaboration requested");
+    left
   }
 
   pub fn join_collaboration_session(
@@ -201,10 +214,11 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Option<flowstate_collab::SessionId> {
+    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "workspace joining collaboration session");
     let request = match crate::collab::join_session(ticket, cx) {
       Ok(request) => request,
       Err(error) => {
-        eprintln!("joining collaboration session failed: {error:#}");
+        tracing::error!(error = %format_args!("{error:#}"), "joining collaboration session failed");
         return None;
       },
     };
@@ -218,10 +232,12 @@ impl Workspace {
         let _ = workspace.update(cx, |workspace, cx| {
           match result {
             Ok(Ok(joined)) => {
+              tracing::info!(session = %joined.session, title = %joined.title, "collaboration join completed; opening joined document");
               let panel = workspace.add_joined_collaboration_panel(joined.document, joined.title, window, cx);
               let panel_id = panel.read(cx).id();
               let editor = panel.read(cx).editor();
               if let Err(error) = crate::collab::attach_joined_session(joined.session, panel_id, editor, cx) {
+                tracing::error!(session = %joined.session, %panel_id, error = %format_args!("{error:#}"), "collaboration joined document attachment failed");
                 let detail = format!("Joined document opened, but collaboration attachment failed: {error:#}");
                 std::mem::drop(window.prompt(
                   PromptLevel::Critical,
@@ -233,6 +249,7 @@ impl Workspace {
               }
             },
             Ok(Err(error)) => {
+              tracing::error!(%session, error = %format_args!("{error:#}"), "joining collaboration session failed");
               let detail = format!("Joining collaboration session failed: {error:#}");
               std::mem::drop(window.prompt(
                 PromptLevel::Critical,
@@ -243,6 +260,7 @@ impl Workspace {
               ));
             },
             Err(error) => {
+              tracing::error!(%session, error = %error, "collaboration join completion channel closed");
               let detail = format!("Joining collaboration session failed: {error}");
               std::mem::drop(window.prompt(
                 PromptLevel::Critical,

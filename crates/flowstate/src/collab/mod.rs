@@ -64,29 +64,43 @@ impl CollabManager {
     T: 'static,
   {
     if let Some(session) = self.session_by_panel.get(&panel_id).copied() {
+      tracing::debug!(%panel_id, %session, "collaboration session already exists for panel");
       return Ok(session);
     }
 
     let commands = self.ensure_runtime(cx)?;
     let session = SessionId::new();
     let document = editor.read(cx).document().clone();
+    tracing::info!(
+      %panel_id,
+      %session,
+      title = %title,
+      paragraphs = document.paragraphs.len(),
+      blocks = document.blocks.len(),
+      assets = document.assets.assets.len(),
+      "starting local collaboration session",
+    );
     let collab = CollabSession::from_local_document(session, panel_id, editor, title, document, commands.clone())?;
     let direct_handler = collab.direct_handler();
     let entity = cx.new(|_| collab);
     entity.update(cx, |session, cx| session.attach(cx));
 
     self.register_session(entity.clone(), cx);
-    commands
-      .try_send(NetCommand::RegisterDirectHandler {
+    if let Err(error) = commands.try_send(NetCommand::RegisterDirectHandler {
         session,
         handler: direct_handler,
-      })
-      .context("registering collaboration direct handler failed")?;
+      }) {
+      tracing::error!(%panel_id, %session, error = %error, "registering collaboration direct handler failed");
+      return Err(error).context("registering collaboration direct handler failed");
+    }
+    tracing::debug!(%panel_id, %session, "registered collaboration direct handler for local session");
 
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    commands
-      .try_send(NetCommand::CreateSession { session, reply: reply_tx })
-      .context("creating collaboration network session failed")?;
+    if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
+      tracing::error!(%panel_id, %session, error = %error, "queueing collaboration create-session command failed");
+      return Err(error).context("creating collaboration network session failed");
+    }
+    tracing::debug!(%panel_id, %session, "queued collaboration create-session command");
     Self::finish_create_session(entity, reply_rx, cx);
     Ok(session)
   }
@@ -95,7 +109,14 @@ impl CollabManager {
   where
     T: 'static,
   {
+    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, title = %ticket.title, "joining collaboration session from ticket");
+    if !ticket.is_supported_version() {
+      tracing::warn!(session = %ticket.session, "unsupported collaboration protocol version in ticket");
+    }
     ensure!(ticket.is_supported_version(), "unsupported collaboration protocol version");
+    if self.sessions_by_id.contains_key(&ticket.session) {
+      tracing::warn!(session = %ticket.session, "collaboration session is already open");
+    }
     ensure!(
       !self.sessions_by_id.contains_key(&ticket.session),
       "collaboration session is already open"
@@ -112,6 +133,7 @@ impl CollabManager {
       session,
       bootstrap: vec![ticket.inviter],
     }) {
+      tracing::error!(%session, error = %error, "queueing collaboration join-session command failed");
       entity.update(cx, |session, cx| {
         session.detach(
           DetachReason::JoinFailed(format!("joining collaboration network session failed: {error}")),
@@ -121,6 +143,7 @@ impl CollabManager {
       self.unregister_session(session);
       return Err(error).context("joining collaboration network session failed");
     }
+    tracing::debug!(%session, inviter = %inviter, "queued collaboration join-session command");
     let completed = entity.update(cx, |session, cx| {
       session.set_join_stage(JoinStage::Subscribing, cx);
       session.begin_join_bootstrap(inviter, cx)
@@ -138,6 +161,7 @@ impl CollabManager {
   where
     T: 'static,
   {
+    tracing::info!(%session_id, %panel_id, "attaching joined collaboration session to editor");
     let commands = self.ensure_runtime(cx)?;
     let session = self
       .sessions_by_id
@@ -147,12 +171,14 @@ impl CollabManager {
     let direct_handler = session.read(cx).direct_handler();
     session.update(cx, |session, cx| session.attach_joined_editor(panel_id, editor, cx))?;
     self.session_by_panel.insert(panel_id, session_id);
-    commands
-      .try_send(NetCommand::RegisterDirectHandler {
+    if let Err(error) = commands.try_send(NetCommand::RegisterDirectHandler {
         session: session_id,
         handler: direct_handler,
-      })
-      .context("registering collaboration direct handler failed")?;
+      }) {
+      tracing::error!(%session_id, %panel_id, error = %error, "registering collaboration direct handler for joined session failed");
+      return Err(error).context("registering collaboration direct handler failed");
+    }
+    tracing::debug!(%session_id, %panel_id, "registered collaboration direct handler for joined session");
     Self::establish_joined_peer(session, commands, cx)?;
     Ok(())
   }
@@ -162,13 +188,16 @@ impl CollabManager {
     T: 'static,
   {
     let Some(session_id) = self.session_by_panel.get(&panel_id).copied() else {
+      tracing::debug!(%panel_id, "leave requested for panel without collaboration session");
       return false;
     };
     let Some(session) = self.sessions_by_id.get(&session_id).cloned() else {
+      tracing::warn!(%panel_id, %session_id, "leave requested for missing registered collaboration session");
       self.unregister_session(session_id);
       return false;
     };
 
+    tracing::info!(%panel_id, %session_id, "leaving collaboration session for panel");
     let _ = session.update(cx, |session, cx| session.detach(DetachReason::UserLeft, cx));
     self.unregister_session(session_id);
     true
@@ -184,14 +213,22 @@ impl CollabManager {
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    commands
-      .try_send(NetCommand::MintTicketAddr { reply: reply_tx })
-      .ok()?;
+    if let Err(error) = commands.try_send(NetCommand::MintTicketAddr { reply: reply_tx }) {
+      tracing::error!(%panel_id, %session_id, error = %error, "queueing collaboration ticket address command failed");
+      return None;
+    }
+    tracing::debug!(%panel_id, %session_id, "requested collaboration ticket address");
 
     cx.spawn(async move |_, _| {
       let ticket = match reply_rx.recv().await {
-        Ok(addr) => Ok(SessionTicket::new(session_id, addr, title)),
-        Err(error) => Err(anyhow!("collaboration endpoint address unavailable: {error}")),
+        Ok(addr) => {
+          tracing::info!(%session_id, inviter = %addr.id, "created collaboration share ticket");
+          Ok(SessionTicket::new(session_id, addr, title))
+        },
+        Err(error) => {
+          tracing::error!(%session_id, error = %error, "collaboration endpoint address unavailable for ticket");
+          Err(anyhow!("collaboration endpoint address unavailable: {error}"))
+        },
       };
       let _ = ticket_tx.send(ticket).await;
     })
@@ -223,13 +260,16 @@ impl CollabManager {
     let id = session.read(cx).session_id();
     if let Some(panel_id) = session.read(cx).panel_id() {
       self.session_by_panel.insert(panel_id, id);
+      tracing::debug!(%id, %panel_id, "registered collaboration session panel mapping");
     }
     self.sessions_by_id.insert(id, session);
+    tracing::debug!(%id, open_sessions = self.sessions_by_id.len(), "registered collaboration session");
   }
 
   fn unregister_session(&mut self, session: SessionId) {
-    self.sessions_by_id.remove(&session);
+    let removed = self.sessions_by_id.remove(&session).is_some();
     self.session_by_panel.retain(|_, active| *active != session);
+    tracing::debug!(%session, removed, open_sessions = self.sessions_by_id.len(), "unregistered collaboration session");
   }
 
   fn ensure_runtime<T>(&mut self, cx: &mut Context<T>) -> Result<CommandSender>
@@ -237,9 +277,11 @@ impl CollabManager {
     T: 'static,
   {
     if let Some(runtime) = &self.runtime {
+      tracing::trace!("collaboration runtime already available");
       return Ok(runtime.commands.clone());
     }
 
+    tracing::info!("starting collaboration runtime for manager");
     let (commands, events) = runtime::start()?;
     self.runtime = Some(CollabRuntime { commands: commands.clone() });
     self.start_event_pump(events, cx);
@@ -251,18 +293,22 @@ impl CollabManager {
     T: 'static,
   {
     if self.event_pump_started {
+      tracing::trace!("collaboration network event pump already started");
       return;
     }
     self.event_pump_started = true;
+    tracing::debug!("starting collaboration network event pump");
     cx.spawn(async move |_, cx| {
       while let Ok(event) = events.recv().await {
         if cx
           .update_global::<CollabManager, _>(|manager, cx| manager.handle_net_event(event, cx))
           .is_err()
         {
+          tracing::warn!("collaboration network event pump could not update manager; stopping");
           break;
         }
       }
+      tracing::debug!("collaboration network event pump stopped");
     })
     .detach();
   }
@@ -270,24 +316,30 @@ impl CollabManager {
   fn handle_net_event(&mut self, event: NetEvent, cx: &mut App) {
     match event {
       NetEvent::EndpointOnline(online) => {
+        tracing::info!(online, "collaboration endpoint status changed");
         self.endpoint_online = online;
         for session in self.sessions_by_id.values() {
           session.update(cx, |session, cx| session.set_endpoint_online(online, cx));
         }
       },
       NetEvent::Gossip { session, from, msg } => {
+        tracing::trace!(%session, from = %from, gossip_kind = msg.kind(), gossip_payload_bytes = msg.payload_len(), "routing collaboration gossip event");
         self.update_session(session, cx, |session, cx| session.handle_gossip(from, msg, cx));
       },
       NetEvent::NeighborUp { session, peer } => {
+        tracing::debug!(%session, peer = %peer, "routing collaboration neighbor-up event");
         self.update_session(session, cx, |session, cx| session.neighbor_up(peer, cx));
       },
       NetEvent::NeighborDown { session, peer } => {
+        tracing::debug!(%session, peer = %peer, "routing collaboration neighbor-down event");
         self.update_session(session, cx, |session, cx| session.neighbor_down(peer, cx));
       },
       NetEvent::GossipLagged { session } => {
+        tracing::warn!(%session, "routing collaboration gossip-lagged event");
         self.update_session(session, cx, |session, cx| session.handle_gossip_lagged(cx));
       },
       NetEvent::SubscribeFailed { session, error } => {
+        tracing::error!(%session, error = %error, "collaboration gossip subscription failed");
         let detached = self.update_session(session, cx, |session, cx| session.detach(DetachReason::Fatal(error), cx));
         if detached.unwrap_or(false) {
           self.unregister_session(session);
@@ -307,22 +359,30 @@ impl CollabManager {
       .get(&session)
       .cloned()
       .map(|session| session.update(cx, update))
+      .or_else(|| {
+        tracing::warn!(%session, "collaboration event targeted missing session");
+        None
+      })
   }
 
   fn finish_create_session<T>(session: Entity<CollabSession>, reply_rx: Receiver<Result<TicketSeed>>, cx: &mut Context<T>)
   where
     T: 'static,
   {
+    let session_id = session.read(cx).session_id();
     cx.spawn(async move |_, cx| match reply_rx.recv().await {
       Ok(Ok(seed)) => {
+        tracing::info!(%session_id, inviter = %seed.inviter.id, "collaboration create-session completed");
         let _ = session.update(cx, |session, cx| session.establish_local_peer(&seed.inviter.id, cx));
       },
       Ok(Err(error)) => {
+        tracing::error!(%session_id, error = %format_args!("{error:#}"), "collaboration create-session failed");
         let _ = session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error:#}")), cx);
         });
       },
       Err(error) => {
+        tracing::error!(%session_id, error = %error, "collaboration create-session reply channel closed");
         let _ = session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("creating collaboration session failed: {error}")), cx);
         });
@@ -335,15 +395,20 @@ impl CollabManager {
   where
     T: 'static,
   {
+    let session_id = session.read(cx).session_id();
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    commands
-      .try_send(NetCommand::MintTicketAddr { reply: reply_tx })
-      .context("requesting collaboration endpoint address failed")?;
+    if let Err(error) = commands.try_send(NetCommand::MintTicketAddr { reply: reply_tx }) {
+      tracing::error!(%session_id, error = %error, "queueing collaboration endpoint address command failed");
+      return Err(error).context("requesting collaboration endpoint address failed");
+    }
+    tracing::debug!(%session_id, "requested collaboration endpoint address for joined session");
     cx.spawn(async move |_, cx| match reply_rx.recv().await {
       Ok(addr) => {
+        tracing::info!(%session_id, peer = %addr.id, "collaboration joined session local peer established");
         let _ = session.update(cx, |session, cx| session.establish_local_peer(&addr.id, cx));
       },
       Err(error) => {
+        tracing::error!(%session_id, error = %error, "collaboration endpoint address unavailable for joined session");
         let _ = session.update(cx, |session, cx| {
           session.detach(DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error}")), cx);
         });

@@ -2996,6 +2996,9 @@ dependencies = [
  "serde_json",
  "tempfile",
  "toml 1.1.2+spec-1.1.0",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
  "uuid",
 ]
 
@@ -3016,6 +3019,7 @@ dependencies = [
  "rand 0.9.4",
  "serde",
  "tokio",
+ "tracing",
  "twox-hash",
  "uuid",
 ]

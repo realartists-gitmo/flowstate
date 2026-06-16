@@ -17,6 +17,7 @@ postcard = { workspace = true }
 rand = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 twox-hash = { workspace = true }
 uuid = { workspace = true }
 

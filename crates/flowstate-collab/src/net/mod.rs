@@ -26,6 +26,25 @@ pub enum PublishPayload {
   Digest { vv: Vec<u8> },
 }
 
+impl PublishPayload {
+  #[must_use]
+  pub fn kind(&self) -> &'static str {
+    match self {
+      Self::Update(_) => "update",
+      Self::Presence(_) => "presence",
+      Self::Digest { .. } => "digest",
+    }
+  }
+
+  #[must_use]
+  pub fn byte_len(&self) -> usize {
+    match self {
+      Self::Update(bytes) | Self::Presence(bytes) => bytes.len(),
+      Self::Digest { vv } => vv.len(),
+    }
+  }
+}
+
 #[derive(Debug)]
 pub enum NetCommand {
   EnsureUp,
@@ -75,6 +94,26 @@ pub enum NetCommand {
     reply: Reply<EndpointAddr>,
   },
   Shutdown,
+}
+
+impl NetCommand {
+  #[must_use]
+  pub fn kind(&self) -> &'static str {
+    match self {
+      Self::EnsureUp => "ensure_up",
+      Self::RegisterDirectHandler { .. } => "register_direct_handler",
+      Self::CreateSession { .. } => "create_session",
+      Self::JoinSession { .. } => "join_session",
+      Self::LeaveSession { .. } => "leave_session",
+      Self::Publish { .. } => "publish",
+      Self::PullUpdates { .. } => "pull_updates",
+      Self::PullSnapshot { .. } => "pull_snapshot",
+      Self::PullBlob { .. } => "pull_blob",
+      Self::PullAsset { .. } => "pull_asset",
+      Self::MintTicketAddr { .. } => "mint_ticket_addr",
+      Self::Shutdown => "shutdown",
+    }
+  }
 }
 
 #[derive(Clone, Debug)]

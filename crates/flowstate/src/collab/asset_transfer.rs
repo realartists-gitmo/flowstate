@@ -22,19 +22,22 @@ pub(super) fn schedule_missing_assets(
   cx: &mut Context<CollabSession>,
 ) {
   let Some(editor) = session.editor.clone() else {
+    tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because editor is missing");
     return;
   };
   let Some(doc) = &session.doc else {
+    tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because Loro doc is missing");
     return;
   };
 
   let assets = match image_assets_in_loro(doc) {
     Ok(assets) => assets,
     Err(error) => {
-      eprintln!("flowstate collab asset scan failed: {error:#}");
+      tracing::warn!(session = %session.session, error = %format_args!("{error:#}"), "collaboration asset scan failed");
       return;
     },
   };
+  tracing::trace!(session = %session.session, assets = assets.len(), "scanned collaboration image assets");
   if assets.is_empty() {
     return;
   }
@@ -55,6 +58,7 @@ pub(super) fn schedule_missing_assets(
       .cloned()
       .collect::<Vec<_>>()
   };
+  tracing::debug!(session = %session.session, assets = assets.len(), missing_assets = missing_assets.len(), "checked collaboration image assets for missing bytes");
   if missing_assets.is_empty() {
     return;
   }
@@ -66,18 +70,22 @@ pub(super) fn schedule_missing_assets(
       record: meta.placeholder_record(),
     })
     .collect::<Vec<_>>();
+  tracing::debug!(session = %session.session, placeholders = placeholders.len(), "queueing collaboration asset placeholders");
   session.apply_or_queue_patches(placeholders, cx);
 
   let candidates = session.pull_candidates(preferred_peer);
   if candidates.is_empty() {
+    tracing::warn!(session = %session.session, missing_assets = missing_assets.len(), "cannot pull collaboration assets because no candidate peers are available");
     return;
   }
 
   for meta in missing_assets {
     let id = AssetId(meta.asset_id);
     if !session.asset_pulls_in_flight.insert(id) {
+      tracing::trace!(session = %session.session, ?id, "collaboration asset pull already in flight");
       continue;
     }
+    tracing::debug!(session = %session.session, ?id, bytes = meta.byte_len, candidate_count = candidates.len(), "scheduling collaboration asset pull");
     start_asset_pull(session, candidates.clone(), meta, cx);
   }
 }
@@ -90,7 +98,9 @@ fn start_asset_pull(
 ) {
   let (reply_tx, reply_rx) = async_channel::bounded(1);
   let id = AssetId(meta.asset_id);
-  if session
+  let session_id = session.session;
+  let candidate_count = candidates.len();
+  if let Err(error) = session
     .net_tx
     .try_send(NetCommand::PullAsset {
       session: session.session,
@@ -98,11 +108,12 @@ fn start_asset_pull(
       asset: meta.asset_id,
       reply: reply_tx,
     })
-    .is_err()
   {
+    tracing::warn!(session = %session_id, ?id, candidate_count, error = %error, "queueing collaboration asset pull failed");
     session.asset_pulls_in_flight.remove(&id);
     return;
   }
+  tracing::debug!(session = %session_id, ?id, candidate_count, expected_bytes = meta.byte_len, "queued collaboration asset pull");
 
   cx.spawn(async move |session, cx| {
     let result = reply_rx.recv().await;
@@ -111,12 +122,13 @@ fn start_asset_pull(
       match result {
         Ok(Ok(bytes)) => match meta.record_from_bytes(bytes.bytes) {
           Ok(record) => {
+            tracing::debug!(session = %session_id, ?id, bytes = record.bytes.len(), "collaboration asset pull succeeded");
             session.apply_or_queue_patches(vec![CollabPatch::AssetArrived { id, record }], cx);
           },
-          Err(error) => eprintln!("flowstate collab rejected fetched asset {id:?}: {error:#}"),
+          Err(error) => tracing::warn!(session = %session_id, ?id, error = %format_args!("{error:#}"), "rejected fetched collaboration asset"),
         },
-        Ok(Err(error)) => eprintln!("flowstate collab asset pull failed for {id:?}: {error:#}"),
-        Err(error) => eprintln!("flowstate collab asset pull channel closed for {id:?}: {error}"),
+        Ok(Err(error)) => tracing::warn!(session = %session_id, ?id, error = %format_args!("{error:#}"), "collaboration asset pull failed"),
+        Err(error) => tracing::warn!(session = %session_id, ?id, error = %error, "collaboration asset pull channel closed"),
       }
     });
   })
@@ -144,6 +156,7 @@ impl ImageAssetMeta {
   }
 
   fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<AssetRecord> {
+    tracing::trace!(asset = self.asset_id, expected_bytes = self.byte_len, received_bytes = bytes.len(), "validating fetched collaboration asset bytes");
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
     let mut hasher = DefaultHasher::new();
     bytes.hash(&mut hasher);

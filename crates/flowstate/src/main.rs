@@ -7,6 +7,7 @@ use clap::{Parser, Subcommand};
 
 use flowstate::{
   docx_conversion::{convert_db8_to_docx, convert_db8_to_pdf, convert_docx_to_pdf, convert_pdf_to_db8},
+  logging,
   run_standalone, write_demo_document,
 };
 
@@ -94,6 +95,14 @@ enum CliCommand {
 
 #[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
+  let _logging_guard = match logging::init() {
+    Ok(guard) => Some(guard),
+    Err(error) => {
+      eprintln!("flowstate logging initialization failed: {error:#}");
+      None
+    },
+  };
+
   let cli = Cli::parse();
 
   if cli.write_demo_db8 {

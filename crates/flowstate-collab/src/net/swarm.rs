@@ -36,11 +36,13 @@ impl SwarmHandle {
     bootstrap: Vec<EndpointAddr>,
     evt_tx: Sender<NetEvent>,
   ) -> Result<Self> {
+    tracing::info!(%session, bootstrap_count = bootstrap.len(), "spawning collaboration gossip swarm");
     register_bootstrap_addrs(&endpoint, &bootstrap)?;
     let bootstrap_ids = bootstrap.iter().map(endpoint_id).collect::<Vec<_>>();
     let (tx, rx) = async_channel::unbounded();
     tokio::spawn(async move {
       if let Err(error) = run_session(gossip, direct_state, session, bootstrap_ids, rx, evt_tx.clone()).await {
+        tracing::error!(%session, error = %format_args!("{error:#}"), "collaboration gossip swarm failed");
         let _ = evt_tx
           .send(NetEvent::SubscribeFailed {
             session,
@@ -53,6 +55,7 @@ impl SwarmHandle {
   }
 
   pub async fn publish(&self, payload: PublishPayload) -> Result<()> {
+    tracing::trace!(session = %self.session, payload_kind = payload.kind(), payload_bytes = payload.byte_len(), "queueing collaboration gossip publish");
     self
       .tx
       .send(SwarmCommand::Publish(payload))
@@ -61,6 +64,7 @@ impl SwarmHandle {
   }
 
   pub async fn stop(&self) {
+    tracing::debug!(session = %self.session, "stopping collaboration gossip swarm");
     let _ = self.tx.send(SwarmCommand::Stop).await;
   }
 }
@@ -73,10 +77,12 @@ async fn run_session(
   rx: Receiver<SwarmCommand>,
   evt_tx: Sender<NetEvent>,
 ) -> Result<()> {
+  tracing::info!(%session, bootstrap_count = bootstrap.len(), "subscribing to collaboration gossip topic");
   let topic = gossip
     .subscribe(topic_id(session), bootstrap)
     .await
     .context("subscribing to collaboration gossip topic failed")?;
+  tracing::info!(%session, "subscribed to collaboration gossip topic");
   let (sender, mut receiver) = topic.split();
 
   loop {
@@ -84,7 +90,14 @@ async fn run_session(
       command = rx.recv() => {
         match command {
           Ok(SwarmCommand::Publish(payload)) => publish(&sender, &direct_state, session, payload).await?,
-          Ok(SwarmCommand::Stop) | Err(_) => break,
+          Ok(SwarmCommand::Stop) => {
+            tracing::debug!(%session, "collaboration gossip swarm stop received");
+            break;
+          },
+          Err(error) => {
+            tracing::debug!(%session, error = %error, "collaboration gossip swarm command channel closed");
+            break;
+          },
         }
       },
       event = receiver.next() => {
@@ -94,10 +107,13 @@ async fn run_session(
     }
   }
 
+  tracing::info!(%session, "collaboration gossip swarm stopped");
   Ok(())
 }
 
 async fn publish(sender: &GossipSender, direct_state: &DirectServeState, session: SessionId, payload: PublishPayload) -> Result<()> {
+  let payload_kind = payload.kind();
+  let payload_bytes = payload.byte_len();
   let (message, neighbors_only) = match payload {
     PublishPayload::Update(bytes) => (update_message(direct_state, session, bytes).await?, false),
     PublishPayload::Presence(bytes) => (GossipMsg::Presence(bytes), false),
@@ -109,23 +125,38 @@ async fn publish(sender: &GossipSender, direct_state: &DirectServeState, session
   } else {
     proto_gossip::encode_inline(&message)?
   };
+  let frame_bytes = frame.len();
+  tracing::trace!(
+    %session,
+    payload_kind,
+    payload_bytes,
+    gossip_kind = message.kind(),
+    gossip_payload_bytes = message.payload_len(),
+    frame_bytes,
+    neighbors_only,
+    "broadcasting collaboration gossip frame",
+  );
 
   if neighbors_only {
     sender.broadcast_neighbors(frame.into()).await?;
   } else {
     sender.broadcast(frame.into()).await?;
   }
+  tracing::trace!(%session, payload_kind, frame_bytes, neighbors_only, "collaboration gossip frame broadcast complete");
   Ok(())
 }
 
 async fn update_message(direct_state: &DirectServeState, session: SessionId, bytes: Vec<u8>) -> Result<GossipMsg> {
+  let update_bytes = bytes.len();
   let inline = GossipMsg::Update(bytes.clone());
   if proto_gossip::encoded_len(&inline)? <= GOSSIP_INLINE_LIMIT {
+    tracing::trace!(%session, update_bytes, "collaboration update will be sent inline over gossip");
     return Ok(inline);
   }
 
   let len = bytes.len() as u64;
   let blob = direct_state.insert_blob(session, bytes).await;
+  tracing::debug!(%session, ?blob, update_bytes, "collaboration update exceeded gossip limit; publishing blob announcement");
   Ok(GossipMsg::UpdateAvailable { blob, len })
 }
 
@@ -133,6 +164,14 @@ async fn handle_event(event: Event, session: SessionId, evt_tx: &Sender<NetEvent
   match event {
     Event::Received(message) => match proto_gossip::decode(&message.content) {
       Ok(msg) => {
+        tracing::trace!(
+          %session,
+          from = %message.delivered_from,
+          gossip_kind = msg.kind(),
+          gossip_payload_bytes = msg.payload_len(),
+          frame_bytes = message.content.len(),
+          "received collaboration gossip frame",
+        );
         let _ = evt_tx
           .send(NetEvent::Gossip {
             session,
@@ -141,15 +180,24 @@ async fn handle_event(event: Event, session: SessionId, evt_tx: &Sender<NetEvent
           })
           .await;
       },
-      Err(error) => eprintln!("flowstate collab ignored gossip frame: {error:#}"),
+      Err(error) => tracing::warn!(
+        %session,
+        from = %message.delivered_from,
+        frame_bytes = message.content.len(),
+        error = %format_args!("{error:#}"),
+        "ignored malformed collaboration gossip frame",
+      ),
     },
     Event::NeighborUp(peer) => {
+      tracing::info!(%session, peer = %peer, "collaboration gossip neighbor up");
       let _ = evt_tx.send(NetEvent::NeighborUp { session, peer }).await;
     },
     Event::NeighborDown(peer) => {
+      tracing::info!(%session, peer = %peer, "collaboration gossip neighbor down");
       let _ = evt_tx.send(NetEvent::NeighborDown { session, peer }).await;
     },
     Event::Lagged => {
+      tracing::warn!(%session, "collaboration gossip receiver lagged");
       let _ = evt_tx.send(NetEvent::GossipLagged { session }).await;
     },
   }
@@ -160,6 +208,7 @@ fn register_bootstrap_addrs(endpoint: &Endpoint, bootstrap: &[EndpointAddr]) -> 
   if bootstrap.is_empty() {
     return Ok(());
   }
+  tracing::debug!(bootstrap_count = bootstrap.len(), "registering collaboration bootstrap addresses");
   endpoint
     .address_lookup()?
     .add(MemoryLookup::from_endpoint_info(bootstrap.iter().cloned()));

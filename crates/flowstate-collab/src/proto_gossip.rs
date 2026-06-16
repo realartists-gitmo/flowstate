@@ -15,6 +15,27 @@ pub enum GossipMsg {
   Digest { session: SessionId, vv: Vec<u8> },
 }
 
+impl GossipMsg {
+  #[must_use]
+  pub fn kind(&self) -> &'static str {
+    match self {
+      Self::Update(_) => "update",
+      Self::UpdateAvailable { .. } => "update_available",
+      Self::Presence(_) => "presence",
+      Self::Digest { .. } => "digest",
+    }
+  }
+
+  #[must_use]
+  pub fn payload_len(&self) -> u64 {
+    match self {
+      Self::Update(bytes) | Self::Presence(bytes) => bytes.len() as u64,
+      Self::UpdateAvailable { len, .. } => *len,
+      Self::Digest { vv, .. } => vv.len() as u64,
+    }
+  }
+}
+
 pub fn encode(msg: &GossipMsg) -> Result<Vec<u8>> {
   let mut bytes = PROTOCOL_VERSION.to_le_bytes().to_vec();
   bytes.extend(postcard::to_stdvec(msg)?);

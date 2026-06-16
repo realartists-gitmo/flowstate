@@ -132,6 +132,15 @@ impl CollabSession {
     let (direct_tx, direct_rx) = async_channel::unbounded();
     let (undo_tx, undo_rx) = async_channel::unbounded();
     let now = Instant::now();
+    tracing::info!(
+      %session,
+      %panel_id,
+      title = %title,
+      paragraphs = document.paragraphs.len(),
+      blocks = document.blocks.len(),
+      assets = document.assets.assets.len(),
+      "built local collaboration document projection",
+    );
 
     Ok(Self {
       session,
@@ -173,6 +182,7 @@ impl CollabSession {
     let (direct_tx, direct_rx) = async_channel::unbounded();
     let (undo_tx, undo_rx) = async_channel::unbounded();
     let now = Instant::now();
+    tracing::info!(%session, title = %title, bootstrap_count = bootstrap_addrs.len(), "created joining collaboration session state");
     Self {
       session,
       title,
@@ -261,6 +271,7 @@ impl CollabSession {
   }
 
   pub fn set_join_stage(&mut self, stage: JoinStage, cx: &mut Context<Self>) {
+    tracing::debug!(session = %self.session, ?stage, "collaboration join stage changed");
     self.phase = SessionPhase::Joining(stage);
     cx.notify();
   }
@@ -275,11 +286,15 @@ impl CollabSession {
     cx.notify();
 
     let (reply_tx, reply_rx) = async_channel::bounded(1);
+    let candidates = self.pull_candidates(Some(inviter));
+    let session_id = self.session;
+    tracing::info!(session = %self.session, inviter = %inviter, candidate_count = candidates.len(), "requesting collaboration join snapshot");
     if let Err(error) = self.net_tx.try_send(NetCommand::PullSnapshot {
       session: self.session,
-      candidates: self.pull_candidates(Some(inviter)),
+      candidates,
       reply: reply_tx,
     }) {
+      tracing::error!(session = %self.session, inviter = %inviter, error = %error, "queueing collaboration join snapshot pull failed");
       let detail = format!("requesting collaboration snapshot failed: {error}");
       self.detach(DetachReason::JoinFailed(detail.clone()), cx);
       let _ = result_tx.try_send(Err(anyhow!(detail)));
@@ -288,17 +303,25 @@ impl CollabSession {
 
     cx.spawn(async move |session, cx| {
       let joined = match reply_rx.recv().await {
-        Ok(Ok(bytes)) => session
-          .update(cx, |session, cx| match session.finish_join_snapshot(&bytes, cx) {
-            Ok(joined) => Ok(joined),
-            Err(error) => {
-              let detail = format!("building collaboration document failed: {error:#}");
-              session.detach(DetachReason::JoinFailed(detail), cx);
-              Err(error.context("building collaboration document failed"))
-            },
-          })
-          .unwrap_or_else(|error| Err(anyhow!("collaboration join session disappeared: {error}"))),
+        Ok(Ok(bytes)) => {
+          tracing::info!(session = %session_id, snapshot_bytes = bytes.len(), "collaboration join snapshot pulled");
+          session
+            .update(cx, |session, cx| match session.finish_join_snapshot(&bytes, cx) {
+              Ok(joined) => Ok(joined),
+              Err(error) => {
+                tracing::error!(session = %session.session, error = %format_args!("{error:#}"), "building collaboration document from snapshot failed");
+                let detail = format!("building collaboration document failed: {error:#}");
+                session.detach(DetachReason::JoinFailed(detail), cx);
+                Err(error.context("building collaboration document failed"))
+              },
+            })
+            .unwrap_or_else(|error| {
+              tracing::error!(error = %error, "collaboration join session disappeared while building snapshot");
+              Err(anyhow!("collaboration join session disappeared: {error}"))
+            })
+        },
         Ok(Err(error)) => {
+          tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "pulling collaboration join snapshot failed");
           let detail = format!("pulling collaboration snapshot failed: {error:#}");
           let _ = session.update(cx, |session, cx| {
             session.detach(DetachReason::JoinFailed(detail.clone()), cx);
@@ -306,6 +329,7 @@ impl CollabSession {
           Err(anyhow!(detail))
         },
         Err(error) => {
+          tracing::error!(session = %session_id, error = %error, "collaboration join snapshot reply channel closed");
           let detail = format!("collaboration snapshot reply channel closed: {error}");
           let _ = session.update(cx, |session, cx| {
             session.detach(DetachReason::JoinFailed(detail.clone()), cx);
@@ -322,9 +346,17 @@ impl CollabSession {
 
   pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
     if self.doc.is_none() || self.binding.is_none() {
+      tracing::warn!(session = %self.session, %panel_id, "cannot attach joined editor before snapshot load finishes");
       bail!("collaboration snapshot has not finished loading");
     }
 
+    tracing::info!(
+      session = %self.session,
+      %panel_id,
+      pending_remote_updates = self.pending_remote_updates.len(),
+      pending_remote_patches = self.pending_remote_patches.len(),
+      "attaching joined collaboration editor",
+    );
     self.panel_id = Some(panel_id);
     self.editor = Some(editor);
     self.attach(cx);
@@ -337,10 +369,12 @@ impl CollabSession {
     asset_transfer::schedule_missing_assets(self, None, cx);
     self.publish_digest();
     cx.notify();
+    tracing::info!(session = %self.session, %panel_id, "joined collaboration editor attached");
     Ok(())
   }
 
   pub fn attach(&mut self, cx: &mut Context<Self>) {
+    tracing::debug!(session = %self.session, phase = ?self.phase, "attaching collaboration session hooks");
     self.attach_undo_manager();
     self.attach_editor_hooks(cx);
     self.attach_loro_publish_hook();
@@ -351,19 +385,27 @@ impl CollabSession {
 
   pub fn establish_local_peer(&mut self, peer: &flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     if self.presence.is_none() {
+      tracing::info!(session = %self.session, peer = %peer, "establishing local collaboration peer presence");
       let presence = PresenceStore::new(peer);
       let session = self.session;
       let net_tx = self.net_tx.clone();
       self
         .loro_subscriptions
         .push(presence.subscribe_local_updates(move |bytes| {
-          let _ = net_tx.try_send(NetCommand::Publish {
+          let bytes_len = bytes.len();
+          if let Err(error) = net_tx.try_send(NetCommand::Publish {
             session,
             payload: PublishPayload::Presence(bytes.clone()),
-          });
+          }) {
+            tracing::warn!(%session, bytes = bytes_len, error = %error, "queueing collaboration presence publish failed");
+          } else {
+            tracing::trace!(%session, bytes = bytes_len, "queued collaboration presence publish from local update");
+          }
           true
         }));
       self.presence = Some(presence);
+    } else {
+      tracing::debug!(session = %self.session, peer = %peer, "local collaboration peer presence already established");
     }
     self.refresh_own_presence(cx);
     self.endpoint_online = true;
@@ -375,9 +417,11 @@ impl CollabSession {
     self.publish_digest();
     asset_transfer::schedule_missing_assets(self, None, cx);
     cx.notify();
+    tracing::info!(session = %self.session, peer = %peer, peers_present = self.peers_present(), "local collaboration peer established");
   }
 
   fn finish_join_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) -> Result<JoinedDocument> {
+    tracing::info!(session = %self.session, snapshot_bytes = snapshot.len(), "building collaboration document from join snapshot");
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
 
@@ -388,6 +432,13 @@ impl CollabSession {
     projection::verify_lineage(&doc, self.session)?;
     let document = projection::document_from_loro(&doc, load_document_theme())?;
     let binding = DocBinding::build(&doc, &document)?;
+    tracing::info!(
+      session = %self.session,
+      paragraphs = document.paragraphs.len(),
+      blocks = document.blocks.len(),
+      assets = document.assets.assets.len(),
+      "built collaboration document from join snapshot",
+    );
 
     self.doc = Some(doc);
     self.binding = Some(binding);
@@ -400,16 +451,21 @@ impl CollabSession {
 
   pub fn detach(&mut self, reason: DetachReason, cx: &mut Context<Self>) -> bool {
     if matches!(self.phase, SessionPhase::Detached(_)) {
+      tracing::debug!(session = %self.session, ?reason, "collaboration session already detached");
       return false;
     }
 
+    tracing::warn!(session = %self.session, ?reason, phase = ?self.phase, "detaching collaboration session");
     if let Some(presence) = &self.presence {
       presence.delete_self();
       self.publish_presence_bytes(presence.encode_self());
     }
-    let _ = self
+    if let Err(error) = self
       .net_tx
-      .try_send(NetCommand::LeaveSession { session: self.session });
+      .try_send(NetCommand::LeaveSession { session: self.session })
+    {
+      tracing::warn!(session = %self.session, error = %error, "queueing collaboration leave-session command failed during detach");
+    }
     self.flush_pending_remote_patches(cx);
 
     if let Some(editor) = self.editor.clone() {
@@ -439,11 +495,13 @@ impl CollabSession {
     self.local_update_publish_attached = false;
     self.phase = SessionPhase::Detached(reason);
     cx.notify();
+    tracing::info!(session = %self.session, "collaboration session detached and cleaned up");
     true
   }
 
   pub fn flush_local_edits(&mut self, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
     if matches!(self.phase, SessionPhase::Detached(_) | SessionPhase::Joining(_)) {
+      tracing::trace!(session = %self.session, phase = ?self.phase, "skipping local collaboration edit flush for inactive phase");
       return Ok(());
     }
 
@@ -453,10 +511,19 @@ impl CollabSession {
       editor.clear_collab_history();
       edits
     });
+    let edit_count = edits.len();
+    let operation_count = edits.iter().map(|edit| edit.operations.len()).sum::<usize>();
+    if edit_count == 0 || operation_count == 0 {
+      tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
+    } else {
+      tracing::debug!(session = %self.session, edit_count, operation_count, "flushing local collaboration edits into Loro");
+    }
     let Some(doc) = &self.doc else {
+      tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because Loro doc is missing");
       return Ok(());
     };
     let Some(binding) = &mut self.binding else {
+      tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because binding is missing");
       return Ok(());
     };
 
@@ -465,22 +532,32 @@ impl CollabSession {
       if edit.operations.is_empty() {
         continue;
       }
-      LocalApplier { doc, binding }.apply(&document, &edit.operations)?;
+      let operation_count = edit.operations.len();
+      if let Err(error) = (LocalApplier { doc, binding }).apply(&document, &edit.operations) {
+        tracing::error!(session = %self.session, operation_count, error = %format_args!("{error:#}"), "applying local collaboration edit failed");
+        return Err(error);
+      }
+      tracing::trace!(session = %self.session, operation_count, "applied local collaboration edit to Loro");
       applied = true;
     }
     if applied {
       self.last_document_activity = Instant::now();
+      tracing::debug!(session = %self.session, "local collaboration edits flushed");
     }
     Ok(())
   }
 
   pub fn handle_gossip(&mut self, from: flowstate_collab::ids::PeerId, msg: GossipMsg, cx: &mut Context<Self>) {
+    let gossip_kind = msg.kind();
+    let gossip_payload_bytes = msg.payload_len();
+    tracing::trace!(session = %self.session, from = %from, gossip_kind, gossip_payload_bytes, "handling collaboration gossip message");
     self.note_inbound_traffic(cx);
     let result = match msg {
       GossipMsg::Update(bytes) => self
         .import_update_bytes(&bytes, cx)
         .map(|()| asset_transfer::schedule_missing_assets(self, Some(from), cx)),
-      GossipMsg::UpdateAvailable { blob, .. } => {
+      GossipMsg::UpdateAvailable { blob, len } => {
+        tracing::debug!(session = %self.session, from = %from, ?blob, bytes = len, "collaboration update available via direct blob pull");
         self.pull_blob(from, blob, cx);
         Ok(())
       },
@@ -491,30 +568,34 @@ impl CollabSession {
       GossipMsg::Digest { session, vv } => self.handle_digest(from, session, &vv, cx),
     };
     if let Err(error) = result {
+      tracing::error!(session = %self.session, from = %from, gossip_kind, error = %format_args!("{error:#}"), "collaboration gossip handling failed");
       self.detach(DetachReason::Fatal(format!("collaboration update failed: {error:#}")), cx);
     }
   }
 
   pub fn neighbor_up(&mut self, peer: flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
-    self.neighbors.insert(peer);
+    let inserted = self.neighbors.insert(peer);
     self.zero_neighbors_since = None;
     self.anti_entropy.on_neighbor_up();
     self.mark_online(cx);
     self.publish_digest();
     asset_transfer::schedule_missing_assets(self, Some(peer), cx);
     cx.notify();
+    tracing::info!(session = %self.session, peer = %peer, inserted, neighbors = self.neighbors.len(), "collaboration neighbor up");
   }
 
   pub fn neighbor_down(&mut self, peer: flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
-    self.neighbors.remove(&peer);
+    let removed = self.neighbors.remove(&peer);
     if self.neighbors.is_empty() && self.zero_neighbors_since.is_none() {
       self.zero_neighbors_since = Some(Instant::now());
     }
     self.evaluate_connectivity(cx);
     cx.notify();
+    tracing::info!(session = %self.session, peer = %peer, removed, neighbors = self.neighbors.len(), "collaboration neighbor down");
   }
 
   pub fn handle_gossip_lagged(&mut self, cx: &mut Context<Self>) {
+    tracing::warn!(session = %self.session, neighbors = self.neighbors.len(), "collaboration gossip lagged; scheduling recovery");
     self.publish_digest();
     let peer = self.neighbors.iter().next().copied();
     let vv = self
@@ -527,6 +608,7 @@ impl CollabSession {
   }
 
   pub fn set_endpoint_online(&mut self, online: bool, cx: &mut Context<Self>) {
+    tracing::info!(session = %self.session, online, previous_online = self.endpoint_online, "collaboration endpoint online state applied to session");
     self.endpoint_online = online;
     if online {
       if self.peers_present() == 0 || !self.neighbors.is_empty() {
@@ -540,15 +622,19 @@ impl CollabSession {
 
   fn attach_editor_hooks(&mut self, cx: &mut Context<Self>) {
     if !self.editor_subscriptions.is_empty() {
+      tracing::trace!(session = %self.session, "collaboration editor hooks already attached");
       return;
     }
     let Some(editor) = self.editor.clone() else {
+      tracing::warn!(session = %self.session, "cannot attach collaboration editor hooks because editor is missing");
       return;
     };
 
+    tracing::debug!(session = %self.session, "attaching collaboration editor hooks");
     editor.update(cx, |editor, cx| {
       if editor.document_path().is_none() {
         editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)), cx);
+        tracing::debug!(session = %self.session, "set collaboration recovery path for untitled document");
       }
       editor.clear_collab_history();
       editor.set_collab_capture(true);
@@ -562,6 +648,7 @@ impl CollabSession {
       .editor_subscriptions
       .push(cx.observe(&editor, |session, editor, cx| {
         if let Err(error) = session.flush_local_edits(editor.clone(), cx) {
+          tracing::error!(session = %session.session, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
           session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
           return;
         }
@@ -572,13 +659,16 @@ impl CollabSession {
       .editor_subscriptions
       .push(cx.subscribe(&editor, |session, _, event: &EditorEvent, cx| {
         if matches!(event, EditorEvent::SelectionChanged { .. }) {
+          tracing::trace!(session = %session.session, "collaboration local selection changed; refreshing presence");
           session.refresh_own_presence(cx);
         }
       }));
+    tracing::debug!(session = %self.session, subscriptions = self.editor_subscriptions.len(), "collaboration editor hooks attached");
   }
 
   fn attach_loro_publish_hook(&mut self) {
     if self.doc.is_none() || self.local_update_publish_attached {
+      tracing::trace!(session = %self.session, has_doc = self.doc.is_some(), attached = self.local_update_publish_attached, "skipping collaboration Loro publish hook attach");
       return;
     }
     let Some(doc) = &self.doc else {
@@ -586,13 +676,19 @@ impl CollabSession {
     };
     let session = self.session;
     let net_tx = self.net_tx.clone();
+    tracing::debug!(%session, "attaching collaboration Loro local-update publish hook");
     self
       .loro_subscriptions
       .push(doc.subscribe_local_update(Box::new(move |bytes| {
-        let _ = net_tx.try_send(NetCommand::Publish {
+        let bytes_len = bytes.len();
+        if let Err(error) = net_tx.try_send(NetCommand::Publish {
           session,
           payload: PublishPayload::Update(bytes.clone()),
-        });
+        }) {
+          tracing::warn!(%session, bytes = bytes_len, error = %error, "queueing collaboration update publish failed");
+        } else {
+          tracing::trace!(%session, bytes = bytes_len, "queued collaboration update publish from local Loro update");
+        }
         true
       })));
     self.local_update_publish_attached = true;
@@ -600,36 +696,46 @@ impl CollabSession {
 
   fn attach_undo_manager(&mut self) {
     if self.undo_manager.is_some() {
+      tracing::trace!(session = %self.session, "collaboration undo manager already attached");
       return;
     }
     let Some(doc) = &self.doc else {
+      tracing::warn!(session = %self.session, "cannot attach collaboration undo manager because Loro doc is missing");
       return;
     };
     let mut undo_manager = UndoManager::new(doc);
     undo_manager.set_merge_interval(500);
     undo_manager.set_max_undo_steps(300);
     self.undo_manager = Some(undo_manager);
+    tracing::debug!(session = %self.session, merge_interval_ms = 500, max_undo_steps = 300, "collaboration undo manager attached");
   }
 
   fn attach_undo_request_pump(&mut self, cx: &mut Context<Self>) {
     if self.undo_pump_started {
+      tracing::trace!(session = %self.session, "collaboration undo request pump already started");
       return;
     }
     self.undo_pump_started = true;
     let requests = self.undo_rx.clone();
+    let session_id = self.session;
+    tracing::debug!(session = %session_id, "starting collaboration undo request pump");
     cx.spawn(async move |session, cx| {
       while let Ok(redirect) = requests.recv().await {
+        tracing::debug!(session = %session_id, ?redirect, "received collaboration undo redirect");
         if session
           .update(cx, |session, cx| {
             if let Err(error) = session.apply_loro_undo_redirect(redirect, cx) {
+              tracing::error!(session = %session.session, error = %format_args!("{error:#}"), "collaboration undo redirect failed");
               session.detach(DetachReason::Fatal(format!("collaboration undo failed: {error:#}")), cx);
             }
           })
           .is_err()
         {
+          tracing::debug!(session = %session_id, "collaboration undo request pump session disappeared");
           break;
         }
       }
+      tracing::debug!(session = %session_id, "collaboration undo request pump stopped");
     })
     .detach();
   }

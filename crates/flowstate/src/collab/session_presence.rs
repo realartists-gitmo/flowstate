@@ -6,69 +6,96 @@ use super::{CollabSession, presence_view};
 impl CollabSession {
   pub(super) fn apply_presence(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
     if let Some(presence) = &self.presence {
+      tracing::trace!(session = %self.session, bytes = bytes.len(), "applying remote collaboration presence update");
       if let Err(error) = presence.apply(bytes) {
-        eprintln!("flowstate collab presence update failed: {error:#}");
+        tracing::warn!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "collaboration presence update failed");
       }
       self.refresh_peer_count();
       self.evaluate_connectivity(cx);
       self.refresh_external_carets(cx);
       cx.notify();
+    } else {
+      tracing::debug!(session = %self.session, bytes = bytes.len(), "ignored collaboration presence update before local presence was established");
     }
   }
 
   pub(super) fn refresh_own_presence(&mut self, cx: &mut Context<Self>) {
     let Some(presence) = &self.presence else {
+      tracing::trace!(session = %self.session, "skipping own collaboration presence refresh because store is missing");
       return;
     };
+    let selection = self.own_presence_selection(cx);
     let state = PresenceState {
       name: default_presence_name(),
-      selection: self.own_presence_selection(cx),
+      selection,
     };
+    tracing::trace!(session = %self.session, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
     if let Err(error) = presence.set_self(&state) {
-      eprintln!("flowstate collab presence encode failed: {error:#}");
+      tracing::warn!(session = %self.session, error = %format_args!("{error:#}"), "collaboration presence encode failed");
     }
     self.refresh_peer_count();
   }
 
   pub(super) fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
     let Some(presence) = &self.presence else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
     };
     let Some(doc) = &self.doc else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because Loro doc is missing");
       return;
     };
     let Some(binding) = &self.binding else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because binding is missing");
       return;
     };
     let Some(editor) = self.editor.clone() else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because editor is missing");
       return;
     };
     let carets = presence_view::external_carets(doc, binding, presence);
+    tracing::trace!(session = %self.session, carets = carets.len(), "refreshing collaboration external carets");
     editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
   }
 
   pub(super) fn publish_presence_snapshot(&self) {
     if let Some(presence) = &self.presence {
-      self.publish_presence_bytes(presence.encode_all());
+      let bytes = presence.encode_all();
+      tracing::debug!(session = %self.session, bytes = bytes.len(), "publishing collaboration presence snapshot");
+      self.publish_presence_bytes(bytes);
+    } else {
+      tracing::trace!(session = %self.session, "skipping collaboration presence snapshot because store is missing");
     }
   }
 
   pub(super) fn publish_presence_bytes(&self, bytes: Vec<u8>) {
     if bytes.is_empty() {
+      tracing::trace!(session = %self.session, "skipping empty collaboration presence publish");
       return;
     }
-    let _ = self
+    let byte_len = bytes.len();
+    if let Err(error) = self
       .net_tx
       .try_send(flowstate_collab::net::NetCommand::Publish {
         session: self.session,
         payload: flowstate_collab::net::PublishPayload::Presence(bytes),
-      });
+      })
+    {
+      tracing::warn!(session = %self.session, bytes = byte_len, error = %error, "queueing collaboration presence publish failed");
+    } else {
+      tracing::trace!(session = %self.session, bytes = byte_len, "queued collaboration presence publish");
+    }
   }
 
   pub(super) fn refresh_peer_count(&mut self) {
     let peers_present = self.peers_present();
+    let session_id = self.session;
     if let super::SessionPhase::Attached(attachment) = &mut self.phase {
+      let previous = attachment.peers_present;
       attachment.peers_present = peers_present;
+      if previous != peers_present {
+        tracing::info!(session = %session_id, previous, peers_present, "collaboration peer presence count changed");
+      }
     }
   }
 
