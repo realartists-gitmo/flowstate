@@ -1,10 +1,19 @@
-use std::{collections::HashMap, sync::OnceLock, thread, time::Duration};
+use std::{
+  collections::HashMap,
+  sync::{Mutex, OnceLock},
+  thread,
+  time::Duration,
+};
 
 use anyhow::{Context as _, Result};
-use iroh::{Endpoint, EndpointAddr, endpoint::presets};
+use iroh::{Endpoint, EndpointAddr, Watcher as _, endpoint::presets};
 use iroh_gossip::net::Gossip;
+use tokio::time::timeout;
 
-use crate::proto_direct::{AssetBytes, DirectRequest};
+use crate::{
+  SessionId,
+  proto_direct::{AssetBytes, DirectRequest},
+};
 
 use super::{
   NetCommand, NetEvent, TicketSeed,
@@ -16,7 +25,8 @@ pub type CommandSender = async_channel::Sender<NetCommand>;
 pub type EventReceiver = async_channel::Receiver<NetEvent>;
 
 const DIRECT_PULL_TIMEOUT: Duration = Duration::from_secs(10);
-static RUNTIME: OnceLock<RuntimeBridge> = OnceLock::new();
+const ENDPOINT_ADDR_READY_TIMEOUT: Duration = Duration::from_secs(2);
+static RUNTIME: OnceLock<Mutex<Option<RuntimeBridge>>> = OnceLock::new();
 
 #[derive(Clone)]
 struct RuntimeBridge {
@@ -24,20 +34,30 @@ struct RuntimeBridge {
   events: EventReceiver,
 }
 
+impl RuntimeBridge {
+  fn is_alive(&self) -> bool {
+    !self.commands.is_closed()
+  }
+
+  fn handles(&self) -> (CommandSender, EventReceiver) {
+    (self.commands.clone(), self.events.clone())
+  }
+}
+
 pub fn start() -> Result<(CommandSender, EventReceiver)> {
-  if let Some(runtime) = RUNTIME.get() {
+  let runtime = RUNTIME.get_or_init(|| Mutex::new(None));
+  let mut runtime = runtime.lock().expect("collaboration runtime lock poisoned");
+  if let Some(runtime) = runtime.as_ref().filter(|runtime| runtime.is_alive()) {
     tracing::debug!("reusing existing collaboration network runtime");
-    return Ok((runtime.commands.clone(), runtime.events.clone()));
+    return Ok(runtime.handles());
   }
 
   tracing::info!("starting collaboration network runtime");
-  let runtime = spawn_runtime()?;
-  let set_failed = RUNTIME.set(runtime.clone()).is_err();
-  if set_failed && let Some(runtime) = RUNTIME.get() {
-    tracing::debug!("another caller initialized collaboration network runtime first");
-    return Ok((runtime.commands.clone(), runtime.events.clone()));
-  }
-  Ok((runtime.commands, runtime.events))
+  let next_runtime = spawn_runtime()?;
+  let handles = next_runtime.handles();
+  *runtime = Some(next_runtime);
+  drop(runtime);
+  Ok(handles)
 }
 
 fn spawn_runtime() -> Result<RuntimeBridge> {
@@ -109,37 +129,22 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         direct_state.register_handler(session, handler).await;
       },
       NetCommand::CreateSession { session, reply } => {
-        tracing::info!(%session, "creating collaboration network session");
-        direct_state.attach_session(session).await;
-        replace_swarm(
-          &mut swarms,
-          SwarmHandle::spawn(
-            endpoint.clone(),
-            gossip.clone(),
-            direct_state.clone(),
-            session,
-            Vec::new(),
-            evt_tx.clone(),
-          )?,
-        )
-        .await;
-        tracing::debug!(%session, peer = %bound_addr.id, "collaboration network session created");
-        let _ = reply
-          .send(Ok(TicketSeed {
-            inviter: bound_addr.clone(),
-          }))
-          .await;
+        let result = create_session(&mut swarms, &endpoint, &gossip, &direct_state, &evt_tx, session).await;
+        if let Err(error) = &result {
+          tracing::warn!(%session, error = %format_args!("{error:#}"), "collaboration create session failed");
+        }
+        let _ = reply.send(result).await;
       },
       NetCommand::JoinSession { session, bootstrap } => {
-        let bootstrap_count = bootstrap.len();
-        tracing::info!(%session, bootstrap_count, "joining collaboration network session");
-        direct_state.attach_session(session).await;
-        replace_swarm(
-          &mut swarms,
-          SwarmHandle::spawn(endpoint.clone(), gossip.clone(), direct_state.clone(), session, bootstrap, evt_tx.clone())?,
-        )
-        .await;
-        tracing::debug!(%session, bootstrap_count, "collaboration network join subscribed");
+        if let Err(error) = join_session(&mut swarms, &endpoint, &gossip, &direct_state, &evt_tx, session, bootstrap).await {
+          tracing::warn!(%session, error = %format_args!("{error:#}"), "collaboration join session failed");
+          let _ = evt_tx
+            .send(NetEvent::SubscribeFailed {
+              session,
+              error: format!("{error:#}"),
+            })
+            .await;
+        }
       },
       NetCommand::LeaveSession { session } => {
         tracing::info!(%session, "leaving collaboration network session");
@@ -155,7 +160,9 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         let payload_bytes = payload.byte_len();
         if let Some(handle) = swarms.get(&session) {
           tracing::trace!(%session, payload_kind, payload_bytes, "publishing collaboration payload");
-          handle.publish(payload).await?;
+          if let Err(error) = handle.publish(payload).await {
+            tracing::warn!(%session, payload_kind, payload_bytes, error = %format_args!("{error:#}"), "collaboration publish failed");
+          }
         } else {
           tracing::warn!(%session, payload_kind, payload_bytes, "dropped collaboration publish for missing swarm");
         }
@@ -173,10 +180,15 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         log_direct_pull_result("updates", session, candidate_count, &result);
         let _ = reply.send(result).await;
       },
-      NetCommand::PullSnapshot { session, candidates, reply } => {
+      NetCommand::PullSnapshot {
+        session,
+        candidates,
+        progress,
+        reply,
+      } => {
         let candidate_count = candidates.len();
         tracing::debug!(%session, candidate_count, "pulling collaboration snapshot");
-        let result = direct::pull_with_fallback(DirectRequest::Snapshot { session }, candidates, DIRECT_PULL_TIMEOUT).await;
+        let result = direct::pull_with_fallback_progress(DirectRequest::Snapshot { session }, candidates, DIRECT_PULL_TIMEOUT, progress).await;
         log_direct_pull_result("snapshot", session, candidate_count, &result);
         let _ = reply.send(result).await;
       },
@@ -210,8 +222,9 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         let _ = reply.send(result).await;
       },
       NetCommand::MintTicketAddr { reply } => {
-        tracing::debug!(peer = %bound_addr.id, "minting collaboration ticket address");
-        let _ = reply.send(bound_addr.clone()).await;
+        let addr = reachable_endpoint_addr(&endpoint).await;
+        tracing::debug!(peer = %addr.id, "minting collaboration ticket address");
+        let _ = reply.send(addr).await;
       },
       NetCommand::Shutdown => {
         tracing::info!(open_sessions = swarms.len(), "shutting down collaboration network runtime");
@@ -226,6 +239,54 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
   }
   endpoint.close().await;
   tracing::info!(peer = %bound_addr.id, "collaboration endpoint closed");
+  Ok(())
+}
+
+async fn create_session(
+  swarms: &mut HashMap<SessionId, SwarmHandle>,
+  endpoint: &Endpoint,
+  gossip: &Gossip,
+  direct_state: &DirectServeState,
+  evt_tx: &async_channel::Sender<NetEvent>,
+  session: SessionId,
+) -> Result<TicketSeed> {
+  tracing::info!(%session, "creating collaboration network session");
+  direct_state.attach_session(session).await;
+  replace_swarm(
+    swarms,
+    SwarmHandle::spawn(
+      endpoint.clone(),
+      gossip.clone(),
+      direct_state.clone(),
+      session,
+      Vec::new(),
+      evt_tx.clone(),
+    )?,
+  )
+  .await;
+  let inviter = reachable_endpoint_addr(endpoint).await;
+  tracing::debug!(%session, peer = %inviter.id, "collaboration network session created");
+  Ok(TicketSeed { inviter })
+}
+
+async fn join_session(
+  swarms: &mut HashMap<SessionId, SwarmHandle>,
+  endpoint: &Endpoint,
+  gossip: &Gossip,
+  direct_state: &DirectServeState,
+  evt_tx: &async_channel::Sender<NetEvent>,
+  session: SessionId,
+  bootstrap: Vec<EndpointAddr>,
+) -> Result<()> {
+  let bootstrap_count = bootstrap.len();
+  tracing::info!(%session, bootstrap_count, "joining collaboration network session");
+  direct_state.attach_session(session).await;
+  replace_swarm(
+    swarms,
+    SwarmHandle::spawn(endpoint.clone(), gossip.clone(), direct_state.clone(), session, bootstrap, evt_tx.clone())?,
+  )
+  .await;
+  tracing::debug!(%session, bootstrap_count, "collaboration network join subscribed");
   Ok(())
 }
 
@@ -246,4 +307,25 @@ fn log_direct_pull_result(kind: &'static str, session: crate::SessionId, candida
     Ok(bytes) => tracing::debug!(%session, kind, candidate_count, bytes = bytes.len(), "collaboration direct pull succeeded"),
     Err(error) => tracing::warn!(%session, kind, candidate_count, error = %format_args!("{error:#}"), "collaboration direct pull failed"),
   }
+}
+
+async fn reachable_endpoint_addr(endpoint: &Endpoint) -> EndpointAddr {
+  let mut addr_watcher = endpoint.watch_addr();
+  let wait = async {
+    loop {
+      if !addr_watcher.get().is_empty() {
+        return;
+      }
+      tokio::select! {
+        () = endpoint.online() => return,
+        updated = addr_watcher.updated() => {
+          if updated.is_err() {
+            return;
+          }
+        },
+      }
+    }
+  };
+  let _ = timeout(ENDPOINT_ADDR_READY_TIMEOUT, wait).await;
+  endpoint_addr(endpoint)
 }

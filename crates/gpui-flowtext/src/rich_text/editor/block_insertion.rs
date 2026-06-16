@@ -77,7 +77,8 @@ impl RichTextEditor {
   }
 
   fn insert_ordered_block_fragment_after_caret(&mut self, input_blocks: &[InputBlock], cx: &mut Context<Self>) {
-    let insert_ix = self.prepare_block_insertion_index(cx);
+    let remove_empty_caret_paragraph = !input_blocks.iter().any(|block| matches!(block, InputBlock::Paragraph(_)));
+    let insert_ix = self.prepare_block_insertion_index(remove_empty_caret_paragraph, cx);
     let insert_paragraph_ix = self
       .document
       .blocks
@@ -164,7 +165,8 @@ impl RichTextEditor {
     if blocks.is_empty() {
       return;
     }
-    let insert_ix = self.prepare_block_insertion_index(cx);
+    let remove_empty_caret_paragraph = !blocks.iter().any(|block| matches!(block, Block::Paragraph(_)));
+    let insert_ix = self.prepare_block_insertion_index(remove_empty_caret_paragraph, cx);
     let inserted_count = blocks.len();
     Arc::make_mut(&mut self.document.blocks).splice(insert_ix..insert_ix, blocks);
     for relative_ix in 0..inserted_count {
@@ -178,7 +180,7 @@ impl RichTextEditor {
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
   }
 
-  fn prepare_block_insertion_index(&mut self, cx: &mut Context<Self>) -> usize {
+  fn prepare_block_insertion_index(&mut self, remove_empty_caret_paragraph: bool, cx: &mut Context<Self>) -> usize {
     if let Some(
       BlockSelection::Image(block_ix)
       | BlockSelection::Equation(block_ix)
@@ -189,7 +191,9 @@ impl RichTextEditor {
       return (block_ix + 1).min(self.document.blocks.len());
     }
 
-    if let Some(insert_ix) = self.remove_empty_caret_paragraph_for_block_insertion(cx) {
+    if remove_empty_caret_paragraph
+      && let Some(insert_ix) = self.remove_empty_caret_paragraph_for_block_insertion(cx)
+    {
       return insert_ix;
     }
 

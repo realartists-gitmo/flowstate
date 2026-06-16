@@ -57,3 +57,41 @@ Manual QA for P2P `.db8` collaboration. Run with two or three app instances usin
 3. Try joining a session already open in the same app; verify it is rejected.
 4. Kill the inviter before join; verify join fails without modifying existing documents.
 5. Confirm saved files are plain `.db8` snapshots and do not contain CRDT history.
+
+## Failure Checklist
+
+| Row | Scenario | Expected Result |
+|---|---|---|
+| F1 | Garbage or truncated ticket | Inline parse error; no network dial. |
+| F2 | Inviter unreachable at join | Join times out with actionable copy. |
+| F3 | Inviter reachable but snapshot pull fails | Fallback candidates are tried; all failures end in `JoinFailed`. |
+| F4 | Old dead-session ticket | Join times out and copy indicates the session may be over. |
+| F5 | Protocol version skew | Join rejects fast or in-session gossip is ignored with a one-time notice. |
+| F6 | Lineage violation | Join meta check fails or digest mismatch is ignored; no merge. |
+| F7 | Peer crash or kill | Presence ages out within 30 seconds and roster updates. |
+| F8 | Transient network loss | Offline pill appears; edits accumulate and resync after reconnect. |
+| F9 | Long offline window | Reconnect merges local and remote edits without data loss. |
+| F10 | All other peers leave | Session remains attached as `Only you`; no auto-detach. |
+| F11 | Gossip receiver lag | Digest pull runs and peers converge. |
+| F12 | Oversized blob pull fails | Later anti-entropy recovers the missing update. |
+| F13 | Projection drift | Self-check rebuilds from projection and clamps selection. |
+| F14 | Remote patch during drag or IME | Patch is deferred, then applied safely. |
+| F15 | Asset fetch fails everywhere | Placeholder persists; text sync remains unaffected. |
+| F16 | Self-join with own ticket | Friendly error; no dial. |
+| F17 | Share on already-attached tab | Attached view opens and can mint a fresh invite. |
+| F18 | Close tab or quit while attached | Transactional prompts appear; Cancel aborts the close or quit. |
+| F19 | Crash with attached pathless tab | Recovery file opens as a local document on next launch. |
+| F20 | Same table cell edited concurrently | Cell converges with documented last-writer-wins behavior. |
+| F21 | Peer clock skew | Presence remains sensible; document sync does not depend on wall clock. |
+
+## Additional Soak Checklist
+
+1. Simultaneously type in the same paragraph from two peers.
+2. Race Enter-split on one peer against typing later in the same paragraph on another peer.
+3. Race edits in the same table cell and observe last-writer-wins convergence.
+4. Paste an image on each peer and verify asset placeholders resolve.
+5. Undo and redo interleaved edits from multiple peers.
+6. Leave and rejoin using a fresh ticket.
+7. Close a laptop lid or disconnect a peer for 5 minutes, then resync.
+8. Cancel close-tab prompts at each step and verify the session stays attached.
+9. Run a 30-minute soak with autosave enabled on a path-backed peer.

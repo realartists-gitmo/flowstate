@@ -1,8 +1,8 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-  App, AvailableSpace, Background, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
-  Style, Window, fill, px, relative,
+  App, AvailableSpace, Background, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, InspectorElementId, IntoElement,
+  LayoutId, Pixels, Style, Window, fill, px, relative,
 };
 
 use super::*;
@@ -259,6 +259,8 @@ impl Element for VirtualParagraphChunkElement {
       )
     };
     if let Some((layout, bounds)) = self.layout.positioned() {
+      let focus_handle = self.editor.read(cx).focus_handle.clone();
+      window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.editor.clone()), cx);
       if self.chunk_ix == 0 {
         let collapse_state = self
           .editor

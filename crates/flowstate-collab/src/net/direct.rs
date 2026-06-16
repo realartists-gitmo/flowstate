@@ -1,6 +1,6 @@
 use std::{
   collections::{HashMap, HashSet},
-  sync::{Arc, OnceLock},
+  sync::{Arc, OnceLock, RwLock as StdRwLock},
   time::Duration,
 };
 
@@ -12,20 +12,22 @@ use iroh::{
   protocol::{AcceptError, ProtocolHandler},
 };
 use tokio::{
-  sync::{RwLock, Semaphore},
+  sync::{OwnedSemaphorePermit, RwLock, Semaphore},
   time::timeout,
 };
 
 use crate::{
   ids::{BlobId, SessionId},
-  proto_direct::{AssetBytes, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame, encode_frame},
-  proto_gossip::DIRECT_ALPN,
+  proto_direct::{
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame,
+    encode_frame,
+  },
 };
 
-use super::blobs::BlobOutbox;
+use super::{PullProgress, blobs::BlobOutbox};
 
 const DIRECT_SERVE_CONCURRENCY: usize = 4;
-static CLIENT_ENDPOINT: OnceLock<Endpoint> = OnceLock::new();
+static CLIENT_ENDPOINT: OnceLock<StdRwLock<Option<Endpoint>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct DirectSessionHandler {
@@ -184,21 +186,14 @@ impl DirectProto {
     }
   }
 
-  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream) -> Result<()> {
+  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, _permit: OwnedSemaphorePermit) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
     let session = request.session();
     let request_kind = direct_request_kind(&request);
     tracing::debug!(%session, request_kind, "received collaboration direct stream request");
-    let Ok(permit) = self.permits.clone().try_acquire_owned() else {
-      tracing::warn!(%session, request_kind, "collaboration direct server is busy");
-      write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await?;
-      return Ok(());
-    };
-
     let outcome = self.state.serve(request).await;
     tracing::debug!(%session, request_kind, outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "collaboration direct request served");
     write_response(&mut send, outcome).await?;
-    drop(permit);
     Ok(())
   }
 }
@@ -207,9 +202,16 @@ impl ProtocolHandler for DirectProto {
   async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
     tracing::trace!("accepted collaboration direct connection");
     while let Ok((send, recv)) = connection.accept_bi().await {
+      let Ok(permit) = self.permits.clone().try_acquire_owned() else {
+        let mut send = send;
+        if let Err(error) = write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await {
+          tracing::warn!("flowstate collab direct busy response failed: {error:#}");
+        }
+        continue;
+      };
       let proto = self.clone();
       tokio::spawn(async move {
-        if let Err(error) = proto.handle_stream(send, recv).await {
+        if let Err(error) = proto.handle_stream(send, recv, permit).await {
           tracing::error!(error = %format_args!("{error:#}"), "collaboration direct stream failed");
         }
       });
@@ -220,16 +222,31 @@ impl ProtocolHandler for DirectProto {
 }
 
 pub(crate) fn install_endpoint(endpoint: Endpoint) {
-  let installed = CLIENT_ENDPOINT.set(endpoint).is_ok();
-  tracing::debug!(installed, "installed collaboration direct client endpoint");
+  let cache = CLIENT_ENDPOINT.get_or_init(|| StdRwLock::new(None));
+  if let Ok(mut cached) = cache.write() {
+    *cached = Some(endpoint);
+    tracing::debug!(installed = true, "installed collaboration direct client endpoint");
+  } else {
+    tracing::warn!("failed to install collaboration direct client endpoint");
+  }
 }
 
 pub async fn pull_with_fallback(req: DirectRequest, candidates: Vec<EndpointId>, per_peer_timeout: Duration) -> Result<Vec<u8>> {
+  pull_with_fallback_progress(req, candidates, per_peer_timeout, None).await
+}
+
+pub async fn pull_with_fallback_progress(
+  req: DirectRequest,
+  candidates: Vec<EndpointId>,
+  per_peer_timeout: Duration,
+  progress: Option<Sender<PullProgress>>,
+) -> Result<Vec<u8>> {
   let endpoint = CLIENT_ENDPOINT
     .get()
-    .cloned()
+    .and_then(|cache| cache.read().ok().and_then(|cached| cached.clone()))
     .ok_or_else(|| anyhow!("collaboration direct client endpoint is not running"))?;
-  pull_with_endpoint(&endpoint, req, candidates, per_peer_timeout).await
+  ensure!(!endpoint.is_closed(), "collaboration direct client endpoint is not running");
+  pull_with_endpoint_progress(&endpoint, req, candidates, per_peer_timeout, progress).await
 }
 
 pub async fn pull_with_endpoint(
@@ -237,6 +254,16 @@ pub async fn pull_with_endpoint(
   req: DirectRequest,
   candidates: Vec<EndpointId>,
   per_peer_timeout: Duration,
+) -> Result<Vec<u8>> {
+  pull_with_endpoint_progress(endpoint, req, candidates, per_peer_timeout, None).await
+}
+
+pub async fn pull_with_endpoint_progress(
+  endpoint: &Endpoint,
+  req: DirectRequest,
+  candidates: Vec<EndpointId>,
+  per_peer_timeout: Duration,
+  progress: Option<Sender<PullProgress>>,
 ) -> Result<Vec<u8>> {
   let session = req.session();
   let request_kind = direct_request_kind(&req);
@@ -250,7 +277,7 @@ pub async fn pull_with_endpoint(
   let mut errors = Vec::new();
   for peer in candidates {
     tracing::trace!(%session, request_kind, peer = %peer, "attempting collaboration direct pull peer");
-    match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone())).await {
+    match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone(), progress.as_ref())).await {
       Ok(Ok(bytes)) => {
         tracing::debug!(%session, request_kind, peer = %peer, bytes = bytes.len(), "collaboration direct pull peer succeeded");
         return Ok(bytes);
@@ -270,7 +297,7 @@ pub async fn pull_with_endpoint(
   Err(anyhow!("direct pull failed for all candidates: {}", errors.join("; ")))
 }
 
-async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest) -> Result<Vec<u8>> {
+async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let session = req.session();
   let request_kind = direct_request_kind(&req);
   tracing::trace!(%session, request_kind, peer = %peer, "dialing collaboration direct peer");
@@ -292,7 +319,7 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest) ->
   tracing::trace!(%session, request_kind, peer = %peer, response = direct_response_header_kind(&header), "received collaboration direct response header");
   match header {
     DirectResponseHeader::Ok { total_len } => {
-      let payload = read_payload(&mut recv, total_len).await?;
+      let payload = read_payload(&mut recv, total_len, progress).await?;
       tracing::trace!(%session, request_kind, peer = %peer, bytes = payload.len(), "read collaboration direct response payload");
       Ok(payload)
     },
@@ -397,15 +424,21 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
   Ok(())
 }
 
-async fn read_payload(recv: &mut RecvStream, total_len: u64) -> Result<Vec<u8>> {
-  let total_len = usize::try_from(total_len).context("direct payload is too large for this platform")?;
-  tracing::trace!(payload_bytes = total_len, chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "reading collaboration direct payload");
-  let mut payload = vec![0; total_len];
+async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
+  let total_len_usize = usize::try_from(total_len).context("direct payload is too large for this platform")?;
+  tracing::trace!(payload_bytes = total_len_usize, chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "reading collaboration direct payload");
+  let mut payload = vec![0; total_len_usize];
   let mut offset = 0;
-  while offset < total_len {
-    let next = (offset + MAX_PAYLOAD_CHUNK_LEN).min(total_len);
+  if let Some(progress) = progress {
+    let _ = progress.try_send(PullProgress { got: 0, total: total_len });
+  }
+  while offset < total_len_usize {
+    let next = (offset + MAX_PAYLOAD_CHUNK_LEN).min(total_len_usize);
     recv.read_exact(&mut payload[offset..next]).await?;
     offset = next;
+    if let Some(progress) = progress {
+      let _ = progress.try_send(PullProgress { got: offset as u64, total: total_len });
+    }
   }
   Ok(payload)
 }

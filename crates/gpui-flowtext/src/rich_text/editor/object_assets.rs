@@ -82,14 +82,13 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
     .file_name()
     .map(|name| name.to_string_lossy().to_string());
   let alt_text: SharedString = original_name.clone().unwrap_or_default().into();
-  let mut hasher = DefaultHasher::new();
-  bytes.hash(&mut hasher);
+  let content_hash = AssetRecord::stable_content_hash(&bytes);
   Some((
     AssetRecord {
       id: AssetId(uuid::Uuid::new_v4().as_u128()),
       mime_type: format.mime_type().into(),
       original_name: original_name.map(Into::into),
-      content_hash: hasher.finish(),
+      content_hash,
       bytes: Arc::new(bytes),
     },
     alt_text,
@@ -99,14 +98,13 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
 #[hotpath::measure]
 fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
   let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
-  let mut hasher = DefaultHasher::new();
-  image.bytes.hash(&mut hasher);
+  let content_hash = AssetRecord::stable_content_hash(&image.bytes);
   (
     AssetRecord {
       id: asset_id,
       mime_type: image.format.mime_type().into(),
       original_name: None,
-      content_hash: hasher.finish(),
+      content_hash,
       bytes: Arc::new(image.bytes),
     },
     "Pasted image".into(),

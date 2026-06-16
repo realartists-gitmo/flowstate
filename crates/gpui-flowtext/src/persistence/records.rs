@@ -674,6 +674,11 @@ fn read_asset_record(cursor: &mut Cursor<&[u8]>) -> io::Result<AssetRecord> {
   let content_hash = read_u64(cursor)?;
   let byte_len = read_len(cursor, "native document asset byte length")?;
   let bytes = read_bytes(cursor, byte_len, "native document asset bytes")?.to_vec();
+  let content_hash = if bytes.is_empty() {
+    content_hash
+  } else {
+    AssetRecord::stable_content_hash(&bytes)
+  };
   Ok(AssetRecord {
     id,
     mime_type,

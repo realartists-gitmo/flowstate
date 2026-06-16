@@ -8,6 +8,7 @@ pub mod binding;
 pub mod ids;
 pub mod local_apply;
 pub mod net;
+pub mod patch_apply;
 pub mod presence;
 pub mod projection;
 pub mod proto_direct;
@@ -18,4 +19,5 @@ pub mod self_check;
 pub mod ticket;
 
 pub use ids::{BlobId, SessionId};
-pub use proto_gossip::{DIRECT_ALPN, PROTOCOL_VERSION};
+pub use proto_direct::DIRECT_ALPN;
+pub use proto_gossip::PROTOCOL_VERSION;

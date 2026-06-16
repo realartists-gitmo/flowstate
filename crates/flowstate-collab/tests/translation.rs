@@ -214,6 +214,14 @@ mod tests {
   }
 
   #[test]
+  fn replace_block_none_updates_single_changed_object_row() {
+    let (mut document, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![plain(MULTIBYTE)]), equation_block("x = 1")]);
+
+    replace_object_block_with_version(&mut document, 1, equation_block("x = aé + 🌍"), 1);
+    apply_and_assert_projection(&document, &loro, &mut binding, &[CanonicalOperation::ReplaceBlock { block: None }]);
+  }
+
+  #[test]
   fn replace_document_rebuilds_the_loro_projection() {
     let (_, loro, mut binding) = collab_fixture(vec![paragraph_block(vec![plain("old")]), equation_block("old = 1")]);
     let document = document_from_input_blocks(
@@ -277,6 +285,17 @@ mod tests {
 
   fn replace_object_block(document: &mut Document, block_ix: usize, input: InputBlock) {
     Arc::make_mut(&mut document.blocks)[block_ix] = block_from_input_block(&input);
+  }
+
+  fn replace_object_block_with_version(document: &mut Document, block_ix: usize, input: InputBlock, version: u64) {
+    let mut block = block_from_input_block(&input);
+    match &mut block {
+      Block::Paragraph(_) => {},
+      Block::Image(image) => image.version = version,
+      Block::Equation(equation) => equation.version = version,
+      Block::Table(table) => table.version = version,
+    }
+    Arc::make_mut(&mut document.blocks)[block_ix] = block;
   }
 
   fn delete_object_block(document: &mut Document, block_ix: usize) {

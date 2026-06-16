@@ -1,4 +1,11 @@
+use std::{cell::RefCell, rc::Rc};
+
 use gpui::AppContext as _;
+
+struct SelectionEventRecorder {
+  selections: Rc<RefCell<Vec<EditorSelection>>>,
+  _subscription: gpui::Subscription,
+}
 
 #[gpui::test]
 fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppContext) {
@@ -56,4 +63,44 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
     })
   });
   assert!(edits_after_paste_undo.is_empty());
+}
+
+#[gpui::test]
+fn select_all_emits_selection_changed_once(cx: &mut gpui::TestAppContext) {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("alpha beta")],
+    }],
+  );
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+  let selections = Rc::new(RefCell::new(Vec::new()));
+  let recorder_selections = selections.clone();
+  let _recorder = cx.update(|cx| {
+    let editor = editor.clone();
+    cx.new(|cx| SelectionEventRecorder {
+      selections: recorder_selections,
+      _subscription: cx.subscribe(&editor, |recorder: &mut SelectionEventRecorder, _, event: &EditorEvent, _| {
+        if let EditorEvent::SelectionChanged { selection } = event {
+          recorder.selections.borrow_mut().push(selection.clone());
+        }
+      }),
+    })
+  });
+
+  cx.update(|cx| editor.update(cx, |editor, cx| editor.select_all(cx)));
+  let first_events = selections.borrow();
+  assert_eq!(first_events.len(), 1);
+  assert_eq!(
+    first_events[0].normalized(),
+    DocumentOffset { paragraph: 0, byte: 0 }..DocumentOffset {
+      paragraph: 0,
+      byte: "alpha beta".len(),
+    }
+  );
+  drop(first_events);
+
+  cx.update(|cx| editor.update(cx, |editor, cx| editor.select_all(cx)));
+  assert_eq!(selections.borrow().len(), 1);
 }

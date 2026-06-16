@@ -485,6 +485,7 @@ impl RichTextEditor {
     if block_ix >= self.document.blocks.len() {
       return false;
     }
+    let block_id = self.identity_map.block_id(block_ix);
     let blocks = Arc::make_mut(&mut self.document.blocks);
     if matches!(blocks.get(block_ix), Some(Block::Paragraph(_))) {
       return false;
@@ -495,9 +496,10 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::DeleteBlock {
-      block: self.identity_map.block_id(block_ix).unwrap_or(BlockId(0)),
-    }];
+    let canonical_operations = block_id.map_or_else(
+      || vec![CanonicalOperation::ReplaceDocument],
+      |block| vec![CanonicalOperation::DeleteBlock { block }],
+    );
     self.undo_stack.push(EditRecord {
       before_selection: before_selection.clone(),
       before_generation,

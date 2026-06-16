@@ -1,10 +1,10 @@
-use flowstate_collab::ticket::SessionTicket;
+use flowstate_collab::{SessionId, ticket::SessionTicket};
 use gpui::{
-  AnyElement, AnyWindowHandle, App, ClipboardItem, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-  MouseButton, ParentElement, Render, SharedString, Subscription, WeakEntity, Window, div, prelude::*, px, relative, rgb,
+  AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
+  SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
-  ActiveTheme as _, Disableable, IconName, Sizable,
+  Disableable, WindowExt as _,
   button::{Button, ButtonVariants as _},
   h_flex,
   input::{Input, InputEvent, InputState},
@@ -15,7 +15,11 @@ use uuid::Uuid;
 
 use crate::workspace::Workspace;
 
-use super::{Connectivity, SessionPhase, status};
+use super::{DetachReason, SessionPhase, status};
+
+#[path = "share_dialog_view.rs"]
+mod share_dialog_view;
+use share_dialog_view::*;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum CollabDialogMode {
@@ -28,12 +32,14 @@ pub struct CollabShareDialog {
   panel_id: Option<Uuid>,
   mode: CollabDialogMode,
   join_input: Entity<InputState>,
+  joining_session: Option<SessionId>,
   ticket_text: Option<SharedString>,
   ticket_loading: bool,
   ticket_error: Option<SharedString>,
   copy_notice: Option<SharedString>,
   join_error: Option<SharedString>,
   _input_subscription: Subscription,
+  _join_subscription: Option<Subscription>,
 }
 
 #[hotpath::measure_all]
@@ -46,8 +52,10 @@ impl CollabShareDialog {
     cx: &mut Context<Self>,
   ) -> Self {
     let join_input = cx.new(|cx| InputState::new(window, cx).placeholder("Paste a Flowstate collaboration invite"));
-    let _input_subscription = cx.subscribe(&join_input, |dialog, _, event: &InputEvent, cx| {
+    let input_subscription = cx.subscribe(&join_input, |dialog, _, event: &InputEvent, cx| {
       if let InputEvent::Change = event {
+        dialog.joining_session = None;
+        dialog._join_subscription = None;
         dialog.validate_join_ticket(cx);
       }
     });
@@ -57,15 +65,17 @@ impl CollabShareDialog {
       panel_id,
       mode,
       join_input,
+      joining_session: None,
       ticket_text: None,
       ticket_loading: false,
       ticket_error: None,
       copy_notice: None,
       join_error: None,
-      _input_subscription,
+      _input_subscription: input_subscription,
+      _join_subscription: None,
     };
     if mode == CollabDialogMode::Share {
-      dialog.refresh_ticket(None, cx);
+      dialog.refresh_ticket(cx);
     }
     dialog
   }
@@ -76,10 +86,11 @@ impl CollabShareDialog {
     }
   }
 
-  fn close(&mut self, cx: &mut Context<Self>) {
+  fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let _ = self
       .workspace
       .update(cx, |workspace, cx| workspace.close_collaboration_dialog(cx));
+    window.close_dialog(cx);
   }
 
   fn set_mode(&mut self, mode: CollabDialogMode, cx: &mut Context<Self>) {
@@ -90,7 +101,7 @@ impl CollabShareDialog {
     self.join_error = None;
     self.copy_notice = None;
     if mode == CollabDialogMode::Share {
-      self.refresh_ticket(None, cx);
+      self.refresh_ticket(cx);
     }
     cx.notify();
   }
@@ -106,7 +117,7 @@ impl CollabShareDialog {
       .workspace
       .update(cx, |workspace, cx| workspace.start_collaboration_on_document(panel_id, cx))
     {
-      Ok(Some(_)) => self.refresh_ticket(None, cx),
+      Ok(Some(_)) => self.refresh_ticket(cx),
       Ok(None) => {
         self.ticket_error = Some("The active document could not be shared.".into());
         cx.notify();
@@ -118,7 +129,7 @@ impl CollabShareDialog {
     }
   }
 
-  fn refresh_ticket(&mut self, copy_to_clipboard: Option<AnyWindowHandle>, cx: &mut Context<Self>) {
+  fn refresh_ticket(&mut self, cx: &mut Context<Self>) {
     let Some(panel_id) = self.panel_id else {
       self.ticket_text = None;
       self.ticket_loading = false;
@@ -143,14 +154,6 @@ impl CollabShareDialog {
         Ok(Err(error)) => Err(format!("Creating collaboration invite failed: {error:#}")),
         Err(error) => Err(format!("Creating collaboration invite failed: {error}")),
       };
-      let should_copy = copy_to_clipboard.is_some();
-
-      if let Ok(text) = &encoded
-        && let Some(window_handle) = copy_to_clipboard
-      {
-        let text = text.clone();
-        let _ = window_handle.update(cx, |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(text)));
-      }
 
       let _ = dialog.update(cx, |dialog, cx| {
         dialog.ticket_loading = false;
@@ -158,9 +161,6 @@ impl CollabShareDialog {
           Ok(text) => {
             dialog.ticket_text = Some(text.into());
             dialog.ticket_error = None;
-            if should_copy {
-              dialog.copy_notice = Some("Fresh invite copied to clipboard.".into());
-            }
           },
           Err(error) => {
             dialog.ticket_error = Some(error.into());
@@ -170,10 +170,6 @@ impl CollabShareDialog {
       });
     })
     .detach();
-  }
-
-  fn copy_invite(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.refresh_ticket(Some(window.window_handle()), cx);
   }
 
   fn validate_join_ticket(&mut self, cx: &mut Context<Self>) {
@@ -195,6 +191,9 @@ impl CollabShareDialog {
   }
 
   fn join_session(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    if self.joining_session.is_some() {
+      return;
+    }
     let ticket = match self.parse_join_ticket(cx) {
       Ok(Some(ticket)) => ticket,
       Ok(None) => {
@@ -213,7 +212,12 @@ impl CollabShareDialog {
       .workspace
       .update(cx, |workspace, cx| workspace.join_collaboration_session(ticket, window, cx))
     {
-      Ok(Some(_)) => self.close(cx),
+      Ok(Some(session)) => {
+        self.join_error = None;
+        self.joining_session = Some(session);
+        self.subscribe_join_session(session, cx);
+        cx.notify();
+      },
       Ok(None) => {
         self.join_error = Some("Joining collaboration session failed.".into());
         cx.notify();
@@ -223,6 +227,10 @@ impl CollabShareDialog {
         cx.notify();
       },
     }
+  }
+
+  fn subscribe_join_session(&mut self, session_id: SessionId, cx: &mut Context<Self>) {
+    self._join_subscription = crate::collab::session_for_id(session_id, cx).map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
   }
 
   fn confirm_leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -237,7 +245,7 @@ impl CollabShareDialog {
   fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
     match event.keystroke.key.as_str() {
       "escape" => {
-        self.close(cx);
+        self.close(window, cx);
         cx.stop_propagation();
       },
       "enter" if self.mode == CollabDialogMode::Join => {
@@ -296,35 +304,19 @@ impl CollabShareDialog {
       .when_some(self.ticket_error.clone(), |this, error| this.child(error_text(error, cx)))
       .when_some(self.copy_notice.clone(), |this, notice| this.child(success_text(notice, cx)))
       .child(
-        h_flex()
-          .gap_2()
-          .child(
-            Button::new("copy-collaboration-invite")
-              .label(if self.ticket_loading { "Minting..." } else { "Copy invite" })
-              .primary()
-              .disabled(self.ticket_loading)
-              .on_click(cx.listener(|dialog, _, window, cx| dialog.copy_invite(window, cx))),
-          )
-          .child(
-            Button::new("refresh-collaboration-invite")
-              .label("Refresh invite")
-              .outline()
-              .disabled(self.ticket_loading)
-              .on_click(cx.listener(|dialog, _, _, cx| dialog.refresh_ticket(None, cx))),
-          )
-          .child(div().flex_1())
-          .child(
-            Button::new("leave-collaboration-session")
-              .label("Leave session")
-              .danger()
-              .on_click(cx.listener(|dialog, _, window, cx| dialog.confirm_leave(window, cx))),
-          ),
+        h_flex().justify_end().child(
+          Button::new("leave-collaboration-session")
+            .label("Leave session")
+            .danger()
+            .on_click(cx.listener(|dialog, _, window, cx| dialog.confirm_leave(window, cx))),
+        ),
       )
       .into_any_element()
   }
 
   fn render_join_pane(&self, cx: &mut Context<Self>) -> AnyElement {
     let parsed = self.parse_join_ticket(cx).ok().flatten();
+    let progress = self.join_progress(cx);
     v_flex()
       .gap_3()
       .child(section_title("Join a session", cx))
@@ -336,16 +328,35 @@ impl CollabShareDialog {
       .when_some(parsed.as_ref().map(|ticket| ticket.title.clone()), |this, title| {
         this.child(success_text(format!("Invite for: {title}").into(), cx))
       })
+      .when_some(progress, |this, (is_error, text)| {
+        if is_error {
+          this.child(error_text(text, cx))
+        } else {
+          this.child(progress_text(text, cx))
+        }
+      })
       .when_some(self.join_error.clone(), |this, error| this.child(error_text(error, cx)))
       .child(
-        h_flex().justify_end().gap_2().child(
+        h_flex().justify_end().child(
           Button::new("join-collaboration-session")
-            .label("Join")
+            .label(if self.joining_session.is_some() { "Joining..." } else { "Join" })
             .primary()
+            .disabled(self.joining_session.is_some())
             .on_click(cx.listener(|dialog, _, window, cx| dialog.join_session(window, cx))),
         ),
       )
       .into_any_element()
+  }
+
+  fn join_progress(&self, cx: &App) -> Option<(bool, SharedString)> {
+    let phase = crate::collab::phase_for_session(self.joining_session?, cx)?;
+    match phase {
+      SessionPhase::Creating => Some((false, "Starting collaboration...".into())),
+      SessionPhase::Joining(stage) => Some((false, status::join_stage_label(&stage).into())),
+      SessionPhase::Attached(_) => Some((false, "Joined. Opening shared document...".into())),
+      SessionPhase::Detached(DetachReason::JoinFailed(error)) => Some((true, error.into())),
+      SessionPhase::Detached(_) => None,
+    }
   }
 }
 
@@ -363,194 +374,29 @@ impl Render for CollabShareDialog {
       .panel_id
       .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
 
-    div()
-      .absolute()
-      .top_0()
-      .right_0()
-      .bottom_0()
-      .left_0()
-      .bg(cx.theme().background.opacity(0.72))
-      .flex()
-      .items_center()
-      .justify_center()
-      .occlude()
+    v_flex()
+      .max_h(px(560.0))
+      .gap_4()
       .on_key_down(cx.listener(Self::on_key_down))
-      .on_mouse_down(
-        MouseButton::Left,
-        cx.listener(|dialog, _, _, cx| {
-          dialog.close(cx);
-          cx.stop_propagation();
-        }),
-      )
-      .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
       .child(
-        v_flex()
-          .w(px(620.0))
-          .max_w_full()
-          .max_h(px(620.0))
-          .overflow_hidden()
-          .rounded_lg()
-          .border_1()
-          .border_color(cx.theme().border)
-          .bg(cx.theme().popover)
-          .shadow_lg()
-          .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-          .child(
-            h_flex()
-              .h(px(44.0))
-              .items_center()
-              .justify_between()
-              .px_4()
-              .border_b_1()
-              .border_color(cx.theme().border)
-              .child(
-                div()
-                  .font_weight(gpui::FontWeight::SEMIBOLD)
-                  .child("Share / Collaborate"),
-              )
-              .child(
-                Button::new("close-collaboration-dialog")
-                  .icon(IconName::Close)
-                  .xsmall()
-                  .ghost()
-                  .tooltip("Close")
-                  .on_click(cx.listener(|dialog, _, _, cx| dialog.close(cx))),
-              ),
-          )
-          .child(
-            h_flex()
-              .gap_2()
-              .px_4()
-              .pt_4()
-              .child(
-                tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
-                  dialog.set_mode(CollabDialogMode::Share, cx);
-                })),
-              )
-              .child(
-                tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
-                  dialog.set_mode(CollabDialogMode::Join, cx);
-                  dialog.focus(window, cx);
-                })),
-              ),
-          )
-          .child(
-            div()
-              .flex_1()
-              .overflow_y_scrollbar()
-              .p_4()
-              .child(match self.mode {
-                CollabDialogMode::Share => self.render_share_pane(phase.as_ref(), cx),
-                CollabDialogMode::Join => self.render_join_pane(cx),
-              }),
-          ),
+        h_flex()
+          .gap_2()
+          .child(tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
+            dialog.set_mode(CollabDialogMode::Share, cx);
+          })))
+          .child(tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
+            dialog.set_mode(CollabDialogMode::Join, cx);
+            dialog.focus(window, cx);
+          }))),
       )
-  }
-}
-
-fn tab_button(id: &'static str, label: &'static str, selected: bool) -> Button {
-  let button = Button::new(id).label(label).small();
-  if selected { button.primary() } else { button.outline() }
-}
-
-fn section_title(title: &'static str, cx: &App) -> impl IntoElement {
-  div()
-    .text_lg()
-    .font_weight(gpui::FontWeight::SEMIBOLD)
-    .text_color(cx.theme().foreground)
-    .child(title)
-}
-
-fn helper_text(text: &str, cx: &App) -> impl IntoElement {
-  div()
-    .text_sm()
-    .line_height(relative(1.45))
-    .text_color(cx.theme().muted_foreground)
-    .child(text.to_string())
-}
-
-fn ticket_box(ticket: Option<SharedString>, loading: bool, cx: &App) -> impl IntoElement {
-  div()
-    .w_full()
-    .min_h(px(84.0))
-    .max_h(px(132.0))
-    .overflow_y_scrollbar()
-    .rounded_md()
-    .border_1()
-    .border_color(cx.theme().border)
-    .bg(cx.theme().background)
-    .p_3()
-    .text_xs()
-    .line_height(relative(1.35))
-    .text_color(cx.theme().foreground)
-    .child(if loading {
-      SharedString::from("Minting a fresh invite...")
-    } else {
-      ticket.unwrap_or_else(|| "Start sharing to mint an invite.".into())
-    })
-}
-
-fn error_text(text: SharedString, cx: &App) -> impl IntoElement {
-  div().text_sm().text_color(cx.theme().danger).child(text)
-}
-
-fn success_text(text: SharedString, cx: &App) -> impl IntoElement {
-  div().text_sm().text_color(cx.theme().success).child(text)
-}
-
-fn roster_list(entries: Vec<crate::collab::SessionRosterEntry>, cx: &App) -> AnyElement {
-  let mut list = v_flex()
-    .gap_2()
-    .rounded_md()
-    .border_1()
-    .border_color(cx.theme().border)
-    .bg(cx.theme().background)
-    .p_3()
-    .child(
-      div()
-        .text_xs()
-        .text_color(cx.theme().muted_foreground)
-        .child("Participants"),
-    );
-
-  if entries.is_empty() {
-    return list
       .child(
         div()
-          .text_sm()
-          .text_color(cx.theme().muted_foreground)
-          .child("Presence is starting..."),
+          .flex_1()
+          .overflow_y_scrollbar()
+          .child(match self.mode {
+            CollabDialogMode::Share => self.render_share_pane(phase.as_ref(), cx),
+            CollabDialogMode::Join => self.render_join_pane(cx),
+          }),
       )
-      .into_any_element();
-  }
-
-  for entry in entries {
-    let label = if entry.is_self { format!("{} (you)", entry.name) } else { entry.name };
-    list = list.child(
-      h_flex()
-        .items_center()
-        .gap_2()
-        .child(div().size(px(8.0)).rounded_full().bg(rgb(entry.color_rgb)))
-        .child(
-          div()
-            .text_sm()
-            .text_color(cx.theme().foreground)
-            .child(label),
-        ),
-    );
-  }
-  list.into_any_element()
-}
-
-fn connectivity_text(phase: &SessionPhase) -> String {
-  match phase {
-    SessionPhase::Creating => "Starting collaboration...".to_string(),
-    SessionPhase::Joining(_) => "Joining collaboration...".to_string(),
-    SessionPhase::Attached(attachment) => match &attachment.connectivity {
-      Connectivity::Online if attachment.peers_present == 0 => "Only you - share the invite.".to_string(),
-      Connectivity::Online => format!("{} people in session.", attachment.peers_present + 1),
-      Connectivity::Offline { .. } => "Offline - reconnecting. Changes will sync when connected.".to_string(),
-    },
-    SessionPhase::Detached(_) => "This document is local.".to_string(),
   }
 }

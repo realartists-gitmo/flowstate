@@ -43,6 +43,8 @@ impl SessionTicket {
 impl Ticket for SessionTicket {
   const KIND: &'static str = TICKET_KIND;
 
+  /// `iroh_tickets::Ticket::encode_bytes` cannot return a `Result`; `SessionTicket`
+  /// only contains postcard-serializable fields, so serialization failure would be a programmer error.
   fn encode_bytes(&self) -> Vec<u8> {
     postcard::to_stdvec(self).expect("SessionTicket serialization should not fail")
   }

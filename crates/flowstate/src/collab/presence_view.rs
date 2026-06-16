@@ -39,7 +39,9 @@ pub fn external_carets(doc: &LoroDoc, binding: &DocBinding, presence: &PresenceS
 
 pub fn collaboration_recovery_path(session: SessionId, title: &str) -> PathBuf {
   let dir = std::env::temp_dir().join("flowstate-collab-recovery");
-  let _ = std::fs::create_dir_all(&dir);
+  if let Err(error) = std::fs::create_dir_all(&dir) {
+    tracing::warn!("creating collaboration recovery directory failed ({}): {error}", dir.display());
+  }
   let session_hex = session.to_string();
   let prefix = session_hex.get(..16).unwrap_or(&session_hex);
   dir.join(format!("{prefix}-{}.db8", sanitized_recovery_title(title)))

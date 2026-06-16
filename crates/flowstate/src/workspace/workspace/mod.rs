@@ -31,7 +31,7 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
   ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
-  VirtualListScrollHandle, h_flex, v_flex,
+  VirtualListScrollHandle, WindowExt as _, h_flex, v_flex,
 };
 use uuid::Uuid;
 
@@ -104,6 +104,8 @@ pub struct Workspace {
   autosave_document_generations: HashMap<Uuid, u64>,
   autosave_flow_in_flight: HashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
+  collab_notice_subscriptions: HashMap<flowstate_collab::SessionId, Subscription>,
+  collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,

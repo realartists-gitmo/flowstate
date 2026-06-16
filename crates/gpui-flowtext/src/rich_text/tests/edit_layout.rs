@@ -1,9 +1,5 @@
 use super::*;
 use gpui::{Bounds, black, point, px, size};
-use std::{
-  collections::hash_map::DefaultHasher,
-  hash::{Hash, Hasher},
-};
 
 #[test]
 #[hotpath::measure]

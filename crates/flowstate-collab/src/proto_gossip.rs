@@ -1,11 +1,30 @@
-use anyhow::{Result, anyhow, ensure};
+use std::fmt;
+
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlobId, SessionId};
 
 pub const PROTOCOL_VERSION: u16 = 1;
-pub const DIRECT_ALPN: &[u8] = b"flowstate/collab-direct/0";
 pub const GOSSIP_INLINE_LIMIT: usize = 2 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ProtocolVersionMismatch {
+  pub version: u16,
+}
+
+impl fmt::Display for ProtocolVersionMismatch {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    write!(f, "unsupported gossip protocol version {}", self.version)
+  }
+}
+
+impl std::error::Error for ProtocolVersionMismatch {}
+
+#[must_use]
+pub fn is_protocol_version_mismatch(error: &anyhow::Error) -> bool {
+  error.is::<ProtocolVersionMismatch>()
+}
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum GossipMsg {
@@ -49,6 +68,8 @@ pub fn encode_inline(msg: &GossipMsg) -> Result<Vec<u8>> {
 }
 
 pub fn encoded_len(msg: &GossipMsg) -> Result<usize> {
+  // This intentionally uses the encoder: postcard has no stable counting
+  // serializer here, and callers only need a small inline/blob decision.
   Ok(encode(msg)?.len())
 }
 
@@ -56,7 +77,7 @@ pub fn decode(bytes: &[u8]) -> Result<GossipMsg> {
   ensure!(bytes.len() >= 2, "gossip frame is missing protocol version");
   let version = u16::from_le_bytes([bytes[0], bytes[1]]);
   if version != PROTOCOL_VERSION {
-    return Err(anyhow!("unsupported gossip protocol version {version}"));
+    return Err(ProtocolVersionMismatch { version }.into());
   }
   Ok(postcard::from_bytes(&bytes[2..])?)
 }

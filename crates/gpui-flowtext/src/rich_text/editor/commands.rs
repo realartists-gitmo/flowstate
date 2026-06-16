@@ -159,6 +159,7 @@ impl RichTextEditor {
     if paragraph_ix < self.document.paragraphs.len() {
       // Outline navigation should place the insertion caret at the start of
       // the target paragraph, matching what the user just selected in the nav.
+      let before_selection = self.selection.clone();
       self.selection = EditorSelection {
         anchor: DocumentOffset {
           paragraph: paragraph_ix,
@@ -171,6 +172,9 @@ impl RichTextEditor {
       };
       self.goal_x = None;
       self.reset_caret_blink(cx);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
 
       let width = self.current_layout_width();
       let start = paragraph_ix.saturating_sub(2);
@@ -312,6 +316,7 @@ impl RichTextEditor {
     self.selection = selection;
     self.goal_x = None;
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 

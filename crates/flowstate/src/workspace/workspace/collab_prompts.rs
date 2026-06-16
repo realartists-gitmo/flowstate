@@ -132,7 +132,6 @@ impl Workspace {
 
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| workspace.leave_all_collaboration_sessions(cx));
-        crate::collab::shutdown(cx);
         window.remove_window();
       });
     })

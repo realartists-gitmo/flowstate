@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{BlobId, SessionId};
 use crate::proto_gossip::PROTOCOL_VERSION;
 
+pub const DIRECT_ALPN: &[u8] = b"flowstate/collab-direct/0";
 pub const MAX_FRAME_LEN: usize = 2 * 1024 * 1024;
 pub const MAX_PAYLOAD_CHUNK_LEN: usize = 256 * 1024;
 
@@ -31,7 +32,7 @@ pub struct AssetBytes {
 pub fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>> {
   let payload = postcard::to_stdvec(&(PROTOCOL_VERSION, value))?;
   ensure!(payload.len() <= MAX_FRAME_LEN, "direct frame exceeds {MAX_FRAME_LEN} bytes");
-  let len = u32::try_from(payload.len())?;
+  let len = payload.len() as u32;
   let mut frame = len.to_le_bytes().to_vec();
   frame.extend(payload);
   Ok(frame)

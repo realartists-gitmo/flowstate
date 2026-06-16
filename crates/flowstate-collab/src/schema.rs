@@ -9,8 +9,8 @@ use std::{collections::HashMap, hash::BuildHasher, ops::Range};
 
 use anyhow::Result;
 use gpui_flowtext::{
-  AssetStore, Block, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph, InputRun,
-  InputTableBlock, RunSemanticStyle, RunStyles, TextRun, input_block_from_block,
+  AssetStore, Block, Document, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph,
+  InputRun, InputTableBlock, RunSemanticStyle, RunStyles, TextRun, input_block_from_block, paragraph_text_len,
 };
 use loro::{ExpandType, LoroDoc, LoroResult, LoroText, LoroValue, StyleConfig, StyleConfigMap, TextDelta, cursor::PosType};
 use serde::{Deserialize, Serialize};
@@ -275,6 +275,12 @@ pub fn apply_mark_intervals(text: &LoroText, intervals: &MarkIntervals) -> Resul
     }
   }
   Ok(())
+}
+
+pub fn debug_assert_paragraph_text_len(text: &LoroText, document: &Document, paragraph_ix: usize) {
+  if let Some(paragraph) = document.paragraphs.get(paragraph_ix) {
+    debug_assert_eq!(text.len_utf8(), paragraph_text_len(paragraph));
+  }
 }
 
 #[must_use]

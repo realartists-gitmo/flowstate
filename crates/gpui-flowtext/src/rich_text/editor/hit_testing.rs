@@ -110,6 +110,7 @@ impl RichTextEditor {
     self.goal_x = None;
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 

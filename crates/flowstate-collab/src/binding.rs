@@ -97,8 +97,8 @@ impl DocBinding {
         debug_assert!(false, "binding row has no matching document block");
         continue;
       };
-      debug_assert_eq!(row.kind, BlockKind::from_block(block));
-      debug_assert_eq!(document.ids.block_ids.get(row_ix).copied(), Some(row.block_id));
+      debug_assert_eq!(row.kind, BlockKind::from_block(block), "binding row {row_ix} kind does not match document block");
+      debug_assert_eq!(document.ids.block_ids.get(row_ix).copied(), Some(row.block_id), "binding row {row_ix} block id does not match document block id");
       debug_assert_eq!(row.version, block_version(block));
       if matches!(row.kind, BlockKind::Paragraph) {
         debug_assert_eq!(document.ids.paragraph_ids.get(paragraph_ix).copied(), row.paragraph_id);
@@ -146,13 +146,22 @@ impl DocBinding {
   }
 
   pub fn rebuild_indexes(&mut self) {
-    self.by_paragraph.clear();
-    self.by_block.clear();
-    self.by_container.clear();
-    for ix in 0..self.rows.len() {
-      let row = self.rows[ix].clone();
-      self.index_row(ix, &row);
+    let mut by_paragraph = HashMap::new();
+    let mut by_block = HashMap::new();
+    let mut by_container = HashMap::new();
+    for (ix, row) in self.rows.iter().enumerate() {
+      by_block.insert(row.block_id, ix);
+      by_container.insert(row.map.id(), ix);
+      if let Some(text) = &row.text {
+        by_container.insert(text.id(), ix);
+      }
+      if let Some(paragraph_id) = row.paragraph_id {
+        by_paragraph.insert(paragraph_id, ix);
+      }
     }
+    self.by_paragraph = by_paragraph;
+    self.by_block = by_block;
+    self.by_container = by_container;
   }
 
   fn index_row(&mut self, ix: usize, row: &BindingRow) {

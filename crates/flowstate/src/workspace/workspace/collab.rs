@@ -19,9 +19,26 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
+    if self.collaboration_dialog.is_some() {
+      window.close_dialog(cx);
+      self.collaboration_dialog = None;
+    }
     let workspace = cx.entity().downgrade();
     let panel_id = self.active_editor.as_ref().and(self.active_document_id);
     let dialog = cx.new(|cx| crate::collab::share_dialog::CollabShareDialog::new(workspace, panel_id, mode, window, cx));
+    let dialog_for_render = dialog.clone();
+    let workspace_for_close = cx.entity().downgrade();
+    window.open_dialog(cx, move |component_dialog, _, _| {
+      let workspace_for_close = workspace_for_close.clone();
+      component_dialog
+        .title("Share / Collaborate")
+        .w(px(620.0))
+        .max_w(px(620.0))
+        .on_close(move |_, _, cx| {
+          let _ = workspace_for_close.update(cx, |workspace, cx| workspace.close_collaboration_dialog(cx));
+        })
+        .child(dialog_for_render.clone())
+    });
     dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
     self.collaboration_dialog = Some(dialog);
     cx.notify();
@@ -180,22 +197,12 @@ impl Workspace {
       &[PromptButton::ok("Leave"), PromptButton::cancel("Cancel")],
       cx,
     );
-    let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       if !matches!(answer.await, Ok(0)) {
         return;
       }
       let _ = workspace.update(cx, |workspace, cx| {
         workspace.leave_collaboration_on_panel(panel_id, cx);
-      });
-      let _ = window_handle.update(cx, |_, window, cx| {
-        std::mem::drop(window.prompt(
-          PromptLevel::Info,
-          "Left session",
-          Some("Left session - this copy is now local."),
-          &[PromptButton::ok("Ok")],
-          cx,
-        ));
       });
     })
     .detach();
@@ -219,6 +226,14 @@ impl Workspace {
       Ok(request) => request,
       Err(error) => {
         tracing::error!(error = %format_args!("{error:#}"), "joining collaboration session failed");
+        let detail = format!("Joining collaboration session failed: {error:#}");
+        std::mem::drop(window.prompt(
+          PromptLevel::Critical,
+          "Join failed",
+          Some(&detail),
+          &[PromptButton::ok("Ok")],
+          cx,
+        ));
         return None;
       },
     };
@@ -246,6 +261,9 @@ impl Workspace {
                   &[PromptButton::ok("Ok")],
                   cx,
                 ));
+              } else if workspace.collaboration_dialog.is_some() {
+                workspace.close_collaboration_dialog(cx);
+                window.close_dialog(cx);
               }
             },
             Ok(Err(error)) => {

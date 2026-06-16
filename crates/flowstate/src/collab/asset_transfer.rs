@@ -1,8 +1,4 @@
-use std::{
-  collections::hash_map::DefaultHasher,
-  hash::{Hash, Hasher},
-  sync::Arc,
-};
+use std::sync::Arc;
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use flowstate_collab::{
@@ -158,9 +154,7 @@ impl ImageAssetMeta {
   fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<AssetRecord> {
     tracing::trace!(asset = self.asset_id, expected_bytes = self.byte_len, received_bytes = bytes.len(), "validating fetched collaboration asset bytes");
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
-    let mut hasher = DefaultHasher::new();
-    bytes.hash(&mut hasher);
-    let content_hash = hasher.finish();
+    let content_hash = AssetRecord::stable_content_hash(&bytes);
     ensure!(content_hash == self.content_hash, "asset content hash mismatch");
     Ok(AssetRecord {
       id: AssetId(self.asset_id),

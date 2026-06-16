@@ -202,7 +202,7 @@ impl CollabSession {
     let patches = std::mem::take(&mut self.pending_remote_patches);
     tracing::debug!(session = %self.session, patches = patches.len(), "flushing remote collaboration patches to editor");
     editor.update(cx, |editor, cx| {
-      editor.clear_collab_history();
+      editor.clear_undo_redo_stacks();
       editor.apply_collab_patches(&patches, cx);
     });
     self.last_document_activity = std::time::Instant::now();

@@ -12,9 +12,10 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
-  ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-  Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
+  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
+  Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point,
+  prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
@@ -907,7 +908,7 @@ pub struct RichTextEditor {
   autoscroll_active: bool,
   pub(super) caret_visible: bool,
   caret_blink_active: bool,
-  last_text_input_at: Option<Instant>,
+  last_text_input_at: Option<Instant>, ime_marked_range: Option<Range<usize>>,
   external_carets: Vec<ExternalCaret>,
   pub(super) search_highlights: Vec<Range<DocumentOffset>>,
   pub(super) active_search_highlight: Option<usize>,

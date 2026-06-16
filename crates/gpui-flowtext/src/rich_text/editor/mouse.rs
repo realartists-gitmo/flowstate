@@ -35,6 +35,7 @@ impl RichTextEditor {
       2 => SelectionGranularity::Word,
       _ => SelectionGranularity::Paragraph,
     };
+    let before_selection = self.selection.clone();
     self.selection = match self.drag_granularity {
       SelectionGranularity::Character if event.modifiers.shift => EditorSelection {
         anchor: self.selection.anchor,
@@ -49,6 +50,9 @@ impl RichTextEditor {
     };
     self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
+    if self.selection != before_selection {
+      self.emit_selection_changed(cx);
+    }
     cx.notify();
   }
 
@@ -150,7 +154,11 @@ impl RichTextEditor {
         source_range: source_range.clone(),
         fragment: selected_rich_fragment(&self.document, source_range),
       });
+      let before_selection = self.selection.clone();
       self.selection = pending_drag.source_selection;
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       self.pending_text_drag = None;
     }
     if self.active_text_drag.is_some() {
@@ -163,6 +171,7 @@ impl RichTextEditor {
         self.selection = selection;
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
+        self.emit_selection_changed(cx);
       }
       cx.notify();
       return;
@@ -196,6 +205,7 @@ impl RichTextEditor {
       self.selection = selection;
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
+      self.emit_selection_changed(cx);
       cx.notify();
     } else {
       cx.notify();
@@ -230,9 +240,13 @@ impl RichTextEditor {
     } else if self.pending_text_drag.take().is_some() {
       self.clear_drop_preview();
       let caret = self.hit_test_document_position(event.position, window, cx);
+      let before_selection = self.selection.clone();
       self.selection = EditorSelection { anchor: caret, head: caret };
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       cx.notify();
     }
     if self.selecting {
@@ -251,13 +265,18 @@ impl RichTextEditor {
   fn move_rich_text_fragment(&mut self, drag: ActiveTextDrag, drop: DocumentOffset, cx: &mut Context<Self>) {
     if offset_in_range(drop, drag.source_range.clone()) {
       self.clear_drop_preview();
+      let before_selection = self.selection.clone();
       self.selection = EditorSelection {
         anchor: drag.source_range.start,
         head: drag.source_range.end,
       };
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       cx.notify();
       return;
     }
+    let before_document = self.document.clone();
     let before_selection = EditorSelection {
       anchor: drag.source_range.start,
       head: drag.source_range.end,
@@ -267,6 +286,10 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let source_range = drag.source_range.clone();
     let adjusted_drop = adjust_drop_after_source_delete(drop, source_range.clone());
+    let capture_start = source_range.start.paragraph.min(drop.paragraph);
+    let capture_end = source_range.end.paragraph.max(drop.paragraph).saturating_add(1);
+    let before_span = capture_document_span(&before_document, capture_start..capture_end);
+    let start_paragraph = self.identity_map.paragraph_id(before_span.start_paragraph);
     self.selection = before_selection.clone();
     self.delete_selection_internal();
     let inserted_start = adjusted_drop;
@@ -275,16 +298,24 @@ impl RichTextEditor {
       anchor: inserted_end,
       head: inserted_end,
     };
+    self.emit_selection_changed(cx);
+    let paragraph_delta = self.document.paragraphs.len() as isize - before_document.paragraphs.len() as isize;
+    let after_count = before_span
+      .paragraphs
+      .len()
+      .saturating_add_signed(paragraph_delta)
+      .min(
+        self
+          .document
+          .paragraphs
+          .len()
+          .saturating_sub(before_span.start_paragraph),
+      );
+    let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
     let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
-      start_paragraph: self.identity_map.paragraph_id(inserted_start.paragraph),
-      before: capture_document_span(
-        &self.document,
-        inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len()),
-      ),
-      after: capture_document_span(
-        &self.document,
-        inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len()),
-      ),
+      start_paragraph,
+      before: before_span,
+      after: after_span,
     }];
     self.undo_stack.push(EditRecord {
       before_selection,
@@ -434,6 +465,7 @@ impl RichTextEditor {
               && editor.selection.head != head
             {
               editor.selection.head = head;
+              editor.emit_selection_changed(cx);
             }
             cx.notify();
             true

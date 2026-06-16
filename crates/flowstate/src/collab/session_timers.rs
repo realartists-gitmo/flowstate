@@ -6,13 +6,14 @@ use gpui::{Context, Timer};
 
 use crate::{app_settings::load_document_theme, rich_text_element::Document};
 
-use super::{Attachment, CollabSession, Connectivity, SessionPhase};
+use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionNotice, SessionPhase};
 
 const ZERO_NEIGHBOR_OFFLINE_GRACE: Duration = Duration::from_secs(5);
 const QUIET_DIGEST_ROUNDS_OFFLINE: u8 = 2;
 const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
 const SELF_CHECK_IDLE: Duration = Duration::from_secs(2);
 const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
+const RECOVERY_NEIGHBOR_WAIT: Duration = Duration::from_secs(10);
 
 impl CollabSession {
   pub(super) fn attach_timers(&mut self, cx: &mut Context<Self>) {
@@ -38,12 +39,22 @@ impl CollabSession {
   }
 
   pub(super) fn mark_online(&mut self, cx: &mut Context<Self>) -> bool {
+    if self
+      .awaiting_recovery_neighbor_until
+      .is_some_and(|deadline| self.peers_present() > 0 && self.neighbors.is_empty() && Instant::now() < deadline)
+    {
+      return false;
+    }
+
     let mut changed = false;
     if let SessionPhase::Attached(attachment) = &mut self.phase
       && matches!(attachment.connectivity, Connectivity::Offline { .. })
     {
       attachment.connectivity = Connectivity::Online;
       self.next_recovery_at = None;
+      self.awaiting_recovery_neighbor_until = None;
+      self.probe_pending = false;
+      self.last_probe_failed = false;
       changed = true;
     }
     if changed {
@@ -67,20 +78,24 @@ impl CollabSession {
     }
 
     let now = Instant::now();
-    let peers_present = self.peers_present();
-    let neighbors = self.neighbors.len();
     let zero_since = *self.zero_neighbors_since.get_or_insert(now);
-    let quiet_enough = self.quiet_digest_rounds >= QUIET_DIGEST_ROUNDS_OFFLINE || !self.endpoint_online;
+    let zero_long_enough = now.saturating_duration_since(zero_since) >= ZERO_NEIGHBOR_OFFLINE_GRACE;
+    let quiet_enough = self.quiet_digest_rounds >= QUIET_DIGEST_ROUNDS_OFFLINE;
     tracing::trace!(
       session = %self.session,
-      peers_present,
-      neighbors,
+      peers_present = self.peers_present(),
+      neighbors = self.neighbors.len(),
       quiet_rounds = self.quiet_digest_rounds,
       quiet_enough,
+      zero_long_enough,
       endpoint_online = self.endpoint_online,
+      last_probe_failed = self.last_probe_failed,
       "evaluating collaboration connectivity",
     );
-    if quiet_enough && now.saturating_duration_since(zero_since) >= ZERO_NEIGHBOR_OFFLINE_GRACE {
+    if zero_long_enough
+      && quiet_enough
+      && (!self.endpoint_online || self.last_probe_failed || !self.start_connectivity_probe(cx))
+    {
       self.mark_offline(now, cx);
     }
   }
@@ -166,9 +181,7 @@ impl CollabSession {
     }
     if self.presence.is_some() {
       tracing::trace!(session = %self.session, "collaboration presence timer fired");
-      if let Some(presence) = &self.presence {
-        presence.remove_outdated();
-      }
+      self.remove_outdated_presence(cx);
       self.refresh_own_presence(cx);
       self.refresh_peer_count();
       self.evaluate_connectivity(cx);
@@ -227,6 +240,7 @@ impl CollabSession {
 
     if attempted {
       tracing::warn!(session = %self.session, bootstrap_count = self.bootstrap_addrs.len(), "attempting collaboration connectivity recovery");
+      self.awaiting_recovery_neighbor_until = Some(now + RECOVERY_NEIGHBOR_WAIT);
       if self.bootstrap_addrs.is_empty() {
         if let Err(error) = self.net_tx.try_send(NetCommand::EnsureUp) {
           tracing::warn!(session = %self.session, error = %error, "queueing collaboration ensure-up recovery failed");
@@ -273,7 +287,7 @@ impl CollabSession {
   }
 
   fn rebuild_from_projection(&mut self, projected: Document, cx: &mut Context<Self>) -> Result<()> {
-    let Some(doc) = &self.doc else {
+    let Some(doc) = self.doc.clone() else {
       return Ok(());
     };
     let Some(editor) = self.editor.clone() else {
@@ -281,12 +295,67 @@ impl CollabSession {
     };
     tracing::warn!(session = %self.session, paragraphs = projected.paragraphs.len(), blocks = projected.blocks.len(), "rebuilding editor document from collaboration projection");
     editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
+    self.pending_remote_patches.clear();
     let document = editor.read(cx).document().clone();
-    self.binding = Some(DocBinding::build(doc, &document).context("rebuilding collaboration binding after self-check failed")?);
+    self.binding = Some(DocBinding::build(&doc, &document).context("rebuilding collaboration binding after self-check failed")?);
     self.last_document_activity = Instant::now();
     self.refresh_external_carets(cx);
     tracing::info!(session = %self.session, "rebuilt editor document from collaboration projection");
+    cx.emit(SessionNotice::ViewRebuilt);
     Ok(())
+  }
+
+  fn start_connectivity_probe(&mut self, cx: &mut Context<Self>) -> bool {
+    if self.probe_pending {
+      return true;
+    }
+    let Some(doc) = &self.doc else {
+      return false;
+    };
+    let candidates = self.known_peers.iter().copied().collect::<Vec<_>>();
+    if candidates.is_empty() {
+      return false;
+    }
+    let our_vv = doc.oplog_vv().encode();
+    let (reply_tx, reply_rx) = async_channel::bounded(1);
+    if self
+      .net_tx
+      .try_send(NetCommand::PullUpdates {
+        session: self.session,
+        candidates,
+        our_vv,
+        reply: reply_tx,
+      })
+      .is_err()
+    {
+      return false;
+    }
+
+    self.probe_pending = true;
+    cx.spawn(async move |session, cx| {
+      let result = reply_rx.recv().await;
+      let _ = session.update(cx, |session, cx| {
+        session.probe_pending = false;
+        match result {
+          Ok(Ok(bytes)) => {
+            session.last_probe_failed = false;
+            if !bytes.is_empty()
+              && let Err(error) = session.import_update_bytes(&bytes, cx)
+            {
+              session.detach(DetachReason::Fatal(format!("probing collaboration peer failed to apply updates: {error:#}")), cx);
+              return;
+            }
+            session.note_inbound_traffic(cx);
+          },
+          Ok(Err(_)) | Err(_) => {
+            session.last_probe_failed = true;
+            session.evaluate_connectivity(cx);
+          },
+        }
+      });
+    })
+    .detach();
+    true
   }
 
   fn mark_offline(&mut self, now: Instant, cx: &mut Context<Self>) {
