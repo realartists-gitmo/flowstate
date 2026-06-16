@@ -34,7 +34,7 @@ hotpath = "0.16.1"
 ignore = "0.4.25"
 imagesize = "0.13"
 lopdf = "0.40.0"
-rimalloc = { path = "vendor/rimalloc" }
+mimalloc = "0.1.52"
 mitex = "0.2"
 notify = "8.2.0"
 quick-xml = "0.36.2"

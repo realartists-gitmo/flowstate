@@ -18,20 +18,23 @@ impl Default for FlowstateAllocator {
   }
 }
 
-// SAFETY: This allocator delegates all allocation operations directly to
-// rimalloc's `GlobalAlloc` implementation without changing the pointer,
-// layout, or ownership contracts.
 unsafe impl GlobalAlloc for FlowstateAllocator {
+  #[cfg(not(windows))]
   unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-    // SAFETY: The caller upholds `GlobalAlloc::alloc`'s layout contract, and
-    // the layout is forwarded unchanged to rimalloc.
     unsafe { rimalloc::Rimalloc.alloc(layout) }
   }
+  #[cfg(windows)]
+  unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+    unsafe { mimalloc::MiMalloc.alloc(layout) }
+  }
 
+  #[cfg(not(windows))]
   unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
-    // SAFETY: The caller guarantees `ptr` and `layout` came from this
-    // allocator; both are forwarded unchanged to rimalloc.
     unsafe { rimalloc::Rimalloc.dealloc(ptr, layout) }
+  }
+  #[cfg(windows)]
+  unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+    unsafe { mimalloc::MiMalloc.dealloc(ptr, layout) }
   }
 }
 
