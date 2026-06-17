@@ -36,6 +36,22 @@ mod tests {
   }
 
   #[test]
+  fn reordered_run_style_after_inserts_converges() {
+    let ops = [
+      FuzzOp::Style { peer: 0, paragraph: 0, start: 0, len: 0, style: 0 },
+      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
+      FuzzOp::Style { peer: 0, paragraph: 0, start: 0, len: 0, style: 0 },
+      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
+      FuzzOp::DeleteText { peer: 0, paragraph: 61, start: 31, len: 29 },
+      FuzzOp::DeleteText { peer: 138, paragraph: 161, start: 6, len: 0 },
+      FuzzOp::InsertText { peer: 0, paragraph: 125, byte: 20, text: 0, style: 0 },
+      FuzzOp::Style { peer: 2, paragraph: 12, start: 0, len: 0, style: 1 },
+    ];
+
+    run_program(2, 4754897484207400829, &ops).expect("reordered run style after inserts should converge");
+  }
+
+  #[test]
   fn style_then_join_converges_when_updates_reorder() {
     let ops = [
       FuzzOp::Style {

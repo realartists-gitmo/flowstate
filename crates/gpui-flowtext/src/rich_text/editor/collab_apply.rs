@@ -14,7 +14,6 @@ impl RichTextEditor {
     }
     self.suppress_collab_capture = self.suppress_collab_capture.saturating_sub(1);
     self.identity_map.reconcile(&self.document);
-    self.last_collaboration_edit = None;
     self.layout_invalidation_hint = invalidation;
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
@@ -172,12 +171,18 @@ fn replace_paragraph_content(document: &mut Document, paragraph_ix: usize, parag
   let byte_range = paragraph_byte_range(document, paragraph_ix);
   document.text.delete(byte_range.clone());
   document.text.insert(byte_range.start, &text);
+  let old_style = document.paragraphs[paragraph_ix].style;
   let mut replacement = paragraph_from_input_paragraph(paragraph);
   replacement.version = document.paragraphs[paragraph_ix].version.wrapping_add(1);
+  replacement.byte_range = byte_range.clone();
   paragraphs_mut(document)[paragraph_ix] = replacement;
-  rebuild_document_offset_index(document);
-  update_paragraph_block(document, paragraph_ix);
-  rebuild_document_sections(document);
+  // Single in-place paragraph update (count unchanged): shift the offset index
+  // and the block in place. The section outline can only change if this
+  // paragraph's style changed.
+  update_paragraph_offsets_after_len_change(document, paragraph_ix);
+  if old_style != paragraph.style {
+    rebuild_document_sections(document);
+  }
 }
 
 #[hotpath::measure]

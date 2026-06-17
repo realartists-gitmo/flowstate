@@ -249,7 +249,6 @@ impl RichTextEditor {
     if reconcile_identity {
       self.identity_map.reconcile(&self.document);
     }
-    self.last_collaboration_edit = operations.map(|operations| CollaborationEdit { operations: operations.to_vec() });
     if self.collab_capture
       && self.suppress_collab_capture == 0
       && let Some(operations) = operations

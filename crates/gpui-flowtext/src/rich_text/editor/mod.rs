@@ -878,7 +878,6 @@ pub struct RichTextEditor {
   undo_stack: Vec<EditRecord>,
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
-  last_collaboration_edit: Option<CollaborationEdit>,
   pending_collab_edits: Vec<CollaborationEdit>,
   collab_capture: bool,
   suppress_collab_capture: u32,

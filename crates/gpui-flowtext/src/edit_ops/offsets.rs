@@ -43,36 +43,60 @@ pub fn refresh_paragraph_ranges(document: &mut Document) {
 }
 
 #[hotpath::measure]
-fn refresh_paragraph_ranges_from(document: &mut Document, start_paragraph: usize) {
-  let paragraph_count = document.paragraphs.len();
-  for paragraph_ix in start_paragraph.min(paragraph_count)..paragraph_count {
-    refresh_paragraph_range(document, paragraph_ix);
-  }
-}
-
-#[hotpath::measure]
 pub fn rebuild_document_offset_index(document: &mut Document) {
   document.offset_index.rebuild(&document.paragraphs);
   refresh_paragraph_ranges(document);
 }
 
+fn shift_byte_range(range: &Range<usize>, delta: isize) -> Range<usize> {
+  range.start.saturating_add_signed(delta)..range.end.saturating_add_signed(delta)
+}
+
+// Per-keystroke hot path: a single paragraph's text length changed (paragraph
+// COUNT is unchanged). Update the Fenwick offset index in O(log n), shift the
+// cached `byte_range`s of the edited paragraph and the ones after it, and mirror
+// the change into the parallel block representation in place. We deliberately do
+// NOT clone the paragraph tail, rebuild the block vector, reconcile ids, or
+// rebuild the section outline: a content-only edit changes none of those.
 #[hotpath::measure]
 pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragraph_ix: usize) {
   if paragraph_ix >= document.paragraphs.len() {
     return;
   }
+  let new_len = paragraph_text_len(&document.paragraphs[paragraph_ix]);
+  let old_len = document.paragraphs[paragraph_ix].byte_range.len();
+  let delta = new_len as isize - old_len as isize;
   document
     .offset_index
     .update_paragraph_width(paragraph_ix, &document.paragraphs);
-  refresh_paragraph_ranges_from(document, paragraph_ix);
-  let paragraph_count = document.paragraphs.len();
-  let replacements = document.paragraphs[paragraph_ix..].to_vec();
-  replace_paragraph_blocks(
-    document,
-    paragraph_ix,
-    paragraph_count.saturating_sub(paragraph_ix),
-    &replacements,
-  );
+
+  let start = document.paragraphs[paragraph_ix].byte_range.start;
+  {
+    let paragraphs = paragraphs_mut(document);
+    paragraphs[paragraph_ix].byte_range = start..start + new_len;
+    if delta != 0 {
+      for paragraph in paragraphs.iter_mut().skip(paragraph_ix + 1) {
+        paragraph.byte_range = shift_byte_range(&paragraph.byte_range, delta);
+      }
+    }
+  }
+
+  let mut edited = Some(document.paragraphs[paragraph_ix].clone());
+  let blocks = Arc::make_mut(&mut document.blocks);
+  let mut paragraph_ord = 0usize;
+  for block in blocks.iter_mut() {
+    let Block::Paragraph(paragraph) = block else {
+      continue;
+    };
+    if paragraph_ord == paragraph_ix {
+      if let Some(updated) = edited.take() {
+        *paragraph = updated;
+      }
+    } else if paragraph_ord > paragraph_ix && delta != 0 {
+      paragraph.byte_range = shift_byte_range(&paragraph.byte_range, delta);
+    }
+    paragraph_ord += 1;
+  }
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within

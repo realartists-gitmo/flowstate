@@ -261,7 +261,7 @@ impl CollabSession {
   }
 
   fn run_self_check(&mut self, cx: &mut Context<Self>) -> Result<()> {
-    let Some(doc) = &self.doc else {
+    let Some(doc) = self.doc.clone() else {
       return Ok(());
     };
     let Some(editor) = self.editor.clone() else {
@@ -270,10 +270,24 @@ impl CollabSession {
 
     let live_document = editor.read(cx).document().clone();
     let live_hash = self_check::projection_hash(&live_document);
-    let mut projected = projection::document_from_loro(doc, load_document_theme())?;
+    let current_vv = doc.oplog_vv().encode();
+    // Cheap path: if neither the Loro state (version vector) nor the live
+    // projection hash changed since the last verified check, there can be no new
+    // drift, so skip the full reprojection.
+    if self
+      .last_self_check
+      .as_ref()
+      .is_some_and(|(vv, hash)| *vv == current_vv && *hash == live_hash)
+    {
+      tracing::trace!(session = %self.session, "collaboration projection self-check skipped (unchanged)");
+      return Ok(());
+    }
+
+    let mut projected = projection::document_from_loro(&doc, load_document_theme())?;
     projected.assets = live_document.assets.clone();
     let projected_hash = self_check::projection_hash(&projected);
     if live_hash == projected_hash {
+      self.last_self_check = Some((current_vv, live_hash));
       tracing::trace!(session = %self.session, live_hash = %format_args!("{live_hash:016x}"), "collaboration projection self-check passed");
       return Ok(());
     }
@@ -282,7 +296,7 @@ impl CollabSession {
       session = %self.session,
       live_hash = %format_args!("{live_hash:016x}"),
       projected_hash = %format_args!("{projected_hash:016x}"),
-      vv_bytes = doc.oplog_vv().encode().len(),
+      vv_bytes = current_vv.len(),
       "collaboration projection drift detected",
     );
     self.rebuild_from_projection(projected, cx)

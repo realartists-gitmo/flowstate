@@ -140,6 +140,7 @@ pub struct CollabSession {
   join_neighbor_tx: Option<async_channel::Sender<JoinNeighborSignal>>,
   incompatible_version_peers: HashSet<PeerId>,
   last_document_activity: Instant,
+  last_self_check: Option<(Vec<u8>, u64)>,
 }
 
 const DIRECT_REQUEST_CHANNEL_CAPACITY: usize = 32;
@@ -216,6 +217,7 @@ impl CollabSession {
       join_neighbor_tx: None,
       incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
+      last_self_check: None,
     })
   }
 
@@ -264,6 +266,7 @@ impl CollabSession {
       join_neighbor_tx: None,
       incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
+      last_self_check: None,
     }
   }
 

@@ -3,10 +3,13 @@
 use std::collections::HashMap;
 
 use anyhow::{Context as _, Result, bail};
-use gpui_flowtext::{Block, BlockId, Document, ParagraphId};
+use gpui_flowtext::{Block, BlockId, Document, ParagraphId, paragraph_text_len};
 use loro::{Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, ValueOrContainer};
 
-use crate::schema::BLOCKS;
+use crate::{
+  body_index::{BodyParagraphIndex, paragraph_lens_from_body_text},
+  schema::{BLOCKS, body_text},
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlockKind {
@@ -31,6 +34,9 @@ pub struct DocBinding {
   pub by_paragraph: HashMap<ParagraphId, usize>,
   pub by_block: HashMap<BlockId, usize>,
   pub by_container: HashMap<ContainerID, usize>,
+  /// Paragraph ordinal -> body byte-range index, kept in sync with the body text
+  /// so paragraph offset lookups never stringify the whole body.
+  pub body_index: BodyParagraphIndex,
 }
 
 impl DocBinding {
@@ -75,8 +81,24 @@ impl DocBinding {
         version: block_version(block),
       });
     }
+    binding.refresh_body_index(document);
     binding.assert_consistent(doc, document);
     Ok(binding)
+  }
+
+  /// Rebuilds the paragraph byte-offset index from the document's paragraphs.
+  /// Used on build and on the O(n) structural paths (block insert/delete/move)
+  /// that already rewrite the whole body; the per-keystroke paths update the
+  /// index incrementally instead.
+  pub fn refresh_body_index(&mut self, document: &Document) {
+    self.body_index = BodyParagraphIndex::from_lens(document.paragraphs.iter().map(paragraph_text_len).collect());
+  }
+
+  /// Rebuilds the paragraph byte-offset index from the live Loro body text.
+  /// Used by the remote applier after a full body reprojection so the index
+  /// keeps matching the freshly imported body (O(body length)).
+  pub fn refresh_body_index_from_loro(&mut self, doc: &LoroDoc) {
+    self.body_index = BodyParagraphIndex::from_lens(paragraph_lens_from_body_text(&body_text(doc)));
   }
 
   pub fn assert_consistent(&self, doc: &LoroDoc, document: &Document) {
@@ -98,6 +120,21 @@ impl DocBinding {
         paragraph_ix += 1;
       } else {
         debug_assert!(row.paragraph_id.is_none());
+      }
+    }
+
+    debug_assert_eq!(self.body_index.len(), paragraph_ix, "body index paragraph count does not match paragraph rows");
+    #[cfg(debug_assertions)]
+    {
+      let body_lens = paragraph_lens_from_body_text(&body_text(doc));
+      debug_assert_eq!(self.body_index.len(), body_lens.len(), "body index paragraph count does not match the body text");
+      for (ordinal, expected) in body_lens.iter().enumerate() {
+        debug_assert_eq!(self.body_index.paragraph_len(ordinal), *expected, "body index byte length mismatch vs body at paragraph {ordinal}");
+        debug_assert_eq!(
+          self.body_index.paragraph_len(ordinal),
+          document.paragraphs.get(ordinal).map_or(0, paragraph_text_len),
+          "body index byte length mismatch vs document at paragraph {ordinal}"
+        );
       }
     }
   }

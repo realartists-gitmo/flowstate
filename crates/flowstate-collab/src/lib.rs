@@ -5,6 +5,7 @@
 //! lives in `crates/flowstate/src/collab`.
 
 pub mod binding;
+pub mod body_index;
 pub mod ids;
 pub mod local_apply;
 pub mod net;

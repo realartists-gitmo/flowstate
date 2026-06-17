@@ -2,18 +2,19 @@
 
 use anyhow::{Context as _, Result, bail};
 use gpui_flowtext::{
-  BlockId, CollabPatch, CollabStructuralBlock, CollabTextDelta, Document, InputBlock, InputParagraph, InputRun, ParagraphId, new_block_id,
-  new_paragraph_id, paragraph_text, TextRun,
+  BlockId, CollabPatch, CollabStructuralBlock, CollabTextDelta, Document, InputBlock, InputParagraph, InputRun, ParagraphId, ParagraphStyle,
+  new_block_id, new_paragraph_id, paragraph_text, TextRun,
 };
 use loro::{
-  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroValue, ValueOrContainer,
+  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroValue, TextDelta, ValueOrContainer,
+  cursor::PosType,
   event::{Diff, DiffEvent, ListDiffItem},
 };
 
 use crate::{
   binding::{BindingRow, BlockKind, DocBinding},
   projection::{input_block_from_container, input_blocks_from_loro},
-  schema::{BLOCKS, DATA, REV, STYLE, body_text, decode_paragraph_style},
+  schema::{BLOCKS, DATA, REV, STYLE, body_text, decode_paragraph_style, input_runs_from_delta, paragraph_style_from_attrs, utf8_byte},
 };
 
 pub struct RemoteApplier<'s> {
@@ -29,22 +30,160 @@ impl RemoteApplier<'_> {
 
     let pre_event_binding = self.binding.clone();
     let body_id = body_text(self.doc).id();
-    let mut body_changed = false;
+    let mut body_delta: Option<Vec<TextDelta>> = None;
+    let mut multiple_body_deltas = false;
     let inserted_containers = inserted_container_ids(self.doc, event)?;
     let mut patches = Vec::new();
     for diff in &event.events {
       match &diff.diff {
-        Diff::Text(_) if *diff.target == body_id => body_changed = true,
+        Diff::Text(delta) if *diff.target == body_id => {
+          if body_delta.replace(delta.clone()).is_some() {
+            multiple_body_deltas = true;
+          }
+        },
         Diff::Text(_) => {},
         Diff::Map(delta) => self.apply_map_diff(diff.target, delta.updated.keys().map(|key| key.as_ref()), &inserted_containers, &mut patches)?,
         Diff::List(delta) => self.apply_list_diff(diff.target, delta, &mut patches)?,
         Diff::Tree(_) | Diff::Counter(_) | Diff::Unknown => {},
       }
     }
-    if body_changed {
-      self.reconcile_body_text(document, &pre_event_binding, &mut patches)?;
+    if let Some(delta) = body_delta {
+      // Fast path: a pure intra-paragraph text edit — no structural/style patches
+      // this event, a single contiguous change, and no newline change — reconciles
+      // only the affected paragraph. Anything else falls back to the full
+      // reprojection (which is always correct).
+      let handled = !multiple_body_deltas
+        && patches.is_empty()
+        && self.try_reconcile_body_delta(document, &delta, &mut patches)?;
+      if !handled {
+        self.reconcile_body_text(document, &pre_event_binding, &mut patches)?;
+        self.binding.refresh_body_index_from_loro(self.doc);
+      }
     }
     Ok(patches)
+  }
+
+  /// Attempts to reconcile a body text change by inspecting the Loro `TextDelta`
+  /// and re-projecting only the single affected paragraph. Returns `Ok(false)`
+  /// (without mutating) when the change is not a clean single-paragraph,
+  /// no-newline edit, so the caller can fall back to the full reprojection.
+  fn try_reconcile_body_delta(&mut self, document: &Document, delta: &[TextDelta], patches: &mut Vec<CollabPatch>) -> Result<bool> {
+    // Only safe while the index mirrors the editor document's paragraph count.
+    if self.binding.body_index.len() != document.paragraphs.len() {
+      return Ok(false);
+    }
+
+    // The delta must be a single contiguous change with no inserted newline.
+    let mut lead = 0usize; // unicode codepoints retained before the change
+    let mut inserted_bytes = 0usize;
+    let mut deleted_unicode = 0usize;
+    let mut in_change = false;
+    let mut after_change = false;
+    for item in delta {
+      match item {
+        TextDelta::Retain { retain, attributes } => {
+          // A retain carrying attributes is a mark change over existing text
+          // (e.g. a remote run/paragraph style edit). That changes a paragraph's
+          // runs without changing its text, which this text-splice fast path does
+          // not model — defer to the full reprojection.
+          if attributes.as_ref().is_some_and(|attributes| !attributes.is_empty()) {
+            return Ok(false);
+          }
+          if in_change {
+            after_change = true;
+            in_change = false;
+          } else if !after_change {
+            lead += retain;
+          }
+        },
+        TextDelta::Insert { insert, .. } => {
+          if after_change || insert.contains('\n') {
+            return Ok(false);
+          }
+          in_change = true;
+          inserted_bytes += insert.len();
+        },
+        TextDelta::Delete { delete } => {
+          if after_change {
+            return Ok(false);
+          }
+          in_change = true;
+          deleted_unicode += delete;
+        },
+      }
+    }
+    if !in_change && !after_change {
+      return Ok(false);
+    }
+
+    let new_body = body_text(self.doc);
+    let change_byte = utf8_byte(&new_body, lead);
+    let ordinal = self.binding.body_index.paragraph_ordinal_for_body_byte(change_byte);
+    let start_byte = self.binding.body_index.paragraph_start(ordinal);
+    let old_len = self.binding.body_index.paragraph_len(ordinal);
+    if change_byte < start_byte || change_byte > start_byte + old_len {
+      return Ok(false);
+    }
+
+    // Require the index and the editor document to agree on this paragraph's
+    // pre-edit length so all byte arithmetic below is consistent.
+    let old_text = paragraph_text(document, ordinal);
+    if old_text.len() != old_len {
+      return Ok(false);
+    }
+    let local_offset = change_byte - start_byte;
+    let mut deleted_bytes = 0usize;
+    let mut tail = old_text[local_offset..].chars();
+    for _ in 0..deleted_unicode {
+      // Running out of paragraph text means the deletion crossed a newline.
+      let Some(ch) = tail.next() else {
+        return Ok(false);
+      };
+      deleted_bytes += ch.len_utf8();
+    }
+    let new_len = old_len + inserted_bytes - deleted_bytes;
+
+    let Some(row_ix) = row_for_paragraph_ordinal(self.binding, ordinal) else {
+      return Ok(false);
+    };
+    let slice = new_body.slice_delta(start_byte, start_byte + new_len, PosType::Bytes)?;
+    let new_paragraph = InputParagraph {
+      style: paragraph_style_from_slice(&slice),
+      runs: input_runs_from_delta(&slice),
+    };
+    let Some(old_paragraph) = input_paragraph_from_document(document, ordinal) else {
+      return Ok(false);
+    };
+
+    // Keep the index aligned with the freshly imported body for later events.
+    self.binding.body_index.set_paragraph_len(ordinal, new_len);
+
+    if input_paragraphs_equal(&old_paragraph, &new_paragraph) {
+      return Ok(true);
+    }
+    let old_paragraph_text = input_paragraph_text(&old_paragraph);
+    let new_paragraph_text = input_paragraph_text(&new_paragraph);
+    if old_paragraph_text == new_paragraph_text {
+      if old_paragraph.style != new_paragraph.style {
+        patches.push(CollabPatch::ParagraphStyle {
+          row: row_ix,
+          style: new_paragraph.style,
+        });
+      }
+      if !input_runs_equal(&old_paragraph.runs, &new_paragraph.runs) {
+        patches.push(CollabPatch::ParagraphRuns {
+          row: row_ix,
+          runs: text_runs_from_input(&new_paragraph),
+        });
+      }
+    } else {
+      patches.push(CollabPatch::ParagraphText {
+        row: row_ix,
+        new: new_paragraph.clone(),
+        delta_utf8: text_delta_for_replacement(&old_paragraph_text, &new_paragraph_text),
+      });
+    }
+    Ok(true)
   }
 
   fn reconcile_body_text(&self, document: &Document, pre_event_binding: &DocBinding, patches: &mut Vec<CollabPatch>) -> Result<()> {
@@ -488,6 +627,30 @@ fn paragraph_ordinal_for_row(binding: &DocBinding, target_row: usize) -> Option<
     }
   }
   None
+}
+
+fn row_for_paragraph_ordinal(binding: &DocBinding, target_ordinal: usize) -> Option<usize> {
+  let mut paragraph_ix = 0usize;
+  for (row_ix, row) in binding.rows.iter().enumerate() {
+    if row.paragraph_id.is_some() {
+      if paragraph_ix == target_ordinal {
+        return Some(row_ix);
+      }
+      paragraph_ix += 1;
+    }
+  }
+  None
+}
+
+fn paragraph_style_from_slice(delta: &[TextDelta]) -> ParagraphStyle {
+  for item in delta {
+    if let TextDelta::Insert { attributes, .. } = item
+      && let Some(style) = paragraph_style_from_attrs(attributes.as_ref())
+    {
+      return style;
+    }
+  }
+  ParagraphStyle::Normal
 }
 
 fn map_i64(map: &LoroMap, key: &str) -> Result<i64> {

@@ -1,3 +1,15 @@
+> **SUPERSEDED — kept for history only.** The current source of truth is
+> **`FIX_LORO_ROOT.md`** (read its §0–§4 first); do not implement from this file.
+>
+> This doc describes the *abandoned* v1 schema: one `LoroText` **per paragraph**
+> held in `BindingRow { text: Option<LoroText> }`, with "no global offset arithmetic."
+> The implementation now uses a **single-root `LoroText`** — one `"body"` container,
+> paragraphs separated by `\n`, a maintained paragraph→byte offset index, and a
+> `"blocks"` movable list of **metadata-only** maps. Treat every per-paragraph-text,
+> `BindingRow { text }`, and "no offset math" claim below as obsolete.
+
+---
+
 # Flowstate P2P Collaborative Editing — Implementation Plan (v2)
 
 **Status:** approved architecture, ready for implementation

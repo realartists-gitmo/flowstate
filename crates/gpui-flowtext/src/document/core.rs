@@ -157,6 +157,22 @@ pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
 
 #[hotpath::measure]
 pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
+  // Fast path: a single in-place paragraph update in a paragraph-only-aligned
+  // document. Block ids and order are unchanged, so we replace just that one
+  // block instead of rebuilding the whole block vector.
+  if old_count == 1
+    && replacements.len() == 1
+    && document.blocks.len() == document.paragraphs.len()
+    && matches!(document.blocks.get(start_paragraph), Some(Block::Paragraph(_)))
+  {
+    if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(start_paragraph) {
+      *block = Block::Paragraph(replacements[0].clone());
+    }
+    reconcile_document_ids(document);
+    rebuild_document_sections(document);
+    return;
+  }
+
   let block_start = block_ix_for_paragraph(document, start_paragraph).unwrap_or(document.blocks.len());
   let mut paragraph_ix = 0;
   let mut output = Vec::with_capacity(document.blocks.len() + replacements.len());
@@ -335,6 +351,16 @@ pub fn remove_block_ids(document: &mut Document, range: Range<usize>) {
 #[hotpath::measure]
 pub fn rebuild_document_sections(document: &mut Document) {
   reconcile_document_ids(document);
+  document.sections = Arc::new(document_sections(document));
+}
+
+/// Computes the heading outline purely from paragraph styles, order, and ids.
+/// Pure (no `reconcile_document_ids`); callers that need id reconciliation use
+/// [`rebuild_document_sections`]. Because the outline never depends on paragraph
+/// text/runs, content-only edits can skip recomputation entirely.
+#[hotpath::measure]
+#[must_use]
+pub fn document_sections(document: &Document) -> Vec<DocumentSection> {
   let mut sections: Vec<DocumentSection> = Vec::new();
   let mut stack: Vec<(usize, SectionId)> = Vec::new();
 
@@ -374,7 +400,26 @@ pub fn rebuild_document_sections(document: &mut Document) {
       section.end_paragraph_exclusive = None;
     }
   }
-  document.sections = Arc::new(sections);
+  sections
+}
+
+/// Whether the paragraph at `paragraph_ix` carries a heading (section) style.
+#[hotpath::measure]
+#[must_use]
+pub fn paragraph_is_heading(document: &Document, paragraph_ix: usize) -> bool {
+  document
+    .paragraphs
+    .get(paragraph_ix)
+    .is_some_and(|paragraph| section_level_and_kind(document, paragraph.style).is_some())
+}
+
+/// Whether any paragraph in `range` (clamped to the paragraph count) is a heading.
+/// Lets callers decide whether a content edit can skip [`rebuild_document_sections`].
+#[hotpath::measure]
+#[must_use]
+pub fn range_contains_heading(document: &Document, range: Range<usize>) -> bool {
+  let end = range.end.min(document.paragraphs.len());
+  (range.start..end).any(|paragraph_ix| paragraph_is_heading(document, paragraph_ix))
 }
 
 #[hotpath::measure]

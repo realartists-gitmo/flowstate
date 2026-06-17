@@ -92,8 +92,9 @@ pub fn apply_document_span_replacement(document: &mut Document, current: &Docume
     paragraph_end.saturating_sub(current.start_paragraph),
     &replacement.paragraphs,
   );
+  // `replace_paragraph_blocks` already rebuilt the section outline; only the
+  // byte-offset index still needs refreshing after the splice.
   rebuild_document_offset_index(document);
-  rebuild_document_sections(document);
 }
 
 #[hotpath::measure]

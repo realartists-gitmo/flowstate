@@ -14,6 +14,7 @@ pub fn apply_patches(document: &mut Document, binding: &mut DocBinding, doc: &Lo
     apply_one(document, patch)?;
   }
   binding.refresh_versions(document);
+  binding.refresh_body_index(document);
   binding.assert_consistent(doc, document);
   Ok(())
 }
