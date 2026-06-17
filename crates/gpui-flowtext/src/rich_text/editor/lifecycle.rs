@@ -43,6 +43,7 @@ impl RichTextEditor {
       suppress_collab_capture: 0,
       collab_undo_redirect: None,
       collaboration_role: None,
+      own_collaboration_caret_color_rgb: None,
       recovery_write_in_progress: false,
       recovery_write_pending: false,
       last_recovery_generation: 0,
@@ -162,6 +163,7 @@ impl RichTextEditor {
     self.suppress_collab_capture = 0;
     self.collab_undo_redirect = None;
     self.collaboration_role = None;
+    self.own_collaboration_caret_color_rgb = None;
     self.recovery_write_in_progress = false;
     self.recovery_write_pending = false;
     self.paste_cache = None;
@@ -258,6 +260,11 @@ impl RichTextEditor {
     if !on {
       self.pending_collab_edits.clear();
     }
+  }
+
+  #[cfg(test)]
+  pub(crate) fn pending_scroll_head_after_layout_for_test(&self) -> bool {
+    self.pending_scroll_head_after_layout
   }
 
   pub fn set_collab_undo_redirect(&mut self, hook: Option<Rc<dyn Fn(UndoRedirect)>>) {
@@ -500,6 +507,28 @@ impl RichTextEditor {
   pub fn toggle_smart_word_selection(&mut self, cx: &mut Context<Self>) {
     self.config.smart_word_selection = !self.config.smart_word_selection;
     cx.notify();
+  }
+
+  pub fn set_show_own_collaboration_caret_color(&mut self, enabled: bool, cx: &mut Context<Self>) {
+    if self.config.show_own_collaboration_caret_color != enabled {
+      self.config.show_own_collaboration_caret_color = enabled;
+      cx.notify();
+    }
+  }
+
+  pub fn set_own_collaboration_caret_color(&mut self, color_rgb: Option<u32>, cx: &mut Context<Self>) {
+    if self.own_collaboration_caret_color_rgb != color_rgb {
+      self.own_collaboration_caret_color_rgb = color_rgb;
+      cx.notify();
+    }
+  }
+
+  pub(super) fn local_caret_color_rgb(&self) -> Option<u32> {
+    self
+      .config
+      .show_own_collaboration_caret_color
+      .then_some(self.own_collaboration_caret_color_rgb)
+      .flatten()
   }
 
   pub fn save_status(&self) -> &SaveStatus {

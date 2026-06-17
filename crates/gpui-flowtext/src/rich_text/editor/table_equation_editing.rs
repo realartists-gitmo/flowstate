@@ -1,5 +1,15 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
+  fn insert_text_into_selected_object_text(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    if self.insert_text_into_selected_table_cell(text, cx) {
+      return true;
+    }
+    if self.insert_text_into_selected_equation(text, cx) {
+      return true;
+    }
+    false
+  }
+
   fn insert_text_into_selected_table_cell(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;

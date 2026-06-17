@@ -2,18 +2,18 @@
 
 use anyhow::{Context as _, Result, bail};
 use gpui_flowtext::{
-  BlockId, CollabPatch, CollabStructuralBlock, CollabTextDelta, Document, InputBlock, ParagraphId, new_block_id, new_paragraph_id,
-  paragraph_text,
+  BlockId, CollabPatch, CollabStructuralBlock, CollabTextDelta, Document, InputBlock, InputParagraph, InputRun, ParagraphId, new_block_id,
+  new_paragraph_id, paragraph_text, TextRun,
 };
 use loro::{
-  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, TextDelta, ValueOrContainer,
+  Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroValue, ValueOrContainer,
   event::{Diff, DiffEvent, ListDiffItem},
 };
 
 use crate::{
   binding::{BindingRow, BlockKind, DocBinding},
-  projection::input_block_from_container,
-  schema::{BLOCKS, DATA, REV, STYLE, TEXT, decode_paragraph_style},
+  projection::{input_block_from_container, input_blocks_from_loro},
+  schema::{BLOCKS, DATA, REV, STYLE, body_text, decode_paragraph_style},
 };
 
 pub struct RemoteApplier<'s> {
@@ -28,64 +28,73 @@ impl RemoteApplier<'_> {
     }
 
     let pre_event_binding = self.binding.clone();
+    let body_id = body_text(self.doc).id();
+    let mut body_changed = false;
     let inserted_containers = inserted_container_ids(self.doc, event)?;
     let mut patches = Vec::new();
     for diff in &event.events {
       match &diff.diff {
-        Diff::Text(delta) => self.apply_text_diff(document, &pre_event_binding, &inserted_containers, diff.target, delta, &mut patches)?,
+        Diff::Text(_) if *diff.target == body_id => body_changed = true,
+        Diff::Text(_) => {},
         Diff::Map(delta) => self.apply_map_diff(diff.target, delta.updated.keys().map(|key| key.as_ref()), &inserted_containers, &mut patches)?,
         Diff::List(delta) => self.apply_list_diff(diff.target, delta, &mut patches)?,
         Diff::Tree(_) | Diff::Counter(_) | Diff::Unknown => {},
       }
     }
+    if body_changed {
+      self.reconcile_body_text(document, &pre_event_binding, &mut patches)?;
+    }
     Ok(patches)
   }
 
-  fn apply_text_diff(
-    &self,
-    document: &Document,
-    pre_event_binding: &DocBinding,
-    inserted_containers: &[ContainerID],
-    target: &ContainerID,
-    delta: &[TextDelta],
-    patches: &mut Vec<CollabPatch>,
-  ) -> Result<()> {
-    if inserted_containers.contains(target) {
-      return Ok(());
+  fn reconcile_body_text(&self, document: &Document, pre_event_binding: &DocBinding, patches: &mut Vec<CollabPatch>) -> Result<()> {
+    let projected_blocks = input_blocks_from_loro(self.doc)?;
+    for (row_ix, row) in self.binding.rows.iter().enumerate() {
+      if !matches!(row.kind, BlockKind::Paragraph) {
+        continue;
+      }
+      let Some(InputBlock::Paragraph(new)) = projected_blocks.get(row_ix) else {
+        continue;
+      };
+      let old = pre_event_binding
+        .by_container
+        .get(&row.map.id())
+        .and_then(|old_row_ix| paragraph_ordinal_for_row(pre_event_binding, *old_row_ix))
+        .and_then(|old_paragraph_ix| input_paragraph_from_document(document, old_paragraph_ix));
+      let Some(old) = old else {
+        patches.push(CollabPatch::ParagraphText {
+          row: row_ix,
+          new: new.clone(),
+          delta_utf8: text_delta_for_replacement("", &input_paragraph_text(new)),
+        });
+        continue;
+      };
+      if input_paragraphs_equal(&old, new) {
+        continue;
+      }
+      let old_text = input_paragraph_text(&old);
+      let new_text = input_paragraph_text(new);
+      if old_text == new_text {
+        if old.style != new.style && !has_paragraph_style_patch(patches, row_ix) {
+          patches.push(CollabPatch::ParagraphStyle {
+            row: row_ix,
+            style: new.style,
+          });
+        }
+        if !input_runs_equal(&old.runs, &new.runs) {
+          patches.push(CollabPatch::ParagraphRuns {
+            row: row_ix,
+            runs: text_runs_from_input(new),
+          });
+        }
+        continue;
+      }
+      patches.push(CollabPatch::ParagraphText {
+        row: row_ix,
+        new: new.clone(),
+        delta_utf8: text_delta_for_replacement(&old_text, &new_text),
+      });
     }
-    let Some(row_ix) = self.binding.by_container.get(target).copied() else {
-      return Ok(());
-    };
-    let row = self
-      .binding
-      .rows
-      .get(row_ix)
-      .context("text diff row is outside DocBinding")?;
-    if !matches!(row.kind, BlockKind::Paragraph) {
-      return Ok(());
-    }
-    let text = row
-      .text
-      .as_ref()
-      .context("paragraph diff row is missing its LoroText")?;
-    let style = decode_paragraph_style(map_i64(&row.map, STYLE)?);
-    let old_paragraph_ix = pre_event_binding
-      .by_container
-      .get(target)
-      .copied()
-      .and_then(|old_row_ix| paragraph_ordinal_for_row(pre_event_binding, old_row_ix));
-    let old_text = if let Some(paragraph_ix) = old_paragraph_ix
-      && paragraph_ix < document.paragraphs.len()
-    {
-      paragraph_text(document, paragraph_ix)
-    } else {
-      String::new()
-    };
-    patches.push(CollabPatch::ParagraphText {
-      row: row_ix,
-      new: crate::schema::input_paragraph_from_text(text, style),
-      delta_utf8: text_delta_to_collab_utf8(&old_text, delta),
-    });
     Ok(())
   }
 
@@ -123,9 +132,8 @@ impl RemoteApplier<'_> {
       });
     }
     if object_changed {
-      let input = input_block_from_container(&row.map)?;
+      let input = input_block_from_container(&row.map, None)?;
       row.kind = block_kind_for_input(&input);
-      row.text = None;
       row.paragraph_id = None;
       row.version = 0;
       patches.push(CollabPatch::ReplaceObjectBlock {
@@ -189,7 +197,7 @@ impl RemoteApplier<'_> {
               continue;
             }
 
-            let input = input_block_from_container(&map)?;
+            let input = input_block_from_container(&map, None)?;
             let structural = structural_block_for_insert(&input);
             let row = binding_row_from_insert(map, &input, structural.block_id, structural.paragraph_id)?;
             self.binding.insert_row(row_ix, row);
@@ -212,24 +220,16 @@ pub fn should_process_event(event: &DiffEvent<'_>) -> bool {
   event.triggered_by.is_import() || event.triggered_by.is_checkout()
 }
 
-fn text_delta_to_collab_utf8(old_text: &str, delta: &[TextDelta]) -> Vec<CollabTextDelta> {
-  let mut output = Vec::with_capacity(delta.len());
-  let mut old_chars = 0usize;
-  for item in delta {
-    match item {
-      TextDelta::Retain { retain, .. } => {
-        let len = utf8_len_for_char_span(old_text, old_chars, *retain);
-        push_text_delta(&mut output, CollabTextDelta::Retain(len));
-        old_chars = old_chars.saturating_add(*retain);
-      },
-      TextDelta::Insert { insert, .. } => push_text_delta(&mut output, CollabTextDelta::Insert(insert.len())),
-      TextDelta::Delete { delete } => {
-        let len = utf8_len_for_char_span(old_text, old_chars, *delete);
-        push_text_delta(&mut output, CollabTextDelta::Delete(len));
-        old_chars = old_chars.saturating_add(*delete);
-      },
-    }
-  }
+fn text_delta_for_replacement(old_text: &str, new_text: &str) -> Vec<CollabTextDelta> {
+  let prefix = common_prefix_bytes(old_text, new_text);
+  let suffix = common_suffix_bytes(&old_text[prefix..], &new_text[prefix..]);
+  let old_middle = old_text.len().saturating_sub(prefix + suffix);
+  let new_middle = new_text.len().saturating_sub(prefix + suffix);
+  let mut output = Vec::with_capacity(4);
+  push_text_delta(&mut output, CollabTextDelta::Retain(prefix));
+  push_text_delta(&mut output, CollabTextDelta::Delete(old_middle));
+  push_text_delta(&mut output, CollabTextDelta::Insert(new_middle));
+  push_text_delta(&mut output, CollabTextDelta::Retain(suffix));
   output
 }
 
@@ -251,17 +251,91 @@ fn push_text_delta(output: &mut Vec<CollabTextDelta>, delta: CollabTextDelta) {
   }
 }
 
-fn utf8_len_for_char_span(text: &str, start_char: usize, char_len: usize) -> usize {
-  let start = byte_for_char(text, start_char);
-  let end = byte_for_char(text, start_char.saturating_add(char_len));
-  end.saturating_sub(start)
+fn common_prefix_bytes(left: &str, right: &str) -> usize {
+  let mut prefix = 0usize;
+  for (left_ch, right_ch) in left.chars().zip(right.chars()) {
+    if left_ch != right_ch {
+      break;
+    }
+    prefix += left_ch.len_utf8();
+  }
+  prefix
 }
 
-fn byte_for_char(text: &str, target_char: usize) -> usize {
+fn common_suffix_bytes(left: &str, right: &str) -> usize {
+  let mut suffix = 0usize;
+  for (left_ch, right_ch) in left.chars().rev().zip(right.chars().rev()) {
+    if left_ch != right_ch {
+      break;
+    }
+    let len = left_ch.len_utf8();
+    if suffix + len > left.len() || suffix + len > right.len() {
+      break;
+    }
+    suffix += len;
+  }
+  suffix
+}
+
+fn input_paragraph_from_document(document: &Document, paragraph_ix: usize) -> Option<InputParagraph> {
+  let paragraph = document.paragraphs.get(paragraph_ix)?;
+  let text = paragraph_text(document, paragraph_ix);
+  let mut byte = 0usize;
+  let runs = paragraph
+    .runs
+    .iter()
+    .map(|run| {
+      let start = byte;
+      let end = start.saturating_add(run.len).min(text.len());
+      byte = end;
+      InputRun {
+        text: text.get(start..end).unwrap_or_default().to_string(),
+        styles: run.styles,
+      }
+    })
+    .collect();
+  Some(InputParagraph {
+    style: paragraph.style,
+    runs,
+  })
+}
+
+fn input_paragraph_text(paragraph: &InputParagraph) -> String {
+  let mut text = String::new();
+  for run in &paragraph.runs {
+    text.push_str(&run.text);
+  }
   text
-    .char_indices()
-    .nth(target_char)
-    .map_or(text.len(), |(byte, _)| byte)
+}
+
+fn input_paragraphs_equal(left: &InputParagraph, right: &InputParagraph) -> bool {
+  left.style == right.style
+    && input_runs_equal(&left.runs, &right.runs)
+}
+
+fn has_paragraph_style_patch(patches: &[CollabPatch], target_row: usize) -> bool {
+  patches
+    .iter()
+    .any(|patch| matches!(patch, CollabPatch::ParagraphStyle { row, .. } if *row == target_row))
+}
+
+fn input_runs_equal(left: &[InputRun], right: &[InputRun]) -> bool {
+  left.len() == right.len()
+    && left
+      .iter()
+      .zip(right)
+      .all(|(left, right)| left.text == right.text && left.styles == right.styles)
+}
+
+fn text_runs_from_input(paragraph: &InputParagraph) -> Vec<TextRun> {
+  paragraph
+    .runs
+    .iter()
+    .map(|run| TextRun {
+      len: run.text.len(),
+      styles: run.styles,
+    })
+    .collect()
 }
 
 fn map_from_insert(value: &ValueOrContainer) -> Result<LoroMap> {
@@ -291,9 +365,6 @@ fn inserted_container_ids(doc: &LoroDoc, event: &DiffEvent<'_>) -> Result<Vec<Co
       for value in insert {
         let map = map_from_insert(value)?;
         ids.push(map.id());
-        if let Some(ValueOrContainer::Container(Container::Text(text))) = map.get(TEXT) {
-          ids.push(text.id());
-        }
       }
     }
   }
@@ -360,7 +431,7 @@ fn insert_missing_binding_rows(
       continue;
     }
     let map = map_from_list(blocks, row_ix)?;
-    let input = input_block_from_container(&map)?;
+    let input = input_block_from_container(&map, None)?;
     let structural = structural_block_for_insert(&input);
     let row = binding_row_from_insert(map, &input, structural.block_id, structural.paragraph_id)?;
     binding.insert_row(row_ix, row);
@@ -388,14 +459,8 @@ fn structural_block_for_insert(input: &InputBlock) -> CollabStructuralBlock {
 }
 
 fn binding_row_from_insert(map: LoroMap, input: &InputBlock, block_id: BlockId, paragraph_id: Option<ParagraphId>) -> Result<BindingRow> {
-  let text = if matches!(input, InputBlock::Paragraph(_)) {
-    Some(text_child(&map)?)
-  } else {
-    None
-  };
   Ok(BindingRow {
     map,
-    text,
     kind: block_kind_for_input(input),
     block_id,
     paragraph_id,
@@ -413,7 +478,7 @@ fn block_kind_for_input(input: &InputBlock) -> BlockKind {
 }
 
 fn paragraph_ordinal_for_row(binding: &DocBinding, target_row: usize) -> Option<usize> {
-  let mut paragraph_ix = 0;
+  let mut paragraph_ix = 0usize;
   for (row_ix, row) in binding.rows.iter().enumerate() {
     if row_ix == target_row {
       return row.paragraph_id.map(|_| paragraph_ix);
@@ -423,13 +488,6 @@ fn paragraph_ordinal_for_row(binding: &DocBinding, target_row: usize) -> Option<
     }
   }
   None
-}
-
-fn text_child(map: &LoroMap) -> Result<LoroText> {
-  match map.get(TEXT) {
-    Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text),
-    Some(ValueOrContainer::Value(_)) | Some(ValueOrContainer::Container(_)) | None => bail!("paragraph block map is missing its text container"),
-  }
 }
 
 fn map_i64(map: &LoroMap, key: &str) -> Result<i64> {

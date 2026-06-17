@@ -478,6 +478,9 @@ fn trace_collab_patch(session: SessionId, patch: &CollabPatch) {
     CollabPatch::ParagraphStyle { row, style } => {
       tracing::trace!(%session, patch_kind = "paragraph_style", row, ?style, "queued collaboration patch");
     },
+    CollabPatch::ParagraphRuns { row, runs } => {
+      tracing::trace!(%session, patch_kind = "paragraph_runs", row, runs = runs.len(), "queued collaboration patch");
+    },
     CollabPatch::ReplaceObjectBlock { row, block } => {
       tracing::trace!(%session, patch_kind = "replace_object_block", row, block_id = ?block.block_id, "queued collaboration patch");
     },

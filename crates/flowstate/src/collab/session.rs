@@ -75,6 +75,7 @@ pub enum SessionNotice {
   PeerJoined(String),
   PeerLeft(String),
   LeftSession,
+  Disconnected(String),
   ViewRebuilt,
   IncompatibleVersion(String),
 }
@@ -542,6 +543,9 @@ impl CollabSession {
     } else {
       tracing::debug!(session = %self.session, peer = %peer, "local collaboration peer presence already established");
     }
+    if let (Some(editor), Some(presence)) = (self.editor.clone(), self.presence.as_ref()) {
+      editor.update(cx, |editor, cx| editor.set_own_collaboration_caret_color(Some(presence.self_color()), cx));
+    }
     self.refresh_own_presence(cx);
     self.endpoint_online = true;
     self.phase = SessionPhase::Attached(Attachment {
@@ -601,6 +605,10 @@ impl CollabSession {
 
     tracing::warn!(session = %self.session, ?reason, phase = ?self.phase, "detaching collaboration session");
     let user_left = matches!(reason, DetachReason::UserLeft);
+    let fatal_detail = match &reason {
+      DetachReason::Fatal(detail) => Some(detail.clone()),
+      DetachReason::UserLeft | DetachReason::JoinFailed(_) => None,
+    };
     if let Some(presence) = &self.presence {
       presence.delete_self();
       self.publish_presence_bytes(presence.encode_self());
@@ -617,6 +625,7 @@ impl CollabSession {
       editor.update(cx, |editor, cx| {
         editor.set_collab_undo_redirect(None);
         editor.set_collab_capture(false);
+        editor.set_own_collaboration_caret_color(None, cx);
         editor.clear_undo_redo_stacks();
         let _ = editor.take_pending_collab_edits();
         editor.set_external_carets(Vec::new(), cx);
@@ -646,6 +655,8 @@ impl CollabSession {
     self.phase = SessionPhase::Detached(reason);
     if user_left {
       cx.emit(SessionNotice::LeftSession);
+    } else if let Some(detail) = fatal_detail {
+      cx.emit(SessionNotice::Disconnected(detail));
     }
     cx.notify();
     tracing::info!(session = %self.session, "collaboration session detached and cleaned up");
@@ -658,7 +669,6 @@ impl CollabSession {
       return Ok(());
     }
 
-    let document = editor.read(cx).document().clone();
     let edits = editor.update(cx, |editor, _| {
       let edits = editor.take_pending_collab_edits();
       editor.clear_undo_redo_stacks();
@@ -668,9 +678,10 @@ impl CollabSession {
     let operation_count = edits.iter().map(|edit| edit.operations.len()).sum::<usize>();
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
-    } else {
-      tracing::debug!(session = %self.session, edit_count, operation_count, "flushing local collaboration edits into Loro");
+      return Ok(());
     }
+    tracing::debug!(session = %self.session, edit_count, operation_count, "flushing local collaboration edits into Loro");
+    let document = editor.read(cx).document().clone();
     let Some(doc) = &self.doc else {
       tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because Loro doc is missing");
       return Ok(());

@@ -33,6 +33,16 @@ fn apply_one(document: &mut Document, patch: &CollabPatch) -> Result<()> {
         rebuild_document_sections(document);
       }
     },
+    CollabPatch::ParagraphRuns { row, runs } => {
+      if let Some(paragraph_ix) = paragraph_ix_for_block(document, *row)
+        && let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
+      {
+        paragraph.runs.clone_from(runs);
+        gpui_flowtext::bump_paragraph_version(paragraph);
+        update_paragraph_block(document, paragraph_ix);
+        rebuild_document_sections(document);
+      }
+    },
     CollabPatch::ReplaceObjectBlock { row, block } => {
       let mut blocks = structural_blocks_from_document(document)?;
       if *row < blocks.len() {

@@ -181,12 +181,14 @@ impl CollabSession {
     }
     if self.presence.is_some() {
       tracing::trace!(session = %self.session, "collaboration presence timer fired");
-      self.remove_outdated_presence(cx);
+      let roster_changed = self.remove_outdated_presence(cx);
       self.refresh_own_presence(cx);
-      self.refresh_peer_count();
+      let peer_count_changed = self.refresh_peer_count();
       self.evaluate_connectivity(cx);
       self.refresh_external_carets(cx);
-      cx.notify();
+      if roster_changed || peer_count_changed {
+        cx.notify();
+      }
     }
     true
   }

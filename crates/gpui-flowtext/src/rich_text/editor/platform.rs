@@ -46,6 +46,9 @@ impl RichTextEditor {
   }
 
   fn replace_text_for_utf16_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+    if self.insert_text_into_selected_object_text(text, cx) {
+      return;
+    }
     let offsets = self.utf16_range_to_document_offsets(range);
     let selection = EditorSelection {
       anchor: offsets.start,
@@ -72,6 +75,11 @@ impl RichTextEditor {
     if self.selection != before_selection {
       self.emit_selection_changed(cx);
     }
+  }
+
+  #[cfg(test)]
+  pub(super) fn replace_selected_text_from_platform_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
+    self.replace_text_for_utf16_range(self.selection_utf16_range(), text, cx);
   }
 }
 

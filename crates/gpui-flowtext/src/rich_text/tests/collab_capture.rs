@@ -66,6 +66,88 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
 }
 
 #[gpui::test]
+fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      assert!(!editor.pending_scroll_head_after_layout_for_test());
+      let before_generation = editor.edit_generation();
+      editor.apply_collab_patches(
+        &[CollabPatch::ParagraphText {
+          row: 0,
+          new: InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![plain("remote")],
+          },
+          delta_utf8: vec![CollabTextDelta::Insert("remote".len())],
+        }],
+        cx,
+      );
+      assert!(!editor.pending_scroll_head_after_layout_for_test());
+      assert!(editor.edit_generation() > before_generation);
+    });
+  });
+}
+
+#[gpui::test]
+fn own_collaboration_caret_color_can_be_toggled_off(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_own_collaboration_caret_color(Some(0x3b82f6), cx);
+      assert_eq!(editor.local_caret_color_rgb(), Some(0x3b82f6));
+      editor.set_show_own_collaboration_caret_color(false, cx);
+      assert_eq!(editor.local_caret_color_rgb(), None);
+      editor.set_show_own_collaboration_caret_color(true, cx);
+      assert_eq!(editor.local_caret_color_rgb(), Some(0x3b82f6));
+    });
+  });
+}
+
+#[gpui::test]
+fn text_entry_in_selected_equation_updates_equation_only(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Equation(EquationBlock {
+      source: "x".into(),
+      syntax: EquationSyntax::Latex,
+      display: EquationDisplay::Display,
+      version: 0,
+    }),
+  ]);
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  let (document, edits) = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.select_equation_block_for_test(1, cx);
+      editor.insert_plain_text_from_toolkit("+1", cx);
+      editor.replace_selected_text_from_platform_for_test("+2", cx);
+      (editor.document().clone(), editor.take_pending_collab_edits())
+    })
+  });
+
+  assert_eq!(paragraph_text(&document, 0), "body");
+  let Block::Equation(equation) = &document.blocks[1] else {
+    panic!("expected equation block after toolkit text insert");
+  };
+  assert_eq!(equation.source.as_ref(), "x+1+2");
+  assert_eq!(edits.len(), 2);
+  for edit in edits {
+    assert!(matches!(edit.operations.as_slice(), [CanonicalOperation::ReplaceBlock { .. }]));
+  }
+}
+
+#[gpui::test]
 fn select_all_emits_selection_changed_once(cx: &mut gpui::TestAppContext) {
   let document = document_from_input(
     DocumentTheme::default(),

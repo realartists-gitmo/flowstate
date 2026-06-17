@@ -1,4 +1,4 @@
-use gpui::{App, Window};
+use gpui::{App, PromptButton, PromptLevel, Window};
 use gpui_component::{
   WindowExt as _,
   notification::Notification,
@@ -11,6 +11,15 @@ pub fn show_session_notice(notice: &SessionNotice, window: &mut Window, cx: &mut
     SessionNotice::PeerJoined(name) => push_info(collaborator_message(name, "joined"), window, cx),
     SessionNotice::PeerLeft(name) => push_info(collaborator_message(name, "left"), window, cx),
     SessionNotice::LeftSession => push_info("Left session - this copy is now local.", window, cx),
+    SessionNotice::Disconnected(detail) => {
+      std::mem::drop(window.prompt(
+        PromptLevel::Critical,
+        "Collaboration disconnected",
+        Some(detail.as_str()),
+        &[PromptButton::ok("Ok")],
+        cx,
+      ));
+    },
     SessionNotice::ViewRebuilt => {
       #[cfg(debug_assertions)]
       push_info("Collaboration view rebuilt from remote state.", window, cx);

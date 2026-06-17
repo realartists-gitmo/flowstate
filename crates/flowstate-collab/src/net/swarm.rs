@@ -39,9 +39,10 @@ impl SwarmHandle {
     tracing::info!(%session, bootstrap_count = bootstrap.len(), "spawning collaboration gossip swarm");
     register_bootstrap_addrs(&endpoint, &bootstrap)?;
     let bootstrap_ids = bootstrap.iter().map(endpoint_id).collect::<Vec<_>>();
+    let local_peer = endpoint_id(&endpoint.addr());
     let (tx, rx) = async_channel::unbounded();
     tokio::spawn(async move {
-      if let Err(error) = run_session(gossip, direct_state, session, bootstrap_ids, rx, evt_tx.clone()).await {
+      if let Err(error) = run_session(gossip, direct_state, session, local_peer, bootstrap_ids, rx, evt_tx.clone()).await {
         tracing::error!(%session, error = %format_args!("{error:#}"), "collaboration gossip swarm failed");
         let _ = evt_tx
           .send(NetEvent::SubscribeFailed {
@@ -73,6 +74,7 @@ async fn run_session(
   gossip: Gossip,
   direct_state: DirectServeState,
   session: SessionId,
+  local_peer: EndpointId,
   bootstrap: Vec<EndpointId>,
   rx: Receiver<SwarmCommand>,
   evt_tx: Sender<NetEvent>,
@@ -102,7 +104,7 @@ async fn run_session(
       },
       event = receiver.next() => {
         let event = event.context("collaboration gossip receiver ended")??;
-        handle_event(event, session, &evt_tx).await?;
+        handle_event(event, session, local_peer, &evt_tx).await?;
       },
     }
   }
@@ -160,8 +162,16 @@ async fn update_message(direct_state: &DirectServeState, session: SessionId, byt
   Ok(GossipMsg::UpdateAvailable { blob, len })
 }
 
-async fn handle_event(event: Event, session: SessionId, evt_tx: &Sender<NetEvent>) -> Result<()> {
+async fn handle_event(event: Event, session: SessionId, local_peer: EndpointId, evt_tx: &Sender<NetEvent>) -> Result<()> {
   match event {
+    Event::Received(message) if message.delivered_from == local_peer => {
+      tracing::trace!(
+        %session,
+        from = %message.delivered_from,
+        frame_bytes = message.content.len(),
+        "ignored self-delivered collaboration gossip frame",
+      );
+    },
     Event::Received(message) => match proto_gossip::decode(&message.content) {
       Ok(msg) => {
         tracing::trace!(
@@ -250,6 +260,7 @@ mod tests {
   #[tokio::test]
   async fn version_mismatch_emits_incompatible_version_once() {
     let session = SessionId::new();
+    let local_peer = SecretKey::generate().public();
     let peer = SecretKey::generate().public();
     let mut frame = proto_gossip::encode(&GossipMsg::Presence(Vec::new())).expect("valid gossip frame");
     frame[0] = frame[0].wrapping_add(1);
@@ -262,6 +273,7 @@ mod tests {
         delivered_from: peer,
       }),
       session,
+      local_peer,
       &evt_tx,
     )
     .await
@@ -274,6 +286,29 @@ mod tests {
       },
       event => panic!("unexpected event: {event:?}"),
     }
+    assert!(evt_rx.try_recv().is_err());
+  }
+
+  #[tokio::test]
+  async fn self_delivered_gossip_frame_is_ignored() {
+    let session = SessionId::new();
+    let local_peer = SecretKey::generate().public();
+    let frame = proto_gossip::encode(&GossipMsg::Update(vec![1, 2, 3])).expect("valid gossip frame");
+
+    let (evt_tx, evt_rx) = async_channel::unbounded();
+    handle_event(
+      Event::Received(Message {
+        content: frame.into(),
+        scope: DeliveryScope::Neighbors,
+        delivered_from: local_peer,
+      }),
+      session,
+      local_peer,
+      &evt_tx,
+    )
+    .await
+    .expect("self-delivered gossip frames should be ignored");
+
     assert!(evt_rx.try_recv().is_err());
   }
 }

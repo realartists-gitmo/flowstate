@@ -136,13 +136,14 @@ impl CollabManager {
       self.own_endpoint_id != Some(ticket.inviter.id),
       "That's your own invite — open the Share dialog instead."
     );
-    if self.sessions_by_id.contains_key(&ticket.session) {
-      tracing::warn!(session = %ticket.session, "collaboration session is already open");
+    if self.unregister_detached_session(ticket.session, cx) {
+      tracing::info!(session = %ticket.session, "discarded detached collaboration session before rejoin");
     }
-    ensure!(
-      !self.sessions_by_id.contains_key(&ticket.session),
-      "collaboration session is already open"
-    );
+    if let Some(existing) = self.sessions_by_id.get(&ticket.session) {
+      let phase = existing.read(cx).phase().clone();
+      tracing::warn!(session = %ticket.session, ?phase, "collaboration session is already open");
+      return Err(anyhow!("collaboration session is already open"));
+    }
 
     let session = ticket.session;
     let inviter = ticket.inviter.id;
@@ -312,6 +313,20 @@ impl CollabManager {
     let removed = self.sessions_by_id.remove(&session).is_some();
     self.session_by_panel.retain(|_, active| *active != session);
     tracing::debug!(%session, removed, open_sessions = self.sessions_by_id.len(), "unregistered collaboration session");
+  }
+
+  fn unregister_detached_session<T>(&mut self, session: SessionId, cx: &mut Context<T>) -> bool
+  where
+    T: 'static,
+  {
+    let detached = self
+      .sessions_by_id
+      .get(&session)
+      .is_some_and(|existing| matches!(existing.read(cx).phase(), SessionPhase::Detached(_)));
+    if detached {
+      self.unregister_session(session);
+    }
+    detached
   }
 
   fn ensure_runtime<T>(&mut self, cx: &mut Context<T>) -> Result<CommandSender>

@@ -69,11 +69,8 @@ mod tests {
     );
     let loro = schema::new_configured_doc();
     projection::populate_from_document(&loro, SessionId::from_bytes([8; 32]), "offsets", &original).expect("populate should succeed");
-    let binding = DocBinding::build(&loro, &original).expect("binding should build");
-    let text = binding.rows[0]
-      .text
-      .as_ref()
-      .expect("first row should be paragraph text");
+    let _binding = DocBinding::build(&loro, &original).expect("binding should build");
+    let text = schema::body_text(&loro);
     let byte_to_unicode = [
       (0, 0),
       ("a".len(), 1),
@@ -85,8 +82,8 @@ mod tests {
 
     assert_eq!(text.len_utf8(), MULTIBYTE.len());
     for (byte, unicode) in byte_to_unicode {
-      assert_eq!(schema::loro_pos(text, byte), unicode);
-      assert_eq!(schema::utf8_byte(text, unicode), byte);
+      assert_eq!(schema::loro_pos(&text, byte), unicode);
+      assert_eq!(schema::utf8_byte(&text, unicode), byte);
     }
   }
 

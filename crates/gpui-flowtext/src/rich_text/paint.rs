@@ -12,6 +12,7 @@ pub(super) fn paint_layout(
   drag_selection: Option<&EditorSelection>,
   show_caret: bool,
   caret_width: Pixels,
+  caret_color_rgb: Option<u32>,
   external_carets: &[ExternalCaret],
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
@@ -103,13 +104,14 @@ pub(super) fn paint_layout(
     && caret.intersects(&content_mask)
   {
     caret.size.width = caret_width;
-    window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), black()));
+    let caret_color = caret_color_rgb.map_or_else(|| Background::from(black()), |color_rgb| Background::from(rgb(color_rgb)));
+    window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
     if let Some(mut caret) = caret_bounds(layout, external_caret.offset, bounds.origin)
       && caret.intersects(&content_mask)
     {
-      caret.size.width = px(2.0);
+      caret.size.width = caret_width;
       window.paint_quad(fill(
         snap_vertical_rule_to_device_pixels(caret, window),
         Background::from(rgb(external_caret.color_rgb)),

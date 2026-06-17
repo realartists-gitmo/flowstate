@@ -1,9 +1,8 @@
 //! Shared Loro container schema for Flowstate rich-text documents.
 //!
-//! The schema uses one `LoroText` per paragraph inside a movable block list.
-//! Concurrent edits after a split can therefore converge into the first half of
-//! the split paragraph; this is the accepted per-paragraph CRDT trade-off from
-//! the implementation plan.
+//! The schema stores document text in one root `LoroText`. Paragraph rows in
+//! the movable block list carry block identity and metadata only; paragraph
+//! breaks are newline bytes in the root text.
 
 use std::{collections::HashMap, hash::BuildHasher, ops::Range};
 
@@ -16,18 +15,18 @@ use loro::{ExpandType, LoroDoc, LoroResult, LoroText, LoroValue, StyleConfig, St
 use serde::{Deserialize, Serialize};
 
 pub const META: &str = "meta";
+pub const BODY: &str = "body";
 pub const BLOCKS: &str = "blocks";
 pub const META_SCHEMA: &str = "schema";
 pub const META_SESSION: &str = "session";
 pub const META_TITLE: &str = "title";
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 pub const KIND: &str = "kind";
 pub const KIND_PARAGRAPH: &str = "p";
 pub const KIND_IMAGE: &str = "image";
 pub const KIND_EQUATION: &str = "equation";
 pub const KIND_TABLE: &str = "table";
-pub const TEXT: &str = "text";
 pub const STYLE: &str = "style";
 pub const DATA: &str = "data";
 pub const REV: &str = "rev";
@@ -36,8 +35,9 @@ pub const MARK_SEMANTIC: &str = "sem";
 pub const MARK_UNDERLINE: &str = "ul";
 pub const MARK_STRIKE: &str = "strike";
 pub const MARK_HIGHLIGHT: &str = "hl";
+pub const MARK_PARAGRAPH_STYLE: &str = "pstyle";
 
-pub type MarkIntervals = [Vec<(Range<usize>, LoroValue)>; 4];
+pub type MarkIntervals = [Vec<(Range<usize>, LoroValue)>; 5];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum BlockPayload {
@@ -132,7 +132,25 @@ pub fn configure_text_styles(doc: &LoroDoc) {
   styles.insert(MARK_UNDERLINE.into(), no_expand);
   styles.insert(MARK_STRIKE.into(), no_expand);
   styles.insert(MARK_HIGHLIGHT.into(), no_expand);
+  styles.insert(MARK_PARAGRAPH_STYLE.into(), StyleConfig { expand: ExpandType::Both });
   doc.config_text_style(styles);
+}
+
+#[must_use]
+pub fn body_text(doc: &LoroDoc) -> LoroText {
+  doc.get_text(BODY)
+}
+
+#[must_use]
+pub fn text_content(text: &LoroText) -> String {
+  let mut content = String::new();
+  for item in text.to_delta() {
+    let TextDelta::Insert { insert, .. } = item else {
+      continue;
+    };
+    content.push_str(&insert);
+  }
+  content
 }
 
 #[must_use]
@@ -174,6 +192,20 @@ pub fn set_run_styles_utf8(text: &LoroText, range: Range<usize>, styles: RunStyl
     unmark_utf8(text, range, MARK_HIGHLIGHT)?;
   }
   Ok(())
+}
+
+pub fn set_paragraph_style_utf8(
+  text: &LoroText,
+  range: Range<usize>,
+  style: gpui_flowtext::ParagraphStyle,
+) -> LoroResult<()> {
+  if range.is_empty() {
+    return Ok(());
+  }
+  match style {
+    gpui_flowtext::ParagraphStyle::Normal => unmark_utf8(text, range, MARK_PARAGRAPH_STYLE),
+    gpui_flowtext::ParagraphStyle::Custom(slot) => text.mark_utf8(range, MARK_PARAGRAPH_STYLE, LoroValue::I64(i64::from(slot))),
+  }
 }
 
 pub fn unmark_utf8(text: &LoroText, range: Range<usize>, key: &str) -> LoroResult<()> {
@@ -219,6 +251,66 @@ pub fn input_paragraph_from_text(text: &LoroText, style: gpui_flowtext::Paragrap
 }
 
 #[must_use]
+pub fn input_paragraphs_from_body_text(text: &LoroText) -> Vec<InputParagraph> {
+  let mut paragraphs = vec![InputParagraph {
+    style: gpui_flowtext::ParagraphStyle::Normal,
+    runs: Vec::new(),
+  }];
+  for item in text.to_delta() {
+    let TextDelta::Insert { insert, attributes } = item else {
+      continue;
+    };
+    if insert.is_empty() {
+      continue;
+    }
+    let styles = run_styles_from_attrs(attributes.as_ref());
+    let paragraph_style = paragraph_style_from_attrs(attributes.as_ref());
+    for (ix, segment) in insert.split('\n').enumerate() {
+      if ix > 0 {
+        if let Some(style) = paragraph_style {
+          paragraphs.last_mut().expect("paragraph accumulator is never empty").style = style;
+        }
+        paragraphs.push(InputParagraph {
+          style: paragraph_style.unwrap_or(gpui_flowtext::ParagraphStyle::Normal),
+          runs: Vec::new(),
+        });
+      }
+      if !segment.is_empty() {
+        if let Some(style) = paragraph_style {
+          paragraphs.last_mut().expect("paragraph accumulator is never empty").style = style;
+        }
+        push_input_run(paragraphs.last_mut().expect("paragraph accumulator is never empty"), segment, styles);
+      }
+    }
+  }
+  paragraphs
+}
+
+#[must_use]
+pub fn paragraph_style_from_attrs<S>(attrs: Option<&HashMap<String, LoroValue, S>>) -> Option<gpui_flowtext::ParagraphStyle>
+where
+  S: BuildHasher,
+{
+  attrs
+    .and_then(|attrs| attrs.get(MARK_PARAGRAPH_STYLE))
+    .and_then(loro_i64)
+    .map(decode_paragraph_style)
+}
+
+pub fn push_input_run(paragraph: &mut InputParagraph, text: &str, styles: RunStyles) {
+  if let Some(last) = paragraph.runs.last_mut()
+    && last.styles == styles
+  {
+    last.text.push_str(text);
+    return;
+  }
+  paragraph.runs.push(InputRun {
+    text: text.to_string(),
+    styles,
+  });
+}
+
+#[must_use]
 pub fn run_styles_from_attrs<S>(attrs: Option<&HashMap<String, LoroValue, S>>) -> RunStyles
 where
   S: BuildHasher,
@@ -245,7 +337,7 @@ where
 
 #[must_use]
 pub fn mark_intervals_from_runs(runs: &[TextRun]) -> MarkIntervals {
-  let mut intervals: MarkIntervals = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+  let mut intervals: MarkIntervals = [Vec::new(), Vec::new(), Vec::new(), Vec::new(), Vec::new()];
   let mut byte = 0;
   for run in runs {
     let range = byte..byte + run.len;
@@ -268,7 +360,7 @@ pub fn mark_intervals_from_runs(runs: &[TextRun]) -> MarkIntervals {
 }
 
 pub fn apply_mark_intervals(text: &LoroText, intervals: &MarkIntervals) -> Result<()> {
-  let keys = [MARK_SEMANTIC, MARK_UNDERLINE, MARK_STRIKE, MARK_HIGHLIGHT];
+  let keys = [MARK_SEMANTIC, MARK_UNDERLINE, MARK_STRIKE, MARK_HIGHLIGHT, MARK_PARAGRAPH_STYLE];
   for (key, intervals) in keys.into_iter().zip(intervals) {
     for (range, value) in intervals {
       text.mark_utf8(range.clone(), key, value.clone())?;

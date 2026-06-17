@@ -1,18 +1,17 @@
 //! Translation from flowtext canonical operations into Loro operations.
 
 use anyhow::{Context as _, Result, bail};
-use gpui_flowtext::{
-  Block, BlockId, CanonicalOperation, Document, DocumentSpan, Paragraph, ParagraphId, RunStyles, TextRun, paragraph_text, paragraph_text_len,
-};
-use loro::{CommitOptions, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, TextDelta, UpdateOptions, ValueOrContainer, cursor::PosType};
+use std::ops::Range;
+
+use gpui_flowtext::{Block, BlockId, CanonicalOperation, Document, DocumentSpan, ParagraphId, RunStyles, full_document_text};
+use loro::{CommitOptions, LoroDoc, LoroMap, LoroMovableList, LoroValue, ValueOrContainer};
 
 use crate::{
   binding::{BindingRow, BlockKind, DocBinding, block_version},
-  projection::{insert_object_container, insert_paragraph_container, replace_blocks_from_document},
+  projection::{insert_object_container, insert_paragraph_container, replace_blocks_from_document, replace_body_from_document},
   schema::{
-    BLOCKS, BlockPayload, DATA, KIND, KIND_EQUATION, KIND_IMAGE, KIND_TABLE, MARK_HIGHLIGHT, MARK_SEMANTIC, MARK_STRIKE, MARK_UNDERLINE, REV,
-    STYLE, apply_mark_intervals, debug_assert_paragraph_text_len, decode_paragraph_style, encode_paragraph_style, mark_intervals_from_runs,
-    payload_from_block, run_styles_from_attrs, set_run_styles_utf8, unmark_utf8,
+    BLOCKS, BlockPayload, DATA, KIND, KIND_EQUATION, KIND_IMAGE, KIND_TABLE, REV, STYLE, body_text, decode_paragraph_style,
+    encode_paragraph_style, payload_from_block, set_paragraph_style_utf8, set_run_styles_utf8, text_content,
   },
 };
 
@@ -59,21 +58,19 @@ impl LocalApplier<'_> {
       CanonicalOperation::SetParagraphStyle { paragraph, style } => {
         let row = self.row_for_paragraph(*paragraph)?;
         row.map.insert(STYLE, encode_paragraph_style(*style))?;
+        let range = self.body_range_for_paragraph(*paragraph)?;
+        set_paragraph_style_utf8(&body_text(self.doc), range, *style)?;
         Ok(())
       },
       CanonicalOperation::SetRunStyles { paragraph, range, styles } => {
-        let row = self.row_for_paragraph(*paragraph)?;
-        let text = row
-          .text
-          .as_ref()
-          .context("paragraph row is missing its LoroText")?;
-        set_run_styles_utf8(text, range.clone(), *styles)?;
-        self.debug_assert_row_text_len(document, self.row_ix_for_paragraph(*paragraph)?);
+        let start = self.body_byte_for_paragraph_byte(*paragraph, range.start)?;
+        let end = self.body_byte_for_paragraph_byte(*paragraph, range.end)?;
+        set_run_styles_utf8(&body_text(self.doc), start..end, *styles)?;
         Ok(())
       },
       CanonicalOperation::InsertBlock { block, block_ix } => self.insert_block(document, *block, *block_ix),
-      CanonicalOperation::DeleteBlock { block } => self.delete_block(*block),
-      CanonicalOperation::MoveBlock { block, new_block_ix } => self.move_block(*block, *new_block_ix),
+      CanonicalOperation::DeleteBlock { block } => self.delete_block(document, *block),
+      CanonicalOperation::MoveBlock { block, new_block_ix } => self.move_block(document, *block, *new_block_ix),
       CanonicalOperation::ReplaceParagraphSpan {
         start_paragraph,
         before,
@@ -85,19 +82,11 @@ impl LocalApplier<'_> {
   }
 
   fn insert_text(&mut self, document: &Document, paragraph: ParagraphId, byte: usize, value: &str, styles: RunStyles) -> Result<()> {
-    let row_ix = self.row_ix_for_paragraph(paragraph)?;
-    let row = self
-      .binding
-      .rows
-      .get(row_ix)
-      .context("DocBinding paragraph index is out of bounds")?;
-    let text = row
-      .text
-      .as_ref()
-      .context("paragraph row is missing its LoroText")?;
-    text.insert_utf8(byte, value)?;
-    set_run_styles_utf8(text, byte..byte + value.len(), styles)?;
-    self.debug_assert_row_text_len(document, row_ix);
+    let byte = self.body_byte_for_paragraph_byte(paragraph, byte)?;
+    let body = body_text(self.doc);
+    body.insert_utf8(byte, value)?;
+    set_run_styles_utf8(&body, byte..byte + value.len(), styles)?;
+    self.debug_assert_body_matches_document(document);
     Ok(())
   }
 
@@ -111,39 +100,37 @@ impl LocalApplier<'_> {
   ) -> Result<()> {
     let start_ix = self.row_ix_for_paragraph(start_paragraph)?;
     let end_ix = self.row_ix_for_paragraph(end_paragraph)?;
+    let start_byte = self.body_byte_for_paragraph_byte(start_paragraph, start)?;
+    let end_byte = self.body_byte_for_paragraph_byte(end_paragraph, end)?;
+    if end_byte > start_byte {
+      body_text(self.doc).delete_utf8(start_byte, end_byte - start_byte)?;
+    }
     if start_ix == end_ix {
-      self.delete_text_at_row(start_ix, start, end)?;
-      self.debug_assert_row_text_len(document, start_ix);
+      self.debug_assert_body_matches_document(document);
       return Ok(());
     }
     if start_ix > end_ix {
       bail!("cross-paragraph delete start row is after end row");
     }
 
-    let start_text = self.paragraph_text_at_row(start_ix)?;
-    let end_text = self.paragraph_text_at_row(end_ix)?;
-    let tail = end_text.slice_delta(end, end_text.len_utf8(), PosType::Bytes)?;
-    let start_len = start_text.len_utf8();
-    if start < start_len {
-      start_text.delete_utf8(start, start_len - start)?;
+    let start_paragraph_ix = self
+      .paragraph_ordinal_for_row(start_ix)
+      .context("delete start row is not a paragraph")?;
+    let end_paragraph_ix = self
+      .paragraph_ordinal_for_row(end_ix)
+      .context("delete end row is not a paragraph")?;
+    if end_paragraph_ix > start_paragraph_ix {
+      let deleted_rows = self.paragraph_row_indices(start_paragraph_ix + 1, end_paragraph_ix - start_paragraph_ix)?;
+      let blocks = self.blocks();
+      for row_ix in deleted_rows.into_iter().rev() {
+        blocks.delete(row_ix, 1)?;
+        self
+          .binding
+          .remove_row(row_ix)
+          .context("DocBinding paragraph row disappeared during cross-paragraph delete")?;
+      }
     }
-
-    let blocks = self.blocks();
-    for row_ix in ((start_ix + 1)..end_ix).rev() {
-      blocks.delete(row_ix, 1)?;
-      self
-        .binding
-        .remove_row(row_ix)
-        .context("DocBinding row disappeared during cross-paragraph delete")?;
-    }
-
-    insert_delta_at(&start_text, start, &tail)?;
-    blocks.delete(start_ix + 1, 1)?;
-    self
-      .binding
-      .remove_row(start_ix + 1)
-      .context("DocBinding end row disappeared during cross-paragraph delete")?;
-    self.debug_assert_row_text_len(document, start_ix);
+    self.debug_assert_body_matches_document(document);
     Ok(())
   }
 
@@ -161,44 +148,52 @@ impl LocalApplier<'_> {
       .get(insert_ix)
       .map(block_version)
       .context("post-split document is missing the new block")?;
-    let row = self
-      .binding
-      .rows
-      .get(row_ix)
-      .context("DocBinding paragraph index is out of bounds")?;
-    let style = decode_paragraph_style(map_i64(&row.map, STYLE)?);
-    let text = row
-      .text
-      .as_ref()
-      .context("paragraph row is missing its LoroText")?
-      .clone();
-    let tail = text.slice_delta(byte, text.len_utf8(), PosType::Bytes)?;
-    if byte < text.len_utf8() {
-      text.delete_utf8(byte, text.len_utf8() - byte)?;
-    }
-    self.debug_assert_row_text_len(document, row_ix);
+    let body_byte = self.body_byte_for_paragraph_byte(paragraph, byte)?;
+    body_text(self.doc).insert_utf8(body_byte, "\n")?;
 
     let blocks = self.blocks();
-    let (map, new_text) = insert_paragraph_container(&blocks, insert_ix, style, &[], "")?;
-    insert_delta_at(&new_text, 0, &tail)?;
+    let paragraph_ix = self
+      .paragraph_ordinal_for_row(row_ix)
+      .context("split row is not a paragraph")?
+      .saturating_add(1);
+    let style = document
+      .paragraphs
+      .get(paragraph_ix)
+      .map_or_else(
+        || {
+          self
+            .binding
+            .rows
+            .get(row_ix)
+            .and_then(|row| map_i64(&row.map, STYLE).ok())
+            .map(decode_paragraph_style)
+            .unwrap_or(gpui_flowtext::ParagraphStyle::Normal)
+        },
+        |paragraph| paragraph.style,
+      );
+    let map = insert_paragraph_container(&blocks, insert_ix, style)?;
     self.binding.insert_row(
       insert_ix,
       BindingRow {
         map,
-        text: Some(new_text),
         kind: BlockKind::Paragraph,
         block_id,
         paragraph_id: Some(new_paragraph),
         version,
       },
     );
-    self.debug_assert_row_text_len(document, insert_ix);
+    self.debug_assert_body_matches_document(document);
     Ok(())
   }
 
   fn join_paragraphs(&mut self, document: &Document, first: ParagraphId, second: ParagraphId) -> Result<()> {
     let first_ix = self.row_ix_for_paragraph(first)?;
-    let first_len = self.paragraph_text_at_row(first_ix)?.len_utf8();
+    let first_paragraph_ix = self
+      .paragraph_ordinal_for_row(first_ix)
+      .context("join first row is not a paragraph")?;
+    let first_len = self
+      .body_paragraph_range(first_paragraph_ix)?
+      .len();
     self.delete_range(document, first, first_len, second, 0)
   }
 
@@ -209,6 +204,7 @@ impl LocalApplier<'_> {
       .context("inserted block index is out of bounds in the post-edit document")?;
     match block {
       Block::Paragraph(paragraph) => {
+        replace_body_from_document(self.doc, document)?;
         let paragraph_ix = document_paragraph_ix_for_block(document, block_ix)?;
         let paragraph_id = document
           .ids
@@ -216,17 +212,14 @@ impl LocalApplier<'_> {
           .get(paragraph_ix)
           .copied()
           .context("inserted paragraph block is missing a paragraph id")?;
-        let text = paragraph_text(document, paragraph_ix);
         self.insert_paragraph_row(
           block_ix,
           block_id,
           paragraph_id,
           paragraph.style,
-          &paragraph.runs,
-          &text,
           block_version(block),
         )?;
-        self.debug_assert_row_text_len(document, block_ix);
+        self.debug_assert_body_matches_document(document);
         Ok(())
       },
       Block::Image(_) | Block::Equation(_) | Block::Table(_) => {
@@ -236,7 +229,6 @@ impl LocalApplier<'_> {
           block_ix,
           BindingRow {
             map,
-            text: None,
             kind: BlockKind::from_block(block),
             block_id,
             paragraph_id: None,
@@ -248,20 +240,36 @@ impl LocalApplier<'_> {
     }
   }
 
-  fn delete_block(&mut self, block: BlockId) -> Result<()> {
+  fn delete_block(&mut self, document: &Document, block: BlockId) -> Result<()> {
     let row_ix = self.row_ix_for_block(block)?;
+    let was_paragraph = matches!(
+      self.binding.rows.get(row_ix).map(|row| row.kind),
+      Some(BlockKind::Paragraph)
+    );
     self.blocks().delete(row_ix, 1)?;
     self
       .binding
       .remove_row(row_ix)
       .context("DocBinding block row disappeared during block delete")?;
+    if was_paragraph {
+      replace_body_from_document(self.doc, document)?;
+      self.debug_assert_body_matches_document(document);
+    }
     Ok(())
   }
 
-  fn move_block(&mut self, block: BlockId, new_block_ix: usize) -> Result<()> {
+  fn move_block(&mut self, document: &Document, block: BlockId, new_block_ix: usize) -> Result<()> {
     let old_ix = self.row_ix_for_block(block)?;
+    let was_paragraph = matches!(
+      self.binding.rows.get(old_ix).map(|row| row.kind),
+      Some(BlockKind::Paragraph)
+    );
     self.blocks().mov(old_ix, new_block_ix)?;
     self.binding.move_row(old_ix, new_block_ix);
+    if was_paragraph {
+      replace_body_from_document(self.doc, document)?;
+      self.debug_assert_body_matches_document(document);
+    }
     Ok(())
   }
 
@@ -272,81 +280,8 @@ impl LocalApplier<'_> {
     before: &DocumentSpan,
     after: &DocumentSpan,
   ) -> Result<()> {
-    let start = self.replace_span_start_ordinal(start_paragraph, before);
-    let old_rows = self.paragraph_row_indices(start, before.paragraphs.len())?;
-    let before_texts = span_paragraph_texts(before)?;
-    let after_texts = span_paragraph_texts(after)?;
-    let matched = before.paragraphs.len().min(after.paragraphs.len());
-
-    for ix in 0..matched {
-      self.update_matched_paragraph(
-        document,
-        old_rows[ix],
-        &before.paragraphs[ix],
-        &before_texts[ix],
-        &after.paragraphs[ix],
-        &after_texts[ix],
-      )?;
-    }
-
-    if after.paragraphs.len() > matched {
-      let base_insert_ix = if matched > 0 {
-        old_rows[matched - 1] + 1
-      } else {
-        old_rows
-          .first()
-          .copied()
-          .unwrap_or_else(|| self.row_ix_for_paragraph_insert_ordinal(start))
-      };
-      for (ix, (paragraph, text)) in after
-        .paragraphs
-        .iter()
-        .zip(after_texts.iter())
-        .enumerate()
-        .skip(matched)
-      {
-        let insert_ix = base_insert_ix + ix - matched;
-        let paragraph_ix = start + ix;
-        let block_ix = document_block_ix_for_paragraph(document, paragraph_ix)?;
-        let block_id = document
-          .ids
-          .block_ids
-          .get(block_ix)
-          .copied()
-          .context("inserted paragraph span block is missing a block id")?;
-        let paragraph_id = document
-          .ids
-          .paragraph_ids
-          .get(paragraph_ix)
-          .copied()
-          .context("inserted paragraph span block is missing a paragraph id")?;
-        self.insert_paragraph_row(
-          insert_ix,
-          block_id,
-          paragraph_id,
-          paragraph.style,
-          &paragraph.runs,
-          text,
-          block_version(&document.blocks[block_ix]),
-        )?;
-        self.debug_assert_row_text_len(document, insert_ix);
-      }
-    }
-
-    if before.paragraphs.len() > matched {
-      let blocks = self.blocks();
-      for row_ix in old_rows[matched..].iter().rev().copied() {
-        blocks.delete(row_ix, 1)?;
-        self
-          .binding
-          .remove_row(row_ix)
-          .context("DocBinding paragraph span row disappeared during delete")?;
-      }
-    }
-
-    self.binding.refresh_versions(document);
-    self.binding.assert_consistent(self.doc, document);
-    Ok(())
+    let _ = (start_paragraph, before, after);
+    self.replace_document(document)
   }
 
   fn replace_block(&mut self, document: &Document, block: Option<BlockId>) -> Result<()> {
@@ -365,37 +300,6 @@ impl LocalApplier<'_> {
   fn replace_document(&mut self, document: &Document) -> Result<()> {
     replace_blocks_from_document(self.doc, document)?;
     *self.binding = DocBinding::build(self.doc, document)?;
-    Ok(())
-  }
-
-  fn update_matched_paragraph(
-    &self,
-    document: &Document,
-    row_ix: usize,
-    before: &Paragraph,
-    before_text: &str,
-    after: &Paragraph,
-    after_text: &str,
-  ) -> Result<()> {
-    let row = self
-      .binding
-      .rows
-      .get(row_ix)
-      .context("matched paragraph row is out of bounds")?;
-    let text = row
-      .text
-      .as_ref()
-      .context("matched paragraph row is missing its LoroText")?;
-    if before_text != after_text {
-      text.update(after_text, UpdateOptions::default())?;
-    }
-    if before.runs != after.runs {
-      refresh_marks(text, &after.runs)?;
-    }
-    if before.style != after.style {
-      row.map.insert(STYLE, encode_paragraph_style(after.style))?;
-    }
-    self.debug_assert_row_text_len(document, row_ix);
     Ok(())
   }
 
@@ -419,7 +323,6 @@ impl LocalApplier<'_> {
       .map
       .insert(REV, map_i64_or(&row.map, REV, 0)?.saturating_add(1))?;
     row.kind = BlockKind::from_block(block);
-    row.text = None;
     row.paragraph_id = None;
     row.version = block_version(block);
     self.binding.rebuild_indexes();
@@ -432,17 +335,14 @@ impl LocalApplier<'_> {
     block_id: BlockId,
     paragraph_id: ParagraphId,
     style: gpui_flowtext::ParagraphStyle,
-    runs: &[TextRun],
-    text: &str,
     version: u64,
   ) -> Result<()> {
     let blocks = self.blocks();
-    let (map, loro_text) = insert_paragraph_container(&blocks, row_ix, style, runs, text)?;
+    let map = insert_paragraph_container(&blocks, row_ix, style)?;
     self.binding.insert_row(
       row_ix,
       BindingRow {
         map,
-        text: Some(loro_text),
         kind: BlockKind::Paragraph,
         block_id,
         paragraph_id: Some(paragraph_id),
@@ -466,23 +366,6 @@ impl LocalApplier<'_> {
     changed
   }
 
-  fn delete_text_at_row(&self, row_ix: usize, start: usize, end: usize) -> Result<()> {
-    let text = self.paragraph_text_at_row(row_ix)?;
-    if end > start {
-      text.delete_utf8(start, end - start)?;
-    }
-    Ok(())
-  }
-
-  fn paragraph_text_at_row(&self, row_ix: usize) -> Result<LoroText> {
-    self
-      .binding
-      .rows
-      .get(row_ix)
-      .and_then(|row| row.text.clone())
-      .context("paragraph row is missing its LoroText")
-  }
-
   fn row_for_paragraph(&self, paragraph: ParagraphId) -> Result<&BindingRow> {
     let ix = self.row_ix_for_paragraph(paragraph)?;
     self
@@ -492,16 +375,8 @@ impl LocalApplier<'_> {
       .context("DocBinding paragraph index is out of bounds")
   }
 
-  fn debug_assert_row_text_len(&self, document: &Document, row_ix: usize) {
-    let Some(row) = self.binding.rows.get(row_ix) else {
-      return;
-    };
-    let Some(text) = row.text.as_ref() else {
-      return;
-    };
-    if let Some(paragraph_ix) = self.paragraph_ordinal_for_row(row_ix) {
-      debug_assert_paragraph_text_len(text, document, paragraph_ix);
-    }
+  fn debug_assert_body_matches_document(&self, document: &Document) {
+    debug_assert_eq!(text_content(&body_text(self.doc)), full_document_text(document));
   }
 
   fn row_ix_for_paragraph(&self, paragraph: ParagraphId) -> Result<usize> {
@@ -520,13 +395,6 @@ impl LocalApplier<'_> {
       .get(&block)
       .copied()
       .context("block id is not present in DocBinding")
-  }
-
-  fn replace_span_start_ordinal(&self, start_paragraph: Option<ParagraphId>, before: &DocumentSpan) -> usize {
-    start_paragraph
-      .and_then(|paragraph| self.binding.by_paragraph.get(&paragraph).copied())
-      .and_then(|row_ix| self.paragraph_ordinal_for_row(row_ix))
-      .unwrap_or(before.start_paragraph)
   }
 
   fn paragraph_ordinal_for_row(&self, target_row: usize) -> Option<usize> {
@@ -560,68 +428,31 @@ impl LocalApplier<'_> {
     Ok(rows)
   }
 
-  fn row_ix_for_paragraph_insert_ordinal(&self, target: usize) -> usize {
-    let mut paragraph_ix = 0;
-    for (row_ix, row) in self.binding.rows.iter().enumerate() {
-      if row.paragraph_id.is_none() {
-        continue;
-      }
-      if paragraph_ix == target {
-        return row_ix;
-      }
-      paragraph_ix += 1;
-    }
-    self.binding.rows.len()
-  }
-
   fn blocks(&self) -> LoroMovableList {
     self.doc.get_movable_list(BLOCKS)
   }
-}
 
-fn insert_delta_at(text: &LoroText, byte: usize, delta: &[TextDelta]) -> Result<()> {
-  let mut cursor = byte;
-  for item in delta {
-    let TextDelta::Insert { insert, attributes } = item else {
-      continue;
-    };
-    if insert.is_empty() {
-      continue;
-    }
-    text.insert_utf8(cursor, insert)?;
-    let styles = run_styles_from_attrs(attributes.as_ref());
-    set_run_styles_utf8(text, cursor..cursor + insert.len(), styles)?;
-    cursor += insert.len();
+  fn body_byte_for_paragraph_byte(&self, paragraph: ParagraphId, byte: usize) -> Result<usize> {
+    let row_ix = self.row_ix_for_paragraph(paragraph)?;
+    let paragraph_ix = self
+      .paragraph_ordinal_for_row(row_ix)
+      .context("paragraph row has no paragraph ordinal")?;
+    let range = self.body_paragraph_range(paragraph_ix)?;
+    Ok(range.start + byte.min(range.len()))
   }
-  Ok(())
-}
 
-fn refresh_marks(text: &LoroText, runs: &[TextRun]) -> Result<()> {
-  let len = text.len_utf8();
-  if len == 0 {
-    return Ok(());
+  fn body_range_for_paragraph(&self, paragraph: ParagraphId) -> Result<Range<usize>> {
+    let row_ix = self.row_ix_for_paragraph(paragraph)?;
+    let paragraph_ix = self
+      .paragraph_ordinal_for_row(row_ix)
+      .context("paragraph row has no paragraph ordinal")?;
+    self.body_paragraph_range(paragraph_ix)
   }
-  for key in [MARK_SEMANTIC, MARK_UNDERLINE, MARK_STRIKE, MARK_HIGHLIGHT] {
-    unmark_utf8(text, 0..len, key)?;
-  }
-  apply_mark_intervals(text, &mark_intervals_from_runs(runs))
-}
 
-fn span_paragraph_texts(span: &DocumentSpan) -> Result<Vec<String>> {
-  let mut texts = Vec::with_capacity(span.paragraphs.len());
-  let mut byte = 0;
-  for (ix, paragraph) in span.paragraphs.iter().enumerate() {
-    let end = byte + paragraph_text_len(paragraph);
-    texts.push(
-      span
-        .text
-        .get(byte..end)
-        .context("DocumentSpan text is shorter than its paragraph runs")?
-        .to_string(),
-    );
-    byte = end + usize::from(ix + 1 < span.paragraphs.len());
+  fn body_paragraph_range(&self, target_paragraph_ix: usize) -> Result<Range<usize>> {
+    paragraph_range_in_body_text(&text_content(&body_text(self.doc)), target_paragraph_ix)
+      .context("paragraph ordinal is outside the body text")
   }
-  Ok(texts)
 }
 
 fn document_paragraph_ix_for_block(document: &Document, target_block_ix: usize) -> Result<usize> {
@@ -639,24 +470,28 @@ fn document_paragraph_ix_for_block(document: &Document, target_block_ix: usize) 
   bail!("target block index is out of bounds")
 }
 
-fn document_block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -> Result<usize> {
-  let mut paragraph_ix = 0;
-  for (block_ix, block) in document.blocks.iter().enumerate() {
-    match block {
-      Block::Paragraph(_) if paragraph_ix == target_paragraph_ix => return Ok(block_ix),
-      Block::Paragraph(_) => paragraph_ix += 1,
-      Block::Image(_) | Block::Equation(_) | Block::Table(_) => {},
-    }
-  }
-  bail!("target paragraph index is out of bounds")
-}
-
 fn kind_for_payload(payload: &BlockPayload) -> &'static str {
   match payload {
     BlockPayload::Image { .. } => KIND_IMAGE,
     BlockPayload::Equation { .. } => KIND_EQUATION,
     BlockPayload::Table(_) => KIND_TABLE,
   }
+}
+
+fn paragraph_range_in_body_text(text: &str, target_paragraph_ix: usize) -> Option<Range<usize>> {
+  let mut paragraph_ix = 0usize;
+  let mut start = 0usize;
+  for (byte, ch) in text.char_indices() {
+    if ch != '\n' {
+      continue;
+    }
+    if paragraph_ix == target_paragraph_ix {
+      return Some(start..byte);
+    }
+    paragraph_ix += 1;
+    start = byte + ch.len_utf8();
+  }
+  (paragraph_ix == target_paragraph_ix).then_some(start..text.len())
 }
 
 fn map_i64(map: &LoroMap, key: &str) -> Result<i64> {

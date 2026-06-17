@@ -62,7 +62,7 @@ mod tests {
     );
     let run_style_updates = source.apply(&[CanonicalOperation::SetRunStyles { paragraph, range, styles }]);
     let run_style_patches = target.import_updates(&run_style_updates);
-    assert!(matches!(run_style_patches.as_slice(), [CollabPatch::ParagraphText { row: 0, .. }]));
+    assert!(matches!(run_style_patches.as_slice(), [CollabPatch::ParagraphRuns { row: 0, .. }]));
     assert_documents_match(&source.document, &target.document, &target.loro);
   }
 

@@ -16,7 +16,12 @@ impl RichTextEditor {
     self.identity_map.reconcile(&self.document);
     self.last_collaboration_edit = None;
     self.layout_invalidation_hint = invalidation;
-    self.after_text_mutation(cx);
+    let generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    self.mark_document_changed_with_ops(generation, false, None, cx);
+    // Remote collaboration patches should update this editor in place, but
+    // should not scroll the viewport as if the local user typed the change.
+    self.after_formatting_mutation(cx);
     self.layout_invalidation_hint = None;
   }
 
@@ -43,6 +48,17 @@ impl RichTextEditor {
           && let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix)
         {
           paragraph.style = *style;
+          bump_paragraph_version(paragraph);
+          update_paragraph_block(&mut self.document, paragraph_ix);
+          rebuild_document_sections(&mut self.document);
+          extend_invalidation(invalidation, paragraph_ix..paragraph_ix + 1);
+        }
+      },
+      CollabPatch::ParagraphRuns { row, runs } => {
+        if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row)
+          && let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix)
+        {
+          paragraph.runs.clone_from(runs);
           bump_paragraph_version(paragraph);
           update_paragraph_block(&mut self.document, paragraph_ix);
           rebuild_document_sections(&mut self.document);

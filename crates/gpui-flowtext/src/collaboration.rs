@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::{
   AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles,
+  TextRun,
   new_block_id, new_paragraph_id,
 };
 
@@ -331,6 +332,10 @@ pub enum CollabPatch {
   ParagraphStyle {
     row: usize,
     style: ParagraphStyle,
+  },
+  ParagraphRuns {
+    row: usize,
+    runs: Vec<TextRun>,
   },
   ReplaceObjectBlock {
     row: usize,

@@ -16,11 +16,13 @@ impl CollabSession {
         tracing::warn!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "collaboration presence update failed");
         return;
       }
-      self.emit_presence_roster_diff(before, cx);
-      self.refresh_peer_count();
+      let roster_changed = self.emit_presence_roster_diff(before, cx);
+      let peer_count_changed = self.refresh_peer_count();
       self.evaluate_connectivity(cx);
       self.refresh_external_carets(cx);
-      cx.notify();
+      if roster_changed || peer_count_changed {
+        cx.notify();
+      }
     } else {
       tracing::debug!(session = %self.session, bytes = bytes.len(), "ignored collaboration presence update before local presence was established");
     }
@@ -58,13 +60,13 @@ impl CollabSession {
     .detach();
   }
 
-  pub(super) fn remove_outdated_presence(&mut self, cx: &mut Context<Self>) {
+  pub(super) fn remove_outdated_presence(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(presence) = &self.presence else {
-      return;
+      return false;
     };
     let before = remote_roster(presence);
     presence.remove_outdated();
-    self.emit_presence_roster_diff(before, cx);
+    self.emit_presence_roster_diff(before, cx)
   }
 
   pub(super) fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
@@ -76,15 +78,12 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because Loro doc is missing");
       return;
     };
-    let Some(binding) = &self.binding else {
-      tracing::trace!(session = %self.session, "skipping external caret refresh because binding is missing");
-      return;
-    };
     let Some(editor) = self.editor.clone() else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because editor is missing");
       return;
     };
-    let carets = presence_view::external_carets(doc, binding, presence);
+    let document = editor.read(cx).document().clone();
+    let carets = presence_view::external_carets(doc, &document, presence);
     tracing::trace!(session = %self.session, carets = carets.len(), "refreshing collaboration external carets");
     editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
   }
@@ -118,7 +117,7 @@ impl CollabSession {
     }
   }
 
-  pub(super) fn refresh_peer_count(&mut self) {
+  pub(super) fn refresh_peer_count(&mut self) -> bool {
     let peers_present = self.peers_present();
     let session_id = self.session;
     if let super::SessionPhase::Attached(attachment) = &mut self.phase {
@@ -126,8 +125,10 @@ impl CollabSession {
       attachment.peers_present = peers_present;
       if previous != peers_present {
         tracing::info!(session = %session_id, previous, peers_present, "collaboration peer presence count changed");
+        return true;
       }
     }
+    false
   }
 
   pub(super) fn peers_present(&self) -> usize {
@@ -138,16 +139,18 @@ impl CollabSession {
   }
 
   fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
+    let doc = self.doc.as_ref()?;
     let editor = self.editor.as_ref()?.read(cx);
     let binding = self.binding.as_ref()?;
-    presence_view::selection_for_editor(editor, binding)
+    presence_view::selection_for_editor(doc, editor, binding)
   }
 
-  fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) {
+  fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) -> bool {
     let Some(presence) = &self.presence else {
-      return;
+      return false;
     };
     let after = remote_roster(presence);
+    let changed = before != after;
     for (key, name) in &after {
       if !before.contains_key(key) {
         cx.emit(SessionNotice::PeerJoined(name.clone()));
@@ -158,6 +161,7 @@ impl CollabSession {
         cx.emit(SessionNotice::PeerLeft(name));
       }
     }
+    changed
   }
 }
 

@@ -455,12 +455,16 @@ pub struct RichTextEditorStyleState {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
+  pub show_own_collaboration_caret_color: bool,
 }
 
 #[hotpath::measure_all]
 impl Default for RichTextEditorConfig {
   fn default() -> Self {
-    Self { smart_word_selection: true }
+    Self {
+      smart_word_selection: true,
+      show_own_collaboration_caret_color: true,
+    }
   }
 }
 
@@ -880,6 +884,7 @@ pub struct RichTextEditor {
   suppress_collab_capture: u32,
   collab_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
   collaboration_role: Option<CollaborationRole>,
+  own_collaboration_caret_color_rgb: Option<u32>,
   recovery_write_in_progress: bool,
   recovery_write_pending: bool,
   last_recovery_generation: u64,

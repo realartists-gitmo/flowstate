@@ -583,6 +583,9 @@ impl RichTextEditor {
     if text.trim().is_empty() {
       return;
     }
+    if self.insert_text_into_selected_equation(text, cx) {
+      return;
+    }
     if self.insert_plain_text_into_selected_table_cell(text, cx) {
       return;
     }

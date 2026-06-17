@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use anyhow::{Context as _, Result, bail};
 use gpui_flowtext::{Block, BlockId, Document, ParagraphId};
-use loro::{Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroText, ValueOrContainer};
+use loro::{Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, ValueOrContainer};
 
 use crate::schema::BLOCKS;
 
@@ -19,7 +19,6 @@ pub enum BlockKind {
 #[derive(Clone, Debug)]
 pub struct BindingRow {
   pub map: LoroMap,
-  pub text: Option<LoroText>,
   pub kind: BlockKind,
   pub block_id: BlockId,
   pub paragraph_id: Option<ParagraphId>,
@@ -68,14 +67,8 @@ impl DocBinding {
         .get(row_ix)
         .copied()
         .context("document is missing a block id for a block row")?;
-      let text = if matches!(kind, BlockKind::Paragraph) {
-        Some(text_child(&map)?)
-      } else {
-        None
-      };
       binding.push_row(BindingRow {
         map,
-        text,
         kind,
         block_id,
         paragraph_id,
@@ -152,9 +145,6 @@ impl DocBinding {
     for (ix, row) in self.rows.iter().enumerate() {
       by_block.insert(row.block_id, ix);
       by_container.insert(row.map.id(), ix);
-      if let Some(text) = &row.text {
-        by_container.insert(text.id(), ix);
-      }
       if let Some(paragraph_id) = row.paragraph_id {
         by_paragraph.insert(paragraph_id, ix);
       }
@@ -167,9 +157,6 @@ impl DocBinding {
   fn index_row(&mut self, ix: usize, row: &BindingRow) {
     self.by_block.insert(row.block_id, ix);
     self.by_container.insert(row.map.id(), ix);
-    if let Some(text) = &row.text {
-      self.by_container.insert(text.id(), ix);
-    }
     if let Some(paragraph_id) = row.paragraph_id {
       self.by_paragraph.insert(paragraph_id, ix);
     }
@@ -203,15 +190,6 @@ fn map_at(blocks: &LoroMovableList, ix: usize) -> Result<LoroMap> {
     Some(ValueOrContainer::Container(Container::Map(map))) => Ok(map),
     Some(ValueOrContainer::Value(_)) | Some(ValueOrContainer::Container(_)) | None => {
       bail!("binding row {ix} is not a map container")
-    },
-  }
-}
-
-fn text_child(map: &LoroMap) -> Result<LoroText> {
-  match map.get(crate::schema::TEXT) {
-    Some(ValueOrContainer::Container(Container::Text(text))) => Ok(text),
-    Some(ValueOrContainer::Value(_)) | Some(ValueOrContainer::Container(_)) | None => {
-      bail!("paragraph block map is missing its text container")
     },
   }
 }

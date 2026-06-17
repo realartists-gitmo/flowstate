@@ -27,6 +27,11 @@ impl RichTextEditor {
     cx.notify();
   }
 
+  #[cfg(test)]
+  pub(super) fn select_equation_block_for_test(&mut self, block_ix: usize, cx: &mut Context<Self>) {
+    self.select_block(BlockSelection::Equation(block_ix), cx);
+  }
+
   fn select_block_from_click(
     &mut self,
     block_ix: usize,

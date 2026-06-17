@@ -14,7 +14,7 @@ mod tests {
     Block, CanonicalOperation, Document, DocumentOffset, DocumentTheme, HighlightStyle, InputBlock, InputEquationBlock, InputEquationDisplay,
     InputEquationSyntax, InputParagraph, ParagraphStyle, RunSemanticStyle, RunStyle, RunStyles, block_from_input_block,
     delete_cross_paragraph_range, delete_range_in_paragraph, document_from_input_blocks, insert_block_id, insert_text_at, mutate_runs_in_range,
-    paragraph_text, plain, remove_block_ids, split_paragraph_at,
+    paragraph_text, paragraphs_mut, plain, remove_block_ids, split_paragraph_at, update_paragraph_block,
   };
   use loro::{ExportMode, LoroDoc, Subscription, event::Subscriber};
   use proptest::{prelude::*, test_runner::TestCaseError};
@@ -103,6 +103,85 @@ mod tests {
     ];
 
     run_program(2, 0, &ops).expect("text edit after object insert should preserve block order");
+  }
+
+  #[test]
+  fn concurrent_insert_after_split_point_stays_in_second_half() -> Result<()> {
+    let session = SessionId::from_bytes([88; 32]);
+    let initial = document_from_input_blocks(DocumentTheme::default(), vec![paragraph_block("abcd")]);
+    let mut amy = Peer::from_initial(session, initial)?;
+    let snapshot = amy.snapshot()?;
+    let mut bob = Peer::from_snapshot(session, &snapshot)?;
+
+    amy.apply_op(&FuzzOp::Split {
+      peer: 0,
+      paragraph: 0,
+      byte: 2,
+    })?;
+    let amy_updates = amy.drain_updates();
+
+    bob.apply_op(&FuzzOp::InsertText {
+      peer: 1,
+      paragraph: 0,
+      byte: 3,
+      text: 4,
+      style: 0,
+    })?;
+    let bob_updates = bob.drain_updates();
+
+    for update in &bob_updates {
+      amy.import_update(update)?;
+    }
+    for update in &amy_updates {
+      bob.import_update(update)?;
+    }
+
+    assert_eq!(paragraph_text(&amy.document, 0), "ab");
+    assert_eq!(paragraph_text(&amy.document, 1), "cxd");
+    assert_eq!(paragraph_text(&bob.document, 0), "ab");
+    assert_eq!(paragraph_text(&bob.document, 1), "cxd");
+    Ok(())
+  }
+
+  #[test]
+  fn concurrent_paragraph_style_applies_to_both_split_halves() -> Result<()> {
+    let session = SessionId::from_bytes([89; 32]);
+    let initial = document_from_input_blocks(DocumentTheme::default(), vec![paragraph_block("abcd")]);
+    let mut amy = Peer::from_initial(session, initial)?;
+    let snapshot = amy.snapshot()?;
+    let mut bob = Peer::from_snapshot(session, &snapshot)?;
+
+    amy.apply_op(&FuzzOp::Split {
+      peer: 0,
+      paragraph: 0,
+      byte: 2,
+    })?;
+    let amy_updates = amy.drain_updates();
+
+    let paragraph = bob.document.ids.paragraph_ids[0];
+    paragraphs_mut(&mut bob.document)[0].style = ParagraphStyle::Custom(3);
+    update_paragraph_block(&mut bob.document, 0);
+    LocalApplier { doc: &bob.loro, binding: &mut bob.binding }
+      .apply(&bob.document, &[CanonicalOperation::SetParagraphStyle {
+        paragraph,
+        style: ParagraphStyle::Custom(3),
+      }])?;
+    let bob_updates = bob.drain_updates();
+
+    for update in &bob_updates {
+      amy.import_update(update)?;
+    }
+    for update in &amy_updates {
+      bob.import_update(update)?;
+    }
+
+    for peer in [&amy, &bob] {
+      assert_eq!(paragraph_text(&peer.document, 0), "ab");
+      assert_eq!(paragraph_text(&peer.document, 1), "cd");
+      assert_eq!(peer.document.paragraphs[0].style, ParagraphStyle::Custom(3));
+      assert_eq!(peer.document.paragraphs[1].style, ParagraphStyle::Custom(3));
+    }
+    Ok(())
   }
 
   #[test]
