@@ -5,7 +5,6 @@ use serde::{Deserialize, Serialize};
 use super::{
   AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles,
   TextRun,
-  new_block_id, new_paragraph_id,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -46,15 +45,6 @@ impl DocumentIdentityMap {
         resize_ids(&mut rows[row_ix], row.cells.len(), TableCellId);
       }
     }
-  }
-
-  pub fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
-    self
-      .paragraph_ids
-      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), new_paragraph_id());
-    let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
-    self.block_ids.insert(block_insert_ix, new_block_id());
-    self.table_cell_ids.insert(block_insert_ix, Vec::new());
   }
 
   #[must_use]

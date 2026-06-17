@@ -623,6 +623,8 @@ impl CollabSession {
 
     if let Some(editor) = self.editor.clone() {
       editor.update(cx, |editor, cx| {
+        editor.set_recovery_path(None, cx);
+        editor.set_collaboration_role(None, cx);
         editor.set_collab_undo_redirect(None);
         editor.set_collab_capture(false);
         editor.set_own_collaboration_caret_color(None, cx);

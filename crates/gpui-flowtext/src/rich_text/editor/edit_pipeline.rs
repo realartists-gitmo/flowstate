@@ -198,7 +198,7 @@ impl RichTextEditor {
     self.mark_document_changed_with_ops(after_generation, identity_shape_changed, Some(&collab_operations), cx);
   }
 
-  fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, block_ix: usize, cx: &mut Context<Self>) {
+  fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, _block_ix: usize, cx: &mut Context<Self>) {
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
@@ -209,9 +209,7 @@ impl RichTextEditor {
     self.insert_paragraph_break(cx);
     self.suppress_mutation_notify = self.suppress_mutation_notify.saturating_sub(1);
     self.layout_invalidation_hint = None;
-    self
-      .identity_map
-      .insert_split_paragraph(caret.paragraph, block_ix);
+    self.identity_map.reconcile(&self.document);
     let after_span = capture_document_span(&self.document, caret.paragraph..caret.paragraph + 2);
 
     if before_span == after_span && before_selection == self.selection {
