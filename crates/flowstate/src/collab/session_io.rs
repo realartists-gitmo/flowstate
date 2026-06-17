@@ -294,7 +294,7 @@ impl CollabSession {
         match &result {
           Ok(bytes) => tracing::debug!(session = %self.session, asset, bytes = bytes.bytes.len(), "served collaboration asset direct request"),
           Err(error) => {
-            tracing::warn!(session = %self.session, asset, error = %format_args!("{error:#}"), "serving collaboration asset direct request failed")
+            tracing::warn!(session = %self.session, asset, error = %format_args!("{error:#}"), "serving collaboration asset direct request failed");
           },
         }
         let _ = reply.try_send(result);
