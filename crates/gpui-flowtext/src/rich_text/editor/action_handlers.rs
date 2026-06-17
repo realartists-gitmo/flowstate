@@ -233,24 +233,30 @@ impl RichTextEditor {
         key_char.to_string()
       };
       if self.insert_text_into_selected_table_cell(&key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       if self.insert_text_into_selected_equation(&key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       self.insert_text_command(&key_char, cx);
+      cx.stop_propagation();
     }
 
     #[cfg(not(target_os = "windows"))]
     {
       let _ = window;
       if self.insert_text_into_selected_table_cell(key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       if self.insert_text_into_selected_equation(key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       self.insert_text_command(key_char, cx);
+      cx.stop_propagation();
     }
   }
 
