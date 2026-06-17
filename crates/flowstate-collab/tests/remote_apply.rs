@@ -2,13 +2,7 @@
 mod tests {
   use std::sync::{Arc, Mutex};
 
-  use flowstate_collab::{
-    SessionId,
-    binding::DocBinding,
-    local_apply::LocalApplier,
-    patch_apply::apply_patches,
-    projection, schema,
-  };
+  use flowstate_collab::{SessionId, binding::DocBinding, local_apply::LocalApplier, patch_apply::apply_patches, projection, schema};
   use gpui_flowtext::{
     Block, CanonicalOperation, CollabPatch, Document, DocumentOffset, DocumentTheme, InputBlock, InputEquationBlock, InputEquationDisplay,
     InputEquationSyntax, InputParagraph, ParagraphStyle, RunStyle, RunStyles, block_from_input_block, document_from_input_blocks,
@@ -49,7 +43,13 @@ mod tests {
       style: ParagraphStyle::Custom(7),
     }]);
     let paragraph_style_patches = target.import_updates(&paragraph_style_updates);
-    assert!(matches!(paragraph_style_patches.as_slice(), [CollabPatch::ParagraphStyle { row: 0, style: ParagraphStyle::Custom(7) }]));
+    assert!(matches!(
+      paragraph_style_patches.as_slice(),
+      [CollabPatch::ParagraphStyle {
+        row: 0,
+        style: ParagraphStyle::Custom(7)
+      }]
+    ));
 
     let range = "a".len().."aé🌍".len();
     let styles = RunStyles::default()
@@ -57,7 +57,13 @@ mod tests {
       .with_direct_underline();
     mutate_runs_in_range(
       &mut source.document,
-      DocumentOffset { paragraph: 0, byte: range.start }..DocumentOffset { paragraph: 0, byte: range.end },
+      DocumentOffset {
+        paragraph: 0,
+        byte: range.start,
+      }..DocumentOffset {
+        paragraph: 0,
+        byte: range.end,
+      },
       |run_styles| *run_styles = styles,
     );
     let run_style_updates = source.apply(&[CanonicalOperation::SetRunStyles { paragraph, range, styles }]);
@@ -100,7 +106,11 @@ mod tests {
       new_block_ix: 2,
     }]);
     let move_patches = target.import_updates(&move_updates);
-    assert!(move_patches.iter().any(|patch| matches!(patch, CollabPatch::MoveBlock { from: 1, to: 2 })));
+    assert!(
+      move_patches
+        .iter()
+        .any(|patch| matches!(patch, CollabPatch::MoveBlock { from: 1, to: 2 }))
+    );
     assert_documents_match(&source.document, &target.document, &target.loro);
 
     delete_object_block(&mut source.document, 2);
@@ -132,7 +142,10 @@ mod tests {
       }
       .apply(&self.document, ops)
       .expect("local apply should succeed");
-      let mut updates = self.updates.lock().expect("update lock should not be poisoned");
+      let mut updates = self
+        .updates
+        .lock()
+        .expect("update lock should not be poisoned");
       std::mem::take(&mut *updates)
     }
   }
@@ -168,7 +181,10 @@ mod tests {
               .apply_event(&document, &event)
             });
           match result {
-            Ok(mut produced) => patches.lock().expect("patch lock should not be poisoned").append(&mut produced),
+            Ok(mut produced) => patches
+              .lock()
+              .expect("patch lock should not be poisoned")
+              .append(&mut produced),
             Err(apply_error) => *error.lock().expect("error lock should not be poisoned") = Some(format!("{apply_error:#}")),
           }
         }
@@ -181,7 +197,10 @@ mod tests {
         .into_inner()
         .expect("binding lock should not be poisoned");
       import_result.expect("remote import should succeed");
-      let remote_error = error.lock().expect("error lock should not be poisoned").take();
+      let remote_error = error
+        .lock()
+        .expect("error lock should not be poisoned")
+        .take();
       if let Some(error) = remote_error {
         panic!("remote apply failed: {error}");
       }
@@ -203,13 +222,20 @@ mod tests {
     let updates = Arc::new(Mutex::new(Vec::new()));
     let captured = updates.clone();
     let subscription = loro.subscribe_local_update(Box::new(move |bytes| {
-      captured.lock().expect("update lock should not be poisoned").push(bytes.clone());
+      captured
+        .lock()
+        .expect("update lock should not be poisoned")
+        .push(bytes.clone());
       true
     }));
-    let snapshot = loro.export(ExportMode::Snapshot).expect("snapshot export should succeed");
+    let snapshot = loro
+      .export(ExportMode::Snapshot)
+      .expect("snapshot export should succeed");
 
     let target_loro = schema::new_configured_doc();
-    target_loro.import(&snapshot).expect("snapshot import should succeed");
+    target_loro
+      .import(&snapshot)
+      .expect("snapshot import should succeed");
     projection::verify_lineage(&target_loro, session).expect("lineage should match");
     let target_document = projection::document_from_loro(&target_loro, DocumentTheme::default()).expect("projection should succeed");
     let target_binding = DocBinding::build(&target_loro, &target_document).expect("binding should build");
@@ -263,7 +289,10 @@ mod tests {
     let insert_ix = to.min(document.blocks.len());
     Arc::make_mut(&mut document.blocks).insert(insert_ix, block);
     let block_id = document.ids.block_ids.remove(from);
-    document.ids.block_ids.insert(to.min(document.ids.block_ids.len()), block_id);
+    document
+      .ids
+      .block_ids
+      .insert(to.min(document.ids.block_ids.len()), block_id);
   }
 
   fn delete_object_block(document: &mut Document, row: usize) {
@@ -312,5 +341,4 @@ mod tests {
       }
     }
   }
-
 }

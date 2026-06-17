@@ -1,4 +1,7 @@
-use std::{env, path::{Path, PathBuf}};
+use std::{
+  env,
+  path::{Path, PathBuf},
+};
 
 use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::WorkerGuard;
@@ -21,8 +24,7 @@ impl LoggingGuard {
 
 pub fn init() -> Result<LoggingGuard> {
   let directory = log_directory();
-  std::fs::create_dir_all(&directory)
-    .with_context(|| format!("creating log directory {} failed", directory.display()))?;
+  std::fs::create_dir_all(&directory).with_context(|| format!("creating log directory {} failed", directory.display()))?;
   let file_appender = tracing_appender::rolling::daily(&directory, "flowstate.log");
   let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -41,10 +43,7 @@ pub fn init() -> Result<LoggingGuard> {
     .try_init()
     .context("initializing flowstate logging failed")?;
 
-  Ok(LoggingGuard {
-    _guard: guard,
-    directory,
-  })
+  Ok(LoggingGuard { _guard: guard, directory })
 }
 
 fn env_filter() -> EnvFilter {

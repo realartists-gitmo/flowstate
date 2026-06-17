@@ -43,8 +43,15 @@ impl BlobOutbox {
   }
 
   pub fn insert_with_id(&mut self, id: BlobId, bytes: Vec<u8>) {
-    if let Some((_, existing)) = self.entries.iter_mut().find(|(candidate, _)| *candidate == id) {
-      self.total_bytes = self.total_bytes.saturating_sub(existing.len()).saturating_add(bytes.len());
+    if let Some((_, existing)) = self
+      .entries
+      .iter_mut()
+      .find(|(candidate, _)| *candidate == id)
+    {
+      self.total_bytes = self
+        .total_bytes
+        .saturating_sub(existing.len())
+        .saturating_add(bytes.len());
       *existing = bytes;
       self.trim();
       return;

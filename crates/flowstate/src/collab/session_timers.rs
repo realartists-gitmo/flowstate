@@ -92,10 +92,7 @@ impl CollabSession {
       last_probe_failed = self.last_probe_failed,
       "evaluating collaboration connectivity",
     );
-    if zero_long_enough
-      && quiet_enough
-      && (!self.endpoint_online || self.last_probe_failed || !self.start_connectivity_probe(cx))
-    {
+    if zero_long_enough && quiet_enough && (!self.endpoint_online || self.last_probe_failed || !self.start_connectivity_probe(cx)) {
       self.mark_offline(now, cx);
     }
   }
@@ -358,7 +355,10 @@ impl CollabSession {
             if !bytes.is_empty()
               && let Err(error) = session.import_update_bytes(&bytes, cx)
             {
-              session.detach(DetachReason::Fatal(format!("probing collaboration peer failed to apply updates: {error:#}")), cx);
+              session.detach(
+                DetachReason::Fatal(format!("probing collaboration peer failed to apply updates: {error:#}")),
+                cx,
+              );
               return;
             }
             session.note_inbound_traffic(cx);

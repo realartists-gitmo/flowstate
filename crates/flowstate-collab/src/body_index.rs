@@ -232,11 +232,7 @@ mod tests {
   use super::*;
 
   fn fresh_start(lens: &[usize], ordinal: usize) -> usize {
-    lens
-      .iter()
-      .take(ordinal)
-      .map(|len| len + 1)
-      .sum()
+    lens.iter().take(ordinal).map(|len| len + 1).sum()
   }
 
   #[test]
@@ -245,7 +241,10 @@ mod tests {
     let index = BodyParagraphIndex::from_lens(lens.clone());
     for ordinal in 0..lens.len() {
       assert_eq!(index.paragraph_start(ordinal), fresh_start(&lens, ordinal));
-      assert_eq!(index.paragraph_range(ordinal), fresh_start(&lens, ordinal)..fresh_start(&lens, ordinal) + lens[ordinal]);
+      assert_eq!(
+        index.paragraph_range(ordinal),
+        fresh_start(&lens, ordinal)..fresh_start(&lens, ordinal) + lens[ordinal]
+      );
     }
     // Total length has no trailing newline after the last paragraph.
     let total: usize = lens.iter().sum::<usize>() + lens.len() - 1;

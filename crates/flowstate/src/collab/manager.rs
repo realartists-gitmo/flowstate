@@ -49,7 +49,11 @@ impl CollabManager {
   }
 
   pub(super) fn shutdown_runtime(&mut self) {
-    tracing::info!(open_sessions = self.sessions_by_id.len(), runtime_running = self.runtime.is_some(), "shutting down collaboration runtime");
+    tracing::info!(
+      open_sessions = self.sessions_by_id.len(),
+      runtime_running = self.runtime.is_some(),
+      "shutting down collaboration runtime"
+    );
     if let Some(runtime) = self.runtime.take()
       && let Err(error) = runtime.commands.try_send(NetCommand::Shutdown)
     {
@@ -101,7 +105,11 @@ impl CollabManager {
       handler: direct_handler,
     }) {
       tracing::error!(%panel_id, %session, error = %error, "registering collaboration direct handler failed");
-      Self::detach_entity(&entity, DetachReason::Fatal(format!("registering collaboration direct handler failed: {error}")), cx);
+      Self::detach_entity(
+        &entity,
+        DetachReason::Fatal(format!("registering collaboration direct handler failed: {error}")),
+        cx,
+      );
       self.unregister_session(session);
       return Err(error).context("registering collaboration direct handler failed");
     }
@@ -110,7 +118,11 @@ impl CollabManager {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
       tracing::error!(%panel_id, %session, error = %error, "queueing collaboration create-session command failed");
-      Self::detach_entity(&entity, DetachReason::Fatal(format!("creating collaboration network session failed: {error}")), cx);
+      Self::detach_entity(
+        &entity,
+        DetachReason::Fatal(format!("creating collaboration network session failed: {error}")),
+        cx,
+      );
       self.unregister_session(session);
       return Err(error).context("creating collaboration network session failed");
     }
@@ -194,18 +206,30 @@ impl CollabManager {
       handler: direct_handler,
     }) {
       tracing::error!(%session_id, %panel_id, error = %error, "registering collaboration direct handler for joined session failed");
-      Self::detach_entity(&session, DetachReason::Fatal(format!("registering collaboration direct handler failed: {error}")), cx);
+      Self::detach_entity(
+        &session,
+        DetachReason::Fatal(format!("registering collaboration direct handler failed: {error}")),
+        cx,
+      );
       self.unregister_session(session_id);
       return Err(error).context("registering collaboration direct handler failed");
     }
     tracing::debug!(%session_id, %panel_id, "registered collaboration direct handler for joined session");
     if let Err(error) = Self::establish_joined_peer(session.clone(), commands, cx) {
-      Self::detach_entity(&session, DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error:#}")), cx);
+      Self::detach_entity(
+        &session,
+        DetachReason::Fatal(format!("collaboration endpoint address unavailable: {error:#}")),
+        cx,
+      );
       self.unregister_session(session_id);
       return Err(error);
     }
     if let Err(error) = session.update(cx, |session, cx| session.attach_joined_editor(panel_id, editor, cx)) {
-      Self::detach_entity(&session, DetachReason::Fatal(format!("attaching joined collaboration editor failed: {error:#}")), cx);
+      Self::detach_entity(
+        &session,
+        DetachReason::Fatal(format!("attaching joined collaboration editor failed: {error:#}")),
+        cx,
+      );
       self.unregister_session(session_id);
       return Err(error);
     }

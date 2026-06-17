@@ -4,8 +4,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{
-  AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles,
-  TextRun,
+  AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles, TextRun,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]

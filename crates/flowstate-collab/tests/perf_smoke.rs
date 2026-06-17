@@ -8,13 +8,7 @@
 mod tests {
   use std::sync::{Arc, Mutex};
 
-  use flowstate_collab::{
-    SessionId,
-    binding::DocBinding,
-    local_apply::LocalApplier,
-    patch_apply::apply_patches,
-    projection, schema,
-  };
+  use flowstate_collab::{SessionId, binding::DocBinding, local_apply::LocalApplier, patch_apply::apply_patches, projection, schema};
   use gpui_flowtext::{
     CanonicalOperation, CollabPatch, Document, DocumentTheme, InputBlock, InputParagraph, ParagraphStyle, RunStyles, capture_document_span,
     document_from_input_blocks, insert_text_at, paragraph_text, plain,
@@ -51,11 +45,19 @@ mod tests {
       after,
     };
 
-    LocalApplier { doc: &loro, binding: &mut binding }
-      .apply(&edited, &[op])
-      .expect("local apply");
+    LocalApplier {
+      doc: &loro,
+      binding: &mut binding,
+    }
+    .apply(&edited, &[op])
+    .expect("local apply");
 
-    let emitted: usize = updates.lock().expect("update lock").iter().map(Vec::len).sum();
+    let emitted: usize = updates
+      .lock()
+      .expect("update lock")
+      .iter()
+      .map(Vec::len)
+      .sum();
     let body_bytes = full_body_len(&document);
     // The whole-document body is large; a single-character incremental splice must
     // stay far below it (a full-body rewrite would be >= body_bytes).
@@ -100,13 +102,19 @@ mod tests {
     let before = capture_document_span(&edited, target..target + 1);
     insert_text_at(&mut edited, target, 0, "X", RunStyles::default());
     let after = capture_document_span(&edited, target..target + 1);
-    LocalApplier { doc: &source_loro, binding: &mut source_binding }
-      .apply(&edited, &[CanonicalOperation::ReplaceParagraphSpan {
+    LocalApplier {
+      doc: &source_loro,
+      binding: &mut source_binding,
+    }
+    .apply(
+      &edited,
+      &[CanonicalOperation::ReplaceParagraphSpan {
         start_paragraph: Some(edited.ids.paragraph_ids[target]),
         before,
         after,
-      }])
-      .expect("local apply");
+      }],
+    )
+    .expect("local apply");
     let update_batches = std::mem::take(&mut *updates.lock().expect("update lock"));
 
     let patches = import_updates(&target_loro, &mut target_document, &mut target_binding, &update_batches);
@@ -127,13 +135,20 @@ mod tests {
 
   fn large_document() -> Document {
     let blocks = (0..PARAGRAPHS)
-      .map(|ix| InputBlock::Paragraph(InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain(&format!("paragraph number {ix} body text"))] }))
+      .map(|ix| {
+        InputBlock::Paragraph(InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain(&format!("paragraph number {ix} body text"))],
+        })
+      })
       .collect();
     document_from_input_blocks(DocumentTheme::default(), blocks)
   }
 
   fn full_body_len(document: &Document) -> usize {
-    (0..document.paragraphs.len()).map(|ix| paragraph_text(document, ix).len() + 1).sum()
+    (0..document.paragraphs.len())
+      .map(|ix| paragraph_text(document, ix).len() + 1)
+      .sum()
   }
 
   fn import_updates(loro: &LoroDoc, document: &mut Document, binding: &mut DocBinding, updates: &[Vec<u8>]) -> Vec<CollabPatch> {
@@ -149,9 +164,12 @@ mod tests {
         move |event| {
           let produced = {
             let mut guard = shared_binding.lock().expect("binding lock");
-            flowstate_collab::remote_apply::RemoteApplier { doc: &doc, binding: &mut guard }
-              .apply_event(&snapshot_document, &event)
-              .expect("remote apply")
+            flowstate_collab::remote_apply::RemoteApplier {
+              doc: &doc,
+              binding: &mut guard,
+            }
+            .apply_event(&snapshot_document, &event)
+            .expect("remote apply")
           };
           patches.lock().expect("patch lock").extend(produced);
         }
@@ -159,8 +177,14 @@ mod tests {
       let subscription = loro.subscribe_root(callback);
       loro.import_with(update, "remote").expect("import");
       drop(subscription);
-      *binding = Arc::try_unwrap(shared_binding).expect("binding owner").into_inner().expect("binding lock");
-      let produced = Arc::try_unwrap(patches).expect("patch owner").into_inner().expect("patch lock");
+      *binding = Arc::try_unwrap(shared_binding)
+        .expect("binding owner")
+        .into_inner()
+        .expect("binding lock");
+      let produced = Arc::try_unwrap(patches)
+        .expect("patch owner")
+        .into_inner()
+        .expect("patch lock");
       apply_patches(document, binding, loro, &produced).expect("apply patches");
       all.extend(produced);
     }

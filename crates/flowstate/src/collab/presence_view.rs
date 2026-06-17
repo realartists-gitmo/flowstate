@@ -7,8 +7,7 @@ use flowstate_collab::{
   schema::body_text,
 };
 use loro::{
-  ContainerTrait as _,
-  LoroDoc,
+  ContainerTrait as _, LoroDoc,
   cursor::{Cursor, PosType, Side},
 };
 
@@ -56,12 +55,7 @@ fn cursor_bytes_for_offset(doc: &LoroDoc, document: &Document, offset: DocumentO
     .map(|cursor| cursor.encode())
 }
 
-fn external_caret_for_presence(
-  doc: &LoroDoc,
-  document: &Document,
-  selection: &PresenceSelection,
-  color_rgb: u32,
-) -> Option<ExternalCaret> {
+fn external_caret_for_presence(doc: &LoroDoc, document: &Document, selection: &PresenceSelection, color_rgb: u32) -> Option<ExternalCaret> {
   let cursor = Cursor::decode(&selection.head).ok()?;
   let text = body_text(doc);
   if cursor.container != text.id() {

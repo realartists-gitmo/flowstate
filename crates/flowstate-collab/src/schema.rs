@@ -194,11 +194,7 @@ pub fn set_run_styles_utf8(text: &LoroText, range: Range<usize>, styles: RunStyl
   Ok(())
 }
 
-pub fn set_paragraph_style_utf8(
-  text: &LoroText,
-  range: Range<usize>,
-  style: gpui_flowtext::ParagraphStyle,
-) -> LoroResult<()> {
+pub fn set_paragraph_style_utf8(text: &LoroText, range: Range<usize>, style: gpui_flowtext::ParagraphStyle) -> LoroResult<()> {
   if range.is_empty() {
     return Ok(());
   }
@@ -268,7 +264,10 @@ pub fn input_paragraphs_from_body_text(text: &LoroText) -> Vec<InputParagraph> {
     for (ix, segment) in insert.split('\n').enumerate() {
       if ix > 0 {
         if let Some(style) = paragraph_style {
-          paragraphs.last_mut().expect("paragraph accumulator is never empty").style = style;
+          paragraphs
+            .last_mut()
+            .expect("paragraph accumulator is never empty")
+            .style = style;
         }
         paragraphs.push(InputParagraph {
           style: paragraph_style.unwrap_or(gpui_flowtext::ParagraphStyle::Normal),
@@ -277,9 +276,18 @@ pub fn input_paragraphs_from_body_text(text: &LoroText) -> Vec<InputParagraph> {
       }
       if !segment.is_empty() {
         if let Some(style) = paragraph_style {
-          paragraphs.last_mut().expect("paragraph accumulator is never empty").style = style;
+          paragraphs
+            .last_mut()
+            .expect("paragraph accumulator is never empty")
+            .style = style;
         }
-        push_input_run(paragraphs.last_mut().expect("paragraph accumulator is never empty"), segment, styles);
+        push_input_run(
+          paragraphs
+            .last_mut()
+            .expect("paragraph accumulator is never empty"),
+          segment,
+          styles,
+        );
       }
     }
   }

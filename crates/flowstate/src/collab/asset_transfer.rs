@@ -96,15 +96,12 @@ fn start_asset_pull(
   let id = AssetId(meta.asset_id);
   let session_id = session.session;
   let candidate_count = candidates.len();
-  if let Err(error) = session
-    .net_tx
-    .try_send(NetCommand::PullAsset {
-      session: session.session,
-      candidates,
-      asset: meta.asset_id,
-      reply: reply_tx,
-    })
-  {
+  if let Err(error) = session.net_tx.try_send(NetCommand::PullAsset {
+    session: session.session,
+    candidates,
+    asset: meta.asset_id,
+    reply: reply_tx,
+  }) {
     tracing::warn!(session = %session_id, ?id, candidate_count, error = %error, "queueing collaboration asset pull failed");
     session.asset_pulls_in_flight.remove(&id);
     return;
@@ -152,7 +149,12 @@ impl ImageAssetMeta {
   }
 
   fn record_from_bytes(&self, bytes: Vec<u8>) -> Result<AssetRecord> {
-    tracing::trace!(asset = self.asset_id, expected_bytes = self.byte_len, received_bytes = bytes.len(), "validating fetched collaboration asset bytes");
+    tracing::trace!(
+      asset = self.asset_id,
+      expected_bytes = self.byte_len,
+      received_bytes = bytes.len(),
+      "validating fetched collaboration asset bytes"
+    );
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
     let content_hash = AssetRecord::stable_content_hash(&bytes);
     ensure!(content_hash == self.content_hash, "asset content hash mismatch");

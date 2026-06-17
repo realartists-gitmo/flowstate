@@ -19,8 +19,7 @@ use tokio::{
 use crate::{
   ids::{BlobId, SessionId},
   proto_direct::{
-    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame,
-    encode_frame,
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame, encode_frame,
   },
 };
 
@@ -70,7 +69,10 @@ impl DirectServeState {
   pub async fn detach_session(&self, session: SessionId) {
     let mut inner = self.inner.write().await;
     let removed = inner.attached.remove(&session);
-    let blob_count = inner.blobs.remove(&session).map_or(0, |outbox| outbox.len());
+    let blob_count = inner
+      .blobs
+      .remove(&session)
+      .map_or(0, |outbox| outbox.len());
     let handler_removed = inner.handlers.remove(&session).is_some();
     tracing::debug!(%session, removed, blob_count, handler_removed, attached_sessions = inner.attached.len(), "detached collaboration direct session");
   }
@@ -121,13 +123,16 @@ impl DirectServeState {
           .blobs
           .get(&session)
           .and_then(|outbox| outbox.get(blob))
-          .map_or_else(|| {
-            tracing::warn!(%session, ?blob, "collaboration direct blob request missed outbox");
-            ServeOutcome::Header(DirectResponseHeader::NotFound)
-          }, |bytes| {
-            tracing::debug!(%session, ?blob, bytes = bytes.len(), "collaboration direct blob request hit outbox");
-            ServeOutcome::Payload(bytes.to_vec())
-          });
+          .map_or_else(
+            || {
+              tracing::warn!(%session, ?blob, "collaboration direct blob request missed outbox");
+              ServeOutcome::Header(DirectResponseHeader::NotFound)
+            },
+            |bytes| {
+              tracing::debug!(%session, ?blob, bytes = bytes.len(), "collaboration direct blob request hit outbox");
+              ServeOutcome::Payload(bytes.to_vec())
+            },
+          );
       }
       inner.handlers.get(&session).cloned()
     };
@@ -138,10 +143,16 @@ impl DirectServeState {
     };
 
     match request {
-      DirectRequest::Snapshot { .. } => request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await,
+      DirectRequest::Snapshot { .. } => {
+        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await
+      },
       DirectRequest::Updates { have_vv, .. } => {
         tracing::trace!(%session, have_vv_bytes = have_vv.len(), "forwarding collaboration direct updates request to session");
-        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates { have_vv, reply }).await
+        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates {
+          have_vv,
+          reply,
+        })
+        .await
       },
       DirectRequest::Asset { asset, .. } => request_asset(handler.requests, session, asset).await,
       DirectRequest::Blob { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
@@ -329,7 +340,12 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, pr
   }
 }
 
-async fn request_payload<F>(requests: Sender<DirectServeRequest>, session: SessionId, request_kind: &'static str, make_request: F) -> ServeOutcome
+async fn request_payload<F>(
+  requests: Sender<DirectServeRequest>,
+  session: SessionId,
+  request_kind: &'static str,
+  make_request: F,
+) -> ServeOutcome
 where
   F: FnOnce(Sender<Result<Vec<u8>>>) -> DirectServeRequest,
 {
@@ -395,7 +411,11 @@ where
 }
 
 async fn write_response(send: &mut SendStream, outcome: ServeOutcome) -> Result<()> {
-  tracing::trace!(outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "writing collaboration direct response");
+  tracing::trace!(
+    outcome = outcome.kind(),
+    payload_bytes = outcome.payload_len(),
+    "writing collaboration direct response"
+  );
   match outcome {
     ServeOutcome::Header(header) => write_frame(send, &encode_frame(&header)?).await?,
     ServeOutcome::Payload(payload) => {
@@ -417,7 +437,11 @@ async fn write_frame(send: &mut SendStream, frame: &[u8]) -> Result<()> {
 }
 
 async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
-  tracing::trace!(payload_bytes = payload.len(), chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "writing collaboration direct payload");
+  tracing::trace!(
+    payload_bytes = payload.len(),
+    chunk_bytes = MAX_PAYLOAD_CHUNK_LEN,
+    "writing collaboration direct payload"
+  );
   for chunk in payload.chunks(MAX_PAYLOAD_CHUNK_LEN) {
     send.write_all(chunk).await?;
   }
@@ -426,7 +450,11 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
 
 async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let total_len_usize = usize::try_from(total_len).context("direct payload is too large for this platform")?;
-  tracing::trace!(payload_bytes = total_len_usize, chunk_bytes = MAX_PAYLOAD_CHUNK_LEN, "reading collaboration direct payload");
+  tracing::trace!(
+    payload_bytes = total_len_usize,
+    chunk_bytes = MAX_PAYLOAD_CHUNK_LEN,
+    "reading collaboration direct payload"
+  );
   let mut payload = vec![0; total_len_usize];
   let mut offset = 0;
   if let Some(progress) = progress {
@@ -437,7 +465,10 @@ async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&S
     recv.read_exact(&mut payload[offset..next]).await?;
     offset = next;
     if let Some(progress) = progress {
-      let _ = progress.try_send(PullProgress { got: offset as u64, total: total_len });
+      let _ = progress.try_send(PullProgress {
+        got: offset as u64,
+        total: total_len,
+      });
     }
   }
   Ok(payload)

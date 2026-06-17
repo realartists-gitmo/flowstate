@@ -3,7 +3,9 @@
 use anyhow::{Context as _, Result, bail};
 use std::ops::Range;
 
-use gpui_flowtext::{Block, BlockId, CanonicalOperation, Document, DocumentSpan, Paragraph, ParagraphId, RunStyles, full_document_text, paragraph_text_len};
+use gpui_flowtext::{
+  Block, BlockId, CanonicalOperation, Document, DocumentSpan, Paragraph, ParagraphId, RunStyles, full_document_text, paragraph_text_len,
+};
 use loro::{CommitOptions, LoroDoc, LoroMap, LoroMovableList, LoroValue, ValueOrContainer};
 
 use crate::{
@@ -116,7 +118,10 @@ impl LocalApplier<'_> {
     if start_ix == end_ix {
       if let Some(ordinal) = self.paragraph_ordinal_for_row(start_ix) {
         let len = self.binding.body_index.paragraph_len(ordinal);
-        self.binding.body_index.set_paragraph_len(ordinal, len.saturating_sub(deleted));
+        self
+          .binding
+          .body_index
+          .set_paragraph_len(ordinal, len.saturating_sub(deleted));
       }
       self.debug_assert_body_matches_document(document);
       return Ok(());
@@ -149,7 +154,10 @@ impl LocalApplier<'_> {
         .binding
         .body_index
         .remove_paragraph_range(start_paragraph_ix + 1, end_paragraph_ix - start_paragraph_ix);
-      self.binding.body_index.set_paragraph_len(start_paragraph_ix, merged_len);
+      self
+        .binding
+        .body_index
+        .set_paragraph_len(start_paragraph_ix, merged_len);
     }
     self.debug_assert_body_matches_document(document);
     Ok(())
@@ -179,21 +187,18 @@ impl LocalApplier<'_> {
 
     let blocks = self.blocks();
     let paragraph_ix = orig_ordinal.saturating_add(1);
-    let style = document
-      .paragraphs
-      .get(paragraph_ix)
-      .map_or_else(
-        || {
-          self
-            .binding
-            .rows
-            .get(row_ix)
-            .and_then(|row| map_i64(&row.map, STYLE).ok())
-            .map(decode_paragraph_style)
-            .unwrap_or(gpui_flowtext::ParagraphStyle::Normal)
-        },
-        |paragraph| paragraph.style,
-      );
+    let style = document.paragraphs.get(paragraph_ix).map_or_else(
+      || {
+        self
+          .binding
+          .rows
+          .get(row_ix)
+          .and_then(|row| map_i64(&row.map, STYLE).ok())
+          .map(decode_paragraph_style)
+          .unwrap_or(gpui_flowtext::ParagraphStyle::Normal)
+      },
+      |paragraph| paragraph.style,
+    );
     let map = insert_paragraph_container(&blocks, insert_ix, style)?;
     self.binding.insert_row(
       insert_ix,
@@ -205,7 +210,10 @@ impl LocalApplier<'_> {
         version,
       },
     );
-    self.binding.body_index.set_paragraph_len(orig_ordinal, split);
+    self
+      .binding
+      .body_index
+      .set_paragraph_len(orig_ordinal, split);
     self
       .binding
       .body_index
@@ -219,9 +227,7 @@ impl LocalApplier<'_> {
     let first_paragraph_ix = self
       .paragraph_ordinal_for_row(first_ix)
       .context("join first row is not a paragraph")?;
-    let first_len = self
-      .body_paragraph_range(first_paragraph_ix)?
-      .len();
+    let first_len = self.body_paragraph_range(first_paragraph_ix)?.len();
     self.delete_range(document, first, first_len, second, 0)
   }
 
@@ -241,13 +247,7 @@ impl LocalApplier<'_> {
           .get(paragraph_ix)
           .copied()
           .context("inserted paragraph block is missing a paragraph id")?;
-        self.insert_paragraph_row(
-          block_ix,
-          block_id,
-          paragraph_id,
-          paragraph.style,
-          block_version(block),
-        )?;
+        self.insert_paragraph_row(block_ix, block_id, paragraph_id, paragraph.style, block_version(block))?;
         self.debug_assert_body_matches_document(document);
         Ok(())
       },
@@ -271,10 +271,7 @@ impl LocalApplier<'_> {
 
   fn delete_block(&mut self, document: &Document, block: BlockId) -> Result<()> {
     let row_ix = self.row_ix_for_block(block)?;
-    let was_paragraph = matches!(
-      self.binding.rows.get(row_ix).map(|row| row.kind),
-      Some(BlockKind::Paragraph)
-    );
+    let was_paragraph = matches!(self.binding.rows.get(row_ix).map(|row| row.kind), Some(BlockKind::Paragraph));
     self.blocks().delete(row_ix, 1)?;
     self
       .binding
@@ -290,10 +287,7 @@ impl LocalApplier<'_> {
 
   fn move_block(&mut self, document: &Document, block: BlockId, new_block_ix: usize) -> Result<()> {
     let old_ix = self.row_ix_for_block(block)?;
-    let was_paragraph = matches!(
-      self.binding.rows.get(old_ix).map(|row| row.kind),
-      Some(BlockKind::Paragraph)
-    );
+    let was_paragraph = matches!(self.binding.rows.get(old_ix).map(|row| row.kind), Some(BlockKind::Paragraph));
     self.blocks().mov(old_ix, new_block_ix)?;
     self.binding.move_row(old_ix, new_block_ix);
     if was_paragraph {
@@ -356,14 +350,22 @@ impl LocalApplier<'_> {
       return Ok(false);
     };
     let first_row = before_rows[0];
-    if before_rows.iter().enumerate().any(|(offset, row)| *row != first_row + offset) {
+    if before_rows
+      .iter()
+      .enumerate()
+      .any(|(offset, row)| *row != first_row + offset)
+    {
       return Ok(false);
     }
 
     // The body slice for the span must currently equal `before.text`; if the
     // lengths disagree the editor and CRDT have diverged — bail to the rewrite.
     let start_byte = self.binding.body_index.paragraph_start(start_ord);
-    let end_byte = self.binding.body_index.paragraph_range(start_ord + before_n - 1).end;
+    let end_byte = self
+      .binding
+      .body_index
+      .paragraph_range(start_ord + before_n - 1)
+      .end;
     if end_byte - start_byte != before.text.len() {
       return Ok(false);
     }
@@ -461,7 +463,10 @@ impl LocalApplier<'_> {
           .remove_row(row_ix)
           .context("spliced paragraph row disappeared during span shrink")?;
       }
-      self.binding.body_index.remove_paragraph_range(start_ord + after_n, removed);
+      self
+        .binding
+        .body_index
+        .remove_paragraph_range(start_ord + after_n, removed);
     }
 
     self.binding.rebuild_indexes();

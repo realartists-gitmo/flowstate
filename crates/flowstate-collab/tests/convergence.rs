@@ -1,15 +1,13 @@
 #[cfg(test)]
 mod tests {
-  use std::{fmt::Write as _, ops::Range, sync::{Arc, Mutex}};
+  use std::{
+    fmt::Write as _,
+    ops::Range,
+    sync::{Arc, Mutex},
+  };
 
   use anyhow::{Context as _, Result, anyhow, bail};
-  use flowstate_collab::{
-    SessionId,
-    binding::DocBinding,
-    local_apply::LocalApplier,
-    patch_apply::apply_patches,
-    projection, schema,
-  };
+  use flowstate_collab::{SessionId, binding::DocBinding, local_apply::LocalApplier, patch_apply::apply_patches, projection, schema};
   use gpui_flowtext::{
     Block, CanonicalOperation, Document, DocumentOffset, DocumentTheme, HighlightStyle, InputBlock, InputEquationBlock, InputEquationDisplay,
     InputEquationSyntax, InputParagraph, ParagraphStyle, RunSemanticStyle, RunStyle, RunStyles, block_from_input_block,
@@ -38,14 +36,60 @@ mod tests {
   #[test]
   fn reordered_run_style_after_inserts_converges() {
     let ops = [
-      FuzzOp::Style { peer: 0, paragraph: 0, start: 0, len: 0, style: 0 },
-      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
-      FuzzOp::Style { peer: 0, paragraph: 0, start: 0, len: 0, style: 0 },
-      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
-      FuzzOp::DeleteText { peer: 0, paragraph: 61, start: 31, len: 29 },
-      FuzzOp::DeleteText { peer: 138, paragraph: 161, start: 6, len: 0 },
-      FuzzOp::InsertText { peer: 0, paragraph: 125, byte: 20, text: 0, style: 0 },
-      FuzzOp::Style { peer: 2, paragraph: 12, start: 0, len: 0, style: 1 },
+      FuzzOp::Style {
+        peer: 0,
+        paragraph: 0,
+        start: 0,
+        len: 0,
+        style: 0,
+      },
+      FuzzOp::InsertText {
+        peer: 0,
+        paragraph: 0,
+        byte: 0,
+        text: 0,
+        style: 0,
+      },
+      FuzzOp::Style {
+        peer: 0,
+        paragraph: 0,
+        start: 0,
+        len: 0,
+        style: 0,
+      },
+      FuzzOp::InsertText {
+        peer: 0,
+        paragraph: 0,
+        byte: 0,
+        text: 0,
+        style: 0,
+      },
+      FuzzOp::DeleteText {
+        peer: 0,
+        paragraph: 61,
+        start: 31,
+        len: 29,
+      },
+      FuzzOp::DeleteText {
+        peer: 138,
+        paragraph: 161,
+        start: 6,
+        len: 0,
+      },
+      FuzzOp::InsertText {
+        peer: 0,
+        paragraph: 125,
+        byte: 20,
+        text: 0,
+        style: 0,
+      },
+      FuzzOp::Style {
+        peer: 2,
+        paragraph: 12,
+        start: 0,
+        len: 0,
+        style: 1,
+      },
     ];
 
     run_program(2, 4754897484207400829, &ops).expect("reordered run style after inserts should converge");
@@ -84,7 +128,11 @@ mod tests {
   #[test]
   fn insert_object_at_start_then_split_converges_across_three_peers() {
     let ops = [
-      FuzzOp::InsertObject { peer: 96, row: 129, source: 0 },
+      FuzzOp::InsertObject {
+        peer: 96,
+        row: 129,
+        source: 0,
+      },
       FuzzOp::Split {
         peer: 108,
         paragraph: 91,
@@ -94,7 +142,6 @@ mod tests {
 
     run_program(3, 0, &ops).expect("insert object at start then split should converge");
   }
-
 
   #[test]
   fn insert_object_between_paragraphs_does_not_create_invalid_join() {
@@ -109,7 +156,11 @@ mod tests {
   #[test]
   fn insert_object_between_paragraphs_then_text_edit_preserves_order() {
     let ops = [
-      FuzzOp::InsertObject { peer: 7, row: 106, source: 0 },
+      FuzzOp::InsertObject {
+        peer: 7,
+        row: 106,
+        source: 0,
+      },
       FuzzOp::DeleteText {
         peer: 19,
         paragraph: 48,
@@ -177,11 +228,17 @@ mod tests {
     let paragraph = bob.document.ids.paragraph_ids[0];
     paragraphs_mut(&mut bob.document)[0].style = ParagraphStyle::Custom(3);
     update_paragraph_block(&mut bob.document, 0);
-    LocalApplier { doc: &bob.loro, binding: &mut bob.binding }
-      .apply(&bob.document, &[CanonicalOperation::SetParagraphStyle {
+    LocalApplier {
+      doc: &bob.loro,
+      binding: &mut bob.binding,
+    }
+    .apply(
+      &bob.document,
+      &[CanonicalOperation::SetParagraphStyle {
         paragraph,
         style: ParagraphStyle::Custom(3),
-      }])?;
+      }],
+    )?;
     let bob_updates = bob.drain_updates();
 
     for update in &bob_updates {
@@ -203,21 +260,78 @@ mod tests {
   #[test]
   fn concurrent_object_insert_move_interleaving_converges() {
     let ops = [
-      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
-      FuzzOp::InsertText { peer: 0, paragraph: 0, byte: 0, text: 0, style: 0 },
+      FuzzOp::InsertText {
+        peer: 0,
+        paragraph: 0,
+        byte: 0,
+        text: 0,
+        style: 0,
+      },
+      FuzzOp::InsertText {
+        peer: 0,
+        paragraph: 0,
+        byte: 0,
+        text: 0,
+        style: 0,
+      },
       FuzzOp::Join { peer: 86, paragraph: 76 },
-      FuzzOp::Style { peer: 144, paragraph: 122, start: 123, len: 147, style: 171 },
+      FuzzOp::Style {
+        peer: 144,
+        paragraph: 122,
+        start: 123,
+        len: 147,
+        style: 171,
+      },
       FuzzOp::DeleteObject { peer: 212, row: 116 },
-      FuzzOp::Split { peer: 44, paragraph: 85, byte: 123 },
-      FuzzOp::InsertText { peer: 47, paragraph: 61, byte: 160, text: 91, style: 192 },
+      FuzzOp::Split {
+        peer: 44,
+        paragraph: 85,
+        byte: 123,
+      },
+      FuzzOp::InsertText {
+        peer: 47,
+        paragraph: 61,
+        byte: 160,
+        text: 91,
+        style: 192,
+      },
       FuzzOp::DeleteObject { peer: 216, row: 243 },
-      FuzzOp::DeleteText { peer: 86, paragraph: 45, start: 114, len: 95 },
-      FuzzOp::InsertObject { peer: 122, row: 21, source: 177 },
-      FuzzOp::InsertText { peer: 44, paragraph: 23, byte: 38, text: 111, style: 124 },
+      FuzzOp::DeleteText {
+        peer: 86,
+        paragraph: 45,
+        start: 114,
+        len: 95,
+      },
+      FuzzOp::InsertObject {
+        peer: 122,
+        row: 21,
+        source: 177,
+      },
+      FuzzOp::InsertText {
+        peer: 44,
+        paragraph: 23,
+        byte: 38,
+        text: 111,
+        style: 124,
+      },
       FuzzOp::MoveObject { peer: 1, row: 223, to: 58 },
-      FuzzOp::InsertObject { peer: 167, row: 184, source: 207 },
-      FuzzOp::InsertText { peer: 199, paragraph: 128, byte: 125, text: 41, style: 165 },
-      FuzzOp::MoveObject { peer: 211, row: 103, to: 135 },
+      FuzzOp::InsertObject {
+        peer: 167,
+        row: 184,
+        source: 207,
+      },
+      FuzzOp::InsertText {
+        peer: 199,
+        paragraph: 128,
+        byte: 125,
+        text: 41,
+        style: 165,
+      },
+      FuzzOp::MoveObject {
+        peer: 211,
+        row: 103,
+        to: 135,
+      },
     ];
 
     run_program(2, 9640017939277306283, &ops).expect("concurrent object move interleaving should converge");
@@ -226,25 +340,117 @@ mod tests {
   #[test]
   fn buffered_object_split_join_move_program_converges() {
     let ops = [
-      FuzzOp::Style { peer: 34, paragraph: 235, start: 63, len: 151, style: 35 },
-      FuzzOp::DeleteText { peer: 10, paragraph: 205, start: 201, len: 24 },
-      FuzzOp::Style { peer: 244, paragraph: 167, start: 13, len: 60, style: 35 },
-      FuzzOp::InsertText { peer: 159, paragraph: 175, byte: 242, text: 64, style: 7 },
-      FuzzOp::Style { peer: 86, paragraph: 113, start: 237, len: 135, style: 240 },
-      FuzzOp::DeleteText { peer: 186, paragraph: 150, start: 45, len: 253 },
-      FuzzOp::InsertText { peer: 236, paragraph: 70, byte: 124, text: 228, style: 238 },
-      FuzzOp::Style { peer: 212, paragraph: 57, start: 248, len: 168, style: 47 },
-      FuzzOp::Style { peer: 128, paragraph: 69, start: 13, len: 201, style: 209 },
-      FuzzOp::InsertObject { peer: 208, row: 159, source: 38 },
-      FuzzOp::DeleteText { peer: 70, paragraph: 2, start: 247, len: 227 },
-      FuzzOp::DeleteText { peer: 45, paragraph: 59, start: 175, len: 74 },
-      FuzzOp::InsertText { peer: 234, paragraph: 209, byte: 216, text: 230, style: 207 },
-      FuzzOp::DeleteText { peer: 197, paragraph: 38, start: 169, len: 78 },
-      FuzzOp::InsertText { peer: 118, paragraph: 146, byte: 65, text: 27, style: 176 },
-      FuzzOp::Split { peer: 32, paragraph: 124, byte: 11 },
+      FuzzOp::Style {
+        peer: 34,
+        paragraph: 235,
+        start: 63,
+        len: 151,
+        style: 35,
+      },
+      FuzzOp::DeleteText {
+        peer: 10,
+        paragraph: 205,
+        start: 201,
+        len: 24,
+      },
+      FuzzOp::Style {
+        peer: 244,
+        paragraph: 167,
+        start: 13,
+        len: 60,
+        style: 35,
+      },
+      FuzzOp::InsertText {
+        peer: 159,
+        paragraph: 175,
+        byte: 242,
+        text: 64,
+        style: 7,
+      },
+      FuzzOp::Style {
+        peer: 86,
+        paragraph: 113,
+        start: 237,
+        len: 135,
+        style: 240,
+      },
+      FuzzOp::DeleteText {
+        peer: 186,
+        paragraph: 150,
+        start: 45,
+        len: 253,
+      },
+      FuzzOp::InsertText {
+        peer: 236,
+        paragraph: 70,
+        byte: 124,
+        text: 228,
+        style: 238,
+      },
+      FuzzOp::Style {
+        peer: 212,
+        paragraph: 57,
+        start: 248,
+        len: 168,
+        style: 47,
+      },
+      FuzzOp::Style {
+        peer: 128,
+        paragraph: 69,
+        start: 13,
+        len: 201,
+        style: 209,
+      },
+      FuzzOp::InsertObject {
+        peer: 208,
+        row: 159,
+        source: 38,
+      },
+      FuzzOp::DeleteText {
+        peer: 70,
+        paragraph: 2,
+        start: 247,
+        len: 227,
+      },
+      FuzzOp::DeleteText {
+        peer: 45,
+        paragraph: 59,
+        start: 175,
+        len: 74,
+      },
+      FuzzOp::InsertText {
+        peer: 234,
+        paragraph: 209,
+        byte: 216,
+        text: 230,
+        style: 207,
+      },
+      FuzzOp::DeleteText {
+        peer: 197,
+        paragraph: 38,
+        start: 169,
+        len: 78,
+      },
+      FuzzOp::InsertText {
+        peer: 118,
+        paragraph: 146,
+        byte: 65,
+        text: 27,
+        style: 176,
+      },
+      FuzzOp::Split {
+        peer: 32,
+        paragraph: 124,
+        byte: 11,
+      },
       FuzzOp::Join { peer: 19, paragraph: 41 },
       FuzzOp::MoveObject { peer: 94, row: 196, to: 197 },
-      FuzzOp::DeleteText { peer: 56, paragraph: 171, start: 218, len: 154 },
+      FuzzOp::DeleteText {
+        peer: 56,
+        paragraph: 171,
+        start: 218,
+        len: 154,
+      },
       FuzzOp::DeleteObject { peer: 222, row: 98 },
     ];
 
@@ -253,14 +459,49 @@ mod tests {
 
   #[derive(Clone, Debug)]
   enum FuzzOp {
-    InsertText { peer: u8, paragraph: u8, byte: u8, text: u8, style: u8 },
-    DeleteText { peer: u8, paragraph: u8, start: u8, len: u8 },
-    Split { peer: u8, paragraph: u8, byte: u8 },
-    Join { peer: u8, paragraph: u8 },
-    Style { peer: u8, paragraph: u8, start: u8, len: u8, style: u8 },
-    InsertObject { peer: u8, row: u8, source: u8 },
-    DeleteObject { peer: u8, row: u8 },
-    MoveObject { peer: u8, row: u8, to: u8 },
+    InsertText {
+      peer: u8,
+      paragraph: u8,
+      byte: u8,
+      text: u8,
+      style: u8,
+    },
+    DeleteText {
+      peer: u8,
+      paragraph: u8,
+      start: u8,
+      len: u8,
+    },
+    Split {
+      peer: u8,
+      paragraph: u8,
+      byte: u8,
+    },
+    Join {
+      peer: u8,
+      paragraph: u8,
+    },
+    Style {
+      peer: u8,
+      paragraph: u8,
+      start: u8,
+      len: u8,
+      style: u8,
+    },
+    InsertObject {
+      peer: u8,
+      row: u8,
+      source: u8,
+    },
+    DeleteObject {
+      peer: u8,
+      row: u8,
+    },
+    MoveObject {
+      peer: u8,
+      row: u8,
+      to: u8,
+    },
   }
 
   impl FuzzOp {
@@ -293,13 +534,7 @@ mod tests {
 
   fn run_program(peer_count: usize, delivery_seed: u64, ops: &[FuzzOp]) -> Result<()> {
     let session = SessionId::from_bytes([77; 32]);
-    let initial = document_from_input_blocks(
-      DocumentTheme::default(),
-      vec![
-        paragraph_block(MULTIBYTE),
-        paragraph_block("second aé🌍"),
-      ],
-    );
+    let initial = document_from_input_blocks(DocumentTheme::default(), vec![paragraph_block(MULTIBYTE), paragraph_block("second aé🌍")]);
     let mut peers = Vec::with_capacity(peer_count);
     let first = Peer::from_initial(session, initial)?;
     let snapshot = first.snapshot()?;
@@ -322,9 +557,12 @@ mod tests {
           let copies = 1 + usize::from(pseudo(delivery_seed, step, source, target, 0).is_multiple_of(5));
           for copy in 0..copies {
             let buffered = pseudo(delivery_seed, step, source, target, copy).is_multiple_of(7);
-            let key = pseudo(delivery_seed, step, source, target, copy + 17)
-              .saturating_add(if buffered { 10_000 + step as u64 } else { 0 });
-            network.push(Message { key, target, bytes: update.clone() });
+            let key = pseudo(delivery_seed, step, source, target, copy + 17).saturating_add(if buffered { 10_000 + step as u64 } else { 0 });
+            network.push(Message {
+              key,
+              target,
+              bytes: update.clone(),
+            });
           }
         }
       }
@@ -391,10 +629,19 @@ mod tests {
       let updates = Arc::new(Mutex::new(Vec::new()));
       let captured = updates.clone();
       let subscription = loro.subscribe_local_update(Box::new(move |bytes| {
-        captured.lock().expect("update capture lock should not be poisoned").push(bytes.clone());
+        captured
+          .lock()
+          .expect("update capture lock should not be poisoned")
+          .push(bytes.clone());
         true
       }));
-      Self { document, loro, binding, updates, _subscription: subscription }
+      Self {
+        document,
+        loro,
+        binding,
+        updates,
+        _subscription: subscription,
+      }
     }
 
     fn snapshot(&self) -> Result<Vec<u8>> {
@@ -402,7 +649,10 @@ mod tests {
     }
 
     fn drain_updates(&self) -> Vec<Vec<u8>> {
-      let mut updates = self.updates.lock().expect("update capture lock should not be poisoned");
+      let mut updates = self
+        .updates
+        .lock()
+        .expect("update capture lock should not be poisoned");
       std::mem::take(&mut *updates)
     }
 
@@ -410,14 +660,23 @@ mod tests {
       let Some(ops) = self.mutate_document(op)? else {
         return Ok(false);
       };
-      LocalApplier { doc: &self.loro, binding: &mut self.binding }
-        .apply(&self.document, &ops)?;
+      LocalApplier {
+        doc: &self.loro,
+        binding: &mut self.binding,
+      }
+      .apply(&self.document, &ops)?;
       Ok(true)
     }
 
     fn mutate_document(&mut self, op: &FuzzOp) -> Result<Option<Vec<CanonicalOperation>>> {
       match *op {
-        FuzzOp::InsertText { paragraph, byte, text, style, .. } => {
+        FuzzOp::InsertText {
+          paragraph,
+          byte,
+          text,
+          style,
+          ..
+        } => {
           if self.document.paragraphs.is_empty() {
             return Ok(None);
           }
@@ -479,11 +738,23 @@ mod tests {
           let first_len = paragraph_text(&self.document, first_ix).len();
           delete_cross_paragraph_range(
             &mut self.document,
-            DocumentOffset { paragraph: first_ix, byte: first_len }..DocumentOffset { paragraph: first_ix + 1, byte: 0 },
+            DocumentOffset {
+              paragraph: first_ix,
+              byte: first_len,
+            }..DocumentOffset {
+              paragraph: first_ix + 1,
+              byte: 0,
+            },
           );
           Ok(Some(vec![CanonicalOperation::JoinParagraphs { first, second }]))
         },
-        FuzzOp::Style { paragraph, start, len, style, .. } => {
+        FuzzOp::Style {
+          paragraph,
+          start,
+          len,
+          style,
+          ..
+        } => {
           if self.document.paragraphs.is_empty() {
             return Ok(None);
           }
@@ -496,10 +767,20 @@ mod tests {
           let paragraph_id = self.document.ids.paragraph_ids[paragraph_ix];
           mutate_runs_in_range(
             &mut self.document,
-            DocumentOffset { paragraph: paragraph_ix, byte: range.start }..DocumentOffset { paragraph: paragraph_ix, byte: range.end },
+            DocumentOffset {
+              paragraph: paragraph_ix,
+              byte: range.start,
+            }..DocumentOffset {
+              paragraph: paragraph_ix,
+              byte: range.end,
+            },
             |run_styles| *run_styles = styles,
           );
-          Ok(Some(vec![CanonicalOperation::SetRunStyles { paragraph: paragraph_id, range, styles }]))
+          Ok(Some(vec![CanonicalOperation::SetRunStyles {
+            paragraph: paragraph_id,
+            range,
+            styles,
+          }]))
         },
         FuzzOp::InsertObject { row, source, .. } => {
           if self.document.blocks.len() >= 8 {
@@ -537,7 +818,11 @@ mod tests {
           let insert_ix = to.min(self.document.blocks.len());
           Arc::make_mut(&mut self.document.blocks).insert(insert_ix, moved_block);
           let block_id = self.document.ids.block_ids.remove(from);
-          self.document.ids.block_ids.insert(insert_ix.min(self.document.ids.block_ids.len()), block_id);
+          self
+            .document
+            .ids
+            .block_ids
+            .insert(insert_ix.min(self.document.ids.block_ids.len()), block_id);
           Ok(Some(vec![CanonicalOperation::MoveBlock { block, new_block_ix: to }]))
         },
       }
@@ -558,11 +843,17 @@ mod tests {
             .lock()
             .map_err(|lock_error| anyhow!("binding lock poisoned: {lock_error}"))
             .and_then(|mut binding| {
-              flowstate_collab::remote_apply::RemoteApplier { doc: &doc, binding: &mut binding }
-                .apply_event(&document, &event)
+              flowstate_collab::remote_apply::RemoteApplier {
+                doc: &doc,
+                binding: &mut binding,
+              }
+              .apply_event(&document, &event)
             });
           match result {
-            Ok(mut produced) => patches.lock().expect("patch lock should not be poisoned").append(&mut produced),
+            Ok(mut produced) => patches
+              .lock()
+              .expect("patch lock should not be poisoned")
+              .append(&mut produced),
             Err(apply_error) => *error.lock().expect("error lock should not be poisoned") = Some(format!("{apply_error:#}")),
           }
         }
@@ -575,7 +866,10 @@ mod tests {
         .into_inner()
         .map_err(|error| anyhow!("binding lock poisoned: {error}"))?;
       import_result.context("importing remote update failed")?;
-      let remote_error = error.lock().expect("error lock should not be poisoned").take();
+      let remote_error = error
+        .lock()
+        .expect("error lock should not be poisoned")
+        .take();
       if let Some(error) = remote_error {
         bail!("remote apply failed: {error}");
       }
@@ -589,7 +883,10 @@ mod tests {
   }
 
   fn paragraph_block(text: &str) -> InputBlock {
-    InputBlock::Paragraph(InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain(text)] })
+    InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain(text)],
+    })
   }
 
   fn equation_block(source: &str) -> InputBlock {
@@ -674,10 +971,18 @@ mod tests {
   }
 
   fn block_order_snapshot(document: &Document, paragraph_ix: usize) -> Option<(usize, Vec<Block>, Vec<gpui_flowtext::BlockId>)> {
-    Some((block_ix_for_paragraph_ix(document, paragraph_ix)?, document.blocks.as_ref().clone(), document.ids.block_ids.clone()))
+    Some((
+      block_ix_for_paragraph_ix(document, paragraph_ix)?,
+      document.blocks.as_ref().clone(),
+      document.ids.block_ids.clone(),
+    ))
   }
 
-  fn restore_block_order(document: &mut Document, paragraph_ix: usize, (block_ix, mut blocks, block_ids): (usize, Vec<Block>, Vec<gpui_flowtext::BlockId>)) {
+  fn restore_block_order(
+    document: &mut Document,
+    paragraph_ix: usize,
+    (block_ix, mut blocks, block_ids): (usize, Vec<Block>, Vec<gpui_flowtext::BlockId>),
+  ) {
     if let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned()
       && let Some(block) = blocks.get_mut(block_ix)
     {
@@ -727,7 +1032,9 @@ mod tests {
       1 => RunStyles::default().with(RunStyle::Semantic(1)),
       2 => RunStyles::default().with(RunStyle::Highlight(2)),
       3 => RunStyles::default().with_direct_underline(),
-      _ => RunStyles::default().with(RunStyle::Semantic(3)).with_strikethrough(),
+      _ => RunStyles::default()
+        .with(RunStyle::Semantic(3))
+        .with_strikethrough(),
     }
   }
 
@@ -756,11 +1063,8 @@ mod tests {
   }
 
   fn pseudo(seed: u64, step: usize, source: usize, target: usize, copy: usize) -> u64 {
-    let mut value = seed
-      ^ ((step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15))
-      ^ ((source as u64) << 17)
-      ^ ((target as u64) << 33)
-      ^ ((copy as u64) << 49);
+    let mut value =
+      seed ^ ((step as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) ^ ((source as u64) << 17) ^ ((target as u64) << 33) ^ ((copy as u64) << 49);
     value ^= value >> 30;
     value = value.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     value ^= value >> 27;

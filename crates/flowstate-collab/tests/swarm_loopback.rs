@@ -125,19 +125,24 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   recv_neighbor(&c.events).await?;
 
   let small_update = b"a-to-b-to-c".to_vec();
-  a.publish(PublishPayload::Update(small_update.clone())).await?;
+  a.publish(PublishPayload::Update(small_update.clone()))
+    .await?;
   recv_update(&b.events, &small_update).await?;
   recv_update(&c.events, &small_update).await?;
 
-  a.publish(PublishPayload::Presence(b"presence-a".to_vec())).await?;
-  b.publish(PublishPayload::Presence(b"presence-b".to_vec())).await?;
-  c.publish(PublishPayload::Presence(b"presence-c".to_vec())).await?;
+  a.publish(PublishPayload::Presence(b"presence-a".to_vec()))
+    .await?;
+  b.publish(PublishPayload::Presence(b"presence-b".to_vec()))
+    .await?;
+  c.publish(PublishPayload::Presence(b"presence-c".to_vec()))
+    .await?;
   recv_presence(&a.events).await?;
   recv_presence(&b.events).await?;
   recv_presence(&c.events).await?;
 
   let large_update = vec![7; GOSSIP_INLINE_LIMIT + 1];
-  a.publish(PublishPayload::Update(large_update.clone())).await?;
+  a.publish(PublishPayload::Update(large_update.clone()))
+    .await?;
   let blob = recv_update_available(&b.events, large_update.len() as u64).await?;
   let blob_bytes = direct::pull_with_endpoint(
     &b.endpoint,
@@ -158,12 +163,24 @@ async fn swarm_loopback_net_subset() -> Result<()> {
 
   c.stop_swarm().await;
   c.start_swarm(session, vec![b_addr])?;
-  b.publish(PublishPayload::Digest { vv: b"digest-after-resubscribe".to_vec() }).await?;
+  b.publish(PublishPayload::Digest {
+    vv: b"digest-after-resubscribe".to_vec(),
+  })
+  .await?;
   recv_digest(&c.events).await?;
 
-  a.router.shutdown().await.context("shutting down A router failed")?;
-  b.router.shutdown().await.context("shutting down B router failed")?;
-  c.router.shutdown().await.context("shutting down C router failed")?;
+  a.router
+    .shutdown()
+    .await
+    .context("shutting down A router failed")?;
+  b.router
+    .shutdown()
+    .await
+    .context("shutting down B router failed")?;
+  c.router
+    .shutdown()
+    .await
+    .context("shutting down C router failed")?;
   Ok(())
 }
 
@@ -195,20 +212,30 @@ async fn wait_addr(endpoint: &Endpoint) -> EndpointAddr {
       }
     }
   };
-  timeout(Duration::from_secs(3), wait).await.unwrap_or_else(|_| endpoint.addr())
+  timeout(Duration::from_secs(3), wait)
+    .await
+    .unwrap_or_else(|_| endpoint.addr())
 }
 
 async fn recv_update(events: &Receiver<NetEvent>, expected: &[u8]) -> Result<()> {
-  recv_matching(events, "update", |event| {
-    matches!(event, NetEvent::Gossip { msg: GossipMsg::Update(bytes), .. } if bytes == expected)
-  })
+  recv_matching(
+    events,
+    "update",
+    |event| matches!(event, NetEvent::Gossip { msg: GossipMsg::Update(bytes), .. } if bytes == expected),
+  )
   .await
   .map(|_| ())
 }
 
 async fn recv_presence(events: &Receiver<NetEvent>) -> Result<()> {
   recv_matching(events, "presence", |event| {
-    matches!(event, NetEvent::Gossip { msg: GossipMsg::Presence(_), .. })
+    matches!(
+      event,
+      NetEvent::Gossip {
+        msg: GossipMsg::Presence(_),
+        ..
+      }
+    )
   })
   .await
   .map(|_| ())
@@ -221,9 +248,11 @@ async fn recv_neighbor(events: &Receiver<NetEvent>) -> Result<()> {
 }
 
 async fn recv_update_available(events: &Receiver<NetEvent>, expected_len: u64) -> Result<flowstate_collab::BlobId> {
-  let event = recv_matching(events, "update-available", |event| {
-    matches!(event, NetEvent::Gossip { msg: GossipMsg::UpdateAvailable { len, .. }, .. } if *len == expected_len)
-  })
+  let event = recv_matching(
+    events,
+    "update-available",
+    |event| matches!(event, NetEvent::Gossip { msg: GossipMsg::UpdateAvailable { len, .. }, .. } if *len == expected_len),
+  )
   .await?;
   let NetEvent::Gossip {
     msg: GossipMsg::UpdateAvailable { blob, .. },
@@ -237,7 +266,13 @@ async fn recv_update_available(events: &Receiver<NetEvent>, expected_len: u64) -
 
 async fn recv_digest(events: &Receiver<NetEvent>) -> Result<()> {
   recv_matching(events, "digest", |event| {
-    matches!(event, NetEvent::Gossip { msg: GossipMsg::Digest { .. }, .. })
+    matches!(
+      event,
+      NetEvent::Gossip {
+        msg: GossipMsg::Digest { .. },
+        ..
+      }
+    )
   })
   .await
   .map(|_| ())

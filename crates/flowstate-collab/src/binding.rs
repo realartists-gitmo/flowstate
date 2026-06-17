@@ -112,8 +112,16 @@ impl DocBinding {
         debug_assert!(false, "binding row has no matching document block");
         continue;
       };
-      debug_assert_eq!(row.kind, BlockKind::from_block(block), "binding row {row_ix} kind does not match document block");
-      debug_assert_eq!(document.ids.block_ids.get(row_ix).copied(), Some(row.block_id), "binding row {row_ix} block id does not match document block id");
+      debug_assert_eq!(
+        row.kind,
+        BlockKind::from_block(block),
+        "binding row {row_ix} kind does not match document block"
+      );
+      debug_assert_eq!(
+        document.ids.block_ids.get(row_ix).copied(),
+        Some(row.block_id),
+        "binding row {row_ix} block id does not match document block id"
+      );
       debug_assert_eq!(row.version, block_version(block));
       if matches!(row.kind, BlockKind::Paragraph) {
         debug_assert_eq!(document.ids.paragraph_ids.get(paragraph_ix).copied(), row.paragraph_id);
@@ -123,16 +131,31 @@ impl DocBinding {
       }
     }
 
-    debug_assert_eq!(self.body_index.len(), paragraph_ix, "body index paragraph count does not match paragraph rows");
+    debug_assert_eq!(
+      self.body_index.len(),
+      paragraph_ix,
+      "body index paragraph count does not match paragraph rows"
+    );
     #[cfg(debug_assertions)]
     {
       let body_lens = paragraph_lens_from_body_text(&body_text(doc));
-      debug_assert_eq!(self.body_index.len(), body_lens.len(), "body index paragraph count does not match the body text");
+      debug_assert_eq!(
+        self.body_index.len(),
+        body_lens.len(),
+        "body index paragraph count does not match the body text"
+      );
       for (ordinal, expected) in body_lens.iter().enumerate() {
-        debug_assert_eq!(self.body_index.paragraph_len(ordinal), *expected, "body index byte length mismatch vs body at paragraph {ordinal}");
         debug_assert_eq!(
           self.body_index.paragraph_len(ordinal),
-          document.paragraphs.get(ordinal).map_or(0, paragraph_text_len),
+          *expected,
+          "body index byte length mismatch vs body at paragraph {ordinal}"
+        );
+        debug_assert_eq!(
+          self.body_index.paragraph_len(ordinal),
+          document
+            .paragraphs
+            .get(ordinal)
+            .map_or(0, paragraph_text_len),
           "body index byte length mismatch vs document at paragraph {ordinal}"
         );
       }

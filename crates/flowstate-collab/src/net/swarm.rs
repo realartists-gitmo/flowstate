@@ -250,9 +250,9 @@ mod tests {
   };
 
   use crate::{
+    SessionId,
     net::NetEvent,
     proto_gossip::{self, GossipMsg},
-    SessionId,
   };
 
   use super::handle_event;
@@ -280,7 +280,10 @@ mod tests {
     .expect("gossip event handling should ignore mismatches");
 
     match evt_rx.recv().await.expect("incompatible-version event") {
-      NetEvent::IncompatibleVersion { session: event_session, peer: event_peer } => {
+      NetEvent::IncompatibleVersion {
+        session: event_session,
+        peer: event_peer,
+      } => {
         assert_eq!(event_session, session);
         assert_eq!(event_peer, peer);
       },

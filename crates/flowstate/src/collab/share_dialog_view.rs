@@ -54,7 +54,9 @@ pub(super) fn ticket_box(ticket: Option<SharedString>, loading: bool, cx: &mut C
         .child(if loading {
           SharedString::from("Minting a fresh invite...")
         } else {
-          ticket.clone().unwrap_or_else(|| "Start sharing to mint an invite.".into())
+          ticket
+            .clone()
+            .unwrap_or_else(|| "Start sharing to mint an invite.".into())
         }),
     )
     .child(copy_invite_button(ticket, loading, cx))
@@ -116,7 +118,12 @@ pub(super) fn roster_list(entries: Vec<crate::collab::SessionRosterEntry>, cx: &
             .border_color(color.opacity(0.32)),
         )
         .child(div().size(px(8.0)).rounded_full().bg(color))
-        .child(div().text_sm().text_color(cx.theme().foreground).child(label)),
+        .child(
+          div()
+            .text_sm()
+            .text_color(cx.theme().foreground)
+            .child(label),
+        ),
     );
   }
   list.into_any_element()
@@ -147,12 +154,21 @@ fn copy_invite_button(ticket: Option<SharedString>, loading: bool, cx: &mut Cont
   h_flex()
     .items_center()
     .gap_1()
-    .child(Clipboard::new("copy-collaboration-invite").value(ticket).on_copied(move |_, _, cx| {
-      let _ = dialog.update(cx, |dialog, cx| {
-        dialog.copy_notice = Some("Invite copied to clipboard.".into());
-        cx.notify();
-      });
-    }))
-    .child(div().text_xs().text_color(cx.theme().muted_foreground).child("Copy"))
+    .child(
+      Clipboard::new("copy-collaboration-invite")
+        .value(ticket)
+        .on_copied(move |_, _, cx| {
+          let _ = dialog.update(cx, |dialog, cx| {
+            dialog.copy_notice = Some("Invite copied to clipboard.".into());
+            cx.notify();
+          });
+        }),
+    )
+    .child(
+      div()
+        .text_xs()
+        .text_color(cx.theme().muted_foreground)
+        .child("Copy"),
+    )
     .into_any_element()
 }

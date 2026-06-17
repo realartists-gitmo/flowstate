@@ -1,8 +1,5 @@
 use gpui::{App, PromptButton, PromptLevel, Window};
-use gpui_component::{
-  WindowExt as _,
-  notification::Notification,
-};
+use gpui_component::{WindowExt as _, notification::Notification};
 
 use super::SessionNotice;
 
@@ -24,11 +21,7 @@ pub fn show_session_notice(notice: &SessionNotice, window: &mut Window, cx: &mut
       #[cfg(debug_assertions)]
       push_info("Collaboration view rebuilt from remote state.", window, cx);
     },
-    SessionNotice::IncompatibleVersion(peer) => push_warning(
-      format!("{peer} is using an incompatible collaboration version."),
-      window,
-      cx,
-    ),
+    SessionNotice::IncompatibleVersion(peer) => push_warning(format!("{peer} is using an incompatible collaboration version."), window, cx),
   }
 }
 

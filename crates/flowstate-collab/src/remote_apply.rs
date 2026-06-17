@@ -3,7 +3,7 @@
 use anyhow::{Context as _, Result, bail};
 use gpui_flowtext::{
   BlockId, CollabPatch, CollabStructuralBlock, CollabTextDelta, Document, InputBlock, InputParagraph, InputRun, ParagraphId, ParagraphStyle,
-  new_block_id, new_paragraph_id, paragraph_text, TextRun,
+  TextRun, new_block_id, new_paragraph_id, paragraph_text,
 };
 use loro::{
   Container, ContainerID, ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroValue, TextDelta, ValueOrContainer,
@@ -42,7 +42,12 @@ impl RemoteApplier<'_> {
           }
         },
         Diff::Text(_) => {},
-        Diff::Map(delta) => self.apply_map_diff(diff.target, delta.updated.keys().map(|key| key.as_ref()), &inserted_containers, &mut patches)?,
+        Diff::Map(delta) => self.apply_map_diff(
+          diff.target,
+          delta.updated.keys().map(|key| key.as_ref()),
+          &inserted_containers,
+          &mut patches,
+        )?,
         Diff::List(delta) => self.apply_list_diff(diff.target, delta, &mut patches)?,
         Diff::Tree(_) | Diff::Counter(_) | Diff::Unknown => {},
       }
@@ -52,9 +57,7 @@ impl RemoteApplier<'_> {
       // this event, a single contiguous change, and no newline change — reconciles
       // only the affected paragraph. Anything else falls back to the full
       // reprojection (which is always correct).
-      let handled = !multiple_body_deltas
-        && patches.is_empty()
-        && self.try_reconcile_body_delta(document, &delta, &mut patches)?;
+      let handled = !multiple_body_deltas && patches.is_empty() && self.try_reconcile_body_delta(document, &delta, &mut patches)?;
       if !handled {
         self.reconcile_body_text(document, &pre_event_binding, &mut patches)?;
         self.binding.refresh_body_index_from_loro(self.doc);
@@ -86,7 +89,10 @@ impl RemoteApplier<'_> {
           // (e.g. a remote run/paragraph style edit). That changes a paragraph's
           // runs without changing its text, which this text-splice fast path does
           // not model — defer to the full reprojection.
-          if attributes.as_ref().is_some_and(|attributes| !attributes.is_empty()) {
+          if attributes
+            .as_ref()
+            .is_some_and(|attributes| !attributes.is_empty())
+          {
             return Ok(false);
           }
           if in_change {
@@ -118,7 +124,10 @@ impl RemoteApplier<'_> {
 
     let new_body = body_text(self.doc);
     let change_byte = utf8_byte(&new_body, lead);
-    let ordinal = self.binding.body_index.paragraph_ordinal_for_body_byte(change_byte);
+    let ordinal = self
+      .binding
+      .body_index
+      .paragraph_ordinal_for_body_byte(change_byte);
     let start_byte = self.binding.body_index.paragraph_start(ordinal);
     let old_len = self.binding.body_index.paragraph_len(ordinal);
     if change_byte < start_byte || change_byte > start_byte + old_len {
@@ -308,7 +317,10 @@ impl RemoteApplier<'_> {
             };
             if final_block_ids.contains(&row.map.id()) {
               if let Some(start) = delete_start.take() {
-                patches.push(CollabPatch::DeleteBlocks { row: start, count: delete_count });
+                patches.push(CollabPatch::DeleteBlocks {
+                  row: start,
+                  count: delete_count,
+                });
                 delete_count = 0;
               }
               row_ix += 1;
@@ -322,7 +334,10 @@ impl RemoteApplier<'_> {
             delete_count += 1;
           }
           if let Some(start) = delete_start {
-            patches.push(CollabPatch::DeleteBlocks { row: start, count: delete_count });
+            patches.push(CollabPatch::DeleteBlocks {
+              row: start,
+              count: delete_count,
+            });
           }
         },
         ListDiffItem::Insert { insert, is_move } => {
@@ -448,8 +463,7 @@ fn input_paragraph_text(paragraph: &InputParagraph) -> String {
 }
 
 fn input_paragraphs_equal(left: &InputParagraph, right: &InputParagraph) -> bool {
-  left.style == right.style
-    && input_runs_equal(&left.runs, &right.runs)
+  left.style == right.style && input_runs_equal(&left.runs, &right.runs)
 }
 
 fn has_paragraph_style_patch(patches: &[CollabPatch], target_row: usize) -> bool {

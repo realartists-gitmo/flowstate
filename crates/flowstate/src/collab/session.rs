@@ -1,4 +1,8 @@
-use std::{collections::HashSet, rc::Rc, time::{Duration, Instant}};
+use std::{
+  collections::HashSet,
+  rc::Rc,
+  time::{Duration, Instant},
+};
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
@@ -680,7 +684,10 @@ impl CollabSession {
       edits
     });
     let edit_count = edits.len();
-    let operation_count = edits.iter().map(|edit| edit.operations.len()).sum::<usize>();
+    let operation_count = edits
+      .iter()
+      .map(|edit| edit.operations.len())
+      .sum::<usize>();
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
       return Ok(());

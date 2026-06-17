@@ -2,8 +2,8 @@
 
 use anyhow::{Context as _, Result};
 use gpui_flowtext::{
-  Block, CollabPatch, CollabStructuralBlock, Document, InputBlock, InputParagraph, InputRun, document_from_input_blocks,
-  input_block_from_block, paragraph_text, paragraphs_mut, rebuild_document_sections, update_paragraph_block,
+  Block, CollabPatch, CollabStructuralBlock, Document, InputBlock, InputParagraph, InputRun, document_from_input_blocks, input_block_from_block,
+  paragraph_text, paragraphs_mut, rebuild_document_sections, update_paragraph_block,
 };
 use loro::LoroDoc;
 
@@ -157,11 +157,18 @@ fn rebuild_document_from_structural_blocks(document: &mut Document, blocks: Vec<
     .iter()
     .map(|block| block.block.clone())
     .collect::<Vec<_>>();
-  let block_ids = blocks.iter().map(|block| block.block_id).collect::<Vec<_>>();
+  let block_ids = blocks
+    .iter()
+    .map(|block| block.block_id)
+    .collect::<Vec<_>>();
   let paragraph_ids = blocks
     .iter()
     .filter_map(|block| match &block.block {
-      InputBlock::Paragraph(_) => Some(block.paragraph_id.context("structural paragraph patch is missing a paragraph id")),
+      InputBlock::Paragraph(_) => Some(
+        block
+          .paragraph_id
+          .context("structural paragraph patch is missing a paragraph id"),
+      ),
       InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_) => None,
     })
     .collect::<Result<Vec<_>>>()?;

@@ -67,10 +67,9 @@ pub fn input_block_from_container(map: &LoroMap, body_paragraph: Option<&gpui_fl
   match map_string(map, KIND)?.as_str() {
     KIND_PARAGRAPH => {
       let style = decode_paragraph_style(map_i64(map, STYLE)?);
-      let mut paragraph = body_paragraph.cloned().unwrap_or(gpui_flowtext::InputParagraph {
-        style,
-        runs: Vec::new(),
-      });
+      let mut paragraph = body_paragraph
+        .cloned()
+        .unwrap_or(gpui_flowtext::InputParagraph { style, runs: Vec::new() });
       if body_paragraph.is_none() {
         paragraph.style = style;
       }
@@ -100,11 +99,7 @@ fn clear_blocks(blocks: &LoroMovableList) -> Result<()> {
   Ok(())
 }
 
-pub fn insert_paragraph_container(
-  blocks: &LoroMovableList,
-  ix: usize,
-  style: gpui_flowtext::ParagraphStyle,
-) -> Result<LoroMap> {
+pub fn insert_paragraph_container(blocks: &LoroMovableList, ix: usize, style: gpui_flowtext::ParagraphStyle) -> Result<LoroMap> {
   let map = blocks.insert_container(ix, LoroMap::new())?;
   map.insert(KIND, KIND_PARAGRAPH)?;
   map.insert(STYLE, encode_paragraph_style(style))?;

@@ -19,7 +19,9 @@ pub fn projection_hash(document: &Document) -> u64 {
           run.len.hash(&mut hasher);
           run.styles.hash(&mut hasher);
         }
-        paragraph_text(document, paragraph_ix).as_bytes().hash(&mut hasher);
+        paragraph_text(document, paragraph_ix)
+          .as_bytes()
+          .hash(&mut hasher);
         "p".hash(&mut hasher);
         paragraph_ix += 1;
       },

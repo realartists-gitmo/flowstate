@@ -1,7 +1,7 @@
 use flowstate_collab::{SessionId, ticket::SessionTicket};
 use gpui::{
-  AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render,
-  SharedString, Subscription, WeakEntity, Window, div, prelude::*, px,
+  AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
+  Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
   Disableable, WindowExt as _,
@@ -381,13 +381,17 @@ impl Render for CollabShareDialog {
       .child(
         h_flex()
           .gap_2()
-          .child(tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
-            dialog.set_mode(CollabDialogMode::Share, cx);
-          })))
-          .child(tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
-            dialog.set_mode(CollabDialogMode::Join, cx);
-            dialog.focus(window, cx);
-          }))),
+          .child(
+            tab_button("collab-share-tab", "Share", self.mode == CollabDialogMode::Share).on_click(cx.listener(|dialog, _, _, cx| {
+              dialog.set_mode(CollabDialogMode::Share, cx);
+            })),
+          )
+          .child(
+            tab_button("collab-join-tab", "Join", self.mode == CollabDialogMode::Join).on_click(cx.listener(|dialog, _, window, cx| {
+              dialog.set_mode(CollabDialogMode::Join, cx);
+              dialog.focus(window, cx);
+            })),
+          ),
       )
       .child(
         div()

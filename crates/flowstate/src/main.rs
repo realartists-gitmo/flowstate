@@ -7,8 +7,7 @@ use clap::{Parser, Subcommand};
 
 use flowstate::{
   docx_conversion::{convert_db8_to_docx, convert_db8_to_pdf, convert_docx_to_pdf, convert_pdf_to_db8},
-  logging,
-  run_standalone, write_demo_document,
+  logging, run_standalone, write_demo_document,
 };
 
 struct FlowstateAllocator;

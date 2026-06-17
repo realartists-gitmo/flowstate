@@ -1,7 +1,7 @@
 mod manager;
-mod pump;
-mod presence_view;
 pub(crate) mod notify;
+mod presence_view;
+mod pump;
 mod session;
 pub mod share_dialog;
 mod shutdown;

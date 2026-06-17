@@ -136,33 +136,28 @@ impl CollabSession {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     let candidates = self.pull_candidates(Some(from));
     tracing::debug!(session = %self.session, from = %from, ?blob, candidate_count = candidates.len(), "requesting collaboration update blob pull");
-    if let Err(error) = self
-      .net_tx
-      .try_send(NetCommand::PullBlob {
-        session: self.session,
-        candidates,
-        blob,
-        reply: reply_tx,
-      })
-    {
+    if let Err(error) = self.net_tx.try_send(NetCommand::PullBlob {
+      session: self.session,
+      candidates,
+      blob,
+      reply: reply_tx,
+    }) {
       tracing::warn!(session = %self.session, from = %from, ?blob, error = %error, "queueing collaboration blob pull failed");
       return;
     }
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
       let result = reply_rx.recv().await;
-      let _ = session.update(cx, |session, cx| {
-        match result {
-          Ok(Ok(bytes)) => {
-            tracing::debug!(session = %session_id, ?blob, bytes = bytes.len(), "collaboration blob pull succeeded");
-            if let Err(error) = session.import_update_bytes(&bytes, cx) {
-              tracing::error!(session = %session_id, ?blob, error = %format_args!("{error:#}"), "importing pulled collaboration blob failed");
-              session.detach(DetachReason::Fatal(format!("pulling collaboration blob failed: {error:#}")), cx);
-            }
-          },
-          Ok(Err(error)) => tracing::warn!(session = %session_id, ?blob, error = %format_args!("{error:#}"), "collaboration blob pull failed"),
-          Err(error) => tracing::warn!(session = %session_id, ?blob, error = %error, "collaboration blob pull reply channel closed"),
-        }
+      let _ = session.update(cx, |session, cx| match result {
+        Ok(Ok(bytes)) => {
+          tracing::debug!(session = %session_id, ?blob, bytes = bytes.len(), "collaboration blob pull succeeded");
+          if let Err(error) = session.import_update_bytes(&bytes, cx) {
+            tracing::error!(session = %session_id, ?blob, error = %format_args!("{error:#}"), "importing pulled collaboration blob failed");
+            session.detach(DetachReason::Fatal(format!("pulling collaboration blob failed: {error:#}")), cx);
+          }
+        },
+        Ok(Err(error)) => tracing::warn!(session = %session_id, ?blob, error = %format_args!("{error:#}"), "collaboration blob pull failed"),
+        Err(error) => tracing::warn!(session = %session_id, ?blob, error = %error, "collaboration blob pull reply channel closed"),
       });
     })
     .detach();
@@ -298,7 +293,9 @@ impl CollabSession {
         let result = self.asset_bytes(asset, cx);
         match &result {
           Ok(bytes) => tracing::debug!(session = %self.session, asset, bytes = bytes.bytes.len(), "served collaboration asset direct request"),
-          Err(error) => tracing::warn!(session = %self.session, asset, error = %format_args!("{error:#}"), "serving collaboration asset direct request failed"),
+          Err(error) => {
+            tracing::warn!(session = %self.session, asset, error = %format_args!("{error:#}"), "serving collaboration asset direct request failed")
+          },
         }
         let _ = reply.try_send(result);
       },
