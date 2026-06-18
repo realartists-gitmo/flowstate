@@ -1,6 +1,7 @@
 use anyhow::{Context as _, Result, anyhow};
 use flowstate_collab::{
   SessionId,
+  crdt_runtime::SemanticCommand,
   net::{
     NetCommand, PublishPayload,
     anti_entropy::{GapAction, VersionVectorRelation},
@@ -17,12 +18,12 @@ use super::{CollabSession, DetachReason};
 
 impl CollabSession {
   pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.editor.is_none() {
+    if self.runtime.is_none() || self.editor.is_none() {
       tracing::debug!(
         session = %self.session,
         bytes = bytes.len(),
         queued_updates = self.pending_remote_updates.len() + 1,
-        has_doc = self.doc.is_some(),
+        has_runtime = self.runtime.is_some(),
         has_editor = self.editor.is_some(),
         "queueing remote collaboration update until session is attached",
       );
@@ -31,41 +32,20 @@ impl CollabSession {
     }
 
     tracing::debug!(session = %self.session, bytes = bytes.len(), "importing remote collaboration update");
-    let editor = self
-      .editor
-      .clone()
-      .context("collaboration session has no editor")?;
-    let doc = self
-      .doc
-      .clone()
-      .context("collaboration session has no Loro document")?;
-
-    let import_result = doc.import_with(bytes, "remote");
-    let import_status = match import_result.context("importing collaboration update failed") {
-      Ok(status) => status,
+    let events = match self
+      .runtime
+      .as_mut()
+      .context("collaboration session has no CRDT runtime")?
+      .import_remote_update(bytes)
+      .context("importing collaboration update failed")
+    {
+      Ok(events) => events,
       Err(error) => {
-      tracing::error!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "remote collaboration update import failed");
-      return Err(error);
+        tracing::error!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "remote collaboration update import failed");
+        return Err(error);
       },
     };
-    if let Some(pending) = &import_status.pending {
-      tracing::debug!(
-        session = %self.session,
-        bytes = bytes.len(),
-        pending_ranges = pending.iter().count(),
-        "remote collaboration update has pending Loro dependencies; requesting anti-entropy pull immediately",
-      );
-      if let Some(from) = self.pull_candidates(None).first().copied() {
-        self.start_update_pull(from, doc.oplog_vv().encode(), cx);
-      } else {
-        tracing::warn!(session = %self.session, "cannot pull pending Loro dependencies because no collaboration peers are available");
-      }
-    }
-    let mut projected = flowstate_document::document_from_loro(&doc).context("projecting remote collaboration update")?;
-    projected.assets = editor.read(cx).document().assets.clone();
-    editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
-    self.last_document_activity = std::time::Instant::now();
-    self.refresh_external_carets(cx);
+    self.apply_runtime_events(events, true, cx)?;
     tracing::debug!(session = %self.session, bytes = bytes.len(), "remote collaboration update imported and projected");
     Ok(())
   }
@@ -102,7 +82,7 @@ impl CollabSession {
     vv: &[u8],
     cx: &mut Context<Self>,
   ) -> Result<()> {
-    let Some(doc) = &self.doc else {
+    let Some(runtime) = &self.runtime else {
       tracing::debug!(session = %self.session, from = %from, digest_session = %digest_session, vv_bytes = vv.len(), "ignored collaboration digest because Loro doc is missing");
       return Ok(());
     };
@@ -113,7 +93,7 @@ impl CollabSession {
         return Err(error);
       },
     };
-    let our_vv = doc.oplog_vv();
+    let our_vv = runtime.doc().oplog_vv();
     let relation = match sender_vv.partial_cmp(&our_vv) {
       Some(std::cmp::Ordering::Equal) => VersionVectorRelation::Equal,
       Some(std::cmp::Ordering::Greater) => VersionVectorRelation::SenderHasMissingOps,
@@ -168,8 +148,8 @@ impl CollabSession {
   }
 
   pub(super) fn publish_digest(&self) {
-    if let Some(doc) = &self.doc {
-      let vv = doc.oplog_vv().encode();
+    if let Some(runtime) = &self.runtime {
+      let vv = runtime.doc().oplog_vv().encode();
       let vv_bytes = vv.len();
       if let Err(error) = self.net_tx.try_send(NetCommand::Publish {
         session: self.session,
@@ -211,43 +191,32 @@ impl CollabSession {
   }
 
   pub(super) fn apply_loro_undo_redirect(&mut self, redirect: UndoRedirect, cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.editor.is_none() || self.undo_manager.is_none() {
+    if self.runtime.is_none() || self.editor.is_none() {
       tracing::warn!(
         session = %self.session,
         ?redirect,
-        has_doc = self.doc.is_some(),
+        has_runtime = self.runtime.is_some(),
         has_editor = self.editor.is_some(),
-        has_undo_manager = self.undo_manager.is_some(),
         "cannot apply collaboration undo redirect because session state is incomplete",
       );
       return Ok(());
     }
 
     tracing::debug!(session = %self.session, ?redirect, "applying collaboration undo redirect");
-    let editor = self
-      .editor
-      .clone()
-      .context("collaboration session has no editor")?;
-    let undo_result = match redirect {
-      UndoRedirect::Undo => self
-        .undo_manager
-        .as_mut()
-        .context("collaboration session has no undo manager")?
-        .undo(),
-      UndoRedirect::Redo => self
-        .undo_manager
-        .as_mut()
-        .context("collaboration session has no undo manager")?
-        .redo(),
+    let command = match redirect {
+      UndoRedirect::Undo => SemanticCommand::Undo,
+      UndoRedirect::Redo => SemanticCommand::Redo,
     };
-    let applied = undo_result.context("applying collaboration undo operation failed")?;
+    let events = self
+      .runtime
+      .as_mut()
+      .context("collaboration session has no CRDT runtime")?
+      .command(command)
+      .context("applying collaboration undo operation failed")?;
+    let applied = !events.is_empty();
     tracing::debug!(session = %self.session, ?redirect, applied, "collaboration undo redirect applied");
     if applied {
-      if let Some(doc) = &self.doc {
-        let mut projected = flowstate_document::document_from_loro(doc).context("projecting collaboration undo result")?;
-        projected.assets = editor.read(cx).document().assets.clone();
-        editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
-      }
+      self.apply_runtime_events(events, true, cx)?;
       self.publish_digest();
     }
     Ok(())
@@ -295,9 +264,10 @@ impl CollabSession {
 
   fn snapshot_bytes(&self) -> Result<Vec<u8>> {
     let bytes = self
-      .doc
+      .runtime
       .as_ref()
       .context("collaboration session is not attached")?
+      .doc()
       .export(ExportMode::Snapshot)
       .context("exporting collaboration snapshot failed")?;
     tracing::debug!(session = %self.session, bytes = bytes.len(), "exported collaboration snapshot");
@@ -307,9 +277,10 @@ impl CollabSession {
   fn update_bytes(&self, have_vv: &[u8]) -> Result<Vec<u8>> {
     let vv = VersionVector::decode(have_vv).context("decoding collaboration version vector failed")?;
     let bytes = self
-      .doc
+      .runtime
       .as_ref()
       .context("collaboration session is not attached")?
+      .doc()
       .export(ExportMode::updates(&vv))
       .context("exporting collaboration updates failed")?;
     tracing::debug!(session = %self.session, have_vv_bytes = have_vv.len(), bytes = bytes.len(), "exported collaboration updates");
@@ -347,7 +318,7 @@ impl CollabSession {
     tracing::trace!(session = %self.session, pending_after = self.pending_remote_patches.len(), flushed, "remote collaboration patch queue updated");
   }
 
-  fn start_update_pull(&mut self, from: flowstate_collab::ids::PeerId, our_vv: Vec<u8>, cx: &mut Context<Self>) {
+  pub(super) fn start_update_pull(&mut self, from: flowstate_collab::ids::PeerId, our_vv: Vec<u8>, cx: &mut Context<Self>) {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     let candidates = self.pull_candidates(Some(from));
     tracing::debug!(session = %self.session, from = %from, our_vv_bytes = our_vv.len(), candidate_count = candidates.len(), "requesting collaboration update pull");

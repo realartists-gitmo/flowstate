@@ -10,7 +10,7 @@ use uuid::Uuid;
 use crate::{
   AssetChunk, BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
-  ROOT_BODY_FLOW_ID, SENTINEL_NEWLINE,
+  ROOT_BODY_FLOW_ID, SECTIONS_BY_ID, SENTINEL_NEWLINE,
   loro_schema::{ASSETS_BY_ID, REVISIONS},
 };
 
@@ -37,6 +37,7 @@ fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<
   let flows = root.ensure_mergeable_map(FLOWS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+  let sections = root.ensure_mergeable_map(SECTIONS_BY_ID)?;
   root.ensure_mergeable_list(REVISIONS)?;
 
   let body_flow = ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
@@ -44,6 +45,7 @@ fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<
   replace_text(&body_text, SENTINEL_NEWLINE)?;
   clear_map(&blocks)?;
   clear_map(&paragraphs)?;
+  clear_map(&sections)?;
 
   let mut paragraph_ix = 0_usize;
   for (block_ix, block) in document.blocks.iter().enumerate() {
@@ -101,8 +103,45 @@ fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<
       }
     }
   }
+  import_sections(document, &sections, &body_text)?;
   doc.commit();
   Ok(())
+}
+
+fn import_sections(document: &Document, sections: &LoroMap, body_text: &LoroText) -> LoroResult<()> {
+  for section in document.sections.iter() {
+    let section_id = section.id.0.to_string();
+    let section_map = sections.ensure_mergeable_map(&section_id)?;
+    section_map.insert("id", section_id.as_str())?;
+    section_map.insert("start_paragraph_id", section.start_paragraph.0.to_string())?;
+    if let Some(parent_id) = section.parent_id {
+      section_map.insert("parent_section_id", parent_id.0.to_string())?;
+    }
+    if let Some(heading_id) = section.heading_paragraph {
+      section_map.insert("heading_paragraph_id", heading_id.0.to_string())?;
+    }
+    if let Some(end_id) = section.end_paragraph_exclusive {
+      section_map.insert("end_paragraph_exclusive_id", end_id.0.to_string())?;
+    }
+    let gpui_flowtext::SectionKind::Custom(kind_slot) = section.kind;
+    section_map.insert("kind_slot", i64::from(kind_slot))?;
+    if let Some(paragraph_ix) = document.ids.paragraph_ids.iter().position(|id| *id == section.start_paragraph)
+      && let Some(cursor) = body_text.get_cursor(paragraph_boundary_unicode_pos(document, paragraph_ix), Side::Left)
+    {
+      section_map.insert("start_cursor", cursor.encode())?;
+    }
+    let attrs = section_map.ensure_mergeable_map("attrs")?;
+    attrs.insert("source", "paragraph_style_outline")?;
+  }
+  Ok(())
+}
+
+fn paragraph_boundary_unicode_pos(document: &Document, paragraph_ix: usize) -> usize {
+  let mut pos = 0_usize;
+  for ix in 0..paragraph_ix.min(document.paragraphs.len()) {
+    pos += paragraph_text(document, ix).chars().count() + 1;
+  }
+  pos
 }
 
 fn append_paragraph(

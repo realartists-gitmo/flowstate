@@ -19,12 +19,12 @@ pub(super) fn schedule_missing_assets(
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because editor is missing");
     return;
   };
-  let Some(doc) = &session.doc else {
+  let Some(runtime) = &session.runtime else {
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because Loro doc is missing");
     return;
   };
 
-  let assets = match image_assets_in_loro(doc) {
+  let assets = match image_assets_in_loro(runtime.doc()) {
     Ok(assets) => assets,
     Err(error) => {
       tracing::warn!(session = %session.session, error = %format_args!("{error:#}"), "collaboration asset scan failed");

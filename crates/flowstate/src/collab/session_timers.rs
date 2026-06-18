@@ -2,7 +2,6 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, self_check};
-use flowstate_document::document_from_loro;
 use gpui::{Context, Timer};
 
 use crate::rich_text_element::Document;
@@ -259,7 +258,7 @@ impl CollabSession {
   }
 
   fn run_self_check(&mut self, cx: &mut Context<Self>) -> Result<()> {
-    let Some(doc) = self.doc.clone() else {
+    let Some(runtime) = self.runtime.as_ref() else {
       return Ok(());
     };
     let Some(editor) = self.editor.clone() else {
@@ -268,7 +267,7 @@ impl CollabSession {
 
     let live_document = editor.read(cx).document().clone();
     let live_hash = self_check::projection_hash(&live_document);
-    let current_vv = doc.oplog_vv().encode();
+    let current_vv = runtime.doc().oplog_vv().encode();
     // Cheap path: if neither the Loro state (version vector) nor the live
     // projection hash changed since the last verified check, there can be no new
     // drift, so skip the full reprojection.
@@ -281,7 +280,7 @@ impl CollabSession {
       return Ok(());
     }
 
-    let mut projected = document_from_loro(&doc)?;
+    let mut projected = runtime.projection_snapshot()?;
     projected.assets = live_document.assets.clone();
     let projected_hash = self_check::projection_hash(&projected);
     if live_hash == projected_hash {
@@ -318,14 +317,14 @@ impl CollabSession {
     if self.probe_pending {
       return true;
     }
-    let Some(doc) = &self.doc else {
+    let Some(runtime) = &self.runtime else {
       return false;
     };
     let candidates = self.known_peers.iter().copied().collect::<Vec<_>>();
     if candidates.is_empty() {
       return false;
     }
-    let our_vv = doc.oplog_vv().encode();
+    let our_vv = runtime.doc().oplog_vv().encode();
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if self
       .net_tx

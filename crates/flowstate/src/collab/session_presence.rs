@@ -74,7 +74,7 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
     };
-    let Some(doc) = &self.doc else {
+    let Some(runtime) = &self.runtime else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because Loro doc is missing");
       return;
     };
@@ -83,7 +83,7 @@ impl CollabSession {
       return;
     };
     let document = editor.read(cx).document().clone();
-    let carets = presence_view::external_carets(doc, &document, presence);
+    let carets = presence_view::external_carets(runtime.doc(), &document, presence);
     tracing::trace!(session = %self.session, carets = carets.len(), "refreshing collaboration external carets");
     editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
   }
@@ -139,9 +139,9 @@ impl CollabSession {
   }
 
   fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
-    let doc = self.doc.as_ref()?;
+    let runtime = self.runtime.as_ref()?;
     let editor = self.editor.as_ref()?.read(cx);
-    presence_view::selection_for_editor(doc, editor)
+    presence_view::selection_for_editor(runtime.doc(), editor)
   }
 
   fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) -> bool {

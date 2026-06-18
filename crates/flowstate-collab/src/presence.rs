@@ -20,8 +20,37 @@ pub struct PresenceState {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PresenceSelection {
-  pub head: Vec<u8>,
-  pub anchor: Vec<u8>,
+  pub anchor: SelectionEndpoint,
+  pub head: SelectionEndpoint,
+  pub direction: SelectionDirection,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct SelectionEndpoint {
+  pub cursor: Vec<u8>,
+  pub affinity: SelectionAffinity,
+  pub visual_gravity: VisualGravity,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SelectionAffinity {
+  Before,
+  After,
+  Neutral,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum VisualGravity {
+  Upstream,
+  Downstream,
+  Neutral,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SelectionDirection {
+  Forward,
+  Backward,
+  None,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

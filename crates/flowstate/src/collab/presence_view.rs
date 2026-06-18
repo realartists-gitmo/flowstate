@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use flowstate_collab::{
   SessionId,
-  presence::{PresenceSelection, PresenceStore},
+  presence::{PresenceSelection, PresenceStore, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity},
 };
 use flowstate_document::loro_schema::body_text;
 use loro::{
@@ -14,9 +14,12 @@ use crate::rich_text_element::{Document, DocumentOffset, ExternalCaret, RichText
 
 pub fn selection_for_editor(doc: &LoroDoc, editor: &RichTextEditor) -> Option<PresenceSelection> {
   let selection = editor.selection().clone();
+  let direction = selection_direction(selection.anchor, selection.head);
+  let (anchor_affinity, head_affinity, anchor_gravity, head_gravity) = endpoint_intent(direction);
   Some(PresenceSelection {
-    anchor: cursor_bytes_for_offset(doc, editor.document(), selection.anchor)?,
-    head: cursor_bytes_for_offset(doc, editor.document(), selection.head)?,
+    anchor: endpoint_for_offset(doc, editor.document(), selection.anchor, anchor_affinity, anchor_gravity)?,
+    head: endpoint_for_offset(doc, editor.document(), selection.head, head_affinity, head_gravity)?,
+    direction,
   })
 }
 
@@ -45,17 +48,25 @@ pub fn collaboration_recovery_path(session: SessionId, title: &str) -> PathBuf {
   dir.join(format!("{prefix}-{}.db8", sanitized_recovery_title(title)))
 }
 
-fn cursor_bytes_for_offset(doc: &LoroDoc, document: &Document, offset: DocumentOffset) -> Option<Vec<u8>> {
+fn endpoint_for_offset(
+  doc: &LoroDoc,
+  document: &Document,
+  offset: DocumentOffset,
+  affinity: SelectionAffinity,
+  visual_gravity: VisualGravity,
+) -> Option<SelectionEndpoint> {
   let text = body_text(doc);
   let byte = global_byte(document, offset).min(text.len_utf8());
   let pos = text.convert_pos(byte, PosType::Bytes, PosType::Unicode)?;
-  text
-    .get_cursor(pos, Side::Middle)
-    .map(|cursor| cursor.encode())
+  text.get_cursor(pos, side_for_affinity(affinity)).map(|cursor| SelectionEndpoint {
+    cursor: cursor.encode(),
+    affinity,
+    visual_gravity,
+  })
 }
 
 fn external_caret_for_presence(doc: &LoroDoc, document: &Document, selection: &PresenceSelection, color_rgb: u32) -> Option<ExternalCaret> {
-  let cursor = Cursor::decode(&selection.head).ok()?;
+  let cursor = Cursor::decode(&selection.head.cursor).ok()?;
   let text = body_text(doc);
   if cursor.container != text.id() {
     return None;
@@ -66,6 +77,47 @@ fn external_caret_for_presence(doc: &LoroDoc, document: &Document, selection: &P
     offset: global_to_document_offset(document, byte),
     color_rgb,
   })
+}
+
+fn selection_direction(anchor: DocumentOffset, head: DocumentOffset) -> SelectionDirection {
+  match anchor.cmp(&head) {
+    std::cmp::Ordering::Less => SelectionDirection::Forward,
+    std::cmp::Ordering::Greater => SelectionDirection::Backward,
+    std::cmp::Ordering::Equal => SelectionDirection::None,
+  }
+}
+
+fn endpoint_intent(
+  direction: SelectionDirection,
+) -> (SelectionAffinity, SelectionAffinity, VisualGravity, VisualGravity) {
+  match direction {
+    SelectionDirection::Forward => (
+      SelectionAffinity::Before,
+      SelectionAffinity::After,
+      VisualGravity::Upstream,
+      VisualGravity::Downstream,
+    ),
+    SelectionDirection::Backward => (
+      SelectionAffinity::After,
+      SelectionAffinity::Before,
+      VisualGravity::Downstream,
+      VisualGravity::Upstream,
+    ),
+    SelectionDirection::None => (
+      SelectionAffinity::After,
+      SelectionAffinity::After,
+      VisualGravity::Downstream,
+      VisualGravity::Downstream,
+    ),
+  }
+}
+
+fn side_for_affinity(affinity: SelectionAffinity) -> Side {
+  match affinity {
+    SelectionAffinity::Before => Side::Left,
+    SelectionAffinity::After => Side::Right,
+    SelectionAffinity::Neutral => Side::Middle,
+  }
 }
 
 fn sanitized_recovery_title(title: &str) -> String {

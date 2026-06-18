@@ -133,6 +133,7 @@ impl CrdtRuntime {
     }));
     let mut undo = UndoManager::new(&doc);
     undo.set_merge_interval(600);
+    undo.set_max_undo_steps(300);
     undo.add_exclude_origin_prefix("remote");
     Ok(Self {
       doc,
@@ -150,6 +151,17 @@ impl CrdtRuntime {
     &self.doc
   }
 
+  pub fn apply_editor_semantic_command(&mut self, projection: &Document, command: &EditorSemanticCommand) -> Result<Vec<RuntimeEvent>> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    if apply_editor_semantic_command(&self.doc, projection, command)? {
+      self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
+      self.events_after_local_change(from_frontier, from_vv)
+    } else {
+      Ok(Vec::new())
+    }
+  }
+
   pub fn projection_snapshot(&self) -> Result<Document> {
     let mut document = document_from_loro(&self.doc).context("projecting Flowstate document from canonical Loro state")?;
     if let Some(package) = &self.package {
@@ -163,6 +175,9 @@ impl CrdtRuntime {
     let from_vv = self.doc.state_vv();
     match command {
       SemanticCommand::InsertText { unicode_index, text } => {
+        if text.is_empty() {
+          return Ok(Vec::new());
+        }
         let body = body_text(&self.doc);
         body.insert(unicode_index, &text).context("inserting text into Loro body flow")?;
         self.doc.commit();
@@ -179,6 +194,8 @@ impl CrdtRuntime {
             .context("deleting text from Loro body flow")?;
           self.doc.commit();
           self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
+        } else {
+          return Ok(Vec::new());
         }
       }
       SemanticCommand::SplitParagraph {
@@ -209,6 +226,9 @@ impl CrdtRuntime {
         self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
       }
       SemanticCommand::SetRunStyles { unicode_range, styles } => {
+        if unicode_range.is_empty() {
+          return Ok(Vec::new());
+        }
         mark_run_styles(&body_text(&self.doc), unicode_range, styles).context("marking run styles in Loro body flow")?;
         self.doc.commit();
         self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
@@ -262,10 +282,14 @@ impl CrdtRuntime {
         }]);
       }
       SemanticCommand::Undo => {
-        self.undo.undo().context("applying Loro undo")?;
+        if !self.undo.undo().context("applying Loro undo")? {
+          return Ok(Vec::new());
+        }
       }
       SemanticCommand::Redo => {
-        self.undo.redo().context("applying Loro redo")?;
+        if !self.undo.redo().context("applying Loro redo")? {
+          return Ok(Vec::new());
+        }
       }
     }
     self.events_after_local_change(from_frontier, from_vv)
@@ -371,6 +395,7 @@ impl CrdtRuntime {
   fn persist_update_segment(&mut self, from_frontier: Frontiers, from_vv: VersionVector, update: Vec<u8>) -> Result<()> {
     if let Some(package) = &mut self.package {
       package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update)?;
+      package.rebuild_search_units_from_loro(&self.doc)?;
       if let Some(path) = &self.package_path {
         package.write(path)?;
       }
@@ -509,6 +534,9 @@ fn paragraph_boundary_unicode_index(projection: &Document, paragraph_ix: usize) 
 }
 
 fn replace_body_paragraph_span(doc: &LoroDoc, projection: &Document, before: &flowstate_document::DocumentSpan, after: &flowstate_document::DocumentSpan) -> Result<bool> {
+  if before.paragraphs.is_empty() && after.paragraphs.is_empty() {
+    return Ok(false);
+  }
   let start = projection_offset_to_body_unicode_index(
     projection,
     flowstate_document::DocumentOffset {
@@ -531,7 +559,8 @@ fn replace_body_paragraph_span(doc: &LoroDoc, projection: &Document, before: &fl
       },
     )
   };
-  let replacement = after.text.clone();
+  let paragraph_texts = span_paragraph_texts(after);
+  let replacement = paragraph_texts.join("\n");
   let body = body_text(doc);
   if end > start {
     body.delete(start, end - start)?;
@@ -539,6 +568,7 @@ fn replace_body_paragraph_span(doc: &LoroDoc, projection: &Document, before: &fl
   if !replacement.is_empty() {
     body.insert(start, &replacement)?;
   }
+  mark_replacement_span(&body, paragraph_boundary_unicode_index(projection, before.start_paragraph), start, after, &paragraph_texts)?;
   doc.commit();
   Ok(true)
 }
@@ -549,15 +579,93 @@ fn replace_entire_body_from_projection(doc: &LoroDoc, projection: &Document) -> 
   if len > 1 {
     body.delete(1, len - 1)?;
   }
-  let replacement = (0..projection.paragraphs.len())
+  let paragraph_texts = (0..projection.paragraphs.len())
     .map(|paragraph_ix| flowstate_document::paragraph_text(projection, paragraph_ix))
-    .collect::<Vec<_>>()
-    .join("\n");
+    .collect::<Vec<_>>();
+  let replacement = paragraph_texts.join("\n");
   if !replacement.is_empty() {
     body.insert(1, &replacement)?;
   }
+  body.mark(0..1, MARK_PARAGRAPH_STYLE, paragraph_style_value(projection.paragraphs.first().map_or(ParagraphStyle::Normal, |paragraph| paragraph.style)))?;
+  mark_projected_paragraphs(&body, 1, &projection.paragraphs, &paragraph_texts)?;
   doc.commit();
   Ok(true)
+}
+
+fn span_paragraph_texts(span: &flowstate_document::DocumentSpan) -> Vec<String> {
+  let mut offset = 0_usize;
+  span
+    .paragraphs
+    .iter()
+    .enumerate()
+    .map(|(paragraph_ix, paragraph)| {
+      if paragraph_ix > 0 && span.text.get(offset..).is_some_and(|text| text.starts_with('\n')) {
+        offset += '\n'.len_utf8();
+      }
+      let len = flowstate_document::paragraph_text_len(paragraph);
+      let end = offset.saturating_add(len).min(span.text.len());
+      let text = span.text.get(offset..end).unwrap_or_default().to_string();
+      offset = end;
+      text
+    })
+    .collect()
+}
+
+fn mark_replacement_span(
+  body: &loro::LoroText,
+  first_boundary_unicode: usize,
+  text_start_unicode: usize,
+  span: &flowstate_document::DocumentSpan,
+  paragraph_texts: &[String],
+) -> loro::LoroResult<()> {
+  if let Some(first) = span.paragraphs.first() {
+    body.mark(
+      first_boundary_unicode..first_boundary_unicode + 1,
+      MARK_PARAGRAPH_STYLE,
+      paragraph_style_value(first.style),
+    )?;
+  }
+  mark_projected_paragraphs(body, text_start_unicode, &span.paragraphs, paragraph_texts)
+}
+
+fn mark_projected_paragraphs(
+  body: &loro::LoroText,
+  text_start_unicode: usize,
+  paragraphs: &[flowstate_document::Paragraph],
+  paragraph_texts: &[String],
+) -> loro::LoroResult<()> {
+  let mut paragraph_start = text_start_unicode;
+  for (paragraph_ix, (paragraph, paragraph_text)) in paragraphs.iter().zip(paragraph_texts).enumerate() {
+    if paragraph_ix > 0 {
+      let boundary = paragraph_start.saturating_sub(1);
+      body.mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))?;
+    }
+    mark_paragraph_runs(body, paragraph_start, paragraph_text, &paragraph.runs)?;
+    paragraph_start += paragraph_text.chars().count() + 1;
+  }
+  Ok(())
+}
+
+fn mark_paragraph_runs(
+  body: &loro::LoroText,
+  paragraph_start_unicode: usize,
+  paragraph_text: &str,
+  runs: &[flowstate_document::TextRun],
+) -> loro::LoroResult<()> {
+  let mut byte_offset = 0_usize;
+  for run in runs {
+    let end = byte_offset.saturating_add(run.len).min(paragraph_text.len());
+    let Some(run_text) = paragraph_text.get(byte_offset..end) else {
+      break;
+    };
+    let run_len = run_text.chars().count();
+    if run_len > 0 {
+      let run_start = paragraph_start_unicode + paragraph_text.get(..byte_offset).unwrap_or_default().chars().count();
+      mark_run_styles(body, run_start..run_start + run_len, run.styles)?;
+    }
+    byte_offset = end;
+  }
+  Ok(())
 }
 
 fn attach_package_assets(document: &mut Document, package: &DocumentPackage) {
@@ -867,6 +975,65 @@ mod tests {
         attributes: Some(attributes),
       } if insert == "\n" && attributes.get(flowstate_document::MARK_PARAGRAPH_STYLE).is_some()
     )));
+    Ok(())
+  }
+
+  #[test]
+  fn editor_replace_paragraph_span_preserves_boundaries_and_marks() -> Result<()> {
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+        style: flowstate_document::ParagraphStyle::Normal,
+        runs: vec![flowstate_document::InputRun {
+          text: "old".to_string(),
+          styles: flowstate_document::RunStyles::default(),
+        }],
+      })],
+    );
+    let replacement_styles = flowstate_document::RunStyles {
+      semantic: flowstate_document::RunSemanticStyle::Custom(3),
+      direct_underline: true,
+      strikethrough: false,
+      highlight: Some(flowstate_document::HighlightStyle::Custom(4)),
+    };
+    let replacement = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![
+        flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+          style: flowstate_document::ParagraphStyle::Custom(2),
+          runs: vec![flowstate_document::InputRun {
+            text: "Hello".to_string(),
+            styles: replacement_styles,
+          }],
+        }),
+        flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+          style: flowstate_document::ParagraphStyle::Normal,
+          runs: vec![flowstate_document::InputRun {
+            text: "World".to_string(),
+            styles: flowstate_document::RunStyles::default(),
+          }],
+        }),
+      ],
+    );
+    let doc = flowstate_document::document_to_loro(&source, "Span")?;
+    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
+
+    let events = runtime.apply_editor_semantic_command(
+      &source,
+      &EditorSemanticCommand::ReplaceParagraphSpan {
+        start: None,
+        before: flowstate_document::capture_document_span(&source, 0..1),
+        after: flowstate_document::capture_document_span(&replacement, 0..2),
+      },
+    )?;
+
+    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert_eq!(body_text(runtime.doc()).to_string(), "\nHello\nWorld");
+    let projection = runtime.projection_snapshot()?;
+    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "Hello");
+    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "World");
+    assert_eq!(projection.paragraphs[0].style, flowstate_document::ParagraphStyle::Custom(2));
+    assert_eq!(projection.paragraphs[0].runs[0].styles, replacement_styles);
     Ok(())
   }
 
