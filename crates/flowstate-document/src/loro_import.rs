@@ -4,7 +4,7 @@ use gpui_flowtext::{
   Block, BlockAlignment, Document, EquationDisplay, EquationSyntax, HighlightStyle, ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle,
   RunStyles, TableBlock, TableCellBlock, TableColumnWidth, paragraph_text,
 };
-use loro::{LoroDoc, LoroMap, LoroResult, LoroText, cursor::Side};
+use loro::{LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, cursor::Side};
 use uuid::Uuid;
 
 use crate::{
@@ -221,31 +221,42 @@ fn mark_run_styles(text: &LoroText, range: std::ops::Range<usize>, styles: RunSt
 
 fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &str) -> LoroResult<()> {
   let table_map = block.ensure_mergeable_map("table")?;
-  let row_order = table_map.ensure_mergeable_list("row_order")?;
-  let column_order = table_map.ensure_mergeable_list("column_order")?;
+  let row_order = table_map.ensure_mergeable_movable_list("row_order")?;
+  let column_order = table_map.ensure_mergeable_movable_list("column_order")?;
   let rows_by_id = table_map.ensure_mergeable_map("rows_by_id")?;
   let columns_by_id = table_map.ensure_mergeable_map("columns_by_id")?;
   let cells_by_id = table_map.ensure_mergeable_map("cells_by_id")?;
   table_map.insert("header_row", table.style.header_row)?;
 
-  clear_list(&row_order)?;
-  clear_list(&column_order)?;
+  clear_movable_list(&row_order)?;
+  clear_movable_list(&column_order)?;
   clear_map(&rows_by_id)?;
   clear_map(&columns_by_id)?;
   clear_map(&cells_by_id)?;
 
-  for (column_ix, width) in table.column_widths.iter().enumerate() {
+  let column_count = table.column_widths.len().max(
+    table
+      .rows
+      .iter()
+      .map(|row| row.cells.iter().map(|cell| usize::from(cell.col_span.max(1))).sum())
+      .max()
+      .unwrap_or(0),
+  );
+  let mut column_ids = Vec::with_capacity(column_count);
+  for column_ix in 0..column_count {
     let column_id = format!("{prefix}.column.{column_ix}");
     column_order.push(column_id.as_str())?;
+    column_ids.push(column_id.clone());
     let column = columns_by_id.ensure_mergeable_map(&column_id)?;
     column.insert("id", column_id.as_str())?;
-    match width {
-      TableColumnWidth::Auto => column.insert("width_kind", "auto")?,
-      TableColumnWidth::FixedPx(px) => {
+    column.ensure_mergeable_map("attrs")?;
+    match table.column_widths.get(column_ix) {
+      Some(TableColumnWidth::Auto) | None => column.insert("width_kind", "auto")?,
+      Some(TableColumnWidth::FixedPx(px)) => {
         column.insert("width_kind", "fixed_px")?;
         column.insert("width_px", i64::from(*px))?;
       }
-      TableColumnWidth::Fraction(fraction) => {
+      Some(TableColumnWidth::Fraction(fraction)) => {
         column.insert("width_kind", "fraction")?;
         column.insert("fraction", i64::from(*fraction))?;
       }
@@ -257,16 +268,24 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     row_order.push(row_id.as_str())?;
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
+    row_map.ensure_mergeable_map("attrs")?;
+    let mut column_ix = 0_usize;
     for (cell_ix, cell) in row.cells.iter().enumerate() {
       let cell_id = format!("{row_id}.cell.{cell_ix}");
+      let column_id = &column_ids[column_ix];
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
       cell_map.insert("id", cell_id.as_str())?;
       cell_map.insert("row_id", row_id.as_str())?;
-      cell_map.insert("column_index", i64::try_from(cell_ix).unwrap_or(i64::MAX))?;
+      cell_map.insert("column_id", column_id.as_str())?;
       cell_map.insert("row_span", i64::from(cell.row_span))?;
       cell_map.insert("column_span", i64::from(cell.col_span))?;
+      cell_map.ensure_mergeable_map("attrs")?;
       let flow_id = format!("{cell_id}.flow");
       cell_map.insert("flow_id", flow_id.as_str())?;
+      let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
+      let nested_tables_by_id = cell_map.ensure_mergeable_map("nested_tables_by_id")?;
+      clear_movable_list(&nested_table_ids)?;
+      clear_map(&nested_tables_by_id)?;
       let flow = ensure_flow(flows, &flow_id, "table_cell")?;
       let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
       replace_text(&text, SENTINEL_NEWLINE)?;
@@ -276,11 +295,20 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
           TableCellBlock::Table(nested) => {
             let pos = text.len_unicode();
             text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-            let nested_map = cell_map.ensure_mergeable_map(&format!("nested_table.{block_ix}"))?;
+            let nested_table_id = format!("{cell_id}.nested_table.{block_ix}");
+            nested_table_ids.push(nested_table_id.as_str())?;
+            let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
+            nested_map.insert("id", nested_table_id.as_str())?;
+            nested_map.insert("kind", "table")?;
+            if let Some(cursor) = text.get_cursor(pos, Side::Left) {
+              nested_map.insert("anchor_cursor", cursor.encode())?;
+            }
+            nested_map.ensure_mergeable_map("attrs")?;
             import_table(flows, &nested_map, nested, &format!("{cell_id}.nested.{block_ix}"))?;
           }
         }
       }
+      column_ix += usize::from(cell.col_span.max(1));
     }
   }
   Ok(())
@@ -372,12 +400,8 @@ fn clear_map(map: &LoroMap) -> LoroResult<()> {
   Ok(())
 }
 
-fn clear_list(list: &loro::LoroList) -> LoroResult<()> {
-  let len = list.len();
-  if len > 0 {
-    list.delete(0, len)?;
-  }
-  Ok(())
+fn clear_movable_list(list: &LoroMovableList) -> LoroResult<()> {
+  list.clear()
 }
 
 fn paragraph_style_value(style: ParagraphStyle) -> i64 {

@@ -4,7 +4,7 @@ use std::{
   path::Path,
 };
 
-use loro::{ExportMode, Frontiers, LoroDoc, VersionVector, cursor::Side};
+use loro::{ExportMode, Frontiers, LoroDoc, VersionVector};
 use serde::{Deserialize, Serialize};
 use tempfile::NamedTempFile;
 use uuid::Uuid;
@@ -343,49 +343,7 @@ impl DocumentPackage {
   pub fn rebuild_search_units_from_loro(&mut self, doc: &LoroDoc) -> io::Result<()> {
     doc.commit();
     let frontier = encode_frontiers(&doc.state_frontiers());
-    let body = crate::loro_schema::body_text(doc);
-    let body_string = body.to_string();
-    let mut units = Vec::new();
-    let mut paragraph_start = None;
-    let mut paragraph_ix = 0_usize;
-    let mut current = String::new();
-
-    for (unicode_ix, ch) in body_string.chars().enumerate() {
-      if ch == '\n' {
-        if let Some(start) = paragraph_start.take() {
-          push_search_unit(
-            &mut units,
-            &frontier,
-            &body,
-            self.manifest.document_id,
-            paragraph_ix,
-            start,
-            unicode_ix,
-            &current,
-          )?;
-          paragraph_ix += 1;
-          current.clear();
-        }
-        paragraph_start = Some(unicode_ix + 1);
-      } else if paragraph_start.is_some() && ch != crate::OBJECT_REPLACEMENT {
-        current.push(ch);
-      }
-    }
-
-    if let Some(start) = paragraph_start {
-      push_search_unit(
-        &mut units,
-        &frontier,
-        &body,
-        self.manifest.document_id,
-        paragraph_ix,
-        start,
-        body.len_unicode(),
-        &current,
-      )?;
-    }
-
-    self.search_units = units;
+    self.search_units = crate::package_search::search_units_from_loro(doc, self.manifest.document_id, &frontier)?;
     self.manifest.search_cache_frontier = Some(frontier);
     self.manifest.modified_at_unix_secs = unix_time_secs();
     self.validate()?;
@@ -677,55 +635,6 @@ fn decode_chunk<'a, T: Deserialize<'a>>(bytes: &'a [u8], label: &'static str) ->
   postcard::from_bytes(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("decoding {label} failed: {error}")))
 }
 
-fn push_search_unit(
-  units: &mut Vec<SearchUnitChunk>,
-  frontier: &[u8],
-  body: &loro::LoroText,
-  document_id: u128,
-  paragraph_ix: usize,
-  start: usize,
-  end: usize,
-  text: &str,
-) -> io::Result<()> {
-  let normalized = text.trim();
-  if normalized.is_empty() {
-    return Ok(());
-  }
-  let start_cursor = body
-    .get_cursor(start, Side::Left)
-    .map(|cursor| cursor.encode())
-    .unwrap_or_default();
-  let end_cursor = body
-    .get_cursor(end, Side::Right)
-    .map(|cursor| cursor.encode())
-    .unwrap_or_default();
-  let unit_id = stable_search_unit_id(document_id, paragraph_ix, frontier, normalized);
-  units.push(SearchUnitChunk {
-    frontier: frontier.to_vec(),
-    unit_id,
-    unit_kind: "paragraph".to_string(),
-    heading_path: Vec::new(),
-    heading: String::new(),
-    body: normalized.to_string(),
-    insert_text: normalized.to_string(),
-    paragraph_start_cursor: start_cursor,
-    paragraph_end_cursor: end_cursor,
-  });
-  Ok(())
-}
-
-fn stable_search_unit_id(document_id: u128, paragraph_ix: usize, frontier: &[u8], body: &str) -> u128 {
-  let mut hasher = blake3::Hasher::new();
-  hasher.update(&document_id.to_le_bytes());
-  hasher.update(&(paragraph_ix as u64).to_le_bytes());
-  hasher.update(frontier);
-  hasher.update(body.as_bytes());
-  let digest = hasher.finalize();
-  let mut bytes = [0_u8; 16];
-  bytes.copy_from_slice(&digest.as_bytes()[..16]);
-  u128::from_le_bytes(bytes)
-}
-
 fn encode_frontiers(frontiers: &Frontiers) -> Vec<u8> {
   frontiers.encode()
 }
@@ -813,10 +722,11 @@ mod tests {
   use crate::{
     AssetId, AssetRecord, Block, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax,
     InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
-    InputTableRow, InputTableStyle, RunStyles, TableCellBlock, document_to_loro_db8_bytes,
+    InputTableRow, InputTableStyle, RunStyles, TableCellBlock, document_from_loro, document_to_loro, document_to_loro_db8_bytes,
     loro_schema::{body_text, new_loro_document},
     read_db8_bytes,
   };
+  use loro::{Container, LoroDoc, LoroMap, LoroValue, ValueOrContainer};
 
   #[test]
   fn package_roundtrips_loro_snapshot() -> io::Result<()> {
@@ -935,6 +845,223 @@ mod tests {
   }
 
   #[test]
+  fn table_cells_use_column_ids_and_project_by_column_order() -> io::Result<()> {
+    let source = crate::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![InputBlock::Table(InputTableBlock {
+        rows: vec![InputTableRow {
+          cells: vec![
+            InputTableCell {
+              blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+                style: crate::ParagraphStyle::Normal,
+                runs: vec![InputRun {
+                  text: "left".to_string(),
+                  styles: RunStyles::default(),
+                }],
+              })],
+              row_span: 1,
+              col_span: 1,
+            },
+            InputTableCell {
+              blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+                style: crate::ParagraphStyle::Normal,
+                runs: vec![InputRun {
+                  text: "right".to_string(),
+                  styles: RunStyles::default(),
+                }],
+              })],
+              row_span: 1,
+              col_span: 1,
+            },
+          ],
+        }],
+        column_widths: vec![InputTableColumnWidth::Auto, InputTableColumnWidth::Auto],
+        style: InputTableStyle { header_row: false },
+      })],
+    );
+    let doc = document_to_loro(&source, "Table schema")?;
+    let table_owner = first_table_owner(&doc)?;
+    let table = test_child_map(&table_owner, "table")?;
+    let column_ids = test_ordered_ids(&table, "column_order")?;
+    assert_eq!(column_ids.len(), 2);
+
+    let cells_by_id = test_child_map(&table, "cells_by_id")?;
+    let mut seen_column_ids = Vec::new();
+    for cell_id in cells_by_id.keys().map(|key| key.to_string()) {
+      let cell = test_child_map(&cells_by_id, &cell_id)?;
+      assert!(cell.get("column_index").is_none());
+      seen_column_ids.push(test_map_string(&cell, "column_id")?);
+    }
+    assert!(seen_column_ids.contains(&column_ids[0]));
+    assert!(seen_column_ids.contains(&column_ids[1]));
+
+    let column_order = test_child_movable_list(&table, "column_order")?;
+    column_order.mov(0, 1).map_err(loro_test_error)?;
+    doc.commit();
+
+    let projected = document_from_loro(&doc)?;
+    let projected_table = projected
+      .blocks
+      .iter()
+      .find_map(|block| match block {
+        Block::Table(table) => Some(table),
+        _ => None,
+      })
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "projected table is missing"))?;
+    let cell_texts = projected_table.rows[0]
+      .cells
+      .iter()
+      .map(|cell| match &cell.blocks[0] {
+        TableCellBlock::Paragraph(paragraph) => paragraph.text.as_str(),
+        TableCellBlock::Table(_) => "",
+      })
+      .collect::<Vec<_>>();
+    assert_eq!(cell_texts, vec!["right", "left"]);
+    Ok(())
+  }
+
+  #[test]
+  fn nested_tables_use_stable_list_refs_and_project_by_anchor_cursor() -> io::Result<()> {
+    let nested_table = InputTableBlock {
+      rows: vec![InputTableRow {
+        cells: vec![InputTableCell {
+          blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+            style: crate::ParagraphStyle::Normal,
+            runs: vec![InputRun {
+              text: "inner".to_string(),
+              styles: RunStyles::default(),
+            }],
+          })],
+          row_span: 1,
+          col_span: 1,
+        }],
+      }],
+      column_widths: vec![InputTableColumnWidth::Auto],
+      style: InputTableStyle { header_row: false },
+    };
+    let source = crate::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![InputBlock::Table(InputTableBlock {
+        rows: vec![InputTableRow {
+          cells: vec![InputTableCell {
+            blocks: vec![
+              InputTableCellBlock::Paragraph(InputParagraph {
+                style: crate::ParagraphStyle::Normal,
+                runs: vec![InputRun {
+                  text: "outer".to_string(),
+                  styles: RunStyles::default(),
+                }],
+              }),
+              InputTableCellBlock::Table(nested_table),
+            ],
+            row_span: 1,
+            col_span: 1,
+          }],
+        }],
+        column_widths: vec![InputTableColumnWidth::Auto],
+        style: InputTableStyle { header_row: false },
+      })],
+    );
+    let doc = document_to_loro(&source, "Nested table")?;
+    let table = test_child_map(&first_table_owner(&doc)?, "table")?;
+    let cell = first_cell_map(&table)?;
+    assert_eq!(test_ordered_ids(&cell, "nested_table_ids")?.len(), 1);
+    assert!(test_child_map(&cell, "nested_tables_by_id").is_ok());
+    assert!(!cell.keys().any(|key| key.starts_with("nested_table.")));
+
+    let projected = document_from_loro(&doc)?;
+    let projected_table = projected
+      .blocks
+      .iter()
+      .find_map(|block| match block {
+        Block::Table(table) => Some(table),
+        _ => None,
+      })
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "projected table is missing"))?;
+    let blocks = &projected_table.rows[0].cells[0].blocks;
+    assert!(matches!(&blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "outer"));
+    assert!(matches!(&blocks[1], TableCellBlock::Table(table) if matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "inner")));
+    Ok(())
+  }
+
+  #[test]
+  fn package_search_units_come_from_projection_objects_and_tables() -> io::Result<()> {
+    let source = crate::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![
+        InputBlock::Paragraph(InputParagraph {
+          style: crate::ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "Body".to_string(),
+            styles: RunStyles::default(),
+          }],
+        }),
+        InputBlock::Image(InputImageBlock {
+          asset_id: AssetId(7),
+          alt_text: "diagram alt".to_string(),
+          caption: Some(InputParagraph {
+            style: crate::ParagraphStyle::Normal,
+            runs: vec![InputRun {
+              text: "caption text".to_string(),
+              styles: RunStyles::default(),
+            }],
+          }),
+          sizing: InputImageSizing::FitWidth,
+          alignment: InputBlockAlignment::Left,
+        }),
+        InputBlock::Equation(InputEquationBlock {
+          source: "x^2".to_string(),
+          syntax: InputEquationSyntax::Latex,
+          display: InputEquationDisplay::Display,
+        }),
+        InputBlock::Table(InputTableBlock {
+          rows: vec![InputTableRow {
+            cells: vec![InputTableCell {
+              blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+                style: crate::ParagraphStyle::Normal,
+                runs: vec![InputRun {
+                  text: "cell text".to_string(),
+                  styles: RunStyles::default(),
+                }],
+              })],
+              row_span: 1,
+              col_span: 1,
+            }],
+          }],
+          column_widths: vec![InputTableColumnWidth::Auto],
+          style: InputTableStyle { header_row: false },
+        }),
+      ],
+    );
+    let doc = document_to_loro(&source, "Search projection")?;
+    let image = first_block_owner_by_kind(&doc, "image")?;
+    let caption_flow_id = test_map_string(&image, "caption_flow_id")?;
+    let root = doc.get_map(crate::ROOT);
+    let flows = test_child_map(&root, crate::FLOWS_BY_ID)?;
+    let caption_flow = test_child_map(&flows, &caption_flow_id)?;
+    let caption_text = test_child_text(&caption_flow, crate::FLOW_TEXT_KEY)?;
+    caption_text.insert(1, "caption text").map_err(loro_test_error)?;
+    doc.commit();
+    let package = DocumentPackage::from_loro_snapshot(&doc, "Search projection")?;
+    let units = package.current_search_units();
+
+    assert!(units.iter().any(|unit| unit.unit_kind == "paragraph" && unit.body == "Body"));
+    assert!(units.iter().any(|unit| unit.unit_kind == "image_alt" && unit.body == "diagram alt"));
+    assert!(units.iter().any(|unit| unit.unit_kind == "image_caption" && unit.body == "caption text"));
+    assert!(units.iter().any(|unit| unit.unit_kind == "equation" && unit.body == "x^2"));
+    assert!(units.iter().any(|unit| unit.unit_kind == "table_cell" && unit.body == "cell text"));
+    assert!(units.iter().all(|unit| !unit.body.contains(crate::OBJECT_REPLACEMENT)));
+    let body_unit = units
+      .iter()
+      .find(|unit| unit.unit_kind == "paragraph" && unit.body == "Body")
+      .expect("body paragraph search unit should exist");
+    assert!(!body_unit.paragraph_start_cursor.is_empty());
+    assert!(!body_unit.paragraph_end_cursor.is_empty());
+    assert_eq!(package.manifest.search_cache_frontier.as_deref(), Some(package.manifest.latest_frontier.as_slice()));
+    Ok(())
+  }
+
+  #[test]
   fn public_db8_roundtrips_structured_loro_objects_and_assets() -> io::Result<()> {
     let asset_id = AssetId(42);
     let asset_bytes = b"not really a png".to_vec();
@@ -1023,6 +1150,81 @@ mod tests {
           && matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "cell")
     ));
     Ok(())
+  }
+
+  fn first_table_owner(doc: &LoroDoc) -> io::Result<LoroMap> {
+    first_block_owner_by_kind(doc, "table")
+  }
+
+  fn first_block_owner_by_kind(doc: &LoroDoc, kind: &str) -> io::Result<LoroMap> {
+    let root = doc.get_map(crate::ROOT);
+    let blocks = test_child_map(&root, crate::BLOCKS_BY_ID)?;
+    for block_id in blocks.keys().map(|key| key.to_string()) {
+      let block = test_child_map(&blocks, &block_id)?;
+      if test_map_string_opt(&block, "kind").as_deref() == Some(kind) {
+        return Ok(block);
+      }
+    }
+    Err(io::Error::new(io::ErrorKind::InvalidData, format!("{kind} block is missing")))
+  }
+
+  fn first_cell_map(table: &LoroMap) -> io::Result<LoroMap> {
+    let cells_by_id = test_child_map(table, "cells_by_id")?;
+    let cell_id = cells_by_id
+      .keys()
+      .next()
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "table cell is missing"))?
+      .to_string();
+    test_child_map(&cells_by_id, &cell_id)
+  }
+
+  fn test_child_map(parent: &LoroMap, key: &str) -> io::Result<LoroMap> {
+    match parent.get(key) {
+      Some(ValueOrContainer::Container(container)) => container
+        .into_map()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("`{key}` is not a map"))),
+      _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("missing map `{key}`"))),
+    }
+  }
+
+  fn test_child_movable_list(parent: &LoroMap, key: &str) -> io::Result<loro::LoroMovableList> {
+    match parent.get(key) {
+      Some(ValueOrContainer::Container(Container::MovableList(list))) => Ok(list),
+      _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("missing movable list `{key}`"))),
+    }
+  }
+
+  fn test_child_text(parent: &LoroMap, key: &str) -> io::Result<loro::LoroText> {
+    match parent.get(key) {
+      Some(ValueOrContainer::Container(container)) => container
+        .into_text()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, format!("`{key}` is not text"))),
+      _ => Err(io::Error::new(io::ErrorKind::InvalidData, format!("missing text `{key}`"))),
+    }
+  }
+
+  fn test_ordered_ids(parent: &LoroMap, key: &str) -> io::Result<Vec<String>> {
+    Ok(
+      test_child_movable_list(parent, key)?
+        .to_vec()
+        .into_iter()
+        .filter_map(|value| match value {
+          LoroValue::String(value) => Some(value.to_string()),
+          _ => None,
+        })
+        .collect(),
+    )
+  }
+
+  fn test_map_string(map: &LoroMap, key: &str) -> io::Result<String> {
+    test_map_string_opt(map, key).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("missing string `{key}`")))
+  }
+
+  fn test_map_string_opt(map: &LoroMap, key: &str) -> Option<String> {
+    map.get(key).and_then(|value| match value {
+      ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
+      _ => None,
+    })
   }
 
   fn loro_test_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {

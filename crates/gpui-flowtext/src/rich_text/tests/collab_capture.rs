@@ -100,6 +100,31 @@ fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAp
 }
 
 #[gpui::test]
+fn applying_collab_asset_records_updates_asset_cache(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      let asset_id = AssetId(42);
+      let bytes = vec![1, 2, 3, 4];
+      let record = AssetRecord {
+        id: asset_id,
+        mime_type: "image/png".into(),
+        original_name: Some("figure.png".into()),
+        content_hash: AssetRecord::stable_content_hash(&bytes),
+        bytes: std::sync::Arc::new(bytes),
+      };
+      let before_generation = editor.edit_generation();
+      editor.apply_collab_asset_records(&[(asset_id, record.clone())], cx);
+
+      assert_eq!(editor.document().assets.assets.get(&asset_id), Some(&record));
+      assert!(editor.edit_generation() > before_generation);
+      assert!(!editor.pending_scroll_head_after_layout_for_test());
+    });
+  });
+}
+
+#[gpui::test]
 fn own_collaboration_caret_color_can_be_toggled_off(cx: &mut gpui::TestAppContext) {
   let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
 

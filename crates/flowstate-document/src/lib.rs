@@ -1,4 +1,5 @@
 pub mod package;
+mod package_search;
 pub mod loro_import;
 pub mod loro_projection;
 pub mod loro_schema;

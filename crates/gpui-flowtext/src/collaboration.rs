@@ -135,6 +135,8 @@ pub enum SemanticEditCommand {
   },
   ReplaceBlock {
     block: Option<BlockId>,
+    block_ix: usize,
+    after: InputBlock,
   },
   ReplaceDocument,
 }

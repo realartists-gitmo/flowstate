@@ -6,7 +6,7 @@ use flowstate_document::{ROOT, loro_schema::ASSETS_BY_ID};
 use gpui::{Context, SharedString};
 use loro::{Container, LoroValue, ValueOrContainer};
 
-use crate::rich_text_element::{AssetId, AssetRecord, CollabPatch};
+use crate::rich_text_element::{AssetId, AssetRecord};
 
 use super::CollabSession;
 
@@ -59,13 +59,10 @@ pub(super) fn schedule_missing_assets(
 
   let placeholders = missing_assets
     .iter()
-    .map(|meta| CollabPatch::AssetArrived {
-      id: AssetId(meta.asset_id),
-      record: meta.placeholder_record(),
-    })
+    .map(|meta| (AssetId(meta.asset_id), meta.placeholder_record()))
     .collect::<Vec<_>>();
-  tracing::debug!(session = %session.session, placeholders = placeholders.len(), "queueing collaboration asset placeholders");
-  session.apply_or_queue_patches(placeholders, cx);
+  tracing::debug!(session = %session.session, placeholders = placeholders.len(), "queueing collaboration asset placeholder records");
+  session.queue_asset_records(placeholders, cx);
 
   let candidates = session.pull_candidates(preferred_peer);
   if candidates.is_empty() {
@@ -114,7 +111,7 @@ fn start_asset_pull(
         Ok(Ok(bytes)) => match meta.record_from_bytes(bytes.bytes) {
           Ok(record) => {
             tracing::debug!(session = %session_id, ?id, bytes = record.bytes.len(), "collaboration asset pull succeeded");
-            session.apply_or_queue_patches(vec![CollabPatch::AssetArrived { id, record }], cx);
+            session.queue_asset_records(vec![(id, record)], cx);
           },
           Err(error) => tracing::warn!(session = %session_id, ?id, error = %format_args!("{error:#}"), "rejected fetched collaboration asset"),
         },

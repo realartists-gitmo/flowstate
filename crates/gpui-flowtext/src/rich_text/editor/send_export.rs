@@ -9,10 +9,19 @@ pub trait DocumentExportAdapter: Send + Sync + 'static {
   fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()>;
 }
 
+pub trait DocumentRecoveryAdapter: Send + Sync + 'static {
+  fn write_recovery_snapshot(&self, recovery_path: &Path, source_path: Option<&Path>, document: &Document) -> io::Result<()>;
+}
+
 static DOCUMENT_EXPORT_ADAPTER: OnceLock<Arc<dyn DocumentExportAdapter>> = OnceLock::new();
+static DOCUMENT_RECOVERY_ADAPTER: OnceLock<Arc<dyn DocumentRecoveryAdapter>> = OnceLock::new();
 
 pub fn set_document_export_adapter(adapter: Arc<dyn DocumentExportAdapter>) -> Result<(), Arc<dyn DocumentExportAdapter>> {
   DOCUMENT_EXPORT_ADAPTER.set(adapter)
+}
+
+pub fn set_document_recovery_adapter(adapter: Arc<dyn DocumentRecoveryAdapter>) -> Result<(), Arc<dyn DocumentRecoveryAdapter>> {
+  DOCUMENT_RECOVERY_ADAPTER.set(adapter)
 }
 
 #[hotpath::measure_all]
@@ -200,10 +209,119 @@ fn write_document_export(output_path: &Path, document: &Document, format: Docume
     return adapter.write_document_export(output_path, document, format);
   }
   match format {
-    DocumentExportFormat::Native | DocumentExportFormat::NativeWithExtension(_) => write_document(output_path, document),
+    DocumentExportFormat::Native => write_document(output_path, document),
+    DocumentExportFormat::NativeWithExtension(extension) if extension.eq_ignore_ascii_case(DEFAULT_DOCUMENT_EXTENSION) => {
+      write_document(output_path, document)
+    },
+    DocumentExportFormat::NativeWithExtension(extension) => Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      format!("native export .{extension} requires a host-application adapter"),
+    )),
     DocumentExportFormat::Docx | DocumentExportFormat::Pdf => Err(io::Error::new(
       io::ErrorKind::Unsupported,
       "DOCX and PDF export are host-application adapters; gpui-flowtext only writes its native binary format directly",
     )),
+  }
+}
+
+#[hotpath::measure]
+fn write_native_document(output_path: &Path, document: &Document) -> io::Result<()> {
+  if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
+    return adapter.write_document_export(output_path, document, DocumentExportFormat::Native);
+  }
+  if path_extension_requires_host_adapter(output_path) {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "native save for a host-native document requires a host-application adapter",
+    ));
+  }
+  write_document(output_path, document)
+}
+
+#[hotpath::measure]
+fn write_recovery_snapshot(recovery_path: &Path, source_path: Option<&Path>, document: &Document) -> io::Result<()> {
+  if let Some(adapter) = DOCUMENT_RECOVERY_ADAPTER.get() {
+    return adapter.write_recovery_snapshot(recovery_path, source_path, document);
+  }
+  if recovery_requires_host_adapter(recovery_path, source_path) {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      "recovery snapshot for a host-native document requires a host-application adapter",
+    ));
+  }
+  write_document(recovery_path, document)
+}
+
+#[hotpath::measure]
+fn recovery_requires_host_adapter(recovery_path: &Path, source_path: Option<&Path>) -> bool {
+  if source_path.is_some_and(path_extension_requires_host_adapter) {
+    return true;
+  }
+  recovery_source_extension(recovery_path).is_some_and(|extension| extension.eq_ignore_ascii_case("db8"))
+    || recovery_path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("db8"))
+}
+
+#[hotpath::measure]
+fn path_extension_requires_host_adapter(path: &Path) -> bool {
+  path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| !extension.eq_ignore_ascii_case(DEFAULT_DOCUMENT_EXTENSION))
+}
+
+#[hotpath::measure]
+fn recovery_source_extension(path: &Path) -> Option<&str> {
+  let file_name = path.file_name()?.to_str()?;
+  let lower = file_name.to_ascii_lowercase();
+  if !lower.ends_with(".recovery") {
+    return None;
+  }
+  let source_name = &file_name[..file_name.len() - ".recovery".len()];
+  Path::new(source_name).extension()?.to_str()
+}
+
+#[cfg(test)]
+mod send_export_tests {
+  use super::*;
+
+  #[test]
+  fn native_extension_without_adapter_does_not_write_db8_as_gptx() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("document.db8");
+
+    let error = write_document_export(&path, &blank_document(), DocumentExportFormat::NativeWithExtension("db8")).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert!(!path.exists());
+  }
+
+  #[test]
+  fn native_save_without_adapter_does_not_write_db8_as_gptx() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("document.db8");
+
+    let error = write_native_document(&path, &blank_document()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert!(!path.exists());
+  }
+
+  #[test]
+  fn recovery_for_db8_source_without_adapter_is_unsupported() {
+    let error = write_recovery_snapshot(
+      Path::new("document.db8.recovery"),
+      Some(Path::new("document.db8")),
+      &blank_document(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+  }
+
+  #[test]
+  fn recovery_for_db8_path_without_source_without_adapter_is_unsupported() {
+    let error = write_recovery_snapshot(Path::new("collaboration.db8"), None, &blank_document()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
   }
 }

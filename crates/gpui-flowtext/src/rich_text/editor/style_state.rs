@@ -271,7 +271,7 @@ impl RichTextEditor {
         .background_executor()
         .spawn(async move {
           let document = detach_document_for_background_write(&document);
-          let result = write_document(&path, &document);
+          let result = write_native_document(&path, &document);
           if result.is_ok()
             && let Some(recovery_path) = recovery_path
           {

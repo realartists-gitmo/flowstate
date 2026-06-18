@@ -24,7 +24,7 @@ use loro::Subscription as LoroSubscription;
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
-use crate::rich_text_element::{AssetId, CollabPatch, Document, EditorEvent, RichTextEditor, UndoRedirect};
+use crate::rich_text_element::{AssetId, AssetRecord, Document, EditorEvent, RichTextEditor, UndoRedirect};
 
 use super::presence_view;
 
@@ -109,7 +109,8 @@ pub struct CollabSession {
   runtime: Option<CrdtRuntime>,
   editor: Option<Entity<RichTextEditor>>,
   panel_id: Option<Uuid>,
-  pending_remote_patches: Vec<CollabPatch>,
+  // UI-only asset cache records fetched after Loro metadata arrives.
+  pending_asset_records: Vec<(AssetId, AssetRecord)>,
   pending_remote_updates: Vec<Vec<u8>>,
   presence: Option<PresenceStore>,
   net_tx: CommandSender,
@@ -180,7 +181,7 @@ impl CollabSession {
       runtime: Some(runtime),
       editor: Some(editor),
       panel_id: Some(panel_id),
-      pending_remote_patches: Vec::new(),
+      pending_asset_records: Vec::new(),
       pending_remote_updates: Vec::new(),
       presence: None,
       net_tx,
@@ -226,7 +227,7 @@ impl CollabSession {
       runtime: None,
       editor: None,
       panel_id: None,
-      pending_remote_patches: Vec::new(),
+      pending_asset_records: Vec::new(),
       pending_remote_updates: Vec::new(),
       presence: None,
       net_tx,
@@ -483,7 +484,7 @@ impl CollabSession {
       session = %self.session,
       %panel_id,
       pending_remote_updates = self.pending_remote_updates.len(),
-      pending_remote_patches = self.pending_remote_patches.len(),
+      pending_asset_records = self.pending_asset_records.len(),
       "attaching joined collaboration editor",
     );
     self.panel_id = Some(panel_id);
@@ -494,7 +495,7 @@ impl CollabSession {
     for update in pending_updates {
       self.import_update_bytes(&update, cx)?;
     }
-    self.flush_pending_remote_patches(cx);
+    self.flush_pending_asset_records(cx);
     asset_transfer::schedule_missing_assets(self, None, cx);
     self.publish_digest();
     cx.notify();
@@ -607,7 +608,7 @@ impl CollabSession {
     {
       tracing::warn!(session = %self.session, error = %error, "queueing collaboration leave-session command failed during detach");
     }
-    self.flush_pending_remote_patches(cx);
+    self.flush_pending_asset_records(cx);
 
     if let Some(editor) = self.editor.clone() {
       editor.update(cx, |editor, cx| {
@@ -626,7 +627,7 @@ impl CollabSession {
     self.loro_subscriptions.clear();
     self.presence = None;
     self.runtime = None;
-    self.pending_remote_patches.clear();
+    self.pending_asset_records.clear();
     self.pending_remote_updates.clear();
     self.neighbors.clear();
     self.asset_pulls_in_flight.clear();
@@ -755,7 +756,6 @@ impl CollabSession {
     document.assets = current.assets;
     document.theme = current.theme;
     editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(document, cx));
-    self.pending_remote_patches.clear();
     self.last_document_activity = Instant::now();
     self.last_self_check = None;
     self.refresh_external_carets(cx);
@@ -898,7 +898,7 @@ impl CollabSession {
           session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
           return;
         }
-        session.flush_pending_remote_patches(cx);
+        session.flush_pending_asset_records(cx);
       }));
 
     self

@@ -1,5 +1,27 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
+  // Asset bytes are transferred out-of-band; remote document content is applied
+  // by replacing the Loro projection snapshot, not by feeding document patches.
+  pub fn apply_collab_asset_records(&mut self, asset_records: &[(AssetId, AssetRecord)], cx: &mut Context<Self>) {
+    if asset_records.is_empty() {
+      return;
+    }
+    debug_assert!(self.undo_stack.is_empty());
+    debug_assert!(self.redo_stack.is_empty());
+
+    self.suppress_collab_capture = self.suppress_collab_capture.saturating_add(1);
+    for (id, record) in asset_records {
+      self.document.assets.assets.insert(*id, record.clone());
+    }
+    self.suppress_collab_capture = self.suppress_collab_capture.saturating_sub(1);
+    let generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    self.mark_document_changed_with_ops(generation, false, None, cx);
+    self.after_formatting_mutation(cx);
+  }
+
+  // Retained for local derived UI-diff helpers; network collaboration applies
+  // Loro projection snapshots instead.
   pub fn apply_collab_patches(&mut self, patches: &[CollabPatch], cx: &mut Context<Self>) {
     if patches.is_empty() {
       return;

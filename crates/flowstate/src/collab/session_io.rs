@@ -12,7 +12,7 @@ use flowstate_collab::{
 use gpui::Context;
 use loro::{ExportMode, VersionVector};
 
-use crate::rich_text_element::{AssetId, CollabPatch, UndoRedirect};
+use crate::rich_text_element::{AssetId, AssetRecord, UndoRedirect};
 
 use super::{CollabSession, DetachReason};
 
@@ -164,29 +164,30 @@ impl CollabSession {
     }
   }
 
-  pub(super) fn flush_pending_remote_patches(&mut self, cx: &mut Context<Self>) -> bool {
+  pub(super) fn flush_pending_asset_records(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(editor) = self.editor.clone() else {
-      tracing::trace!(session = %self.session, pending_patches = self.pending_remote_patches.len(), "cannot flush remote collaboration patches because editor is missing");
+      tracing::trace!(session = %self.session, pending_asset_records = self.pending_asset_records.len(), "cannot flush collaboration asset records because editor is missing");
       return false;
     };
-    if self.pending_remote_patches.is_empty() || editor.read(cx).collab_apply_deferred() {
+    let deferred = editor.read(cx).collab_apply_deferred();
+    if self.pending_asset_records.is_empty() || deferred {
       tracing::trace!(
         session = %self.session,
-        pending_patches = self.pending_remote_patches.len(),
-        deferred = editor.read(cx).collab_apply_deferred(),
-        "remote collaboration patch flush skipped",
+        pending_asset_records = self.pending_asset_records.len(),
+        deferred,
+        "collaboration asset record flush skipped",
       );
       return false;
     }
-    let patches = std::mem::take(&mut self.pending_remote_patches);
-    tracing::debug!(session = %self.session, patches = patches.len(), "flushing remote collaboration patches to editor");
+    let asset_records = std::mem::take(&mut self.pending_asset_records);
+    tracing::debug!(session = %self.session, asset_records = asset_records.len(), "flushing collaboration asset records to editor");
     editor.update(cx, |editor, cx| {
       editor.clear_undo_redo_stacks();
-      editor.apply_collab_patches(&patches, cx);
+      editor.apply_collab_asset_records(&asset_records, cx);
     });
     self.last_document_activity = std::time::Instant::now();
     self.refresh_external_carets(cx);
-    tracing::debug!(session = %self.session, patches = patches.len(), "remote collaboration patches flushed to editor");
+    tracing::debug!(session = %self.session, asset_records = asset_records.len(), "collaboration asset records flushed to editor");
     true
   }
 
@@ -304,18 +305,18 @@ impl CollabSession {
     Ok(AssetBytes { bytes })
   }
 
-  pub(super) fn apply_or_queue_patches(&mut self, mut patches: Vec<CollabPatch>, cx: &mut Context<Self>) {
-    if patches.is_empty() {
-      tracing::trace!(session = %self.session, "no remote collaboration patches to queue");
+  pub(super) fn queue_asset_records(&mut self, mut asset_records: Vec<(AssetId, AssetRecord)>, cx: &mut Context<Self>) {
+    if asset_records.is_empty() {
+      tracing::trace!(session = %self.session, "no collaboration asset records to queue");
       return;
     }
-    for patch in &patches {
-      trace_collab_patch(self.session, patch);
+    for (id, record) in &asset_records {
+      trace_asset_record(self.session, *id, record);
     }
-    tracing::debug!(session = %self.session, patches = patches.len(), pending_before = self.pending_remote_patches.len(), "queueing remote collaboration patches");
-    self.pending_remote_patches.append(&mut patches);
-    let flushed = self.flush_pending_remote_patches(cx);
-    tracing::trace!(session = %self.session, pending_after = self.pending_remote_patches.len(), flushed, "remote collaboration patch queue updated");
+    tracing::debug!(session = %self.session, asset_records = asset_records.len(), pending_before = self.pending_asset_records.len(), "queueing collaboration asset records");
+    self.pending_asset_records.append(&mut asset_records);
+    let flushed = self.flush_pending_asset_records(cx);
+    tracing::trace!(session = %self.session, pending_after = self.pending_asset_records.len(), flushed, "collaboration asset record queue updated");
   }
 
   pub(super) fn start_update_pull(&mut self, from: flowstate_collab::ids::PeerId, our_vv: Vec<u8>, cx: &mut Context<Self>) {
@@ -378,31 +379,6 @@ fn log_direct_serve_result(session: SessionId, kind: &'static str, result: &Resu
   }
 }
 
-fn trace_collab_patch(session: SessionId, patch: &CollabPatch) {
-  match patch {
-    CollabPatch::ParagraphText { row, delta_utf8, .. } => {
-      tracing::trace!(%session, patch_kind = "paragraph_text", row, deltas = delta_utf8.len(), "queued collaboration patch");
-    },
-    CollabPatch::ParagraphStyle { row, style } => {
-      tracing::trace!(%session, patch_kind = "paragraph_style", row, ?style, "queued collaboration patch");
-    },
-    CollabPatch::ParagraphRuns { row, runs } => {
-      tracing::trace!(%session, patch_kind = "paragraph_runs", row, runs = runs.len(), "queued collaboration patch");
-    },
-    CollabPatch::ReplaceObjectBlock { row, block } => {
-      tracing::trace!(%session, patch_kind = "replace_object_block", row, block_id = ?block.block_id, "queued collaboration patch");
-    },
-    CollabPatch::InsertBlocks { row, blocks } => {
-      tracing::trace!(%session, patch_kind = "insert_blocks", row, blocks = blocks.len(), "queued collaboration patch");
-    },
-    CollabPatch::DeleteBlocks { row, count } => {
-      tracing::trace!(%session, patch_kind = "delete_blocks", row, count, "queued collaboration patch");
-    },
-    CollabPatch::MoveBlock { from, to } => {
-      tracing::trace!(%session, patch_kind = "move_block", from, to, "queued collaboration patch");
-    },
-    CollabPatch::AssetArrived { id, record } => {
-      tracing::trace!(%session, patch_kind = "asset_arrived", ?id, bytes = record.bytes.len(), "queued collaboration patch");
-    },
-  }
+fn trace_asset_record(session: SessionId, id: AssetId, record: &AssetRecord) {
+  tracing::trace!(%session, ?id, bytes = record.bytes.len(), placeholder = record.is_loading_placeholder(), "queued collaboration asset record");
 }

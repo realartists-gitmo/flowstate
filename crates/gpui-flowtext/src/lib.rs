@@ -44,8 +44,8 @@ pub mod persistence_api {
 
 pub mod host {
   pub use crate::{
-    AssetResolver, BlockKindId, DocumentExportAdapter, DocumentExportFormat, DocumentSerializer, ExternalFormatExporter,
-    set_document_export_adapter,
+    AssetResolver, BlockKindId, DocumentExportAdapter, DocumentExportFormat, DocumentRecoveryAdapter, DocumentSerializer,
+    ExternalFormatExporter, set_document_export_adapter, set_document_recovery_adapter,
   };
 }
 

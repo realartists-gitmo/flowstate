@@ -17,7 +17,8 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 use crate::app_settings::{load_app_settings, load_keymap};
 use crate::commands::register_keymap;
 use crate::rich_text_element::{
-  Document, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter, write_db8,
+  Document, DocumentExportAdapter, DocumentExportFormat, DocumentRecoveryAdapter, RichTextEditor, demo_document, set_document_export_adapter,
+  set_document_recovery_adapter, write_db8,
 };
 use crate::workspace::open_workspace_window;
 
@@ -290,9 +291,9 @@ pub fn write_demo_document() -> anyhow::Result<()> {
   Ok(())
 }
 
-struct FlowstateDocumentExportAdapter;
+struct FlowstateFlowtextAdapter;
 
-impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
+impl DocumentExportAdapter for FlowstateFlowtextAdapter {
   fn send_output_directory(&self, source_path: Option<&Path>, recovery_path: Option<&Path>) -> Option<PathBuf> {
     if crate::app_settings::load_send_to_document_directory() {
       source_path
@@ -314,9 +315,17 @@ impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
   }
 }
 
+impl DocumentRecoveryAdapter for FlowstateFlowtextAdapter {
+  fn write_recovery_snapshot(&self, recovery_path: &Path, _source_path: Option<&Path>, document: &Document) -> io::Result<()> {
+    write_db8(recovery_path, document)
+  }
+}
+
 #[hotpath::measure]
 fn install_flowtext_adapters() {
-  let _ = set_document_export_adapter(Arc::new(FlowstateDocumentExportAdapter));
+  let adapter = Arc::new(FlowstateFlowtextAdapter);
+  let _ = set_document_export_adapter(adapter.clone());
+  let _ = set_document_recovery_adapter(adapter);
 }
 
 /// Run the rich text processor by itself for focused component development.

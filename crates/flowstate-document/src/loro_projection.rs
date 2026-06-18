@@ -5,7 +5,7 @@ use gpui_flowtext::{
   InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
   InputTableColumnWidth, InputTableRow, InputTableStyle, RunSemanticStyle, RunStyles, document_from_input_blocks,
 };
-use loro::{LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
+use loro::{Container, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
 
 use crate::{
@@ -14,9 +14,13 @@ use crate::{
 };
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<Document> {
-  let projector = Projector::new(doc)?;
-  let blocks = projector.body_blocks()?;
+  let blocks = input_blocks_from_loro(doc)?;
   Ok(document_from_input_blocks(DocumentTheme::clone(&flowstate_document_theme()), blocks))
+}
+
+pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
+  let projector = Projector::new(doc)?;
+  projector.body_blocks()
 }
 
 struct Projector<'a> {
@@ -171,10 +175,16 @@ impl<'a> Projector<'a> {
     let columns = child_map(table, "columns_by_id")?.ok_or_else(|| invalid("table has no column map"))?;
     let rows_by_id = child_map(table, "rows_by_id")?.ok_or_else(|| invalid("table has no row map"))?;
     let cells_by_id = child_map(table, "cells_by_id")?.ok_or_else(|| invalid("table has no cell map"))?;
-    let column_widths = ordered_ids(table, "column_order")?
-      .into_iter()
+    let column_ids = ordered_ids(table, "column_order")?;
+    let column_positions = column_ids
+      .iter()
+      .enumerate()
+      .map(|(ix, column_id)| (column_id.clone(), ix))
+      .collect::<BTreeMap<_, _>>();
+    let column_widths = column_ids
+      .iter()
       .map(|column_id| {
-        let column = child_map(&columns, &column_id)?.ok_or_else(|| invalid(format!("missing table column `{column_id}`")))?;
+        let column = child_map(&columns, column_id)?.ok_or_else(|| invalid(format!("missing table column `{column_id}`")))?;
         table_column_width(&column)
       })
       .collect::<io::Result<Vec<_>>>()?;
@@ -183,16 +193,20 @@ impl<'a> Projector<'a> {
     for row_id in ordered_ids(table, "row_order")? {
       let _row = child_map(&rows_by_id, &row_id)?.ok_or_else(|| invalid(format!("missing table row `{row_id}`")))?;
       let mut row_cells = Vec::new();
-      let mut cell_ids = cells_by_id
-        .keys()
-        .map(|key| key.to_string())
-        .filter_map(|cell_id| {
-          let cell = child_map(&cells_by_id, &cell_id).ok().flatten()?;
-          (map_string_opt(&cell, "row_id").ok().flatten().as_deref() == Some(row_id.as_str())).then_some((cell_id, cell))
-        })
-        .collect::<Vec<_>>();
-      cell_ids.sort_by_key(|(_, cell)| map_i64_opt(cell, "column_index").ok().flatten().unwrap_or(i64::MAX));
-      for (_, cell) in cell_ids {
+      let mut cells_by_column = BTreeMap::new();
+      for cell_id in cells_by_id.keys().map(|key| key.to_string()) {
+        let Some(cell) = child_map(&cells_by_id, &cell_id)? else {
+          continue;
+        };
+        if map_string_opt(&cell, "row_id")?.as_deref() != Some(row_id.as_str()) {
+          continue;
+        }
+        let column_id = map_string(&cell, "column_id")?;
+        if let Some(column_ix) = column_positions.get(&column_id) {
+          cells_by_column.insert(*column_ix, cell);
+        }
+      }
+      for (_, cell) in cells_by_column {
         row_cells.push(self.table_cell(&cell)?);
       }
       rows.push(InputTableRow { cells: row_cells });
@@ -210,7 +224,7 @@ impl<'a> Projector<'a> {
   fn table_cell(&self, cell: &LoroMap) -> io::Result<InputTableCell> {
     let flow_id = map_string(cell, "flow_id")?;
     let flow = self.flow_text(&flow_id)?;
-    let object_blocks = self.cell_nested_tables(cell)?;
+    let object_blocks = self.cell_nested_tables(cell, &flow)?;
     let mut projected = Vec::new();
     self.push_flow_blocks(&flow, &object_blocks, &mut projected)?;
     let mut blocks = projected
@@ -234,18 +248,26 @@ impl<'a> Projector<'a> {
     })
   }
 
-  fn cell_nested_tables(&self, cell: &LoroMap) -> io::Result<BTreeMap<usize, LoroMap>> {
+  fn cell_nested_tables(&self, cell: &LoroMap, flow: &LoroText) -> io::Result<BTreeMap<usize, LoroMap>> {
     let mut tables = BTreeMap::new();
-    for key in cell.keys() {
-      let key = key.to_string();
-      if !key.starts_with("nested_table.") {
-        continue;
-      }
-      let Some(owner) = child_map(cell, &key)? else {
+    let Some(tables_by_id) = child_map(cell, "nested_tables_by_id")? else {
+      return Ok(tables);
+    };
+    for nested_table_id in ordered_ids(cell, "nested_table_ids")? {
+      let Some(owner) = child_map(&tables_by_id, &nested_table_id)? else {
         continue;
       };
-      if let Some(pos) = key.rsplit('.').next().and_then(|segment| segment.parse::<usize>().ok()) {
-        tables.insert(pos, owner);
+      let Some(cursor_bytes) = map_binary_opt(&owner, "anchor_cursor")? else {
+        continue;
+      };
+      let Ok(cursor) = Cursor::decode(&cursor_bytes) else {
+        continue;
+      };
+      if cursor.container != flow.id() {
+        continue;
+      }
+      if let Ok(pos) = self.doc.get_cursor_pos(&cursor) {
+        tables.insert(pos.current.pos, owner);
       }
     }
     Ok(tables)
@@ -342,15 +364,15 @@ fn child_text(parent: &LoroMap, key: &str) -> io::Result<Option<LoroText>> {
 }
 
 fn ordered_ids(map: &LoroMap, key: &str) -> io::Result<Vec<String>> {
-  let Some(list) = map.get(key).and_then(|value| match value {
-    ValueOrContainer::Container(container) => container.into_list().ok(),
-    ValueOrContainer::Value(_) => None,
-  }) else {
+  let Some(ValueOrContainer::Container(container)) = map.get(key) else {
     return Ok(Vec::new());
   };
+  let value = match container {
+    Container::MovableList(list) => list.get_deep_value(),
+    _ => return Ok(Vec::new()),
+  };
   Ok(
-    list
-      .get_deep_value()
+    value
       .into_list()
       .unwrap_or_default()
       .iter()

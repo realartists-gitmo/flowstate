@@ -167,6 +167,8 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
       block: self.identity_map.block_id(block_ix),
+      block_ix,
+      after: input_block_from_block(&after),
     }];
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),

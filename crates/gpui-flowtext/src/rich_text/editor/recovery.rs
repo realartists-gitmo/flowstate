@@ -148,6 +148,7 @@ impl RichTextEditor {
     let Some(path) = self.recovery_path.clone() else {
       return;
     };
+    let source_path = self.document_path.clone();
     if !self.has_unsaved_changes() {
       return;
     }
@@ -195,7 +196,7 @@ impl RichTextEditor {
         .background_executor()
         .spawn(async move {
           let document = detach_document_for_background_write(&document);
-          write_document(path, &document)
+          write_recovery_snapshot(&path, source_path.as_deref(), &document)
         })
         .await;
       log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));
