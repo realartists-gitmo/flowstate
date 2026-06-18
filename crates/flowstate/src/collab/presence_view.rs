@@ -2,10 +2,9 @@ use std::path::PathBuf;
 
 use flowstate_collab::{
   SessionId,
-  binding::DocBinding,
   presence::{PresenceSelection, PresenceStore},
-  schema::body_text,
 };
+use flowstate_document::loro_schema::body_text;
 use loro::{
   ContainerTrait as _, LoroDoc,
   cursor::{Cursor, PosType, Side},
@@ -13,7 +12,7 @@ use loro::{
 
 use crate::rich_text_element::{Document, DocumentOffset, ExternalCaret, RichTextEditor, global_byte, global_to_document_offset};
 
-pub fn selection_for_editor(doc: &LoroDoc, editor: &RichTextEditor, _binding: &DocBinding) -> Option<PresenceSelection> {
+pub fn selection_for_editor(doc: &LoroDoc, editor: &RichTextEditor) -> Option<PresenceSelection> {
   let selection = editor.selection().clone();
   Some(PresenceSelection {
     anchor: cursor_bytes_for_offset(doc, editor.document(), selection.anchor)?,

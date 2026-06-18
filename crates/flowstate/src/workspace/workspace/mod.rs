@@ -46,7 +46,7 @@ use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
   ArmedInlineTool, CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
-  load_or_create_document, paragraph_byte_range, paragraph_index_for_id,
+  paragraph_byte_range, paragraph_index_for_id,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{

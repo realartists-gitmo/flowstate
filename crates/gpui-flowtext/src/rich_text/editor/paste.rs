@@ -29,12 +29,6 @@ impl RichTextEditor {
     {
       return false;
     }
-    let Some(paragraph_id) = self
-      .identity_map
-      .paragraph_id(self.selection.head.paragraph)
-    else {
-      return false;
-    };
     let paragraph = &fragment.paragraphs[0];
     if paragraph.runs.iter().all(|run| run.text.is_empty()) {
       return true;
@@ -53,8 +47,11 @@ impl RichTextEditor {
       head: inserted_end,
     };
     self.emit_selection_changed(cx);
-    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
-      start_paragraph: Some(paragraph_id),
+    let semantic_commands = vec![SemanticEditCommand::ReplaceParagraphSpan {
+      start: Some(DocumentOffset {
+        paragraph: offset.paragraph,
+        byte: 0,
+      }),
       before: before_span.clone(),
       after: after_span.clone(),
     }];
@@ -68,12 +65,12 @@ impl RichTextEditor {
         inserted_end,
         fragment: fragment.clone(),
       }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.layout_invalidation_hint = Some(offset.paragraph..offset.paragraph + 1);
     self.after_text_mutation(cx);
-    self.mark_document_changed_with_ops(after_generation, false, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, false, Some(&semantic_commands), cx);
     true
   }
 

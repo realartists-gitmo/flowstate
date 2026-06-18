@@ -7,9 +7,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
   SessionId,
-  binding::DocBinding,
+  crdt_runtime::apply_editor_semantic_command,
   ids::PeerId,
-  local_apply::LocalApplier,
   net::{
     NetCommand, PeerAddr, PublishPayload,
     anti_entropy::AntiEntropyState,
@@ -17,10 +16,9 @@ use flowstate_collab::{
     runtime::CommandSender,
   },
   presence::PresenceStore,
-  projection,
   proto_gossip::GossipMsg,
-  schema,
 };
+use flowstate_document::{document_from_loro, document_to_loro};
 use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::{LoroDoc, Subscription as LoroSubscription, UndoManager};
 use uuid::Uuid;
@@ -109,7 +107,6 @@ pub struct CollabSession {
   title: String,
   phase: SessionPhase,
   doc: Option<LoroDoc>,
-  binding: Option<DocBinding>,
   editor: Option<Entity<RichTextEditor>>,
   panel_id: Option<Uuid>,
   pending_remote_patches: Vec<CollabPatch>,
@@ -163,9 +160,7 @@ impl CollabSession {
     document: Document,
     net_tx: CommandSender,
   ) -> Result<Self> {
-    let doc = schema::new_configured_doc();
-    projection::populate_from_document(&doc, session, &title, &document)?;
-    let binding = DocBinding::build(&doc, &document)?;
+    let doc = document_to_loro(&document, &title).context("creating Loro-native collaboration document")?;
     // Direct serving is network-bound and should backpressure rather than grow without limit.
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     // Undo redirects can burst under key-repeat, but a stuck pump should not retain unbounded UI events.
@@ -186,7 +181,6 @@ impl CollabSession {
       title,
       phase: SessionPhase::Creating,
       doc: Some(doc),
-      binding: Some(binding),
       editor: Some(editor),
       panel_id: Some(panel_id),
       pending_remote_patches: Vec::new(),
@@ -235,7 +229,6 @@ impl CollabSession {
       title,
       phase: SessionPhase::Joining(JoinStage::Resolving),
       doc: None,
-      binding: None,
       editor: None,
       panel_id: None,
       pending_remote_patches: Vec::new(),
@@ -488,7 +481,7 @@ impl CollabSession {
   }
 
   pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.binding.is_none() {
+    if self.doc.is_none() {
       tracing::warn!(session = %self.session, %panel_id, "cannot attach joined editor before snapshot load finishes");
       bail!("collaboration snapshot has not finished loading");
     }
@@ -580,13 +573,10 @@ impl CollabSession {
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
 
-    let doc = schema::new_configured_doc();
-    doc
-      .import_with(snapshot, "remote")
-      .context("importing collaboration snapshot failed")?;
-    projection::verify_lineage(&doc, self.session)?;
-    let document = projection::document_from_loro(&doc, load_document_theme())?;
-    let binding = DocBinding::build(&doc, &document)?;
+    let doc = flowstate_document::new_loro_document(&self.title).context("creating Loro-native join document")?;
+    doc.import_with(snapshot, "remote").context("importing collaboration snapshot failed")?;
+    let mut document = document_from_loro(&doc).context("projecting joined Loro-native document")?;
+    document.theme = load_document_theme();
     tracing::info!(
       session = %self.session,
       paragraphs = document.paragraphs.len(),
@@ -596,7 +586,6 @@ impl CollabSession {
     );
 
     self.doc = Some(doc);
-    self.binding = Some(binding);
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
@@ -645,7 +634,6 @@ impl CollabSession {
     self.loro_subscriptions.clear();
     self.undo_manager = None;
     self.presence = None;
-    self.binding = None;
     self.doc = None;
     self.pending_remote_patches.clear();
     self.pending_remote_updates.clear();
@@ -686,7 +674,7 @@ impl CollabSession {
     let edit_count = edits.len();
     let operation_count = edits
       .iter()
-      .map(|edit| edit.operations.len())
+      .map(|edit| edit.semantic_commands.len())
       .sum::<usize>();
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
@@ -698,22 +686,23 @@ impl CollabSession {
       tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because Loro doc is missing");
       return Ok(());
     };
-    let Some(binding) = &mut self.binding else {
-      tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because binding is missing");
-      return Ok(());
-    };
-
     let mut applied = false;
     for edit in edits {
-      if edit.operations.is_empty() {
+      if edit.semantic_commands.is_empty() {
         continue;
       }
-      let operation_count = edit.operations.len();
-      if let Err(error) = (LocalApplier { doc, binding }).apply(&document, &edit.operations) {
-        tracing::error!(session = %self.session, operation_count, error = %format_args!("{error:#}"), "applying local collaboration edit failed");
-        return Err(error);
+      let command_count = edit.semantic_commands.len();
+      for command in &edit.semantic_commands {
+        let did_apply = apply_editor_semantic_command(doc, &document, command)?;
+        if !did_apply {
+          tracing::warn!(session = %self.session, ?command, "editor semantic collaboration command is not yet implemented by Loro runtime bridge");
+        }
       }
-      tracing::trace!(session = %self.session, operation_count, "applied local collaboration edit to Loro");
+      if let Err(error) = flowstate_document::document_from_loro(doc) {
+        tracing::error!(session = %self.session, command_count, error = %format_args!("{error:#}"), "projecting local semantic collaboration edit failed");
+        return Err(error.into());
+      }
+      tracing::trace!(session = %self.session, command_count, "applied local semantic collaboration edit to Loro");
       applied = true;
     }
     if applied {

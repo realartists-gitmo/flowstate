@@ -303,7 +303,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::ReplaceDocument];
+    let semantic_commands = vec![SemanticEditCommand::ReplaceDocument];
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
@@ -313,11 +313,11 @@ impl RichTextEditor {
         before: Box::new(before_document),
         after: Box::new(self.document.clone()),
       }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
   }
 
   fn insert_plain_text_fragment(&mut self, text: &str, cx: &mut Context<Self>) {

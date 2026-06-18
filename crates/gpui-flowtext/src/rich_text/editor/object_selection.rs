@@ -242,7 +242,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::ReplaceBlock {
+    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
       block: self.identity_map.block_id(drag.block_ix),
     }];
     self.undo_stack.push(EditRecord {
@@ -255,11 +255,11 @@ impl RichTextEditor {
         before: Block::Table(drag.before),
         after: Block::Table(after),
       }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     true
   }
 
@@ -455,7 +455,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::ReplaceDocument];
+    let semantic_commands = vec![SemanticEditCommand::ReplaceDocument];
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
@@ -465,11 +465,11 @@ impl RichTextEditor {
         before: Box::new(before_document),
         after: Box::new(after_document),
       }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     true
   }
 
@@ -501,9 +501,9 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = block_id.map_or_else(
-      || vec![CanonicalOperation::ReplaceDocument],
-      |block| vec![CanonicalOperation::DeleteBlock { block }],
+    let semantic_commands = block_id.map_or_else(
+      || vec![SemanticEditCommand::ReplaceDocument],
+      |block| vec![SemanticEditCommand::DeleteBlock { block }],
     );
     self.undo_stack.push(EditRecord {
       before_selection: before_selection.clone(),
@@ -511,13 +511,13 @@ impl RichTextEditor {
       after_selection: self.selection.clone(),
       after_generation,
       operations: vec![EditOperation::DeleteBlock { block_ix, block }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     true
   }
 

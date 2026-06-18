@@ -4,7 +4,8 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{
-  AssetId, AssetRecord, Block, BlockId, Document, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, RunStyles, TextRun,
+  AssetId, AssetRecord, Block, BlockId, Document, DocumentOffset, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle,
+  RunStyles, TextRun,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -90,23 +91,18 @@ where
 }
 
 #[derive(Clone, Debug)]
-pub enum CanonicalOperation {
+pub enum SemanticEditCommand {
   InsertText {
-    paragraph: ParagraphId,
-    byte: usize,
+    at: DocumentOffset,
     text: String,
     styles: RunStyles,
   },
   DeleteRange {
-    start_paragraph: ParagraphId,
-    start_byte: usize,
-    end_paragraph: ParagraphId,
-    end_byte: usize,
+    range: Range<DocumentOffset>,
   },
   SplitParagraph {
-    paragraph: ParagraphId,
-    byte: usize,
-    new_paragraph: ParagraphId,
+    at: DocumentOffset,
+    inherited_style: ParagraphStyle,
   },
   JoinParagraphs {
     first: ParagraphId,
@@ -133,7 +129,7 @@ pub enum CanonicalOperation {
     new_block_ix: usize,
   },
   ReplaceParagraphSpan {
-    start_paragraph: Option<ParagraphId>,
+    start: Option<DocumentOffset>,
     before: DocumentSpan,
     after: DocumentSpan,
   },
@@ -145,7 +141,7 @@ pub enum CanonicalOperation {
 
 #[derive(Clone, Debug, Default)]
 pub struct CollaborationEdit {
-  pub operations: Vec<CanonicalOperation>,
+  pub semantic_commands: Vec<SemanticEditCommand>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

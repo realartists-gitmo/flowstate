@@ -289,7 +289,6 @@ impl RichTextEditor {
     let capture_start = source_range.start.paragraph.min(drop.paragraph);
     let capture_end = source_range.end.paragraph.max(drop.paragraph).saturating_add(1);
     let before_span = capture_document_span(&before_document, capture_start..capture_end);
-    let start_paragraph = self.identity_map.paragraph_id(before_span.start_paragraph);
     self.selection = before_selection.clone();
     self.delete_selection_internal();
     let inserted_start = adjusted_drop;
@@ -312,8 +311,11 @@ impl RichTextEditor {
           .saturating_sub(before_span.start_paragraph),
       );
     let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
-    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
-      start_paragraph,
+    let semantic_commands = vec![SemanticEditCommand::ReplaceParagraphSpan {
+      start: Some(DocumentOffset {
+        paragraph: before_span.start_paragraph,
+        byte: 0,
+      }),
       before: before_span,
       after: after_span,
     }];
@@ -328,11 +330,11 @@ impl RichTextEditor {
         inserted_range: inserted_start..inserted_end,
         fragment: drag.fragment,
       }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.after_text_mutation(cx);
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     self.clear_drop_preview();
   }
 

@@ -14,10 +14,6 @@ impl RichTextEditor {
     if caret.byte > paragraph_text_len(paragraph) {
       return false;
     }
-    let Some(paragraph_id) = self.identity_map.paragraph_id(caret.paragraph) else {
-      return false;
-    };
-
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
@@ -46,7 +42,7 @@ impl RichTextEditor {
       && before_selection.anchor == before_selection.head
       && record.after_selection == before_selection
       && record.operations.len() == 1
-      && record.canonical_operations.len() == 1
+      && record.semantic_commands.len() == 1
       && let EditOperation::InsertText {
         paragraph,
         byte,
@@ -56,18 +52,17 @@ impl RichTextEditor {
       && *paragraph == caret.paragraph
       && *previous_styles == styles
       && *byte + previous_text.len() == caret.byte
-      && let CanonicalOperation::InsertText {
-        paragraph: canonical_paragraph,
-        byte: canonical_byte,
-        text: canonical_text,
-        styles: canonical_styles,
-      } = &mut record.canonical_operations[0]
-      && *canonical_paragraph == paragraph_id
-      && *canonical_styles == styles
-      && *canonical_byte + canonical_text.len() == caret.byte
+      && let SemanticEditCommand::InsertText {
+        at,
+        text: semantic_text,
+        styles: semantic_styles,
+      } = &mut record.semantic_commands[0]
+      && at.paragraph == caret.paragraph
+      && *semantic_styles == styles
+      && at.byte + semantic_text.len() == caret.byte
     {
       previous_text.push_str(text);
-      canonical_text.push_str(text);
+      semantic_text.push_str(text);
       record.after_selection = self.selection.clone();
       record.after_generation = after_generation;
       merged_into_previous = true;
@@ -85,9 +80,8 @@ impl RichTextEditor {
           text: text.to_string(),
           styles,
         }],
-        canonical_operations: vec![CanonicalOperation::InsertText {
-          paragraph: paragraph_id,
-          byte: caret.byte,
+        semantic_commands: vec![SemanticEditCommand::InsertText {
+          at: caret,
           text: text.to_string(),
           styles,
         }],
@@ -95,9 +89,8 @@ impl RichTextEditor {
     }
     if self.collab_capture && self.suppress_collab_capture == 0 {
       self.pending_collab_edits.push(CollaborationEdit {
-        operations: vec![CanonicalOperation::InsertText {
-          paragraph: paragraph_id,
-          byte: caret.byte,
+        semantic_commands: vec![SemanticEditCommand::InsertText {
+          at: caret,
           text: text.to_string(),
           styles,
         }],
@@ -175,12 +168,17 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
-      start_paragraph: self.identity_map.paragraph_id(before_span.start_paragraph),
+    let semantic_commands = vec![SemanticEditCommand::ReplaceParagraphSpan {
+      start: self
+        .identity_map
+        .paragraph_id(before_span.start_paragraph)
+        .map(|_| DocumentOffset {
+          paragraph: before_span.start_paragraph,
+          byte: 0,
+        }),
       before: before_span.clone(),
       after: after_span.clone(),
     }];
-    let collab_operations = canonical_operations.clone();
     let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len() || before_block_count != self.document.blocks.len();
     let record = EditRecord {
       before_selection,
@@ -191,11 +189,11 @@ impl RichTextEditor {
         before: before_span,
         after: after_span,
       }],
-      canonical_operations,
+      semantic_commands: semantic_commands.clone(),
     };
     self.undo_stack.push(record);
     self.redo_stack.clear();
-    self.mark_document_changed_with_ops(after_generation, identity_shape_changed, Some(&collab_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, identity_shape_changed, Some(&semantic_commands), cx);
   }
 
   fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, _block_ix: usize, cx: &mut Context<Self>) {
@@ -216,10 +214,13 @@ impl RichTextEditor {
       return;
     }
 
-    let canonical_operations = vec![CanonicalOperation::ReplaceParagraphSpan {
-      start_paragraph: self.identity_map.paragraph_id(caret.paragraph),
-      before: before_span.clone(),
-      after: after_span.clone(),
+    let semantic_commands = vec![SemanticEditCommand::SplitParagraph {
+      at: caret,
+      inherited_style: before_span
+        .paragraphs
+        .first()
+        .map(|paragraph| paragraph.style)
+        .unwrap_or(ParagraphStyle::Normal),
     }];
     let record = EditRecord {
       before_selection,
@@ -230,19 +231,18 @@ impl RichTextEditor {
         before: before_span.clone(),
         after: after_span.clone(),
       }],
-      canonical_operations,
+      semantic_commands: semantic_commands.clone(),
     };
-    let collab_operations = record.canonical_operations.clone();
     self.undo_stack.push(record);
     self.redo_stack.clear();
-    self.mark_document_changed_with_ops(after_generation, false, Some(&collab_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, false, Some(&semantic_commands), cx);
   }
 
   fn mark_document_changed_with_ops(
     &mut self,
     generation: u64,
     reconcile_identity: bool,
-    operations: Option<&[CanonicalOperation]>,
+    semantic_commands: Option<&[SemanticEditCommand]>,
     cx: &mut Context<Self>,
   ) {
     self.edit_generation = generation;
@@ -251,10 +251,12 @@ impl RichTextEditor {
     }
     if self.collab_capture
       && self.suppress_collab_capture == 0
-      && let Some(operations) = operations
-      && !operations.is_empty()
+      && let Some(semantic_commands) = semantic_commands
+      && !semantic_commands.is_empty()
     {
-      self.pending_collab_edits.push(CollaborationEdit { operations: operations.to_vec() });
+      self.pending_collab_edits.push(CollaborationEdit {
+        semantic_commands: semantic_commands.to_vec(),
+      });
     }
     self.refresh_save_status();
     self.schedule_recovery_write(cx);

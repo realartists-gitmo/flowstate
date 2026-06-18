@@ -4,7 +4,7 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use flowstate_document::{Document, db8_bytes, read_db8};
+use flowstate_document::{Document, document_to_loro_db8_bytes, read_db8};
 
 use crate::{embed_db8_bytes_in_pdf, write_docx};
 
@@ -24,7 +24,7 @@ pub fn convert_docx_to_pdf(input: impl AsRef<Path>, output: impl AsRef<Path>) ->
 
 #[hotpath::measure]
 pub fn write_pdf(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
-  let db8 = db8_bytes(document)?;
+  let db8 = document_to_loro_db8_bytes(document, "PDF Source")?;
   write_pdf_with_db8_bytes(path, document, &db8)
 }
 

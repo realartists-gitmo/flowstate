@@ -24,8 +24,6 @@ use super::{
 // UTF-8 text blob, then per-paragraph run metadata. Keeping the format
 // length-prefixed makes the reader resilient against trailing junk.
 const DOCUMENT_MAGIC: &[u8; 4] = b"GPTX";
-const LEGACY_DOCUMENT_MAGIC: &[u8; 4] = &[b'D', b'B', b'8', 0];
-const DOCUMENT_LEGACY_VERSION: u32 = 5;
 const DOCUMENT_VERSION: u32 = 6;
 
 const CHUNK_TEXT: u8 = 1;
@@ -64,6 +62,7 @@ pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
 #[hotpath::measure]
 pub fn read_document(path: impl AsRef<Path>) -> io::Result<Document> {
   let timing = Instant::now();
+  reject_db8_path(path.as_ref())?;
   let bytes = fs::read(path)?;
   read_document_bytes_with_timing(&bytes, timing)
 }
@@ -78,13 +77,10 @@ fn read_document_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<
   let mut cursor = Cursor::new(bytes);
   let mut magic = [0; 4];
   cursor.read_exact(&mut magic)?;
-  if &magic != DOCUMENT_MAGIC && &magic != LEGACY_DOCUMENT_MAGIC {
+  if &magic != DOCUMENT_MAGIC {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid document magic"));
   }
   let version = read_u32(&mut cursor)?;
-  if version == DOCUMENT_LEGACY_VERSION {
-    return read_document_current(cursor, timing);
-  }
   if version == DOCUMENT_VERSION {
     return read_document_vnext(cursor, timing);
   }
@@ -94,6 +90,7 @@ fn read_document_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<
 #[hotpath::measure]
 pub fn write_document(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
   let path = path.as_ref();
+  reject_db8_path(path)?;
   // Skip directory creation when the parent component is empty (e.g. a bare
   // filename like "doc.gptx" with no directory prefix), as create_dir_all("")
   // fails on most platforms. write_bytes_atomic handles it identically.
@@ -104,6 +101,17 @@ pub fn write_document(path: impl AsRef<Path>, document: &Document) -> io::Result
   validate_document(&document)?;
   let bytes = serialize_document(&document);
   write_bytes_atomic(path, &bytes)
+}
+
+#[hotpath::measure]
+fn reject_db8_path(path: &Path) -> io::Result<()> {
+  if path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("db8")) {
+    return Err(io::Error::new(
+      io::ErrorKind::Unsupported,
+      ".db8 is Flowstate's Loro-native package format; gpui-flowtext's internal final-state serializer must not handle it",
+    ));
+  }
+  Ok(())
 }
 
 #[hotpath::measure]

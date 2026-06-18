@@ -3008,6 +3008,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-channel 2.5.0",
+ "flowstate-document",
  "gpui-flowtext",
  "iroh",
  "iroh-gossip",
@@ -3018,6 +3019,7 @@ dependencies = [
  "proptest",
  "rand 0.9.4",
  "serde",
+ "tempfile",
  "tokio",
  "tracing",
  "twox-hash",
@@ -3028,9 +3030,16 @@ dependencies = [
 name = "flowstate-document"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "gpui",
  "gpui-flowtext",
+ "loro",
+ "postcard",
  "rustc-hash 2.1.2",
+ "serde",
+ "tempfile",
+ "uuid",
+ "zstd",
 ]
 
 [[package]]

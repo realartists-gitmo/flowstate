@@ -33,7 +33,12 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
     }
   }
 
-  load_or_create_document(path).map(|document| LoadedDocumentForOpen {
+  let document = match flowstate_document::read_db8(path) {
+    Ok(document) => document,
+    Err(error) if error.kind() == std::io::ErrorKind::NotFound => new_blank_document(),
+    Err(error) => return Err(error),
+  };
+  Ok(LoadedDocumentForOpen {
     document,
     path: Some(path.clone()),
     title: None,

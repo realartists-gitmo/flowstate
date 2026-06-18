@@ -7,6 +7,7 @@ publish.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 async-channel = { workspace = true }
+flowstate-document.workspace = true
 gpui-flowtext = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
@@ -23,6 +24,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -1,10 +1,11 @@
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
-use flowstate_collab::{binding::DocBinding, net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, projection, self_check};
+use anyhow::Result;
+use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, self_check};
+use flowstate_document::document_from_loro;
 use gpui::{Context, Timer};
 
-use crate::{app_settings::load_document_theme, rich_text_element::Document};
+use crate::rich_text_element::Document;
 
 use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionNotice, SessionPhase};
 
@@ -280,7 +281,7 @@ impl CollabSession {
       return Ok(());
     }
 
-    let mut projected = projection::document_from_loro(&doc, load_document_theme())?;
+    let mut projected = document_from_loro(&doc)?;
     projected.assets = live_document.assets.clone();
     let projected_hash = self_check::projection_hash(&projected);
     if live_hash == projected_hash {
@@ -300,17 +301,12 @@ impl CollabSession {
   }
 
   fn rebuild_from_projection(&mut self, projected: Document, cx: &mut Context<Self>) -> Result<()> {
-    let Some(doc) = self.doc.clone() else {
-      return Ok(());
-    };
     let Some(editor) = self.editor.clone() else {
       return Ok(());
     };
     tracing::warn!(session = %self.session, paragraphs = projected.paragraphs.len(), blocks = projected.blocks.len(), "rebuilding editor document from collaboration projection");
     editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
     self.pending_remote_patches.clear();
-    let document = editor.read(cx).document().clone();
-    self.binding = Some(DocBinding::build(&doc, &document).context("rebuilding collaboration binding after self-check failed")?);
     self.last_document_activity = Instant::now();
     self.refresh_external_carets(cx);
     tracing::info!(session = %self.session, "rebuilt editor document from collaboration projection");

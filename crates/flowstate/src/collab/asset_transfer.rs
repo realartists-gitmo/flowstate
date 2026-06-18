@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow, ensure};
-use flowstate_collab::{
-  net::NetCommand,
-  schema::{BLOCKS, BlockPayload, DATA, KIND, KIND_IMAGE, decode_block_payload},
-};
+use anyhow::{Context as _, Result, ensure};
+use flowstate_collab::net::NetCommand;
+use flowstate_document::{ROOT, loro_schema::ASSETS_BY_ID};
 use gpui::{Context, SharedString};
 use loro::{Container, LoroValue, ValueOrContainer};
 
@@ -157,7 +155,6 @@ impl ImageAssetMeta {
     );
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
     let content_hash = AssetRecord::stable_content_hash(&bytes);
-    ensure!(content_hash == self.content_hash, "asset content hash mismatch");
     Ok(AssetRecord {
       id: AssetId(self.asset_id),
       mime_type: SharedString::from(self.mime.clone()),
@@ -169,33 +166,24 @@ impl ImageAssetMeta {
 }
 
 fn image_assets_in_loro(doc: &loro::LoroDoc) -> Result<Vec<ImageAssetMeta>> {
-  let blocks = doc.get_movable_list(BLOCKS);
+  let root = doc.get_map(ROOT);
+  let Some(ValueOrContainer::Container(Container::Map(assets_by_id))) = root.get(ASSETS_BY_ID) else {
+    return Ok(Vec::new());
+  };
   let mut assets = Vec::new();
-  for ix in 0..blocks.len() {
-    let Some(ValueOrContainer::Container(Container::Map(map))) = blocks.get(ix) else {
+  for key in assets_by_id.keys() {
+    let Some(ValueOrContainer::Container(Container::Map(map))) = assets_by_id.get(&key) else {
       continue;
     };
-    let Some(ValueOrContainer::Value(LoroValue::String(kind))) = map.get(KIND) else {
+    let Some(asset_id) = loro_map_string(&map, "asset_id") else {
       continue;
     };
-    if kind.as_ref() != KIND_IMAGE {
-      continue;
-    }
-    let Some(ValueOrContainer::Value(LoroValue::Binary(data))) = map.get(DATA) else {
-      return Err(anyhow!("image block {ix} is missing asset metadata"));
-    };
-    let payload = decode_block_payload(&data).context("decoding image asset metadata failed")?;
-    let BlockPayload::Image {
-      asset_id,
-      mime,
-      original_name,
-      content_hash,
-      byte_len,
-      ..
-    } = payload
-    else {
-      continue;
-    };
+    let asset_id = asset_id
+      .parse::<u128>()
+      .with_context(|| format!("invalid Loro asset id {asset_id}"))?;
+    let mime = loro_map_string(&map, "mime_type").unwrap_or_else(|| "application/octet-stream".to_string());
+    let original_name = loro_map_string(&map, "original_name");
+    let byte_len = loro_map_i64(&map, "byte_length").unwrap_or_default().max(0) as u64;
     if byte_len == 0 {
       continue;
     }
@@ -203,9 +191,23 @@ fn image_assets_in_loro(doc: &loro::LoroDoc) -> Result<Vec<ImageAssetMeta>> {
       asset_id,
       mime,
       original_name,
-      content_hash,
+      content_hash: 0,
       byte_len,
     });
   }
   Ok(assets)
+}
+
+fn loro_map_string(map: &loro::LoroMap, key: &str) -> Option<String> {
+  match map.get(key) {
+    Some(ValueOrContainer::Value(LoroValue::String(value))) => Some(value.to_string()),
+    _ => None,
+  }
+}
+
+fn loro_map_i64(map: &loro::LoroMap, key: &str) -> Option<i64> {
+  match map.get(key) {
+    Some(ValueOrContainer::Value(LoroValue::I64(value))) => Some(value),
+    _ => None,
+  }
 }

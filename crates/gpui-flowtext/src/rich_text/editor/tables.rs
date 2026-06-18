@@ -165,7 +165,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let canonical_operations = vec![CanonicalOperation::ReplaceBlock {
+    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
       block: self.identity_map.block_id(block_ix),
     }];
     self.undo_stack.push(EditRecord {
@@ -174,11 +174,11 @@ impl RichTextEditor {
       after_selection: self.selection.clone(),
       after_generation,
       operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      canonical_operations: canonical_operations.clone(),
+      semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
     self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&canonical_operations), cx);
+    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
   }
 
   fn selected_table_block_ix(&self) -> Option<usize> {

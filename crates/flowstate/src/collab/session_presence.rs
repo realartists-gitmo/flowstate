@@ -141,8 +141,7 @@ impl CollabSession {
   fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
     let doc = self.doc.as_ref()?;
     let editor = self.editor.as_ref()?.read(cx);
-    let binding = self.binding.as_ref()?;
-    presence_view::selection_for_editor(doc, editor, binding)
+    presence_view::selection_for_editor(doc, editor)
   }
 
   fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) -> bool {

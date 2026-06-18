@@ -205,7 +205,7 @@ struct EditRecord {
   after_selection: EditorSelection,
   after_generation: u64,
   operations: Vec<EditOperation>,
-  canonical_operations: Vec<CanonicalOperation>,
+  semantic_commands: Vec<SemanticEditCommand>,
 }
 
 #[derive(Clone, Debug)]

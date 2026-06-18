@@ -1,11 +1,12 @@
 use std::{fs, io, path::Path};
 
+use flowstate_document::DocumentPackage;
 use lopdf::{Dictionary, Document as PdfDocument, Object, ObjectId, Stream, dictionary};
 
-const PAYLOAD_NAME: &str = "flowstate-source.db8.zst";
-const PAYLOAD_DESCRIPTION: &str = "Flowstate DB8 source document";
-const PAYLOAD_MIME_TYPE: &str = "application/x-flowstate-db8+zstd";
-const PAYLOAD_MAGIC: &[u8; 8] = b"FSDB8ZST";
+const PAYLOAD_NAME: &str = "flowstate-loro-source.db8.zst";
+const PAYLOAD_DESCRIPTION: &str = "Flowstate Loro-native DB8 source package";
+const PAYLOAD_MIME_TYPE: &str = "application/x-flowstate-loro-db8+zstd";
+const PAYLOAD_MAGIC: &[u8; 8] = b"FSL8ZST\0";
 const PAYLOAD_VERSION: u32 = 1;
 const ZSTD_LEVEL: i32 = 3;
 
@@ -76,6 +77,7 @@ pub fn convert_pdf_to_db8(input_pdf: impl AsRef<Path>, output_db8: impl AsRef<Pa
 
 #[hotpath::measure]
 fn encode_payload(db8_bytes: &[u8]) -> io::Result<Vec<u8>> {
+  DocumentPackage::from_bytes(db8_bytes)?;
   let compressed = zstd::bulk::compress(db8_bytes, ZSTD_LEVEL).map_err(io::Error::other)?;
   let mut payload = Vec::with_capacity(PAYLOAD_MAGIC.len() + 4 + 8 + compressed.len());
   payload.extend_from_slice(PAYLOAD_MAGIC);
@@ -115,6 +117,7 @@ fn decode_payload(payload: &[u8]) -> io::Result<Vec<u8>> {
   if decompressed.len() as u64 != original_len {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate PDF payload length mismatch"));
   }
+  DocumentPackage::from_bytes(&decompressed)?;
   Ok(decompressed)
 }
 

@@ -23,11 +23,17 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
 
   assert_eq!(edits.len(), 3);
   for (edit, (expected_text, expected_byte)) in edits.iter().zip([("a", 0), ("b", 1), ("c", 2)]) {
-    let [CanonicalOperation::InsertText { byte, text, .. }] = edit.operations.as_slice() else {
-      panic!("expected one InsertText op, got {:?}", edit.operations);
+    let [SemanticEditCommand::InsertText { at, text, .. }] = edit.semantic_commands.as_slice() else {
+      panic!("expected one semantic InsertText command, got {:?}", edit.semantic_commands);
     };
     assert_eq!(text, expected_text);
-    assert_eq!(*byte, expected_byte);
+    assert_eq!(
+      *at,
+      DocumentOffset {
+        paragraph: 0,
+        byte: expected_byte,
+      }
+    );
   }
 
   let edits_after_undo = cx.update(|cx| {
@@ -54,7 +60,10 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
     })
   });
   assert_eq!(paste_edits.len(), 1);
-  assert!(matches!(paste_edits[0].operations.as_slice(), [CanonicalOperation::ReplaceParagraphSpan { .. }]));
+  assert!(matches!(
+    paste_edits[0].semantic_commands.as_slice(),
+    [SemanticEditCommand::ReplaceParagraphSpan { .. }]
+  ));
 
   let edits_after_paste_undo = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
@@ -143,7 +152,10 @@ fn text_entry_in_selected_equation_updates_equation_only(cx: &mut gpui::TestAppC
   assert_eq!(equation.source.as_ref(), "x+1+2");
   assert_eq!(edits.len(), 2);
   for edit in edits {
-    assert!(matches!(edit.operations.as_slice(), [CanonicalOperation::ReplaceBlock { .. }]));
+    assert!(matches!(
+      edit.semantic_commands.as_slice(),
+      [SemanticEditCommand::ReplaceBlock { .. }]
+    ));
   }
 }
 

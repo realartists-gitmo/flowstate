@@ -1,33 +1,28 @@
-use std::sync::{Arc, Mutex};
-
 use anyhow::{Context as _, Result, anyhow};
 use flowstate_collab::{
   SessionId,
-  binding::DocBinding,
   net::{
     NetCommand, PublishPayload,
     anti_entropy::{GapAction, VersionVectorRelation},
     direct::DirectServeRequest,
   },
   proto_direct::AssetBytes,
-  remote_apply::RemoteApplier,
 };
 use gpui::Context;
-use loro::{ExportMode, LoroDoc, Subscription as LoroSubscription, VersionVector, event::Subscriber};
+use loro::{ExportMode, VersionVector};
 
-use crate::rich_text_element::{AssetId, CollabPatch, Document, UndoRedirect};
+use crate::rich_text_element::{AssetId, CollabPatch, UndoRedirect};
 
 use super::{CollabSession, DetachReason};
 
 impl CollabSession {
   pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.binding.is_none() || self.editor.is_none() {
+    if self.doc.is_none() || self.editor.is_none() {
       tracing::debug!(
         session = %self.session,
         bytes = bytes.len(),
         queued_updates = self.pending_remote_updates.len() + 1,
         has_doc = self.doc.is_some(),
-        has_binding = self.binding.is_some(),
         has_editor = self.editor.is_some(),
         "queueing remote collaboration update until session is attached",
       );
@@ -40,29 +35,38 @@ impl CollabSession {
       .editor
       .clone()
       .context("collaboration session has no editor")?;
-    let document = Arc::new(editor.read(cx).document().clone());
     let doc = self
       .doc
       .clone()
       .context("collaboration session has no Loro document")?;
-    let binding = self
-      .binding
-      .take()
-      .context("collaboration session has no document binding")?;
-    let binding = Arc::new(Mutex::new(binding));
-    let patches = Arc::new(Mutex::new(Vec::<CollabPatch>::new()));
-    let sub = self.diff_subscription(doc.clone(), document, binding.clone(), patches.clone());
 
     let import_result = doc.import_with(bytes, "remote");
-    drop(sub);
-    self.binding = Some(take_mutex_value(binding, "document binding")?);
-    let patches = take_mutex_value(patches, "remote patches")?;
-    if let Err(error) = import_result.context("importing collaboration update failed") {
+    let import_status = match import_result.context("importing collaboration update failed") {
+      Ok(status) => status,
+      Err(error) => {
       tracing::error!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "remote collaboration update import failed");
       return Err(error);
+      },
+    };
+    if let Some(pending) = &import_status.pending {
+      tracing::debug!(
+        session = %self.session,
+        bytes = bytes.len(),
+        pending_ranges = pending.iter().count(),
+        "remote collaboration update has pending Loro dependencies; requesting anti-entropy pull immediately",
+      );
+      if let Some(from) = self.pull_candidates(None).first().copied() {
+        self.start_update_pull(from, doc.oplog_vv().encode(), cx);
+      } else {
+        tracing::warn!(session = %self.session, "cannot pull pending Loro dependencies because no collaboration peers are available");
+      }
     }
-    tracing::debug!(session = %self.session, bytes = bytes.len(), patches = patches.len(), "remote collaboration update imported");
-    self.apply_or_queue_patches(patches, cx);
+    let mut projected = flowstate_document::document_from_loro(&doc).context("projecting remote collaboration update")?;
+    projected.assets = editor.read(cx).document().assets.clone();
+    editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
+    self.last_document_activity = std::time::Instant::now();
+    self.refresh_external_carets(cx);
+    tracing::debug!(session = %self.session, bytes = bytes.len(), "remote collaboration update imported and projected");
     Ok(())
   }
 
@@ -207,12 +211,11 @@ impl CollabSession {
   }
 
   pub(super) fn apply_loro_undo_redirect(&mut self, redirect: UndoRedirect, cx: &mut Context<Self>) -> Result<()> {
-    if self.doc.is_none() || self.binding.is_none() || self.editor.is_none() || self.undo_manager.is_none() {
+    if self.doc.is_none() || self.editor.is_none() || self.undo_manager.is_none() {
       tracing::warn!(
         session = %self.session,
         ?redirect,
         has_doc = self.doc.is_some(),
-        has_binding = self.binding.is_some(),
         has_editor = self.editor.is_some(),
         has_undo_manager = self.undo_manager.is_some(),
         "cannot apply collaboration undo redirect because session state is incomplete",
@@ -225,19 +228,6 @@ impl CollabSession {
       .editor
       .clone()
       .context("collaboration session has no editor")?;
-    let document = Arc::new(editor.read(cx).document().clone());
-    let doc = self
-      .doc
-      .clone()
-      .context("collaboration session has no Loro document")?;
-    let binding = self
-      .binding
-      .take()
-      .context("collaboration session has no document binding")?;
-    let binding = Arc::new(Mutex::new(binding));
-    let patches = Arc::new(Mutex::new(Vec::<CollabPatch>::new()));
-    let sub = self.diff_subscription(doc, document, binding.clone(), patches.clone());
-
     let undo_result = match redirect {
       UndoRedirect::Undo => self
         .undo_manager
@@ -250,13 +240,14 @@ impl CollabSession {
         .context("collaboration session has no undo manager")?
         .redo(),
     };
-    drop(sub);
-    self.binding = Some(take_mutex_value(binding, "document binding")?);
-    let patches = take_mutex_value(patches, "undo patches")?;
     let applied = undo_result.context("applying collaboration undo operation failed")?;
-    tracing::debug!(session = %self.session, ?redirect, applied, patches = patches.len(), "collaboration undo redirect applied");
+    tracing::debug!(session = %self.session, ?redirect, applied, "collaboration undo redirect applied");
     if applied {
-      self.apply_or_queue_patches(patches, cx);
+      if let Some(doc) = &self.doc {
+        let mut projected = flowstate_document::document_from_loro(doc).context("projecting collaboration undo result")?;
+        projected.assets = editor.read(cx).document().assets.clone();
+        editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
+      }
       self.publish_digest();
     }
     Ok(())
@@ -342,48 +333,6 @@ impl CollabSession {
     Ok(AssetBytes { bytes })
   }
 
-  fn diff_subscription(
-    &self,
-    doc: LoroDoc,
-    document: Arc<Document>,
-    binding: Arc<Mutex<DocBinding>>,
-    patches: Arc<Mutex<Vec<CollabPatch>>>,
-  ) -> LoroSubscription {
-    let subscribed_doc = doc.clone();
-    let callback: Subscriber = Arc::new(move |event| {
-      let produced = {
-        let mut binding = match binding.lock() {
-          Ok(binding) => binding,
-          Err(error) => {
-            tracing::error!(error = %error, "collaboration binding lock failed during remote apply");
-            return;
-          },
-        };
-        let result = {
-          let mut applier = RemoteApplier {
-            doc: &doc,
-            binding: &mut binding,
-          };
-          applier.apply_event(&document, &event)
-        };
-        drop(binding);
-        result
-      };
-      match produced {
-        Ok(mut produced) => {
-          tracing::trace!(patches = produced.len(), "collaboration remote apply produced patches");
-          if let Ok(mut patches) = patches.lock() {
-            patches.append(&mut produced);
-          } else {
-            tracing::error!("collaboration remote patch lock failed");
-          }
-        },
-        Err(error) => tracing::error!(error = %format_args!("{error:#}"), "collaboration remote apply failed"),
-      }
-    });
-    subscribed_doc.subscribe_root(callback)
-  }
-
   pub(super) fn apply_or_queue_patches(&mut self, mut patches: Vec<CollabPatch>, cx: &mut Context<Self>) {
     if patches.is_empty() {
       tracing::trace!(session = %self.session, "no remote collaboration patches to queue");
@@ -432,15 +381,6 @@ impl CollabSession {
       });
     })
     .detach();
-  }
-}
-
-fn take_mutex_value<T>(value: Arc<Mutex<T>>, label: &str) -> Result<T> {
-  match Arc::try_unwrap(value) {
-    Ok(mutex) => mutex
-      .into_inner()
-      .map_err(|error| anyhow!("collaboration {label} lock was poisoned: {error}")),
-    Err(_) => Err(anyhow!("collaboration {label} is still referenced")),
   }
 }
 
