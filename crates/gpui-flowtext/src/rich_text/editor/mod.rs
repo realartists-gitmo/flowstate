@@ -906,8 +906,6 @@ pub struct RichTextEditor {
   pending_collab_edits: Vec<CollaborationEdit>,
   pending_runtime_edits: Vec<CollaborationEdit>,
   runtime_edits_in_flight: usize,
-  pending_command_selection: Option<EditorSelection>,
-  pending_projection_rollback: Option<DocumentProjection>,
   collab_capture: bool,
   runtime_capture: bool,
   native_save_hook: Option<NativeSaveHook>,

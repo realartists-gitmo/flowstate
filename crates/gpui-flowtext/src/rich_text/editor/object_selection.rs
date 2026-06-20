@@ -523,25 +523,15 @@ impl RichTextEditor {
         after: after_span,
       });
     }
-    let runtime_owned = self.suppress_collab_capture == 0
-      && !semantic_commands.is_empty()
-      && (self.collab_capture || self.runtime_capture);
-    if runtime_owned {
-      self.pending_projection_rollback = Some(before_document.clone());
-    }
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: if runtime_owned {
-        Vec::new()
-      } else {
-        vec![EditOperation::RestoreProjectionSnapshot {
-          before: Box::new(before_document),
-          after: Box::new(after_document),
-        }]
-      },
+      operations: vec![EditOperation::RestoreProjectionSnapshot {
+        before: Box::new(before_document),
+        after: Box::new(after_document),
+      }],
       semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();

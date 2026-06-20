@@ -40,8 +40,6 @@ impl RichTextEditor {
       pending_collab_edits: Vec::new(),
       pending_runtime_edits: Vec::new(),
       runtime_edits_in_flight: 0,
-      pending_command_selection: None,
-      pending_projection_rollback: None,
       collab_capture: false,
       runtime_capture: false,
       native_save_hook: None,
@@ -168,8 +166,6 @@ impl RichTextEditor {
     self.pending_collab_edits.clear();
     self.pending_runtime_edits.clear();
     self.runtime_edits_in_flight = 0;
-    self.pending_command_selection = None;
-    self.pending_projection_rollback = None;
     self.collab_capture = false;
     self.runtime_capture = false;
     self.native_save_hook = None;
@@ -261,8 +257,6 @@ impl RichTextEditor {
         clamp_selection_to_document(&self.document, &mut self.selection);
         self.emit_selection_changed(cx);
       }
-      self.pending_command_selection = None;
-      self.pending_projection_rollback = None;
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       cx.notify();

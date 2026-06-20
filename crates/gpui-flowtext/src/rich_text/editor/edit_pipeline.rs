@@ -1,84 +1,18 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn backspace_pending_runtime_command(&mut self, cx: &mut Context<Self>) -> bool {
-    if self.suppress_collab_capture != 0 || !(self.collab_capture || self.runtime_capture) || !self.selection.is_caret() {
-      return false;
-    }
-    let Some(pending_selection) = self.pending_command_selection.clone() else {
-      return false;
-    };
-    if pending_selection == self.selection || !pending_selection.is_caret() {
-      return false;
-    }
-    let caret = pending_selection.head;
-    let Some((insert_at, inserted)) = self.undo_stack.iter().rev().find_map(|record| {
-      record.semantic_commands.iter().rev().find_map(|command| match command {
-        SemanticEditCommand::InsertText { at, text, .. } if at.paragraph == caret.paragraph => {
-          let relative = caret.byte.checked_sub(at.byte)?;
-          (relative > 0 && relative <= text.len() && text.is_char_boundary(relative)).then(|| (*at, &text[..relative]))
-        },
-        _ => None,
-      })
-    }) else {
-      return false;
-    };
-    let Some((last_grapheme_byte, _)) = inserted.grapheme_indices(true).next_back() else {
-      return false;
-    };
-    let delete_start = DocumentOffset {
-      paragraph: caret.paragraph,
-      byte: insert_at.byte.saturating_add(last_grapheme_byte),
-    };
-    let after_selection = EditorSelection {
-      anchor: delete_start,
-      head: delete_start,
-    };
-    let command = SemanticEditCommand::DeleteRange {
-      range: delete_start..caret,
-    };
-    let edit = CollaborationEdit {
-      semantic_commands: vec![command.clone()],
-      selection_after: Some(after_selection.clone()),
-    };
-    if self.collab_capture {
-      self.pending_collab_edits.push(edit.clone());
-    }
-    if self.runtime_capture {
-      self.pending_runtime_edits.push(edit);
-    }
-    let before_generation = self.next_edit_generation.saturating_sub(1);
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection: pending_selection,
-      before_generation,
-      after_selection: after_selection.clone(),
-      after_generation,
-      operations: Vec::new(),
-      semantic_commands: vec![command],
-    });
-    self.redo_stack.clear();
-    self.pending_command_selection = Some(after_selection);
-    cx.notify();
-    true
-  }
 
   pub(super) fn insert_single_grapheme_fast_path(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
     if !is_single_grapheme_text_insert(text) || !self.selection.is_caret() || self.selected_block.is_some() {
       return false;
     }
-    let runtime_owned = self.suppress_collab_capture == 0 && (self.collab_capture || self.runtime_capture);
-    let caret = self
-      .pending_command_selection
-      .as_ref()
-      .map_or(self.selection.head, |selection| selection.head);
+    let caret = self.selection.head;
     let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
       return false;
     };
     if self.invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
       return false;
     }
-    if !runtime_owned && caret.byte > paragraph_text_len(paragraph) {
+    if caret.byte > paragraph_text_len(paragraph) {
       return false;
     }
     let before_selection = self.selection.clone();
@@ -101,56 +35,6 @@ impl RichTextEditor {
       byte: caret.byte + text.len(),
     };
     let after_selection = EditorSelection { anchor: after, head: after };
-    if runtime_owned {
-      let merge_with_pending = (self.collab_capture && !self.pending_collab_edits.is_empty())
-        || (self.runtime_capture && !self.pending_runtime_edits.is_empty());
-      let command = SemanticEditCommand::InsertText {
-        at: caret,
-        text: text.to_string(),
-        styles,
-      };
-      let edit = CollaborationEdit {
-        semantic_commands: vec![command.clone()],
-        selection_after: Some(after_selection.clone()),
-      };
-      if self.collab_capture {
-        self.pending_collab_edits.push(edit.clone());
-      }
-      if self.runtime_capture {
-        self.pending_runtime_edits.push(edit);
-      }
-      self.pending_command_selection = Some(after_selection.clone());
-      if merge_with_pending
-        && let Some(record) = self.undo_stack.last_mut()
-        && let Some(SemanticEditCommand::InsertText {
-          at,
-          text: previous_text,
-          styles: previous_styles,
-        }) = record.semantic_commands.last_mut()
-        && at.paragraph == caret.paragraph
-        && *previous_styles == styles
-        && at.byte + previous_text.len() == caret.byte
-      {
-        previous_text.push_str(text);
-        record.after_selection = after_selection;
-        record.after_generation = after_generation;
-        self.redo_stack.clear();
-        cx.notify();
-        return true;
-      }
-      self.undo_stack.push(EditRecord {
-        before_selection,
-        before_generation,
-        after_selection,
-        after_generation,
-        operations: Vec::new(),
-        semantic_commands: vec![command],
-      });
-      self.redo_stack.clear();
-      cx.notify();
-      return true;
-    }
-
     insert_text_at(&mut self.document, caret.paragraph, caret.byte, text, styles);
     self.selection = EditorSelection { anchor: after, head: after };
     self.emit_selection_changed(cx);
@@ -241,8 +125,6 @@ impl RichTextEditor {
     edit: impl FnOnce(&mut Self, &mut Context<Self>),
   ) {
     let timing = Instant::now();
-    let runtime_rollback = (self.suppress_collab_capture == 0 && (self.collab_capture || self.runtime_capture))
-      .then(|| self.document.clone());
     let before_selection = self.selection.clone();
     let before_paragraph_count = self.document.paragraphs.len();
     let before_block_count = self.document.blocks.len();
@@ -266,14 +148,7 @@ impl RichTextEditor {
           .saturating_sub(before_span.start_paragraph),
       );
     let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
-    self.finish_document_edit(
-      before_span,
-      before_selection,
-      before_block_count,
-      after_span,
-      runtime_rollback,
-      cx,
-    );
+    self.finish_document_edit(before_span, before_selection, before_block_count, after_span, cx);
     log_timing_lazy("edit command", timing, || {
       format!("paragraphs={}", self.document.paragraphs.len())
     });
@@ -298,7 +173,6 @@ impl RichTextEditor {
     before_selection: EditorSelection,
     before_block_count: usize,
     after_span: DocumentSpan,
-    runtime_rollback: Option<DocumentProjection>,
     cx: &mut Context<Self>,
   ) {
     if before_span == after_span && before_selection == self.selection {
@@ -309,22 +183,15 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let semantic_commands = self.semantic_commands_for_span_edit(&before_span, &after_span);
     let identity_shape_changed = before_span.paragraphs.len() != after_span.paragraphs.len() || before_block_count != self.document.blocks.len();
-    if runtime_rollback.is_some() {
-      self.pending_projection_rollback = runtime_rollback;
-    }
     let record = EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: if self.pending_projection_rollback.is_some() {
-        Vec::new()
-      } else {
-        vec![EditOperation::ReplaceParagraphSpan {
-          before: before_span,
-          after: after_span,
-        }]
-      },
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span,
+        after: after_span,
+      }],
       semantic_commands: semantic_commands.clone(),
     };
     self.undo_stack.push(record);
@@ -419,8 +286,6 @@ impl RichTextEditor {
   }
 
   fn insert_paragraph_break_at_caret(&mut self, caret: DocumentOffset, _block_ix: usize, cx: &mut Context<Self>) {
-    let runtime_rollback = (self.suppress_collab_capture == 0 && (self.collab_capture || self.runtime_capture))
-      .then(|| self.document.clone());
     let before_selection = self.selection.clone();
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
@@ -453,22 +318,15 @@ impl RichTextEditor {
       at: caret,
       inherited_style,
     }];
-    if runtime_rollback.is_some() {
-      self.pending_projection_rollback = runtime_rollback;
-    }
     let record = EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: if self.pending_projection_rollback.is_some() {
-        Vec::new()
-      } else {
-        vec![EditOperation::ReplaceParagraphSpan {
-          before: before_span.clone(),
-          after: after_span.clone(),
-        }]
-      },
+      operations: vec![EditOperation::ReplaceParagraphSpan {
+        before: before_span.clone(),
+        after: after_span.clone(),
+      }],
       semantic_commands: semantic_commands.clone(),
     };
     self.undo_stack.push(record);
@@ -498,28 +356,12 @@ impl RichTextEditor {
       if self.runtime_capture {
         self.pending_runtime_edits.push(edit);
       }
-      self.pending_command_selection = Some(selection_after);
-      if let Some(before_document) = self.pending_projection_rollback.take() {
-        self.document = before_document;
-        self.selection = self
-          .undo_stack
-          .last()
-          .map_or_else(EditorSelection::caret, |record| record.before_selection.clone());
-        self.edit_generation = self
-          .undo_stack
-          .last()
-          .map_or(self.edit_generation, |record| record.before_generation);
-      } else if let Some(record) = self.undo_stack.last_mut() {
-        for operation in record.operations.iter().rev() {
-          operation.undo(&mut self.document);
-        }
-        self.selection = record.before_selection.clone();
-        self.edit_generation = record.before_generation;
-        record.operations.clear();
+      self.edit_generation = generation;
+      if reconcile_identity {
+        self.identity_map.reconcile(&self.document);
       }
-      self.identity_map.reconcile(&self.document);
-      self.invalidate_document_layout_caches();
-      self.emit_selection_changed(cx);
+      self.refresh_save_status();
+      self.schedule_recovery_write(cx);
       cx.notify();
       return;
     }

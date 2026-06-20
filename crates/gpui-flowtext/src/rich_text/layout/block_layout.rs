@@ -294,12 +294,6 @@ fn image_placeholder_height(document: &DocumentProjection, image: &ImageBlock, w
   }
 }
 
-#[cfg(test)]
-#[hotpath::measure]
-pub(super) fn image_layout_height_for_test(document: &DocumentProjection, image: &ImageBlock, width: Pixels) -> Pixels {
-  image_placeholder_height(document, image, width)
-}
-
 #[hotpath::measure]
 fn image_intrinsic_size(document: &DocumentProjection, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
   let asset = document.assets.assets.get(&image.asset_id)?;

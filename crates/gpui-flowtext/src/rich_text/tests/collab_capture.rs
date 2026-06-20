@@ -113,6 +113,21 @@ fn runtime_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestApp
 }
 
 #[gpui::test]
+fn stale_runtime_caret_style_lookup_is_safe(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, _| {
+      editor.selection = EditorSelection {
+        anchor: DocumentOffset { paragraph: 1, byte: 0 },
+        head: DocumentOffset { paragraph: 1, byte: 0 },
+      };
+      assert_eq!(editor.styles_at_caret(), RunStyles::default());
+    });
+  });
+}
+
+#[gpui::test]
 fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAppContext) {
   let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
 

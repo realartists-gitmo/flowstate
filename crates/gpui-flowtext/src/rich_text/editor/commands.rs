@@ -440,9 +440,6 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    if self.backspace_pending_runtime_command(cx) {
-      return;
-    }
     if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
       let _ = self.delete_selection_with_document_snapshot(cx);
       return;

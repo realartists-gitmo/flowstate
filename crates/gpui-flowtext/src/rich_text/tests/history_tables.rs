@@ -235,55 +235,6 @@ fn replace_block_operation_undo_redo_preserves_equation_source_changes() {
 
 #[test]
 #[hotpath::measure]
-fn default_inserted_table_shape_round_trips_through_document() {
-  let mut document = document_from_input(
-    DocumentTheme::default(),
-    vec![InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![plain("body")],
-    }],
-  );
-  let table = Block::Table(TableBlock {
-    rows: (0..2)
-      .map(|_| TableRow {
-        cells: (0..2)
-          .map(|_| TableCell {
-            blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
-              paragraph: Paragraph {
-                style: ParagraphStyle::Normal,
-                byte_range: 0..0,
-                runs: Vec::new(),
-                version: 0,
-              },
-              text: String::new(),
-            })],
-            row_span: 1,
-            col_span: 1,
-          })
-          .collect(),
-      })
-      .collect(),
-    column_widths: vec![TableColumnWidth::Fraction(1), TableColumnWidth::Fraction(1)],
-    style: TableStyle { header_row: false },
-    version: 0,
-  });
-  document.blocks = std::sync::Arc::new(vec![Block::Paragraph(document.paragraphs[0].clone()), table]);
-
-  let path = std::env::temp_dir().join(format!("flowtext-default-table-{}.document", uuid::Uuid::new_v4()));
-  write_document(&path, &document).unwrap();
-  let loaded = read_document(&path).unwrap();
-  let _ = std::fs::remove_file(path);
-
-  let Block::Table(table) = &loaded.blocks[1] else {
-    panic!("expected table block");
-  };
-  assert_eq!(table.rows.len(), 2);
-  assert!(table.rows.iter().all(|row| row.cells.len() == 2));
-  assert_eq!(table.column_widths.len(), 2);
-}
-
-#[test]
-#[hotpath::measure]
 fn table_cell_paragraph_clipboard_conversion_preserves_text_and_styles() {
   let styles = RunStyles::default().with(RunStyle::Semantic(2));
   let paragraph = InputParagraph {

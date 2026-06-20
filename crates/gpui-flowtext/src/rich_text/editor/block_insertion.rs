@@ -443,25 +443,15 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let runtime_owned = self.suppress_collab_capture == 0
-      && !semantic_commands.is_empty()
-      && (self.collab_capture || self.runtime_capture);
-    if runtime_owned {
-      self.pending_projection_rollback = Some(before_document.clone());
-    }
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: if runtime_owned {
-        Vec::new()
-      } else {
-        vec![EditOperation::RestoreProjectionSnapshot {
-          before: Box::new(before_document),
-          after: Box::new(self.document.clone()),
-        }]
-      },
+      operations: vec![EditOperation::RestoreProjectionSnapshot {
+        before: Box::new(before_document),
+        after: Box::new(self.document.clone()),
+      }],
       semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();

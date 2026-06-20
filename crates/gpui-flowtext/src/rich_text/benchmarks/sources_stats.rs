@@ -9,19 +9,7 @@ fn benchmark_sources(options: &BenchmarkOptions) -> Vec<BenchmarkSource> {
       .collect();
   }
 
-  let mut paths = fs::read_dir(".")
-    .ok()
-    .into_iter()
-    .flat_map(|entries| entries.filter_map(Result::ok))
-    .map(|entry| entry.path())
-    .filter(|path| path.extension().is_some_and(|extension| extension == DEFAULT_DOCUMENT_EXTENSION))
-    .collect::<Vec<_>>();
-  paths.sort();
-  if paths.is_empty() {
-    vec![BenchmarkSource::Demo]
-  } else {
-    paths.into_iter().map(BenchmarkSource::Path).collect()
-  }
+  vec![BenchmarkSource::Demo]
 }
 
 #[hotpath::measure]
@@ -33,7 +21,12 @@ fn load_document_source(source: &BenchmarkSource, iterations: usize) -> Result<L
   for _ in 0..iterations {
     let started = Instant::now();
     let loaded = match source {
-      BenchmarkSource::Path(path) => read_document(path).map_err(|error| error.to_string())?,
+      BenchmarkSource::Path(path) => {
+        return Err(format!(
+          "loading {} requires a host Loro package adapter",
+          path.display()
+        ));
+      },
       BenchmarkSource::Demo => demo_document(),
     };
     timings.push(started.elapsed());

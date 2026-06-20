@@ -434,7 +434,10 @@ impl Workspace {
       self.revision_dialog = None;
     }
     let workspace = cx.entity().downgrade();
-    let dialog = cx.new(|cx| crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, cx));
+    let revisions = self.request_document_revisions(panel_id, cx);
+    let dialog = cx.new(|cx| {
+      crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, revisions, cx)
+    });
     let dialog_for_render = dialog.clone();
     let workspace_for_close = cx.entity().downgrade();
     window.open_dialog(cx, move |component_dialog, _, _| {

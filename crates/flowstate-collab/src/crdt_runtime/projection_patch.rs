@@ -354,9 +354,39 @@ pub(super) fn remote_body_projection_patches(
   if touched.is_empty() {
     return Some(Vec::new());
   }
+  paragraph_projection_patches(projection, doc, touched)
+}
 
+pub(super) fn remote_nonstructural_projection_patches(
+  projection: &DocumentProjection,
+  doc: &LoroDoc,
+  invalidation: &ProjectionInvalidation,
+  touched_paragraphs: &[usize],
+) -> Option<Vec<CollabPatch>> {
+  if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
+    return None;
+  }
+
+  let mut patches = paragraph_projection_patches(projection, doc, touched_paragraphs.iter().copied())?;
+  if !invalidation.changed_blocks.is_empty()
+    || !invalidation.changed_tables.is_empty()
+    || invalidation
+      .changed_flows
+      .iter()
+      .any(|flow| flow != flowstate_document::ROOT_BODY_FLOW_ID)
+  {
+    patches.extend(remote_object_projection_patches(projection, doc)?);
+  }
+  Some(patches)
+}
+
+fn paragraph_projection_patches(
+  projection: &DocumentProjection,
+  doc: &LoroDoc,
+  touched_paragraphs: impl IntoIterator<Item = usize>,
+) -> Option<Vec<CollabPatch>> {
   let mut patches = Vec::new();
-  for paragraph_ix in touched {
+  for paragraph_ix in touched_paragraphs {
     let old = projection.paragraphs.get(paragraph_ix)?;
     let old_input = input_paragraph(projection, paragraph_ix, old);
     let new_input = body_input_paragraph(doc, paragraph_ix)?;

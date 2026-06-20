@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  AssetId, AssetRecord, BLOCKS_BY_ID, CollabPatch, CollabStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
+  AssetId, AssetRecord, BLOCKS_BY_ID, Block, CollabPatch, CollabStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
   FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, InputBlock, InputBlockAlignment, InputEquationDisplay,
   InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow,
   MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
@@ -35,7 +35,9 @@ pub use types::{
   ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
   RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity, UndoSelectionDirection, UndoSelectionSnapshot,
 };
-use projection_patch::{body_input_paragraph, projection_patches_between, remote_body_projection_patches};
+use projection_patch::{
+  body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
+};
 use types::UndoSelectionState;
 use crate::presence::{
   PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity,
@@ -52,11 +54,13 @@ use loro::{
 pub struct CrdtRuntime {
   doc: LoroDoc,
   projection: DocumentProjection,
+  projection_index: ProjectionRuntimeIndex,
   undo: UndoManager,
   defer_undo_checkpoints: bool,
   undo_checkpoint_pending: bool,
   package: Option<DocumentPackage>,
   package_path: Option<PathBuf>,
+  package_journal_prepared: bool,
   last_persisted_frontier: Frontiers,
   last_persisted_vv: VersionVector,
   undo_selection: Arc<Mutex<UndoSelectionState>>,
@@ -65,6 +69,160 @@ pub struct CrdtRuntime {
   projection_fallback_counts: Mutex<BTreeMap<String, u64>>,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
+}
+
+#[derive(Debug, Default)]
+struct ProjectionRuntimeIndex {
+  paragraph_body_unicode_starts: Vec<usize>,
+  paragraph_boundary_positions: Vec<usize>,
+  object_placeholder_positions: Vec<usize>,
+}
+
+impl ProjectionRuntimeIndex {
+  fn from_projection(projection: &DocumentProjection) -> Self {
+    let mut index = Self::default();
+    let mut body_unicode = 1usize;
+    let mut paragraph_ix = 0usize;
+    let mut has_body_content = false;
+
+    for block in projection.blocks.iter() {
+      match block {
+        Block::Paragraph(_) => {
+          if has_body_content {
+            index.paragraph_boundary_positions.push(body_unicode);
+            body_unicode = body_unicode.saturating_add(1);
+          } else {
+            index.paragraph_boundary_positions.push(0);
+          }
+          index.paragraph_body_unicode_starts.push(body_unicode);
+          body_unicode = body_unicode.saturating_add(
+            flowstate_document::paragraph_text(projection, paragraph_ix)
+              .chars()
+              .count(),
+          );
+          paragraph_ix = paragraph_ix.saturating_add(1);
+          has_body_content = true;
+        },
+        Block::Image(_) | Block::Equation(_) | Block::Table(_) => {
+          index.object_placeholder_positions.push(body_unicode);
+          body_unicode = body_unicode.saturating_add(1);
+          has_body_content = true;
+        },
+      }
+    }
+    index
+  }
+
+  fn body_unicode_for_offset(&self, projection: &DocumentProjection, offset: DocumentOffset) -> Option<usize> {
+    let paragraph = projection.paragraphs.get(offset.paragraph)?;
+    let paragraph_text = flowstate_document::paragraph_text(projection, offset.paragraph);
+    let byte = offset.byte.min(flowstate_document::paragraph_text_len(paragraph));
+    if !paragraph_text.is_char_boundary(byte) {
+      return None;
+    }
+    Some(*self.paragraph_body_unicode_starts.get(offset.paragraph)? + paragraph_text[..byte].chars().count())
+  }
+
+  fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize) -> Vec<usize> {
+    let mut touched = std::collections::BTreeSet::new();
+    for range in ranges.iter().filter(|range| range.flow_id == ROOT_BODY_FLOW_ID) {
+      let start = self.paragraph_at_body_unicode(range.unicode_start, paragraph_count);
+      let end = self.paragraph_at_body_unicode(range.unicode_start.saturating_add(range.unicode_len), paragraph_count);
+      if let Some(start) = start {
+        touched.insert(start);
+      }
+      if let Some(end) = end {
+        touched.insert(end);
+      }
+      if let (Some(start), Some(end)) = (start, end) {
+        touched.extend(start.min(end)..=start.max(end));
+      }
+    }
+    touched.into_iter().collect()
+  }
+
+  fn paragraph_at_body_unicode(&self, unicode: usize, paragraph_count: usize) -> Option<usize> {
+    if paragraph_count == 0 || self.paragraph_body_unicode_starts.is_empty() {
+      return None;
+    }
+    match self.paragraph_body_unicode_starts.binary_search(&unicode) {
+      Ok(ix) => Some(ix.min(paragraph_count - 1)),
+      Err(0) => Some(0),
+      Err(ix) => Some((ix - 1).min(paragraph_count - 1)),
+    }
+  }
+
+  fn deleted_range_contains_structure(&self, start: usize, len: usize) -> bool {
+    if len == 0 {
+      return false;
+    }
+    let end = start.saturating_add(len);
+    self
+      .paragraph_boundary_positions
+      .iter()
+      .chain(&self.object_placeholder_positions)
+      .any(|position| (start..end).contains(position))
+  }
+
+  fn update_for_patches(&mut self, projection: &DocumentProjection, patches: &[CollabPatch]) -> bool {
+    let mut text_deltas = Vec::new();
+    let mut rebuild = false;
+    for patch in patches {
+      match patch {
+        CollabPatch::ParagraphText { row, new, .. } => {
+          let Some(paragraph_ix) = paragraph_index_for_block_row(projection, *row) else {
+            rebuild = true;
+            break;
+          };
+          let old_len = flowstate_document::paragraph_text(projection, paragraph_ix).chars().count();
+          let new_len = new.runs.iter().map(|run| run.text.chars().count()).sum::<usize>();
+          text_deltas.push((paragraph_ix, new_len as isize - old_len as isize));
+        },
+        CollabPatch::InsertBlocks { .. } | CollabPatch::DeleteBlocks { .. } | CollabPatch::MoveBlock { .. } => {
+          rebuild = true;
+          break;
+        },
+        CollabPatch::ParagraphStyle { .. }
+        | CollabPatch::ParagraphRuns { .. }
+        | CollabPatch::ReplaceObjectBlock { .. }
+        | CollabPatch::AssetArrived { .. } => {},
+      }
+    }
+    if rebuild {
+      return true;
+    }
+    for (paragraph_ix, delta) in text_deltas {
+      if delta == 0 {
+        continue;
+      }
+      for start in self.paragraph_body_unicode_starts.iter_mut().skip(paragraph_ix.saturating_add(1)) {
+        *start = start.saturating_add_signed(delta);
+      }
+      for boundary in self.paragraph_boundary_positions.iter_mut().skip(paragraph_ix.saturating_add(1)) {
+        *boundary = boundary.saturating_add_signed(delta);
+      }
+      let threshold = self
+        .paragraph_body_unicode_starts
+        .get(paragraph_ix)
+        .copied()
+        .unwrap_or_default();
+      for placeholder in self.object_placeholder_positions.iter_mut().filter(|position| **position > threshold) {
+        *placeholder = placeholder.saturating_add_signed(delta);
+      }
+    }
+    false
+  }
+}
+
+fn paragraph_index_for_block_row(projection: &DocumentProjection, row: usize) -> Option<usize> {
+  matches!(projection.blocks.get(row), Some(Block::Paragraph(_))).then(|| {
+    projection
+      .blocks
+      .iter()
+      .take(row)
+      .filter(|block| matches!(block, Block::Paragraph(_)))
+      .count()
+  })
 }
 
 impl CrdtRuntime {
@@ -80,7 +238,9 @@ impl CrdtRuntime {
       .current_projection_document()
       .context("reading frontier-matched package projection cache")?;
     let doc = package.load_loro_doc().context("loading Loro document from package")?;
-    Self::from_doc_with_projection(doc, Some(package), Some(path.to_path_buf()), projection)
+    let mut runtime = Self::from_doc_with_projection(doc, Some(package), Some(path.to_path_buf()), projection)?;
+    runtime.package_journal_prepared = true;
+    Ok(runtime)
   }
 
   pub fn from_package(package: DocumentPackage, package_path: Option<PathBuf>) -> Result<Self> {
@@ -148,14 +308,17 @@ impl CrdtRuntime {
     undo.add_exclude_origin_prefix("remote");
     let undo_selection = Arc::new(Mutex::new(UndoSelectionState::default()));
     install_undo_selection_callbacks(&mut undo, &undo_selection);
+    let projection_index = ProjectionRuntimeIndex::from_projection(&projection);
     Ok(Self {
       doc,
       projection,
+      projection_index,
       undo,
       defer_undo_checkpoints: false,
       undo_checkpoint_pending: false,
       package,
       package_path,
+      package_journal_prepared: false,
       last_persisted_frontier,
       last_persisted_vv,
       undo_selection,
@@ -201,11 +364,10 @@ impl CrdtRuntime {
     let direction = selection_direction(selection.anchor, selection.head);
     let (anchor_affinity, head_affinity, _, _) = endpoint_intent(direction);
     let body = body_text(&self.doc);
-    let snapshot = body.to_string();
     let anchor = clamp_projection_offset(&self.projection, selection.anchor);
     let head = clamp_projection_offset(&self.projection, selection.head);
-    let anchor_pos = projection_offset_to_body_unicode_index_without_projection(&snapshot, anchor)?;
-    let head_pos = projection_offset_to_body_unicode_index_without_projection(&snapshot, head)?;
+    let anchor_pos = self.projection_index.body_unicode_for_offset(&self.projection, anchor)?;
+    let head_pos = self.projection_index.body_unicode_for_offset(&self.projection, head)?;
     let anchor_cursor = body.get_cursor(anchor_pos, side_for_affinity(anchor_affinity))?.encode();
     let head_cursor = body.get_cursor(head_pos, side_for_affinity(head_affinity))?.encode();
     Some(UndoSelectionSnapshot {
@@ -237,10 +399,9 @@ impl CrdtRuntime {
     &mut self,
     command: &EditorSemanticCommand,
   ) -> Result<Option<Vec<RuntimeEvent>>> {
-    let before_projection = self.projection.clone();
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
-    if apply_editor_semantic_command_body_fast_path(&self.doc, command)? {
+    if apply_editor_semantic_command_body_fast_path(&self.doc, &self.projection, &self.projection_index, command)? {
       self.record_undo_checkpoint()?;
       let mut invalidation = ProjectionInvalidation::body_text(
         from_frontier.encode(),
@@ -250,11 +411,12 @@ impl CrdtRuntime {
       );
       self.merge_subscription_invalidation(&mut invalidation);
       let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
-      if let Some(patches) = incremental_projection_patches_for_command(&before_projection, &self.doc, command) {
-        apply_projection_patches(&mut self.projection, &patches);
+      if let Some(patches) = incremental_projection_patches_for_command(&self.projection, &self.doc, command) {
+        self.apply_projection_patch_set(&patches);
         self.projection.frontier = self.doc.state_frontiers().encode();
         events.push(self.projection_patched_event(patches, invalidation));
       } else {
+        let before_projection = self.projection.clone();
         self.refresh_projection()?;
         events.push(self.projection_change_event(&before_projection, invalidation)?);
       }
@@ -269,7 +431,6 @@ impl CrdtRuntime {
     command: &EditorSemanticCommand,
     emit_projection: bool,
   ) -> Result<Vec<RuntimeEvent>> {
-    let before_projection = self.projection.clone();
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     if apply_editor_semantic_command(&self.doc, projection, command)? {
@@ -283,11 +444,12 @@ impl CrdtRuntime {
       self.merge_subscription_invalidation(&mut invalidation);
       let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
       if emit_projection {
-        if let Some(patches) = incremental_projection_patches_for_command(&before_projection, &self.doc, command) {
-          apply_projection_patches(&mut self.projection, &patches);
+        if let Some(patches) = incremental_projection_patches_for_command(&self.projection, &self.doc, command) {
+          self.apply_projection_patch_set(&patches);
           self.projection.frontier = self.doc.state_frontiers().encode();
           events.push(self.projection_patched_event(patches, invalidation));
         } else {
+          let before_projection = self.projection.clone();
           self.refresh_projection()?;
           events.push(self.projection_change_event(&before_projection, invalidation)?);
         }
@@ -458,8 +620,9 @@ impl CrdtRuntime {
     self.undo_checkpoint_pending = false;
     let result = (|| {
       let mut events = Vec::new();
+      flowstate_document::touch_document_metadata(&self.doc)
+        .context("updating canonical document metadata for editor command batch")?;
       for command in commands {
-        flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for editor command")?;
         let command_events = if let Some(events) = self.try_apply_editor_semantic_command_without_projection(command)? {
           events
         } else {
@@ -702,7 +865,7 @@ impl CrdtRuntime {
       &self.doc,
       &projection_invalidation,
     ) {
-      apply_projection_patches(&mut self.projection, &patches);
+      self.apply_projection_patch_set(&patches);
       self.projection.frontier = self.doc.state_frontiers().encode();
       events.push(self.projection_patched_event(patches, projection_invalidation));
     } else {
@@ -781,8 +944,6 @@ impl CrdtRuntime {
 
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
     let from_frontier = self.doc.state_frontiers();
-    let before_projection = self.projection.clone();
-    let before_body = body_text(&self.doc).to_string();
     let status = self.doc.import_with(bytes, "remote").context("importing remote Loro update")?;
     let after_remote_vv = self.doc.state_vv();
     let repair_update = if status.pending.is_none() && repair_missing_paragraph_style_marks(&self.doc)? {
@@ -814,18 +975,20 @@ impl CrdtRuntime {
         ..ProjectionInvalidation::default()
       };
       self.merge_subscription_invalidation(&mut invalidation);
-      let after_body = body_text(&self.doc).to_string();
-      if let Some(patches) = remote_body_projection_patches(
-        &before_projection,
-        &before_body,
-        &after_body,
+      let touched_paragraphs = self
+        .projection_index
+        .paragraphs_for_changed_ranges(&invalidation.changed_text_ranges, self.projection.paragraphs.len());
+      if let Some(patches) = remote_nonstructural_projection_patches(
+        &self.projection,
         &self.doc,
         &invalidation,
+        &touched_paragraphs,
       ) {
-        apply_projection_patches(&mut self.projection, &patches);
+        self.apply_projection_patch_set(&patches);
         self.projection.frontier = self.doc.state_frontiers().encode();
         events.push(self.projection_patched_event(patches, invalidation));
       } else {
+        let before_projection = self.projection.clone();
         self.refresh_projection()?;
         events.push(self.projection_change_event(&before_projection, invalidation)?);
       }
@@ -869,14 +1032,16 @@ impl CrdtRuntime {
     status.pending.as_ref()
   }
 
-  pub fn save_package(&self) -> io::Result<()> {
+  pub fn save_package(&mut self) -> io::Result<()> {
     let Some(package) = &self.package else {
       return Ok(());
     };
     let Some(path) = &self.package_path else {
       return Ok(());
     };
-    package.write(path)
+    package.write(path)?;
+    self.package_journal_prepared = true;
+    Ok(())
   }
 
   fn projection_change_event(&self, before: &DocumentProjection, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
@@ -935,11 +1100,21 @@ impl CrdtRuntime {
     }
     projection.theme = self.projection.theme.clone();
     self.projection = projection;
+    self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
     Ok(())
+  }
+
+  fn apply_projection_patch_set(&mut self, patches: &[CollabPatch]) {
+    let rebuild_index = self.projection_index.update_for_patches(&self.projection, patches);
+    apply_projection_patches(&mut self.projection, patches);
+    if rebuild_index {
+      self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
+    }
   }
 
   pub fn save_package_to(&mut self, path: impl AsRef<Path>) -> io::Result<()> {
     self.package_path = Some(path.as_ref().to_path_buf());
+    self.package_journal_prepared = false;
     self.save_package()
   }
 
@@ -995,6 +1170,7 @@ impl CrdtRuntime {
     )?;
     if let Some(path) = path {
       self.package_path = Some(path);
+      self.package_journal_prepared = false;
     }
     self.save_package()
   }
@@ -1068,7 +1244,13 @@ impl CrdtRuntime {
             target,
             unicode_start,
             unicode_len,
+            deleted_len,
+            inserted_structure,
           } if target == body_target => {
+            if inserted_structure || self.projection_index.deleted_range_contains_structure(unicode_start, deleted_len) {
+              invalidation.rebuild_required = true;
+              invalidation.fallback_reason = Some("structural_body_text_change");
+            }
             invalidation.changed_flows.push(ROOT_BODY_FLOW_ID.to_string());
             invalidation.changed_text_ranges.push(ProjectionTextRange {
               flow_id: ROOT_BODY_FLOW_ID.to_string(),
@@ -1119,8 +1301,12 @@ impl CrdtRuntime {
       if let Some(path) = &self.package_path {
         if compacted.is_some() {
           package.write(path)?;
+          self.package_journal_prepared = true;
+        } else if self.package_journal_prepared {
+          package.append_latest_update_to_prepared_path(path)?;
         } else {
           package.append_latest_update_to_path(path)?;
+          self.package_journal_prepared = true;
         }
       }
     }
@@ -1145,6 +1331,8 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
                   target: target.clone(),
                   unicode_start: cursor,
                   unicode_len: *retain,
+                  deleted_len: 0,
+                  inserted_structure: false,
                 });
               }
               cursor = cursor.saturating_add(*retain);
@@ -1155,6 +1343,8 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
                 target: target.clone(),
                 unicode_start: cursor,
                 unicode_len: len,
+                deleted_len: 0,
+                inserted_structure: insert.chars().any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT),
               });
               cursor = cursor.saturating_add(len);
             },
@@ -1163,6 +1353,8 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
                 target: target.clone(),
                 unicode_start: cursor,
                 unicode_len: *delete,
+                deleted_len: *delete,
+                inserted_structure: false,
               });
             },
           }
@@ -1425,6 +1617,8 @@ enum SubscriptionChange {
     target: String,
     unicode_start: usize,
     unicode_len: usize,
+    deleted_len: usize,
+    inserted_structure: bool,
   },
   Map {
     target: String,
@@ -1438,12 +1632,16 @@ enum SubscriptionChange {
   },
 }
 
-fn apply_editor_semantic_command_body_fast_path(doc: &LoroDoc, command: &EditorSemanticCommand) -> Result<bool> {
+fn apply_editor_semantic_command_body_fast_path(
+  doc: &LoroDoc,
+  projection: &DocumentProjection,
+  projection_index: &ProjectionRuntimeIndex,
+  command: &EditorSemanticCommand,
+) -> Result<bool> {
   match command {
     EditorSemanticCommand::InsertText { at, text, styles } => {
       let body = body_text(doc);
-      let snapshot = body.to_string();
-      let Some(unicode_index) = projection_offset_to_body_unicode_index_without_projection(&snapshot, *at) else {
+      let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
         return Ok(false);
       };
       let newline_boundaries = inserted_newline_boundaries(unicode_index, text);
@@ -1460,11 +1658,10 @@ fn apply_editor_semantic_command_body_fast_path(doc: &LoroDoc, command: &EditorS
     },
     EditorSemanticCommand::DeleteRange { range } => {
       let body = body_text(doc);
-      let snapshot = body.to_string();
-      let Some(start) = projection_offset_to_body_unicode_index_without_projection(&snapshot, range.start) else {
+      let Some(start) = projection_index.body_unicode_for_offset(projection, range.start) else {
         return Ok(false);
       };
-      let Some(end) = projection_offset_to_body_unicode_index_without_projection(&snapshot, range.end) else {
+      let Some(end) = projection_index.body_unicode_for_offset(projection, range.end) else {
         return Ok(false);
       };
       if end > start {
@@ -1482,8 +1679,7 @@ fn apply_editor_semantic_command_body_fast_path(doc: &LoroDoc, command: &EditorS
       inherited_style,
     } => {
       let body = body_text(doc);
-      let snapshot = body.to_string();
-      let Some(unicode_index) = projection_offset_to_body_unicode_index_without_projection(&snapshot, *at) else {
+      let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
         return Ok(false);
       };
       body
@@ -2963,53 +3159,9 @@ fn clear_movable_list(list: &LoroMovableList) -> loro::LoroResult<()> {
 }
 
 fn projection_offset_to_body_unicode_index(projection: &DocumentProjection, offset: flowstate_document::DocumentOffset) -> usize {
-  let mut unicode_index = 1;
-  for paragraph_ix in 0..offset.paragraph.min(projection.paragraphs.len()) {
-    unicode_index += flowstate_document::paragraph_text(projection, paragraph_ix)
-      .chars()
-      .count()
-      + 1;
-  }
-  if let Some(paragraph) = projection.paragraphs.get(offset.paragraph) {
-    let text = flowstate_document::paragraph_text(projection, offset.paragraph);
-    unicode_index += text[..offset.byte.min(paragraph.byte_range.len())].chars().count();
-  }
-  unicode_index
-}
-
-fn projection_offset_to_body_unicode_index_without_projection(
-  body: &str,
-  offset: flowstate_document::DocumentOffset,
-) -> Option<usize> {
-  if body.contains(OBJECT_REPLACEMENT) {
-    return None;
-  }
-  let mut seen_sentinel = false;
-  let mut paragraph_ix = 0usize;
-  let mut paragraph_byte = 0usize;
-  let mut last_unicode_pos = 0usize;
-
-  for (unicode_pos, ch) in body.chars().enumerate() {
-    last_unicode_pos = unicode_pos + 1;
-    if seen_sentinel && paragraph_ix == offset.paragraph && paragraph_byte == offset.byte {
-      return Some(unicode_pos);
-    }
-    if ch == '\n' {
-      if seen_sentinel {
-        paragraph_ix = paragraph_ix.saturating_add(1);
-      } else {
-        seen_sentinel = true;
-      }
-      paragraph_byte = 0;
-    } else if seen_sentinel && paragraph_ix == offset.paragraph {
-      paragraph_byte = paragraph_byte.saturating_add(ch.len_utf8());
-      if paragraph_byte > offset.byte {
-        return None;
-      }
-    }
-  }
-
-  (seen_sentinel && paragraph_ix == offset.paragraph && paragraph_byte == offset.byte).then_some(last_unicode_pos)
+  ProjectionRuntimeIndex::from_projection(projection)
+    .body_unicode_for_offset(projection, offset)
+    .unwrap_or(1)
 }
 
 fn clamp_projection_offset(projection: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
@@ -5349,6 +5501,40 @@ mod tests {
     assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
     assert!(events.iter().all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. })));
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
+    Ok(())
+  }
+
+  #[test]
+  fn editor_insert_after_object_uses_canonical_body_index() -> Result<()> {
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::DocumentTheme::default(),
+      vec![
+        InputBlock::Paragraph(input_paragraph("before")),
+        InputBlock::Image(flowstate_document::InputImageBlock {
+          asset_id: flowstate_document::AssetId(9),
+          alt_text: "figure".to_string(),
+          caption: None,
+          sizing: InputImageSizing::Intrinsic,
+          alignment: InputBlockAlignment::Center,
+        }),
+        InputBlock::Paragraph(input_paragraph("after")),
+      ],
+    );
+    let doc = flowstate_document::document_to_loro(&source, "Mixed editor offsets")?;
+    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
+
+    runtime.apply_editor_commands(
+      &[EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: 1, byte: 2 },
+        text: "!".to_string(),
+        styles: RunStyles::default(),
+      }],
+      None,
+    )?;
+
+    let projection = runtime.projection_snapshot()?;
+    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "before");
+    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "af!ter");
     Ok(())
   }
 

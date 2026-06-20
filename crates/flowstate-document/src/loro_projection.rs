@@ -136,6 +136,14 @@ impl<'a> Projector<'a> {
               pending_style = style;
               current.style = style;
               current_boundary = Some(unicode_pos);
+            } else if current.runs.is_empty()
+              && output
+                .last()
+                .is_some_and(|block| !matches!(block, InputBlock::Paragraph(_)))
+            {
+              current.style = style;
+              pending_style = style;
+              current_boundary = Some(unicode_pos);
             } else {
               push_paragraph_projection_metadata(
                 self.doc,
@@ -172,6 +180,7 @@ impl<'a> Projector<'a> {
               if let Some(block_ids) = block_ids.as_deref_mut() {
                 block_ids.push(BlockId(loro_id_u128(&map_string(block, "id")?)));
               }
+              current_boundary = None;
             }
           }
           _ => push_char(&mut current, ch, run_styles),
@@ -180,7 +189,7 @@ impl<'a> Projector<'a> {
       }
     }
 
-    if !current.runs.is_empty() || output.is_empty() && seen_sentinel {
+    if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
       push_paragraph_projection_metadata(
         self.doc,
         text,
@@ -755,6 +764,44 @@ mod tests {
     assert_eq!(projected.ids.paragraph_ids[0], ParagraphId(loro_id_u128(&first_paragraph_id)));
     assert_eq!(projected.ids.block_ids[0], BlockId(loro_id_u128(&first_block_id)));
     assert_eq!(projected.ids.block_ids[1], BlockId(loro_id_u128(&image_id)));
+    Ok(())
+  }
+
+  #[test]
+  fn object_boundary_does_not_create_a_phantom_paragraph() -> io::Result<()> {
+    let paragraph = |text: &str| {
+      InputBlock::Paragraph(InputParagraph {
+        style: gpui_flowtext::ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: text.to_string(),
+          styles: RunStyles::default(),
+        }],
+      })
+    };
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![
+        paragraph("before"),
+        InputBlock::Image(InputImageBlock {
+          asset_id: AssetId(7),
+          alt_text: "figure".into(),
+          caption: None,
+          sizing: InputImageSizing::Intrinsic,
+          alignment: InputBlockAlignment::Center,
+        }),
+        paragraph("after"),
+      ],
+    );
+
+    let projected = document_from_loro(&document_to_loro(&source, "Object boundary")?)?;
+
+    assert_eq!(projected.paragraphs.len(), 2);
+    assert_eq!(gpui_flowtext::paragraph_text(&projected, 0), "before");
+    assert_eq!(gpui_flowtext::paragraph_text(&projected, 1), "after");
+    assert!(matches!(
+      projected.blocks.as_slice(),
+      [gpui_flowtext::Block::Paragraph(_), gpui_flowtext::Block::Image(_), gpui_flowtext::Block::Paragraph(_)]
+    ));
     Ok(())
   }
 }

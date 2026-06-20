@@ -28,12 +28,9 @@ impl RevisionDialog {
   pub fn new(
     workspace: WeakEntity<Workspace>,
     panel_id: Uuid,
+    receiver: Option<async_channel::Receiver<anyhow::Result<Vec<RuntimeRevisionInfo>>>>,
     cx: &mut Context<Self>,
   ) -> Self {
-    let receiver = workspace
-      .update(cx, |workspace, cx| workspace.request_document_revisions(panel_id, cx))
-      .ok()
-      .flatten();
     let loading = receiver.is_some();
     if let Some(receiver) = receiver {
       cx.spawn(async move |dialog, cx| {

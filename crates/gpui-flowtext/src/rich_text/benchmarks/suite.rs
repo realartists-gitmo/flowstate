@@ -31,7 +31,7 @@ fn run_benchmark_suite(options: &BenchmarkOptions, window: &mut Window, cx: &mut
 
   let sources = benchmark_sources(options);
   if sources.is_empty() {
-    let _ = writeln!(report, "No `.gptx` files or explicit benchmark documents were found.");
+    let _ = writeln!(report, "No explicit benchmark documents were found.");
     return report;
   }
 
@@ -157,7 +157,6 @@ fn benchmark_document(
 
   write_stats_tables(&mut out, stats);
   write_fidelity_report(&mut out, &fidelity);
-  write_roundtrip_report(&mut out, loaded, iterations);
 
   let index_rows = benchmark_index_paths(document, iterations);
   write_operation_table(&mut out, "Index And Mapping Benchmarks", &index_rows);

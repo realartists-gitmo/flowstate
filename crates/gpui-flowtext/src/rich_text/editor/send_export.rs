@@ -254,20 +254,11 @@ fn write_document_export(output_path: &Path, document: &DocumentProjection, form
   if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
     return adapter.write_document_export(output_path, document, format);
   }
-  match format {
-    DocumentExportFormat::Native => write_document(output_path, document),
-    DocumentExportFormat::NativeWithExtension(extension) if extension.eq_ignore_ascii_case(DEFAULT_DOCUMENT_EXTENSION) => {
-      write_document(output_path, document)
-    },
-    DocumentExportFormat::NativeWithExtension(extension) => Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      format!("native export .{extension} requires a host-application adapter"),
-    )),
-    DocumentExportFormat::Docx | DocumentExportFormat::Pdf => Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      "DOCX and PDF export are host-application adapters; gpui-flowtext only writes its native binary format directly",
-    )),
-  }
+  let _ = (output_path, document, format);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "document export requires a host-application adapter",
+  ))
 }
 
 #[hotpath::measure]
@@ -275,13 +266,11 @@ fn write_native_document(output_path: &Path, document: &DocumentProjection) -> i
   if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
     return adapter.write_document_export(output_path, document, DocumentExportFormat::Native);
   }
-  if path_extension_requires_host_adapter(output_path) {
-    return Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      "native save for a host-native document requires a host-application adapter",
-    ));
-  }
-  write_document(output_path, document)
+  let _ = (output_path, document);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "native save requires a host-application adapter",
+  ))
 }
 
 #[hotpath::measure]
@@ -289,41 +278,11 @@ fn write_recovery_snapshot(recovery_path: &Path, source_path: Option<&Path>, doc
   if let Some(adapter) = DOCUMENT_RECOVERY_ADAPTER.get() {
     return adapter.write_recovery_snapshot(recovery_path, source_path, document);
   }
-  if recovery_requires_host_adapter(recovery_path, source_path) {
-    return Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      "recovery snapshot for a host-native document requires a host-application adapter",
-    ));
-  }
-  write_document(recovery_path, document)
-}
-
-#[hotpath::measure]
-fn recovery_requires_host_adapter(recovery_path: &Path, source_path: Option<&Path>) -> bool {
-  if source_path.is_some_and(path_extension_requires_host_adapter) {
-    return true;
-  }
-  recovery_source_extension(recovery_path).is_some_and(|extension| extension.eq_ignore_ascii_case("db8"))
-    || recovery_path.extension().and_then(|extension| extension.to_str()).is_some_and(|extension| extension.eq_ignore_ascii_case("db8"))
-}
-
-#[hotpath::measure]
-fn path_extension_requires_host_adapter(path: &Path) -> bool {
-  path
-    .extension()
-    .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| !extension.eq_ignore_ascii_case(DEFAULT_DOCUMENT_EXTENSION))
-}
-
-#[hotpath::measure]
-fn recovery_source_extension(path: &Path) -> Option<&str> {
-  let file_name = path.file_name()?.to_str()?;
-  let lower = file_name.to_ascii_lowercase();
-  if !lower.ends_with(".recovery") {
-    return None;
-  }
-  let source_name = &file_name[..file_name.len() - ".recovery".len()];
-  Path::new(source_name).extension()?.to_str()
+  let _ = (recovery_path, source_path, document);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "recovery snapshots require a host-application adapter",
+  ))
 }
 
 #[cfg(test)]
@@ -331,7 +290,7 @@ mod send_export_tests {
   use super::*;
 
   #[test]
-  fn native_extension_without_adapter_does_not_write_db8_as_gptx() {
+  fn native_extension_without_adapter_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("document.db8");
 
@@ -342,7 +301,7 @@ mod send_export_tests {
   }
 
   #[test]
-  fn native_save_without_adapter_does_not_write_db8_as_gptx() {
+  fn native_save_without_adapter_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("document.db8");
 

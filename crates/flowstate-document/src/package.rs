@@ -557,7 +557,18 @@ impl DocumentPackage {
   }
 
   pub fn read(path: impl AsRef<Path>) -> io::Result<Self> {
-    Self::from_bytes(&fs::read(path)?)
+    let path = path.as_ref();
+    let bytes = fs::read(path)?;
+    let package = Self::from_bytes(&bytes)?;
+    if bytes.starts_with(JOURNAL_MAGIC) {
+      let (_, committed_end) = committed_journal_transactions(&bytes)?;
+      if committed_end != bytes.len() {
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_len(committed_end as u64)?;
+        file.sync_all()?;
+      }
+    }
+    Ok(package)
   }
 
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
@@ -592,6 +603,21 @@ impl DocumentPackage {
       segment,
     })?;
     append_journal_transaction(path, &payload)
+  }
+
+  pub fn append_latest_update_to_prepared_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    let Some(segment) = self.loro_update_segments.last().cloned() else {
+      return self.write(path);
+    };
+    if !file_has_journal_header(path)? {
+      return self.write(path);
+    }
+    let payload = encode_journal_delta(&PackageJournalDelta::Update {
+      manifest: self.manifest.clone(),
+      segment,
+    })?;
+    append_journal_transaction_to_prepared_file(path, &payload)
   }
 
   pub fn append_assets_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
@@ -1105,6 +1131,19 @@ fn append_journal_transaction(path: &Path, payload: &[u8]) -> io::Result<()> {
     file.set_len(committed_end as u64)?;
   }
   file.seek(SeekFrom::End(0))?;
+  let mut bytes = Vec::with_capacity(journal_transaction_len(payload.len()));
+  append_journal_transaction_bytes(&mut bytes, payload);
+  file.write_all(&bytes)?;
+  file.sync_all()
+}
+
+fn append_journal_transaction_to_prepared_file(path: &Path, payload: &[u8]) -> io::Result<()> {
+  let parent = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .unwrap_or_else(|| Path::new("."));
+  fs::create_dir_all(parent)?;
+  let mut file = OpenOptions::new().append(true).open(path)?;
   let mut bytes = Vec::with_capacity(journal_transaction_len(payload.len()));
   append_journal_transaction_bytes(&mut bytes, payload);
   file.write_all(&bytes)?;
