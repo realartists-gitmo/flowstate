@@ -1,3 +1,9 @@
+// Projection snapshots carry semantic style slots; their appearance catalog is editor-local.
+fn projection_with_local_theme(mut document: DocumentProjection, theme: &DocumentTheme) -> DocumentProjection {
+  document.theme = theme.clone();
+  document
+}
+
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
@@ -407,7 +413,7 @@ impl RichTextEditor {
   }
 
   pub fn replace_document_projection(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
-    self.document = document;
+    self.document = projection_with_local_theme(document, &self.document.theme);
     self.identity_map.reconcile(&self.document);
     self.after_text_mutation(cx);
   }
@@ -495,4 +501,21 @@ impl RichTextEditor {
   }
 }
 
+#[cfg(test)]
+mod projection_theme_tests {
+  use super::*;
 
+  #[test]
+  fn replacement_projection_preserves_local_theme_catalog() {
+    let mut current = blank_document();
+    current.theme.body_font_size = pt(18.0);
+    current.theme.custom_highlight_styles.insert(77, CustomHighlightStyle {
+      color: rgb(0x0012_3456).into(),
+    });
+
+    let replacement = projection_with_local_theme(blank_document(), &current.theme);
+
+    assert_eq!(replacement.theme.body_font_size, pt(18.0));
+    assert!(replacement.theme.custom_highlight_styles.contains_key(&77));
+  }
+}

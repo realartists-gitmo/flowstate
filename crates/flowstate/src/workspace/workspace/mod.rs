@@ -41,7 +41,7 @@ use crate::app_settings::{
   save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::CommandId;
-use crate::docx_conversion::convert_docx_to_document;
+use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
   ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,

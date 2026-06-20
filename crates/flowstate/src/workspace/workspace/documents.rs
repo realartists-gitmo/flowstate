@@ -172,7 +172,10 @@ impl Workspace {
       .unwrap_or("Flowstate Document");
     let runtime = match runtime {
       DocumentRuntimeSource::FromProjection => {
-        let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, runtime_title)
+        let imported = flowstate_document::import_document_projection(document, runtime_title)
+          .map_err(|error| anyhow::anyhow!("creating canonical Loro document failed: {error}"))?;
+        document = imported.projection.clone();
+        let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported)
           .map_err(|error| anyhow::anyhow!("creating canonical Loro runtime failed: {error:#}"))?;
         flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
           .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
@@ -731,6 +734,9 @@ impl Workspace {
         }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
+              workspace
+                .recent_document_previews
+                .insert(path_for_recent.clone(), recent_document_preview_document(&document));
               workspace.record_recent_document(path_for_recent.clone(), cx);
               workspace.add_document_panel_with_title(*document, path, title, *runtime, window, cx);
               if let Some(paragraph_ix) = target_paragraph_ix {
@@ -969,9 +975,9 @@ impl Workspace {
           .spawn({
             let path = path.clone();
             async move {
-              let mut loaded = load_document_for_open(&path).ok()?;
-              loaded.document.theme = load_document_theme();
-              Some(recent_document_preview_document(&loaded.document))
+              let mut document = load_document_preview(&path).ok()?;
+              document.theme = load_document_theme();
+              Some(recent_document_preview_document(&document))
             }
           })
           .await;

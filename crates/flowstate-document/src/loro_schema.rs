@@ -44,7 +44,19 @@ pub fn new_loro_document(title: &str) -> LoroResult<LoroDoc> {
   Ok(doc)
 }
 
+pub(crate) fn new_loro_import_document(title: &str) -> LoroResult<LoroDoc> {
+  let doc = LoroDoc::new();
+  init_loro_document_structure(&doc, title, false)?;
+  Ok(doc)
+}
+
 pub fn init_loro_document(doc: &LoroDoc, title: &str) -> LoroResult<()> {
+  init_loro_document_structure(doc, title, true)?;
+  doc.commit();
+  Ok(())
+}
+
+fn init_loro_document_structure(doc: &LoroDoc, title: &str, include_initial_paragraph: bool) -> LoroResult<()> {
   configure_text_styles(doc);
 
   let root = doc.get_map(ROOT);
@@ -71,10 +83,10 @@ pub fn init_loro_document(doc: &LoroDoc, title: &str) -> LoroResult<()> {
   let body_flow = ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
   let body_text = body_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
   body_flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
-  ensure_sentinel(&body_text)?;
-  ensure_initial_paragraph(&paragraphs, &blocks, &body_text)?;
-
-  doc.commit();
+  if include_initial_paragraph {
+    ensure_sentinel(&body_text)?;
+    ensure_initial_paragraph(&paragraphs, &blocks, &body_text)?;
+  }
   Ok(())
 }
 

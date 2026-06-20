@@ -13,8 +13,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
-  DocumentParagraphInput, DocumentProjection, DocumentRunInput, DocumentTheme, ParagraphStyle, RunSemanticStyle, RunStyles,
-  document_from_paragraphs,
+  DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
+  document_from_paragraphs, flowstate_document_theme, import_paragraphs_as_loro,
 };
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
@@ -102,6 +102,42 @@ pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(DocumentProje
 
 #[hotpath::measure]
 pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
+  let interpreted = interpret_cleaned_docx(cleaned)?;
+  Ok((
+    document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs),
+    interpreted.report,
+  ))
+}
+
+/// Imports DOCX semantics directly into the canonical Loro document and returns
+/// the frontier-matched initial projection. No package, snapshot, search cache,
+/// or second Loro projection is created on the open path.
+#[hotpath::measure]
+pub fn import_docx_to_loro(path: impl AsRef<Path>, title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let cleaned = clean_docx_path(path)?;
+  import_cleaned_docx_to_loro(cleaned, title)
+}
+
+#[hotpath::measure]
+pub fn import_docx_bytes_to_loro(bytes: &[u8], title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let cleaned = super::cleaner::clean_docx_bytes(bytes)?;
+  import_cleaned_docx_to_loro(cleaned, title)
+}
+
+#[hotpath::measure]
+pub fn import_cleaned_docx_to_loro(cleaned: CleanedDocx, title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let interpreted = interpret_cleaned_docx(cleaned)?;
+  let imported = import_paragraphs_as_loro(flowstate_document_theme(), interpreted.paragraphs, title)?;
+  Ok((imported, interpreted.report))
+}
+
+struct InterpretedDocx {
+  paragraphs: Vec<DocumentParagraphInput>,
+  report: DocxConversionReport,
+}
+
+#[hotpath::measure]
+fn interpret_cleaned_docx(cleaned: CleanedDocx) -> io::Result<InterpretedDocx> {
   let CleanedDocx {
     bytes,
     main_document_xml,
@@ -273,17 +309,15 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
     paragraphs.push(DocumentParagraphInput { style, runs });
   }
 
-  let paragraphs_imported = paragraphs.len();
-  let document = document_from_paragraphs(DocumentTheme::default(), paragraphs);
   let report = DocxConversionReport {
     clean: clean_report,
     recognition_rules: RECOGNITION_RULES,
-    paragraphs_imported,
+    paragraphs_imported: paragraphs.len(),
     runs_imported,
     unknown_paragraph_styles,
     unknown_run_styles,
   };
-  Ok((document, report))
+  Ok(InterpretedDocx { paragraphs, report })
 }
 #[derive(Clone, Debug)]
 struct RunFact {

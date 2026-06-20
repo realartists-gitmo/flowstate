@@ -8,11 +8,12 @@ use std::{
 use anyhow::{Context as _, Result};
 use flowstate_document::{
   AssetId, AssetRecord, BLOCKS_BY_ID, Block, ProjectionPatch, ProjectionStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
+  ImportedLoroDocument,
   FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, InputBlock, InputBlockAlignment, InputEquationDisplay,
   InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow,
   MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
   OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles,
-  SENTINEL_NEWLINE, document_from_loro, document_to_loro,
+  SENTINEL_NEWLINE, document_from_loro, import_document_projection,
   loro_import::assets_from_document,
   loro_schema::body_text,
   new_loro_document,
@@ -253,10 +254,14 @@ impl CrdtRuntime {
   }
 
   pub fn from_document_projection(document: &DocumentProjection, title: &str) -> Result<Self> {
-    let doc = document_to_loro(document, title).context("importing projected document into canonical Loro runtime")?;
-    let package = DocumentPackage::from_loro_snapshot_with_assets(&doc, title, assets_from_document(document))
-      .context("creating Loro-native package from projected document")?;
-    Self::from_doc(doc, Some(package), None)
+    let imported = import_document_projection(document.clone(), title)
+      .context("importing projected document into canonical Loro runtime")?;
+    Self::from_imported_document(imported)
+  }
+
+  pub fn from_imported_document(imported: ImportedLoroDocument) -> Result<Self> {
+    let ImportedLoroDocument { doc, projection } = imported;
+    Self::from_doc_with_projection_options(doc, None, None, Some(projection), false)
   }
 
   pub fn from_doc(doc: LoroDoc, package: Option<DocumentPackage>, package_path: Option<PathBuf>) -> Result<Self> {
@@ -265,20 +270,38 @@ impl CrdtRuntime {
 
   fn from_doc_with_projection(
     doc: LoroDoc,
-    mut package: Option<DocumentPackage>,
+    package: Option<DocumentPackage>,
     package_path: Option<PathBuf>,
     projection: Option<DocumentProjection>,
   ) -> Result<Self> {
-    persist_body_paragraph_style_mark_repair(&doc, package.as_mut(), package_path.as_deref())?;
+    Self::from_doc_with_projection_options(doc, package, package_path, projection, true)
+  }
+
+  fn from_doc_with_projection_options(
+    doc: LoroDoc,
+    mut package: Option<DocumentPackage>,
+    package_path: Option<PathBuf>,
+    projection: Option<DocumentProjection>,
+    repair_paragraph_style_marks: bool,
+  ) -> Result<Self> {
+    let frontier_before_startup_metadata = doc.state_frontiers().encode();
+    let projection_content_repaired = if repair_paragraph_style_marks {
+      persist_body_paragraph_style_mark_repair(&doc, package.as_mut(), package_path.as_deref())?
+    } else {
+      // Trusted import builders apply every paragraph boundary mark while constructing
+      // the body. Avoid materializing a full rich-text delta only to verify it again.
+      flowstate_document::register_replica(&doc, None)?;
+      false
+    };
     let current_frontier = doc.state_frontiers().encode();
-    let projection_cache_matches = package
-      .as_ref()
-      .and_then(|package| package.manifest.projection_cache_frontier.as_deref())
-      == Some(current_frontier.as_slice());
     let mut projection = match projection {
-      Some(projection) if projection_cache_matches => projection,
+      Some(projection) if projection.frontier == current_frontier => projection,
+      Some(mut projection) if !projection_content_repaired && projection.frontier == frontier_before_startup_metadata => {
+        projection.frontier.clone_from(&current_frontier);
+        projection
+      }
       None => document_from_loro(&doc).context("building initial projection from canonical Loro state")?,
-      Some(_) => document_from_loro(&doc).context("rebuilding stale package projection cache")?,
+      Some(_) => document_from_loro(&doc).context("rebuilding stale initial projection")?,
     };
     if let Some(package) = &package {
       attach_package_assets(&mut projection, package);
@@ -3401,16 +3424,16 @@ fn persist_body_paragraph_style_mark_repair(
   doc: &LoroDoc,
   package: Option<&mut DocumentPackage>,
   package_path: Option<&Path>,
-) -> Result<()> {
+) -> Result<bool> {
   let from_frontier = doc.state_frontiers();
   let from_vv = doc.state_vv();
   let replica_registered = flowstate_document::register_replica(doc, None)?;
   let paragraph_marks_repaired = repair_missing_paragraph_style_marks(doc)?;
   if !replica_registered && !paragraph_marks_repaired {
-    return Ok(());
+    return Ok(false);
   }
   let Some(package) = package else {
-    return Ok(());
+    return Ok(paragraph_marks_repaired);
   };
   package.sync_revisions_from_loro(doc)?;
   let update = doc
@@ -3424,7 +3447,7 @@ fn persist_body_paragraph_style_mark_repair(
   if let Some(path) = package_path {
     package.write(path)?;
   }
-  Ok(())
+  Ok(paragraph_marks_repaired)
 }
 
 fn repair_missing_paragraph_style_marks(doc: &LoroDoc) -> Result<bool> {
@@ -5611,6 +5634,21 @@ mod tests {
         ..
       })
     ));
+    Ok(())
+  }
+  #[test]
+  fn projected_document_runtime_starts_without_eager_package_or_reprojection() -> Result<()> {
+    let mut source = flowstate_document::document_from_input_blocks(
+      flowstate_document::DocumentTheme::default(),
+      vec![InputBlock::Paragraph(input_paragraph("imported"))],
+    );
+    source.theme.zoom_factor = 1.75;
+    let runtime = CrdtRuntime::from_document_projection(&source, "Imported")?;
+
+    assert!(runtime.package.is_none());
+    assert_eq!(runtime.projection.frontier, runtime.doc.state_frontiers().encode());
+    assert_eq!(runtime.projection.theme.zoom_factor, 1.75);
+    assert_eq!(flowstate_document::paragraph_text(&runtime.projection, 0), "imported");
     Ok(())
   }
 }

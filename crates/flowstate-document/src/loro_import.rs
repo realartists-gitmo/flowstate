@@ -1,33 +1,63 @@
 use std::{io, path::Path};
 
 use gpui_flowtext::{
-  Block, BlockAlignment, DocumentProjection, EquationDisplay, EquationSyntax, HighlightStyle, ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle,
-  RunStyles, TableBlock, TableCellBlock, TableColumnWidth, paragraph_text,
+  Block, BlockAlignment, DocumentParagraphInput, DocumentProjection, DocumentTheme, EquationDisplay, EquationSyntax, HighlightStyle, ImageBlock,
+  ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles, TableBlock, TableCellBlock, TableColumnWidth, document_from_paragraphs,
+  paragraph_text,
 };
-use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, cursor::Side};
+use loro::{
+  ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, TextDelta, cursor::Side,
+};
+use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::{
   AssetChunk, BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
-  ROOT_BODY_FLOW_ID, SECTIONS_BY_ID, SENTINEL_NEWLINE,
+  ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
   loro_schema::{ASSETS_BY_ID, REVISIONS},
 };
 
-pub fn document_to_loro(document: &DocumentProjection, title: &str) -> io::Result<LoroDoc> {
-  let doc = crate::new_loro_document(title).map_err(loro_io_error)?;
+/// Canonical result of an external import. The Loro document is authoritative;
+/// the projection is a frontier-matched initial view built from the same semantic
+/// import plan so the UI does not need to project the document a second time.
+pub struct ImportedLoroDocument {
+  pub doc: LoroDoc,
+  pub projection: DocumentProjection,
+}
+
+pub fn import_document_projection(mut document: DocumentProjection, title: &str) -> io::Result<ImportedLoroDocument> {
+  let doc = crate::loro_schema::new_loro_import_document(title).map_err(loro_io_error)?;
   if document.ids.document_id != 0 {
     crate::loro_schema::set_document_id(&doc, Uuid::from_u128(document.ids.document_id)).map_err(loro_io_error)?;
   }
-  replace_body_from_document(&doc, document).map_err(loro_io_error)?;
-  import_assets(&doc, document).map_err(loro_io_error)?;
+  replace_body_from_document(&doc, &document).map_err(loro_io_error)?;
+  import_assets(&doc, &document).map_err(loro_io_error)?;
   doc.commit();
-  Ok(doc)
+  document.frontier = doc.state_frontiers().encode();
+  Ok(ImportedLoroDocument { doc, projection: document })
+}
+
+pub fn import_paragraphs_as_loro(
+  theme: DocumentTheme,
+  paragraphs: Vec<DocumentParagraphInput>,
+  title: &str,
+) -> io::Result<ImportedLoroDocument> {
+  import_document_projection(document_from_paragraphs(theme, paragraphs), title)
+}
+
+pub fn document_to_loro(document: &DocumentProjection, title: &str) -> io::Result<LoroDoc> {
+  Ok(import_document_projection(document.clone(), title)?.doc)
 }
 
 pub fn write_imported_document_as_loro_db8(path: impl AsRef<Path>, document: &DocumentProjection, title: &str) -> io::Result<()> {
-  let doc = document_to_loro(document, title)?;
-  crate::DocumentPackage::from_loro_snapshot_with_assets(&doc, title, assets_from_document(document))?.write(path)
+  let imported = import_document_projection(document.clone(), title)?;
+  crate::DocumentPackage::from_loro_snapshot_with_assets(
+    &imported.doc,
+    title,
+    assets_from_document(&imported.projection),
+  )?
+  .write(path)
 }
 
 pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult<()> {
@@ -40,69 +70,42 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
 
   let body_flow = ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
   let body_text = body_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  replace_text(&body_text, SENTINEL_NEWLINE)?;
   clear_map(&blocks)?;
   clear_map(&paragraphs)?;
   clear_map(&sections)?;
 
+  let plan = FlowTextImportPlan::for_document(document);
+  plan.write_to(&body_text)?;
+
   let mut paragraph_ix = 0_usize;
-  for (block_ix, block) in document.blocks.iter().enumerate() {
-    match block {
-      Block::Paragraph(paragraph) => {
-        let text = paragraph_text(document, paragraph_ix);
-        append_paragraph(
-          &body_text,
+  for (block_ix, (block, position)) in document.blocks.iter().zip(&plan.block_positions).enumerate() {
+    match (block, position) {
+      (Block::Paragraph(_), FlowBlockPosition::Paragraph { boundary_pos, .. }) => {
+        import_paragraph_record(
           &paragraphs,
           &blocks,
           BODY_FLOW_ID,
-          paragraph,
-          &text,
+          &body_text,
+          *boundary_pos,
           projection_block_id(document, block_ix, "paragraph_block"),
           projection_paragraph_id(document, paragraph_ix),
         )?;
         paragraph_ix += 1;
       }
-      Block::Image(image) => {
-        let pos = body_text.len_unicode();
-        body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-        let durable_block_id = projection_block_id(document, block_ix, "image");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, &body_text, pos)?;
-        block.insert("asset_id", image.asset_id.0.to_string())?;
-        if let Some(asset) = document.assets.assets.get(&image.asset_id) {
-          block.insert("content_hash", blake3::hash(&asset.bytes).to_hex().as_str())?;
-          block.insert("mime_type", asset.mime_type.as_ref())?;
-          block.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
-        }
-        let alt_text_flow_id = nested_flow_id("image_alt", &durable_block_id);
-        block.insert("alt_text_flow_id", alt_text_flow_id.as_str())?;
-        let alt_flow = ensure_flow(&flows, &alt_text_flow_id, "alt_text")?;
-        replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
-        if let Some(caption) = &image.caption {
-          let caption_flow_id = nested_flow_id("image_caption", &durable_block_id);
-          block.insert("caption_flow_id", caption_flow_id.as_str())?;
-          let caption_flow = ensure_flow(&flows, &caption_flow_id, "caption")?;
-          replace_text(&caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, SENTINEL_NEWLINE)?;
-          append_paragraph_text_only(&caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, caption, "")?;
-        }
-        let attrs = block.ensure_mergeable_map("attrs")?;
-        attrs.insert("alignment", alignment_name(image.alignment))?;
-        match image.sizing {
-          ImageSizing::Intrinsic => attrs.insert("sizing", "intrinsic")?,
-          ImageSizing::FitWidth => attrs.insert("sizing", "fit_width")?,
-          ImageSizing::Fixed { width_px, height_px } => {
-            attrs.insert("sizing", "fixed")?;
-            attrs.insert("width_px", i64::from(width_px))?;
-            if let Some(height_px) = height_px {
-              attrs.insert("height_px", i64::from(height_px))?;
-            }
-          }
-        };
+      (Block::Image(image), FlowBlockPosition::Object { anchor_pos }) => {
+        import_image_block(
+          &flows,
+          &blocks,
+          document,
+          image,
+          projection_block_id(document, block_ix, "image"),
+          &body_text,
+          *anchor_pos,
+        )?;
       }
-      Block::Equation(equation) => {
-        let pos = body_text.len_unicode();
-        body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
+      (Block::Equation(equation), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "equation");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, pos)?;
+        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, *anchor_pos)?;
         let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
         block.insert("source_flow_id", source_flow_id.as_str())?;
         let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
@@ -111,21 +114,77 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
         attrs.insert("syntax", equation_syntax_name(equation.syntax))?;
         attrs.insert("display", equation_display_name(equation.display))?;
       }
-      Block::Table(table) => {
-        let pos = body_text.len_unicode();
-        body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
+      (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, pos)?;
+        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, *anchor_pos)?;
         import_table(&flows, &block, table, &durable_block_id)?;
       }
+      _ => unreachable!("flow import plan must preserve document block shape"),
     }
   }
-  import_sections(document, &sections, &body_text)?;
-  doc.commit();
+
+  import_sections(document, &sections, &body_text, &plan.paragraphs)?;
   Ok(())
 }
 
-fn import_sections(document: &DocumentProjection, sections: &LoroMap, body_text: &LoroText) -> LoroResult<()> {
+fn import_image_block(
+  flows: &LoroMap,
+  blocks: &LoroMap,
+  document: &DocumentProjection,
+  image: &ImageBlock,
+  durable_block_id: String,
+  body_text: &LoroText,
+  anchor_pos: usize,
+) -> LoroResult<()> {
+  let block = ensure_block(blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, body_text, anchor_pos)?;
+  block.insert("asset_id", image.asset_id.0.to_string())?;
+  if let Some(asset) = document.assets.assets.get(&image.asset_id) {
+    block.insert("content_hash", blake3::hash(&asset.bytes).to_hex().as_str())?;
+    block.insert("mime_type", asset.mime_type.as_ref())?;
+    block.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
+  }
+  let alt_text_flow_id = nested_flow_id("image_alt", &durable_block_id);
+  block.insert("alt_text_flow_id", alt_text_flow_id.as_str())?;
+  let alt_flow = ensure_flow(flows, &alt_text_flow_id, "alt_text")?;
+  replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
+  if let Some(caption) = &image.caption {
+    let caption_flow_id = nested_flow_id("image_caption", &durable_block_id);
+    block.insert("caption_flow_id", caption_flow_id.as_str())?;
+    let caption_flow = ensure_flow(flows, &caption_flow_id, "caption")?;
+    let caption_text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
+    let mut caption_plan = FlowTextImportPlan::new(1, caption.runs.len().saturating_add(1));
+    caption_plan.push_paragraph(caption, "");
+    caption_plan.write_to(&caption_text)?;
+  }
+  let attrs = block.ensure_mergeable_map("attrs")?;
+  attrs.insert("alignment", alignment_name(image.alignment))?;
+  match image.sizing {
+    ImageSizing::Intrinsic => attrs.insert("sizing", "intrinsic")?,
+    ImageSizing::FitWidth => attrs.insert("sizing", "fit_width")?,
+    ImageSizing::Fixed { width_px, height_px } => {
+      attrs.insert("sizing", "fixed")?;
+      attrs.insert("width_px", i64::from(width_px))?;
+      if let Some(height_px) = height_px {
+        attrs.insert("height_px", i64::from(height_px))?;
+      }
+    }
+  };
+  Ok(())
+}
+
+fn import_sections(
+  document: &DocumentProjection,
+  sections: &LoroMap,
+  body_text: &LoroText,
+  paragraph_plans: &[ParagraphTextImportPlan],
+) -> LoroResult<()> {
+  let paragraph_indexes = document
+    .ids
+    .paragraph_ids
+    .iter()
+    .enumerate()
+    .map(|(ix, id)| (*id, ix))
+    .collect::<rustc_hash::FxHashMap<_, _>>();
   for section in document.sections.iter() {
     let section_id = section.id.0.to_string();
     let section_map = sections.ensure_mergeable_map(&section_id)?;
@@ -143,8 +202,9 @@ fn import_sections(document: &DocumentProjection, sections: &LoroMap, body_text:
     }
     let gpui_flowtext::SectionKind::Custom(kind_slot) = section.kind;
     section_map.insert("kind_slot", i64::from(kind_slot))?;
-    if let Some(paragraph_ix) = document.ids.paragraph_ids.iter().position(|id| *id == section.start_paragraph)
-      && let Some(cursor) = body_text.get_cursor(paragraph_boundary_unicode_pos(document, paragraph_ix), Side::Left)
+    if let Some(paragraph_ix) = paragraph_indexes.get(&section.start_paragraph).copied()
+      && let Some(boundary_pos) = paragraph_plans.get(paragraph_ix).map(|paragraph| paragraph.boundary_pos)
+      && let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Left)
     {
       section_map.insert("start_cursor", cursor.encode())?;
     }
@@ -155,26 +215,15 @@ fn import_sections(document: &DocumentProjection, sections: &LoroMap, body_text:
   Ok(())
 }
 
-fn paragraph_boundary_unicode_pos(document: &DocumentProjection, paragraph_ix: usize) -> usize {
-  let mut pos = 0_usize;
-  for ix in 0..paragraph_ix.min(document.paragraphs.len()) {
-    pos += paragraph_text(document, ix).chars().count() + 1;
-  }
-  pos
-}
-
-fn append_paragraph(
-  body_text: &LoroText,
+fn import_paragraph_record(
   paragraphs: &LoroMap,
   blocks: &LoroMap,
   flow_id: &str,
-  paragraph: &Paragraph,
-  text: &str,
+  body_text: &LoroText,
+  boundary_pos: usize,
   block_id: String,
   paragraph_id: String,
 ) -> LoroResult<()> {
-  append_paragraph_text_only(body_text, paragraph, text)?;
-  let boundary_pos = body_text.len_unicode() - text.chars().count() - 1;
   let paragraph_map = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph_map.insert("id", paragraph_id.as_str())?;
   paragraph_map.insert("container_id", paragraph_map.id().to_string())?;
@@ -191,60 +240,174 @@ fn append_paragraph(
   Ok(())
 }
 
-fn append_paragraph_text_only(text: &LoroText, paragraph: &Paragraph, paragraph_body: &str) -> LoroResult<()> {
-  let use_existing_sentinel = text.len_unicode() == 1 && text.to_string() == SENTINEL_NEWLINE;
-  let boundary_pos = if use_existing_sentinel {
-    0
-  } else {
-    let pos = text.len_unicode();
-    text.insert(pos, "\n")?;
-    pos
-  };
-  text.mark(boundary_pos..boundary_pos + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))?;
-  let text_pos = text.len_unicode();
-  if !paragraph_body.is_empty() {
-    text.insert(text_pos, paragraph_body)?;
-    mark_runs(text, text_pos, paragraph_body, &paragraph.runs)?;
-  }
-  Ok(())
+#[derive(Clone, Copy, Debug)]
+enum FlowBlockPosition {
+  Paragraph { boundary_pos: usize },
+  Object { anchor_pos: usize },
 }
 
-fn mark_runs(text: &LoroText, start: usize, paragraph_body: &str, runs: &[gpui_flowtext::TextRun]) -> LoroResult<()> {
-  let mut offset = 0_usize;
-  for run in runs {
-    let Some(run_text) = paragraph_body.get(offset..offset.saturating_add(run.len)) else {
-      break;
+#[derive(Clone, Debug)]
+struct ParagraphTextImportPlan {
+  boundary_pos: usize,
+}
+
+#[derive(Clone, Debug)]
+struct FlowTextImportPlan {
+  delta: Vec<TextDelta>,
+  unicode_len: usize,
+  block_positions: Vec<FlowBlockPosition>,
+  paragraphs: Vec<ParagraphTextImportPlan>,
+}
+
+impl FlowTextImportPlan {
+  fn new(block_capacity: usize, delta_capacity: usize) -> Self {
+    let mut delta = Vec::with_capacity(delta_capacity.max(block_capacity.saturating_add(1)));
+    delta.push(TextDelta::Insert {
+      insert: "\n".to_string(),
+      attributes: Some(paragraph_style_attributes(ParagraphStyle::Normal)),
+    });
+    Self {
+      delta,
+      unicode_len: 1,
+      block_positions: Vec::with_capacity(block_capacity),
+      paragraphs: Vec::new(),
+    }
+  }
+
+  fn for_document(document: &DocumentProjection) -> Self {
+    let run_count = document.paragraphs.iter().map(|paragraph| paragraph.runs.len()).sum::<usize>();
+    let mut plan = Self::new(
+      document.blocks.len(),
+      run_count.saturating_add(document.blocks.len()).saturating_add(1),
+    );
+    let mut paragraph_ix = 0_usize;
+    for block in document.blocks.iter() {
+      match block {
+        Block::Paragraph(paragraph) => {
+          let paragraph_body = paragraph_text(document, paragraph_ix);
+          plan.push_paragraph(paragraph, &paragraph_body);
+          paragraph_ix += 1;
+        }
+        Block::Image(_) | Block::Equation(_) | Block::Table(_) => plan.push_object(),
+      }
+    }
+    plan
+  }
+
+  fn push_paragraph(&mut self, paragraph: &Paragraph, paragraph_body: &str) {
+    let boundary_pos = if self.block_positions.is_empty() {
+      self.set_initial_paragraph_style(paragraph.style);
+      0
+    } else {
+      let boundary_pos = self.unicode_len;
+      push_rich_text_insert(
+        &mut self.delta,
+        "\n",
+        Some(paragraph_style_attributes(paragraph.style)),
+      );
+      self.unicode_len += 1;
+      boundary_pos
     };
-    let run_len = run_text.chars().count();
-    let range = start + paragraph_body[..offset].chars().count()..start + paragraph_body[..offset].chars().count() + run_len;
-    mark_run_styles(text, range, run.styles)?;
-    offset = offset.saturating_add(run.len);
+
+    self.push_paragraph_body(paragraph_body, &paragraph.runs);
+    self.paragraphs.push(ParagraphTextImportPlan { boundary_pos });
+    self.block_positions.push(FlowBlockPosition::Paragraph { boundary_pos });
   }
-  Ok(())
+
+  fn set_initial_paragraph_style(&mut self, style: ParagraphStyle) {
+    let Some(TextDelta::Insert { insert, attributes }) = self.delta.first_mut() else {
+      unreachable!("flow import plan always starts with a sentinel newline");
+    };
+    debug_assert_eq!(insert, "\n");
+    *attributes = Some(paragraph_style_attributes(style));
+  }
+
+  fn push_paragraph_body(&mut self, paragraph_body: &str, runs: &[gpui_flowtext::TextRun]) {
+    let mut byte_offset = 0_usize;
+    for run in runs {
+      let byte_end = byte_offset.saturating_add(run.len);
+      if byte_end > paragraph_body.len()
+        || !paragraph_body.is_char_boundary(byte_offset)
+        || !paragraph_body.is_char_boundary(byte_end)
+      {
+        break;
+      }
+      push_rich_text_insert(
+        &mut self.delta,
+        &paragraph_body[byte_offset..byte_end],
+        run_style_attributes(run.styles),
+      );
+      byte_offset = byte_end;
+    }
+    if byte_offset < paragraph_body.len() && paragraph_body.is_char_boundary(byte_offset) {
+      push_rich_text_insert(&mut self.delta, &paragraph_body[byte_offset..], None);
+    }
+    self.unicode_len += paragraph_body.chars().count();
+  }
+
+  fn push_object(&mut self) {
+    let anchor_pos = self.unicode_len;
+    let object = OBJECT_REPLACEMENT.to_string();
+    push_rich_text_insert(&mut self.delta, &object, None);
+    self.unicode_len += 1;
+    self.block_positions.push(FlowBlockPosition::Object { anchor_pos });
+  }
+
+  fn write_to(&self, text: &LoroText) -> LoroResult<()> {
+    let len = text.len_unicode();
+    if len > 0 {
+      text.delete(0, len)?;
+    }
+    // Import text and its complete semantic mark state as one rich-text batch.
+    text.apply_delta(&self.delta)
+  }
 }
 
-fn mark_run_styles(text: &LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> LoroResult<()> {
-  for key in [
-    MARK_RUN_SEMANTIC_STYLE,
-    MARK_HIGHLIGHT_STYLE,
-    MARK_DIRECT_UNDERLINE,
-    MARK_STRIKETHROUGH,
-  ] {
-    text.unmark(range.clone(), key)?;
-  }
+fn paragraph_style_attributes(style: ParagraphStyle) -> FxHashMap<String, LoroValue> {
+  let mut attributes = FxHashMap::default();
+  attributes.insert(MARK_PARAGRAPH_STYLE.to_string(), paragraph_style_value(style).into());
+  attributes
+}
+
+fn run_style_attributes(styles: RunStyles) -> Option<FxHashMap<String, LoroValue>> {
+  let mut attributes = FxHashMap::default();
   if let RunSemanticStyle::Custom(slot) = styles.semantic {
-    text.mark(range.clone(), MARK_RUN_SEMANTIC_STYLE, i64::from(slot))?;
+    attributes.insert(MARK_RUN_SEMANTIC_STYLE.to_string(), i64::from(slot).into());
   }
   if let Some(HighlightStyle::Custom(slot)) = styles.highlight {
-    text.mark(range.clone(), MARK_HIGHLIGHT_STYLE, i64::from(slot))?;
+    attributes.insert(MARK_HIGHLIGHT_STYLE.to_string(), i64::from(slot).into());
   }
   if styles.direct_underline {
-    text.mark(range.clone(), MARK_DIRECT_UNDERLINE, true)?;
+    attributes.insert(MARK_DIRECT_UNDERLINE.to_string(), true.into());
   }
   if styles.strikethrough {
-    text.mark(range, MARK_STRIKETHROUGH, true)?;
+    attributes.insert(MARK_STRIKETHROUGH.to_string(), true.into());
   }
-  Ok(())
+  (!attributes.is_empty()).then_some(attributes)
+}
+
+fn push_rich_text_insert(
+  delta: &mut Vec<TextDelta>,
+  value: &str,
+  attributes: Option<FxHashMap<String, LoroValue>>,
+) {
+  if value.is_empty() {
+    return;
+  }
+  if let Some(TextDelta::Insert {
+    insert,
+    attributes: previous_attributes,
+  }) = delta.last_mut()
+  {
+    if previous_attributes.as_ref() == attributes.as_ref() {
+      insert.push_str(value);
+      return;
+    }
+  }
+  delta.push(TextDelta::Insert {
+    insert: value.to_string(),
+    attributes,
+  });
 }
 
 fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &str) -> LoroResult<()> {
@@ -329,26 +492,37 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
       let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
       cell_map.insert("flow_container_id", flow.id().to_string())?;
       cell_map.insert("text_container_id", text.id().to_string())?;
-      replace_text(&text, SENTINEL_NEWLINE)?;
-      for (block_ix, cell_block) in cell.blocks.iter().enumerate() {
+      let cell_delta_capacity = cell
+        .blocks
+        .iter()
+        .map(|block| match block {
+          TableCellBlock::Paragraph(paragraph) => paragraph.paragraph.runs.len().saturating_add(1),
+          TableCellBlock::Table(_) => 1,
+        })
+        .sum();
+      let mut cell_plan = FlowTextImportPlan::new(cell.blocks.len(), cell_delta_capacity);
+      for cell_block in &cell.blocks {
         match cell_block {
-          TableCellBlock::Paragraph(paragraph) => append_paragraph_text_only(&text, &paragraph.paragraph, &paragraph.text)?,
-          TableCellBlock::Table(nested) => {
-            let pos = text.len_unicode();
-            text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-            let nested_table_id = format!("{cell_id}.nested_table.{block_ix}");
-            nested_table_ids.push(nested_table_id.as_str())?;
-            let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
-            nested_map.insert("id", nested_table_id.as_str())?;
-            nested_map.insert("container_id", nested_map.id().to_string())?;
-            nested_map.insert("kind", "table")?;
-            if let Some(cursor) = text.get_cursor(pos, Side::Left) {
-              nested_map.insert("anchor_cursor", cursor.encode())?;
-            }
-            nested_map.ensure_mergeable_map("attrs")?;
-            import_table(flows, &nested_map, nested, &format!("{cell_id}.nested.{block_ix}"))?;
-          }
+          TableCellBlock::Paragraph(paragraph) => cell_plan.push_paragraph(&paragraph.paragraph, &paragraph.text),
+          TableCellBlock::Table(_) => cell_plan.push_object(),
         }
+      }
+      cell_plan.write_to(&text)?;
+      for (block_ix, (cell_block, position)) in cell.blocks.iter().zip(&cell_plan.block_positions).enumerate() {
+        let (TableCellBlock::Table(nested), FlowBlockPosition::Object { anchor_pos }) = (cell_block, position) else {
+          continue;
+        };
+        let nested_table_id = format!("{cell_id}.nested_table.{block_ix}");
+        nested_table_ids.push(nested_table_id.as_str())?;
+        let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
+        nested_map.insert("id", nested_table_id.as_str())?;
+        nested_map.insert("container_id", nested_map.id().to_string())?;
+        nested_map.insert("kind", "table")?;
+        if let Some(cursor) = text.get_cursor(*anchor_pos, Side::Left) {
+          nested_map.insert("anchor_cursor", cursor.encode())?;
+        }
+        nested_map.ensure_mergeable_map("attrs")?;
+        import_table(flows, &nested_map, nested, &format!("{cell_id}.nested.{block_ix}"))?;
       }
       column_ix += usize::from(cell.col_span.max(1));
     }
@@ -554,6 +728,102 @@ mod tests {
     let doc = document_to_loro(&source, "Pocket")?;
     let projected = crate::document_from_loro(&doc)?;
     assert_eq!(projected.paragraphs[0].style, ParagraphStyle::Custom(0));
+    Ok(())
+  }
+
+  #[test]
+  fn bulk_import_preserves_empty_paragraphs_unicode_and_frontier() -> io::Result<()> {
+    let paragraphs = vec![
+      DocumentParagraphInput {
+        style: ParagraphStyle::Custom(0),
+        runs: Vec::new(),
+      },
+      DocumentParagraphInput {
+        style: ParagraphStyle::Normal,
+        runs: Vec::new(),
+      },
+      DocumentParagraphInput {
+        style: ParagraphStyle::Custom(2),
+        runs: vec![gpui_flowtext::DocumentRunInput {
+          text: "héllo 世界".to_string(),
+          styles: RunStyles {
+            semantic: RunSemanticStyle::Custom(3),
+            direct_underline: true,
+            ..RunStyles::default()
+          },
+        }],
+      },
+    ];
+
+    let imported = import_paragraphs_as_loro(DocumentTheme::default(), paragraphs, "Bulk import")?;
+    assert_eq!(imported.projection.frontier, imported.doc.state_frontiers().encode());
+    assert_eq!(crate::loro_schema::body_text(&imported.doc).to_string(), "\n\n\nhéllo 世界");
+
+    let projected = crate::document_from_loro(&imported.doc)?;
+    assert_eq!(projected.paragraphs.len(), 3);
+    assert_eq!(paragraph_text(&projected, 0), "");
+    assert_eq!(paragraph_text(&projected, 1), "");
+    assert_eq!(paragraph_text(&projected, 2), "héllo 世界");
+    assert_eq!(projected.paragraphs[0].style, ParagraphStyle::Custom(0));
+    assert_eq!(projected.paragraphs[2].style, ParagraphStyle::Custom(2));
+    assert_eq!(projected.paragraphs[2].runs[0].styles.semantic, RunSemanticStyle::Custom(3));
+    assert!(projected.paragraphs[2].runs[0].styles.direct_underline);
+    Ok(())
+  }
+
+  #[test]
+  fn bulk_delta_import_preserves_all_semantic_run_attributes() -> io::Result<()> {
+    let expected = RunStyles {
+      semantic: RunSemanticStyle::Custom(3),
+      direct_underline: true,
+      strikethrough: true,
+      highlight: Some(HighlightStyle::Custom(4)),
+    };
+    let imported = import_paragraphs_as_loro(
+      crate::flowstate_document_theme(),
+      vec![DocumentParagraphInput {
+        style: ParagraphStyle::Custom(2),
+        runs: vec![
+          gpui_flowtext::DocumentRunInput {
+            text: "styled".to_string(),
+            styles: expected,
+          },
+          gpui_flowtext::DocumentRunInput {
+            text: " plain".to_string(),
+            styles: RunStyles::default(),
+          },
+        ],
+      }],
+      "Rich delta import",
+    )?;
+
+    let projected = crate::document_from_loro(&imported.doc)?;
+    assert_eq!(paragraph_text(&projected, 0), "styled plain");
+    assert_eq!(projected.paragraphs[0].style, ParagraphStyle::Custom(2));
+    assert!(projected.paragraphs[0].runs.iter().any(|run| run.styles == expected));
+    Ok(())
+  }
+
+  #[test]
+  fn bulk_import_handles_large_paragraph_sets_without_reprojection() -> io::Result<()> {
+    let paragraphs = (0..2_000)
+      .map(|ix| DocumentParagraphInput {
+        style: if ix % 11 == 0 {
+          ParagraphStyle::Custom(1)
+        } else {
+          ParagraphStyle::Normal
+        },
+        runs: vec![gpui_flowtext::DocumentRunInput {
+          text: format!("paragraph {ix}"),
+          styles: RunStyles::default(),
+        }],
+      })
+      .collect();
+
+    let imported = import_paragraphs_as_loro(DocumentTheme::default(), paragraphs, "Large import")?;
+    assert_eq!(imported.projection.paragraphs.len(), 2_000);
+    assert_eq!(imported.projection.frontier, imported.doc.state_frontiers().encode());
+    assert_eq!(paragraph_text(&imported.projection, 1_999), "paragraph 1999");
     Ok(())
   }
 }

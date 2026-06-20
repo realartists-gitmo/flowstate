@@ -4,7 +4,9 @@ pub mod loro_import;
 pub mod loro_projection;
 pub mod loro_schema;
 
-pub use loro_import::{document_to_loro, write_imported_document_as_loro_db8};
+pub use loro_import::{
+  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
+};
 pub use loro_projection::{document_from_loro, object_input_blocks_from_loro};
 pub use gpui_flowtext::*;
 pub use loro_schema::{
