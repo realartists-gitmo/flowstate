@@ -314,7 +314,7 @@ impl CollabSession {
       return Ok(());
     };
     tracing::warn!(session = %self.session, paragraphs = projected.paragraphs.len(), blocks = projected.blocks.len(), "rebuilding editor document from collaboration projection");
-    editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(projected, cx));
+    editor.update(cx, |editor, cx| editor.replace_document_projection(projected, cx));
     self.last_document_activity = Instant::now();
     self.refresh_external_carets(cx);
     tracing::info!(session = %self.session, "rebuilt editor document from collaboration projection");

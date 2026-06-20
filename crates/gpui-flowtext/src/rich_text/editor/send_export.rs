@@ -39,7 +39,7 @@ impl RichTextEditor {
     let generation = self.edit_generation;
     let document = self.document.clone();
     if let Some(export_hook) = self.native_export_hook.clone() {
-      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let pending_runtime_edits = self.take_pending_semantic_edits();
       let selection_after = pending_runtime_edits
         .iter()
         .rev()
@@ -50,7 +50,7 @@ impl RichTextEditor {
         match result {
           Ok(document) => {
             let _ = editor.update(cx, |editor, cx| {
-              editor.replace_document_from_collaboration(document, cx);
+              editor.replace_document_projection(document, cx);
               editor.complete_runtime_edit(selection_after, cx);
               editor.last_send_document_generation = Some(generation);
               cx.notify();
@@ -92,7 +92,7 @@ impl RichTextEditor {
     let generation = self.edit_generation;
     let document = self.document.clone();
     if let Some(export_hook) = self.native_export_hook.clone() {
-      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let pending_runtime_edits = self.take_pending_semantic_edits();
       let selection_after = pending_runtime_edits
         .iter()
         .rev()
@@ -103,7 +103,7 @@ impl RichTextEditor {
         match result {
           Ok(document) => {
             let _ = editor.update(cx, |editor, cx| {
-              editor.replace_document_from_collaboration(document, cx);
+              editor.replace_document_projection(document, cx);
               editor.complete_runtime_edit(selection_after, cx);
               editor.last_format_export_generation = Some(generation);
               cx.notify();

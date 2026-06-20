@@ -443,7 +443,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
@@ -454,7 +454,6 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.invalidate_document_layout_caches();
     self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
   }

@@ -280,7 +280,7 @@ impl RichTextEditor {
     self.save_status = SaveStatus::Saving;
     cx.notify();
     if let Some(save_hook) = self.native_save_hook.clone() {
-      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let pending_runtime_edits = self.take_pending_semantic_edits();
       let selection_after = pending_runtime_edits
         .iter()
         .rev()
@@ -296,7 +296,7 @@ impl RichTextEditor {
         match write_result {
           Ok(document) => {
             let _ = editor.update(cx, |editor, cx| {
-              editor.replace_document_from_collaboration(document, cx);
+              editor.replace_document_projection(document, cx);
               editor.complete_runtime_edit(selection_after, cx);
               editor.saved_generation = editor.saved_generation.max(generation);
               editor.refresh_save_status();

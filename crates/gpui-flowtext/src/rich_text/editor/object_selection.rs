@@ -278,7 +278,7 @@ impl RichTextEditor {
       );
       Vec::new()
     };
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
       after_selection: self.selection.clone(),
@@ -290,7 +290,6 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.invalidate_document_layout_caches();
     self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     true
@@ -523,7 +522,7 @@ impl RichTextEditor {
         after: after_span,
       });
     }
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
@@ -534,7 +533,6 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.invalidate_document_layout_caches();
     self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     true
@@ -575,7 +573,7 @@ impl RichTextEditor {
       },
       |block| vec![SemanticEditCommand::DeleteBlock { block }],
     );
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection: before_selection.clone(),
       before_generation,
       after_selection: self.selection.clone(),
@@ -583,7 +581,6 @@ impl RichTextEditor {
       operations: vec![EditOperation::DeleteBlock { block_ix, block }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);

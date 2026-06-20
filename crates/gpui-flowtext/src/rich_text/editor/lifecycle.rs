@@ -37,17 +37,15 @@ impl RichTextEditor {
       undo_stack: Vec::new(),
       redo_stack: Vec::new(),
       identity_map,
-      pending_collab_edits: Vec::new(),
-      pending_runtime_edits: Vec::new(),
+      pending_semantic_edits: Vec::new(),
       runtime_edits_in_flight: 0,
-      collab_capture: false,
-      runtime_capture: false,
+      command_capture_route: CommandCaptureRoute::Disabled,
       native_save_hook: None,
       native_export_hook: None,
       native_undo_hook: None,
       native_recovery_hook: None,
-      suppress_collab_capture: 0,
-      collab_undo_redirect: None,
+      suppress_command_capture: 0,
+      session_undo_redirect: None,
       collaboration_role: None,
       own_collaboration_caret_color_rgb: None,
       recovery_write_in_progress: false,
@@ -163,17 +161,15 @@ impl RichTextEditor {
   fn release_transient_memory(&mut self) {
     self.undo_stack = Vec::new();
     self.redo_stack = Vec::new();
-    self.pending_collab_edits.clear();
-    self.pending_runtime_edits.clear();
+    self.pending_semantic_edits.clear();
     self.runtime_edits_in_flight = 0;
-    self.collab_capture = false;
-    self.runtime_capture = false;
+    self.command_capture_route = CommandCaptureRoute::Disabled;
     self.native_save_hook = None;
     self.native_export_hook = None;
     self.native_undo_hook = None;
     self.native_recovery_hook = None;
-    self.suppress_collab_capture = 0;
-    self.collab_undo_redirect = None;
+    self.suppress_command_capture = 0;
+    self.session_undo_redirect = None;
     self.collaboration_role = None;
     self.own_collaboration_caret_color_rgb = None;
     self.recovery_write_in_progress = false;
@@ -241,17 +237,29 @@ impl RichTextEditor {
     self.goal_x = None;
   }
 
-  pub fn take_pending_collab_edits(&mut self) -> Vec<CollaborationEdit> {
-    std::mem::take(&mut self.pending_collab_edits)
+  pub fn take_pending_session_edits(&mut self) -> Vec<SemanticCommandBatch> {
+    if self.command_capture_route.accepts_collaboration() {
+      std::mem::take(&mut self.pending_semantic_edits)
+    } else {
+      Vec::new()
+    }
   }
 
-  pub fn take_pending_runtime_edits(&mut self) -> Vec<CollaborationEdit> {
-    std::mem::take(&mut self.pending_runtime_edits)
+  pub fn take_pending_runtime_edits(&mut self) -> Vec<SemanticCommandBatch> {
+    if self.command_capture_route.accepts_runtime() {
+      std::mem::take(&mut self.pending_semantic_edits)
+    } else {
+      Vec::new()
+    }
+  }
+
+  pub fn take_pending_semantic_edits(&mut self) -> Vec<SemanticCommandBatch> {
+    std::mem::take(&mut self.pending_semantic_edits)
   }
 
   pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
     self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
-    if self.runtime_edits_in_flight == 0 && self.pending_runtime_edits.is_empty() && self.pending_collab_edits.is_empty() {
+    if self.runtime_edits_in_flight == 0 && self.pending_semantic_edits.is_empty() {
       if let Some(selection) = selection {
         self.selection = selection;
         clamp_selection_to_document(&self.document, &mut self.selection);
@@ -282,18 +290,51 @@ impl RichTextEditor {
     cx.notify();
   }
 
-  pub fn set_collab_capture(&mut self, on: bool) {
-    self.collab_capture = on;
-    if !on {
-      self.pending_collab_edits.clear();
-    }
+  pub fn set_session_capture(&mut self, on: bool) {
+    self.set_command_capture_route(if on {
+      CommandCaptureRoute::Collaboration
+    } else if self.command_capture_route.accepts_collaboration() {
+      CommandCaptureRoute::Disabled
+    } else {
+      self.command_capture_route
+    });
   }
 
   pub fn set_runtime_capture(&mut self, on: bool) {
-    self.runtime_capture = on;
+    self.set_command_capture_route(if on {
+      CommandCaptureRoute::Runtime
+    } else if self.command_capture_route.accepts_runtime() {
+      CommandCaptureRoute::Disabled
+    } else {
+      self.command_capture_route
+    });
     if !on {
-      self.pending_runtime_edits.clear();
       self.runtime_edits_in_flight = 0;
+    }
+  }
+
+  fn set_command_capture_route(&mut self, route: CommandCaptureRoute) {
+    self.command_capture_route = route;
+  }
+
+  pub(super) fn capture_semantic_edit(&mut self, edit: SemanticCommandBatch) {
+    if self.command_capture_route.is_enabled() && self.suppress_command_capture == 0 {
+      self.pending_semantic_edits.push(edit);
+    }
+  }
+
+  pub(super) fn command_capture_enabled(&self) -> bool {
+    self.command_capture_route.is_enabled()
+  }
+
+  pub(super) fn local_history_enabled(&self) -> bool {
+    !self.command_capture_enabled() && self.native_undo_hook.is_none() && self.session_undo_redirect.is_none()
+  }
+
+  pub(super) fn record_local_history(&mut self, record: EditRecord) {
+    if self.local_history_enabled() {
+      self.undo_stack.push(record);
+      self.redo_stack.clear();
     }
   }
 
@@ -318,8 +359,8 @@ impl RichTextEditor {
     self.pending_scroll_head_after_layout
   }
 
-  pub fn set_collab_undo_redirect(&mut self, hook: Option<Rc<dyn Fn(UndoRedirect)>>) {
-    self.collab_undo_redirect = hook;
+  pub fn set_session_undo_redirect(&mut self, hook: Option<Rc<dyn Fn(UndoRedirect)>>) {
+    self.session_undo_redirect = hook;
   }
 
   pub fn clear_undo_redo_stacks(&mut self) {
@@ -365,11 +406,7 @@ impl RichTextEditor {
       .or_else(|| self.document.ids.block_ids.get(block_ix).copied())
   }
 
-  pub fn table_cell_id(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> Option<TableCellId> {
-    self.identity_map.table_cell_id(block_ix, row_ix, cell_ix)
-  }
-
-  pub fn replace_document_from_collaboration(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
+  pub fn replace_document_projection(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
     self.document = document;
     self.identity_map.reconcile(&self.document);
     self.after_text_mutation(cx);

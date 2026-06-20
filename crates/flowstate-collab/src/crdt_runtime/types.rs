@@ -1,11 +1,30 @@
 use flowstate_document::{
-  CollabPatch, DocumentProjection, DocumentPackage, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth,
+  ProjectionPatch, DocumentProjection, DocumentPackage, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth,
   ParagraphStyle, ROOT_BODY_FLOW_ID, RunStyles,
 };
 use std::collections::BTreeMap;
 use gpui_flowtext::{EditorSelection, ExternalCaret};
 use loro::VersionRange;
 use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug)]
+pub struct StaleProjectionError {
+  pub expected_frontier_len: usize,
+  pub current_frontier_len: usize,
+}
+
+impl std::fmt::Display for StaleProjectionError {
+  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    write!(
+      formatter,
+      "editor command batch was constructed at a stale projection frontier (expected {} bytes, current frontier has {} bytes)",
+      self.expected_frontier_len,
+      self.current_frontier_len,
+    )
+  }
+}
+
+impl std::error::Error for StaleProjectionError {}
 
 #[derive(Clone, Debug)]
 pub struct RuntimeAssetMetadata {
@@ -139,7 +158,7 @@ pub enum RuntimeEvent {
     version_vector: Vec<u8>,
   },
   ProjectionPatched {
-    patches: Vec<CollabPatch>,
+    patches: Vec<ProjectionPatch>,
     invalidation: ProjectionInvalidation,
     frontier: Vec<u8>,
     version_vector: Vec<u8>,

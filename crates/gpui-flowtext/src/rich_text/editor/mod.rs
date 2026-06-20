@@ -479,17 +479,17 @@ pub struct ExternalCaret {
 }
 
 pub type NativeSaveHook =
-  Rc<dyn Fn(PathBuf, Vec<CollaborationEdit>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>>;
+  Rc<dyn Fn(PathBuf, Vec<SemanticCommandBatch>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>>;
 pub type NativeExportHook = Rc<
   dyn Fn(
     PathBuf,
     DocumentExportFormat,
-    Vec<CollaborationEdit>,
+    Vec<SemanticCommandBatch>,
     Vec<AssetRecord>,
   ) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>,
 >;
 pub type NativeUndoHook =
-  Rc<dyn Fn(UndoRedirect, Vec<CollaborationEdit>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<Option<NativeUndoResult>>>>>>;
+  Rc<dyn Fn(UndoRedirect, Vec<SemanticCommandBatch>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<Option<NativeUndoResult>>>>>>;
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 
 pub struct NativeUndoResult {
@@ -882,6 +882,28 @@ impl HeightPrefixIndex {
   }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(super) enum CommandCaptureRoute {
+  #[default]
+  Disabled,
+  Runtime,
+  Collaboration,
+}
+
+impl CommandCaptureRoute {
+  fn accepts_runtime(self) -> bool {
+    matches!(self, Self::Runtime)
+  }
+
+  fn accepts_collaboration(self) -> bool {
+    matches!(self, Self::Collaboration)
+  }
+
+  fn is_enabled(self) -> bool {
+    !matches!(self, Self::Disabled)
+  }
+}
+
 pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
@@ -903,17 +925,15 @@ pub struct RichTextEditor {
   undo_stack: Vec<EditRecord>,
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
-  pending_collab_edits: Vec<CollaborationEdit>,
-  pending_runtime_edits: Vec<CollaborationEdit>,
+  pending_semantic_edits: Vec<SemanticCommandBatch>,
   runtime_edits_in_flight: usize,
-  collab_capture: bool,
-  runtime_capture: bool,
+  command_capture_route: CommandCaptureRoute,
   native_save_hook: Option<NativeSaveHook>,
   native_export_hook: Option<NativeExportHook>,
   native_undo_hook: Option<NativeUndoHook>,
   native_recovery_hook: Option<NativeRecoveryHook>,
-  suppress_collab_capture: u32,
-  collab_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
+  suppress_command_capture: u32,
+  session_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
   collaboration_role: Option<CollaborationRole>,
   own_collaboration_caret_color_rgb: Option<u32>,
   recovery_write_in_progress: bool,
@@ -995,7 +1015,7 @@ pub struct RichTextEditor {
 impl gpui::EventEmitter<EditorEvent> for RichTextEditor {}
 
 include!("lifecycle.rs");
-include!("collab_apply.rs");
+include!("projection_apply.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
 include!("search_highlights.rs");

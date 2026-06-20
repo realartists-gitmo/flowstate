@@ -13,11 +13,11 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       assert!(editor.insert_single_grapheme_fast_path("a", cx));
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       assert!(editor.insert_single_grapheme_fast_path("c", cx));
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -39,7 +39,7 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
   let edits_after_undo = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.undo(cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
   assert!(edits_after_undo.is_empty());
@@ -56,7 +56,7 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
         assets: Vec::new(),
       };
       assert!(editor.insert_rich_fragment_paste_at_caret(&fragment, cx));
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
   assert_eq!(paste_edits.len(), 1);
@@ -68,7 +68,7 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
   let edits_after_paste_undo = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.undo(cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
   assert!(edits_after_paste_undo.is_empty());
@@ -135,14 +135,14 @@ fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAp
     editor.update(cx, |editor, cx| {
       assert!(!editor.pending_scroll_head_after_layout_for_test());
       let before_generation = editor.edit_generation();
-      editor.apply_collab_patches(
-        &[CollabPatch::ParagraphText {
+      editor.apply_projection_patches(
+        &[ProjectionPatch::ParagraphText {
           row: 0,
           new: InputParagraph {
             style: ParagraphStyle::Normal,
             runs: vec![plain("remote")],
           },
-          delta_utf8: vec![CollabTextDelta::Insert("remote".len())],
+          delta_utf8: vec![ProjectionTextDelta::Insert("remote".len())],
         }],
         cx,
       );
@@ -168,7 +168,7 @@ fn applying_collab_asset_records_updates_asset_cache(cx: &mut gpui::TestAppConte
         bytes: std::sync::Arc::new(bytes),
       };
       let before_generation = editor.edit_generation();
-      editor.apply_collab_asset_records(&[(asset_id, record.clone())], cx);
+      editor.apply_synced_asset_records(&[(asset_id, record.clone())], cx);
 
       assert_eq!(editor.document().assets.assets.get(&asset_id), Some(&record));
       assert!(editor.edit_generation() > before_generation);
@@ -183,9 +183,9 @@ fn object_insertion_emits_insert_block_semantic_command(cx: &mut gpui::TestAppCo
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.insert_default_table(2, 2, cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -202,12 +202,12 @@ fn paragraph_block_insertion_emits_paragraph_span_command(cx: &mut gpui::TestApp
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.insert_toolkit_paragraphs_as_blocks(vec![InputParagraph {
         style: ParagraphStyle::Normal,
         runs: vec![plain("inserted")],
       }], cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -229,7 +229,7 @@ fn mixed_block_insertion_emits_paragraph_span_and_insert_block_commands(cx: &mut
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.insert_block_fragment_for_test(
         RichClipboardFragment {
           format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
@@ -249,7 +249,7 @@ fn mixed_block_insertion_emits_paragraph_span_and_insert_block_commands(cx: &mut
         },
         cx,
       );
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -279,14 +279,14 @@ fn block_insertion_over_text_selection_emits_structured_commands(cx: &mut gpui::
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.set_text_selection_for_test(
         DocumentOffset { paragraph: 0, byte: 2 },
         DocumentOffset { paragraph: 1, byte: 2 },
         cx,
       );
       editor.insert_default_table(1, 1, cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -304,10 +304,10 @@ fn table_column_width_edit_emits_structured_semantic_command(cx: &mut gpui::Test
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.insert_default_table(2, 2, cx);
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_table_cell_for_test(0, 0, 1, cx);
       editor.widen_selected_table_column(cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -329,11 +329,11 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
   cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.insert_default_table(2, 2, cx);
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_table_cell_for_test(0, 0, 0, cx);
 
       editor.insert_row_after_selected_table(cx);
-      let edits = editor.take_pending_collab_edits();
+      let edits = editor.take_pending_session_edits();
       let [SemanticEditCommand::InsertTableRow { row_ix, row, .. }] = edits[0].semantic_commands.as_slice() else {
         panic!("expected one semantic InsertTableRow command, got {:?}", edits[0].semantic_commands);
       };
@@ -341,7 +341,7 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
       assert_eq!(row.cells.len(), 2);
 
       editor.insert_column_after_selected_table(cx);
-      let edits = editor.take_pending_collab_edits();
+      let edits = editor.take_pending_session_edits();
       let [SemanticEditCommand::InsertTableColumn {
         column_ix,
         width,
@@ -358,14 +358,14 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
       assert_eq!(cells.len(), 3);
 
       editor.delete_last_row_from_selected_table(cx);
-      let edits = editor.take_pending_collab_edits();
+      let edits = editor.take_pending_session_edits();
       let [SemanticEditCommand::DeleteTableRow { row_ix, .. }] = edits[0].semantic_commands.as_slice() else {
         panic!("expected one semantic DeleteTableRow command, got {:?}", edits[0].semantic_commands);
       };
       assert_eq!(*row_ix, 0);
 
       editor.delete_last_column_from_selected_table(cx);
-      let edits = editor.take_pending_collab_edits();
+      let edits = editor.take_pending_session_edits();
       let [SemanticEditCommand::DeleteTableColumn { column_ix, .. }] = edits[0].semantic_commands.as_slice() else {
         panic!(
           "expected one semantic DeleteTableColumn command, got {:?}",
@@ -384,10 +384,10 @@ fn table_cell_text_edit_emits_cell_scoped_semantic_command(cx: &mut gpui::TestAp
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.insert_default_table(2, 2, cx);
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_table_cell_for_test(0, 0, 0, cx);
       editor.insert_plain_text_from_toolkit("cell", cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -445,11 +445,11 @@ fn text_entry_in_selected_equation_updates_equation_only(cx: &mut gpui::TestAppC
 
   let (document, edits) = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_equation_block_for_test(1, cx);
       editor.insert_plain_text_from_toolkit("+1", cx);
       editor.replace_selected_text_from_platform_for_test("+2", cx);
-      (editor.document().clone(), editor.take_pending_collab_edits())
+      (editor.document().clone(), editor.take_pending_session_edits())
     })
   });
 
@@ -495,10 +495,10 @@ fn image_alt_text_edit_emits_alt_text_semantic_command(cx: &mut gpui::TestAppCon
 
   let (document, edits) = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_image_block_for_test(1, cx);
       editor.set_selected_image_alt_text("new alt", cx);
-      (editor.document().clone(), editor.take_pending_collab_edits())
+      (editor.document().clone(), editor.take_pending_session_edits())
     })
   });
 
@@ -537,10 +537,10 @@ fn image_layout_edit_emits_layout_semantic_command(cx: &mut gpui::TestAppContext
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.select_image_block_for_test(1, cx);
       editor.set_selected_image_fit_width(cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 
@@ -586,14 +586,14 @@ fn deleting_selection_across_object_emits_structured_semantic_commands(cx: &mut 
 
   let edits = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.set_text_selection_for_test(
         DocumentOffset { paragraph: 0, byte: 2 },
         DocumentOffset { paragraph: 1, byte: 2 },
         cx,
       );
       editor.cut(cx);
-      editor.take_pending_collab_edits()
+      editor.take_pending_session_edits()
     })
   });
 

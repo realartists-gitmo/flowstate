@@ -254,7 +254,32 @@ impl Workspace {
           match result {
             Ok(Ok(joined)) => {
               tracing::info!(session = %joined.session, title = %joined.title, "collaboration join completed; opening joined document");
-              let panel = workspace.add_joined_collaboration_panel(joined.document, joined.title, window, cx);
+              let Some(runtime) = crate::collab::runtime_for_session(joined.session, cx) else {
+                tracing::error!(session = %joined.session, "joined collaboration runtime is unavailable");
+                std::mem::drop(window.prompt(
+                  PromptLevel::Critical,
+                  "Join failed",
+                  Some("The joined collaboration runtime is unavailable."),
+                  &[PromptButton::ok("Ok")],
+                  cx,
+                ));
+                return;
+              };
+              let panel = match workspace.add_joined_collaboration_panel(joined.document, joined.title, runtime.clone(), window, cx) {
+                Ok(panel) => panel,
+                Err(error) => {
+                  tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");
+                  let detail = format!("Joined document runtime could not be started: {error:#}");
+                  std::mem::drop(window.prompt(
+                    PromptLevel::Critical,
+                    "Join failed",
+                    Some(&detail),
+                    &[PromptButton::ok("Ok")],
+                    cx,
+                  ));
+                  return;
+                },
+              };
               let panel_id = panel.read(cx).id();
               let editor = panel.read(cx).editor();
               if let Err(error) = crate::collab::attach_joined_session(joined.session, panel_id, editor, cx) {
@@ -268,9 +293,7 @@ impl Workspace {
                   cx,
                 ));
               } else {
-                if let Some(runtime) = crate::collab::runtime_for_session(joined.session, cx) {
-                  workspace.attach_runtime_to_document_panel(panel_id, runtime, cx);
-                }
+                workspace.attach_runtime_to_document_panel(panel_id, runtime, cx);
                 if workspace.collaboration_dialog.is_some() {
                   workspace.close_collaboration_dialog(cx);
                   window.close_dialog(cx);
@@ -312,13 +335,14 @@ impl Workspace {
     &mut self,
     document: DocumentProjection,
     title: String,
+    runtime: flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) -> Entity<DocumentPanel> {
-    let panel = self.create_document_panel(document, None, Some(title), None, window, cx);
+  ) -> anyhow::Result<Entity<DocumentPanel>> {
+    let panel = self.create_document_panel(document, None, Some(title), DocumentRuntimeSource::Handle(runtime), window, cx)?;
     self.persist_temporary_workspace_session(cx);
     cx.notify();
-    panel
+    Ok(panel)
   }
 
   pub fn leave_collaboration_on_active_document(&mut self, cx: &mut Context<Self>) -> bool {

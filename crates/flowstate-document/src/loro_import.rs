@@ -16,6 +16,9 @@ use crate::{
 
 pub fn document_to_loro(document: &DocumentProjection, title: &str) -> io::Result<LoroDoc> {
   let doc = crate::new_loro_document(title).map_err(loro_io_error)?;
+  if document.ids.document_id != 0 {
+    crate::loro_schema::set_document_id(&doc, Uuid::from_u128(document.ids.document_id)).map_err(loro_io_error)?;
+  }
   replace_body_from_document(&doc, document).map_err(loro_io_error)?;
   import_assets(&doc, document).map_err(loro_io_error)?;
   doc.commit();
@@ -47,25 +50,37 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
     match block {
       Block::Paragraph(paragraph) => {
         let text = paragraph_text(document, paragraph_ix);
-        append_paragraph(&body_text, &paragraphs, &blocks, BODY_FLOW_ID, paragraph, &text, block_ix, paragraph_ix)?;
+        append_paragraph(
+          &body_text,
+          &paragraphs,
+          &blocks,
+          BODY_FLOW_ID,
+          paragraph,
+          &text,
+          projection_block_id(document, block_ix, "paragraph_block"),
+          projection_paragraph_id(document, paragraph_ix),
+        )?;
         paragraph_ix += 1;
       }
       Block::Image(image) => {
         let pos = body_text.len_unicode();
         body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-        let block = ensure_block(&blocks, block_id("image", block_ix), "image", BODY_FLOW_ID, &body_text, pos)?;
+        let durable_block_id = projection_block_id(document, block_ix, "image");
+        let block = ensure_block(&blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, &body_text, pos)?;
         block.insert("asset_id", image.asset_id.0.to_string())?;
         if let Some(asset) = document.assets.assets.get(&image.asset_id) {
           block.insert("content_hash", blake3::hash(&asset.bytes).to_hex().as_str())?;
           block.insert("mime_type", asset.mime_type.as_ref())?;
           block.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
         }
-        block.insert("alt_text_flow_id", nested_flow_id("image_alt", block_ix))?;
-        let alt_flow = ensure_flow(&flows, &nested_flow_id("image_alt", block_ix), "alt_text")?;
+        let alt_text_flow_id = nested_flow_id("image_alt", &durable_block_id);
+        block.insert("alt_text_flow_id", alt_text_flow_id.as_str())?;
+        let alt_flow = ensure_flow(&flows, &alt_text_flow_id, "alt_text")?;
         replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
         if let Some(caption) = &image.caption {
-          block.insert("caption_flow_id", nested_flow_id("image_caption", block_ix))?;
-          let caption_flow = ensure_flow(&flows, &nested_flow_id("image_caption", block_ix), "caption")?;
+          let caption_flow_id = nested_flow_id("image_caption", &durable_block_id);
+          block.insert("caption_flow_id", caption_flow_id.as_str())?;
+          let caption_flow = ensure_flow(&flows, &caption_flow_id, "caption")?;
           replace_text(&caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, SENTINEL_NEWLINE)?;
           append_paragraph_text_only(&caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, caption, "")?;
         }
@@ -86,8 +101,9 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       Block::Equation(equation) => {
         let pos = body_text.len_unicode();
         body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-        let block = ensure_block(&blocks, block_id("equation", block_ix), "equation", BODY_FLOW_ID, &body_text, pos)?;
-        let source_flow_id = nested_flow_id("equation_source", block_ix);
+        let durable_block_id = projection_block_id(document, block_ix, "equation");
+        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, pos)?;
+        let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
         block.insert("source_flow_id", source_flow_id.as_str())?;
         let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
         replace_text(&source_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, equation.source.as_ref())?;
@@ -98,8 +114,9 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       Block::Table(table) => {
         let pos = body_text.len_unicode();
         body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
-        let block = ensure_block(&blocks, block_id("table", block_ix), "table", BODY_FLOW_ID, &body_text, pos)?;
-        import_table(&flows, &block, table, &format!("table.{block_ix}"))?;
+        let durable_block_id = projection_block_id(document, block_ix, "table");
+        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, pos)?;
+        import_table(&flows, &block, table, &durable_block_id)?;
       }
     }
   }
@@ -153,12 +170,11 @@ fn append_paragraph(
   flow_id: &str,
   paragraph: &Paragraph,
   text: &str,
-  block_ix: usize,
-  paragraph_ix: usize,
+  block_id: String,
+  paragraph_id: String,
 ) -> LoroResult<()> {
   append_paragraph_text_only(body_text, paragraph, text)?;
   let boundary_pos = body_text.len_unicode() - text.chars().count() - 1;
-  let paragraph_id = block_id("paragraph", paragraph_ix);
   let paragraph_map = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph_map.insert("id", paragraph_id.as_str())?;
   paragraph_map.insert("container_id", paragraph_map.id().to_string())?;
@@ -171,7 +187,7 @@ fn append_paragraph(
   }
   let attrs = paragraph_map.ensure_mergeable_map("attrs")?;
   paragraph_map.insert("attrs_container_id", attrs.id().to_string())?;
-  ensure_block(blocks, block_id("paragraph_block", block_ix), "paragraph", flow_id, body_text, boundary_pos)?;
+  ensure_block(blocks, block_id, "paragraph", flow_id, body_text, boundary_pos)?;
   Ok(())
 }
 
@@ -444,12 +460,28 @@ fn paragraph_style_value(style: ParagraphStyle) -> i64 {
   }
 }
 
-fn block_id(kind: &str, ix: usize) -> String {
+fn projection_block_id(document: &DocumentProjection, block_ix: usize, kind: &str) -> String {
+  document
+    .ids
+    .block_ids
+    .get(block_ix)
+    .map_or_else(|| fallback_id(kind, block_ix), |id| format!("{kind}.{}", id.0))
+}
+
+fn projection_paragraph_id(document: &DocumentProjection, paragraph_ix: usize) -> String {
+  document
+    .ids
+    .paragraph_ids
+    .get(paragraph_ix)
+    .map_or_else(|| fallback_id("paragraph", paragraph_ix), |id| format!("paragraph.{}", id.0))
+}
+
+fn fallback_id(kind: &str, ix: usize) -> String {
   format!("{kind}.{ix}.{}", Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{kind}.{ix}").as_bytes()).as_u128())
 }
 
-fn nested_flow_id(kind: &str, ix: usize) -> String {
-  format!("{kind}.{ix}")
+fn nested_flow_id(kind: &str, block_id: &str) -> String {
+  format!("{block_id}.{kind}")
 }
 
 fn alignment_name(alignment: BlockAlignment) -> &'static str {
@@ -480,6 +512,31 @@ fn loro_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::E
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn projection_identity_round_trips_into_loro() -> io::Result<()> {
+    let mut source = gpui_flowtext::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![gpui_flowtext::InputBlock::Paragraph(gpui_flowtext::InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![gpui_flowtext::InputRun {
+          text: "identity".to_string(),
+          styles: RunStyles::default(),
+        }],
+      })],
+    );
+    source.ids.document_id = 0x0123;
+    source.ids.paragraph_ids[0] = gpui_flowtext::ParagraphId(0x0456);
+    source.ids.block_ids[0] = gpui_flowtext::BlockId(0x0789);
+
+    let doc = document_to_loro(&source, "Identity")?;
+    let projected = crate::document_from_loro(&doc)?;
+
+    assert_eq!(projected.ids.document_id, source.ids.document_id);
+    assert_eq!(projected.ids.paragraph_ids, source.ids.paragraph_ids);
+    assert_eq!(projected.ids.block_ids, source.ids.block_ids);
+    Ok(())
+  }
 
   #[test]
   fn custom_paragraph_style_slot_zero_round_trips() -> io::Result<()> {

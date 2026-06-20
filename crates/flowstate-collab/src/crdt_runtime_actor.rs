@@ -34,12 +34,14 @@ impl CrdtRuntimeHandle {
 impl CrdtRuntimeHandle {
   pub async fn apply_editor_commands(
     &self,
+    base_frontier: Vec<u8>,
     commands: Vec<EditorSemanticCommand>,
     assets: Vec<AssetRecord>,
     selection_after: Option<EditorSelection>,
   ) -> Result<Vec<RuntimeEvent>> {
     self
       .request(|reply| RuntimeRequest::ApplyEditorCommands {
+        base_frontier,
         commands,
         assets,
         selection_after,
@@ -147,6 +149,7 @@ impl CrdtRuntimeHandle {
 
 enum RuntimeRequest {
   ApplyEditorCommands {
+    base_frontier: Vec<u8>,
     commands: Vec<EditorSemanticCommand>,
     assets: Vec<AssetRecord>,
     selection_after: Option<EditorSelection>,
@@ -220,6 +223,7 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
     };
     match request {
       RuntimeRequest::ApplyEditorCommands {
+        base_frontier,
         mut commands,
         mut assets,
         mut selection_after,
@@ -229,11 +233,12 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
         while let Ok(next) = receiver.try_recv() {
           match next {
             RuntimeRequest::ApplyEditorCommands {
+              base_frontier: next_base_frontier,
               commands: next_commands,
               assets: next_assets,
               selection_after: next_selection,
               reply,
-            } => {
+            } if next_base_frontier == base_frontier => {
               commands.extend(next_commands);
               assets.extend(next_assets);
               if next_selection.is_some() {
@@ -249,8 +254,8 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
         }
         let commands = coalesce_editor_commands(commands);
         let result: Result<Vec<RuntimeEvent>> = (|| {
-          let mut events = runtime.merge_asset_records(assets)?;
-          events.extend(runtime.apply_editor_commands(&commands, selection_after.as_ref())?);
+          let mut events = runtime.apply_editor_commands(&base_frontier, &commands, selection_after.as_ref())?;
+          events.extend(runtime.merge_asset_records(assets)?);
           Ok(events)
         })();
         match result {
@@ -264,9 +269,13 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
             }
           },
           Err(error) => {
+            let stale_projection = error.downcast_ref::<crate::crdt_runtime::StaleProjectionError>().copied();
             let message = error.to_string();
             for reply in replies {
-              send_reply(reply, Err(anyhow!(message.clone())));
+              let error = stale_projection
+                .map(anyhow::Error::new)
+                .unwrap_or_else(|| anyhow!(message.clone()));
+              send_reply(reply, Err(error));
             }
           },
         }
@@ -352,4 +361,42 @@ fn coalesce_editor_commands(commands: Vec<EditorSemanticCommand>) -> Vec<EditorS
 
 fn send_reply<T>(reply: Sender<Result<T>>, result: Result<T>) {
   let _ = reply.send_blocking(result);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use flowstate_document::{DocumentOffset, RunStyles};
+
+  #[tokio::test]
+  async fn stale_projection_error_survives_actor_boundary() -> Result<()> {
+    let runtime = CrdtRuntime::new_empty("Actor stale frontier")?;
+    let handle = CrdtRuntimeHandle::spawn(runtime)?;
+    let base_frontier = handle.projection_snapshot().await?.frontier;
+
+    handle
+      .command(SemanticCommand::InsertText {
+        unicode_index: 1,
+        text: "remote".to_string(),
+        styles: RunStyles::default(),
+      })
+      .await?;
+
+    let error = handle
+      .apply_editor_commands(
+        base_frontier,
+        vec![EditorSemanticCommand::InsertText {
+          at: DocumentOffset { paragraph: 0, byte: 0 },
+          text: "local".to_string(),
+          styles: RunStyles::default(),
+        }],
+        Vec::new(),
+        None,
+      )
+      .await
+      .expect_err("stale editor commands must be rejected");
+
+    assert!(error.downcast_ref::<crate::crdt_runtime::StaleProjectionError>().is_some());
+    Ok(())
+  }
 }

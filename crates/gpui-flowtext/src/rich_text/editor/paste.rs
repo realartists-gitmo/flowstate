@@ -58,7 +58,7 @@ impl RichTextEditor {
       before: before_span.clone(),
       after: after_span.clone(),
     }];
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
@@ -70,7 +70,6 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.layout_invalidation_hint = Some(offset.paragraph..offset.paragraph + 1);
     self.after_text_mutation(cx);
     self.mark_document_changed_with_ops(after_generation, false, Some(&semantic_commands), cx);

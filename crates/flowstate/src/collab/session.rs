@@ -24,7 +24,7 @@ use loro::Subscription as LoroSubscription;
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
-use crate::rich_text_element::{AssetId, AssetRecord, CollabPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
+use crate::rich_text_element::{AssetId, AssetRecord, ProjectionPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
 
 use super::presence_view;
 
@@ -680,12 +680,12 @@ impl CollabSession {
       editor.update(cx, |editor, cx| {
         editor.set_recovery_path(None, cx);
         editor.set_collaboration_role(None, cx);
-        editor.set_collab_undo_redirect(None);
-        editor.set_collab_capture(false);
+        editor.set_session_undo_redirect(None);
+        editor.set_session_capture(false);
         editor.set_runtime_capture(true);
         editor.set_own_collaboration_caret_color(None, cx);
         editor.clear_undo_redo_stacks();
-        let _ = editor.take_pending_collab_edits();
+        let _ = editor.take_pending_session_edits();
         editor.set_external_carets(Vec::new(), cx);
       });
     }
@@ -726,8 +726,20 @@ impl CollabSession {
       return;
     }
 
-    let edits = editor.update(cx, |editor, _| editor.take_pending_collab_edits());
+    let edits = editor.update(cx, |editor, _| editor.take_pending_session_edits());
     let edit_count = edits.len();
+    let base_frontier = edits
+      .iter()
+      .find(|edit| !edit.semantic_commands.is_empty())
+      .map(|edit| edit.base_frontier.clone())
+      .unwrap_or_default();
+    debug_assert!(
+      edits
+        .iter()
+        .filter(|edit| !edit.semantic_commands.is_empty())
+        .all(|edit| edit.base_frontier == base_frontier),
+      "queued collaboration commands must share one projection frontier",
+    );
     let selection_after = edits
       .iter()
       .rev()
@@ -755,8 +767,14 @@ impl CollabSession {
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
       let result = runtime
-        .apply_editor_commands(commands, assets, selection_after.clone())
+        .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
         .await;
+      let stale_snapshot = match &result {
+        Err(error) if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() => {
+          runtime.projection_snapshot().await.ok()
+        },
+        _ => None,
+      };
       let _ = session.update(cx, |session, cx| match result {
         Ok(events) => {
           if let Err(error) = session.apply_runtime_events(events, true, cx) {
@@ -770,11 +788,21 @@ impl CollabSession {
           session.last_document_activity = Instant::now();
         },
         Err(error) => {
-          tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
-          if let Some(editor) = session.editor.clone() {
-            editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+          if let Some(document) = stale_snapshot {
+            tracing::debug!(session = %session_id, "discarding stale optimistic projection and restoring the canonical collaboration projection");
+            if let Some(editor) = session.editor.clone() {
+              editor.update(cx, |editor, cx| {
+                editor.replace_document_projection(document, cx);
+                editor.complete_runtime_edit(None, cx);
+              });
+            }
+          } else {
+            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
+            if let Some(editor) = session.editor.clone() {
+              editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+            }
+            session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
           }
-          session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
         },
       });
     })
@@ -847,11 +875,11 @@ impl CollabSession {
     Ok(())
   }
 
-  fn apply_runtime_patches(&mut self, patches: Vec<CollabPatch>, frontier: Vec<u8>, cx: &mut Context<Self>) {
+  fn apply_runtime_patches(&mut self, patches: Vec<ProjectionPatch>, frontier: Vec<u8>, cx: &mut Context<Self>) {
     let Some(editor) = self.editor.clone() else {
       return;
     };
-    editor.update(cx, |editor, cx| editor.apply_collab_patches_at_frontier(&patches, frontier, cx));
+    editor.update(cx, |editor, cx| editor.apply_projection_patches_at_frontier(&patches, frontier, cx));
     self.last_document_activity = Instant::now();
     self.last_self_check = None;
     self.refresh_external_carets(cx);
@@ -864,7 +892,7 @@ impl CollabSession {
     let current = editor.read(cx).document().clone();
     document.assets = current.assets;
     document.theme = current.theme;
-    editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(document, cx));
+    editor.update(cx, |editor, cx| editor.replace_document_projection(document, cx));
     self.last_document_activity = Instant::now();
     self.last_self_check = None;
     self.refresh_external_carets(cx);
@@ -989,10 +1017,10 @@ impl CollabSession {
       }
       editor.clear_undo_redo_stacks();
       editor.set_runtime_capture(false);
-      editor.set_collab_capture(true);
+      editor.set_session_capture(true);
       editor.set_native_undo_hook(None);
       let undo_tx = self.undo_tx.clone();
-      editor.set_collab_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
+      editor.set_session_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
         let _ = undo_tx.try_send(redirect);
       })));
     });

@@ -130,6 +130,13 @@ pub fn record_revision(
   Ok(())
 }
 
+pub fn set_document_id(doc: &LoroDoc, document_id: Uuid) -> LoroResult<()> {
+  let meta = root_map(doc).ensure_mergeable_map(META)?;
+  meta.insert("document_id", document_id.to_string())?;
+  touch_document_metadata(doc)?;
+  Ok(())
+}
+
 pub fn document_id(doc: &LoroDoc) -> Option<Uuid> {
   let ValueOrContainer::Container(container) = root_map(doc).get(META)? else {
     return None;

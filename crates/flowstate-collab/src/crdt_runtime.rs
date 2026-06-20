@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  AssetId, AssetRecord, BLOCKS_BY_ID, Block, CollabPatch, CollabStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
+  AssetId, AssetRecord, BLOCKS_BY_ID, Block, ProjectionPatch, ProjectionStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
   FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, InputBlock, InputBlockAlignment, InputEquationDisplay,
   InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow,
   MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
@@ -33,7 +33,8 @@ mod types;
 mod projection_patch;
 pub use types::{
   ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
-  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity, UndoSelectionDirection, UndoSelectionSnapshot,
+  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity, UndoSelectionDirection,
+  UndoSelectionSnapshot,
 };
 use projection_patch::{
   body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
@@ -164,12 +165,12 @@ impl ProjectionRuntimeIndex {
       .any(|position| (start..end).contains(position))
   }
 
-  fn update_for_patches(&mut self, projection: &DocumentProjection, patches: &[CollabPatch]) -> bool {
+  fn update_for_patches(&mut self, projection: &DocumentProjection, patches: &[ProjectionPatch]) -> bool {
     let mut text_deltas = Vec::new();
     let mut rebuild = false;
     for patch in patches {
       match patch {
-        CollabPatch::ParagraphText { row, new, .. } => {
+        ProjectionPatch::ParagraphText { row, new, .. } => {
           let Some(paragraph_ix) = paragraph_index_for_block_row(projection, *row) else {
             rebuild = true;
             break;
@@ -178,14 +179,14 @@ impl ProjectionRuntimeIndex {
           let new_len = new.runs.iter().map(|run| run.text.chars().count()).sum::<usize>();
           text_deltas.push((paragraph_ix, new_len as isize - old_len as isize));
         },
-        CollabPatch::InsertBlocks { .. } | CollabPatch::DeleteBlocks { .. } | CollabPatch::MoveBlock { .. } => {
+        ProjectionPatch::InsertBlocks { .. } | ProjectionPatch::DeleteBlocks { .. } | ProjectionPatch::MoveBlock { .. } => {
           rebuild = true;
           break;
         },
-        CollabPatch::ParagraphStyle { .. }
-        | CollabPatch::ParagraphRuns { .. }
-        | CollabPatch::ReplaceObjectBlock { .. }
-        | CollabPatch::AssetArrived { .. } => {},
+        ProjectionPatch::ParagraphStyle { .. }
+        | ProjectionPatch::ParagraphRuns { .. }
+        | ProjectionPatch::ReplaceObjectBlock { .. }
+        | ProjectionPatch::AssetArrived { .. } => {},
       }
     }
     if rebuild {
@@ -607,11 +608,20 @@ impl CrdtRuntime {
 
   pub fn apply_editor_commands(
     &mut self,
+    base_frontier: &[u8],
     commands: &[EditorSemanticCommand],
     selection_after: Option<&EditorSelection>,
   ) -> Result<Vec<RuntimeEvent>> {
     if commands.is_empty() {
       return Ok(Vec::new());
+    }
+    let current_frontier = self.doc.state_frontiers().encode();
+    if !base_frontier.is_empty() && base_frontier != current_frontier.as_slice() {
+      return Err(StaleProjectionError {
+        expected_frontier_len: base_frontier.len(),
+        current_frontier_len: current_frontier.len(),
+      }
+      .into());
     }
     if let Some(selection) = selection_after.and_then(|selection| self.undo_selection_for_editor(selection)) {
       self.set_pending_undo_selection(Some(selection))?;
@@ -1061,7 +1071,7 @@ impl CrdtRuntime {
     ))
   }
 
-  fn projection_patched_event(&self, patches: Vec<flowstate_document::CollabPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
+  fn projection_patched_event(&self, patches: Vec<flowstate_document::ProjectionPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
     RuntimeEvent::ProjectionPatched {
       patches,
       invalidation,
@@ -1104,7 +1114,7 @@ impl CrdtRuntime {
     Ok(())
   }
 
-  fn apply_projection_patch_set(&mut self, patches: &[CollabPatch]) {
+  fn apply_projection_patch_set(&mut self, patches: &[ProjectionPatch]) {
     let rebuild_index = self.projection_index.update_for_patches(&self.projection, patches);
     apply_projection_patches(&mut self.projection, patches);
     if rebuild_index {
@@ -1725,7 +1735,7 @@ fn incremental_projection_patches_for_command(
   projection: &DocumentProjection,
   doc: &LoroDoc,
   command: &EditorSemanticCommand,
-) -> Option<Vec<flowstate_document::CollabPatch>> {
+) -> Option<Vec<flowstate_document::ProjectionPatch>> {
   match command {
     EditorSemanticCommand::InsertText { at, text, .. }
       if !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT) =>
@@ -1733,7 +1743,7 @@ fn incremental_projection_patches_for_command(
       let row = flowstate_document::block_ix_for_paragraph(projection, at.paragraph)?;
       let old_len = flowstate_document::paragraph_text_len(projection.paragraphs.get(at.paragraph)?);
       let new = body_input_paragraph(doc, at.paragraph)?;
-      Some(vec![flowstate_document::CollabPatch::ParagraphText {
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
         row,
         new,
         delta_utf8: projection_text_delta(
@@ -1751,7 +1761,7 @@ fn incremental_projection_patches_for_command(
       let start = range.start.byte.min(old_len);
       let end = range.end.byte.min(old_len).max(start);
       let new = body_input_paragraph(doc, paragraph_ix)?;
-      Some(vec![flowstate_document::CollabPatch::ParagraphText {
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
         row,
         new,
         delta_utf8: projection_text_delta(start, end - start, 0, old_len.saturating_sub(end)),
@@ -1760,7 +1770,7 @@ fn incremental_projection_patches_for_command(
     EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
       let paragraph_ix = projection.ids.paragraph_ids.iter().position(|id| id == paragraph)?;
       let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      Some(vec![flowstate_document::CollabPatch::ParagraphStyle {
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle {
         row,
         style: *style,
       }])
@@ -1769,7 +1779,7 @@ fn incremental_projection_patches_for_command(
       let paragraph_ix = projection.ids.paragraph_ids.iter().position(|id| id == paragraph)?;
       let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
       let new = body_input_paragraph(doc, paragraph_ix)?;
-      Some(vec![flowstate_document::CollabPatch::ParagraphRuns {
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphRuns {
         row,
         runs: flowstate_document::document_from_input_blocks(
           projection.theme.clone(),
@@ -1788,25 +1798,25 @@ fn incremental_projection_patches_for_command(
 fn structured_projection_patches_for_command(
   projection: &DocumentProjection,
   command: &EditorSemanticCommand,
-) -> Option<Vec<CollabPatch>> {
+) -> Option<Vec<ProjectionPatch>> {
   match command {
     EditorSemanticCommand::InsertBlock {
       block,
       block_ix,
       after,
-    } => Some(vec![CollabPatch::InsertBlocks {
+    } => Some(vec![ProjectionPatch::InsertBlocks {
       row: (*block_ix).min(projection.blocks.len()),
-      blocks: vec![CollabStructuralBlock {
+      blocks: vec![ProjectionStructuralBlock {
         block_id: *block,
         paragraph_id: None,
         block: after.clone(),
       }],
     }]),
-    EditorSemanticCommand::DeleteBlock { block } => Some(vec![CollabPatch::DeleteBlocks {
+    EditorSemanticCommand::DeleteBlock { block } => Some(vec![ProjectionPatch::DeleteBlocks {
       row: projection.ids.block_ids.iter().position(|id| id == block)?,
       count: 1,
     }]),
-    EditorSemanticCommand::MoveBlock { block, new_block_ix } => Some(vec![CollabPatch::MoveBlock {
+    EditorSemanticCommand::MoveBlock { block, new_block_ix } => Some(vec![ProjectionPatch::MoveBlock {
       from: projection.ids.block_ids.iter().position(|id| id == block)?,
       to: (*new_block_ix).min(projection.blocks.len().saturating_sub(1)),
     }]),
@@ -2001,10 +2011,10 @@ fn object_replacement_patch(
   projection: &DocumentProjection,
   block_ix: usize,
   block: InputBlock,
-) -> Option<Vec<CollabPatch>> {
-  Some(vec![CollabPatch::ReplaceObjectBlock {
+) -> Option<Vec<ProjectionPatch>> {
+  Some(vec![ProjectionPatch::ReplaceObjectBlock {
     row: block_ix,
-    block: CollabStructuralBlock {
+    block: ProjectionStructuralBlock {
       block_id: *projection.ids.block_ids.get(block_ix)?,
       paragraph_id: None,
       block,
@@ -2017,19 +2027,19 @@ fn projection_text_delta(
   delete_len: usize,
   insert_len: usize,
   trailing_retain: usize,
-) -> Vec<flowstate_document::CollabTextDelta> {
+) -> Vec<flowstate_document::ProjectionTextDelta> {
   let mut delta = Vec::new();
   if prefix_retain > 0 {
-    delta.push(flowstate_document::CollabTextDelta::Retain(prefix_retain));
+    delta.push(flowstate_document::ProjectionTextDelta::Retain(prefix_retain));
   }
   if delete_len > 0 {
-    delta.push(flowstate_document::CollabTextDelta::Delete(delete_len));
+    delta.push(flowstate_document::ProjectionTextDelta::Delete(delete_len));
   }
   if insert_len > 0 {
-    delta.push(flowstate_document::CollabTextDelta::Insert(insert_len));
+    delta.push(flowstate_document::ProjectionTextDelta::Insert(insert_len));
   }
   if trailing_retain > 0 {
-    delta.push(flowstate_document::CollabTextDelta::Retain(trailing_retain));
+    delta.push(flowstate_document::ProjectionTextDelta::Retain(trailing_retain));
   }
   delta
 }
@@ -4173,7 +4183,7 @@ fn equation_display_name(display: InputEquationDisplay) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use flowstate_document::{CollabPatch, CollabTextDelta, DocumentPackage, InputRun, loro_schema::body_text};
+  use flowstate_document::{ProjectionPatch, ProjectionTextDelta, DocumentPackage, InputRun, loro_schema::body_text};
 
   fn live_paragraph_metadata_boundaries(doc: &LoroDoc) -> Vec<usize> {
     let body = body_text(doc);
@@ -5421,12 +5431,12 @@ mod tests {
       })
       .expect("remote import should emit a projection patch");
 
-    let [CollabPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
+    let [ProjectionPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
       panic!("expected one paragraph text patch");
     };
     assert_eq!(*row, 0);
     assert_eq!(new.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "hello");
-    assert_eq!(delta_utf8, &[CollabTextDelta::Insert("hello".len())]);
+    assert_eq!(delta_utf8, &[ProjectionTextDelta::Insert("hello".len())]);
     assert!(events.iter().all(|event| !matches!(
       event,
       RuntimeEvent::ProjectionUpdated {
@@ -5482,12 +5492,12 @@ mod tests {
       })
       .expect("remote import should emit a projection patch");
 
-    let [CollabPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
+    let [ProjectionPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
       panic!("expected one paragraph text patch");
     };
     assert_eq!(*row, 2);
     assert_eq!(new.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "omega!");
-    assert_eq!(delta_utf8, &[CollabTextDelta::Retain("omega".len()), CollabTextDelta::Insert("!".len())]);
+    assert_eq!(delta_utf8, &[ProjectionTextDelta::Retain("omega".len()), ProjectionTextDelta::Insert("!".len())]);
     assert!(events.iter().all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. })));
     Ok(())
   }
@@ -5506,6 +5516,33 @@ mod tests {
     assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
     assert!(events.iter().all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. })));
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
+    Ok(())
+  }
+
+  #[test]
+  fn editor_commands_reject_a_stale_projection_frontier() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Stale frontier")?;
+    let base_frontier = runtime.projection_snapshot()?.frontier;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "remote".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    let error = runtime
+      .apply_editor_commands(
+        &base_frontier,
+        &[EditorSemanticCommand::InsertText {
+          at: DocumentOffset { paragraph: 0, byte: 0 },
+          text: "local".to_string(),
+          styles: RunStyles::default(),
+        }],
+        None,
+      )
+      .expect_err("stale editor commands must be rejected");
+
+    assert!(error.downcast_ref::<StaleProjectionError>().is_some());
+    assert_eq!(body_text(runtime.doc()).to_string(), "\nremote");
     Ok(())
   }
 
@@ -5529,6 +5566,7 @@ mod tests {
     let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
 
     runtime.apply_editor_commands(
+      &[],
       &[EditorSemanticCommand::InsertText {
         at: DocumentOffset { paragraph: 1, byte: 2 },
         text: "!".to_string(),

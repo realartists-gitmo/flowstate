@@ -1,3 +1,9 @@
+enum DocumentRuntimeSource {
+  FromProjection,
+  Runtime(flowstate_collab::crdt_runtime::CrdtRuntime),
+  Handle(flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle),
+}
+
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -153,117 +159,121 @@ impl Workspace {
     mut document: DocumentProjection,
     path: Option<PathBuf>,
     title: Option<String>,
-    runtime: Option<flowstate_collab::crdt_runtime::CrdtRuntime>,
+    runtime: DocumentRuntimeSource,
     window: &mut Window,
     cx: &mut Context<Self>,
-  ) -> Entity<DocumentPanel> {
+  ) -> anyhow::Result<Entity<DocumentPanel>> {
     // DB8 stores style assignments, not style appearance. The render theme is
     // local user preference loaded from app settings.
     document.theme = load_document_theme();
-    let runtime = runtime.and_then(|runtime| match flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime) {
-      Ok(runtime) => Some(runtime),
-      Err(error) => {
-        tracing::error!(error = %error, "failed to start document CRDT runtime actor");
-        None
+    let runtime_title = title
+      .as_deref()
+      .or_else(|| path.as_deref().and_then(Path::file_name).and_then(|name| name.to_str()))
+      .unwrap_or("Flowstate Document");
+    let runtime = match runtime {
+      DocumentRuntimeSource::FromProjection => {
+        let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, runtime_title)
+          .map_err(|error| anyhow::anyhow!("creating canonical Loro runtime failed: {error:#}"))?;
+        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
+          .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
       },
-    });
+      DocumentRuntimeSource::Runtime(runtime) => flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
+        .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?,
+      DocumentRuntimeSource::Handle(runtime) => runtime,
+    };
+
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
     let smart_word_selection = load_smart_word_selection();
-    let runtime_for_editor = runtime.clone();
+    let save_runtime = runtime.clone();
+    let export_runtime = runtime.clone();
+    let undo_runtime = runtime.clone();
+    let recovery_runtime = runtime.clone();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);
-      editor.set_runtime_capture(runtime_for_editor.is_some());
-      if let Some(runtime) = runtime_for_editor.clone() {
-        editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
-          let runtime = runtime.clone();
-          Box::pin(async move {
-            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
-            runtime
-              .apply_editor_commands(commands, assets, selection_after)
-              .await
-              .map_err(runtime_io_error)?;
-            let title = document_package_title_for_path(&path);
-            runtime
-              .checkpoint_package(title, Some(path))
-              .await
-              .map_err(runtime_io_error)?;
-            runtime.projection_snapshot().await.map_err(runtime_io_error)
-          })
-        })));
-      }
-      if let Some(runtime) = runtime_for_editor {
-        editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
-          let runtime = runtime.clone();
-          Box::pin(async move {
-            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
-            runtime
-              .apply_editor_commands(commands, assets, selection_after)
-              .await
-              .map_err(runtime_io_error)?;
-            match format {
-              crate::rich_text_element::DocumentExportFormat::Native
-              | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
-                let bytes = runtime
-                  .package_bytes(document_package_title_for_path(&path))
-                  .await
-                  .map_err(runtime_io_error)?;
-                write_bytes_to_path(&path, &bytes)?;
-              },
-              crate::rich_text_element::DocumentExportFormat::Docx => {
-                let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-                crate::docx_conversion::write_docx(&path, &document)?;
-              },
-              crate::rich_text_element::DocumentExportFormat::Pdf => {
-                let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-                let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
-                crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
-              },
-            };
-            runtime.projection_snapshot().await.map_err(runtime_io_error)
-          })
-        })));
-      }
-      if let Some(runtime) = runtime.clone() {
-        editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
-          let runtime = runtime.clone();
-          Box::pin(async move {
-            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
-            runtime
-              .apply_editor_commands(commands, assets, selection_after)
-              .await
-              .map_err(runtime_io_error)?;
-            let command = match redirect {
-              crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
-              crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
-            };
-            let events = runtime.command(command).await.map_err(runtime_io_error)?;
-            if events.is_empty() {
-              return Ok(None);
-            }
-            let selection = events.into_iter().find_map(|event| match event {
-              flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
-              _ => None,
-            });
-            let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-            Ok(Some(crate::rich_text_element::NativeUndoResult {
-              document,
-              selection,
-            }))
-          })
-        })));
-      }
-      if let Some(runtime) = runtime.clone() {
-        editor.set_native_recovery_hook(Some(Rc::new(move |path| {
-          let runtime = runtime.clone();
-          Box::pin(async move {
-            let bytes = runtime
-              .package_bytes("Recovery snapshot".to_string())
-              .await
-              .map_err(runtime_io_error)?;
-            write_bytes_to_path(&path, &bytes)
-          })
-        })));
-      }
+      editor.set_runtime_capture(true);
+      editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
+        let runtime = save_runtime.clone();
+        Box::pin(async move {
+          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          runtime
+            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .await
+            .map_err(runtime_io_error)?;
+          let title = document_package_title_for_path(&path);
+          runtime
+            .checkpoint_package(title, Some(path))
+            .await
+            .map_err(runtime_io_error)?;
+          runtime.projection_snapshot().await.map_err(runtime_io_error)
+        })
+      })));
+      editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
+        let runtime = export_runtime.clone();
+        Box::pin(async move {
+          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          runtime
+            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .await
+            .map_err(runtime_io_error)?;
+          match format {
+            crate::rich_text_element::DocumentExportFormat::Native
+            | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
+              let bytes = runtime
+                .package_bytes(document_package_title_for_path(&path))
+                .await
+                .map_err(runtime_io_error)?;
+              write_bytes_to_path(&path, &bytes)?;
+            },
+            crate::rich_text_element::DocumentExportFormat::Docx => {
+              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+              crate::docx_conversion::write_docx(&path, &document)?;
+            },
+            crate::rich_text_element::DocumentExportFormat::Pdf => {
+              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+              let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+              crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
+            },
+          };
+          runtime.projection_snapshot().await.map_err(runtime_io_error)
+        })
+      })));
+      editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
+        let runtime = undo_runtime.clone();
+        Box::pin(async move {
+          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          runtime
+            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .await
+            .map_err(runtime_io_error)?;
+          let command = match redirect {
+            crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
+            crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
+          };
+          let events = runtime.command(command).await.map_err(runtime_io_error)?;
+          if events.is_empty() {
+            return Ok(None);
+          }
+          let selection = events.into_iter().find_map(|event| match event {
+            flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
+            _ => None,
+          });
+          let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+          Ok(Some(crate::rich_text_element::NativeUndoResult {
+            document,
+            selection,
+          }))
+        })
+      })));
+      editor.set_native_recovery_hook(Some(Rc::new(move |path| {
+        let runtime = recovery_runtime.clone();
+        Box::pin(async move {
+          let bytes = runtime
+            .package_bytes("Recovery snapshot".to_string())
+            .await
+            .map_err(runtime_io_error)?;
+          write_bytes_to_path(&path, &bytes)
+        })
+      })));
     });
     let workspace = cx.entity().downgrade();
     let title = title
@@ -281,9 +291,7 @@ impl Workspace {
     }
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
-    if let Some(runtime) = runtime {
-      self.document_runtimes.insert(id, runtime);
-    }
+    self.document_runtimes.insert(id, runtime);
     self.editor_subscriptions.push((
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
@@ -297,7 +305,7 @@ impl Workspace {
     self.active_editor = Some(editor);
     self.active_flow = None;
     self.document_panels.push(panel.clone());
-    panel
+    Ok(panel)
   }
 
   pub(crate) fn attach_runtime_to_document_panel(
@@ -324,9 +332,9 @@ impl Workspace {
       editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
         let runtime = save_runtime.clone();
         Box::pin(async move {
-          let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(commands, assets, selection_after)
+            .apply_editor_commands(base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           runtime
@@ -339,9 +347,9 @@ impl Workspace {
       editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
         let runtime = export_runtime.clone();
         Box::pin(async move {
-          let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(commands, assets, selection_after)
+            .apply_editor_commands(base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           match format {
@@ -370,9 +378,9 @@ impl Workspace {
         editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
           let runtime = undo_runtime.clone();
           Box::pin(async move {
-            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
             runtime
-              .apply_editor_commands(commands, assets, selection_after)
+              .apply_editor_commands(base_frontier, commands, assets, selection_after)
               .await
               .map_err(runtime_io_error)?;
             let command = match redirect {
@@ -496,14 +504,20 @@ impl Workspace {
                 return;
               },
             };
-            let panel = workspace.create_document_panel(
+            let panel = match workspace.create_document_panel(
               document,
               None,
               Some(format!("Revision {revision_id:x}")),
-              Some(fork_runtime),
+              DocumentRuntimeSource::Runtime(fork_runtime),
               window,
               cx,
-            );
+            ) {
+              Ok(panel) => panel,
+              Err(error) => {
+                tracing::error!(revision_id, error = %format_args!("{error:#}"), "starting revision fork runtime failed");
+                return;
+              },
+            };
             panel
               .read(cx)
               .editor()
@@ -536,16 +550,30 @@ impl Workspace {
       .values()
       .cloned()
       .collect();
-    let (commands, selection_after) = flatten_runtime_edit_commands(edits);
+    let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(edits);
     cx.spawn(async move |workspace, cx| {
       let result = runtime
-        .apply_editor_commands(commands, assets, selection_after.clone())
+        .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
         .await;
+      let stale_snapshot = match &result {
+        Err(error) if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() => {
+          runtime.projection_snapshot().await.ok()
+        },
+        _ => None,
+      };
       let _ = workspace.update(cx, |_, cx| match result {
         Ok(events) => apply_local_runtime_events(&editor, events, selection_after, cx),
         Err(error) => {
-          tracing::error!(%panel_id, error = %error, "failed to apply editor edits to Loro runtime");
-          editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+          if let Some(document) = stale_snapshot {
+            tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
+            editor.update(cx, |editor, cx| {
+              editor.replace_document_projection(document, cx);
+              editor.complete_runtime_edit(None, cx);
+            });
+          } else {
+            tracing::error!(%panel_id, error = %error, "failed to apply editor edits to Loro runtime");
+            editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+          }
         },
       });
     })
@@ -854,7 +882,13 @@ impl Workspace {
           path,
           title,
         } => {
-          let panel = self.create_document_panel(*document, path, title, Some(*runtime), window, cx);
+          let panel = match self.create_document_panel(*document, path, title, DocumentRuntimeSource::Runtime(*runtime), window, cx) {
+            Ok(panel) => panel,
+            Err(error) => {
+              tracing::error!(error = %format_args!("{error:#}"), "restoring document runtime failed");
+              continue;
+            },
+          };
           let panel_id = panel.read(cx).id();
           panel.update(cx, |panel, _| {
             if !entry.collapsed_outline_items.is_empty() {
@@ -997,10 +1031,23 @@ impl Workspace {
   }
 
   fn add_document_panel(&mut self, document: DocumentProjection, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    let runtime = document_runtime_from_projection(&document, None);
-    self.create_document_panel(document, path, None, runtime, window, cx);
-    self.persist_temporary_workspace_session(cx);
-    cx.notify();
+    match self.create_document_panel(document, path, None, DocumentRuntimeSource::FromProjection, window, cx) {
+      Ok(_) => {
+        self.persist_temporary_workspace_session(cx);
+        cx.notify();
+      },
+      Err(error) => {
+        let detail = format!("The canonical Loro runtime could not be started: {error:#}");
+        tracing::error!(error = %format_args!("{error:#}"), "creating document panel failed");
+        std::mem::drop(window.prompt(
+          PromptLevel::Critical,
+          "Document could not be opened",
+          Some(&detail),
+          &[PromptButton::ok("Ok")],
+          cx,
+        ));
+      },
+    }
   }
 
   fn add_document_panel_with_title(
@@ -1012,9 +1059,23 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    self.create_document_panel(document, path, title, Some(runtime), window, cx);
-    self.persist_temporary_workspace_session(cx);
-    cx.notify();
+    match self.create_document_panel(document, path, title, DocumentRuntimeSource::Runtime(runtime), window, cx) {
+      Ok(_) => {
+        self.persist_temporary_workspace_session(cx);
+        cx.notify();
+      },
+      Err(error) => {
+        let detail = format!("The canonical Loro runtime could not be started: {error:#}");
+        tracing::error!(error = %format_args!("{error:#}"), "creating document panel failed");
+        std::mem::drop(window.prompt(
+          PromptLevel::Critical,
+          "Document could not be opened",
+          Some(&detail),
+          &[PromptButton::ok("Ok")],
+          cx,
+        ));
+      },
+    }
   }
 
   fn create_flow_panel(
@@ -1551,19 +1612,6 @@ fn show_save_failed(window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, det
   });
 }
 
-fn document_runtime_from_projection(
-  document: &DocumentProjection,
-  title: Option<&str>,
-) -> Option<flowstate_collab::crdt_runtime::CrdtRuntime> {
-  match flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(document, title.unwrap_or("Flowstate Document")) {
-    Ok(runtime) => Some(runtime),
-    Err(error) => {
-      tracing::error!(error = %error, "failed to create Loro runtime from projected document");
-      None
-    },
-  }
-}
-
 fn document_package_title_for_path(path: &Path) -> String {
   path
     .file_name()
@@ -1584,20 +1632,33 @@ fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn flatten_runtime_edit_commands(
-  edits: Vec<crate::rich_text_element::CollaborationEdit>,
+  edits: Vec<crate::rich_text_element::SemanticCommandBatch>,
 ) -> (
+  Vec<u8>,
   Vec<crate::rich_text_element::SemanticEditCommand>,
   Option<crate::rich_text_element::EditorSelection>,
 ) {
+  let mut base_frontier = None;
   let mut commands = Vec::new();
   let mut selection_after = None;
   for edit in edits {
+    if !edit.semantic_commands.is_empty() {
+      if let Some(existing) = &base_frontier {
+        debug_assert_eq!(existing, &edit.base_frontier, "queued editor commands must share one projection frontier");
+      } else {
+        base_frontier = Some(edit.base_frontier.clone());
+      }
+    }
     commands.extend(edit.semantic_commands);
     if edit.selection_after.is_some() {
       selection_after = edit.selection_after;
     }
   }
-  (coalesce_document_runtime_commands(commands), selection_after)
+  (
+    base_frontier.unwrap_or_default(),
+    coalesce_document_runtime_commands(commands),
+    selection_after,
+  )
 }
 
 fn apply_local_runtime_events(
@@ -1609,11 +1670,11 @@ fn apply_local_runtime_events(
   for event in events {
     match event {
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { patches, frontier, .. } => {
-        editor.update(cx, |editor, cx| editor.apply_collab_patches_at_frontier(&patches, frontier, cx));
+        editor.update(cx, |editor, cx| editor.apply_projection_patches_at_frontier(&patches, frontier, cx));
       },
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { document, .. }
       | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionOpened { document, .. } => {
-        editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(*document, cx));
+        editor.update(cx, |editor, cx| editor.replace_document_projection(*document, cx));
       },
       flowstate_collab::crdt_runtime::RuntimeEvent::LocalUpdate { .. }
       | flowstate_collab::crdt_runtime::RuntimeEvent::RemoteUpdateApplied { .. }

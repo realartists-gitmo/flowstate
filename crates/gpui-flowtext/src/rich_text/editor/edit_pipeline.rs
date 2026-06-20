@@ -38,77 +38,68 @@ impl RichTextEditor {
     self.selection = EditorSelection { anchor: after, head: after };
     self.emit_selection_changed(cx);
 
-    let mut merged_into_previous = false;
-    if let Some(record) = self.undo_stack.last_mut()
-      && before_selection.anchor == before_selection.head
-      && record.after_selection == before_selection
-      && record.operations.len() == 1
-      && record.semantic_commands.len() == 1
-      && let EditOperation::InsertText {
-        paragraph,
-        byte,
-        text: previous_text,
-        styles: previous_styles,
-      } = &mut record.operations[0]
-      && *paragraph == caret.paragraph
-      && *previous_styles == styles
-      && *byte + previous_text.len() == caret.byte
-      && let SemanticEditCommand::InsertText {
-        at,
-        text: semantic_text,
-        styles: semantic_styles,
-      } = &mut record.semantic_commands[0]
-      && at.paragraph == caret.paragraph
-      && *semantic_styles == styles
-      && at.byte + semantic_text.len() == caret.byte
-    {
-      previous_text.push_str(text);
-      semantic_text.push_str(text);
-      record.after_selection = self.selection.clone();
-      record.after_generation = after_generation;
-      merged_into_previous = true;
-    }
+    if self.local_history_enabled() {
+      let mut merged_into_previous = false;
+      if let Some(record) = self.undo_stack.last_mut()
+        && before_selection.anchor == before_selection.head
+        && record.after_selection == before_selection
+        && record.operations.len() == 1
+        && record.semantic_commands.len() == 1
+        && let EditOperation::InsertText {
+          paragraph,
+          byte,
+          text: previous_text,
+          styles: previous_styles,
+        } = &mut record.operations[0]
+        && *paragraph == caret.paragraph
+        && *previous_styles == styles
+        && *byte + previous_text.len() == caret.byte
+        && let SemanticEditCommand::InsertText {
+          at,
+          text: semantic_text,
+          styles: semantic_styles,
+        } = &mut record.semantic_commands[0]
+        && at.paragraph == caret.paragraph
+        && *semantic_styles == styles
+        && at.byte + semantic_text.len() == caret.byte
+      {
+        previous_text.push_str(text);
+        semantic_text.push_str(text);
+        record.after_selection = self.selection.clone();
+        record.after_generation = after_generation;
+        merged_into_previous = true;
+      }
 
-    if !merged_into_previous {
-      self.undo_stack.push(EditRecord {
-        before_selection,
-        before_generation,
-        after_selection: self.selection.clone(),
-        after_generation,
-        operations: vec![EditOperation::InsertText {
-          paragraph: caret.paragraph,
-          byte: caret.byte,
-          text: text.to_string(),
-          styles,
-        }],
-        semantic_commands: vec![SemanticEditCommand::InsertText {
-          at: caret,
-          text: text.to_string(),
-          styles,
-        }],
-      });
+      if !merged_into_previous {
+        self.undo_stack.push(EditRecord {
+          before_selection,
+          before_generation,
+          after_selection: self.selection.clone(),
+          after_generation,
+          operations: vec![EditOperation::InsertText {
+            paragraph: caret.paragraph,
+            byte: caret.byte,
+            text: text.to_string(),
+            styles,
+          }],
+          semantic_commands: vec![SemanticEditCommand::InsertText {
+            at: caret,
+            text: text.to_string(),
+            styles,
+          }],
+        });
+      }
+      self.redo_stack.clear();
     }
-    if self.collab_capture && self.suppress_collab_capture == 0 {
-      self.pending_collab_edits.push(CollaborationEdit {
-        semantic_commands: vec![SemanticEditCommand::InsertText {
-          at: caret,
-          text: text.to_string(),
-          styles,
-        }],
-        selection_after: Some(self.selection.clone()),
-      });
-    }
-    if self.runtime_capture && self.suppress_collab_capture == 0 {
-      self.pending_runtime_edits.push(CollaborationEdit {
-        semantic_commands: vec![SemanticEditCommand::InsertText {
-          at: caret,
-          text: text.to_string(),
-          styles,
-        }],
-        selection_after: Some(self.selection.clone()),
-      });
-    }
-    self.redo_stack.clear();
+    self.capture_semantic_edit(SemanticCommandBatch {
+      base_frontier: self.document.frontier.clone(),
+      semantic_commands: vec![SemanticEditCommand::InsertText {
+        at: caret,
+        text: text.to_string(),
+        styles,
+      }],
+      selection_after: Some(self.selection.clone()),
+    });
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.suppress_mutation_notify += 1;
     self.after_text_mutation(cx);
@@ -193,8 +184,7 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     };
-    self.undo_stack.push(record);
-    self.redo_stack.clear();
+    self.record_local_history(record);
     self.mark_document_changed_with_ops(after_generation, identity_shape_changed, Some(&semantic_commands), cx);
   }
 
@@ -328,8 +318,7 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     };
-    self.undo_stack.push(record);
-    self.redo_stack.clear();
+    self.record_local_history(record);
     self.mark_document_changed_with_ops(after_generation, false, Some(&semantic_commands), cx);
   }
 
@@ -340,54 +329,18 @@ impl RichTextEditor {
     semantic_commands: Option<&[SemanticEditCommand]>,
     cx: &mut Context<Self>,
   ) {
-    let runtime_owned = self.suppress_collab_capture == 0
-      && semantic_commands.is_some_and(|commands| !commands.is_empty())
-      && (self.collab_capture || self.runtime_capture);
+    let runtime_owned = semantic_commands.is_some_and(|commands| !commands.is_empty()) && self.command_capture_enabled();
     if runtime_owned {
-      let selection_after = self.selection.clone();
-      let edit = CollaborationEdit {
+      self.capture_semantic_edit(SemanticCommandBatch {
+        base_frontier: self.document.frontier.clone(),
         semantic_commands: semantic_commands.unwrap_or_default().to_vec(),
-        selection_after: Some(selection_after.clone()),
-      };
-      if self.collab_capture {
-        self.pending_collab_edits.push(edit.clone());
-      }
-      if self.runtime_capture {
-        self.pending_runtime_edits.push(edit);
-      }
-      self.edit_generation = generation;
-      if reconcile_identity {
-        self.identity_map.reconcile(&self.document);
-      }
-      self.refresh_save_status();
-      self.schedule_recovery_write(cx);
-      cx.notify();
-      return;
+        selection_after: Some(self.selection.clone()),
+      });
     }
 
     self.edit_generation = generation;
     if reconcile_identity {
       self.identity_map.reconcile(&self.document);
-    }
-    if self.collab_capture
-      && self.suppress_collab_capture == 0
-      && let Some(semantic_commands) = semantic_commands
-      && !semantic_commands.is_empty()
-    {
-      self.pending_collab_edits.push(CollaborationEdit {
-        semantic_commands: semantic_commands.to_vec(),
-        selection_after: Some(self.selection.clone()),
-      });
-    }
-    if self.runtime_capture
-      && self.suppress_collab_capture == 0
-      && let Some(semantic_commands) = semantic_commands
-      && !semantic_commands.is_empty()
-    {
-      self.pending_runtime_edits.push(CollaborationEdit {
-        semantic_commands: semantic_commands.to_vec(),
-        selection_after: Some(self.selection.clone()),
-      });
     }
     self.refresh_save_status();
     self.schedule_recovery_write(cx);

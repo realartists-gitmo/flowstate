@@ -1,5 +1,5 @@
 use flowstate_document::{
-  Block, CollabPatch, CollabStructuralBlock, CollabTextDelta, DocumentProjection, HighlightStyle, InputBlock, InputParagraph, InputRun,
+  Block, ProjectionPatch, ProjectionStructuralBlock, ProjectionTextDelta, DocumentProjection, HighlightStyle, InputBlock, InputParagraph, InputRun,
   MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, Paragraph,
   ParagraphStyle, RunSemanticStyle, RunStyles, input_block_from_block, loro_schema::body_text, new_block_id, new_paragraph_id,
   paragraph_text,
@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 
 use super::{ProjectionInvalidation, paragraph_style_from_attrs};
 
-pub(super) fn projection_patches_between(before: &DocumentProjection, after: &DocumentProjection) -> Option<Vec<CollabPatch>> {
+pub(super) fn projection_patches_between(before: &DocumentProjection, after: &DocumentProjection) -> Option<Vec<ProjectionPatch>> {
   let mut patches = Vec::new();
   append_asset_patches(before, after, &mut patches);
 
@@ -22,7 +22,7 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
   }
 
   if let Some((from, to)) = single_block_move(before_ids, after_ids) {
-    patches.push(CollabPatch::MoveBlock { from, to });
+    patches.push(ProjectionPatch::MoveBlock { from, to });
     return Some(patches);
   }
 
@@ -31,13 +31,13 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
   let before_end = before_ids.len().saturating_sub(suffix);
   let after_end = after_ids.len().saturating_sub(suffix);
   if before_end > prefix {
-    patches.push(CollabPatch::DeleteBlocks {
+    patches.push(ProjectionPatch::DeleteBlocks {
       row: prefix,
       count: before_end - prefix,
     });
   }
   if after_end > prefix {
-    patches.push(CollabPatch::InsertBlocks {
+    patches.push(ProjectionPatch::InsertBlocks {
       row: prefix,
       blocks: structural_blocks(after, prefix..after_end),
     });
@@ -45,7 +45,7 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
   Some(patches)
 }
 
-fn append_same_shape_patches(before: &DocumentProjection, after: &DocumentProjection, patches: &mut Vec<CollabPatch>) -> Option<()> {
+fn append_same_shape_patches(before: &DocumentProjection, after: &DocumentProjection, patches: &mut Vec<ProjectionPatch>) -> Option<()> {
   if before.blocks.len() != after.blocks.len() {
     return None;
   }
@@ -69,7 +69,7 @@ fn append_same_shape_patches(before: &DocumentProjection, after: &DocumentProjec
       },
       (Block::Image(_) | Block::Equation(_) | Block::Table(_), Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
         if before_block != after_block {
-          patches.push(CollabPatch::ReplaceObjectBlock {
+          patches.push(ProjectionPatch::ReplaceObjectBlock {
             row,
             block: structural_block(after, row, after_paragraph_ix),
           });
@@ -90,12 +90,12 @@ fn append_paragraph_patch(
   after_paragraph_ix: usize,
   before_paragraph: &Paragraph,
   after_paragraph: &Paragraph,
-  patches: &mut Vec<CollabPatch>,
+  patches: &mut Vec<ProjectionPatch>,
 ) {
   let before_text = paragraph_text(before, before_paragraph_ix);
   let after_text = paragraph_text(after, after_paragraph_ix);
   if before_text != after_text {
-    patches.push(CollabPatch::ParagraphText {
+    patches.push(ProjectionPatch::ParagraphText {
       row,
       new: input_paragraph(after, after_paragraph_ix, after_paragraph),
       delta_utf8: text_delta_between(&before_text, &after_text),
@@ -103,13 +103,13 @@ fn append_paragraph_patch(
     return;
   }
   if before_paragraph.style != after_paragraph.style {
-    patches.push(CollabPatch::ParagraphStyle {
+    patches.push(ProjectionPatch::ParagraphStyle {
       row,
       style: after_paragraph.style,
     });
   }
   if before_paragraph.runs != after_paragraph.runs {
-    patches.push(CollabPatch::ParagraphRuns {
+    patches.push(ProjectionPatch::ParagraphRuns {
       row,
       runs: after_paragraph.runs.clone(),
     });
@@ -138,7 +138,7 @@ fn input_paragraph(document: &DocumentProjection, paragraph_ix: usize, paragraph
   }
 }
 
-fn structural_blocks(document: &DocumentProjection, range: std::ops::Range<usize>) -> Vec<CollabStructuralBlock> {
+fn structural_blocks(document: &DocumentProjection, range: std::ops::Range<usize>) -> Vec<ProjectionStructuralBlock> {
   let mut paragraph_ix = document
     .blocks
     .iter()
@@ -156,7 +156,7 @@ fn structural_blocks(document: &DocumentProjection, range: std::ops::Range<usize
     .collect()
 }
 
-fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usize) -> CollabStructuralBlock {
+fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usize) -> ProjectionStructuralBlock {
   let block = document
     .blocks
     .get(row)
@@ -167,7 +167,7 @@ fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usi
         runs: Vec::new(),
       })
     });
-  CollabStructuralBlock {
+  ProjectionStructuralBlock {
     block_id: document.ids.block_ids.get(row).copied().unwrap_or_else(new_block_id),
     paragraph_id: matches!(&block, InputBlock::Paragraph(_))
       .then(|| {
@@ -182,10 +182,10 @@ fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usi
   }
 }
 
-fn append_asset_patches(before: &DocumentProjection, after: &DocumentProjection, patches: &mut Vec<CollabPatch>) {
+fn append_asset_patches(before: &DocumentProjection, after: &DocumentProjection, patches: &mut Vec<ProjectionPatch>) {
   for (id, record) in &after.assets.assets {
     if before.assets.assets.get(id) != Some(record) {
-      patches.push(CollabPatch::AssetArrived {
+      patches.push(ProjectionPatch::AssetArrived {
         id: *id,
         record: record.clone(),
       });
@@ -229,7 +229,7 @@ fn common_id_suffix(left: &[flowstate_document::BlockId], right: &[flowstate_doc
     .count()
 }
 
-fn text_delta_between(before: &str, after: &str) -> Vec<CollabTextDelta> {
+fn text_delta_between(before: &str, after: &str) -> Vec<ProjectionTextDelta> {
   let prefix = common_prefix_byte_len(before, after);
   let suffix = common_suffix_byte_len(before, after, prefix);
   text_delta(
@@ -247,7 +247,7 @@ pub(super) fn remote_body_text_patch(
   doc: &LoroDoc,
   frontier_before: Vec<u8>,
   frontier_after: Vec<u8>,
-) -> Option<(Vec<CollabPatch>, ProjectionInvalidation)> {
+) -> Option<(Vec<ProjectionPatch>, ProjectionInvalidation)> {
   if before == after {
     return None;
   }
@@ -288,7 +288,7 @@ pub(super) fn remote_body_text_patch(
   let unicode_len = before_changed.chars().count().max(after_changed.chars().count());
   let invalidation = ProjectionInvalidation::body_text(frontier_before, frontier_after, unicode_start, unicode_len);
   Some((
-    vec![CollabPatch::ParagraphText {
+    vec![ProjectionPatch::ParagraphText {
       row: flowstate_document::block_ix_for_paragraph(projection, before_location.paragraph_ix)?,
       new: new_paragraph,
       delta_utf8,
@@ -303,7 +303,7 @@ pub(super) fn remote_body_projection_patches(
   after: &str,
   doc: &LoroDoc,
   invalidation: &ProjectionInvalidation,
-) -> Option<Vec<CollabPatch>> {
+) -> Option<Vec<ProjectionPatch>> {
   if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
     return None;
   }
@@ -362,7 +362,7 @@ pub(super) fn remote_nonstructural_projection_patches(
   doc: &LoroDoc,
   invalidation: &ProjectionInvalidation,
   touched_paragraphs: &[usize],
-) -> Option<Vec<CollabPatch>> {
+) -> Option<Vec<ProjectionPatch>> {
   if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
     return None;
   }
@@ -384,7 +384,7 @@ fn paragraph_projection_patches(
   projection: &DocumentProjection,
   doc: &LoroDoc,
   touched_paragraphs: impl IntoIterator<Item = usize>,
-) -> Option<Vec<CollabPatch>> {
+) -> Option<Vec<ProjectionPatch>> {
   let mut patches = Vec::new();
   for paragraph_ix in touched_paragraphs {
     let old = projection.paragraphs.get(paragraph_ix)?;
@@ -394,7 +394,7 @@ fn paragraph_projection_patches(
     let old_text = old_input.runs.iter().map(|run| run.text.as_str()).collect::<String>();
     let new_text = new_input.runs.iter().map(|run| run.text.as_str()).collect::<String>();
     if old_text != new_text {
-      patches.push(CollabPatch::ParagraphText {
+      patches.push(ProjectionPatch::ParagraphText {
         row,
         delta_utf8: text_delta_between(&old_text, &new_text),
         new: new_input,
@@ -402,7 +402,7 @@ fn paragraph_projection_patches(
       continue;
     }
     if old_input.style != new_input.style {
-      patches.push(CollabPatch::ParagraphStyle {
+      patches.push(ProjectionPatch::ParagraphStyle {
         row,
         style: new_input.style,
       });
@@ -416,13 +416,13 @@ fn paragraph_projection_patches(
     .runs
     .clone();
     if old.runs != new_runs {
-      patches.push(CollabPatch::ParagraphRuns { row, runs: new_runs });
+      patches.push(ProjectionPatch::ParagraphRuns { row, runs: new_runs });
     }
   }
   Some(patches)
 }
 
-fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroDoc) -> Option<Vec<CollabPatch>> {
+fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroDoc) -> Option<Vec<ProjectionPatch>> {
   let projected = flowstate_document::object_input_blocks_from_loro(doc).ok()?;
   let mut existing = projection
     .blocks
@@ -453,9 +453,9 @@ fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroD
       .into_iter()
       .zip(projected)
       .filter_map(|((block_id, row, before), (_, after))| {
-        (before != after).then_some(CollabPatch::ReplaceObjectBlock {
+        (before != after).then_some(ProjectionPatch::ReplaceObjectBlock {
           row,
-          block: CollabStructuralBlock {
+          block: ProjectionStructuralBlock {
             block_id,
             paragraph_id: None,
             block: after,
@@ -521,19 +521,19 @@ fn paragraph_text_location(body: &str, body_byte: usize) -> Option<ParagraphText
   })
 }
 
-fn text_delta(prefix_retain: usize, delete_len: usize, insert_len: usize, trailing_retain: usize) -> Vec<CollabTextDelta> {
+fn text_delta(prefix_retain: usize, delete_len: usize, insert_len: usize, trailing_retain: usize) -> Vec<ProjectionTextDelta> {
   let mut delta = Vec::new();
   if prefix_retain > 0 {
-    delta.push(CollabTextDelta::Retain(prefix_retain));
+    delta.push(ProjectionTextDelta::Retain(prefix_retain));
   }
   if delete_len > 0 {
-    delta.push(CollabTextDelta::Delete(delete_len));
+    delta.push(ProjectionTextDelta::Delete(delete_len));
   }
   if insert_len > 0 {
-    delta.push(CollabTextDelta::Insert(insert_len));
+    delta.push(ProjectionTextDelta::Insert(insert_len));
   }
   if trailing_retain > 0 {
-    delta.push(CollabTextDelta::Retain(trailing_retain));
+    delta.push(ProjectionTextDelta::Retain(trailing_retain));
   }
   delta
 }

@@ -8,14 +8,10 @@ use super::{
   EditorSelection, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles, TextRun,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct TableCellId(pub u128);
-
 #[derive(Clone, Debug, Default)]
 pub struct DocumentIdentityMap {
   paragraph_ids: Vec<ParagraphId>,
   block_ids: Vec<BlockId>,
-  table_cell_ids: Vec<Vec<Vec<TableCellId>>>,
   paragraph_index_by_id: FxHashMap<ParagraphId, usize>,
 }
 
@@ -35,22 +31,6 @@ impl DocumentIdentityMap {
       self.paragraph_index_by_id.insert(*id, ix);
     }
     self.block_ids.clone_from(&document.ids.block_ids);
-    self
-      .table_cell_ids
-      .resize_with(document.blocks.len(), Vec::new);
-    self.table_cell_ids.truncate(document.blocks.len());
-    for (block_ix, block) in document.blocks.iter().enumerate() {
-      let Block::Table(table) = block else {
-        self.table_cell_ids[block_ix].clear();
-        continue;
-      };
-      let rows = &mut self.table_cell_ids[block_ix];
-      rows.resize_with(table.rows.len(), Vec::new);
-      rows.truncate(table.rows.len());
-      for (row_ix, row) in table.rows.iter().enumerate() {
-        resize_ids(&mut rows[row_ix], row.cells.len(), TableCellId);
-      }
-    }
   }
 
   #[must_use]
@@ -64,30 +44,9 @@ impl DocumentIdentityMap {
   }
 
   #[must_use]
-  pub fn table_cell_id(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> Option<TableCellId> {
-    self
-      .table_cell_ids
-      .get(block_ix)?
-      .get(row_ix)?
-      .get(cell_ix)
-      .copied()
-  }
-
-  #[must_use]
   pub fn paragraph_index(&self, id: ParagraphId) -> Option<usize> {
     self.paragraph_index_by_id.get(&id).copied()
   }
-}
-
-#[hotpath::measure]
-fn resize_ids<T>(ids: &mut Vec<T>, len: usize, wrap: impl Fn(u128) -> T)
-where
-  T: std::marker::Copy,
-{
-  while ids.len() < len {
-    ids.push(wrap(uuid::Uuid::new_v4().as_u128()));
-  }
-  ids.truncate(len);
 }
 
 #[derive(Clone, Debug)]
@@ -207,31 +166,32 @@ pub enum SemanticEditCommand {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct CollaborationEdit {
+pub struct SemanticCommandBatch {
+  pub base_frontier: Vec<u8>,
   pub semantic_commands: Vec<SemanticEditCommand>,
   pub selection_after: Option<EditorSelection>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum CollabTextDelta {
+pub enum ProjectionTextDelta {
   Retain(usize),
   Insert(usize),
   Delete(usize),
 }
 
 #[derive(Clone, Debug)]
-pub struct CollabStructuralBlock {
+pub struct ProjectionStructuralBlock {
   pub block_id: BlockId,
   pub paragraph_id: Option<ParagraphId>,
   pub block: InputBlock,
 }
 
 #[derive(Clone, Debug)]
-pub enum CollabPatch {
+pub enum ProjectionPatch {
   ParagraphText {
     row: usize,
     new: InputParagraph,
-    delta_utf8: Vec<CollabTextDelta>,
+    delta_utf8: Vec<ProjectionTextDelta>,
   },
   ParagraphStyle {
     row: usize,
@@ -243,11 +203,11 @@ pub enum CollabPatch {
   },
   ReplaceObjectBlock {
     row: usize,
-    block: CollabStructuralBlock,
+    block: ProjectionStructuralBlock,
   },
   InsertBlocks {
     row: usize,
-    blocks: Vec<CollabStructuralBlock>,
+    blocks: Vec<ProjectionStructuralBlock>,
   },
   DeleteBlocks {
     row: usize,

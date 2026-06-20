@@ -319,7 +319,7 @@ impl RichTextEditor {
       before: before_span,
       after: after_span,
     }];
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
@@ -332,7 +332,6 @@ impl RichTextEditor {
       }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.after_text_mutation(cx);
     self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
     self.clear_drop_preview();

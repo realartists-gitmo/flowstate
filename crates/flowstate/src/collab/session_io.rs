@@ -179,7 +179,7 @@ impl CollabSession {
       tracing::trace!(session = %self.session, pending_asset_records = self.pending_asset_records.len(), "cannot flush collaboration asset records because editor is missing");
       return false;
     };
-    let deferred = editor.read(cx).collab_apply_deferred();
+    let deferred = editor.read(cx).projection_apply_deferred();
     if self.pending_asset_records.is_empty() || deferred {
       tracing::trace!(
         session = %self.session,
@@ -193,7 +193,7 @@ impl CollabSession {
     tracing::debug!(session = %self.session, asset_records = asset_records.len(), "flushing collaboration asset records to editor");
     editor.update(cx, |editor, cx| {
       editor.clear_undo_redo_stacks();
-      editor.apply_collab_asset_records(&asset_records, cx);
+      editor.apply_synced_asset_records(&asset_records, cx);
     });
     self.last_document_activity = std::time::Instant::now();
     self.refresh_external_carets(cx);
@@ -334,7 +334,7 @@ impl CollabSession {
     {
       let session_id = self.session;
       cx.spawn(async move |session, cx| {
-        let result = runtime.apply_editor_commands(Vec::new(), canonical_records, None).await;
+        let result = runtime.apply_editor_commands(Vec::new(), Vec::new(), canonical_records, None).await;
         let _ = session.update(cx, |session, cx| match result {
           Ok(events) => {
             if let Err(error) = session.apply_runtime_events(events, true, cx) {

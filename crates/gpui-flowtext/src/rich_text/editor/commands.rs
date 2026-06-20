@@ -194,34 +194,34 @@ impl RichTextEditor {
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
     if let Some(hook) = self.native_undo_hook.clone() {
-      let Some(record) = self.undo_stack.pop() else {
-        return;
-      };
-      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let pending_edits = self.take_pending_semantic_edits();
       let assets = self.document.assets.assets.values().cloned().collect();
+      let fallback_selection = self.selection.clone();
+      let generation = self.next_edit_generation;
+      self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
       cx.spawn(async move |editor, cx| {
-        let result = hook(UndoRedirect::Undo, pending_runtime_edits, assets).await;
+        let result = hook(UndoRedirect::Undo, pending_edits, assets).await;
         let _ = editor.update(cx, |editor, cx| match result {
           Ok(Some(result)) => {
             editor.document = result.document;
             editor.identity_map.reconcile(&editor.document);
-            editor.selection = result.selection.unwrap_or_else(|| record.before_selection.clone());
+            editor.selection = result.selection.unwrap_or(fallback_selection);
             editor.emit_selection_changed(cx);
-            editor.edit_generation = record.before_generation;
-            editor.redo_stack.push(record);
+            editor.edit_generation = generation;
+            editor.undo_stack.clear();
+            editor.redo_stack.clear();
             editor.after_history_restore(cx);
           },
-          Ok(None) => editor.undo_stack.push(record),
+          Ok(None) => {},
           Err(error) => {
             eprintln!("runtime undo failed: {error}");
-            editor.undo_stack.push(record);
           },
         });
       })
       .detach();
       return;
     }
-    if let Some(hook) = self.collab_undo_redirect.clone() {
+    if let Some(hook) = self.session_undo_redirect.clone() {
       hook(UndoRedirect::Undo);
       return;
     }
@@ -241,34 +241,34 @@ impl RichTextEditor {
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
     if let Some(hook) = self.native_undo_hook.clone() {
-      let Some(record) = self.redo_stack.pop() else {
-        return;
-      };
-      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let pending_edits = self.take_pending_semantic_edits();
       let assets = self.document.assets.assets.values().cloned().collect();
+      let fallback_selection = self.selection.clone();
+      let generation = self.next_edit_generation;
+      self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
       cx.spawn(async move |editor, cx| {
-        let result = hook(UndoRedirect::Redo, pending_runtime_edits, assets).await;
+        let result = hook(UndoRedirect::Redo, pending_edits, assets).await;
         let _ = editor.update(cx, |editor, cx| match result {
           Ok(Some(result)) => {
             editor.document = result.document;
             editor.identity_map.reconcile(&editor.document);
-            editor.selection = result.selection.unwrap_or_else(|| record.after_selection.clone());
+            editor.selection = result.selection.unwrap_or(fallback_selection);
             editor.emit_selection_changed(cx);
-            editor.edit_generation = record.after_generation;
-            editor.undo_stack.push(record);
+            editor.edit_generation = generation;
+            editor.undo_stack.clear();
+            editor.redo_stack.clear();
             editor.after_history_restore(cx);
           },
-          Ok(None) => editor.redo_stack.push(record),
+          Ok(None) => {},
           Err(error) => {
             eprintln!("runtime redo failed: {error}");
-            editor.redo_stack.push(record);
           },
         });
       })
       .detach();
       return;
     }
-    if let Some(hook) = self.collab_undo_redirect.clone() {
+    if let Some(hook) = self.session_undo_redirect.clone() {
       hook(UndoRedirect::Redo);
       return;
     }
@@ -287,11 +287,11 @@ impl RichTextEditor {
   }
 
   pub fn can_undo(&self) -> bool {
-    !self.undo_stack.is_empty()
+    self.native_undo_hook.is_some() || self.session_undo_redirect.is_some() || !self.undo_stack.is_empty()
   }
 
   pub fn can_redo(&self) -> bool {
-    !self.redo_stack.is_empty()
+    self.native_undo_hook.is_some() || self.session_undo_redirect.is_some() || !self.redo_stack.is_empty()
   }
 
   pub fn move_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {

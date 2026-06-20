@@ -294,7 +294,7 @@ impl RichTextEditor {
       eprintln!("skipping equation source semantic command because projection block {block_ix} has no durable id");
       Vec::new()
     };
-    self.undo_stack.push(EditRecord {
+    self.record_local_history(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
       after_selection: self.selection.clone(),
@@ -302,7 +302,6 @@ impl RichTextEditor {
       operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
       semantic_commands: semantic_commands.clone(),
     });
-    self.redo_stack.clear();
     self.invalidate_document_layout_caches();
     self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
   }

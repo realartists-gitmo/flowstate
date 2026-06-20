@@ -1,58 +1,49 @@
 # Flowstate Collaboration
 
-Flowstate collaboration lets multiple app instances edit the same `.db8` document over a peer-to-peer session. Saved files remain normal `.db8` files; collaboration history is session state, not file state.
+Flowstate collaboration is a transport and presence layer around the same Loro-native document used for local editing and persistence. It does not introduce a second document model, operation log, or save format.
 
-## User How-To
+## Canonical data flow
 
-1. Open the document you want to share.
-2. Choose `Share / Collaborate...`.
-3. Select `Start session`, then copy the invite.
-4. Send the invite to another Flowstate user.
-5. The other user chooses `Join Collaboration Session...`, pastes the invite, and joins into a new tab titled with `(shared)`.
-6. Use the Share dialog to copy fresh invites, inspect participants, or leave the session.
+Local editing:
 
-Status labels:
+1. `RichTextEditor` resolves input against its current `DocumentProjection` and queues semantic command batches tagged with that projection frontier.
+2. The document or session owner sends those commands to the document's single `CrdtRuntimeHandle`.
+3. The runtime rejects stale-frontier commands, mutates its owned `LoroDoc`, commits the semantic undo group, and emits a frontier-scoped projection patch or snapshot.
+4. The UI applies only that derived projection result. Loro update bytes are persisted and, for a live session, published to peers.
 
-| Status | Meaning |
-|---|---|
-| Online | Connected and publishing local edits. |
-| Only you | Session is still active, but no other peers are currently present. |
-| Offline | Local edits continue and sync should resume after reconnection. |
-| Fetching | Joining peer is downloading the current document snapshot. |
-| Building | Snapshot download finished and the local shared document is being built. |
+Remote editing:
 
-Leaving a session keeps the current tab as a local document. Closing or quitting while attached should prompt before leaving. Pathless attached tabs write recovery snapshots under the temp `flowstate-collab-recovery` directory if the app exits unexpectedly.
+1. The session imports received update bytes directly into the runtime's `LoroDoc`.
+2. Pending dependency status triggers immediate version-vector anti-entropy.
+3. The runtime's permanent subscription produces projection invalidations and update events.
+4. The UI applies derived projection patches or a defensive full projection rebuild.
 
-## Maintainer Notes
+Image bytes are synchronized separately through the content-addressed asset store. Loro stores BLAKE3 identities and image metadata; missing bytes render as recoverable placeholders.
 
-Collaboration is split between the GPUI app crate and the GPUI-free collaboration crate:
+## Ownership
 
-| Area | Responsibility |
-|---|---|
-| `crates/flowstate/src/collab` | Session lifecycle, UI-facing phases, presence, asset pulls, direct request serving, and editor patch application. |
-| `crates/flowstate-collab` | Loro schema/projection, local and remote appliers, anti-entropy, tickets, gossip, direct pulls, and convergence tests. |
-| `crates/gpui-flowtext` | Document model, editor canonical operations, block assets, persistence, and collab patch application. |
+Each open document has one CRDT runtime actor. The actor owns:
 
-Data flow:
+- the canonical `LoroDoc`;
+- permanent Loro subscriptions;
+- the per-replica Loro `UndoManager`;
+- package persistence and revision checkpoints;
+- projection construction and invalidation;
+- update import/export and asset metadata coordination.
 
-1. Local editor mutations emit canonical operations.
-2. `LocalApplier` writes those operations into the session `LoroDoc`.
-3. Local Loro updates publish over gossip when small, or by blob/direct pull when large.
-4. Remote update imports produce `CollabPatch` values via `RemoteApplier`.
-5. App sessions apply patches immediately unless the editor is in a deferred state such as drag or IME composition.
-6. Digest anti-entropy compares version vectors and pulls missing updates when gossip lags.
-7. Image assets travel separately by asset ID and stable content hash; missing assets render placeholders until fetched.
+A joined collaboration tab installs the session's existing runtime handle directly. It does not create a temporary mirror runtime.
 
-Operational notes:
+## Presence
 
-1. Invite tickets contain the session ID, title, protocol version, and inviter endpoint address.
-2. Joins first subscribe to the session, then direct-pull a snapshot with byte progress, then build the editor document.
-3. Lineage checks reject mismatched session metadata before applying snapshots or digest pulls.
-4. Presence uses ephemeral state and should not drive document correctness.
-5. Saved `.db8` files intentionally exclude CRDT session history.
+Presence is ephemeral. Carets and selections are encoded as Loro cursors with affinity, visual gravity, and direction. User identity is distinct from replica identity; every active replica uses a unique Loro peer ID.
 
-Verification references:
+## Persistence
 
-1. `helpers/docs/collab_qa.md` has the manual QA matrix.
-2. `cargo test -p flowstate-collab` covers GPUI-free sync behavior.
-3. `cargo test -p flowstate-collab --test convergence` runs the convergence fuzz gate.
+Saved `.db8` files are the chunked Loro-native Flowstate package. Collaboration does not change the file format and does not maintain session-only canonical history. Explicit saves create package checkpoints/revision boundaries. PDF source recovery embeds only these package bytes.
+
+## Verification
+
+- `crates/flowstate-collab/src/crdt_runtime.rs` contains runtime, projection, undo, table, revision, and anti-entropy coverage.
+- `crates/flowstate-collab/src/crdt_runtime_actor.rs` covers actor serialization and stale-frontier error preservation.
+- `crates/gpui-flowtext/src/rich_text/tests/collab_capture.rs` covers semantic command capture and projection patch application.
+- `helpers/docs/collab_qa.md` contains the manual multi-peer QA matrix.
