@@ -34,7 +34,6 @@ impl RichTextEditor {
       paragraph: caret.paragraph,
       byte: caret.byte + text.len(),
     };
-    let after_selection = EditorSelection { anchor: after, head: after };
     insert_text_at(&mut self.document, caret.paragraph, caret.byte, text, styles);
     self.selection = EditorSelection { anchor: after, head: after };
     self.emit_selection_changed(cx);

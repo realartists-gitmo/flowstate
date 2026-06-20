@@ -1319,6 +1319,27 @@ mod tests {
   }
 
   #[test]
+  fn package_read_repairs_an_incomplete_journal_tail() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("tail-recovery.db8");
+    let doc = new_loro_document("Tail recovery").map_err(loro_test_error)?;
+    let package = DocumentPackage::from_loro_snapshot(&doc, "Tail recovery")?;
+    package.write(&path)?;
+    let committed_len = fs::metadata(&path)?.len();
+
+    let mut file = OpenOptions::new().append(true).open(&path)?;
+    std::io::Write::write_all(&mut file, b"incomplete journal transaction")?;
+    drop(file);
+    assert!(fs::metadata(&path)?.len() > committed_len);
+
+    let repaired = DocumentPackage::read(&path)?;
+
+    repaired.validate()?;
+    assert_eq!(fs::metadata(&path)?.len(), committed_len);
+    Ok(())
+  }
+
+  #[test]
   fn package_rejects_old_final_state_magic() {
     let old_bytes = b"GPTX\x06\0\0\0old-format";
     let error = DocumentPackage::from_bytes(old_bytes).expect_err("old final-state bytes must not load");

@@ -4446,11 +4446,16 @@ mod tests {
       text: "persisted".to_string(),
       styles: RunStyles::default(),
     })?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 10,
+      text: " twice".to_string(),
+      styles: RunStyles::default(),
+    })?;
     let package = DocumentPackage::read(&path)?;
-    assert!(package.loro_update_segments.len() >= 2);
+    assert!(package.loro_update_segments.len() >= 3);
     assert!(package.current_search_units().is_empty());
     let loaded = package.load_loro_doc()?;
-    assert_eq!(body_text(&loaded).to_string(), "\npersisted");
+    assert_eq!(body_text(&loaded).to_string(), "\npersisted twice");
     Ok(())
   }
 
