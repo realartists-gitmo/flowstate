@@ -1,11 +1,28 @@
 use flowstate_document::{
-  CollabPatch, Document, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth, ParagraphStyle,
-  ROOT_BODY_FLOW_ID, RunStyles,
+  CollabPatch, DocumentProjection, DocumentPackage, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth,
+  ParagraphStyle, ROOT_BODY_FLOW_ID, RunStyles,
 };
+use std::collections::BTreeMap;
+use gpui_flowtext::{EditorSelection, ExternalCaret};
 use loro::VersionRange;
 use serde::{Deserialize, Serialize};
 
-use super::CrdtRuntime;
+#[derive(Clone, Debug)]
+pub struct RuntimeAssetMetadata {
+  pub asset_id: u128,
+  pub content_hash: [u8; 32],
+  pub mime_type: String,
+  pub original_name: Option<String>,
+  pub byte_length: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimeRevisionInfo {
+  pub revision_id: u128,
+  pub title: String,
+  pub summary: String,
+  pub created_at_unix_secs: i64,
+}
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UndoSelectionSnapshot {
@@ -105,14 +122,18 @@ pub enum RuntimeEvent {
   },
   RevisionOpened {
     revision_id: u128,
-    document: Box<Document>,
+    document: Box<DocumentProjection>,
   },
   RevisionForked {
     revision_id: u128,
-    runtime: Box<CrdtRuntime>,
+    document: Box<DocumentProjection>,
+    package: Box<DocumentPackage>,
+  },
+  SelectionRestored {
+    selection: EditorSelection,
   },
   ProjectionUpdated {
-    document: Box<Document>,
+    document: Box<DocumentProjection>,
     invalidation: ProjectionInvalidation,
     frontier: Vec<u8>,
     version_vector: Vec<u8>,
@@ -123,6 +144,23 @@ pub enum RuntimeEvent {
     frontier: Vec<u8>,
     version_vector: Vec<u8>,
   },
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimePresenceCaretRequest {
+  pub selection: crate::presence::PresenceSelection,
+  pub color_rgb: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct RuntimePresenceCarets {
+  pub carets: Vec<ExternalCaret>,
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ProjectionFallbackStats {
+  pub total: u64,
+  pub by_reason: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -182,7 +220,6 @@ impl ProjectionInvalidation {
   }
 
   pub(super) fn full_rebuild(frontier_before: Vec<u8>, frontier_after: Vec<u8>, reason: &'static str) -> Self {
-    tracing::warn!(reason, "Flowstate Loro projection requested full rebuild fallback");
     Self {
       frontier_before,
       frontier_after,
