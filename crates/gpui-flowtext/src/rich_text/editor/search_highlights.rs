@@ -134,7 +134,7 @@ impl RichTextEditor {
 }
 
 fn replace_paragraph_matches(
-  document: &mut Document,
+  document: &mut DocumentProjection,
   paragraph_ix: usize,
   matches: &[Range<usize>],
   replacement: &str,

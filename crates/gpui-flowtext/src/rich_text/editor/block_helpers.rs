@@ -1,6 +1,6 @@
 #[hotpath::measure]
 fn insert_standalone_paragraphs_into_projection(
-  document: &mut Document,
+  document: &mut DocumentProjection,
   insert_paragraph_ix: usize,
   inserted: &[InputParagraph],
 ) -> Vec<Paragraph> {

@@ -4,6 +4,7 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::Receiver;
 use flowstate_collab::{
   SessionId,
+  crdt_runtime_actor::CrdtRuntimeHandle,
   ids::PeerId,
   net::{
     NetCommand, TicketSeed,
@@ -72,6 +73,7 @@ impl CollabManager {
     panel_id: Uuid,
     editor: Entity<RichTextEditor>,
     title: String,
+    document_runtime: CrdtRuntimeHandle,
     cx: &mut Context<T>,
   ) -> Result<SessionId>
   where
@@ -84,17 +86,13 @@ impl CollabManager {
 
     let commands = self.ensure_runtime(cx)?;
     let session = SessionId::new();
-    let document = editor.read(cx).document().clone();
     tracing::info!(
       %panel_id,
       %session,
       title = %title,
-      paragraphs = document.paragraphs.len(),
-      blocks = document.blocks.len(),
-      assets = document.assets.assets.len(),
       "starting local collaboration session",
     );
-    let collab = CollabSession::from_local_document(session, panel_id, editor, title, document, commands.clone())?;
+    let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_runtime, commands.clone());
     let direct_handler = collab.direct_handler();
     let entity = cx.new(|_| collab);
     entity.update(cx, |session, cx| session.attach(cx));

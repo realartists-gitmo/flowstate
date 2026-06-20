@@ -1,9 +1,9 @@
 use std::{ops::Range, sync::Arc};
 
-use super::{Document, RunStyle, paragraphs_mut, TextRun, update_paragraph_block, Paragraph, DocumentSpan, remove_paragraph_ids, insert_paragraph_id, replace_paragraph_blocks, rebuild_document_sections, DocumentOffset, SOFT_LINE_BREAK, RichClipboardFragment, InputRun, InputParagraph, block_ix_for_paragraph, Block, insert_block_id, RunStyles, ParagraphStyle, RunSemanticStyle, RICH_TEXT_CLIPBOARD_FORMAT};
+use super::{DocumentProjection, RunStyle, paragraphs_mut, TextRun, update_paragraph_block, Paragraph, DocumentSpan, remove_paragraph_ids, insert_paragraph_id, replace_paragraph_blocks, rebuild_document_sections, DocumentOffset, SOFT_LINE_BREAK, RichClipboardFragment, InputRun, InputParagraph, block_ix_for_paragraph, Block, insert_block_id, RunStyles, ParagraphStyle, RunSemanticStyle, RICH_TEXT_CLIPBOARD_FORMAT};
 
 #[hotpath::measure]
-pub fn apply_style_to_paragraph_range(document: &mut Document, paragraph_ix: usize, range: Range<usize>, style: RunStyle) {
+pub fn apply_style_to_paragraph_range(document: &mut DocumentProjection, paragraph_ix: usize, range: Range<usize>, style: RunStyle) {
   if range.start >= range.end {
     return;
   }

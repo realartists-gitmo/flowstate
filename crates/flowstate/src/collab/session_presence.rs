@@ -1,9 +1,12 @@
 use std::{collections::HashMap, time::Duration};
 
-use flowstate_collab::presence::{PresenceSelection, PresenceState, PresenceStore};
+use flowstate_collab::{
+  crdt_runtime::RuntimePresenceCaretRequest,
+  presence::{PresenceState, PresenceStore},
+};
 use gpui::{Context, Timer};
 
-use super::{CollabSession, SessionNotice, presence_view};
+use super::{CollabSession, SessionNotice};
 
 const PRESENCE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 
@@ -29,20 +32,40 @@ impl CollabSession {
   }
 
   pub(super) fn refresh_own_presence(&mut self, cx: &mut Context<Self>) {
-    let Some(presence) = &self.presence else {
+    if self.presence.is_none() {
       tracing::trace!(session = %self.session, "skipping own collaboration presence refresh because store is missing");
       return;
-    };
-    let selection = self.own_presence_selection(cx);
-    let state = PresenceState {
-      name: default_presence_name(),
-      selection,
-    };
-    tracing::trace!(session = %self.session, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
-    if let Err(error) = presence.set_self(&state) {
-      tracing::warn!(session = %self.session, error = %format_args!("{error:#}"), "collaboration presence encode failed");
     }
-    self.refresh_peer_count();
+    let selection = self.editor.as_ref().map(|editor| editor.read(cx).selection().clone());
+    let runtime = self.runtime.clone();
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let selection = match (runtime, selection) {
+        (Some(runtime), Some(selection)) => runtime.presence_selection(selection).await,
+        _ => Ok(None),
+      };
+      let _ = session.update(cx, |session, cx| match selection {
+        Ok(selection) => {
+          let state = PresenceState {
+            name: default_presence_name(),
+            selection,
+          };
+          tracing::trace!(session = %session_id, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
+          if let Some(presence) = &session.presence
+            && let Err(error) = presence.set_self(&state)
+          {
+            tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration presence encode failed");
+          }
+          if session.refresh_peer_count() {
+            cx.notify();
+          }
+        },
+        Err(error) => {
+          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "resolving own collaboration selection failed");
+        },
+      });
+    })
+    .detach();
   }
 
   pub(super) fn schedule_own_presence_refresh(&mut self, cx: &mut Context<Self>) {
@@ -74,7 +97,7 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
     };
-    let Some(runtime) = &self.runtime else {
+    let Some(runtime) = self.runtime.clone() else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because Loro doc is missing");
       return;
     };
@@ -82,10 +105,34 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because editor is missing");
       return;
     };
-    let document = editor.read(cx).document().clone();
-    let carets = presence_view::external_carets(runtime.doc(), &document, presence);
-    tracing::trace!(session = %self.session, carets = carets.len(), "refreshing collaboration external carets");
-    editor.update(cx, |editor, cx| editor.set_external_carets(carets, cx));
+    let self_key = presence.self_key().to_string();
+    let requests = presence
+      .roster()
+      .into_iter()
+      .filter(|entry| entry.key != self_key)
+      .filter_map(|entry| {
+        entry.selection.map(|selection| RuntimePresenceCaretRequest {
+          selection,
+          color_rgb: entry.color_rgb,
+        })
+      })
+      .collect();
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let result = runtime.resolve_presence_carets(requests).await;
+      let _ = session.update(cx, |session, cx| match result {
+        Ok(resolved) => {
+          tracing::trace!(session = %session_id, carets = resolved.carets.len(), "refreshing collaboration external carets");
+          if session.editor.as_ref().is_some_and(|current| current == &editor) {
+            editor.update(cx, |editor, cx| editor.set_external_carets(resolved.carets, cx));
+          }
+        },
+        Err(error) => {
+          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "resolving collaboration external carets failed");
+        },
+      });
+    })
+    .detach();
   }
 
   pub(super) fn publish_presence_snapshot(&self) {
@@ -136,12 +183,6 @@ impl CollabSession {
       .presence
       .as_ref()
       .map_or(0, |presence| presence.roster().len().saturating_sub(1))
-  }
-
-  fn own_presence_selection(&self, cx: &mut Context<Self>) -> Option<PresenceSelection> {
-    let runtime = self.runtime.as_ref()?;
-    let editor = self.editor.as_ref()?.read(cx);
-    presence_view::selection_for_editor(runtime.doc(), editor)
   }
 
   fn emit_presence_roster_diff(&mut self, before: HashMap<String, String>, cx: &mut Context<Self>) -> bool {

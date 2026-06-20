@@ -60,9 +60,10 @@ impl Workspace {
       .find(|panel| panel.read(cx).id() == panel_id)
       .map(|panel| panel.read(cx).title_text().to_string())
       .unwrap_or_else(|| "Shared document".to_string());
+    let runtime = self.document_runtimes.get(&panel_id)?.clone();
 
     tracing::info!(%panel_id, title = %title, "workspace starting collaboration on document");
-    match crate::collab::start_session_for_panel(panel_id, editor, title, cx) {
+    match crate::collab::start_session_for_panel(panel_id, editor, title, runtime, cx) {
       Ok(session) => {
         tracing::info!(%panel_id, %session, "workspace started collaboration on document");
         Some(session)
@@ -211,6 +212,11 @@ impl Workspace {
 
   pub fn leave_collaboration_on_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> bool {
     let left = crate::collab::leave_session_for_panel(panel_id, cx);
+    if left
+      && let Some(runtime) = self.document_runtimes.get(&panel_id).cloned()
+    {
+      self.attach_runtime_to_document_panel(panel_id, runtime, cx);
+    }
     tracing::info!(%panel_id, left, "workspace leave collaboration requested");
     left
   }
@@ -261,9 +267,14 @@ impl Workspace {
                   &[PromptButton::ok("Ok")],
                   cx,
                 ));
-              } else if workspace.collaboration_dialog.is_some() {
-                workspace.close_collaboration_dialog(cx);
-                window.close_dialog(cx);
+              } else {
+                if let Some(runtime) = crate::collab::runtime_for_session(joined.session, cx) {
+                  workspace.attach_runtime_to_document_panel(panel_id, runtime, cx);
+                }
+                if workspace.collaboration_dialog.is_some() {
+                  workspace.close_collaboration_dialog(cx);
+                  window.close_dialog(cx);
+                }
               }
             },
             Ok(Err(error)) => {
@@ -299,12 +310,12 @@ impl Workspace {
 
   fn add_joined_collaboration_panel(
     &mut self,
-    document: Document,
+    document: DocumentProjection,
     title: String,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
-    let panel = self.create_document_panel(document, None, Some(title), window, cx);
+    let panel = self.create_document_panel(document, None, Some(title), None, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
     panel

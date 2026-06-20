@@ -733,7 +733,7 @@ fn card_paragraph_excluded_from_condense(paragraph: &InputParagraph) -> bool {
 }
 
 fn selected_fragment_or_enclosing_section(
-  document: &Document,
+  document: &DocumentProjection,
   selection: &crate::rich_text_element::EditorSelection,
 ) -> crate::rich_text_element::RichClipboardFragment {
   if selection.anchor != selection.head {
@@ -763,7 +763,7 @@ fn selected_fragment_or_enclosing_section(
   )
 }
 
-fn enclosing_section_bounds(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
+fn enclosing_section_bounds(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
   document
     .sections
     .iter()

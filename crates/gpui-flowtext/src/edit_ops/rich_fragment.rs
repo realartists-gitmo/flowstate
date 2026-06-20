@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
+pub fn insert_rich_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(first_paragraph) = fragment.paragraphs.first() else {
     return offset;
   };
@@ -10,7 +10,7 @@ pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, 
 }
 
 #[hotpath::measure]
-fn insert_single_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, paragraph: &InputParagraph) -> DocumentOffset {
+fn insert_single_paragraph_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, paragraph: &InputParagraph) -> DocumentOffset {
   let text = input_paragraph_text(paragraph);
   if text.is_empty() {
     return offset;
@@ -41,7 +41,7 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
 }
 
 #[hotpath::measure]
-fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
+fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(target) = document.paragraphs.get(offset.paragraph).cloned() else {
     return offset;
   };

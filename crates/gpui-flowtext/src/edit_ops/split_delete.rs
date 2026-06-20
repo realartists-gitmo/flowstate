@@ -37,7 +37,7 @@ pub fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRu
 }
 
 #[hotpath::measure]
-pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: usize) {
+pub fn split_paragraph_at(document: &mut DocumentProjection, paragraph_ix: usize, byte: usize) {
   let paragraph = document.paragraphs[paragraph_ix].clone();
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let global = paragraph_range.start + byte;
@@ -69,7 +69,7 @@ pub fn split_paragraph_at(document: &mut Document, paragraph_ix: usize, byte: us
 }
 
 #[hotpath::measure]
-pub fn delete_cross_paragraph_range(document: &mut Document, range: Range<DocumentOffset>) {
+pub fn delete_cross_paragraph_range(document: &mut DocumentProjection, range: Range<DocumentOffset>) {
   if range.start.paragraph >= range.end.paragraph {
     delete_range_in_paragraph(document, range.start.paragraph, range.start.byte..range.end.byte);
     return;

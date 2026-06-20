@@ -1,26 +1,72 @@
 use std::{collections::BTreeMap, io};
 
 use gpui_flowtext::{
-  AssetId, Document, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
+  AssetId, BlockId, DocumentProjection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
   InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumnWidth, InputTableRow, InputTableStyle, RunSemanticStyle, RunStyles, document_from_input_blocks,
+  InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, document_from_input_blocks,
 };
 use loro::{Container, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
 
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
-  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, ROOT, ROOT_BODY_FLOW_ID, flowstate_document_theme,
+  MARK_STRIKETHROUGH, MAIN_BODY_BLOCK_ID, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
+  flowstate_document_theme,
 };
 
-pub fn document_from_loro(doc: &LoroDoc) -> io::Result<Document> {
-  let blocks = input_blocks_from_loro(doc)?;
-  Ok(document_from_input_blocks(DocumentTheme::clone(&flowstate_document_theme()), blocks))
+pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
+  let projection = projection_from_loro(doc)?;
+  let mut document = document_from_projection_blocks(projection);
+  document.frontier = doc.state_frontiers().encode();
+  Ok(document)
 }
 
 pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
+  Ok(projection_from_loro(doc)?.blocks)
+}
+
+pub fn object_input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<(BlockId, InputBlock)>> {
   let projector = Projector::new(doc)?;
-  projector.body_blocks()
+  let mut blocks = Vec::new();
+  for key in projector.blocks.keys().map(|key| key.to_string()) {
+    let Some(block) = child_map(&projector.blocks, &key)? else {
+      continue;
+    };
+    if map_string_opt(&block, "kind")?.as_deref() == Some("paragraph") {
+      continue;
+    }
+    let id = map_string_opt(&block, "id")?.unwrap_or(key);
+    blocks.push((BlockId(loro_id_u128(&id)), projector.object_block(&block)?));
+  }
+  blocks.sort_by_key(|(id, _)| id.0);
+  Ok(blocks)
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ProjectionBlocks {
+  pub blocks: Vec<InputBlock>,
+  pub paragraph_ids: Vec<ParagraphId>,
+  pub block_ids: Vec<BlockId>,
+}
+
+fn projection_from_loro(doc: &LoroDoc) -> io::Result<ProjectionBlocks> {
+  let projector = Projector::new(doc)?;
+  projector.body_projection()
+}
+
+pub(crate) fn projection_blocks_from_loro(doc: &LoroDoc) -> io::Result<ProjectionBlocks> {
+  projection_from_loro(doc)
+}
+
+pub(crate) fn document_from_projection_blocks(projection: ProjectionBlocks) -> DocumentProjection {
+  let mut document = document_from_input_blocks(DocumentTheme::clone(&flowstate_document_theme()), projection.blocks);
+  if projection.paragraph_ids.len() == document.paragraphs.len() {
+    document.ids.paragraph_ids = projection.paragraph_ids;
+  }
+  if projection.block_ids.len() == document.blocks.len() {
+    document.ids.block_ids = projection.block_ids;
+  }
+  document
 }
 
 struct Projector<'a> {
@@ -37,21 +83,36 @@ impl<'a> Projector<'a> {
     Ok(Self { doc, flows, blocks })
   }
 
-  fn body_blocks(&self) -> io::Result<Vec<InputBlock>> {
+  fn body_projection(&self) -> io::Result<ProjectionBlocks> {
     let body = self.flow_text(ROOT_BODY_FLOW_ID)?;
     let body_blocks = self.object_blocks_for_flow(ROOT_BODY_FLOW_ID)?;
     let mut blocks = Vec::new();
-    self.push_flow_blocks(&body, &body_blocks, &mut blocks)?;
+    let mut paragraph_ids = Vec::new();
+    let mut block_ids = Vec::new();
+    self.push_flow_blocks(&body, &body_blocks, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks)?;
     if blocks.is_empty() {
       blocks.push(InputBlock::Paragraph(InputParagraph {
         style: gpui_flowtext::ParagraphStyle::Normal,
         runs: Vec::new(),
       }));
+      paragraph_ids.push(ParagraphId(loro_id_u128("paragraph.projection.empty")));
+      block_ids.push(BlockId(loro_id_u128("block.projection.empty")));
     }
-    Ok(blocks)
+    Ok(ProjectionBlocks {
+      blocks,
+      paragraph_ids,
+      block_ids,
+    })
   }
 
-  fn push_flow_blocks(&self, text: &LoroText, object_blocks: &BTreeMap<usize, LoroMap>, output: &mut Vec<InputBlock>) -> io::Result<()> {
+  fn push_flow_blocks(
+    &self,
+    text: &LoroText,
+    object_blocks: &BTreeMap<usize, LoroMap>,
+    mut paragraph_ids: Option<&mut Vec<ParagraphId>>,
+    mut block_ids: Option<&mut Vec<BlockId>>,
+    output: &mut Vec<InputBlock>,
+  ) -> io::Result<()> {
     let mut current = InputParagraph {
       style: gpui_flowtext::ParagraphStyle::Normal,
       runs: Vec::new(),
@@ -59,6 +120,7 @@ impl<'a> Projector<'a> {
     let mut pending_style = gpui_flowtext::ParagraphStyle::Normal;
     let mut seen_sentinel = false;
     let mut unicode_pos = 0_usize;
+    let mut current_boundary = None;
 
     for item in text.to_delta() {
       let loro::TextDelta::Insert { insert, attributes } = item else {
@@ -73,15 +135,33 @@ impl<'a> Projector<'a> {
               seen_sentinel = true;
               pending_style = style;
               current.style = style;
+              current_boundary = Some(unicode_pos);
             } else {
+              push_paragraph_projection_metadata(
+                self.doc,
+                text,
+                current_boundary,
+                output.len(),
+                paragraph_ids.as_deref_mut(),
+                block_ids.as_deref_mut(),
+              );
               output.push(InputBlock::Paragraph(current));
               current = InputParagraph { style, runs: Vec::new() };
               pending_style = style;
+              current_boundary = Some(unicode_pos);
             }
           }
           OBJECT_REPLACEMENT => {
             if let Some(block) = object_blocks.get(&unicode_pos) {
               if !current.runs.is_empty() {
+                push_paragraph_projection_metadata(
+                  self.doc,
+                  text,
+                  current_boundary,
+                  output.len(),
+                  paragraph_ids.as_deref_mut(),
+                  block_ids.as_deref_mut(),
+                );
                 output.push(InputBlock::Paragraph(current));
                 current = InputParagraph {
                   style: pending_style,
@@ -89,6 +169,9 @@ impl<'a> Projector<'a> {
                 };
               }
               output.push(self.object_block(block)?);
+              if let Some(block_ids) = block_ids.as_deref_mut() {
+                block_ids.push(BlockId(loro_id_u128(&map_string(block, "id")?)));
+              }
             }
           }
           _ => push_char(&mut current, ch, run_styles),
@@ -98,6 +181,14 @@ impl<'a> Projector<'a> {
     }
 
     if !current.runs.is_empty() || output.is_empty() && seen_sentinel {
+      push_paragraph_projection_metadata(
+        self.doc,
+        text,
+        current_boundary,
+        output.len(),
+        paragraph_ids,
+        block_ids,
+      );
       output.push(InputBlock::Paragraph(current));
     }
     Ok(())
@@ -226,7 +317,7 @@ impl<'a> Projector<'a> {
     let flow = self.flow_text(&flow_id)?;
     let object_blocks = self.cell_nested_tables(cell, &flow)?;
     let mut projected = Vec::new();
-    self.push_flow_blocks(&flow, &object_blocks, &mut projected)?;
+    self.push_flow_blocks(&flow, &object_blocks, None, None, &mut projected)?;
     let mut blocks = projected
       .into_iter()
       .filter_map(|block| match block {
@@ -349,6 +440,96 @@ fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   });
 }
 
+fn push_paragraph_projection_metadata(
+  doc: &LoroDoc,
+  text: &LoroText,
+  boundary: Option<usize>,
+  block_ix: usize,
+  paragraph_ids: Option<&mut Vec<ParagraphId>>,
+  block_ids: Option<&mut Vec<BlockId>>,
+) {
+  if let Some(paragraph_ids) = paragraph_ids {
+    let id = boundary
+      .and_then(|boundary| paragraph_loro_id_at_boundary(doc, text, boundary))
+      .unwrap_or_else(|| format!("paragraph.projection.{block_ix}"));
+    paragraph_ids.push(ParagraphId(loro_id_u128(&id)));
+  }
+  if let Some(block_ids) = block_ids {
+    let id = boundary
+      .and_then(|boundary| paragraph_block_loro_id_at_boundary(doc, text, boundary))
+      .unwrap_or_else(|| format!("paragraph_block.projection.{block_ix}"));
+    block_ids.push(BlockId(loro_id_u128(&id)));
+  }
+}
+
+fn paragraph_loro_id_at_boundary(doc: &LoroDoc, text: &LoroText, boundary: usize) -> Option<String> {
+  let root = doc.get_map(ROOT);
+  let paragraphs = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten()?;
+  let mut matches = map_keys(&paragraphs)
+    .into_iter()
+    .filter(|key| {
+      child_map(&paragraphs, key)
+        .ok()
+        .flatten()
+        .and_then(|paragraph| live_cursor_pos(doc, text, &paragraph, "boundary_cursor").or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor")))
+        == Some(boundary)
+    })
+    .collect::<Vec<_>>();
+  if boundary == 0
+    && let Some(ix) = matches.iter().position(|key| key == ROOT_FIRST_PARAGRAPH_ID)
+  {
+    return Some(matches.swap_remove(ix));
+  }
+  matches.into_iter().next()
+}
+
+fn paragraph_block_loro_id_at_boundary(doc: &LoroDoc, text: &LoroText, boundary: usize) -> Option<String> {
+  let root = doc.get_map(ROOT);
+  let blocks = child_map(&root, BLOCKS_BY_ID).ok().flatten()?;
+  let mut matches = map_keys(&blocks)
+    .into_iter()
+    .filter(|key| {
+      let Some(block) = child_map(&blocks, key).ok().flatten() else {
+        return false;
+      };
+      map_string_opt(&block, "kind").ok().flatten().as_deref() == Some("paragraph")
+        && live_cursor_pos(doc, text, &block, "anchor_cursor") == Some(boundary)
+    })
+    .collect::<Vec<_>>();
+  if boundary == 0
+    && let Some(ix) = matches.iter().position(|key| key == MAIN_BODY_BLOCK_ID)
+  {
+    return Some(matches.swap_remove(ix));
+  }
+  matches.into_iter().next()
+}
+
+fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str) -> Option<usize> {
+  let cursor_bytes = map_binary_opt(map, key).ok().flatten()?;
+  let cursor = Cursor::decode(&cursor_bytes).ok()?;
+  if cursor.container != text.id() {
+    return None;
+  }
+  let pos = doc.get_cursor_pos(&cursor).ok()?.current.pos;
+  (text.to_string().chars().nth(pos).is_some()).then_some(pos)
+}
+
+fn map_keys(map: &LoroMap) -> Vec<String> {
+  let mut keys = map.keys().map(|key| key.to_string()).collect::<Vec<_>>();
+  keys.sort();
+  keys
+}
+
+fn loro_id_u128(id: &str) -> u128 {
+  if let Some(value) = id.rsplit('.').next().and_then(|suffix| suffix.parse::<u128>().ok()) {
+    return value;
+  }
+  let hash = blake3::hash(id.as_bytes());
+  let mut bytes = [0_u8; 16];
+  bytes.copy_from_slice(&hash.as_bytes()[..16]);
+  u128::from_le_bytes(bytes)
+}
+
 fn child_map(parent: &LoroMap, key: &str) -> io::Result<Option<LoroMap>> {
   Ok(parent.get(key).and_then(|value| match value {
     ValueOrContainer::Container(container) => container.into_map().ok(),
@@ -420,7 +601,7 @@ fn paragraph_style_from_attrs(attrs: Option<&FxHashMap<String, LoroValue>>) -> O
   let value = attrs?.get(MARK_PARAGRAPH_STYLE)?;
   match value {
     LoroValue::I64(0) => Some(gpui_flowtext::ParagraphStyle::Normal),
-    LoroValue::I64(slot) => u8::try_from(*slot).ok().map(gpui_flowtext::ParagraphStyle::Custom),
+    LoroValue::I64(slot) if *slot > 0 => u8::try_from(*slot - 1).ok().map(gpui_flowtext::ParagraphStyle::Custom),
     _ => None,
   }
 }
@@ -520,4 +701,60 @@ fn i64_to_u16(value: i64) -> Option<u16> {
 
 fn invalid(message: impl Into<String>) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::{document_to_loro, flowstate_document_theme, loro_schema::body_text};
+  use gpui_flowtext::{
+    InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun, RunStyles, document_from_input_blocks,
+  };
+
+  #[test]
+  fn projection_preserves_loro_paragraph_and_block_ids() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![
+        InputBlock::Paragraph(InputParagraph {
+          style: gpui_flowtext::ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "before".to_string(),
+            styles: RunStyles::default(),
+          }],
+        }),
+        InputBlock::Image(InputImageBlock {
+          asset_id: AssetId(42),
+          alt_text: "alt".into(),
+          caption: None,
+          sizing: InputImageSizing::FitWidth,
+          alignment: InputBlockAlignment::Left,
+        }),
+      ],
+    );
+    let doc = document_to_loro(&source, "Projection ids")?;
+    let body = body_text(&doc);
+    let root = doc.get_map(ROOT);
+    let blocks = child_map(&root, BLOCKS_BY_ID)?.expect("blocks map");
+    let first_paragraph_id = paragraph_loro_id_at_boundary(&doc, &body, 0).expect("first paragraph id");
+    let first_block_id = paragraph_block_loro_id_at_boundary(&doc, &body, 0).expect("first paragraph block id");
+    let image_id = map_keys(&blocks)
+      .into_iter()
+      .find(|key| {
+        child_map(&blocks, key)
+          .ok()
+          .flatten()
+          .and_then(|block| map_string_opt(&block, "kind").ok().flatten())
+          .as_deref()
+          == Some("image")
+      })
+      .expect("image block id");
+
+    let projected = document_from_loro(&doc)?;
+
+    assert_eq!(projected.ids.paragraph_ids[0], ParagraphId(loro_id_u128(&first_paragraph_id)));
+    assert_eq!(projected.ids.block_ids[0], BlockId(loro_id_u128(&first_block_id)));
+    assert_eq!(projected.ids.block_ids[1], BlockId(loro_id_u128(&image_id)));
+    Ok(())
+  }
 }

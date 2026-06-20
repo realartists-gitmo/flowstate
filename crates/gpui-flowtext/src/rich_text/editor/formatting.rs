@@ -368,7 +368,7 @@ impl RichTextEditor {
 }
 
 fn apply_highlight_to_existing_highlights_in_paragraph_range(
-  document: &mut Document,
+  document: &mut DocumentProjection,
   paragraph_ix: usize,
   range: Range<usize>,
   highlight: HighlightStyle,
@@ -390,7 +390,7 @@ fn apply_highlight_to_existing_highlights_in_paragraph_range(
   );
 }
 
-fn hierarchical_section_bounds(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
+fn hierarchical_section_bounds(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   let ParagraphStyle::Custom(slot) = paragraph.style else {
     return None;
@@ -422,7 +422,7 @@ fn hierarchical_section_bounds(document: &Document, paragraph_ix: usize, section
   Some((paragraph_ix, end))
 }
 
-fn collapse_heading_kind(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<u8> {
+fn collapse_heading_kind(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<u8> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   let ParagraphStyle::Custom(slot) = paragraph.style else {
     return None;
@@ -436,14 +436,14 @@ fn collapse_heading_kind(document: &Document, paragraph_ix: usize, section_slots
   Some(style.section_kind.unwrap_or(slot))
 }
 
-fn section_at_heading(document: &Document, paragraph_ix: usize, heading_kind: u8) -> Option<&DocumentSection> {
+fn section_at_heading(document: &DocumentProjection, paragraph_ix: usize, heading_kind: u8) -> Option<&DocumentSection> {
   document.sections.iter().find(|section| {
     let SectionKind::Custom(section_kind) = section.kind;
     section_kind == heading_kind && paragraph_index_for_id(document, section.start_paragraph) == Some(paragraph_ix)
   })
 }
 
-fn enclosing_section<'a>(document: &'a Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<&'a DocumentSection> {
+fn enclosing_section<'a>(document: &'a DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<&'a DocumentSection> {
   document
     .sections
     .iter()
@@ -471,7 +471,7 @@ fn enclosing_section<'a>(document: &'a Document, paragraph_ix: usize, section_sl
     })
 }
 
-fn enclosing_section_bounds(document: &Document, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
+fn enclosing_section_bounds(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
   let section = enclosing_section(document, paragraph_ix, section_slots)?;
   let start = paragraph_index_for_id(document, section.start_paragraph)?;
   let end = section

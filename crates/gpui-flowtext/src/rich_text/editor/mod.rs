@@ -1,10 +1,12 @@
 use std::{
   collections::{VecDeque, hash_map::DefaultHasher},
   fs,
+  future::Future,
   hash::{Hash, Hasher},
   io,
   ops::Range,
   path::{Path, PathBuf},
+  pin::Pin,
   rc::Rc,
   sync::{Arc, Mutex, OnceLock},
   time::{Duration, Instant},
@@ -29,7 +31,9 @@ const DISABLE_SCROLL_LIMITING_FUNCTIONS: bool = true; // cfg!(target_os = "linux
 const SCROLL_FOREGROUND_OVERSCAN_PX: f32 = 384.0;
 const SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS: u64 = 8;
 const SCROLL_FOREGROUND_MAX_CHUNK_LINES: usize = 96;
-const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(150);
+const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(500);
+const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(750);
+const RECOVERY_TYPING_IDLE_WINDOW: Duration = Duration::from_secs(2);
 const OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS: usize = 24;
 const OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS: usize = 160;
 
@@ -239,9 +243,9 @@ pub(super) enum EditOperation {
     before: Block,
     after: Block,
   },
-  ReplaceDocument {
-    before: Box<Document>,
-    after: Box<Document>,
+  RestoreProjectionSnapshot {
+    before: Box<DocumentProjection>,
+    after: Box<DocumentProjection>,
   },
   MoveRichText {
     source_range: Range<DocumentOffset>,
@@ -253,7 +257,7 @@ pub(super) enum EditOperation {
 
 #[hotpath::measure_all]
 impl EditOperation {
-  pub(super) fn undo(&self, document: &mut Document) {
+  pub(super) fn undo(&self, document: &mut DocumentProjection) {
     match self {
       Self::InsertText { paragraph, byte, text, .. } => {
         delete_range_in_paragraph(document, *paragraph, *byte..*byte + text.len());
@@ -273,7 +277,7 @@ impl EditOperation {
           *block = before.clone();
         }
       },
-      Self::ReplaceDocument { before, .. } => {
+      Self::RestoreProjectionSnapshot { before, .. } => {
         *document = before.as_ref().clone();
       },
       Self::MoveRichText {
@@ -288,7 +292,7 @@ impl EditOperation {
     }
   }
 
-  pub(super) fn redo(&self, document: &mut Document) {
+  pub(super) fn redo(&self, document: &mut DocumentProjection) {
     match self {
       Self::InsertText {
         paragraph,
@@ -316,7 +320,7 @@ impl EditOperation {
           *block = after.clone();
         }
       },
-      Self::ReplaceDocument { after, .. } => {
+      Self::RestoreProjectionSnapshot { after, .. } => {
         *document = after.as_ref().clone();
       },
       Self::MoveRichText {
@@ -473,6 +477,26 @@ pub struct ExternalCaret {
   pub offset: DocumentOffset,
   pub color_rgb: u32,
 }
+
+pub type NativeSaveHook =
+  Rc<dyn Fn(PathBuf, Vec<CollaborationEdit>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>>;
+pub type NativeExportHook = Rc<
+  dyn Fn(
+    PathBuf,
+    DocumentExportFormat,
+    Vec<CollaborationEdit>,
+    Vec<AssetRecord>,
+  ) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>,
+>;
+pub type NativeUndoHook =
+  Rc<dyn Fn(UndoRedirect, Vec<CollaborationEdit>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<Option<NativeUndoResult>>>>>>;
+pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+
+pub struct NativeUndoResult {
+  pub document: DocumentProjection,
+  pub selection: Option<EditorSelection>,
+}
+
 #[derive(Clone)]
 struct ParagraphChunkLayoutCacheEntry {
   key: ParagraphCacheKey,
@@ -733,27 +757,28 @@ struct RenderLayoutSnapshot {
 
 #[derive(Clone)]
 enum RenderVirtualItems {
-  Document(Rc<Vec<VirtualItem>>),
+  DocumentProjection(Rc<Vec<VirtualItem>>),
   WithDropPreview(Rc<Vec<RenderVirtualItem>>),
 }
 
 #[derive(Clone)]
 enum RenderVirtualItem {
-  Document(VirtualItem),
+  DocumentProjection(VirtualItem),
   DropPreview,
 }
 
 impl RenderVirtualItems {
   fn get(&self, item_ix: usize) -> Option<RenderVirtualItem> {
     match self {
-      Self::Document(items) => items.get(item_ix).cloned().map(RenderVirtualItem::Document),
+      Self::DocumentProjection(items) => items.get(item_ix).cloned().map(RenderVirtualItem::DocumentProjection),
       Self::WithDropPreview(items) => items.get(item_ix).cloned(),
     }
   }
 }
 
 enum RecoveryWriteDecision {
-  Write { generation: u64, document: Box<Document> },
+  Write { generation: u64, document: Box<DocumentProjection> },
+  WriteRuntime { generation: u64, hook: NativeRecoveryHook },
   Rescheduled,
   Idle,
 }
@@ -865,7 +890,7 @@ pub struct RichTextEditor {
   document_path: Option<PathBuf>,
   document_display_name: Option<SharedString>,
   recovery_path: Option<PathBuf>,
-  pub(super) document: Document,
+  pub(super) document: DocumentProjection,
   pub(super) selection: EditorSelection,
   config: RichTextEditorConfig,
   edit_generation: u64,
@@ -879,7 +904,16 @@ pub struct RichTextEditor {
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
   pending_collab_edits: Vec<CollaborationEdit>,
+  pending_runtime_edits: Vec<CollaborationEdit>,
+  runtime_edits_in_flight: usize,
+  pending_command_selection: Option<EditorSelection>,
+  pending_projection_rollback: Option<DocumentProjection>,
   collab_capture: bool,
+  runtime_capture: bool,
+  native_save_hook: Option<NativeSaveHook>,
+  native_export_hook: Option<NativeExportHook>,
+  native_undo_hook: Option<NativeUndoHook>,
+  native_recovery_hook: Option<NativeRecoveryHook>,
   suppress_collab_capture: u32,
   collab_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
   collaboration_role: Option<CollaborationRole>,

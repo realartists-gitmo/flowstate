@@ -34,10 +34,13 @@ pub struct RichClipboardFragment {
   pub assets: Vec<InputAsset>,
 }
 
-// -- Document and paragraphs ---------------------------------------------
+// -- DocumentProjection and paragraphs ---------------------------------------------
 
 #[derive(Clone, Debug)]
-pub struct Document {
+pub struct DocumentProjection {
+  /// Encoded canonical frontier this disposable projection was built from.
+  /// Empty for standalone projections that are not backed by a CRDT runtime.
+  pub frontier: Vec<u8>,
   pub text: Rope,
   pub paragraphs: Arc<Vec<Paragraph>>,
   pub blocks: Arc<Vec<Block>>,
@@ -52,7 +55,7 @@ pub struct Document {
 }
 
 #[hotpath::measure]
-pub fn paragraphs_mut(document: &mut Document) -> &mut Vec<Paragraph> {
+pub fn paragraphs_mut(document: &mut DocumentProjection) -> &mut Vec<Paragraph> {
   Arc::make_mut(&mut document.paragraphs)
 }
 
@@ -63,7 +66,7 @@ pub fn paragraph_blocks_from_paragraphs(paragraphs: &[Paragraph]) -> Vec<Block> 
 
 #[hotpath::measure]
 #[must_use]
-pub fn block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -> Option<usize> {
+pub fn block_ix_for_paragraph(document: &DocumentProjection, target_paragraph_ix: usize) -> Option<usize> {
   if document.blocks.len() == document.paragraphs.len()
     && document
       .blocks
@@ -87,7 +90,7 @@ pub fn block_ix_for_paragraph(document: &Document, target_paragraph_ix: usize) -
 
 #[hotpath::measure]
 #[must_use]
-pub fn document_position_for_offset(document: &Document, offset: DocumentOffset) -> Option<DocumentPosition> {
+pub fn document_position_for_offset(document: &DocumentProjection, offset: DocumentOffset) -> Option<DocumentPosition> {
   let paragraph = document.paragraphs.get(offset.paragraph)?;
   if offset.byte > paragraph_text_len(paragraph) {
     return None;
@@ -100,7 +103,7 @@ pub fn document_position_for_offset(document: &Document, offset: DocumentOffset)
 
 #[hotpath::measure]
 #[must_use]
-pub fn document_offset_for_position(document: &Document, position: &DocumentPosition) -> Option<DocumentOffset> {
+pub fn document_offset_for_position(document: &DocumentProjection, position: &DocumentPosition) -> Option<DocumentOffset> {
   match position {
     DocumentPosition::Text { block_ix, byte } => {
       if document.blocks.len() == document.paragraphs.len()
@@ -144,7 +147,7 @@ pub fn document_offset_for_position(document: &Document, position: &DocumentPosi
 }
 
 #[hotpath::measure]
-pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
+pub fn update_paragraph_block(document: &mut DocumentProjection, paragraph_ix: usize) {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
     return;
   };
@@ -156,7 +159,7 @@ pub fn update_paragraph_block(document: &mut Document, paragraph_ix: usize) {
 }
 
 #[hotpath::measure]
-pub fn replace_paragraph_blocks(document: &mut Document, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
+pub fn replace_paragraph_blocks(document: &mut DocumentProjection, start_paragraph: usize, old_count: usize, replacements: &[Paragraph]) {
   // Fast path: a single in-place paragraph update in a paragraph-only-aligned
   // document. Block ids and order are unchanged, so we replace just that one
   // block instead of rebuilding the whole block vector.
@@ -269,7 +272,7 @@ pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> Doc
 }
 
 #[hotpath::measure]
-pub fn reconcile_document_ids(document: &mut Document) {
+pub fn reconcile_document_ids(document: &mut DocumentProjection) {
   if document.ids.document_id == 0 {
     document.ids.document_id = new_document_id();
   }
@@ -290,7 +293,7 @@ pub fn reconcile_document_ids(document: &mut Document) {
 
 #[hotpath::measure]
 #[must_use]
-pub fn paragraph_index_for_id(document: &Document, id: ParagraphId) -> Option<usize> {
+pub fn paragraph_index_for_id(document: &DocumentProjection, id: ParagraphId) -> Option<usize> {
   document
     .ids
     .paragraph_ids
@@ -300,18 +303,18 @@ pub fn paragraph_index_for_id(document: &Document, id: ParagraphId) -> Option<us
 
 #[hotpath::measure]
 #[must_use]
-pub fn paragraph_id_at(document: &Document, paragraph_ix: usize) -> Option<ParagraphId> {
+pub fn paragraph_id_at(document: &DocumentProjection, paragraph_ix: usize) -> Option<ParagraphId> {
   document.ids.paragraph_ids.get(paragraph_ix).copied()
 }
 
 #[hotpath::measure]
 #[must_use]
-pub fn block_id_at(document: &Document, block_ix: usize) -> Option<BlockId> {
+pub fn block_id_at(document: &DocumentProjection, block_ix: usize) -> Option<BlockId> {
   document.ids.block_ids.get(block_ix).copied()
 }
 
 #[hotpath::measure]
-pub fn insert_paragraph_id(document: &mut Document, paragraph_ix: usize) -> ParagraphId {
+pub fn insert_paragraph_id(document: &mut DocumentProjection, paragraph_ix: usize) -> ParagraphId {
   let id = new_paragraph_id();
   document
     .ids
@@ -321,7 +324,7 @@ pub fn insert_paragraph_id(document: &mut Document, paragraph_ix: usize) -> Para
 }
 
 #[hotpath::measure]
-pub fn insert_block_id(document: &mut Document, block_ix: usize) -> BlockId {
+pub fn insert_block_id(document: &mut DocumentProjection, block_ix: usize) -> BlockId {
   let id = new_block_id();
   document
     .ids
@@ -331,7 +334,7 @@ pub fn insert_block_id(document: &mut Document, block_ix: usize) -> BlockId {
 }
 
 #[hotpath::measure]
-pub fn remove_paragraph_ids(document: &mut Document, range: Range<usize>) {
+pub fn remove_paragraph_ids(document: &mut DocumentProjection, range: Range<usize>) {
   let start = range.start.min(document.ids.paragraph_ids.len());
   let end = range.end.min(document.ids.paragraph_ids.len());
   if start < end {
@@ -340,7 +343,7 @@ pub fn remove_paragraph_ids(document: &mut Document, range: Range<usize>) {
 }
 
 #[hotpath::measure]
-pub fn remove_block_ids(document: &mut Document, range: Range<usize>) {
+pub fn remove_block_ids(document: &mut DocumentProjection, range: Range<usize>) {
   let start = range.start.min(document.ids.block_ids.len());
   let end = range.end.min(document.ids.block_ids.len());
   if start < end {
@@ -349,7 +352,7 @@ pub fn remove_block_ids(document: &mut Document, range: Range<usize>) {
 }
 
 #[hotpath::measure]
-pub fn rebuild_document_sections(document: &mut Document) {
+pub fn rebuild_document_sections(document: &mut DocumentProjection) {
   reconcile_document_ids(document);
   document.sections = Arc::new(document_sections(document));
 }
@@ -360,7 +363,7 @@ pub fn rebuild_document_sections(document: &mut Document) {
 /// text/runs, content-only edits can skip recomputation entirely.
 #[hotpath::measure]
 #[must_use]
-pub fn document_sections(document: &Document) -> Vec<DocumentSection> {
+pub fn document_sections(document: &DocumentProjection) -> Vec<DocumentSection> {
   let mut sections: Vec<DocumentSection> = Vec::new();
   let mut stack: Vec<(usize, SectionId)> = Vec::new();
 
@@ -406,7 +409,7 @@ pub fn document_sections(document: &Document) -> Vec<DocumentSection> {
 /// Whether the paragraph at `paragraph_ix` carries a heading (section) style.
 #[hotpath::measure]
 #[must_use]
-pub fn paragraph_is_heading(document: &Document, paragraph_ix: usize) -> bool {
+pub fn paragraph_is_heading(document: &DocumentProjection, paragraph_ix: usize) -> bool {
   document
     .paragraphs
     .get(paragraph_ix)
@@ -417,13 +420,13 @@ pub fn paragraph_is_heading(document: &Document, paragraph_ix: usize) -> bool {
 /// Lets callers decide whether a content edit can skip [`rebuild_document_sections`].
 #[hotpath::measure]
 #[must_use]
-pub fn range_contains_heading(document: &Document, range: Range<usize>) -> bool {
+pub fn range_contains_heading(document: &DocumentProjection, range: Range<usize>) -> bool {
   let end = range.end.min(document.paragraphs.len());
   (range.start..end).any(|paragraph_ix| paragraph_is_heading(document, paragraph_ix))
 }
 
 #[hotpath::measure]
-fn section_level_and_kind(document: &Document, style: ParagraphStyle) -> Option<(usize, SectionKind)> {
+fn section_level_and_kind(document: &DocumentProjection, style: ParagraphStyle) -> Option<(usize, SectionKind)> {
   match style {
     ParagraphStyle::Normal => None,
     ParagraphStyle::Custom(slot) => {

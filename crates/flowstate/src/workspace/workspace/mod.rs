@@ -11,7 +11,7 @@ use std::{
 use gpui::{
   AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
-  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
+  SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
   px,
 };
 #[cfg(target_os = "windows")]
@@ -44,7 +44,7 @@ use crate::commands::CommandId;
 use crate::docx_conversion::convert_docx_to_document;
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  ArmedInlineTool, CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
+  ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
   paragraph_byte_range, paragraph_index_for_id,
 };
@@ -58,12 +58,15 @@ use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
+const DOCUMENT_RUNTIME_FLUSH_DEBOUNCE_MS: u64 = 24;
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
+  document_runtimes: HashMap<Uuid, flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle>,
+  document_runtime_flush_pending: HashSet<Uuid>,
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,
@@ -73,7 +76,7 @@ pub struct Workspace {
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
-  recent_document_previews: HashMap<PathBuf, Document>,
+  recent_document_previews: HashMap<PathBuf, DocumentProjection>,
   recent_document_preview_generation: u64,
   temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
   temporary_workspace_session_persist_scheduled: bool,
@@ -104,6 +107,7 @@ pub struct Workspace {
   autosave_document_generations: HashMap<Uuid, u64>,
   autosave_flow_in_flight: HashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
+  revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
   collab_notice_subscriptions: HashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,

@@ -75,6 +75,44 @@ fn collab_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppC
 }
 
 #[gpui::test]
+fn runtime_capture_fast_path_emits_single_grapheme_deltas(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      assert!(editor.insert_single_grapheme_fast_path("a", cx));
+      assert!(editor.insert_single_grapheme_fast_path("b", cx));
+      assert!(editor.insert_single_grapheme_fast_path("c", cx));
+      editor.take_pending_runtime_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 3);
+  for (edit, (expected_text, expected_byte)) in edits.iter().zip([("a", 0), ("b", 1), ("c", 2)]) {
+    let [SemanticEditCommand::InsertText { at, text, .. }] = edit.semantic_commands.as_slice() else {
+      panic!("expected one semantic InsertText command, got {:?}", edit.semantic_commands);
+    };
+    assert_eq!(text, expected_text);
+    assert_eq!(
+      *at,
+      DocumentOffset {
+        paragraph: 0,
+        byte: expected_byte,
+      }
+    );
+  }
+
+  let edits_after_undo = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.undo(cx);
+      editor.take_pending_runtime_edits()
+    })
+  });
+  assert!(edits_after_undo.is_empty());
+}
+
+#[gpui::test]
 fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAppContext) {
   let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
 
@@ -122,6 +160,236 @@ fn applying_collab_asset_records_updates_asset_cache(cx: &mut gpui::TestAppConte
       assert!(!editor.pending_scroll_head_after_layout_for_test());
     });
   });
+}
+
+#[gpui::test]
+fn object_insertion_emits_insert_block_semantic_command(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.insert_default_table(2, 2, cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::InsertBlock { block_ix, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!("expected one semantic InsertBlock command, got {:?}", edits[0].semantic_commands);
+  };
+  assert_eq!(*block_ix, 0);
+}
+
+#[gpui::test]
+fn paragraph_block_insertion_emits_paragraph_span_command(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.insert_toolkit_paragraphs_as_blocks(vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("inserted")],
+      }], cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::ReplaceParagraphSpan { before, after, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!(
+      "expected one semantic ReplaceParagraphSpan command, got {:?}",
+      edits[0].semantic_commands
+    );
+  };
+  assert_eq!(before.paragraphs.len(), 1);
+  assert_eq!(after.paragraphs.len(), 2);
+  assert_eq!(after.text, "\ninserted");
+}
+
+#[gpui::test]
+fn mixed_block_insertion_emits_paragraph_span_and_insert_block_commands(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.insert_block_fragment_for_test(
+        RichClipboardFragment {
+          format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
+          paragraphs: Vec::new(),
+          blocks: vec![
+            InputBlock::Equation(InputEquationBlock {
+              source: "x+1".to_string(),
+              syntax: InputEquationSyntax::Latex,
+              display: InputEquationDisplay::Display,
+            }),
+            InputBlock::Paragraph(InputParagraph {
+              style: ParagraphStyle::Normal,
+              runs: vec![plain("after")],
+            }),
+          ],
+          assets: Vec::new(),
+        },
+        cx,
+      );
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let commands = edits[0].semantic_commands.as_slice();
+  assert_eq!(commands.len(), 2);
+  assert!(matches!(commands[0], SemanticEditCommand::ReplaceParagraphSpan { .. }));
+  assert!(matches!(commands[1], SemanticEditCommand::InsertBlock { block_ix: 1, .. }));
+}
+
+#[gpui::test]
+fn block_insertion_over_text_selection_emits_structured_commands(cx: &mut gpui::TestAppContext) {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("alpha")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("omega")],
+      },
+    ],
+  );
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 2 },
+        DocumentOffset { paragraph: 1, byte: 2 },
+        cx,
+      );
+      editor.insert_default_table(1, 1, cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let commands = edits[0].semantic_commands.as_slice();
+  assert_eq!(commands.len(), 2);
+  assert!(matches!(commands[0], SemanticEditCommand::ReplaceParagraphSpan { .. }));
+  assert!(matches!(commands[1], SemanticEditCommand::InsertBlock { .. }));
+}
+
+#[gpui::test]
+fn table_column_width_edit_emits_structured_semantic_command(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.insert_default_table(2, 2, cx);
+      editor.set_collab_capture(true);
+      editor.select_table_cell_for_test(0, 0, 1, cx);
+      editor.widen_selected_table_column(cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::SetTableColumnWidth { column_ix, width, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!(
+      "expected one semantic SetTableColumnWidth command, got {:?}",
+      edits[0].semantic_commands
+    );
+  };
+  assert_eq!(*column_ix, 1);
+  assert!(matches!(width, InputTableColumnWidth::FixedPx(144)));
+}
+
+#[gpui::test]
+fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.insert_default_table(2, 2, cx);
+      editor.set_collab_capture(true);
+      editor.select_table_cell_for_test(0, 0, 0, cx);
+
+      editor.insert_row_after_selected_table(cx);
+      let edits = editor.take_pending_collab_edits();
+      let [SemanticEditCommand::InsertTableRow { row_ix, row, .. }] = edits[0].semantic_commands.as_slice() else {
+        panic!("expected one semantic InsertTableRow command, got {:?}", edits[0].semantic_commands);
+      };
+      assert_eq!(*row_ix, 1);
+      assert_eq!(row.cells.len(), 2);
+
+      editor.insert_column_after_selected_table(cx);
+      let edits = editor.take_pending_collab_edits();
+      let [SemanticEditCommand::InsertTableColumn {
+        column_ix,
+        width,
+        cells,
+        ..
+      }] = edits[0].semantic_commands.as_slice() else {
+        panic!(
+          "expected one semantic InsertTableColumn command, got {:?}",
+          edits[0].semantic_commands
+        );
+      };
+      assert_eq!(*column_ix, 1);
+      assert!(matches!(width, InputTableColumnWidth::Fraction(1)));
+      assert_eq!(cells.len(), 3);
+
+      editor.delete_last_row_from_selected_table(cx);
+      let edits = editor.take_pending_collab_edits();
+      let [SemanticEditCommand::DeleteTableRow { row_ix, .. }] = edits[0].semantic_commands.as_slice() else {
+        panic!("expected one semantic DeleteTableRow command, got {:?}", edits[0].semantic_commands);
+      };
+      assert_eq!(*row_ix, 0);
+
+      editor.delete_last_column_from_selected_table(cx);
+      let edits = editor.take_pending_collab_edits();
+      let [SemanticEditCommand::DeleteTableColumn { column_ix, .. }] = edits[0].semantic_commands.as_slice() else {
+        panic!(
+          "expected one semantic DeleteTableColumn command, got {:?}",
+          edits[0].semantic_commands
+        );
+      };
+      assert_eq!(*column_ix, 0);
+    });
+  });
+}
+
+#[gpui::test]
+fn table_cell_text_edit_emits_cell_scoped_semantic_command(cx: &mut gpui::TestAppContext) {
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.insert_default_table(2, 2, cx);
+      editor.set_collab_capture(true);
+      editor.select_table_cell_for_test(0, 0, 0, cx);
+      editor.insert_plain_text_from_toolkit("cell", cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::ReplaceTableCell {
+    row_ix,
+    cell_ix,
+    cell,
+    ..
+  }] = edits[0].semantic_commands.as_slice() else {
+    panic!("expected one semantic ReplaceTableCell command, got {:?}", edits[0].semantic_commands);
+  };
+  assert_eq!((*row_ix, *cell_ix), (0, 0));
+  let InputTableCellBlock::Paragraph(paragraph) = &cell.blocks[0] else {
+    panic!("expected paragraph cell payload");
+  };
+  assert_eq!(input_paragraph_text(paragraph), "cell");
 }
 
 #[gpui::test]
@@ -176,12 +444,174 @@ fn text_entry_in_selected_equation_updates_equation_only(cx: &mut gpui::TestAppC
   };
   assert_eq!(equation.source.as_ref(), "x+1+2");
   assert_eq!(edits.len(), 2);
-  for edit in edits {
-    assert!(matches!(
-      edit.semantic_commands.as_slice(),
-      [SemanticEditCommand::ReplaceBlock { .. }]
-    ));
-  }
+  let [SemanticEditCommand::ReplaceEquationSourceRange { range, text, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!("expected first edit to replace an equation source range, got {:?}", edits[0].semantic_commands);
+  };
+  assert_eq!(range.clone(), 1..1);
+  assert_eq!(text, "+1");
+  let [SemanticEditCommand::ReplaceEquationSourceRange { range, text, .. }] = edits[1].semantic_commands.as_slice() else {
+    panic!("expected second edit to replace an equation source range, got {:?}", edits[1].semantic_commands);
+  };
+  assert_eq!(range.clone(), 3..3);
+  assert_eq!(text, "+2");
+}
+
+#[gpui::test]
+fn image_alt_text_edit_emits_alt_text_semantic_command(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Image(ImageBlock {
+      asset_id: AssetId(7),
+      alt_text: "old".into(),
+      caption: None,
+      sizing: ImageSizing::Intrinsic,
+      alignment: BlockAlignment::Left,
+      version: 0,
+    }),
+  ]);
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  let (document, edits) = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.select_image_block_for_test(1, cx);
+      editor.set_selected_image_alt_text("new alt", cx);
+      (editor.document().clone(), editor.take_pending_collab_edits())
+    })
+  });
+
+  let Block::Image(image) = &document.blocks[1] else {
+    panic!("expected image block after alt edit");
+  };
+  assert_eq!(image.alt_text.as_ref(), "new alt");
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::ReplaceImageAltText { text, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!("expected image alt semantic command, got {:?}", edits[0].semantic_commands);
+  };
+  assert_eq!(text, "new alt");
+}
+
+#[gpui::test]
+fn image_layout_edit_emits_layout_semantic_command(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("body")],
+    }],
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Image(ImageBlock {
+      asset_id: AssetId(7),
+      alt_text: "alt".into(),
+      caption: None,
+      sizing: ImageSizing::Intrinsic,
+      alignment: BlockAlignment::Left,
+      version: 0,
+    }),
+  ]);
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.select_image_block_for_test(1, cx);
+      editor.set_selected_image_fit_width(cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let [SemanticEditCommand::SetImageLayout { sizing, alignment, .. }] = edits[0].semantic_commands.as_slice() else {
+    panic!("expected image layout semantic command, got {:?}", edits[0].semantic_commands);
+  };
+  assert!(matches!(sizing, InputImageSizing::FitWidth));
+  assert!(matches!(alignment, InputBlockAlignment::Left));
+}
+
+#[gpui::test]
+fn deleting_selection_across_object_emits_structured_semantic_commands(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("alpha")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("omega")],
+      },
+    ],
+  );
+  document.blocks = std::sync::Arc::new(vec![
+    Block::Paragraph(document.paragraphs[0].clone()),
+    Block::Image(ImageBlock {
+      asset_id: AssetId(7),
+      alt_text: "alt".into(),
+      caption: None,
+      sizing: ImageSizing::Intrinsic,
+      alignment: BlockAlignment::Left,
+      version: 0,
+    }),
+    Block::Paragraph(document.paragraphs[1].clone()),
+  ]);
+  let first_block_id = document.ids.block_ids.first().copied().unwrap_or(BlockId(1));
+  let second_block_id = document.ids.block_ids.get(1).copied().unwrap_or(BlockId(2));
+  document.ids.block_ids = vec![first_block_id, BlockId(7), second_block_id];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  let edits = cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_collab_capture(true);
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 2 },
+        DocumentOffset { paragraph: 1, byte: 2 },
+        cx,
+      );
+      editor.cut(cx);
+      editor.take_pending_collab_edits()
+    })
+  });
+
+  assert_eq!(edits.len(), 1);
+  let commands = edits[0].semantic_commands.as_slice();
+  assert_eq!(commands.len(), 2);
+  assert!(matches!(commands[0], SemanticEditCommand::DeleteBlock { .. }));
+  assert!(matches!(commands[1], SemanticEditCommand::ReplaceParagraphSpan { .. }));
+}
+
+#[gpui::test]
+fn stale_selection_style_commands_do_not_panic(cx: &mut gpui::TestAppContext) {
+  let document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("alpha")],
+    }],
+  );
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 1, byte: 0 },
+        DocumentOffset { paragraph: 1, byte: 0 },
+        cx,
+      );
+      editor.toggle_semantic_style_for_selection(RunSemanticStyle::Custom(2), cx);
+      editor.insert_plain_text_from_toolkit("z", cx);
+      assert_eq!(paragraph_text(editor.document(), 0), "alpha");
+    });
+  });
 }
 
 #[gpui::test]

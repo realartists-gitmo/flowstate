@@ -1063,7 +1063,7 @@ fn toolkit_preview_document(
   fallback_text: &str,
   mut theme: DocumentTheme,
   expanded: bool,
-) -> crate::rich_text_element::Document {
+) -> crate::rich_text_element::DocumentProjection {
   theme.zoom_factor *= TOOLKIT_PREVIEW_ZOOM;
   theme.pageless_inset_x = px(10.0);
   theme.pageless_inset_top = px(8.0);

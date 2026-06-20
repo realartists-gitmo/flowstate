@@ -4,18 +4,20 @@ pub mod loro_import;
 pub mod loro_projection;
 pub mod loro_schema;
 
-pub use loro_import::{document_to_loro, document_to_loro_db8_bytes, write_document_as_loro_db8};
-pub use loro_projection::document_from_loro;
+pub use loro_import::{document_to_loro, write_imported_document_as_loro_db8};
+pub use loro_projection::{document_from_loro, object_input_blocks_from_loro};
 pub use gpui_flowtext::*;
 pub use loro_schema::{
   BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
   MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, META,
   OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, SECTIONS_BY_ID, SENTINEL_NEWLINE,
-  init_loro_document, new_loro_document,
+  document_id, document_schema_version, fork_document_lineage, init_loro_document, new_loro_document, record_revision, register_replica,
+  touch_document_metadata,
 };
 pub use package::{
-  AssetChunk, ChunkRef, DocumentPackage, DocumentPackageManifest, LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision,
-  ProjectionCacheChunk, SearchUnitChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
+  AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, LORO_PACKAGE_FORMAT_VERSION,
+  LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, SearchUnitChunk, ThumbnailChunk, loro_db8_bytes, read_loro_db8,
+  write_loro_db8,
 };
 
 use std::{io, path::Path, sync::Arc};
@@ -51,24 +53,20 @@ fn border_eighth_points(value: f32) -> Pixels {
   pt(value / 8.0)
 }
 
-pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
+pub fn read_db8(path: impl AsRef<Path>) -> io::Result<DocumentProjection> {
   document_from_package(DocumentPackage::read(path)?)
 }
 
-pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<Document> {
+pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<DocumentProjection> {
   document_from_package(DocumentPackage::from_bytes(bytes)?)
 }
 
-pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
-  write_document_as_loro_db8(path, document, "Flowstate Document")
-}
-
-pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
-  document_to_loro_db8_bytes(document, "Flowstate Document")
-}
-
-fn document_from_package(package: DocumentPackage) -> io::Result<Document> {
-  let mut document = document_from_loro(&package.load_loro_doc()?)?;
+fn document_from_package(package: DocumentPackage) -> io::Result<DocumentProjection> {
+  let mut document = if let Some(document) = package.current_projection_document()? {
+    document
+  } else {
+    document_from_loro(&package.load_loro_doc()?)?
+  };
   for asset in package.assets {
     let bytes = asset.bytes;
     document.assets.assets.insert(

@@ -66,7 +66,7 @@ fn source_label(source: &BenchmarkSource) -> String {
 }
 
 #[hotpath::measure]
-fn document_stats(document: &Document) -> DocumentStats {
+fn document_stats(document: &DocumentProjection) -> DocumentStats {
   let mut stats = DocumentStats {
     text_bytes: document.text.byte_len(),
     text_chars: full_document_text(document).chars().count(),
@@ -151,7 +151,7 @@ fn accumulate_table_stats(table: &TableBlock, stats: &mut DocumentStats, nested:
 }
 
 #[hotpath::measure]
-fn check_document_fidelity(document: &Document) -> FidelityReport {
+fn check_document_fidelity(document: &DocumentProjection) -> FidelityReport {
   let mut report = FidelityReport::default();
   let full_text = full_document_text(document);
   report.check(!document.paragraphs.is_empty(), "document must contain at least one paragraph");

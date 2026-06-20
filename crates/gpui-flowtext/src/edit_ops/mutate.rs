@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub fn mutate_runs_in_range(document: &mut Document, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
+pub fn mutate_runs_in_range(document: &mut DocumentProjection, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
   let paragraph_count = paragraphs_mut(document).len();
   if paragraph_count == 0 || range.start.paragraph >= paragraph_count || range.start.paragraph > range.end.paragraph {
     return;

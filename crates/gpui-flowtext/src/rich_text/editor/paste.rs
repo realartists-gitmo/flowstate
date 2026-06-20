@@ -4,7 +4,10 @@ impl RichTextEditor {
     if !self.selection.is_caret() || self.selected_block.is_some() || text.is_empty() || text.contains('\r') || text.contains('\n') {
       return false;
     }
-    let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
+    let Some(paragraph) = self.document.paragraphs.get(self.selection.head.paragraph) else {
+      return false;
+    };
+    let paragraph_style = paragraph.style;
     let fragment = RichClipboardFragment {
       format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
       paragraphs: vec![InputParagraph {
@@ -150,7 +153,7 @@ impl RichTextEditor {
 
   fn insert_paragraphs_into_selected_table_cell(&mut self, paragraphs: &[InputParagraph], cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell {
-      block_ix: _,
+      block_ix,
       row_ix,
       cell_ix,
     }) = self.selected_block
@@ -163,14 +166,7 @@ impl RichTextEditor {
     let current_paragraph_ix = self.table_cell_block_ix;
     let caret = self.table_cell_caret;
     let mut new_caret = None;
-    self.edit_selected_table(cx, |table| {
-      let Some(cell) = table
-        .rows
-        .get_mut(row_ix)
-        .and_then(|row| row.cells.get_mut(cell_ix))
-      else {
-        return;
-      };
+    self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
       new_caret = insert_table_cell_paragraphs_at(cell, current_paragraph_ix, caret, paragraphs);
     });
     if let Some((paragraph_ix, byte)) = new_caret {

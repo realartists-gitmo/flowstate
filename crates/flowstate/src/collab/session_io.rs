@@ -10,7 +10,7 @@ use flowstate_collab::{
   proto_direct::AssetBytes,
 };
 use gpui::Context;
-use loro::{ExportMode, VersionVector};
+use loro::VersionVector;
 
 use crate::rich_text_element::{AssetId, AssetRecord, UndoRedirect};
 
@@ -32,21 +32,31 @@ impl CollabSession {
     }
 
     tracing::debug!(session = %self.session, bytes = bytes.len(), "importing remote collaboration update");
-    let events = match self
+    let runtime = self
       .runtime
-      .as_mut()
-      .context("collaboration session has no CRDT runtime")?
-      .import_remote_update(bytes)
-      .context("importing collaboration update failed")
-    {
-      Ok(events) => events,
-      Err(error) => {
-        tracing::error!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "remote collaboration update import failed");
-        return Err(error);
-      },
-    };
-    self.apply_runtime_events(events, true, cx)?;
-    tracing::debug!(session = %self.session, bytes = bytes.len(), "remote collaboration update imported and projected");
+      .clone()
+      .context("collaboration session has no CRDT runtime")?;
+    let bytes = bytes.to_vec();
+    let bytes_len = bytes.len();
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let result = runtime.import_remote_update(bytes).await;
+      let _ = session.update(cx, |session, cx| match result {
+        Ok(events) => {
+          if let Err(error) = session.apply_runtime_events(events, true, cx) {
+            tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "applying remote collaboration projection failed");
+            session.detach(DetachReason::Fatal(format!("applying collaboration update failed: {error:#}")), cx);
+          } else {
+            tracing::debug!(session = %session_id, bytes = bytes_len, "remote collaboration update imported and projected");
+          }
+        },
+        Err(error) => {
+          tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "remote collaboration update import failed");
+          session.detach(DetachReason::Fatal(format!("importing collaboration update failed: {error:#}")), cx);
+        },
+      });
+    })
+    .detach();
     Ok(())
   }
 
@@ -82,10 +92,10 @@ impl CollabSession {
     vv: &[u8],
     cx: &mut Context<Self>,
   ) -> Result<()> {
-    let Some(runtime) = &self.runtime else {
+    if self.runtime.is_none() {
       tracing::debug!(session = %self.session, from = %from, digest_session = %digest_session, vv_bytes = vv.len(), "ignored collaboration digest because Loro doc is missing");
       return Ok(());
-    };
+    }
     let sender_vv = match VersionVector::decode(vv).context("decoding collaboration digest failed") {
       Ok(sender_vv) => sender_vv,
       Err(error) => {
@@ -93,7 +103,7 @@ impl CollabSession {
         return Err(error);
       },
     };
-    let our_vv = runtime.doc().oplog_vv();
+    let our_vv = VersionVector::decode(&self.runtime_vv).context("decoding local collaboration version vector failed")?;
     let relation = match sender_vv.partial_cmp(&our_vv) {
       Some(std::cmp::Ordering::Equal) => VersionVectorRelation::Equal,
       Some(std::cmp::Ordering::Greater) => VersionVectorRelation::SenderHasMissingOps,
@@ -102,7 +112,7 @@ impl CollabSession {
     };
     let action = self
       .anti_entropy
-      .consider_digest(from, digest_session, relation, our_vv.encode());
+      .consider_digest(from, digest_session, relation, self.runtime_vv.clone());
     tracing::trace!(
       session = %self.session,
       from = %from,
@@ -148,8 +158,8 @@ impl CollabSession {
   }
 
   pub(super) fn publish_digest(&self) {
-    if let Some(runtime) = &self.runtime {
-      let vv = runtime.doc().oplog_vv().encode();
+    if self.runtime.is_some() {
+      let vv = self.runtime_vv.clone();
       let vv_bytes = vv.len();
       if let Err(error) = self.net_tx.try_send(NetCommand::Publish {
         session: self.session,
@@ -208,18 +218,28 @@ impl CollabSession {
       UndoRedirect::Undo => SemanticCommand::Undo,
       UndoRedirect::Redo => SemanticCommand::Redo,
     };
-    let events = self
+    let runtime = self
       .runtime
-      .as_mut()
-      .context("collaboration session has no CRDT runtime")?
-      .command(command)
-      .context("applying collaboration undo operation failed")?;
-    let applied = !events.is_empty();
-    tracing::debug!(session = %self.session, ?redirect, applied, "collaboration undo redirect applied");
-    if applied {
-      self.apply_runtime_events(events, true, cx)?;
-      self.publish_digest();
-    }
+      .clone()
+      .context("collaboration session has no CRDT runtime")?;
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let result = runtime.command(command).await;
+      let _ = session.update(cx, |session, cx| match result {
+        Ok(events) => {
+          let applied = !events.is_empty();
+          tracing::debug!(session = %session_id, ?redirect, applied, "collaboration undo redirect applied");
+          if applied {
+            if let Err(error) = session.apply_runtime_events(events, true, cx) {
+              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying collaboration undo projection failed");
+            }
+            session.publish_digest();
+          }
+        },
+        Err(error) => tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying collaboration undo operation failed"),
+      });
+    })
+    .detach();
     Ok(())
   }
 
@@ -240,15 +260,31 @@ impl CollabSession {
     tracing::trace!(session = %self.session, request_kind = direct_serve_request_kind(&request), "serving collaboration direct request from session");
     match request {
       DirectServeRequest::Snapshot { reply } => {
-        let result = self.snapshot_bytes();
-        log_direct_serve_result(self.session, "snapshot", &result);
-        let _ = reply.try_send(result);
+        let runtime = self.runtime.clone();
+        let session_id = self.session;
+        cx.spawn(async move |_, _| {
+          let result = match runtime {
+            Some(runtime) => runtime.snapshot_bytes().await,
+            None => Err(anyhow!("collaboration session is not attached")),
+          };
+          log_direct_serve_result(session_id, "snapshot", &result);
+          let _ = reply.send(result).await;
+        })
+        .detach();
       },
       DirectServeRequest::Updates { have_vv, reply } => {
         tracing::trace!(session = %self.session, have_vv_bytes = have_vv.len(), "serving collaboration updates request");
-        let result = self.update_bytes(&have_vv);
-        log_direct_serve_result(self.session, "updates", &result);
-        let _ = reply.try_send(result);
+        let runtime = self.runtime.clone();
+        let session_id = self.session;
+        cx.spawn(async move |_, _| {
+          let result = match runtime {
+            Some(runtime) => runtime.export_updates_for(have_vv).await,
+            None => Err(anyhow!("collaboration session is not attached")),
+          };
+          log_direct_serve_result(session_id, "updates", &result);
+          let _ = reply.send(result).await;
+        })
+        .detach();
       },
       DirectServeRequest::Asset { asset, reply } => {
         let result = self.asset_bytes(asset, cx);
@@ -261,31 +297,6 @@ impl CollabSession {
         let _ = reply.try_send(result);
       },
     }
-  }
-
-  fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-    let bytes = self
-      .runtime
-      .as_ref()
-      .context("collaboration session is not attached")?
-      .doc()
-      .export(ExportMode::Snapshot)
-      .context("exporting collaboration snapshot failed")?;
-    tracing::debug!(session = %self.session, bytes = bytes.len(), "exported collaboration snapshot");
-    Ok(bytes)
-  }
-
-  fn update_bytes(&self, have_vv: &[u8]) -> Result<Vec<u8>> {
-    let vv = VersionVector::decode(have_vv).context("decoding collaboration version vector failed")?;
-    let bytes = self
-      .runtime
-      .as_ref()
-      .context("collaboration session is not attached")?
-      .doc()
-      .export(ExportMode::updates(&vv))
-      .context("exporting collaboration updates failed")?;
-    tracing::debug!(session = %self.session, have_vv_bytes = have_vv.len(), bytes = bytes.len(), "exported collaboration updates");
-    Ok(bytes)
   }
 
   fn asset_bytes(&self, asset: u128, cx: &mut Context<Self>) -> Result<AssetBytes> {
@@ -312,6 +323,30 @@ impl CollabSession {
     }
     for (id, record) in &asset_records {
       trace_asset_record(self.session, *id, record);
+    }
+    let canonical_records = asset_records
+      .iter()
+      .filter(|(_, record)| !record.is_loading_placeholder())
+      .map(|(_, record)| record.clone())
+      .collect::<Vec<_>>();
+    if !canonical_records.is_empty()
+      && let Some(runtime) = self.runtime.clone()
+    {
+      let session_id = self.session;
+      cx.spawn(async move |session, cx| {
+        let result = runtime.apply_editor_commands(Vec::new(), canonical_records, None).await;
+        let _ = session.update(cx, |session, cx| match result {
+          Ok(events) => {
+            if let Err(error) = session.apply_runtime_events(events, true, cx) {
+              tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "projecting fetched collaboration assets failed");
+            }
+          },
+          Err(error) => {
+            tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "recording fetched collaboration assets failed");
+          },
+        });
+      })
+      .detach();
     }
     tracing::debug!(session = %self.session, asset_records = asset_records.len(), pending_before = self.pending_asset_records.len(), "queueing collaboration asset records");
     self.pending_asset_records.append(&mut asset_records);

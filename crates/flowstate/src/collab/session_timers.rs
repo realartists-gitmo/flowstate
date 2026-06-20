@@ -4,7 +4,7 @@ use anyhow::Result;
 use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, self_check};
 use gpui::{Context, Timer};
 
-use crate::rich_text_element::Document;
+use crate::rich_text_element::DocumentProjection;
 
 use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionNotice, SessionPhase};
 
@@ -258,7 +258,7 @@ impl CollabSession {
   }
 
   fn run_self_check(&mut self, cx: &mut Context<Self>) -> Result<()> {
-    let Some(runtime) = self.runtime.as_ref() else {
+    let Some(runtime) = self.runtime.clone() else {
       return Ok(());
     };
     let Some(editor) = self.editor.clone() else {
@@ -267,7 +267,7 @@ impl CollabSession {
 
     let live_document = editor.read(cx).document().clone();
     let live_hash = self_check::projection_hash(&live_document);
-    let current_vv = runtime.doc().oplog_vv().encode();
+    let current_vv = self.runtime_vv.clone();
     // Cheap path: if neither the Loro state (version vector) nor the live
     // projection hash changed since the last verified check, there can be no new
     // drift, so skip the full reprojection.
@@ -280,26 +280,36 @@ impl CollabSession {
       return Ok(());
     }
 
-    let mut projected = runtime.projection_snapshot()?;
-    projected.assets = live_document.assets.clone();
-    let projected_hash = self_check::projection_hash(&projected);
-    if live_hash == projected_hash {
-      self.last_self_check = Some((current_vv, live_hash));
-      tracing::trace!(session = %self.session, live_hash = %format_args!("{live_hash:016x}"), "collaboration projection self-check passed");
-      return Ok(());
-    }
-
-    tracing::error!(
-      session = %self.session,
-      live_hash = %format_args!("{live_hash:016x}"),
-      projected_hash = %format_args!("{projected_hash:016x}"),
-      vv_bytes = current_vv.len(),
-      "collaboration projection drift detected",
-    );
-    self.rebuild_from_projection(projected, cx)
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let projected = runtime.projection_snapshot().await;
+      let _ = session.update(cx, |session, cx| match projected {
+        Ok(mut projected) => {
+          projected.assets = live_document.assets.clone();
+          let projected_hash = self_check::projection_hash(&projected);
+          if live_hash == projected_hash {
+            session.last_self_check = Some((current_vv, live_hash));
+            tracing::trace!(session = %session_id, live_hash = %format_args!("{live_hash:016x}"), "collaboration projection self-check passed");
+          } else {
+            tracing::error!(
+              session = %session_id,
+              live_hash = %format_args!("{live_hash:016x}"),
+              projected_hash = %format_args!("{projected_hash:016x}"),
+              "collaboration projection drift detected",
+            );
+            if let Err(error) = session.rebuild_from_projection(projected, cx) {
+              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "rebuilding drifted collaboration projection failed");
+            }
+          }
+        },
+        Err(error) => tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration projection self-check request failed"),
+      });
+    })
+    .detach();
+    Ok(())
   }
 
-  fn rebuild_from_projection(&mut self, projected: Document, cx: &mut Context<Self>) -> Result<()> {
+  fn rebuild_from_projection(&mut self, projected: DocumentProjection, cx: &mut Context<Self>) -> Result<()> {
     let Some(editor) = self.editor.clone() else {
       return Ok(());
     };
@@ -316,14 +326,14 @@ impl CollabSession {
     if self.probe_pending {
       return true;
     }
-    let Some(runtime) = &self.runtime else {
+    if self.runtime.is_none() {
       return false;
-    };
+    }
     let candidates = self.known_peers.iter().copied().collect::<Vec<_>>();
     if candidates.is_empty() {
       return false;
     }
-    let our_vv = runtime.doc().oplog_vv().encode();
+    let our_vv = self.runtime_vv.clone();
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if self
       .net_tx

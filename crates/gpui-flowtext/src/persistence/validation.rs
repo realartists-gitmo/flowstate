@@ -1,7 +1,7 @@
 
 #[allow(dead_code, reason = "Persistence validation is kept available for debug and importer validation paths.")]
 #[hotpath::measure]
-fn document_fingerprint(document: &Document) -> u64 {
+fn document_fingerprint(document: &DocumentProjection) -> u64 {
   let mut hasher = DefaultHasher::new();
   document_text_slice(document, 0..document.text.byte_len()).hash(&mut hasher);
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
@@ -15,7 +15,7 @@ fn document_fingerprint(document: &Document) -> u64 {
 }
 
 #[hotpath::measure]
-fn validate_document(document: &Document) -> io::Result<()> {
+fn validate_document(document: &DocumentProjection) -> io::Result<()> {
   let text_len = document.text.byte_len();
   if document.paragraphs.is_empty() {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "native document has no paragraphs"));
@@ -83,7 +83,7 @@ fn validate_document(document: &Document) -> io::Result<()> {
 }
 
 #[hotpath::measure]
-fn validate_sections(document: &Document) -> io::Result<()> {
+fn validate_sections(document: &DocumentProjection) -> io::Result<()> {
   for section in document.sections.iter() {
     if paragraph_index_for_id(document, section.start_paragraph).is_none() {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "section start paragraph ID is invalid"));
@@ -103,7 +103,7 @@ fn validate_sections(document: &Document) -> io::Result<()> {
 }
 
 #[hotpath::measure]
-fn validate_paragraph_block_projection(document: &Document) -> io::Result<()> {
+fn validate_paragraph_block_projection(document: &DocumentProjection) -> io::Result<()> {
   let paragraph_blocks = document
     .blocks
     .iter()
@@ -130,7 +130,7 @@ fn validate_paragraph_block_projection(document: &Document) -> io::Result<()> {
 }
 
 #[hotpath::measure]
-fn validate_block_payload(block: &Block, document: &Document, table_depth: usize) -> io::Result<()> {
+fn validate_block_payload(block: &Block, document: &DocumentProjection, table_depth: usize) -> io::Result<()> {
   match block {
     // Missing assets are allowed so a partially damaged document can still
     // open and show a visible missing-image block instead of failing load.
@@ -147,7 +147,7 @@ fn validate_block_payload(block: &Block, document: &Document, table_depth: usize
 }
 
 #[hotpath::measure]
-fn validate_image_payload(image: &ImageBlock, document: &Document) -> io::Result<()> {
+fn validate_image_payload(image: &ImageBlock, document: &DocumentProjection) -> io::Result<()> {
   match image.sizing {
     ImageSizing::Fixed { width_px, height_px } => {
       if width_px == 0 || height_px == Some(0) {

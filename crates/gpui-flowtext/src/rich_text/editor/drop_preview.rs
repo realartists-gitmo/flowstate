@@ -6,7 +6,7 @@ enum DropPreviewKind {
 
 #[derive(Clone)]
 enum DropPreviewContent {
-  Document(Box<Document>),
+  DocumentProjection(Box<DocumentProjection>),
   ExternalPaths { label: SharedString },
 }
 
@@ -88,7 +88,7 @@ impl RichTextEditor {
       && preview.fingerprint == fingerprint
       && preview.is_first == is_first
       && preview.is_last == is_last
-      && matches!(&preview.content, DropPreviewContent::Document(_))
+      && matches!(&preview.content, DropPreviewContent::DocumentProjection(_))
     {
       preview.insert_block_ix = placement.insert_block_ix;
       preview.suppressed_block_ix = placement.suppressed_block_ix;
@@ -107,7 +107,7 @@ impl RichTextEditor {
       is_last,
       width,
       height,
-      content: DropPreviewContent::Document(Box::new(document)),
+      content: DropPreviewContent::DocumentProjection(Box::new(document)),
     });
   }
 
@@ -182,7 +182,7 @@ impl RichTextEditor {
     }
   }
 
-  fn drop_preview_document_from_paragraphs(&self, paragraphs: Vec<InputParagraph>, is_first: bool, is_last: bool) -> Document {
+  fn drop_preview_document_from_paragraphs(&self, paragraphs: Vec<InputParagraph>, is_first: bool, is_last: bool) -> DocumentProjection {
     let mut theme = self.document.theme.clone();
     if !is_first {
       theme.pageless_inset_top = px(0.0);
@@ -214,16 +214,16 @@ impl RichTextEditor {
     cx: &mut Context<Self>,
   ) -> (RenderVirtualItems, Rc<Vec<Size<Pixels>>>) {
     if self.drop_preview.is_none() {
-      return (RenderVirtualItems::Document(base_items), base_sizes);
+      return (RenderVirtualItems::DocumentProjection(base_items), base_sizes);
     }
 
     self.refresh_drop_preview_height(width, window, cx);
 
     let Some(preview) = &self.drop_preview else {
-      return (RenderVirtualItems::Document(base_items), base_sizes);
+      return (RenderVirtualItems::DocumentProjection(base_items), base_sizes);
     };
     let Some(cache) = self.item_sizes_cache.as_ref() else {
-      return (RenderVirtualItems::Document(base_items), base_sizes);
+      return (RenderVirtualItems::DocumentProjection(base_items), base_sizes);
     };
 
     let insert_item_ix = drop_preview_insert_item_ix(cache, preview.insert_block_ix);
@@ -244,7 +244,7 @@ impl RichTextEditor {
       if suppressed_range.contains(&item_ix) {
         continue;
       }
-      items.push(RenderVirtualItem::Document(base_items[item_ix].clone()));
+      items.push(RenderVirtualItem::DocumentProjection(base_items[item_ix].clone()));
       sizes.push(base_sizes[item_ix]);
     }
 
@@ -260,7 +260,7 @@ impl RichTextEditor {
     }
     preview.width = width;
     preview.height = match &preview.content {
-      DropPreviewContent::Document(document) => drop_preview_document_height(document, width, self.invisibility_mode, window, cx),
+      DropPreviewContent::DocumentProjection(document) => drop_preview_document_height(document, width, self.invisibility_mode, window, cx),
       DropPreviewContent::ExternalPaths { .. } => drop_preview_external_paths_height(width, window, cx),
     };
   }
@@ -268,13 +268,13 @@ impl RichTextEditor {
 
 fn render_drop_preview(preview: DropPreview, invisibility_mode: bool, cx: &mut Context<RichTextEditor>) -> impl IntoElement {
   let background = match &preview.content {
-    DropPreviewContent::Document(document) => document.theme.document_background_color.opacity(0.78),
+    DropPreviewContent::DocumentProjection(document) => document.theme.document_background_color.opacity(0.78),
     DropPreviewContent::ExternalPaths { .. } => cx.theme().background.opacity(0.78),
   };
   let border = cx.theme().drag_border.opacity(0.72);
   let text_color = cx.theme().foreground.opacity(0.72);
   let content = match preview.content {
-    DropPreviewContent::Document(document) => div()
+    DropPreviewContent::DocumentProjection(document) => div()
       .w_full()
       .child(RichTextDocumentElement::new(*document).with_invisibility_mode(invisibility_mode))
       .into_any_element(),
@@ -312,7 +312,7 @@ fn drop_preview_insert_item_ix(cache: &ItemSizesCache, insert_block_ix: usize) -
 }
 
 fn drop_preview_document_height(
-  document: &Document,
+  document: &DocumentProjection,
   width: Pixels,
   invisibility_mode: bool,
   window: &mut Window,

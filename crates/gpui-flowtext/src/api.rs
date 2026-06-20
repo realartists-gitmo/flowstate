@@ -2,7 +2,7 @@ use std::{borrow::Cow, path::Path, sync::Arc};
 
 use gpui::Pixels;
 
-use crate::{Document, DocumentExportFormat, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle};
+use crate::{DocumentProjection, DocumentExportFormat, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct StyleId(pub Cow<'static, str>);
@@ -120,10 +120,10 @@ pub trait AssetResolver: Send + Sync + 'static {
 }
 
 pub trait DocumentSerializer: Send + Sync + 'static {
-  fn read(&self, bytes: &[u8]) -> std::io::Result<Document>;
-  fn write(&self, document: &Document) -> std::io::Result<Vec<u8>>;
+  fn read(&self, bytes: &[u8]) -> std::io::Result<DocumentProjection>;
+  fn write(&self, document: &DocumentProjection) -> std::io::Result<Vec<u8>>;
 }
 
 pub trait ExternalFormatExporter: Send + Sync + 'static {
-  fn write_external_format(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> std::io::Result<()>;
+  fn write_external_format(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> std::io::Result<()>;
 }

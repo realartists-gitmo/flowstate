@@ -1,6 +1,6 @@
 #[hotpath::measure]
 fn layout_table_block(
-  document: &Document,
+  document: &DocumentProjection,
   block_ix: usize,
   table: &TableBlock,
   width: Pixels,
@@ -60,7 +60,7 @@ fn layout_table_block(
 }
 
 #[hotpath::measure]
-fn table_row_height(document: &Document, row: &TableRow, column_widths: &[Pixels], window: &mut Window, cx: &mut App) -> Pixels {
+fn table_row_height(document: &DocumentProjection, row: &TableRow, column_widths: &[Pixels], window: &mut Window, cx: &mut App) -> Pixels {
   let mut column_ix = 0;
   row
     .cells
@@ -120,7 +120,7 @@ fn spanned_column_width(column_widths: &[Pixels], column_ix: usize, span: usize)
 }
 
 #[hotpath::measure]
-fn table_cell_height(document: &Document, cell: &TableCell, width: Pixels, window: &mut Window, cx: &mut App) -> Pixels {
+fn table_cell_height(document: &DocumentProjection, cell: &TableCell, width: Pixels, window: &mut Window, cx: &mut App) -> Pixels {
   let padding = table_cell_padding();
   let content_width = (width - padding * 2.0).max(px(1.0));
   let mut y = padding;
@@ -144,7 +144,7 @@ fn table_cell_height(document: &Document, cell: &TableCell, width: Pixels, windo
 
 #[hotpath::measure]
 fn layout_table_cell_blocks(
-  document: &Document,
+  document: &DocumentProjection,
   cell: &TableCell,
   bounds: Bounds<Pixels>,
   window: &mut Window,
@@ -173,7 +173,7 @@ fn layout_table_cell_blocks(
 
 #[hotpath::measure]
 fn layout_table_cell_paragraph(
-  document: &Document,
+  document: &DocumentProjection,
   cell_paragraph: &TableCellParagraph,
   index: usize,
   width: Pixels,

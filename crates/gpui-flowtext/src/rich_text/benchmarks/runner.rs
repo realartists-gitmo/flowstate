@@ -143,7 +143,7 @@ struct LoadedDocument {
   label: String,
   path: Option<PathBuf>,
   file_bytes: Option<u64>,
-  document: Document,
+  document: DocumentProjection,
   load: DurationStats,
 }
 

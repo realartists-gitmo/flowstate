@@ -66,13 +66,7 @@ pub fn convert_pdf_to_db8(input_pdf: impl AsRef<Path>, output_db8: impl AsRef<Pa
   let db8_bytes = extract_db8_bytes_from_pdf(input_pdf)?
     .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "PDF does not contain embedded Flowstate DB8 data"))?;
   let output_db8 = output_db8.as_ref();
-  if let Some(parent) = output_db8
-    .parent()
-    .filter(|parent| !parent.as_os_str().is_empty())
-  {
-    fs::create_dir_all(parent)?;
-  }
-  fs::write(output_db8, db8_bytes)
+  DocumentPackage::from_bytes(&db8_bytes)?.write(output_db8)
 }
 
 #[hotpath::measure]

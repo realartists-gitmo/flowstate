@@ -50,7 +50,12 @@ impl RichTextEditor {
       return;
     }
     if self.selection.is_caret() {
-      let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
+      let paragraph_style = self
+        .document
+        .paragraphs
+        .get(self.selection.head.paragraph)
+        .map(|paragraph| paragraph.style)
+        .unwrap_or(ParagraphStyle::Normal);
       let direct = explicit_direct.unwrap_or(matches!(paragraph_style, ParagraphStyle::Custom(3) | ParagraphStyle::Custom(4)));
       let mut styles = self.styles_at_caret();
       if direct {
@@ -201,8 +206,10 @@ impl RichTextEditor {
       return styles;
     }
     let caret = self.selection.head;
-    let paragraph = &self.document.paragraphs[caret.paragraph];
-    let (run_ix, _) = run_containing(paragraph, caret.byte);
+    let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
+      return RunStyles::default();
+    };
+    let (run_ix, _) = run_containing(paragraph, caret.byte.min(paragraph_text_len(paragraph)));
     paragraph
       .runs
       .get(run_ix)

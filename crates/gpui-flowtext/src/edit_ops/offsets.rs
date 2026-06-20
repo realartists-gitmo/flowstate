@@ -24,26 +24,26 @@ pub fn paragraph_width(paragraphs: &[Paragraph], paragraph_ix: usize) -> Option<
 
 #[hotpath::measure]
 #[must_use]
-pub fn paragraph_byte_range(document: &Document, paragraph_ix: usize) -> Range<usize> {
+pub fn paragraph_byte_range(document: &DocumentProjection, paragraph_ix: usize) -> Range<usize> {
   let start = document.offset_index.paragraph_start(paragraph_ix);
   start..start + paragraph_text_len(&document.paragraphs[paragraph_ix])
 }
 
 #[hotpath::measure]
-pub fn refresh_paragraph_range(document: &mut Document, paragraph_ix: usize) {
+pub fn refresh_paragraph_range(document: &mut DocumentProjection, paragraph_ix: usize) {
   let range = paragraph_byte_range(document, paragraph_ix);
   paragraphs_mut(document)[paragraph_ix].byte_range = range;
 }
 
 #[hotpath::measure]
-pub fn refresh_paragraph_ranges(document: &mut Document) {
+pub fn refresh_paragraph_ranges(document: &mut DocumentProjection) {
   for paragraph_ix in 0..document.paragraphs.len() {
     refresh_paragraph_range(document, paragraph_ix);
   }
 }
 
 #[hotpath::measure]
-pub fn rebuild_document_offset_index(document: &mut Document) {
+pub fn rebuild_document_offset_index(document: &mut DocumentProjection) {
   document.offset_index.rebuild(&document.paragraphs);
   refresh_paragraph_ranges(document);
 }
@@ -59,7 +59,7 @@ fn shift_byte_range(range: &Range<usize>, delta: isize) -> Range<usize> {
 // NOT clone the paragraph tail, rebuild the block vector, reconcile ids, or
 // rebuild the section outline: a content-only edit changes none of those.
 #[hotpath::measure]
-pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragraph_ix: usize) {
+pub fn update_paragraph_offsets_after_len_change(document: &mut DocumentProjection, paragraph_ix: usize) {
   if paragraph_ix >= document.paragraphs.len() {
     return;
   }

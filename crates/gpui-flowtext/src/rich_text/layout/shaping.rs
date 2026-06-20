@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn measure_line_width(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: &EffectiveParagraphFormat,
   paragraph_text: &str,
@@ -70,7 +70,7 @@ pub(super) fn measure_line_width(
 
 #[hotpath::measure]
 pub(super) fn shape_line(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   line_text: &str,
@@ -253,7 +253,7 @@ pub(super) struct FormattedFragment {
 #[cfg(test)]
 #[hotpath::measure]
 pub(super) fn formatted_fragments_for_range(
-  document: &Document,
+  document: &DocumentProjection,
   p_format: &EffectiveParagraphFormat,
   paragraph: &Paragraph,
   range: &Range<usize>,
@@ -275,7 +275,7 @@ pub(super) fn formatted_fragments_for_range(
 
 #[hotpath::measure]
 pub(super) fn formatted_fragments_for_range_into(
-  document: &Document,
+  document: &DocumentProjection,
   p_format: &EffectiveParagraphFormat,
   paragraph: &Paragraph,
   range: &Range<usize>,

@@ -141,6 +141,7 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
     RibbonCommandId::ClearFormatting => 5_003,
     RibbonCommandId::Undo => 6_000,
     RibbonCommandId::Redo => 6_001,
+    RibbonCommandId::Revisions => 6_002,
     RibbonCommandId::ExportFormat => 7_000,
     RibbonCommandId::ExportSend => 7_001,
     RibbonCommandId::ToggleInvisibility => 8_000,

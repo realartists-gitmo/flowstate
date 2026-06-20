@@ -116,7 +116,7 @@ fn write_roundtrip_report(out: &mut String, loaded: &LoadedDocument, iterations:
     }
   }
 
-  let _ = writeln!(out, "### Native Document Roundtrip");
+  let _ = writeln!(out, "### Native Projection Roundtrip");
   let _ = writeln!(out);
   match last_error {
     Some(error) => {

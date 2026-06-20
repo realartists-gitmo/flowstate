@@ -6,7 +6,7 @@ struct Db8Chunk {
 }
 
 #[hotpath::measure]
-fn read_document_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<Document> {
+fn read_document_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result<DocumentProjection> {
   let chunk_count = read_u32(&mut cursor)? as usize;
   let mut chunks = Vec::with_capacity(chunk_count.min(32));
   for _ in 0..chunk_count {
@@ -50,7 +50,8 @@ fn read_document_vnext(mut cursor: Cursor<&[u8]>, timing: Instant) -> io::Result
   )?)?;
 
   let offset_index = ParagraphOffsetIndex::new(&paragraphs);
-  let mut document = Document {
+  let mut document = DocumentProjection {
+    frontier: Vec::new(),
     text: Rope::from(text),
     paragraphs: Arc::new(paragraphs),
     blocks: Arc::new(blocks),
@@ -168,7 +169,7 @@ fn read_sections_chunk(bytes: &[u8]) -> io::Result<Vec<DocumentSection>> {
 }
 
 #[hotpath::measure]
-fn validate_or_rebuild_sections(document: &mut Document) {
+fn validate_or_rebuild_sections(document: &mut DocumentProjection) {
   if document.sections.is_empty()
     || document
       .sections

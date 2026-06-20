@@ -90,7 +90,7 @@ pub fn block_from_input_block(block: &InputBlock) -> Block {
 
 #[hotpath::measure]
 #[must_use]
-pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputBlock>) -> Document {
+pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputBlock>) -> DocumentProjection {
   let mut text = String::new();
   let mut paragraphs = Vec::new();
   let mut blocks = Vec::with_capacity(input_blocks.len());
@@ -128,7 +128,8 @@ pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputB
   let offset_index = ParagraphOffsetIndex::new(&paragraphs);
   let paragraph_count = paragraphs.len();
   let block_count = blocks.len();
-  let mut document = Document {
+  let mut document = DocumentProjection {
+    frontier: Vec::new(),
     text: Rope::from(text),
     paragraphs: Arc::new(paragraphs),
     blocks: Arc::new(blocks),
@@ -159,7 +160,7 @@ fn input_paragraph_from_paragraph(paragraph: &Paragraph) -> InputParagraph {
 }
 
 #[hotpath::measure]
-fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
+fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let start = range.start.min(paragraph_text_len(paragraph));
@@ -271,24 +272,7 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
     rows: table
       .rows
       .iter()
-      .map(|row| InputTableRow {
-        cells: row
-          .cells
-          .iter()
-          .map(|cell| InputTableCell {
-            blocks: cell
-              .blocks
-              .iter()
-              .map(|block| match block {
-                TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(input_paragraph_from_table_cell_paragraph(paragraph)),
-                TableCellBlock::Table(table) => InputTableCellBlock::Table(input_table_from_table(table)),
-              })
-              .collect(),
-            row_span: cell.row_span,
-            col_span: cell.col_span,
-          })
-          .collect(),
-      })
+      .map(input_table_row_from_table_row)
       .collect(),
     column_widths: table
       .column_widths
@@ -302,6 +286,38 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
     style: InputTableStyle {
       header_row: table.style.header_row,
     },
+  }
+}
+
+#[hotpath::measure]
+fn input_table_row_from_table_row(row: &TableRow) -> InputTableRow {
+  InputTableRow {
+    cells: row.cells.iter().map(input_table_cell_from_table_cell).collect(),
+  }
+}
+
+#[hotpath::measure]
+fn input_table_cell_from_table_cell(cell: &TableCell) -> InputTableCell {
+  InputTableCell {
+    blocks: cell
+      .blocks
+      .iter()
+      .map(|block| match block {
+        TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(input_paragraph_from_table_cell_paragraph(paragraph)),
+        TableCellBlock::Table(table) => InputTableCellBlock::Table(input_table_from_table(table)),
+      })
+      .collect(),
+    row_span: cell.row_span,
+    col_span: cell.col_span,
+  }
+}
+
+#[hotpath::measure]
+fn input_table_column_width_from_table_column_width(width: &TableColumnWidth) -> InputTableColumnWidth {
+  match *width {
+    TableColumnWidth::Auto => InputTableColumnWidth::Auto,
+    TableColumnWidth::FixedPx(px) => InputTableColumnWidth::FixedPx(px),
+    TableColumnWidth::Fraction(fraction) => InputTableColumnWidth::Fraction(fraction),
   }
 }
 

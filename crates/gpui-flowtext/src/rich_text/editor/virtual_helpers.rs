@@ -102,7 +102,7 @@ fn expand_paragraph_range(range: Range<usize>, paragraph_count: usize, padding: 
 }
 
 #[hotpath::measure]
-fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_byte: usize, end_byte: usize, ratio: f32) -> usize {
+fn byte_at_ratio_in_paragraph(document: &DocumentProjection, paragraph_ix: usize, start_byte: usize, end_byte: usize, ratio: f32) -> usize {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
     return 0;
   };
@@ -117,8 +117,9 @@ fn byte_at_ratio_in_paragraph(document: &Document, paragraph_ix: usize, start_by
 }
 
 #[hotpath::measure]
-fn detach_document_for_background_write(document: &Document) -> Document {
-  Document {
+fn detach_document_for_background_write(document: &DocumentProjection) -> DocumentProjection {
+  DocumentProjection {
+    frontier: document.frontier.clone(),
     text: document.text.clone(),
     paragraphs: Arc::new(document.paragraphs.as_ref().clone()),
     blocks: Arc::new(document.blocks.as_ref().clone()),

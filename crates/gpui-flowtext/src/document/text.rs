@@ -81,13 +81,13 @@ pub struct DocumentSpan {
 /// Input-shape used by document builders (demo data, clipboard fragments).
 /// Carries explicit run text instead of byte offsets so the higher-level
 /// helpers can splice in arbitrary content.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputRun {
   pub text: String,
   pub styles: RunStyles,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputParagraph {
   pub style: ParagraphStyle,
   pub runs: Vec<InputRun>,
@@ -102,7 +102,7 @@ pub struct InputAsset {
   pub bytes: Vec<u8>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputBlock {
   Paragraph(InputParagraph),
   Image(InputImageBlock),
@@ -110,7 +110,7 @@ pub enum InputBlock {
   Table(InputTableBlock),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputImageBlock {
   pub asset_id: AssetId,
   pub alt_text: String,
@@ -119,71 +119,71 @@ pub struct InputImageBlock {
   pub alignment: InputBlockAlignment,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputImageSizing {
   Intrinsic,
   FitWidth,
   Fixed { width_px: u32, height_px: Option<u32> },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputBlockAlignment {
   Left,
   Center,
   Right,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputEquationBlock {
   pub source: String,
   pub syntax: InputEquationSyntax,
   pub display: InputEquationDisplay,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputEquationSyntax {
   Latex,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputEquationDisplay {
   Display,
   InlineLikeParagraph,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableBlock {
   pub rows: Vec<InputTableRow>,
   pub column_widths: Vec<InputTableColumnWidth>,
   pub style: InputTableStyle,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableRow {
   pub cells: Vec<InputTableCell>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableCell {
   pub blocks: Vec<InputTableCellBlock>,
   pub row_span: u16,
   pub col_span: u16,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputTableCellBlock {
   Paragraph(InputParagraph),
   Table(InputTableBlock),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum InputTableColumnWidth {
   Auto,
   FixedPx(u32),
   Fraction(u32),
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableStyle {
   pub header_row: bool,
 }

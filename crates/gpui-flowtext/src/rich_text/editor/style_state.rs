@@ -107,6 +107,19 @@ impl RichTextEditor {
     self.edit_generation
   }
 
+  pub fn mark_saved_generation(&mut self, generation: u64, cx: &mut Context<Self>) {
+    self.saved_generation = self.saved_generation.max(generation);
+    self.refresh_save_status();
+    cx.notify();
+  }
+
+  pub fn set_save_failed(&mut self, generation: u64, message: String, cx: &mut Context<Self>) {
+    if generation >= self.saved_generation {
+      self.save_status = SaveStatus::SaveFailed(message);
+    }
+    cx.notify();
+  }
+
   pub fn update_document_theme(&mut self, update: impl FnOnce(&mut DocumentTheme), cx: &mut Context<Self>) {
     update(&mut self.document.theme);
     rebuild_document_sections(&mut self.document);
@@ -266,6 +279,44 @@ impl RichTextEditor {
     let recovery_path = self.recovery_path.clone();
     self.save_status = SaveStatus::Saving;
     cx.notify();
+    if let Some(save_hook) = self.native_save_hook.clone() {
+      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let selection_after = pending_runtime_edits
+        .iter()
+        .rev()
+        .find_map(|edit| edit.selection_after.clone());
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let write_result = save_hook(path, pending_runtime_edits, assets).await;
+        if write_result.is_ok()
+          && let Some(recovery_path) = recovery_path
+        {
+          let _ = fs::remove_file(recovery_path);
+        }
+        match write_result {
+          Ok(document) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.replace_document_from_collaboration(document, cx);
+              editor.complete_runtime_edit(selection_after, cx);
+              editor.saved_generation = editor.saved_generation.max(generation);
+              editor.refresh_save_status();
+              cx.notify();
+            });
+            Ok(())
+          },
+          Err(error) => {
+            let message = error.to_string();
+            let _ = editor.update(cx, |editor, cx| {
+              if generation >= editor.saved_generation {
+                editor.save_status = SaveStatus::SaveFailed(message);
+              }
+              cx.notify();
+            });
+            Err(error)
+          },
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()

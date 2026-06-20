@@ -8,6 +8,7 @@ use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
   SessionId,
   crdt_runtime::{CrdtRuntime, RuntimeEvent},
+  crdt_runtime_actor::CrdtRuntimeHandle,
   ids::PeerId,
   net::{
     NetCommand, PeerAddr, PublishPayload,
@@ -18,13 +19,12 @@ use flowstate_collab::{
   presence::PresenceStore,
   proto_gossip::GossipMsg,
 };
-use flowstate_document::document_to_loro;
 use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::Subscription as LoroSubscription;
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
-use crate::rich_text_element::{AssetId, AssetRecord, Document, EditorEvent, RichTextEditor, UndoRedirect};
+use crate::rich_text_element::{AssetId, AssetRecord, CollabPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
 
 use super::presence_view;
 
@@ -92,7 +92,7 @@ pub(super) enum JoinNeighborSignal {
 pub struct JoinedDocument {
   pub session: SessionId,
   pub title: String,
-  pub document: Document,
+  pub document: DocumentProjection,
 }
 
 #[derive(Clone, Debug)]
@@ -106,7 +106,8 @@ pub struct CollabSession {
   session: SessionId,
   title: String,
   phase: SessionPhase,
-  runtime: Option<CrdtRuntime>,
+  runtime: Option<CrdtRuntimeHandle>,
+  runtime_vv: Vec<u8>,
   editor: Option<Entity<RichTextEditor>>,
   panel_id: Option<Uuid>,
   // UI-only asset cache records fetched after Loro metadata arrives.
@@ -141,24 +142,61 @@ pub struct CollabSession {
   incompatible_version_peers: HashSet<PeerId>,
   last_document_activity: Instant,
   last_self_check: Option<(Vec<u8>, u64)>,
+  local_edit_flush_pending: bool,
 }
 
 const DIRECT_REQUEST_CHANNEL_CAPACITY: usize = 32;
 const UNDO_REQUEST_CHANNEL_CAPACITY: usize = 128;
 const JOIN_FIRST_NEIGHBOR_TIMEOUT: Duration = Duration::from_secs(15);
 const JOIN_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(30);
+const LOCAL_EDIT_FLUSH_DEBOUNCE_MS: u64 = 24;
+
+fn coalesce_collaboration_commands(commands: impl IntoIterator<Item = SemanticEditCommand>) -> Vec<SemanticEditCommand> {
+  let mut coalesced = Vec::new();
+  for command in commands {
+    if let Some(previous) = coalesced.last_mut()
+      && merge_adjacent_insert_text(previous, &command)
+    {
+      continue;
+    }
+    coalesced.push(command);
+  }
+  coalesced
+}
+
+fn merge_adjacent_insert_text(previous: &mut SemanticEditCommand, next: &SemanticEditCommand) -> bool {
+  let SemanticEditCommand::InsertText {
+    at,
+    text,
+    styles,
+  } = previous
+  else {
+    return false;
+  };
+  let SemanticEditCommand::InsertText {
+    at: next_at,
+    text: next_text,
+    styles: next_styles,
+  } = next
+  else {
+    return false;
+  };
+  if *styles != *next_styles || at.paragraph != next_at.paragraph || at.byte + text.len() != next_at.byte {
+    return false;
+  }
+  text.push_str(next_text);
+  true
+}
 
 impl CollabSession {
-  pub fn from_local_document(
+  pub fn from_local_runtime(
     session: SessionId,
     panel_id: Uuid,
     editor: Entity<RichTextEditor>,
     title: String,
-    document: Document,
+    runtime: CrdtRuntimeHandle,
     net_tx: CommandSender,
-  ) -> Result<Self> {
-    let doc = document_to_loro(&document, &title).context("creating Loro-native collaboration document")?;
-    let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating collaboration CRDT runtime")?;
+  ) -> Self {
     // Direct serving is network-bound and should backpressure rather than grow without limit.
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     // Undo redirects can burst under key-repeat, but a stuck pump should not retain unbounded UI events.
@@ -168,17 +206,15 @@ impl CollabSession {
       %session,
       %panel_id,
       title = %title,
-      paragraphs = document.paragraphs.len(),
-      blocks = document.blocks.len(),
-      assets = document.assets.assets.len(),
-      "built local collaboration document projection",
+      "attached local collaboration session to document runtime",
     );
 
-    Ok(Self {
+    Self {
       session,
       title,
       phase: SessionPhase::Creating,
       runtime: Some(runtime),
+      runtime_vv: Vec::new(),
       editor: Some(editor),
       panel_id: Some(panel_id),
       pending_asset_records: Vec::new(),
@@ -212,7 +248,8 @@ impl CollabSession {
       incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
       last_self_check: None,
-    })
+      local_edit_flush_pending: false,
+    }
   }
 
   pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>) -> Self {
@@ -225,6 +262,7 @@ impl CollabSession {
       title,
       phase: SessionPhase::Joining(JoinStage::Resolving),
       runtime: None,
+      runtime_vv: Vec::new(),
       editor: None,
       panel_id: None,
       pending_asset_records: Vec::new(),
@@ -258,6 +296,7 @@ impl CollabSession {
       incompatible_version_peers: HashSet::new(),
       last_document_activity: now,
       last_self_check: None,
+      local_edit_flush_pending: false,
     }
   }
 
@@ -509,6 +548,31 @@ impl CollabSession {
     self.attach_direct_request_pump(cx);
     self.attach_undo_request_pump(cx);
     self.attach_timers(cx);
+    self.refresh_runtime_version_vector(cx);
+  }
+
+  pub fn runtime_handle(&self) -> Option<CrdtRuntimeHandle> {
+    self.runtime.clone()
+  }
+
+  fn refresh_runtime_version_vector(&mut self, cx: &mut Context<Self>) {
+    let Some(runtime) = self.runtime.clone() else {
+      return;
+    };
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let result = runtime.oplog_version_vector().await;
+      let _ = session.update(cx, |session, _| match result {
+        Ok(vv) => {
+          session.runtime_vv = vv;
+          session.publish_digest();
+        },
+        Err(error) => {
+          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "reading collaboration runtime version vector failed");
+        },
+      });
+    })
+    .detach();
   }
 
   pub fn establish_local_peer(&mut self, peer: &flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
@@ -569,6 +633,7 @@ impl CollabSession {
     doc.import_with(snapshot, "remote").context("importing collaboration snapshot failed")?;
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
     let mut document = runtime.projection_snapshot().context("projecting joined Loro-native document")?;
+    let runtime = CrdtRuntimeHandle::spawn(runtime).context("starting joined collaboration CRDT runtime actor")?;
     document.theme = load_document_theme();
     tracing::info!(
       session = %self.session,
@@ -579,6 +644,7 @@ impl CollabSession {
     );
 
     self.runtime = Some(runtime);
+    self.runtime_vv.clear();
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
@@ -616,6 +682,7 @@ impl CollabSession {
         editor.set_collaboration_role(None, cx);
         editor.set_collab_undo_redirect(None);
         editor.set_collab_capture(false);
+        editor.set_runtime_capture(true);
         editor.set_own_collaboration_caret_color(None, cx);
         editor.clear_undo_redo_stacks();
         let _ = editor.take_pending_collab_edits();
@@ -627,8 +694,10 @@ impl CollabSession {
     self.loro_subscriptions.clear();
     self.presence = None;
     self.runtime = None;
+    self.runtime_vv.clear();
     self.pending_asset_records.clear();
     self.pending_remote_updates.clear();
+    self.local_edit_flush_pending = false;
     self.neighbors.clear();
     self.asset_pulls_in_flight.clear();
     self.zero_neighbors_since = Some(Instant::now());
@@ -651,73 +720,84 @@ impl CollabSession {
     true
   }
 
-  pub fn flush_local_edits(&mut self, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
+  pub fn flush_local_edits(&mut self, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
     if matches!(self.phase, SessionPhase::Detached(_) | SessionPhase::Joining(_)) {
       tracing::trace!(session = %self.session, phase = ?self.phase, "skipping local collaboration edit flush for inactive phase");
-      return Ok(());
+      return;
     }
 
-    let edits = editor.update(cx, |editor, _| {
-      let edits = editor.take_pending_collab_edits();
-      editor.clear_undo_redo_stacks();
-      edits
-    });
+    let edits = editor.update(cx, |editor, _| editor.take_pending_collab_edits());
     let edit_count = edits.len();
-    let operation_count = edits
+    let selection_after = edits
       .iter()
-      .map(|edit| edit.semantic_commands.len())
-      .sum::<usize>();
+      .rev()
+      .find_map(|edit| edit.selection_after.clone());
+    let commands = coalesce_collaboration_commands(edits.into_iter().flat_map(|edit| edit.semantic_commands));
+    let operation_count = commands.len();
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
-      return Ok(());
+      return;
     }
     tracing::debug!(session = %self.session, edit_count, operation_count, "flushing local collaboration edits into Loro");
-    let document = editor.read(cx).document().clone();
-    if self.runtime.is_none() {
+    let Some(runtime) = self.runtime.clone() else {
       tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because Loro doc is missing");
-      return Ok(());
-    }
-    let mut applied = false;
-    let mut runtime_events = Vec::new();
-    for edit in edits {
-      if edit.semantic_commands.is_empty() {
-        continue;
-      }
-      let command_count = edit.semantic_commands.len();
-      for command in &edit.semantic_commands {
-        let events = self
-          .runtime
-          .as_mut()
-          .context("collaboration session has no CRDT runtime")?
-          .apply_editor_semantic_command(&document, command)?;
-        if events.is_empty() {
-          tracing::warn!(session = %self.session, ?command, "editor semantic collaboration command is not yet implemented by Loro runtime bridge");
-        } else {
-          runtime_events.extend(events);
-          applied = true;
-        }
-      }
-      if let Some(runtime) = &self.runtime
-        && let Err(error) = flowstate_document::document_from_loro(runtime.doc())
-      {
-        tracing::error!(session = %self.session, command_count, error = %format_args!("{error:#}"), "projecting local semantic collaboration edit failed");
-        return Err(error.into());
-      }
-      tracing::trace!(session = %self.session, command_count, "applied local semantic collaboration edit to Loro");
-    }
-    if applied {
-      self.apply_runtime_events(runtime_events, false, cx)?;
-      self.last_document_activity = Instant::now();
-      tracing::debug!(session = %self.session, "local collaboration edits flushed");
-    }
-    Ok(())
+      return;
+    };
+    editor.update(cx, |editor, _| editor.begin_runtime_edit());
+    let assets = editor
+      .read(cx)
+      .document()
+      .assets
+      .assets
+      .values()
+      .cloned()
+      .collect();
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      let result = runtime
+        .apply_editor_commands(commands, assets, selection_after.clone())
+        .await;
+      let _ = session.update(cx, |session, cx| match result {
+        Ok(events) => {
+          if let Err(error) = session.apply_runtime_events(events, true, cx) {
+            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying local runtime projection failed");
+            session.detach(DetachReason::Fatal(format!("applying local collaboration edit failed: {error:#}")), cx);
+            return;
+          }
+          if let Some(editor) = session.editor.clone() {
+            editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
+          }
+          session.last_document_activity = Instant::now();
+        },
+        Err(error) => {
+          tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
+          if let Some(editor) = session.editor.clone() {
+            editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+          }
+          session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
+        },
+      });
+    })
+    .detach();
   }
 
   pub(super) fn apply_runtime_events(&mut self, events: Vec<RuntimeEvent>, apply_projection: bool, cx: &mut Context<Self>) -> Result<()> {
     for event in events {
       match event {
-        RuntimeEvent::LocalUpdate { bytes, .. } => self.publish_update_bytes(bytes),
-        RuntimeEvent::RemoteUpdateApplied { pending, .. } => {
+        RuntimeEvent::LocalUpdate {
+          bytes,
+          version_vector,
+          ..
+        } => {
+          self.runtime_vv = version_vector;
+          self.publish_update_bytes(bytes);
+        },
+        RuntimeEvent::RemoteUpdateApplied {
+          pending,
+          version_vector,
+          ..
+        } => {
+          self.runtime_vv = version_vector;
           if let Some(pending) = pending {
             tracing::debug!(
               session = %self.session,
@@ -725,30 +805,59 @@ impl CollabSession {
               "remote collaboration update has pending Loro dependencies; requesting anti-entropy pull immediately",
             );
             if let Some(from) = self.pull_candidates(None).first().copied() {
-              let our_vv = self
-                .runtime
-                .as_ref()
-                .map(|runtime| runtime.doc().oplog_vv().encode())
-                .unwrap_or_default();
+              let our_vv = self.runtime_vv.clone();
               self.start_update_pull(from, our_vv, cx);
             } else {
               tracing::warn!(session = %self.session, "cannot pull pending Loro dependencies because no collaboration peers are available");
             }
           }
         },
-        RuntimeEvent::ProjectionUpdated { document, .. } if apply_projection => {
+        RuntimeEvent::ProjectionUpdated {
+          document,
+          version_vector,
+          ..
+        } if apply_projection => {
+          self.runtime_vv = version_vector;
           self.apply_runtime_projection(*document, cx)?;
+        },
+        RuntimeEvent::ProjectionPatched {
+          patches,
+          frontier,
+          version_vector,
+          ..
+        } if apply_projection => {
+          self.runtime_vv = version_vector;
+          self.apply_runtime_patches(patches, frontier, cx);
         },
         RuntimeEvent::RevisionOpened { document, .. } if apply_projection => {
           self.apply_runtime_projection(*document, cx)?;
         },
-        RuntimeEvent::RevisionForked { .. } | RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::RevisionOpened { .. } => {},
+        RuntimeEvent::SelectionRestored { selection } if apply_projection => {
+          if let Some(editor) = self.editor.clone() {
+            editor.update(cx, |editor, cx| editor.restore_runtime_selection(selection, cx));
+          }
+        },
+        RuntimeEvent::RevisionForked { .. }
+        | RuntimeEvent::ProjectionUpdated { .. }
+        | RuntimeEvent::ProjectionPatched { .. }
+        | RuntimeEvent::RevisionOpened { .. }
+        | RuntimeEvent::SelectionRestored { .. } => {},
       }
     }
     Ok(())
   }
 
-  fn apply_runtime_projection(&mut self, mut document: Document, cx: &mut Context<Self>) -> Result<()> {
+  fn apply_runtime_patches(&mut self, patches: Vec<CollabPatch>, frontier: Vec<u8>, cx: &mut Context<Self>) {
+    let Some(editor) = self.editor.clone() else {
+      return;
+    };
+    editor.update(cx, |editor, cx| editor.apply_collab_patches_at_frontier(&patches, frontier, cx));
+    self.last_document_activity = Instant::now();
+    self.last_self_check = None;
+    self.refresh_external_carets(cx);
+  }
+
+  fn apply_runtime_projection(&mut self, mut document: DocumentProjection, cx: &mut Context<Self>) -> Result<()> {
     let Some(editor) = self.editor.clone() else {
       return Ok(());
     };
@@ -835,11 +944,7 @@ impl CollabSession {
     tracing::warn!(session = %self.session, neighbors = self.neighbors.len(), "collaboration gossip lagged; scheduling recovery");
     self.publish_digest();
     let peer = self.neighbors.iter().next().copied();
-    let vv = self
-      .runtime
-      .as_ref()
-      .map(|runtime| runtime.doc().oplog_vv().encode())
-      .unwrap_or_default();
+    let vv = self.runtime_vv.clone();
     let action = self.anti_entropy.on_lagged(peer, vv);
     self.handle_gap_action(action, cx);
   }
@@ -883,7 +988,9 @@ impl CollabSession {
         tracing::debug!(session = %self.session, "set collaboration recovery path for untitled document");
       }
       editor.clear_undo_redo_stacks();
+      editor.set_runtime_capture(false);
       editor.set_collab_capture(true);
+      editor.set_native_undo_hook(None);
       let undo_tx = self.undo_tx.clone();
       editor.set_collab_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
         let _ = undo_tx.try_send(redirect);
@@ -893,11 +1000,7 @@ impl CollabSession {
     self
       .editor_subscriptions
       .push(cx.observe(&editor, |session, editor, cx| {
-        if let Err(error) = session.flush_local_edits(editor.clone(), cx) {
-          tracing::error!(session = %session.session, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
-          session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
-          return;
-        }
+        session.schedule_local_edit_flush(editor.clone(), cx);
         session.flush_pending_asset_records(cx);
       }));
 
@@ -910,6 +1013,22 @@ impl CollabSession {
         }
       }));
     tracing::debug!(session = %self.session, subscriptions = self.editor_subscriptions.len(), "collaboration editor hooks attached");
+  }
+
+  fn schedule_local_edit_flush(&mut self, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    if self.local_edit_flush_pending {
+      return;
+    }
+    self.local_edit_flush_pending = true;
+    cx.spawn(async move |session, cx| {
+      Timer::after(Duration::from_millis(LOCAL_EDIT_FLUSH_DEBOUNCE_MS)).await;
+      let _ = session.update(cx, |session, cx| {
+        session.local_edit_flush_pending = false;
+        session.flush_local_edits(editor, cx);
+        session.flush_pending_asset_records(cx);
+      });
+    })
+    .detach();
   }
 
   fn attach_undo_request_pump(&mut self, cx: &mut Context<Self>) {
@@ -940,5 +1059,42 @@ impl CollabSession {
       tracing::debug!(session = %session_id, "collaboration undo request pump stopped");
     })
     .detach();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::rich_text_element::{DocumentOffset, RunStyles};
+
+  #[test]
+  fn coalesces_adjacent_insert_text_commands() {
+    let styles = RunStyles::default();
+    let commands = vec![
+      SemanticEditCommand::InsertText {
+        at: DocumentOffset { paragraph: 0, byte: 0 },
+        text: "h".to_string(),
+        styles,
+      },
+      SemanticEditCommand::InsertText {
+        at: DocumentOffset { paragraph: 0, byte: 1 },
+        text: "i".to_string(),
+        styles,
+      },
+      SemanticEditCommand::InsertText {
+        at: DocumentOffset { paragraph: 1, byte: 0 },
+        text: "!".to_string(),
+        styles,
+      },
+    ];
+
+    let coalesced = coalesce_collaboration_commands(commands);
+
+    assert_eq!(coalesced.len(), 2);
+    let SemanticEditCommand::InsertText { at, text, .. } = &coalesced[0] else {
+      panic!("expected merged insert");
+    };
+    assert_eq!(*at, DocumentOffset { paragraph: 0, byte: 0 });
+    assert_eq!(text, "hi");
   }
 }

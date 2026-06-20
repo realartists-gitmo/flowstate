@@ -9,12 +9,12 @@ use std::{
 };
 
 use docx_rs::Docx;
-use flowstate_document::Document;
+use flowstate_document::DocumentProjection;
 
 use self::{blocks::add_block, formatting::docx_fonts, package::write_recompressed_docx, styles::add_flowstate_styles};
 
 #[hotpath::measure]
-pub fn write_docx(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
+pub fn write_docx(path: impl AsRef<Path>, document: &DocumentProjection) -> io::Result<()> {
   let path = path.as_ref();
   if let Some(parent) = path
     .parent()

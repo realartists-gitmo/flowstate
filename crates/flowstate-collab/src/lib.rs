@@ -5,6 +5,7 @@
 //! Application/UI integration lives in `crates/flowstate/src/collab`.
 
 pub mod crdt_runtime;
+pub mod crdt_runtime_actor;
 pub mod ids;
 pub mod net;
 pub mod presence;

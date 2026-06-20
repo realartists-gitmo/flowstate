@@ -8,7 +8,7 @@ impl RichTextEditor {
     EquationRenderer::clear_entries(keys);
   }
 
-  pub fn new_with_path(mut document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+  pub fn new_with_path(mut document: DocumentProjection, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
     rebuild_document_sections(&mut document);
     let paragraph_count = document.paragraphs.len();
     let saved_generation = if document_path.is_some() { 0 } else { u64::MAX };
@@ -38,7 +38,16 @@ impl RichTextEditor {
       redo_stack: Vec::new(),
       identity_map,
       pending_collab_edits: Vec::new(),
+      pending_runtime_edits: Vec::new(),
+      runtime_edits_in_flight: 0,
+      pending_command_selection: None,
+      pending_projection_rollback: None,
       collab_capture: false,
+      runtime_capture: false,
+      native_save_hook: None,
+      native_export_hook: None,
+      native_undo_hook: None,
+      native_recovery_hook: None,
       suppress_collab_capture: 0,
       collab_undo_redirect: None,
       collaboration_role: None,
@@ -115,7 +124,7 @@ impl RichTextEditor {
     }
   }
 
-  pub fn document(&self) -> &Document {
+  pub fn document(&self) -> &DocumentProjection {
     &self.document
   }
 
@@ -157,7 +166,16 @@ impl RichTextEditor {
     self.undo_stack = Vec::new();
     self.redo_stack = Vec::new();
     self.pending_collab_edits.clear();
+    self.pending_runtime_edits.clear();
+    self.runtime_edits_in_flight = 0;
+    self.pending_command_selection = None;
+    self.pending_projection_rollback = None;
     self.collab_capture = false;
+    self.runtime_capture = false;
+    self.native_save_hook = None;
+    self.native_export_hook = None;
+    self.native_undo_hook = None;
+    self.native_recovery_hook = None;
     self.suppress_collab_capture = 0;
     self.collab_undo_redirect = None;
     self.collaboration_role = None;
@@ -231,11 +249,74 @@ impl RichTextEditor {
     std::mem::take(&mut self.pending_collab_edits)
   }
 
+  pub fn take_pending_runtime_edits(&mut self) -> Vec<CollaborationEdit> {
+    std::mem::take(&mut self.pending_runtime_edits)
+  }
+
+  pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
+    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
+    if self.runtime_edits_in_flight == 0 && self.pending_runtime_edits.is_empty() && self.pending_collab_edits.is_empty() {
+      if let Some(selection) = selection {
+        self.selection = selection;
+        clamp_selection_to_document(&self.document, &mut self.selection);
+        self.emit_selection_changed(cx);
+      }
+      self.pending_command_selection = None;
+      self.pending_projection_rollback = None;
+      self.scroll_head_into_view();
+      self.reset_caret_blink(cx);
+      cx.notify();
+    }
+  }
+
+  pub fn begin_runtime_edit(&mut self) {
+    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_add(1);
+  }
+
+  pub fn restore_runtime_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {
+    self.selection = selection;
+    clamp_selection_to_document(&self.document, &mut self.selection);
+    self.emit_selection_changed(cx);
+    self.scroll_head_into_view();
+    cx.notify();
+  }
+
+  pub fn mark_as_unsaved_branch(&mut self, cx: &mut Context<Self>) {
+    self.edit_generation = self.next_edit_generation;
+    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    self.refresh_save_status();
+    cx.notify();
+  }
+
   pub fn set_collab_capture(&mut self, on: bool) {
     self.collab_capture = on;
     if !on {
       self.pending_collab_edits.clear();
     }
+  }
+
+  pub fn set_runtime_capture(&mut self, on: bool) {
+    self.runtime_capture = on;
+    if !on {
+      self.pending_runtime_edits.clear();
+      self.runtime_edits_in_flight = 0;
+    }
+  }
+
+  pub fn set_native_save_hook(&mut self, hook: Option<NativeSaveHook>) {
+    self.native_save_hook = hook;
+  }
+
+  pub fn set_native_export_hook(&mut self, hook: Option<NativeExportHook>) {
+    self.native_export_hook = hook;
+  }
+
+  pub fn set_native_undo_hook(&mut self, hook: Option<NativeUndoHook>) {
+    self.native_undo_hook = hook;
+  }
+
+  pub fn set_native_recovery_hook(&mut self, hook: Option<NativeRecoveryHook>) {
+    self.native_recovery_hook = hook;
   }
 
   #[cfg(test)]
@@ -283,11 +364,18 @@ impl RichTextEditor {
     self.identity_map.block_id(block_ix)
   }
 
+  fn semantic_block_id(&self, block_ix: usize) -> Option<BlockId> {
+    self
+      .identity_map
+      .block_id(block_ix)
+      .or_else(|| self.document.ids.block_ids.get(block_ix).copied())
+  }
+
   pub fn table_cell_id(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> Option<TableCellId> {
     self.identity_map.table_cell_id(block_ix, row_ix, cell_ix)
   }
 
-  pub fn replace_document_from_collaboration(&mut self, document: Document, cx: &mut Context<Self>) {
+  pub fn replace_document_from_collaboration(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
     self.document = document;
     self.identity_map.reconcile(&self.document);
     self.after_text_mutation(cx);
@@ -295,6 +383,12 @@ impl RichTextEditor {
 
   pub fn document_path(&self) -> Option<&PathBuf> {
     self.document_path.as_ref()
+  }
+
+  pub fn set_document_path_for_runtime(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+    self.document_path = Some(path.clone());
+    self.recovery_path = Some(recovery_path_for_document(&path));
+    cx.notify();
   }
 
   pub fn set_document_display_name(&mut self, name: SharedString, cx: &mut Context<Self>) {

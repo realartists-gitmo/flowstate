@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {
+pub fn insert_text_at(document: &mut DocumentProjection, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {
   if text.is_empty() {
     return;
   }
@@ -88,7 +88,7 @@ pub fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize,
 // `paragraph`. Runs are split or dropped as needed; remaining runs are re-
 // merged so adjacent same-style fragments coalesce.
 #[hotpath::measure]
-pub fn delete_range_in_paragraph(document: &mut Document, paragraph_ix: usize, range: Range<usize>) {
+pub fn delete_range_in_paragraph(document: &mut DocumentProjection, paragraph_ix: usize, range: Range<usize>) {
   if range.start >= range.end {
     return;
   }

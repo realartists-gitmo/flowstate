@@ -54,6 +54,7 @@ pub enum RibbonCommandId {
 
   Undo,
   Redo,
+  Revisions,
   ExportFormat,
   ExportSend,
   ToggleInvisibility,
@@ -103,6 +104,7 @@ impl RibbonLabel {
       RibbonCommandId::ClearFormatting => Some("icons/eraser.svg"),
       RibbonCommandId::ExportFormat => Some("icons/export.svg"),
       RibbonCommandId::ExportSend => Some("icons/send-horizontal.svg"),
+      RibbonCommandId::Revisions => Some("icons/archive.svg"),
       _ => None,
     };
     Self {

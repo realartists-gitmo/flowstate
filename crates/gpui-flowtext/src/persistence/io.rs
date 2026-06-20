@@ -13,7 +13,7 @@ use crop::Rope;
 use tempfile::NamedTempFile;
 
 use super::{
-  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, Document, DocumentIds, DocumentSection, DocumentTheme, EquationBlock,
+  AssetId, AssetRecord, AssetStore, Block, BlockAlignment, BlockId, DocumentProjection, DocumentIds, DocumentSection, DocumentTheme, EquationBlock,
   EquationDisplay, EquationSyntax, HighlightStyle, ImageBlock, ImageSizing, Paragraph, ParagraphId, ParagraphOffsetIndex, ParagraphStyle,
   RunSemanticStyle, RunStyles, SectionId, SectionKind, TableBlock, TableCell, TableCellBlock, TableCellParagraph, TableColumnWidth, TableRow,
   TableStyle, TextRun, demo_document, document_text_slice, log_timing_lazy, merge_adjacent_runs, paragraph_byte_range, paragraph_index_for_id,
@@ -43,7 +43,7 @@ const TABLE_CELL_TABLE: u8 = 1;
 pub const DEFAULT_DOCUMENT_EXTENSION: &str = "gptx";
 
 #[hotpath::measure]
-pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
+pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<DocumentProjection> {
   let path = path.as_ref();
   match read_document(path) {
     Ok(document) => Ok(document),
@@ -60,7 +60,7 @@ pub fn load_or_create_document(path: impl AsRef<Path>) -> io::Result<Document> {
 }
 
 #[hotpath::measure]
-pub fn read_document(path: impl AsRef<Path>) -> io::Result<Document> {
+pub fn read_document(path: impl AsRef<Path>) -> io::Result<DocumentProjection> {
   let timing = Instant::now();
   reject_db8_path(path.as_ref())?;
   let bytes = fs::read(path)?;
@@ -68,12 +68,12 @@ pub fn read_document(path: impl AsRef<Path>) -> io::Result<Document> {
 }
 
 #[hotpath::measure]
-pub fn read_document_bytes(bytes: &[u8]) -> io::Result<Document> {
+pub fn read_document_bytes(bytes: &[u8]) -> io::Result<DocumentProjection> {
   read_document_bytes_with_timing(bytes, Instant::now())
 }
 
 #[hotpath::measure]
-fn read_document_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<Document> {
+fn read_document_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<DocumentProjection> {
   let mut cursor = Cursor::new(bytes);
   let mut magic = [0; 4];
   cursor.read_exact(&mut magic)?;
@@ -88,7 +88,7 @@ fn read_document_bytes_with_timing(bytes: &[u8], timing: Instant) -> io::Result<
 }
 
 #[hotpath::measure]
-pub fn write_document(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
+pub fn write_document(path: impl AsRef<Path>, document: &DocumentProjection) -> io::Result<()> {
   let path = path.as_ref();
   reject_db8_path(path)?;
   // Skip directory creation when the parent component is empty (e.g. a bare
@@ -115,14 +115,14 @@ fn reject_db8_path(path: &Path) -> io::Result<()> {
 }
 
 #[hotpath::measure]
-pub fn document_bytes(document: &Document) -> io::Result<Vec<u8>> {
+pub fn document_bytes(document: &DocumentProjection) -> io::Result<Vec<u8>> {
   let document = document_for_serialization(document);
   validate_document(&document)?;
   Ok(serialize_document(&document))
 }
 
 #[hotpath::measure]
-fn document_for_serialization(document: &Document) -> Document {
+fn document_for_serialization(document: &DocumentProjection) -> DocumentProjection {
   let mut document = document.clone();
   // Recovery/autosave can snapshot while live editing is still settling; make
   // sure byte offsets are derived from the paragraph projection we are about
@@ -136,7 +136,7 @@ fn document_for_serialization(document: &Document) -> Document {
 
 #[hotpath::measure]
 #[hotpath::measure]
-fn serialize_document(document: &Document) -> Vec<u8> {
+fn serialize_document(document: &DocumentProjection) -> Vec<u8> {
   let mut chunks = Vec::<(u8, Vec<u8>)>::new();
   let mut text = Vec::with_capacity(document.text.byte_len());
   for chunk in document.text.chunks() {
@@ -205,7 +205,7 @@ fn serialize_document(document: &Document) -> Vec<u8> {
 }
 
 #[hotpath::measure]
-fn serializable_blocks(document: &Document) -> Vec<Block> {
+fn serializable_blocks(document: &DocumentProjection) -> Vec<Block> {
   let mut paragraph_ix = 0;
   let mut blocks = Vec::with_capacity(document.blocks.len().max(document.paragraphs.len()));
 

@@ -1,19 +1,25 @@
 use std::{
-  fs,
-  io::{self, Cursor, Read as _, Write as _},
+  fs::{self, OpenOptions},
+  io::{self, Cursor, Read as _, Seek as _, SeekFrom, Write as _},
   path::Path,
 };
 
-use loro::{ExportMode, Frontiers, LoroDoc, VersionVector};
+use loro::{Container, ExportMode, Frontiers, LoroDoc, LoroValue, ValueOrContainer, VersionVector};
 use serde::{Deserialize, Serialize};
-use tempfile::NamedTempFile;
 use uuid::Uuid;
 
 pub const LORO_PACKAGE_FORMAT_VERSION: u32 = 1;
 pub const LORO_SCHEMA_VERSION: u32 = 1;
+pub const DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD: usize = 256;
 
 const PACKAGE_MAGIC: &[u8; 16] = b"FLOWDB8-LORO\0\0\0\0";
 const PACKAGE_HEADER_VERSION: u32 = 1;
+const JOURNAL_MAGIC: &[u8; 16] = b"FLOWDB8-JOURNAL\0";
+const JOURNAL_HEADER_VERSION: u32 = 1;
+const JOURNAL_TXN_MAGIC: &[u8; 8] = b"DB8TXN01";
+const JOURNAL_COMMIT_MAGIC: &[u8; 8] = b"DB8DONE1";
+const JOURNAL_DELTA_MAGIC: &[u8; 8] = b"DB8DELTA";
+const JOURNAL_GENERATION_COMPACTION_THRESHOLD: usize = 16;
 
 const CHUNK_MANIFEST: u32 = 1;
 const CHUNK_LORO_SNAPSHOT: u32 = 2;
@@ -22,6 +28,7 @@ const CHUNK_ASSET: u32 = 4;
 const CHUNK_REVISION_INDEX: u32 = 5;
 const CHUNK_PROJECTION_CACHE: u32 = 6;
 const CHUNK_SEARCH_UNIT: u32 = 7;
+const CHUNK_THUMBNAIL: u32 = 8;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentPackage {
@@ -32,6 +39,7 @@ pub struct DocumentPackage {
   pub revisions: Vec<PackageRevision>,
   pub projection_caches: Vec<ProjectionCacheChunk>,
   pub search_units: Vec<SearchUnitChunk>,
+  pub thumbnails: Vec<ThumbnailChunk>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +141,27 @@ struct ChunkEntry {
   checksum: [u8; 32],
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ThumbnailChunk {
+  pub thumbnail_id: u128,
+  pub revision_id: Option<u128>,
+  pub frontier: Vec<u8>,
+  pub mime_type: String,
+  pub bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+enum PackageJournalDelta {
+  Update {
+    manifest: DocumentPackageManifest,
+    segment: LoroUpdateSegmentChunk,
+  },
+  Assets {
+    manifest: DocumentPackageManifest,
+    assets: Vec<AssetChunk>,
+  },
+}
+
 impl DocumentPackage {
   pub fn from_loro_snapshot(doc: &LoroDoc, title: &str) -> io::Result<Self> {
     Self::from_loro_snapshot_with_assets(doc, title, Vec::new())
@@ -141,7 +170,21 @@ impl DocumentPackage {
   pub fn from_loro_snapshot_with_assets(doc: &LoroDoc, title: &str, assets: Vec<AssetChunk>) -> io::Result<Self> {
     doc.commit();
     let now = unix_time_secs();
-    let document_id = Uuid::new_v4().as_u128();
+    let document_id = crate::loro_schema::document_id(doc)
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Loro document has no valid canonical document ID"))?
+      .as_u128();
+    let revision_id = Uuid::new_v4().as_u128();
+    let revision_frontiers = doc.state_frontiers();
+    let revision_doc = doc.fork_at(&revision_frontiers).map_err(loro_io_error)?;
+    crate::loro_schema::record_revision(
+      doc,
+      revision_id,
+      encode_frontiers(&revision_frontiers),
+      title,
+      "Initial snapshot",
+      None,
+    )
+    .map_err(loro_io_error)?;
     let snapshot_id = Uuid::new_v4().as_u128();
     let frontier = encode_frontiers(&doc.state_frontiers());
     let version_vector = encode_version_vector(&doc.state_vv());
@@ -161,19 +204,28 @@ impl DocumentPackage {
         created_at_unix_secs: now,
         modified_at_unix_secs: now,
       },
-      loro_snapshots: vec![LoroSnapshotChunk {
-        snapshot_id,
-        frontier: frontier.clone(),
-        version_vector: version_vector.clone(),
-        bytes: snapshot,
-        created_at_unix_secs: now,
-      }],
+      loro_snapshots: vec![
+        LoroSnapshotChunk {
+          snapshot_id,
+          frontier: frontier.clone(),
+          version_vector: version_vector.clone(),
+          bytes: snapshot,
+          created_at_unix_secs: now,
+        },
+        LoroSnapshotChunk {
+          snapshot_id: Uuid::new_v4().as_u128(),
+          frontier: encode_frontiers(&revision_frontiers),
+          version_vector: encode_version_vector(&revision_doc.state_vv()),
+          bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
+          created_at_unix_secs: now,
+        },
+      ],
       loro_update_segments: Vec::new(),
       assets,
       revisions: vec![PackageRevision {
-        revision_id: Uuid::new_v4().as_u128(),
-        frontier,
-        version_vector,
+        revision_id,
+        frontier: encode_frontiers(&revision_frontiers),
+        version_vector: encode_version_vector(&revision_doc.state_vv()),
         title: title.to_string(),
         summary: "Initial snapshot".to_string(),
         author_user_id: None,
@@ -182,23 +234,51 @@ impl DocumentPackage {
       }],
       projection_caches: Vec::new(),
       search_units: Vec::new(),
+      thumbnails: Vec::new(),
     }
     .with_manifest_indexes()?;
+    package.rebuild_projection_cache_from_loro(doc)?;
     package.rebuild_search_units_from_loro(doc)?;
     Ok(package)
   }
 
   pub fn load_loro_doc(&self) -> io::Result<LoroDoc> {
     self.validate()?;
+    self.load_loro_doc_unvalidated()
+  }
+
+  fn load_loro_doc_unvalidated(&self) -> io::Result<LoroDoc> {
     let snapshot = self
       .latest_snapshot()
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package has no latest Loro snapshot"))?;
     let doc = LoroDoc::new();
+    crate::loro_schema::configure_text_styles(&doc);
     doc.import(&snapshot.bytes).map_err(loro_io_error)?;
     for segment in &self.loro_update_segments {
       doc.import(&segment.bytes).map_err(loro_io_error)?;
     }
+    let document_id = crate::loro_schema::document_id(&doc)
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "package Loro state has no valid document ID"))?;
+    if document_id.as_u128() != self.manifest.document_id {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "package manifest document ID does not match canonical Loro lineage",
+      ));
+    }
+    if crate::loro_schema::document_schema_version(&doc) != Some(self.manifest.loro_schema_version) {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "package manifest schema version does not match canonical Loro metadata",
+      ));
+    }
     Ok(doc)
+  }
+
+  pub fn replace_assets_from_document(&mut self, document: &crate::DocumentProjection) -> io::Result<()> {
+    self.assets = crate::loro_import::assets_from_document(document);
+    self.manifest.modified_at_unix_secs = unix_time_secs();
+    *self = self.clone().with_manifest_indexes()?;
+    self.validate()
   }
 
   pub fn current_search_units(&self) -> &[SearchUnitChunk] {
@@ -235,6 +315,8 @@ impl DocumentPackage {
     });
     self.manifest.latest_frontier = encode_frontiers(to_frontier);
     self.manifest.latest_version_vector = encode_version_vector(to_version_vector);
+    self.manifest.projection_cache_frontier = None;
+    self.projection_caches.clear();
     self.manifest.search_cache_frontier = None;
     self.search_units.clear();
     self.manifest.modified_at_unix_secs = now;
@@ -251,17 +333,52 @@ impl DocumentPackage {
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
+    self.create_named_revision_with_id(
+      doc,
+      Uuid::new_v4().as_u128(),
+      title,
+      summary,
+      author_user_id,
+      replica_id,
+    )
+  }
+
+  pub fn create_named_revision_with_id(
+    &mut self,
+    doc: &LoroDoc,
+    revision_id: u128,
+    title: impl Into<String>,
+    summary: impl Into<String>,
+    author_user_id: Option<u128>,
+    replica_id: Option<u128>,
+  ) -> io::Result<u128> {
+    self.create_named_revision_at_with_id(
+      doc,
+      revision_id,
+      &doc.state_frontiers(),
+      title,
+      summary,
+      author_user_id,
+      replica_id,
+    )
+  }
+
+  pub fn create_named_revision_at_with_id(
+    &mut self,
+    doc: &LoroDoc,
+    revision_id: u128,
+    frontiers: &Frontiers,
+    title: impl Into<String>,
+    summary: impl Into<String>,
+    author_user_id: Option<u128>,
+    replica_id: Option<u128>,
+  ) -> io::Result<u128> {
     doc.commit();
-    let frontier = encode_frontiers(&doc.state_frontiers());
-    let version_vector = encode_version_vector(&doc.state_vv());
-    if frontier != self.manifest.latest_frontier || version_vector != self.manifest.latest_version_vector {
-      return Err(io::Error::new(
-        io::ErrorKind::InvalidInput,
-        "cannot create a package revision for a Loro state that has not been persisted into the package",
-      ));
-    }
+    let revision_doc = doc.fork_at(frontiers).map_err(loro_io_error)?;
+    let frontier = encode_frontiers(frontiers);
+    let version_vector = encode_version_vector(&revision_doc.state_vv());
     let revision = PackageRevision {
-      revision_id: Uuid::new_v4().as_u128(),
+      revision_id,
       frontier: frontier.clone(),
       version_vector,
       title: title.into(),
@@ -272,10 +389,9 @@ impl DocumentPackage {
     };
     let revision_id = revision.revision_id;
     if self.snapshot_for_frontier(&frontier).is_none() {
-      let revision_doc = doc.fork_at(&doc.state_frontiers()).map_err(loro_io_error)?;
       self.loro_snapshots.push(LoroSnapshotChunk {
         snapshot_id: Uuid::new_v4().as_u128(),
-        frontier,
+        frontier: frontier.clone(),
         version_vector: encode_version_vector(&revision_doc.state_vv()),
         bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
         created_at_unix_secs: unix_time_secs(),
@@ -295,6 +411,7 @@ impl DocumentPackage {
       .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Flowstate package revision is missing"))?;
     if let Some(snapshot) = self.snapshot_for_frontier(&revision.frontier) {
       let doc = LoroDoc::new();
+      crate::loro_schema::configure_text_styles(&doc);
       doc.import(&snapshot.bytes).map_err(loro_io_error)?;
       return Ok(doc);
     }
@@ -311,8 +428,78 @@ impl DocumentPackage {
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<(u128, u128)> {
+    self.compact_to_named_snapshot_with_id(
+      doc,
+      Uuid::new_v4().as_u128(),
+      title,
+      summary,
+      author_user_id,
+      replica_id,
+    )
+  }
+
+  pub fn sync_revisions_from_loro(&mut self, doc: &LoroDoc) -> io::Result<usize> {
+    let root = doc.get_map(crate::loro_schema::ROOT);
+    let Some(ValueOrContainer::Container(Container::List(revisions))) = root.get(crate::loro_schema::REVISIONS) else {
+      return Ok(0);
+    };
+    let mut added = 0usize;
+    for index in 0..revisions.len() {
+      let Some(ValueOrContainer::Container(Container::Map(revision))) = revisions.get(index) else {
+        continue;
+      };
+      let Some(revision_id) = package_map_string(&revision, "id").and_then(|id| id.parse::<u128>().ok()) else {
+        continue;
+      };
+      if self.revisions.iter().any(|existing| existing.revision_id == revision_id) {
+        continue;
+      }
+      let Some(frontier) = package_map_binary(&revision, "frontier") else {
+        continue;
+      };
+      let frontiers = decode_frontiers(&frontier)?;
+      let revision_doc = doc.fork_at(&frontiers).map_err(loro_io_error)?;
+      let version_vector = encode_version_vector(&revision_doc.state_vv());
+      if self.snapshot_for_frontier(&frontier).is_none() {
+        self.loro_snapshots.push(LoroSnapshotChunk {
+          snapshot_id: Uuid::new_v4().as_u128(),
+          frontier: frontier.clone(),
+          version_vector: version_vector.clone(),
+          bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
+          created_at_unix_secs: package_map_i64(&revision, "timestamp").unwrap_or_else(unix_time_secs),
+        });
+      }
+      self.revisions.push(PackageRevision {
+        revision_id,
+        frontier,
+        version_vector,
+        title: package_map_string(&revision, "title").unwrap_or_else(|| "Revision".to_string()),
+        summary: package_map_string(&revision, "summary").unwrap_or_default(),
+        author_user_id: package_map_string(&revision, "author_user_id").and_then(|id| id.parse().ok()),
+        replica_id: package_map_string(&revision, "replica_id").and_then(|id| id.parse().ok()),
+        created_at_unix_secs: package_map_i64(&revision, "timestamp").unwrap_or_else(unix_time_secs),
+      });
+      added += 1;
+    }
+    if added > 0 {
+      self.revisions.sort_by_key(|revision| revision.created_at_unix_secs);
+      self.manifest.modified_at_unix_secs = unix_time_secs();
+      self.validate()?;
+    }
+    Ok(added)
+  }
+
+  pub fn compact_to_named_snapshot_with_id(
+    &mut self,
+    doc: &LoroDoc,
+    revision_id: u128,
+    title: impl Into<String>,
+    summary: impl Into<String>,
+    author_user_id: Option<u128>,
+    replica_id: Option<u128>,
+  ) -> io::Result<(u128, u128)> {
     let snapshot_id = self.compact_to_snapshot(doc)?;
-    let revision_id = self.create_named_revision(doc, title, summary, author_user_id, replica_id)?;
+    let revision_id = self.create_named_revision_with_id(doc, revision_id, title, summary, author_user_id, replica_id)?;
     Ok((revision_id, snapshot_id))
   }
 
@@ -335,9 +522,28 @@ impl DocumentPackage {
     self.manifest.latest_frontier = frontier;
     self.manifest.latest_version_vector = encode_version_vector(&doc.state_vv());
     self.manifest.modified_at_unix_secs = now;
+    let retained_revision_frontiers = self
+      .revisions
+      .iter()
+      .map(|revision| revision.frontier.clone())
+      .collect::<Vec<_>>();
+    self.loro_snapshots.retain(|snapshot| {
+      snapshot.snapshot_id == snapshot_id
+        || retained_revision_frontiers
+          .iter()
+          .any(|frontier| frontier.as_slice() == snapshot.frontier.as_slice())
+    });
     *self = self.clone().with_manifest_indexes()?;
+    self.rebuild_projection_cache_from_loro(doc)?;
     self.rebuild_search_units_from_loro(doc)?;
     Ok(snapshot_id)
+  }
+
+  pub fn compact_update_segments_if_needed(&mut self, doc: &LoroDoc, max_update_segments: usize) -> io::Result<Option<u128>> {
+    if max_update_segments == 0 || self.loro_update_segments.len() <= max_update_segments {
+      return Ok(None);
+    }
+    self.compact_to_snapshot(doc).map(Some)
   }
 
   pub fn rebuild_search_units_from_loro(&mut self, doc: &LoroDoc) -> io::Result<()> {
@@ -355,10 +561,103 @@ impl DocumentPackage {
   }
 
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
-    write_bytes_atomic(path.as_ref(), &self.to_bytes()?)
+    let path = path.as_ref();
+    let payload = self.to_bytes()?;
+    if file_has_journal_header(path)? {
+      let bytes = fs::read(path)?;
+      let (transactions, committed_end) = committed_journal_transactions(&bytes)?;
+      let rewrite = committed_end != bytes.len()
+        || transactions.len() >= JOURNAL_GENERATION_COMPACTION_THRESHOLD
+        || bytes.len() > journal_transaction_len(payload.len()).saturating_mul(4);
+      if rewrite {
+        write_journal_generation(path, &payload)
+      } else {
+        append_journal_transaction(path, &payload)
+      }
+    } else {
+      write_journal_generation(path, &payload)
+    }
+  }
+
+  pub fn append_latest_update_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    let Some(segment) = self.loro_update_segments.last().cloned() else {
+      return self.write(path);
+    };
+    if !file_has_journal_header(path)? {
+      return self.write(path);
+    }
+    let payload = encode_journal_delta(&PackageJournalDelta::Update {
+      manifest: self.manifest.clone(),
+      segment,
+    })?;
+    append_journal_transaction(path, &payload)
+  }
+
+  pub fn append_assets_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
+    let path = path.as_ref();
+    if !file_has_journal_header(path)? {
+      return self.write(path);
+    }
+    let payload = encode_journal_delta(&PackageJournalDelta::Assets {
+      manifest: self.manifest.clone(),
+      assets: self.assets.clone(),
+    })?;
+    append_journal_transaction(path, &payload)
   }
 
   pub fn from_bytes(bytes: &[u8]) -> io::Result<Self> {
+    if bytes.starts_with(JOURNAL_MAGIC) {
+      return Self::from_journal_bytes(bytes);
+    }
+    Self::from_compact_bytes(bytes)
+  }
+
+  fn from_journal_bytes(bytes: &[u8]) -> io::Result<Self> {
+    let mut package = None;
+    for payload in committed_journal_payloads(bytes)? {
+      if payload.starts_with(PACKAGE_MAGIC) {
+        package = Some(Self::from_compact_bytes(payload)?);
+        continue;
+      }
+      let delta = decode_journal_delta(payload)?;
+      let current = package
+        .as_mut()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"))?;
+      match delta {
+        PackageJournalDelta::Update { manifest, segment } => {
+          if !current
+            .loro_update_segments
+            .iter()
+            .any(|existing| existing.segment_id == segment.segment_id)
+          {
+            current.loro_update_segments.push(segment);
+          }
+          current.manifest = manifest;
+          if current.manifest.projection_cache_frontier.is_none() {
+            current.projection_caches.clear();
+          }
+          if current.manifest.search_cache_frontier.is_none() {
+            current.search_units.clear();
+          }
+        },
+        PackageJournalDelta::Assets { manifest, assets } => {
+          current.manifest = manifest;
+          current.assets = assets;
+        },
+      }
+    }
+    let package = package.ok_or_else(|| {
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Flowstate package journal has no complete full generation",
+      )
+    })?;
+    package.validate()?;
+    Ok(package)
+  }
+
+  fn from_compact_bytes(bytes: &[u8]) -> io::Result<Self> {
     let chunks = read_chunks(bytes)?;
     let mut manifest = None;
     let mut loro_snapshots = Vec::new();
@@ -367,6 +666,7 @@ impl DocumentPackage {
     let mut revisions = Vec::new();
     let mut projection_caches = Vec::new();
     let mut search_units = Vec::new();
+    let mut thumbnails = Vec::new();
 
     for chunk in chunks {
       match chunk.kind {
@@ -377,6 +677,7 @@ impl DocumentPackage {
         CHUNK_REVISION_INDEX => revisions.push(decode_chunk(&chunk.payload, "revision")?),
         CHUNK_PROJECTION_CACHE => projection_caches.push(decode_chunk(&chunk.payload, "projection cache")?),
         CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(&chunk.payload, "search unit")?),
+        CHUNK_THUMBNAIL => thumbnails.push(decode_chunk(&chunk.payload, "thumbnail")?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown Flowstate package chunk kind")),
       }
     }
@@ -389,6 +690,7 @@ impl DocumentPackage {
       revisions,
       projection_caches,
       search_units,
+      thumbnails,
     };
     package.validate()?;
     Ok(package)
@@ -437,6 +739,12 @@ impl DocumentPackage {
         payload: encode_chunk(unit, "search unit")?,
       });
     }
+    for thumbnail in &self.thumbnails {
+      chunks.push(Chunk {
+        kind: CHUNK_THUMBNAIL,
+        payload: encode_chunk(thumbnail, "thumbnail")?,
+      });
+    }
     write_chunks(&chunks)
   }
 
@@ -460,6 +768,15 @@ impl DocumentPackage {
     }
     validate_frontiers(&self.manifest.latest_frontier, "manifest latest frontier")?;
     validate_version_vector(&self.manifest.latest_version_vector, "manifest latest version vector")?;
+    if let Some(frontier) = &self.manifest.projection_cache_frontier {
+      validate_frontiers(frontier, "manifest projection cache frontier")?;
+      if !self.projection_caches.iter().any(|cache| cache.frontier == *frontier) {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest projection cache frontier has no cache chunk"));
+      }
+    }
+    if let Some(frontier) = &self.manifest.search_cache_frontier {
+      validate_frontiers(frontier, "manifest search cache frontier")?;
+    }
     for snapshot in &self.loro_snapshots {
       validate_frontiers(&snapshot.frontier, "snapshot frontier")?;
       validate_version_vector(&snapshot.version_vector, "snapshot version vector")?;
@@ -470,6 +787,21 @@ impl DocumentPackage {
     for revision in &self.revisions {
       validate_frontiers(&revision.frontier, "revision frontier")?;
       validate_version_vector(&revision.version_vector, "revision version vector")?;
+    }
+    for cache in &self.projection_caches {
+      validate_frontiers(&cache.frontier, "projection cache frontier")?;
+      decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
+    }
+    for thumbnail in &self.thumbnails {
+      validate_frontiers(&thumbnail.frontier, "thumbnail frontier")?;
+      if thumbnail.bytes.is_empty() || thumbnail.mime_type.is_empty() {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid empty thumbnail chunk"));
+      }
+      if let Some(revision_id) = thumbnail.revision_id
+        && !self.revisions.iter().any(|revision| revision.revision_id == revision_id)
+      {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "thumbnail references an unknown revision"));
+      }
     }
     if self
       .loro_update_segments
@@ -502,6 +834,59 @@ impl DocumentPackage {
       .any(|asset| asset.content_hash != blake3_hash(&asset.bytes) || asset.byte_length != asset.bytes.len() as u64)
     {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "asset hash or length mismatch"));
+    }
+    self.validate_manifest_indexes()?;
+    self.load_loro_doc_unvalidated()?;
+    Ok(())
+  }
+
+  pub fn rebuild_projection_cache_from_loro(&mut self, doc: &LoroDoc) -> io::Result<()> {
+    doc.commit();
+    let frontier = encode_frontiers(&doc.state_frontiers());
+    let projection = crate::loro_projection::projection_blocks_from_loro(doc)?;
+    self.projection_caches.clear();
+    self.projection_caches.push(ProjectionCacheChunk {
+      frontier: frontier.clone(),
+      bytes: encode_chunk(&projection, "projection cache payload")?,
+    });
+    self.manifest.projection_cache_frontier = Some(frontier);
+    self.manifest.modified_at_unix_secs = unix_time_secs();
+    self.validate()?;
+    Ok(())
+  }
+
+  pub fn current_projection_document(&self) -> io::Result<Option<crate::DocumentProjection>> {
+    let Some(frontier) = self.manifest.projection_cache_frontier.as_deref() else {
+      return Ok(None);
+    };
+    if frontier != self.manifest.latest_frontier.as_slice() {
+      return Ok(None);
+    }
+    let Some(cache) = self.projection_caches.iter().find(|cache| cache.frontier == frontier) else {
+      return Ok(None);
+    };
+    let projection = decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
+    let mut document = crate::loro_projection::document_from_projection_blocks(projection);
+    document.frontier = frontier.to_vec();
+    Ok(Some(document))
+  }
+
+  fn validate_manifest_indexes(&self) -> io::Result<()> {
+    if self.manifest.update_segment_index.len() != self.loro_update_segments.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest update segment index length mismatch"));
+    }
+    for (index, segment) in self.manifest.update_segment_index.iter().zip(&self.loro_update_segments) {
+      if index.id != segment.segment_id || index.checksum != segment.checksum || index.byte_length != segment.bytes.len() as u64 {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest update segment index mismatch"));
+      }
+    }
+    if self.manifest.asset_index.len() != self.assets.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest asset index length mismatch"));
+    }
+    for (index, asset) in self.manifest.asset_index.iter().zip(&self.assets) {
+      if index.id != asset.asset_id || index.checksum != asset.content_hash || index.byte_length != asset.byte_length {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest asset index mismatch"));
+      }
     }
     Ok(())
   }
@@ -693,25 +1078,170 @@ fn write_u64(bytes: &mut Vec<u8>, value: u64) {
   bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+fn file_has_journal_header(path: &Path) -> io::Result<bool> {
+  let mut file = match fs::File::open(path) {
+    Ok(file) => file,
+    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+    Err(error) => return Err(error),
+  };
+  let mut magic = [0_u8; 16];
+  match file.read_exact(&mut magic) {
+    Ok(()) => Ok(&magic == JOURNAL_MAGIC),
+    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => Ok(false),
+    Err(error) => Err(error),
+  }
+}
+
+fn append_journal_transaction(path: &Path, payload: &[u8]) -> io::Result<()> {
+  let parent = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .unwrap_or_else(|| Path::new("."));
+  fs::create_dir_all(parent)?;
+  let existing = fs::read(path)?;
+  let (_, committed_end) = committed_journal_transactions(&existing)?;
+  let mut file = OpenOptions::new().read(true).write(true).open(path)?;
+  if committed_end != existing.len() {
+    file.set_len(committed_end as u64)?;
+  }
+  file.seek(SeekFrom::End(0))?;
+  let mut bytes = Vec::with_capacity(journal_transaction_len(payload.len()));
+  append_journal_transaction_bytes(&mut bytes, payload);
+  file.write_all(&bytes)?;
+  file.sync_all()
+}
+
+fn append_journal_transaction_bytes(bytes: &mut Vec<u8>, payload: &[u8]) {
+  bytes.extend_from_slice(JOURNAL_TXN_MAGIC);
+  write_u64(bytes, payload.len() as u64);
+  bytes.extend_from_slice(&blake3_hash(payload));
+  bytes.extend_from_slice(payload);
+  bytes.extend_from_slice(JOURNAL_COMMIT_MAGIC);
+}
+
+fn journal_transaction_len(payload_len: usize) -> usize {
+  JOURNAL_TXN_MAGIC.len() + 8 + 32 + payload_len + JOURNAL_COMMIT_MAGIC.len()
+}
+
+fn committed_journal_payloads(bytes: &[u8]) -> io::Result<Vec<&[u8]>> {
+  committed_journal_transactions(bytes).map(|(payloads, _)| payloads)
+}
+
+fn committed_journal_transactions(bytes: &[u8]) -> io::Result<(Vec<&[u8]>, usize)> {
+  if bytes.len() < JOURNAL_MAGIC.len() + 4 || !bytes.starts_with(JOURNAL_MAGIC) {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid Flowstate package journal header"));
+  }
+  let mut cursor = Cursor::new(&bytes[JOURNAL_MAGIC.len()..]);
+  let version = read_u32(&mut cursor)?;
+  if version != JOURNAL_HEADER_VERSION {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package journal version"));
+  }
+  let mut offset = JOURNAL_MAGIC.len() + 4;
+  let mut committed = Vec::new();
+  while offset < bytes.len() {
+    let fixed_len = JOURNAL_TXN_MAGIC.len() + 8 + 32;
+    if bytes.len().saturating_sub(offset) < fixed_len {
+      break;
+    }
+    if &bytes[offset..offset + JOURNAL_TXN_MAGIC.len()] != JOURNAL_TXN_MAGIC {
+      break;
+    }
+    offset += JOURNAL_TXN_MAGIC.len();
+    let payload_len = u64::from_le_bytes(
+      bytes[offset..offset + 8]
+        .try_into()
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Flowstate journal transaction length"))?,
+    );
+    offset += 8;
+    let checksum: [u8; 32] = bytes[offset..offset + 32]
+      .try_into()
+      .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid Flowstate journal transaction checksum"))?;
+    offset += 32;
+    let payload_len = usize::try_from(payload_len)
+      .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "Flowstate journal transaction length overflows usize"))?;
+    let payload_end = match offset.checked_add(payload_len) {
+      Some(end) => end,
+      None => break,
+    };
+    let commit_end = match payload_end.checked_add(JOURNAL_COMMIT_MAGIC.len()) {
+      Some(end) => end,
+      None => break,
+    };
+    if commit_end > bytes.len() {
+      break;
+    }
+    if &bytes[payload_end..commit_end] != JOURNAL_COMMIT_MAGIC {
+      break;
+    }
+    let payload = &bytes[offset..payload_end];
+    if blake3_hash(payload) != checksum {
+      break;
+    }
+    committed.push(payload);
+    offset = commit_end;
+  }
+  if committed.is_empty() {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "Flowstate package journal has no complete transaction",
+    ));
+  }
+  Ok((committed, offset))
+}
+
+fn write_journal_generation(path: &Path, payload: &[u8]) -> io::Result<()> {
+  let mut bytes = Vec::with_capacity(JOURNAL_MAGIC.len() + 4 + journal_transaction_len(payload.len()));
+  bytes.extend_from_slice(JOURNAL_MAGIC);
+  write_u32(&mut bytes, JOURNAL_HEADER_VERSION);
+  append_journal_transaction_bytes(&mut bytes, payload);
+  write_bytes_atomic(path, &bytes)
+}
+
+fn encode_journal_delta(delta: &PackageJournalDelta) -> io::Result<Vec<u8>> {
+  let encoded = encode_chunk(delta, "package journal delta")?;
+  let mut payload = Vec::with_capacity(JOURNAL_DELTA_MAGIC.len() + encoded.len());
+  payload.extend_from_slice(JOURNAL_DELTA_MAGIC);
+  payload.extend_from_slice(&encoded);
+  Ok(payload)
+}
+
+fn decode_journal_delta(payload: &[u8]) -> io::Result<PackageJournalDelta> {
+  let encoded = payload
+    .strip_prefix(JOURNAL_DELTA_MAGIC)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "unknown Flowstate package journal transaction"))?;
+  decode_chunk(encoded, "package journal delta")
+}
+
+fn package_map_string(map: &loro::LoroMap, key: &str) -> Option<String> {
+  match map.get(key)? {
+    ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
+    _ => None,
+  }
+}
+
+fn package_map_binary(map: &loro::LoroMap, key: &str) -> Option<Vec<u8>> {
+  match map.get(key)? {
+    ValueOrContainer::Value(LoroValue::Binary(value)) => Some(value.to_vec()),
+    _ => None,
+  }
+}
+
+fn package_map_i64(map: &loro::LoroMap, key: &str) -> Option<i64> {
+  match map.get(key)? {
+    ValueOrContainer::Value(LoroValue::I64(value)) => Some(value),
+    _ => None,
+  }
+}
+
 fn write_bytes_atomic(path: &Path, bytes: &[u8]) -> io::Result<()> {
   let parent = path
     .parent()
     .filter(|p| !p.as_os_str().is_empty())
     .unwrap_or_else(|| Path::new("."));
   fs::create_dir_all(parent)?;
-  let mut temp = NamedTempFile::new_in(parent)?;
-  temp.write_all(bytes)?;
-  temp.as_file_mut().sync_all()?;
-  let temp_path = temp.into_temp_path();
-  #[cfg(target_os = "windows")]
-  {
-    match fs::remove_file(path) {
-      Ok(()) => {},
-      Err(error) if error.kind() == io::ErrorKind::NotFound => {},
-      Err(error) => return Err(error),
-    }
-  }
-  temp_path.persist(path).map_err(|error| error.error)
+  atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
+    .write(|file| file.write_all(bytes))
+    .map_err(Into::into)
 }
 
 #[cfg(test)]
@@ -722,7 +1252,7 @@ mod tests {
   use crate::{
     AssetId, AssetRecord, Block, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax,
     InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
-    InputTableRow, InputTableStyle, RunStyles, TableCellBlock, document_from_loro, document_to_loro, document_to_loro_db8_bytes,
+    InputTableRow, InputTableStyle, RunStyles, TableCellBlock, document_from_loro, document_to_loro,
     loro_schema::{body_text, new_loro_document},
     read_db8_bytes,
   };
@@ -738,10 +1268,14 @@ mod tests {
     let package = DocumentPackage::from_bytes(&bytes)?;
     assert_eq!(package.manifest.package_format_version, LORO_PACKAGE_FORMAT_VERSION);
     assert_eq!(package.manifest.loro_schema_version, LORO_SCHEMA_VERSION);
-    assert_eq!(package.loro_snapshots.len(), 1);
+    assert_eq!(package.loro_snapshots.len(), 2);
+    assert_eq!(package.manifest.projection_cache_frontier.as_deref(), Some(package.manifest.latest_frontier.as_slice()));
+    assert_eq!(package.projection_caches.len(), 1);
 
     let loaded = package.load_loro_doc()?;
     assert_eq!(body_text(&loaded).to_string(), "\nHello Loro");
+    let projected = package.current_projection_document()?.expect("projection cache");
+    assert_eq!(crate::paragraph_text(&projected, 0), "Hello Loro");
     Ok(())
   }
 
@@ -771,7 +1305,9 @@ mod tests {
         }],
       })],
     );
-    let bytes = document_to_loro_db8_bytes(&source, "Public facade")?;
+    let doc = document_to_loro(&source, "Public facade").map_err(loro_test_error)?;
+    let bytes = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Public facade", crate::loro_import::assets_from_document(&source))?
+      .to_bytes()?;
     let package = DocumentPackage::from_bytes(&bytes)?;
     assert_eq!(package.manifest.package_format_version, LORO_PACKAGE_FORMAT_VERSION);
     let projected = read_db8_bytes(&bytes)?;
@@ -791,10 +1327,61 @@ mod tests {
     doc.commit();
     let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+    assert!(package.manifest.projection_cache_frontier.is_none());
+    assert!(package.projection_caches.is_empty());
 
     let bytes = package.to_bytes()?;
     let loaded = DocumentPackage::from_bytes(&bytes)?.load_loro_doc()?;
     assert_eq!(body_text(&loaded).to_string(), "\nafter save");
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_manifest_projection_cache_frontier_without_chunk() -> io::Result<()> {
+    let doc = new_loro_document("Projection cache").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Projection cache")?;
+    package.projection_caches.clear();
+
+    let error = package.validate().expect_err("manifest projection cache frontier must point at a cache chunk");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_manifest_update_segment_index_mismatch() -> io::Result<()> {
+    let doc = new_loro_document("Append").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Append")?;
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+
+    body_text(&doc).insert(1, "update").map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+    package.manifest.update_segment_index[0].byte_length = 0;
+
+    let error = package.validate().expect_err("stale manifest segment index must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_manifest_asset_index_mismatch() -> io::Result<()> {
+    let doc = new_loro_document("Assets").map_err(loro_test_error)?;
+    let bytes = b"asset bytes".to_vec();
+    let asset = AssetChunk {
+      asset_id: 7,
+      content_hash: blake3_hash(&bytes),
+      mime_type: "application/octet-stream".to_string(),
+      byte_length: bytes.len() as u64,
+      bytes,
+      metadata: Vec::new(),
+    };
+    let mut package = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Assets", vec![asset])?;
+    package.manifest.asset_index[0].checksum = [0; 32];
+
+    let error = package.validate().expect_err("stale manifest asset index must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
 
@@ -822,6 +1409,35 @@ mod tests {
     assert_eq!(body_text(&second_doc).to_string(), "\nafter");
     let latest_doc = package.load_loro_doc()?;
     assert_eq!(body_text(&latest_doc).to_string(), "\nafter");
+    Ok(())
+  }
+
+  #[test]
+  fn package_compacts_update_segments_after_threshold() -> io::Result<()> {
+    let doc = new_loro_document("Auto compact").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Auto compact")?;
+    let initial_revision = package.create_named_revision(&doc, "Blank", "Before edits", None, None)?;
+
+    for text in ["one", " two"] {
+      let from_frontier = doc.state_frontiers();
+      let from_vv = doc.state_vv();
+      body_text(&doc)
+        .insert(body_text(&doc).len_unicode(), text)
+        .map_err(loro_test_error)?;
+      doc.commit();
+      let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+      package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+    }
+
+    assert_eq!(package.loro_update_segments.len(), 2);
+    let snapshot_id = package.compact_update_segments_if_needed(&doc, 1)?;
+    assert!(snapshot_id.is_some());
+    assert!(package.loro_update_segments.is_empty());
+
+    let latest_doc = package.load_loro_doc()?;
+    assert_eq!(body_text(&latest_doc).to_string(), "\none two");
+    let revision_doc = package.load_revision_loro_doc(initial_revision)?;
+    assert_eq!(body_text(&revision_doc).to_string(), "\n");
     Ok(())
   }
 
@@ -1126,7 +1742,10 @@ mod tests {
       },
     );
 
-    let loaded = read_db8_bytes(&document_to_loro_db8_bytes(&source, "Structured")?)?;
+    let doc = document_to_loro(&source, "Structured").map_err(loro_test_error)?;
+    let bytes = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Structured", crate::loro_import::assets_from_document(&source))?
+      .to_bytes()?;
+    let loaded = read_db8_bytes(&bytes)?;
     assert_eq!(crate::paragraph_text(&loaded, 0), "before");
     assert_eq!(loaded.assets.assets.get(&asset_id).map(|asset| asset.bytes.as_ref().clone()), Some(asset_bytes));
 

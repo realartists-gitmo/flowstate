@@ -3,7 +3,7 @@ use docx_rs::{
   TableRow as DocxTableRow,
 };
 use flowstate_document::{
-  Block, Document, DocumentTheme, EquationBlock, HighlightStyle, ImageBlock, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles,
+  Block, DocumentProjection, DocumentTheme, EquationBlock, HighlightStyle, ImageBlock, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles,
   SOFT_LINE_BREAK, TableBlock, TableCellBlock, TableCellParagraph, document_text_slice,
 };
 
@@ -13,7 +13,7 @@ use super::{
 };
 
 #[hotpath::measure]
-pub(super) fn add_block(docx: Docx, document: &Document, block: &Block, theme: &DocumentTheme) -> Docx {
+pub(super) fn add_block(docx: Docx, document: &DocumentProjection, block: &Block, theme: &DocumentTheme) -> Docx {
   match block {
     Block::Paragraph(paragraph) => docx.add_paragraph(export_document_paragraph(document, paragraph, theme)),
     Block::Table(table) => docx.add_table(export_table(table, theme)),
@@ -23,7 +23,7 @@ pub(super) fn add_block(docx: Docx, document: &Document, block: &Block, theme: &
 }
 
 #[hotpath::measure]
-fn export_document_paragraph(document: &Document, paragraph: &Paragraph, theme: &DocumentTheme) -> DocxParagraph {
+fn export_document_paragraph(document: &DocumentProjection, paragraph: &Paragraph, theme: &DocumentTheme) -> DocxParagraph {
   let text = document_text_slice(document, paragraph.byte_range.clone());
   export_paragraph_with_text(paragraph, &text, theme)
 }
@@ -149,7 +149,7 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme) -> DocxTable {
 }
 
 #[hotpath::measure]
-fn placeholder_paragraph_for_image(document: &Document, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
+fn placeholder_paragraph_for_image(document: &DocumentProjection, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
   let mut text = image.alt_text.to_string();
   if text.trim().is_empty()
     && let Some(asset) = document.assets.assets.get(&image.asset_id)

@@ -151,11 +151,28 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(drag.block_ix),
-      block_ix: drag.block_ix,
-      after: input_block_from_block(&Block::Image(after.clone())),
-    }];
+    let after_block = Block::Image(after.clone());
+    let semantic_commands = match (self.semantic_block_id(drag.block_ix), input_block_from_block(&after_block)) {
+      (Some(image_id), InputBlock::Image(image)) => vec![SemanticEditCommand::SetImageLayout {
+        image: image_id,
+        sizing: image.sizing,
+        alignment: image.alignment,
+      }],
+      (None, _) => {
+        eprintln!(
+          "skipping image resize semantic command because projection block {} has no durable id",
+          drag.block_ix
+        );
+        Vec::new()
+      },
+      (Some(image_id), _) => {
+        eprintln!(
+          "skipping image resize semantic command because projection block {} ({image_id:?}) is no longer an image",
+          drag.block_ix
+        );
+        Vec::new()
+      },
+    };
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
@@ -195,13 +212,48 @@ impl RichTextEditor {
       return;
     };
     let alt_text = alt_text.into();
-    self.edit_selected_image(block_ix, cx, |image| {
+    let semantic_alt_text = alt_text.to_string();
+    self.edit_selected_image_with_semantic(block_ix, cx, |image| {
       image.alt_text = alt_text;
       image.version = image.version.wrapping_add(1);
+    }, |editor, block_ix, _after| {
+      if let Some(image_id) = editor.semantic_block_id(block_ix) {
+        vec![SemanticEditCommand::ReplaceImageAltText {
+          image: image_id,
+          text: semantic_alt_text,
+        }]
+      } else {
+        eprintln!("skipping image alt-text semantic command because projection block {block_ix} has no durable id");
+        Vec::new()
+      }
     });
   }
 
   fn edit_selected_image(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut ImageBlock)) {
+    self.edit_selected_image_with_semantic(block_ix, cx, update, |editor, block_ix, after| {
+      let Some(image_id) = editor.semantic_block_id(block_ix) else {
+        eprintln!("skipping image layout semantic command because projection block {block_ix} has no durable id");
+        return Vec::new();
+      };
+      let InputBlock::Image(image) = input_block_from_block(after) else {
+        eprintln!("skipping image layout semantic command because projection block {block_ix} ({image_id:?}) is no longer an image");
+        return Vec::new();
+      };
+      vec![SemanticEditCommand::SetImageLayout {
+        image: image_id,
+        sizing: image.sizing,
+        alignment: image.alignment,
+      }]
+    });
+  }
+
+  fn edit_selected_image_with_semantic(
+    &mut self,
+    block_ix: usize,
+    cx: &mut Context<Self>,
+    update: impl FnOnce(&mut ImageBlock),
+    semantic_commands: impl FnOnce(&Self, usize, &Block) -> Vec<SemanticEditCommand>,
+  ) {
     let Some(Block::Image(image)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
@@ -218,11 +270,7 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(block_ix),
-      block_ix,
-      after: input_block_from_block(&after),
-    }];
+    let semantic_commands = semantic_commands(self, block_ix, &after);
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
@@ -271,8 +319,14 @@ impl RichTextEditor {
         version: 0,
       }));
     }
-    self.insert_blocks_after_caret_without_history(blocks, cx);
-    self.push_replace_document_history(before_document, before_selection, cx);
+    let inserted_range = self.insert_blocks_after_caret_without_history(blocks, cx);
+    let semantic_commands = self.insert_block_semantic_commands(&before_document, &before_selection, inserted_range);
+    self.push_document_snapshot_history(
+      before_document,
+      before_selection,
+      semantic_commands.unwrap_or_default(),
+      cx,
+    );
   }
 
   pub fn prompt_insert_image(&mut self, cx: &mut Context<Self>) {

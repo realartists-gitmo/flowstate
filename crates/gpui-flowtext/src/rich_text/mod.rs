@@ -1,4 +1,4 @@
-// Submodules. Document model, edit helpers, persistence, demo builders, and
+// Submodules. DocumentProjection model, edit helpers, persistence, demo builders, and
 // collaboration IDs live at the crate root; this module exposes the reusable
 // GPUI rich-text editor and rendering internals.
 mod benchmarks;

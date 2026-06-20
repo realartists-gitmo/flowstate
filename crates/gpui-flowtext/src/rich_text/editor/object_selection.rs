@@ -32,6 +32,23 @@ impl RichTextEditor {
     self.select_block(BlockSelection::Equation(block_ix), cx);
   }
 
+  #[cfg(test)]
+  pub(super) fn select_image_block_for_test(&mut self, block_ix: usize, cx: &mut Context<Self>) {
+    self.select_block(BlockSelection::Image(block_ix), cx);
+  }
+
+  #[cfg(test)]
+  pub(super) fn select_table_cell_for_test(&mut self, block_ix: usize, row_ix: usize, cell_ix: usize, cx: &mut Context<Self>) {
+    self.select_block(BlockSelection::TableCell { block_ix, row_ix, cell_ix }, cx);
+  }
+
+  #[cfg(test)]
+  pub(super) fn set_text_selection_for_test(&mut self, anchor: DocumentOffset, head: DocumentOffset, cx: &mut Context<Self>) {
+    self.selected_block = None;
+    self.selection = EditorSelection { anchor, head };
+    cx.notify();
+  }
+
   fn select_block_from_click(
     &mut self,
     block_ix: usize,
@@ -242,11 +259,25 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(drag.block_ix),
-      block_ix: drag.block_ix,
-      after: input_block_from_block(&Block::Table(after.clone())),
-    }];
+    let semantic_commands = if let Some(table_id) = self.semantic_block_id(drag.block_ix) {
+      after
+        .column_widths
+        .iter()
+        .enumerate()
+        .filter(|(column_ix, width)| drag.before.column_widths.get(*column_ix) != Some(*width))
+        .map(|(column_ix, width)| SemanticEditCommand::SetTableColumnWidth {
+          table: table_id,
+          column_ix,
+          width: input_table_column_width_from_table_column_width(width),
+        })
+        .collect::<Vec<_>>()
+    } else {
+      eprintln!(
+        "skipping table column resize semantic command because projection block {} has no durable id",
+        drag.block_ix
+      );
+      Vec::new()
+    };
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
@@ -439,6 +470,17 @@ impl RichTextEditor {
     if object_indices.is_empty() {
       return false;
     }
+    let mut object_delete_commands = Vec::with_capacity(object_indices.len());
+    for block_ix in object_indices.iter().copied() {
+      if let Some(block) = self.semantic_block_id(block_ix) {
+        object_delete_commands.push(SemanticEditCommand::DeleteBlock { block });
+      } else {
+        eprintln!("skipping selected-object deletion semantic command because projection block {block_ix} has no durable id");
+      }
+    }
+    let before_paragraph_count = self.document.paragraphs.len();
+    let before_range = range.start.paragraph..(range.end.paragraph + 1).min(before_paragraph_count);
+    let before_span = capture_document_span(&self.document, before_range);
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
     {
@@ -454,19 +496,52 @@ impl RichTextEditor {
     }
     self.delete_selection_internal();
     let after_document = self.document.clone();
+    let paragraph_delta = self.document.paragraphs.len() as isize - before_paragraph_count as isize;
+    let after_count = before_span
+      .paragraphs
+      .len()
+      .saturating_add_signed(paragraph_delta)
+      .min(
+        self
+          .document
+          .paragraphs
+          .len()
+          .saturating_sub(before_span.start_paragraph),
+      );
+    let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceDocument];
+    let mut semantic_commands = object_delete_commands;
+    if before_span != after_span {
+      semantic_commands.push(SemanticEditCommand::ReplaceParagraphSpan {
+        start: Some(DocumentOffset {
+          paragraph: before_span.start_paragraph,
+          byte: 0,
+        }),
+        before: before_span,
+        after: after_span,
+      });
+    }
+    let runtime_owned = self.suppress_collab_capture == 0
+      && !semantic_commands.is_empty()
+      && (self.collab_capture || self.runtime_capture);
+    if runtime_owned {
+      self.pending_projection_rollback = Some(before_document.clone());
+    }
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: vec![EditOperation::ReplaceDocument {
-        before: Box::new(before_document),
-        after: Box::new(after_document),
-      }],
+      operations: if runtime_owned {
+        Vec::new()
+      } else {
+        vec![EditOperation::RestoreProjectionSnapshot {
+          before: Box::new(before_document),
+          after: Box::new(after_document),
+        }]
+      },
       semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
@@ -492,7 +567,7 @@ impl RichTextEditor {
     if block_ix >= self.document.blocks.len() {
       return false;
     }
-    let block_id = self.identity_map.block_id(block_ix);
+    let block_id = self.semantic_block_id(block_ix);
     let blocks = Arc::make_mut(&mut self.document.blocks);
     if matches!(blocks.get(block_ix), Some(Block::Paragraph(_))) {
       return false;
@@ -504,7 +579,10 @@ impl RichTextEditor {
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let semantic_commands = block_id.map_or_else(
-      || vec![SemanticEditCommand::ReplaceDocument],
+      || {
+        eprintln!("skipping selected-block deletion semantic command because projection block {block_ix} has no durable id");
+        Vec::new()
+      },
       |block| vec![SemanticEditCommand::DeleteBlock { block }],
     );
     self.undo_stack.push(EditRecord {

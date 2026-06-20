@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<RunRect> {
+pub(super) fn rects_for_line(document: &DocumentProjection, line: &LaidOutLine) -> Vec<RunRect> {
   let mut backgrounds = Vec::new();
   let mut borders = Vec::new();
   let text_top = line.baseline_y() - line.ascent;
@@ -148,7 +148,7 @@ pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, t
 }
 
 #[hotpath::measure]
-pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
+pub(super) fn underlines_for_line(document: &DocumentProjection, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
   let mut underlines = Vec::with_capacity(line.segments.len().saturating_mul(2));
   let baseline = line.baseline_y();
   for segment in &line.segments {
@@ -188,7 +188,7 @@ pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &
 }
 
 #[hotpath::measure]
-pub(super) fn strikethroughs_for_line(document: &Document, line: &LaidOutLine) -> Vec<Decoration> {
+pub(super) fn strikethroughs_for_line(document: &DocumentProjection, line: &LaidOutLine) -> Vec<Decoration> {
   let baseline = line.baseline_y();
   let mut decorations = Vec::with_capacity(line.segments.len());
   for segment in &line.segments {
@@ -271,7 +271,7 @@ fn same_color(a: Hsla, b: Hsla) -> bool {
 }
 
 #[hotpath::measure]
-pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &Document, cx: &mut App) -> (Pixels, Pixels) {
+pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &DocumentProjection, cx: &mut App) -> (Pixels, Pixels) {
   // GPUI exposes glyph bounds in font coordinates. For Calibri, the
   // underscore bbox is below the baseline. The origin is the lower
   // edge of the glyph box on this metric path; Word positions an
@@ -297,7 +297,7 @@ pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, doc
 }
 
 #[hotpath::measure]
-pub(super) fn double_underline_metrics_for_segment(document: &Document) -> (Pixels, Pixels) {
+pub(super) fn double_underline_metrics_for_segment(document: &DocumentProjection) -> (Pixels, Pixels) {
   (document.theme.double_underline_top_from_baseline, document.theme.underline_rule_thickness)
 }
 

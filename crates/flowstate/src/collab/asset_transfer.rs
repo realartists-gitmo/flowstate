@@ -1,10 +1,8 @@
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, ensure};
-use flowstate_collab::net::NetCommand;
-use flowstate_document::{ROOT, loro_schema::ASSETS_BY_ID};
+use anyhow::{Result, ensure};
+use flowstate_collab::{crdt_runtime::RuntimeAssetMetadata, net::NetCommand};
 use gpui::{Context, SharedString};
-use loro::{Container, LoroValue, ValueOrContainer};
 
 use crate::rich_text_element::{AssetId, AssetRecord};
 
@@ -19,18 +17,31 @@ pub(super) fn schedule_missing_assets(
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because editor is missing");
     return;
   };
-  let Some(runtime) = &session.runtime else {
+  let Some(runtime) = session.runtime.clone() else {
     tracing::trace!(session = %session.session, preferred_peer = ?preferred_peer, "skipping collaboration asset scan because Loro doc is missing");
     return;
   };
+  let session_id = session.session;
+  cx.spawn(async move |session, cx| {
+    let result = runtime.asset_metadata().await;
+    let _ = session.update(cx, |session, cx| match result {
+      Ok(assets) => schedule_missing_assets_from_metadata(session, editor, preferred_peer, assets, cx),
+      Err(error) => {
+        tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration asset scan failed");
+      },
+    });
+  })
+  .detach();
+}
 
-  let assets = match image_assets_in_loro(runtime.doc()) {
-    Ok(assets) => assets,
-    Err(error) => {
-      tracing::warn!(session = %session.session, error = %format_args!("{error:#}"), "collaboration asset scan failed");
-      return;
-    },
-  };
+fn schedule_missing_assets_from_metadata(
+  session: &mut CollabSession,
+  editor: gpui::Entity<crate::rich_text_element::RichTextEditor>,
+  preferred_peer: Option<flowstate_collab::ids::PeerId>,
+  assets: Vec<RuntimeAssetMetadata>,
+  cx: &mut Context<CollabSession>,
+) {
+  let assets = assets.into_iter().map(ImageAssetMeta::from).collect::<Vec<_>>();
   tracing::trace!(session = %session.session, assets = assets.len(), "scanned collaboration image assets");
   if assets.is_empty() {
     return;
@@ -128,8 +139,20 @@ struct ImageAssetMeta {
   asset_id: u128,
   mime: String,
   original_name: Option<String>,
-  content_hash: u64,
+  content_hash: [u8; 32],
   byte_len: u64,
+}
+
+impl From<RuntimeAssetMetadata> for ImageAssetMeta {
+  fn from(value: RuntimeAssetMetadata) -> Self {
+    Self {
+      asset_id: value.asset_id,
+      mime: value.mime_type,
+      original_name: value.original_name,
+      content_hash: value.content_hash,
+      byte_len: value.byte_length,
+    }
+  }
 }
 
 impl ImageAssetMeta {
@@ -138,7 +161,7 @@ impl ImageAssetMeta {
       id: AssetId(self.asset_id),
       mime_type: SharedString::from(self.mime.clone()),
       original_name: self.original_name.clone().map(SharedString::from),
-      content_hash: self.content_hash,
+      content_hash: local_cache_hash(&self.content_hash),
       bytes: Arc::new(Vec::new()),
     }
   }
@@ -151,7 +174,8 @@ impl ImageAssetMeta {
       "validating fetched collaboration asset bytes"
     );
     ensure!(bytes.len() as u64 == self.byte_len, "asset byte length mismatch");
-    let content_hash = AssetRecord::stable_content_hash(&bytes);
+    ensure!(blake3::hash(&bytes).as_bytes() == &self.content_hash, "asset BLAKE3 digest mismatch");
+    let content_hash = local_cache_hash(&self.content_hash);
     Ok(AssetRecord {
       id: AssetId(self.asset_id),
       mime_type: SharedString::from(self.mime.clone()),
@@ -162,49 +186,6 @@ impl ImageAssetMeta {
   }
 }
 
-fn image_assets_in_loro(doc: &loro::LoroDoc) -> Result<Vec<ImageAssetMeta>> {
-  let root = doc.get_map(ROOT);
-  let Some(ValueOrContainer::Container(Container::Map(assets_by_id))) = root.get(ASSETS_BY_ID) else {
-    return Ok(Vec::new());
-  };
-  let mut assets = Vec::new();
-  for key in assets_by_id.keys() {
-    let Some(ValueOrContainer::Container(Container::Map(map))) = assets_by_id.get(&key) else {
-      continue;
-    };
-    let Some(asset_id) = loro_map_string(&map, "asset_id") else {
-      continue;
-    };
-    let asset_id = asset_id
-      .parse::<u128>()
-      .with_context(|| format!("invalid Loro asset id {asset_id}"))?;
-    let mime = loro_map_string(&map, "mime_type").unwrap_or_else(|| "application/octet-stream".to_string());
-    let original_name = loro_map_string(&map, "original_name");
-    let byte_len = loro_map_i64(&map, "byte_length").unwrap_or_default().max(0) as u64;
-    if byte_len == 0 {
-      continue;
-    }
-    assets.push(ImageAssetMeta {
-      asset_id,
-      mime,
-      original_name,
-      content_hash: 0,
-      byte_len,
-    });
-  }
-  Ok(assets)
-}
-
-fn loro_map_string(map: &loro::LoroMap, key: &str) -> Option<String> {
-  match map.get(key) {
-    Some(ValueOrContainer::Value(LoroValue::String(value))) => Some(value.to_string()),
-    _ => None,
-  }
-}
-
-fn loro_map_i64(map: &loro::LoroMap, key: &str) -> Option<i64> {
-  match map.get(key) {
-    Some(ValueOrContainer::Value(LoroValue::I64(value))) => Some(value),
-    _ => None,
-  }
+fn local_cache_hash(content_hash: &[u8; 32]) -> u64 {
+  u64::from_le_bytes(content_hash[..8].try_into().expect("BLAKE3 prefix is exactly eight bytes"))
 }

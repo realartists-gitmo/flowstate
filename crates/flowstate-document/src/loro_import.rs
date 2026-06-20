@@ -1,10 +1,10 @@
 use std::{io, path::Path};
 
 use gpui_flowtext::{
-  Block, BlockAlignment, Document, EquationDisplay, EquationSyntax, HighlightStyle, ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle,
+  Block, BlockAlignment, DocumentProjection, EquationDisplay, EquationSyntax, HighlightStyle, ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle,
   RunStyles, TableBlock, TableCellBlock, TableColumnWidth, paragraph_text,
 };
-use loro::{LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, cursor::Side};
+use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, cursor::Side};
 use uuid::Uuid;
 
 use crate::{
@@ -14,7 +14,7 @@ use crate::{
   loro_schema::{ASSETS_BY_ID, REVISIONS},
 };
 
-pub fn document_to_loro(document: &Document, title: &str) -> io::Result<LoroDoc> {
+pub fn document_to_loro(document: &DocumentProjection, title: &str) -> io::Result<LoroDoc> {
   let doc = crate::new_loro_document(title).map_err(loro_io_error)?;
   replace_body_from_document(&doc, document).map_err(loro_io_error)?;
   import_assets(&doc, document).map_err(loro_io_error)?;
@@ -22,17 +22,12 @@ pub fn document_to_loro(document: &Document, title: &str) -> io::Result<LoroDoc>
   Ok(doc)
 }
 
-pub fn document_to_loro_db8_bytes(document: &Document, title: &str) -> io::Result<Vec<u8>> {
-  let doc = document_to_loro(document, title)?;
-  crate::DocumentPackage::from_loro_snapshot_with_assets(&doc, title, assets_from_document(document))?.to_bytes()
-}
-
-pub fn write_document_as_loro_db8(path: impl AsRef<Path>, document: &Document, title: &str) -> io::Result<()> {
+pub fn write_imported_document_as_loro_db8(path: impl AsRef<Path>, document: &DocumentProjection, title: &str) -> io::Result<()> {
   let doc = document_to_loro(document, title)?;
   crate::DocumentPackage::from_loro_snapshot_with_assets(&doc, title, assets_from_document(document))?.write(path)
 }
 
-fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<()> {
+pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult<()> {
   let root = doc.get_map(ROOT);
   let flows = root.ensure_mergeable_map(FLOWS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
@@ -60,6 +55,11 @@ fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<
         body_text.insert(pos, &OBJECT_REPLACEMENT.to_string())?;
         let block = ensure_block(&blocks, block_id("image", block_ix), "image", BODY_FLOW_ID, &body_text, pos)?;
         block.insert("asset_id", image.asset_id.0.to_string())?;
+        if let Some(asset) = document.assets.assets.get(&image.asset_id) {
+          block.insert("content_hash", blake3::hash(&asset.bytes).to_hex().as_str())?;
+          block.insert("mime_type", asset.mime_type.as_ref())?;
+          block.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
+        }
         block.insert("alt_text_flow_id", nested_flow_id("image_alt", block_ix))?;
         let alt_flow = ensure_flow(&flows, &nested_flow_id("image_alt", block_ix), "alt_text")?;
         replace_text(&alt_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?, image.alt_text.as_ref())?;
@@ -108,11 +108,12 @@ fn replace_body_from_document(doc: &LoroDoc, document: &Document) -> LoroResult<
   Ok(())
 }
 
-fn import_sections(document: &Document, sections: &LoroMap, body_text: &LoroText) -> LoroResult<()> {
+fn import_sections(document: &DocumentProjection, sections: &LoroMap, body_text: &LoroText) -> LoroResult<()> {
   for section in document.sections.iter() {
     let section_id = section.id.0.to_string();
     let section_map = sections.ensure_mergeable_map(&section_id)?;
     section_map.insert("id", section_id.as_str())?;
+    section_map.insert("container_id", section_map.id().to_string())?;
     section_map.insert("start_paragraph_id", section.start_paragraph.0.to_string())?;
     if let Some(parent_id) = section.parent_id {
       section_map.insert("parent_section_id", parent_id.0.to_string())?;
@@ -131,12 +132,13 @@ fn import_sections(document: &Document, sections: &LoroMap, body_text: &LoroText
       section_map.insert("start_cursor", cursor.encode())?;
     }
     let attrs = section_map.ensure_mergeable_map("attrs")?;
+    section_map.insert("attrs_container_id", attrs.id().to_string())?;
     attrs.insert("source", "paragraph_style_outline")?;
   }
   Ok(())
 }
 
-fn paragraph_boundary_unicode_pos(document: &Document, paragraph_ix: usize) -> usize {
+fn paragraph_boundary_unicode_pos(document: &DocumentProjection, paragraph_ix: usize) -> usize {
   let mut pos = 0_usize;
   for ix in 0..paragraph_ix.min(document.paragraphs.len()) {
     pos += paragraph_text(document, ix).chars().count() + 1;
@@ -159,6 +161,7 @@ fn append_paragraph(
   let paragraph_id = block_id("paragraph", paragraph_ix);
   let paragraph_map = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph_map.insert("id", paragraph_id.as_str())?;
+  paragraph_map.insert("container_id", paragraph_map.id().to_string())?;
   paragraph_map.insert("flow_id", flow_id)?;
   if let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Left) {
     paragraph_map.insert("start_cursor", cursor.encode())?;
@@ -166,7 +169,8 @@ fn append_paragraph(
   if let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Right) {
     paragraph_map.insert("boundary_cursor", cursor.encode())?;
   }
-  paragraph_map.ensure_mergeable_map("attrs")?;
+  let attrs = paragraph_map.ensure_mergeable_map("attrs")?;
+  paragraph_map.insert("attrs_container_id", attrs.id().to_string())?;
   ensure_block(blocks, block_id("paragraph_block", block_ix), "paragraph", flow_id, body_text, boundary_pos)?;
   Ok(())
 }
@@ -204,6 +208,14 @@ fn mark_runs(text: &LoroText, start: usize, paragraph_body: &str, runs: &[gpui_f
 }
 
 fn mark_run_styles(text: &LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> LoroResult<()> {
+  for key in [
+    MARK_RUN_SEMANTIC_STYLE,
+    MARK_HIGHLIGHT_STYLE,
+    MARK_DIRECT_UNDERLINE,
+    MARK_STRIKETHROUGH,
+  ] {
+    text.unmark(range.clone(), key)?;
+  }
   if let RunSemanticStyle::Custom(slot) = styles.semantic {
     text.mark(range.clone(), MARK_RUN_SEMANTIC_STYLE, i64::from(slot))?;
   }
@@ -226,6 +238,12 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
   let rows_by_id = table_map.ensure_mergeable_map("rows_by_id")?;
   let columns_by_id = table_map.ensure_mergeable_map("columns_by_id")?;
   let cells_by_id = table_map.ensure_mergeable_map("cells_by_id")?;
+  table_map.insert("container_id", table_map.id().to_string())?;
+  table_map.insert("row_order_container_id", row_order.id().to_string())?;
+  table_map.insert("column_order_container_id", column_order.id().to_string())?;
+  table_map.insert("rows_container_id", rows_by_id.id().to_string())?;
+  table_map.insert("columns_container_id", columns_by_id.id().to_string())?;
+  table_map.insert("cells_container_id", cells_by_id.id().to_string())?;
   table_map.insert("header_row", table.style.header_row)?;
 
   clear_movable_list(&row_order)?;
@@ -249,6 +267,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     column_ids.push(column_id.clone());
     let column = columns_by_id.ensure_mergeable_map(&column_id)?;
     column.insert("id", column_id.as_str())?;
+    column.insert("container_id", column.id().to_string())?;
     column.ensure_mergeable_map("attrs")?;
     match table.column_widths.get(column_ix) {
       Some(TableColumnWidth::Auto) | None => column.insert("width_kind", "auto")?,
@@ -268,6 +287,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     row_order.push(row_id.as_str())?;
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
+    row_map.insert("container_id", row_map.id().to_string())?;
     row_map.ensure_mergeable_map("attrs")?;
     let mut column_ix = 0_usize;
     for (cell_ix, cell) in row.cells.iter().enumerate() {
@@ -275,6 +295,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
       let column_id = &column_ids[column_ix];
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
       cell_map.insert("id", cell_id.as_str())?;
+      cell_map.insert("container_id", cell_map.id().to_string())?;
       cell_map.insert("row_id", row_id.as_str())?;
       cell_map.insert("column_id", column_id.as_str())?;
       cell_map.insert("row_span", i64::from(cell.row_span))?;
@@ -284,10 +305,14 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
       cell_map.insert("flow_id", flow_id.as_str())?;
       let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
       let nested_tables_by_id = cell_map.ensure_mergeable_map("nested_tables_by_id")?;
+      cell_map.insert("nested_table_order_container_id", nested_table_ids.id().to_string())?;
+      cell_map.insert("nested_tables_container_id", nested_tables_by_id.id().to_string())?;
       clear_movable_list(&nested_table_ids)?;
       clear_map(&nested_tables_by_id)?;
       let flow = ensure_flow(flows, &flow_id, "table_cell")?;
       let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
+      cell_map.insert("flow_container_id", flow.id().to_string())?;
+      cell_map.insert("text_container_id", text.id().to_string())?;
       replace_text(&text, SENTINEL_NEWLINE)?;
       for (block_ix, cell_block) in cell.blocks.iter().enumerate() {
         match cell_block {
@@ -299,6 +324,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
             nested_table_ids.push(nested_table_id.as_str())?;
             let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
             nested_map.insert("id", nested_table_id.as_str())?;
+            nested_map.insert("container_id", nested_map.id().to_string())?;
             nested_map.insert("kind", "table")?;
             if let Some(cursor) = text.get_cursor(pos, Side::Left) {
               nested_map.insert("anchor_cursor", cursor.encode())?;
@@ -314,7 +340,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
   Ok(())
 }
 
-fn import_assets(doc: &LoroDoc, document: &Document) -> LoroResult<()> {
+pub fn import_assets(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult<()> {
   let root = doc.get_map(ROOT);
   let assets = root.ensure_mergeable_map(ASSETS_BY_ID)?;
   clear_map(&assets)?;
@@ -323,6 +349,7 @@ fn import_assets(doc: &LoroDoc, document: &Document) -> LoroResult<()> {
     let asset_map = assets.ensure_mergeable_map(&asset_id)?;
     let hash = blake3::hash(&asset.bytes);
     asset_map.insert("asset_id", asset_id.as_str())?;
+    asset_map.insert("container_id", asset_map.id().to_string())?;
     asset_map.insert("content_hash", hash.to_hex().as_str())?;
     asset_map.insert("mime_type", asset.mime_type.as_ref())?;
     asset_map.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
@@ -333,7 +360,7 @@ fn import_assets(doc: &LoroDoc, document: &Document) -> LoroResult<()> {
   Ok(())
 }
 
-pub fn assets_from_document(document: &Document) -> Vec<AssetChunk> {
+pub fn assets_from_document(document: &DocumentProjection) -> Vec<AssetChunk> {
   document
     .assets
     .assets
@@ -363,21 +390,27 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   let flow = flows.ensure_mergeable_map(flow_id)?;
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
-  flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
+  let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
+  let attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
+  flow.insert("container_id", flow.id().to_string())?;
+  flow.insert("text_container_id", text.id().to_string())?;
+  flow.insert("attrs_container_id", attrs.id().to_string())?;
   Ok(flow)
 }
 
 fn ensure_block(blocks: &LoroMap, block_id: String, kind: &str, flow_id: &str, text: &LoroText, pos: usize) -> LoroResult<LoroMap> {
   let block = blocks.ensure_mergeable_map(&block_id)?;
   block.insert("id", block_id.as_str())?;
+  block.insert("container_id", block.id().to_string())?;
   block.insert("kind", kind)?;
   block.insert("flow_id", flow_id)?;
   if let Some(cursor) = text.get_cursor(pos, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  block.ensure_mergeable_map("attrs")?;
-  block.ensure_mergeable_map("nested_refs")?;
+  let attrs = block.ensure_mergeable_map("attrs")?;
+  let nested_refs = block.ensure_mergeable_map("nested_refs")?;
+  block.insert("attrs_container_id", attrs.id().to_string())?;
+  block.insert("nested_refs_container_id", nested_refs.id().to_string())?;
   Ok(block)
 }
 
@@ -407,7 +440,7 @@ fn clear_movable_list(list: &LoroMovableList) -> LoroResult<()> {
 fn paragraph_style_value(style: ParagraphStyle) -> i64 {
   match style {
     ParagraphStyle::Normal => 0,
-    ParagraphStyle::Custom(slot) => i64::from(slot),
+    ParagraphStyle::Custom(slot) => i64::from(slot) + 1,
   }
 }
 
@@ -442,4 +475,28 @@ fn equation_display_name(display: EquationDisplay) -> &'static str {
 
 fn loro_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, error)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn custom_paragraph_style_slot_zero_round_trips() -> io::Result<()> {
+    let source = gpui_flowtext::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![gpui_flowtext::InputBlock::Paragraph(gpui_flowtext::InputParagraph {
+        style: ParagraphStyle::Custom(0),
+        runs: vec![gpui_flowtext::InputRun {
+          text: "pocket".to_string(),
+          styles: RunStyles::default(),
+        }],
+      })],
+    );
+
+    let doc = document_to_loro(&source, "Pocket")?;
+    let projected = crate::document_from_loro(&doc)?;
+    assert_eq!(projected.paragraphs[0].style, ParagraphStyle::Custom(0));
+    Ok(())
+  }
 }

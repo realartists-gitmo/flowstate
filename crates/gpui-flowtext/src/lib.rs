@@ -16,7 +16,7 @@ pub use rich_text::*;
 
 pub mod prelude {
   pub use crate::{
-    Document, DocumentTheme, EditorSelection, HighlightStyle, Paragraph, ParagraphStyle, RichTextDocumentElement, RichTextEditor,
+    DocumentProjection, DocumentTheme, EditorSelection, HighlightStyle, Paragraph, ParagraphStyle, RichTextDocumentElement, RichTextEditor,
     RichTextEditorCommand, RunSemanticStyle, RunStyle, RunStyles, TextRun,
   };
 }

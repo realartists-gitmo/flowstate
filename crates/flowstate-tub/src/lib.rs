@@ -9,7 +9,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  Document, DocumentPackage, InputParagraph, InputRun, SearchUnitChunk, document_text_slice, paragraph_byte_range, paragraph_text_len, read_db8,
+  DocumentPackage, DocumentProjection, InputParagraph, InputRun, SearchUnitChunk, document_text_slice, paragraph_byte_range,
+  paragraph_text_len, read_db8,
 };
 use ignore::WalkBuilder;
 use notify::{
@@ -1005,14 +1006,14 @@ fn package_search_unit(file_id: &str, path: &Path, display_path: &str, file_name
   })
 }
 
-fn input_paragraphs_from_document_range(document: &Document, start: usize, end: usize) -> Vec<InputParagraph> {
+fn input_paragraphs_from_document_range(document: &DocumentProjection, start: usize, end: usize) -> Vec<InputParagraph> {
   (start..end.min(document.paragraphs.len()))
     .map(|paragraph_ix| input_paragraph_from_document_range(document, paragraph_ix, 0..paragraph_text_len(&document.paragraphs[paragraph_ix])))
     .filter(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
     .collect()
 }
 
-fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: std::ops::Range<usize>) -> InputParagraph {
+fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: std::ops::Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let start = range.start.min(paragraph_text_len(paragraph));

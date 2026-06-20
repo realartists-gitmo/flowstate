@@ -1,14 +1,23 @@
 #[hotpath::measure]
 #[must_use]
-pub fn selection_run_styles(document: &Document, range: Range<DocumentOffset>) -> Vec<RunStyles> {
+pub fn selection_run_styles(document: &DocumentProjection, range: Range<DocumentOffset>) -> Vec<RunStyles> {
   let mut styles = Vec::new();
-  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+  if document.paragraphs.is_empty() || range.start.paragraph >= document.paragraphs.len() {
+    return styles;
+  }
+  let last_paragraph = range.end.paragraph.min(document.paragraphs.len() - 1);
+  for paragraph_ix in range.start.paragraph..=last_paragraph {
     let paragraph = &document.paragraphs[paragraph_ix];
-    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
-    let end = if paragraph_ix == range.end.paragraph {
-      range.end.byte
+    let paragraph_len = paragraph_text_len(paragraph);
+    let start = if paragraph_ix == range.start.paragraph {
+      range.start.byte.min(paragraph_len)
     } else {
-      paragraph_text_len(paragraph)
+      0
+    };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte.min(paragraph_len)
+    } else {
+      paragraph_len
     };
     let mut offset = 0;
     for run in &paragraph.runs {
@@ -25,20 +34,24 @@ pub fn selection_run_styles(document: &Document, range: Range<DocumentOffset>) -
 
 #[hotpath::measure]
 #[must_use]
-pub fn selection_prefers_direct_underline(document: &Document, range: Range<DocumentOffset>) -> bool {
-  (range.start.paragraph..=range.end.paragraph)
+pub fn selection_prefers_direct_underline(document: &DocumentProjection, range: Range<DocumentOffset>) -> bool {
+  if document.paragraphs.is_empty() || range.start.paragraph >= document.paragraphs.len() {
+    return false;
+  }
+  let last_paragraph = range.end.paragraph.min(document.paragraphs.len() - 1);
+  (range.start.paragraph..=last_paragraph)
     .any(|paragraph_ix| matches!(document.paragraphs[paragraph_ix].style, ParagraphStyle::Custom(3) | ParagraphStyle::Custom(4)))
 }
 
 #[hotpath::measure]
-pub fn selection_all_run_styles(document: &Document, range: Range<DocumentOffset>, predicate: impl Fn(RunStyles) -> bool) -> bool {
+pub fn selection_all_run_styles(document: &DocumentProjection, range: Range<DocumentOffset>, predicate: impl Fn(RunStyles) -> bool) -> bool {
   let styles = selection_run_styles(document, range);
   !styles.is_empty() && styles.into_iter().all(predicate)
 }
 
 #[hotpath::measure]
 #[must_use]
-pub fn selection_all_underline_kind(document: &Document, range: Range<DocumentOffset>, direct: bool) -> bool {
+pub fn selection_all_underline_kind(document: &DocumentProjection, range: Range<DocumentOffset>, direct: bool) -> bool {
   selection_all_run_styles(document, range, |styles| {
     if direct {
       styles.direct_underline
@@ -50,20 +63,29 @@ pub fn selection_all_underline_kind(document: &Document, range: Range<DocumentOf
 
 #[hotpath::measure]
 #[must_use]
-pub fn selection_contains_whole_paragraph(document: &Document, range: Range<DocumentOffset>) -> bool {
-  (range.start.paragraph..=range.end.paragraph).any(|paragraph_ix| {
-    let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
-    let end = if paragraph_ix == range.end.paragraph {
-      range.end.byte
+pub fn selection_contains_whole_paragraph(document: &DocumentProjection, range: Range<DocumentOffset>) -> bool {
+  if document.paragraphs.is_empty() || range.start.paragraph >= document.paragraphs.len() {
+    return false;
+  }
+  let last_paragraph = range.end.paragraph.min(document.paragraphs.len() - 1);
+  (range.start.paragraph..=last_paragraph).any(|paragraph_ix| {
+    let paragraph_len = paragraph_text_len(&document.paragraphs[paragraph_ix]);
+    let start = if paragraph_ix == range.start.paragraph {
+      range.start.byte.min(paragraph_len)
     } else {
-      paragraph_text_len(&document.paragraphs[paragraph_ix])
+      0
     };
-    start == 0 && end == paragraph_text_len(&document.paragraphs[paragraph_ix])
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte.min(paragraph_len)
+    } else {
+      paragraph_len
+    };
+    start == 0 && end == paragraph_len
   })
 }
 
 #[hotpath::measure]
-pub fn clear_whole_paragraph_formatting(document: &mut Document, paragraph_ix: usize) {
+pub fn clear_whole_paragraph_formatting(document: &mut DocumentProjection, paragraph_ix: usize) {
   let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
     return;
   };

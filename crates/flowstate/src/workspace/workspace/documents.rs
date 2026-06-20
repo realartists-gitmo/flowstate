@@ -50,6 +50,8 @@ impl Workspace {
 
     let mut this = Self {
       document_panels: Vec::new(),
+      document_runtimes: HashMap::new(),
+      document_runtime_flush_pending: HashSet::new(),
       flow_panels: Vec::new(),
       active_document_id: None,
       active_editor: None,
@@ -90,6 +92,7 @@ impl Workspace {
       autosave_document_generations: HashMap::new(),
       autosave_flow_in_flight: HashSet::new(),
       collaboration_dialog: None,
+      revision_dialog: None,
       collab_notice_subscriptions: HashMap::new(),
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
@@ -147,19 +150,120 @@ impl Workspace {
 
   fn create_document_panel(
     &mut self,
-    mut document: Document,
+    mut document: DocumentProjection,
     path: Option<PathBuf>,
     title: Option<String>,
+    runtime: Option<flowstate_collab::crdt_runtime::CrdtRuntime>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<DocumentPanel> {
     // DB8 stores style assignments, not style appearance. The render theme is
     // local user preference loaded from app settings.
     document.theme = load_document_theme();
+    let runtime = runtime.and_then(|runtime| match flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime) {
+      Ok(runtime) => Some(runtime),
+      Err(error) => {
+        tracing::error!(error = %error, "failed to start document CRDT runtime actor");
+        None
+      },
+    });
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
     let smart_word_selection = load_smart_word_selection();
+    let runtime_for_editor = runtime.clone();
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);
+      editor.set_runtime_capture(runtime_for_editor.is_some());
+      if let Some(runtime) = runtime_for_editor.clone() {
+        editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
+          let runtime = runtime.clone();
+          Box::pin(async move {
+            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            runtime
+              .apply_editor_commands(commands, assets, selection_after)
+              .await
+              .map_err(runtime_io_error)?;
+            let title = document_package_title_for_path(&path);
+            runtime
+              .checkpoint_package(title, Some(path))
+              .await
+              .map_err(runtime_io_error)?;
+            runtime.projection_snapshot().await.map_err(runtime_io_error)
+          })
+        })));
+      }
+      if let Some(runtime) = runtime_for_editor {
+        editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
+          let runtime = runtime.clone();
+          Box::pin(async move {
+            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            runtime
+              .apply_editor_commands(commands, assets, selection_after)
+              .await
+              .map_err(runtime_io_error)?;
+            match format {
+              crate::rich_text_element::DocumentExportFormat::Native
+              | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
+                let bytes = runtime
+                  .package_bytes(document_package_title_for_path(&path))
+                  .await
+                  .map_err(runtime_io_error)?;
+                write_bytes_to_path(&path, &bytes)?;
+              },
+              crate::rich_text_element::DocumentExportFormat::Docx => {
+                let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+                crate::docx_conversion::write_docx(&path, &document)?;
+              },
+              crate::rich_text_element::DocumentExportFormat::Pdf => {
+                let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+                let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+                crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
+              },
+            };
+            runtime.projection_snapshot().await.map_err(runtime_io_error)
+          })
+        })));
+      }
+      if let Some(runtime) = runtime.clone() {
+        editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
+          let runtime = runtime.clone();
+          Box::pin(async move {
+            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            runtime
+              .apply_editor_commands(commands, assets, selection_after)
+              .await
+              .map_err(runtime_io_error)?;
+            let command = match redirect {
+              crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
+              crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
+            };
+            let events = runtime.command(command).await.map_err(runtime_io_error)?;
+            if events.is_empty() {
+              return Ok(None);
+            }
+            let selection = events.into_iter().find_map(|event| match event {
+              flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
+              _ => None,
+            });
+            let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+            Ok(Some(crate::rich_text_element::NativeUndoResult {
+              document,
+              selection,
+            }))
+          })
+        })));
+      }
+      if let Some(runtime) = runtime.clone() {
+        editor.set_native_recovery_hook(Some(Rc::new(move |path| {
+          let runtime = runtime.clone();
+          Box::pin(async move {
+            let bytes = runtime
+              .package_bytes("Recovery snapshot".to_string())
+              .await
+              .map_err(runtime_io_error)?;
+            write_bytes_to_path(&path, &bytes)
+          })
+        })));
+      }
     });
     let workspace = cx.entity().downgrade();
     let title = title
@@ -177,9 +281,13 @@ impl Workspace {
     }
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
+    if let Some(runtime) = runtime {
+      self.document_runtimes.insert(id, runtime);
+    }
     self.editor_subscriptions.push((
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
+        workspace.schedule_document_runtime_flush(id, editor.clone(), cx);
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
         workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
@@ -190,6 +298,269 @@ impl Workspace {
     self.active_flow = None;
     self.document_panels.push(panel.clone());
     panel
+  }
+
+  pub(crate) fn attach_runtime_to_document_panel(
+    &mut self,
+    panel_id: Uuid,
+    runtime: flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    else {
+      return;
+    };
+    let editor = panel.read(cx).editor();
+    let runtime_capture = crate::collab::session_for_panel(panel_id, cx).is_none();
+    let save_runtime = runtime.clone();
+    let export_runtime = runtime.clone();
+    let undo_runtime = runtime.clone();
+    let recovery_runtime = runtime.clone();
+    editor.update(cx, |editor, _| {
+      editor.set_runtime_capture(runtime_capture);
+      editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
+        let runtime = save_runtime.clone();
+        Box::pin(async move {
+          let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          runtime
+            .apply_editor_commands(commands, assets, selection_after)
+            .await
+            .map_err(runtime_io_error)?;
+          runtime
+            .checkpoint_package(document_package_title_for_path(&path), Some(path))
+            .await
+            .map_err(runtime_io_error)?;
+          runtime.projection_snapshot().await.map_err(runtime_io_error)
+        })
+      })));
+      editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
+        let runtime = export_runtime.clone();
+        Box::pin(async move {
+          let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          runtime
+            .apply_editor_commands(commands, assets, selection_after)
+            .await
+            .map_err(runtime_io_error)?;
+          match format {
+            crate::rich_text_element::DocumentExportFormat::Native
+            | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
+              let bytes = runtime
+                .package_bytes(document_package_title_for_path(&path))
+                .await
+                .map_err(runtime_io_error)?;
+              write_bytes_to_path(&path, &bytes)?;
+            },
+            crate::rich_text_element::DocumentExportFormat::Docx => {
+              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+              crate::docx_conversion::write_docx(&path, &document)?;
+            },
+            crate::rich_text_element::DocumentExportFormat::Pdf => {
+              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+              let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+              crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
+            },
+          };
+          runtime.projection_snapshot().await.map_err(runtime_io_error)
+        })
+      })));
+      if runtime_capture {
+        editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
+          let runtime = undo_runtime.clone();
+          Box::pin(async move {
+            let (commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            runtime
+              .apply_editor_commands(commands, assets, selection_after)
+              .await
+              .map_err(runtime_io_error)?;
+            let command = match redirect {
+              crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
+              crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
+            };
+            let events = runtime.command(command).await.map_err(runtime_io_error)?;
+            if events.is_empty() {
+              return Ok(None);
+            }
+            let selection = events.into_iter().find_map(|event| match event {
+              flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
+              _ => None,
+            });
+            let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+            Ok(Some(crate::rich_text_element::NativeUndoResult {
+              document,
+              selection,
+            }))
+          })
+        })));
+      } else {
+        editor.set_native_undo_hook(None);
+      }
+      editor.set_native_recovery_hook(Some(Rc::new(move |path| {
+        let runtime = recovery_runtime.clone();
+        Box::pin(async move {
+          let bytes = runtime
+            .package_bytes("Recovery snapshot".to_string())
+            .await
+            .map_err(runtime_io_error)?;
+          write_bytes_to_path(&path, &bytes)
+        })
+      })));
+    });
+    self.document_runtimes.insert(panel_id, runtime);
+  }
+
+  pub fn request_document_revisions(
+    &self,
+    panel_id: Uuid,
+    cx: &mut Context<Self>,
+  ) -> Option<async_channel::Receiver<anyhow::Result<Vec<flowstate_collab::crdt_runtime::RuntimeRevisionInfo>>>> {
+    let runtime = self.document_runtimes.get(&panel_id)?.clone();
+    let (tx, rx) = async_channel::bounded(1);
+    cx.spawn(async move |_, _| {
+      let _ = tx.send(runtime.revisions().await).await;
+    })
+    .detach();
+    Some(rx)
+  }
+
+  pub fn open_revision_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(panel_id) = self.active_document_id else {
+      return;
+    };
+    if self.revision_dialog.is_some() {
+      window.close_dialog(cx);
+      self.revision_dialog = None;
+    }
+    let workspace = cx.entity().downgrade();
+    let dialog = cx.new(|cx| crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, cx));
+    let dialog_for_render = dialog.clone();
+    let workspace_for_close = cx.entity().downgrade();
+    window.open_dialog(cx, move |component_dialog, _, _| {
+      let workspace_for_close = workspace_for_close.clone();
+      component_dialog
+        .title("Document Revisions")
+        .w(px(520.0))
+        .max_w(px(520.0))
+        .on_close(move |_, _, cx| {
+          let _ = workspace_for_close.update(cx, |workspace, cx| {
+            workspace.revision_dialog = None;
+            cx.notify();
+          });
+        })
+        .child(dialog_for_render.clone())
+    });
+    dialog.update(cx, |dialog, cx| dialog.focus(window, cx));
+    self.revision_dialog = Some(dialog);
+    cx.notify();
+  }
+
+  pub fn open_document_revision(
+    &mut self,
+    panel_id: Uuid,
+    revision_id: u128,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> bool {
+    let Some(runtime) = self.document_runtimes.get(&panel_id).cloned() else {
+      return false;
+    };
+    let window_handle = window.window_handle();
+    cx.spawn(async move |workspace, cx| {
+      let result = runtime
+        .command(flowstate_collab::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
+        .await;
+      let _ = window_handle.update(cx, |_, window, cx| {
+        let _ = workspace.update(cx, |workspace, cx| match result {
+          Ok(events) => {
+            let fork = events.into_iter().find_map(|event| match event {
+              flowstate_collab::crdt_runtime::RuntimeEvent::RevisionForked {
+                document,
+                package,
+                ..
+              } => Some((*document, *package)),
+              _ => None,
+            });
+            let Some((document, package)) = fork else {
+              tracing::warn!(revision_id, "revision fork command returned no fork payload");
+              return;
+            };
+            let fork_runtime = match flowstate_collab::crdt_runtime::CrdtRuntime::from_package(package, None) {
+              Ok(runtime) => runtime,
+              Err(error) => {
+                tracing::error!(revision_id, error = %format_args!("{error:#}"), "creating revision fork runtime failed");
+                return;
+              },
+            };
+            let panel = workspace.create_document_panel(
+              document,
+              None,
+              Some(format!("Revision {revision_id:x}")),
+              Some(fork_runtime),
+              window,
+              cx,
+            );
+            panel
+              .read(cx)
+              .editor()
+              .update(cx, |editor, cx| editor.mark_as_unsaved_branch(cx));
+          },
+          Err(error) => {
+            tracing::error!(revision_id, error = %format_args!("{error:#}"), "opening document revision failed");
+          },
+        });
+      });
+    })
+    .detach();
+    true
+  }
+
+  fn flush_document_runtime_edits(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    let edits = editor.update(cx, |editor, _| editor.take_pending_runtime_edits());
+    if edits.is_empty() {
+      return;
+    }
+    let Some(runtime) = self.document_runtimes.get(&panel_id).cloned() else {
+      return;
+    };
+    editor.update(cx, |editor, _| editor.begin_runtime_edit());
+    let assets = editor
+      .read(cx)
+      .document()
+      .assets
+      .assets
+      .values()
+      .cloned()
+      .collect();
+    let (commands, selection_after) = flatten_runtime_edit_commands(edits);
+    cx.spawn(async move |workspace, cx| {
+      let result = runtime
+        .apply_editor_commands(commands, assets, selection_after.clone())
+        .await;
+      let _ = workspace.update(cx, |_, cx| match result {
+        Ok(events) => apply_local_runtime_events(&editor, events, selection_after, cx),
+        Err(error) => {
+          tracing::error!(%panel_id, error = %error, "failed to apply editor edits to Loro runtime");
+          editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+        },
+      });
+    })
+    .detach();
+  }
+
+  fn schedule_document_runtime_flush(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    if !self.document_runtimes.contains_key(&panel_id) || !self.document_runtime_flush_pending.insert(panel_id) {
+      return;
+    }
+    cx.spawn(async move |workspace, cx| {
+      Timer::after(Duration::from_millis(DOCUMENT_RUNTIME_FLUSH_DEBOUNCE_MS)).await;
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.document_runtime_flush_pending.remove(&panel_id);
+        workspace.flush_document_runtime_edits(panel_id, editor, cx);
+      });
+    })
+    .detach();
   }
 
   pub fn set_active_document(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
@@ -219,6 +590,8 @@ impl Workspace {
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
     crate::collab::leave_session_for_panel(panel_id, cx);
+    self.document_runtimes.remove(&panel_id);
+    self.document_runtime_flush_pending.remove(&panel_id);
     let closing_active_document = self.active_document_id == Some(panel_id);
     if let Some(panel) = self
       .document_panels
@@ -319,11 +692,16 @@ impl Workspace {
         .spawn(async move { load_workspace_document(path) })
         .await;
       match loaded {
-        Ok(LoadedWorkspaceDocument::Document { document, path, title }) => {
+        Ok(LoadedWorkspaceDocument::Document {
+          document,
+          runtime,
+          path,
+          title,
+        }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.record_recent_document(path_for_recent.clone(), cx);
-              workspace.add_document_panel_with_title(*document, path, title, window, cx);
+              workspace.add_document_panel_with_title(*document, path, title, *runtime, window, cx);
               if let Some(paragraph_ix) = target_paragraph_ix {
                 workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
                 cx.on_next_frame(window, move |workspace, window, cx| {
@@ -469,10 +847,11 @@ impl Workspace {
       let id = match loaded {
         LoadedWorkspaceDocument::Document {
           document,
+          runtime,
           path,
           title,
         } => {
-          let panel = self.create_document_panel(*document, path, title, window, cx);
+          let panel = self.create_document_panel(*document, path, title, Some(*runtime), window, cx);
           let panel_id = panel.read(cx).id();
           panel.update(cx, |panel, _| {
             if !entry.collapsed_outline_items.is_empty() {
@@ -614,21 +993,23 @@ impl Workspace {
     .detach();
   }
 
-  fn add_document_panel(&mut self, document: Document, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_document_panel(document, path, None, window, cx);
+  fn add_document_panel(&mut self, document: DocumentProjection, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    let runtime = document_runtime_from_projection(&document, None);
+    self.create_document_panel(document, path, None, runtime, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
 
   fn add_document_panel_with_title(
     &mut self,
-    document: Document,
+    document: DocumentProjection,
     path: Option<PathBuf>,
     title: Option<String>,
+    runtime: flowstate_collab::crdt_runtime::CrdtRuntime,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    self.create_document_panel(document, path, title, window, cx);
+    self.create_document_panel(document, path, title, Some(runtime), window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -1167,9 +1548,122 @@ fn show_save_failed(window_handle: AnyWindowHandle, cx: &mut gpui::AsyncApp, det
   });
 }
 
+fn document_runtime_from_projection(
+  document: &DocumentProjection,
+  title: Option<&str>,
+) -> Option<flowstate_collab::crdt_runtime::CrdtRuntime> {
+  match flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(document, title.unwrap_or("Flowstate Document")) {
+    Ok(runtime) => Some(runtime),
+    Err(error) => {
+      tracing::error!(error = %error, "failed to create Loro runtime from projected document");
+      None
+    },
+  }
+}
+
+fn document_package_title_for_path(path: &Path) -> String {
+  path
+    .file_name()
+    .map(|name| name.to_string_lossy().to_string())
+    .unwrap_or_else(|| "Flowstate Document".to_string())
+}
+
+fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+  if let Some(parent) = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
+    fs::create_dir_all(parent)?;
+  }
+  atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
+    .write(|file| std::io::Write::write_all(file, bytes))
+    .map_err(Into::into)
+}
+
+fn flatten_runtime_edit_commands(
+  edits: Vec<crate::rich_text_element::CollaborationEdit>,
+) -> (
+  Vec<crate::rich_text_element::SemanticEditCommand>,
+  Option<crate::rich_text_element::EditorSelection>,
+) {
+  let mut commands = Vec::new();
+  let mut selection_after = None;
+  for edit in edits {
+    commands.extend(edit.semantic_commands);
+    if edit.selection_after.is_some() {
+      selection_after = edit.selection_after;
+    }
+  }
+  (coalesce_document_runtime_commands(commands), selection_after)
+}
+
+fn apply_local_runtime_events(
+  editor: &Entity<RichTextEditor>,
+  events: Vec<flowstate_collab::crdt_runtime::RuntimeEvent>,
+  selection_after: Option<crate::rich_text_element::EditorSelection>,
+  cx: &mut Context<Workspace>,
+) {
+  for event in events {
+    match event {
+      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { patches, frontier, .. } => {
+        editor.update(cx, |editor, cx| editor.apply_collab_patches_at_frontier(&patches, frontier, cx));
+      },
+      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { document, .. }
+      | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionOpened { document, .. } => {
+        editor.update(cx, |editor, cx| editor.replace_document_from_collaboration(*document, cx));
+      },
+      flowstate_collab::crdt_runtime::RuntimeEvent::LocalUpdate { .. }
+      | flowstate_collab::crdt_runtime::RuntimeEvent::RemoteUpdateApplied { .. }
+      | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionForked { .. } => {},
+      flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => {
+        editor.update(cx, |editor, cx| editor.restore_runtime_selection(selection, cx));
+      },
+    }
+  }
+  editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
+}
+
+fn coalesce_document_runtime_commands(
+  commands: Vec<crate::rich_text_element::SemanticEditCommand>,
+) -> Vec<crate::rich_text_element::SemanticEditCommand> {
+  let mut coalesced = Vec::new();
+  for command in commands {
+    if let Some(previous) = coalesced.last_mut()
+      && merge_adjacent_runtime_insert_text(previous, &command)
+    {
+      continue;
+    }
+    coalesced.push(command);
+  }
+  coalesced
+}
+
+fn merge_adjacent_runtime_insert_text(
+  previous: &mut crate::rich_text_element::SemanticEditCommand,
+  next: &crate::rich_text_element::SemanticEditCommand,
+) -> bool {
+  let crate::rich_text_element::SemanticEditCommand::InsertText { at, text, styles } = previous else {
+    return false;
+  };
+  let crate::rich_text_element::SemanticEditCommand::InsertText {
+    at: next_at,
+    text: next_text,
+    styles: next_styles,
+  } = next
+  else {
+    return false;
+  };
+  if *styles != *next_styles || at.paragraph != next_at.paragraph || at.byte + text.len() != next_at.byte {
+    return false;
+  }
+  text.push_str(next_text);
+  true
+}
+
 enum LoadedWorkspaceDocument {
   Document {
-    document: Box<Document>,
+    document: Box<DocumentProjection>,
+    runtime: Box<flowstate_collab::crdt_runtime::CrdtRuntime>,
     path: Option<PathBuf>,
     title: Option<String>,
   },
@@ -1190,6 +1684,7 @@ fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, Str
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {
       document: Box::new(loaded.document),
+      runtime: Box::new(loaded.runtime),
       path: loaded.path,
       title: loaded.title,
     })
@@ -1256,7 +1751,7 @@ fn persist_temporary_workspace_session_to_disk(session: TemporaryWorkspaceSessio
 
   match serde_json::to_vec(&session) {
     Ok(bytes) => {
-      if let Err(error) = fs::write(&path, bytes) {
+      if let Err(error) = write_bytes_to_path(&path, &bytes) {
         eprintln!("failed to write temporary workspace session {}: {error}", path.display());
       }
     },
@@ -1267,7 +1762,7 @@ fn persist_temporary_workspace_session_to_disk(session: TemporaryWorkspaceSessio
 }
 
 #[hotpath::measure]
-fn recent_document_preview_document(document: &Document) -> Document {
+fn recent_document_preview_document(document: &DocumentProjection) -> DocumentProjection {
   const MAX_PARAGRAPHS: usize = 12;
   const MAX_CHARS: usize = 2_200;
 

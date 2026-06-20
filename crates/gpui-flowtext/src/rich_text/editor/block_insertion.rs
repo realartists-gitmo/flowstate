@@ -72,11 +72,17 @@ impl RichTextEditor {
         },
       );
     }
-    self.insert_ordered_block_fragment_after_caret(&fragment.blocks, cx);
-    self.push_replace_document_history(before_document, before_selection, cx);
+    let inserted_range = self.insert_ordered_block_fragment_after_caret(&fragment.blocks, cx);
+    let semantic_commands = self.insert_block_semantic_commands(&before_document, &before_selection, inserted_range);
+    self.push_document_snapshot_history(
+      before_document,
+      before_selection,
+      semantic_commands.unwrap_or_default(),
+      cx,
+    );
   }
 
-  fn insert_ordered_block_fragment_after_caret(&mut self, input_blocks: &[InputBlock], cx: &mut Context<Self>) {
+  fn insert_ordered_block_fragment_after_caret(&mut self, input_blocks: &[InputBlock], cx: &mut Context<Self>) -> Range<usize> {
     let remove_empty_caret_paragraph = !input_blocks.iter().any(|block| matches!(block, InputBlock::Paragraph(_)));
     let insert_ix = self.prepare_block_insertion_index(remove_empty_caret_paragraph, cx);
     let insert_paragraph_ix = self
@@ -149,6 +155,7 @@ impl RichTextEditor {
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    insert_ix..insert_ix + input_blocks.len()
   }
 
   fn insert_blocks_after_caret(&mut self, blocks: Vec<Block>, cx: &mut Context<Self>) {
@@ -157,13 +164,19 @@ impl RichTextEditor {
     }
     let before_document = self.document.clone();
     let before_selection = self.selection.clone();
-    self.insert_blocks_after_caret_without_history(blocks, cx);
-    self.push_replace_document_history(before_document, before_selection, cx);
+    let inserted_range = self.insert_blocks_after_caret_without_history(blocks, cx);
+    let semantic_commands = self.insert_block_semantic_commands(&before_document, &before_selection, inserted_range);
+    self.push_document_snapshot_history(
+      before_document,
+      before_selection,
+      semantic_commands.unwrap_or_default(),
+      cx,
+    );
   }
 
-  fn insert_blocks_after_caret_without_history(&mut self, blocks: Vec<Block>, cx: &mut Context<Self>) {
+  fn insert_blocks_after_caret_without_history(&mut self, blocks: Vec<Block>, cx: &mut Context<Self>) -> Range<usize> {
     if blocks.is_empty() {
-      return;
+      return 0..0;
     }
     let remove_empty_caret_paragraph = !blocks.iter().any(|block| matches!(block, Block::Paragraph(_)));
     let insert_ix = self.prepare_block_insertion_index(remove_empty_caret_paragraph, cx);
@@ -178,6 +191,7 @@ impl RichTextEditor {
     self.clear_layout_work_caches();
     self.item_sizes_cache = None;
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
+    insert_ix..insert_ix + inserted_count
   }
 
   fn prepare_block_insertion_index(&mut self, remove_empty_caret_paragraph: bool, cx: &mut Context<Self>) -> usize {
@@ -292,7 +306,133 @@ impl RichTextEditor {
     rebuild_document_sections(&mut self.document);
   }
 
-  fn push_replace_document_history(&mut self, before_document: Document, before_selection: EditorSelection, cx: &mut Context<Self>) {
+  fn insert_block_semantic_commands(
+    &self,
+    before_document: &DocumentProjection,
+    before_selection: &EditorSelection,
+    inserted_range: Range<usize>,
+  ) -> Option<Vec<SemanticEditCommand>> {
+    if inserted_range.is_empty() {
+      return None;
+    }
+
+    let inserted_blocks = self.document.blocks.get(inserted_range.clone())?;
+    let inserted_paragraph_count = inserted_blocks
+      .iter()
+      .filter(|block| matches!(block, Block::Paragraph(_)))
+      .count();
+    let inserted_object_count = inserted_blocks.len() - inserted_paragraph_count;
+    let deleted_object_ids = if before_selection.is_caret() {
+      Vec::new()
+    } else {
+      object_block_ids_in_text_range(before_document, before_selection.normalized())?
+    };
+    let mut commands = Vec::with_capacity(
+      deleted_object_ids.len() + usize::from(inserted_paragraph_count > 0 || !before_selection.is_caret()) + inserted_object_count,
+    );
+    commands.extend(
+      deleted_object_ids
+        .into_iter()
+        .map(|block| SemanticEditCommand::DeleteBlock { block }),
+    );
+
+    if before_selection.is_caret() && inserted_paragraph_count > 0 {
+      let before_paragraph_count = before_document.paragraphs.len();
+      if before_paragraph_count == 0 {
+        return None;
+      }
+      let insert_paragraph_ix = self
+        .document
+        .blocks
+        .iter()
+        .take(inserted_range.start)
+        .filter(|block| matches!(block, Block::Paragraph(_)))
+        .count();
+      let span_start = insert_paragraph_ix.min(before_paragraph_count.saturating_sub(1));
+      let before_span = if insert_paragraph_ix < before_paragraph_count {
+        capture_document_span(before_document, insert_paragraph_ix..insert_paragraph_ix + 1)
+      } else {
+        capture_document_span(before_document, span_start..span_start + 1)
+      };
+      let after_count = inserted_paragraph_count + 1;
+      let after_span = capture_document_span(&self.document, span_start..span_start + after_count);
+      commands.push(SemanticEditCommand::ReplaceParagraphSpan {
+        start: Some(DocumentOffset {
+          paragraph: before_span.start_paragraph,
+          byte: 0,
+        }),
+        before: before_span,
+        after: after_span,
+      });
+    } else if !before_selection.is_caret() {
+      let before_range = before_selection.normalized();
+      let before_paragraph_count = before_document.paragraphs.len();
+      if before_paragraph_count == 0 || before_range.start.paragraph >= before_paragraph_count {
+        return None;
+      }
+      let before_span = capture_document_span(
+        before_document,
+        before_range.start.paragraph..before_range.end.paragraph.saturating_add(1).min(before_paragraph_count),
+      );
+      let paragraph_delta = self.document.paragraphs.len() as isize - before_paragraph_count as isize;
+      let after_count = before_span
+        .paragraphs
+        .len()
+        .saturating_add_signed(paragraph_delta)
+        .min(
+          self
+            .document
+            .paragraphs
+            .len()
+            .saturating_sub(before_span.start_paragraph),
+        );
+      let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
+      if before_span != after_span {
+        commands.push(SemanticEditCommand::ReplaceParagraphSpan {
+          start: Some(DocumentOffset {
+            paragraph: before_span.start_paragraph,
+            byte: 0,
+          }),
+          before: before_span,
+          after: after_span,
+        });
+      }
+    }
+
+    for block_ix in inserted_range {
+      if matches!(self.document.blocks.get(block_ix), Some(Block::Paragraph(_))) {
+        continue;
+      }
+      let block = self.document.ids.block_ids.get(block_ix).copied().or_else(|| {
+        eprintln!("skipping inserted object semantic command because projection block {block_ix} has no durable id");
+        None
+      })?;
+      let after = self
+        .document
+        .blocks
+        .get(block_ix)
+        .map(input_block_from_block)?;
+      commands.push(SemanticEditCommand::InsertBlock {
+        block,
+        block_ix,
+        after,
+      });
+    }
+    (!commands.is_empty()).then_some(commands)
+  }
+
+  #[cfg(test)]
+  pub(super) fn insert_block_fragment_for_test(&mut self, fragment: RichClipboardFragment, cx: &mut Context<Self>) {
+    self.insert_block_fragment(fragment, cx);
+  }
+
+  fn push_document_snapshot_history(
+    &mut self,
+    before_document: DocumentProjection,
+    before_selection: EditorSelection,
+    semantic_commands: Vec<SemanticEditCommand>,
+    cx: &mut Context<Self>,
+  ) {
     if before_document.text == self.document.text
       && before_document.paragraphs == self.document.paragraphs
       && before_document.blocks == self.document.blocks
@@ -303,16 +443,25 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceDocument];
+    let runtime_owned = self.suppress_collab_capture == 0
+      && !semantic_commands.is_empty()
+      && (self.collab_capture || self.runtime_capture);
+    if runtime_owned {
+      self.pending_projection_rollback = Some(before_document.clone());
+    }
     self.undo_stack.push(EditRecord {
       before_selection,
       before_generation,
       after_selection: self.selection.clone(),
       after_generation,
-      operations: vec![EditOperation::ReplaceDocument {
-        before: Box::new(before_document),
-        after: Box::new(self.document.clone()),
-      }],
+      operations: if runtime_owned {
+        Vec::new()
+      } else {
+        vec![EditOperation::RestoreProjectionSnapshot {
+          before: Box::new(before_document),
+          after: Box::new(self.document.clone()),
+        }]
+      },
       semantic_commands: semantic_commands.clone(),
     });
     self.redo_stack.clear();
@@ -325,7 +474,10 @@ impl RichTextEditor {
     if normalized.is_empty() {
       return;
     }
-    let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
+    let Some(paragraph) = self.document.paragraphs.get(self.selection.head.paragraph) else {
+      return;
+    };
+    let paragraph_style = paragraph.style;
     let styles = self.styles_at_caret();
     let fragment = RichClipboardFragment {
       format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
@@ -356,4 +508,20 @@ fn non_empty_input_paragraphs(paragraphs: Vec<InputParagraph>) -> Vec<InputParag
     .into_iter()
     .filter(|paragraph| !paragraph.runs.is_empty())
     .collect()
+}
+
+fn object_block_ids_in_text_range(document: &DocumentProjection, range: Range<DocumentOffset>) -> Option<Vec<BlockId>> {
+  let start_block = block_ix_for_paragraph(document, range.start.paragraph)?;
+  let end_block = block_ix_for_paragraph(document, range.end.paragraph)?;
+  let mut object_ids = Vec::new();
+  for block_ix in (start_block + 1)..end_block {
+    if document
+      .blocks
+      .get(block_ix)
+      .is_some_and(|block| !matches!(block, Block::Paragraph(_)))
+    {
+      object_ids.push(*document.ids.block_ids.get(block_ix)?);
+    }
+  }
+  Some(object_ids)
 }

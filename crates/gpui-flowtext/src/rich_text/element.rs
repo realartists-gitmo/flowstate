@@ -8,14 +8,14 @@ use gpui::{
 use super::*;
 
 pub struct RichTextDocumentElement {
-  pub(super) document: Document,
+  pub(super) document: DocumentProjection,
   pub(super) layout: WordElementLayout,
   pub(super) invisibility_mode: bool,
 }
 
 #[hotpath::measure_all]
 impl RichTextDocumentElement {
-  pub fn new(document: Document) -> Self {
+  pub fn new(document: DocumentProjection) -> Self {
     Self {
       document,
       layout: WordElementLayout::default(),
@@ -493,7 +493,7 @@ fn packed_element_pair(first: usize, second: usize) -> u64 {
 
 #[hotpath::measure]
 pub(super) fn request_word_layout(
-  document: Document,
+  document: DocumentProjection,
   layout_cell: WordElementLayout,
   invisibility_mode: bool,
   window: &mut Window,

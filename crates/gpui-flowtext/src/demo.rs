@@ -3,14 +3,14 @@ use std::sync::Arc;
 use crop::Rope;
 
 use super::{
-  AssetStore, Document, DocumentParagraphInput, DocumentTheme, InputParagraph, InputRun, Paragraph, ParagraphOffsetIndex, ParagraphStyle,
+  AssetStore, DocumentProjection, DocumentParagraphInput, DocumentTheme, InputParagraph, InputRun, Paragraph, ParagraphOffsetIndex, ParagraphStyle,
   RunStyle, RunStyles, TextRun, document_ids_for_shape, merge_adjacent_runs, paragraph_blocks_from_paragraphs, rebuild_document_sections,
   reconcile_document_ids,
 };
 
 #[hotpath::measure]
 #[must_use]
-pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) -> Document {
+pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>) -> DocumentProjection {
   let text_capacity = paragraphs
     .iter()
     .map(|paragraph| {
@@ -48,7 +48,7 @@ pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>
 
 #[hotpath::measure]
 #[must_use]
-pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentParagraphInput>) -> Document {
+pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentParagraphInput>) -> DocumentProjection {
   let text_capacity = paragraphs
     .iter()
     .map(|paragraph| {
@@ -85,7 +85,7 @@ pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentPa
 }
 
 #[hotpath::measure]
-fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut stored_paragraphs: Vec<Paragraph>) -> Document {
+fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut stored_paragraphs: Vec<Paragraph>) -> DocumentProjection {
   if stored_paragraphs.is_empty() {
     stored_paragraphs.push(Paragraph {
       style: ParagraphStyle::Normal,
@@ -98,7 +98,8 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
   let blocks = paragraph_blocks_from_paragraphs(&stored_paragraphs);
   let paragraph_count = stored_paragraphs.len();
   let block_count = blocks.len();
-  let mut document = Document {
+  let mut document = DocumentProjection {
+    frontier: Vec::new(),
     text: Rope::from(text),
     paragraphs: Arc::new(stored_paragraphs),
     ids: document_ids_for_shape(paragraph_count, block_count),
@@ -115,13 +116,13 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
 
 #[hotpath::measure]
 #[must_use]
-pub fn blank_document() -> Document {
+pub fn blank_document() -> DocumentProjection {
   document_from_input(DocumentTheme::default(), Vec::new())
 }
 
 #[hotpath::measure]
 #[must_use]
-pub fn demo_document() -> Document {
+pub fn demo_document() -> DocumentProjection {
   let mut paragraphs = vec![
     InputParagraph {
       style: ParagraphStyle::Custom(0),

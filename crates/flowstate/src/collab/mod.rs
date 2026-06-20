@@ -9,7 +9,7 @@ pub mod status;
 
 use anyhow::Result;
 use async_channel::Receiver;
-use flowstate_collab::{SessionId, ticket::SessionTicket};
+use flowstate_collab::{SessionId, crdt_runtime_actor::CrdtRuntimeHandle, ticket::SessionTicket};
 use gpui::{App, BorrowAppContext, Context, Entity, ReadGlobal};
 use uuid::Uuid;
 
@@ -28,11 +28,25 @@ where
   CollabManager::init(cx);
 }
 
-pub fn start_session_for_panel<T>(panel_id: Uuid, editor: Entity<RichTextEditor>, title: String, cx: &mut Context<T>) -> Result<SessionId>
+pub fn start_session_for_panel<T>(
+  panel_id: Uuid,
+  editor: Entity<RichTextEditor>,
+  title: String,
+  runtime: CrdtRuntimeHandle,
+  cx: &mut Context<T>,
+) -> Result<SessionId>
 where
   T: 'static,
 {
-  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_session_for_panel(panel_id, editor, title, cx))
+  cx.update_default_global::<CollabManager, _>(|manager, cx| {
+    manager.start_session_for_panel(panel_id, editor, title, runtime, cx)
+  })
+}
+
+pub fn runtime_for_session(session_id: SessionId, cx: &App) -> Option<CrdtRuntimeHandle> {
+  CollabManager::global(cx)
+    .session_for_id(session_id)
+    .and_then(|session| session.read(cx).runtime_handle())
 }
 
 pub fn join_session<T>(ticket: SessionTicket, cx: &mut Context<T>) -> Result<JoinRequest>

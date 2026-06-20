@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn layout_paragraph_at(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   previous_bottom: Pixels,
@@ -90,7 +90,7 @@ pub(super) struct ParagraphChunkBuildResult {
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 pub(super) fn build_paragraph_chunk_layout_with_visibility(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   start_byte: usize,
@@ -170,7 +170,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 fn layout_paragraph_chunk_at(
-  document: &Document,
+  document: &DocumentProjection,
   layout_paragraph_ix: usize,
   display_paragraph_ix: usize,
   width: Pixels,
@@ -204,7 +204,7 @@ fn layout_paragraph_chunk_at(
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 fn layout_prepared_paragraph_chunk_at(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   display_paragraph_ix: usize,
   width: Pixels,

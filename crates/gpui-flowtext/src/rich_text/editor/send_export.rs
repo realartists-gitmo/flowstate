@@ -6,11 +6,11 @@ pub trait DocumentExportAdapter: Send + Sync + 'static {
       .map(Path::to_path_buf)
   }
 
-  fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()>;
+  fn write_document_export(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()>;
 }
 
 pub trait DocumentRecoveryAdapter: Send + Sync + 'static {
-  fn write_recovery_snapshot(&self, recovery_path: &Path, source_path: Option<&Path>, document: &Document) -> io::Result<()>;
+  fn write_recovery_snapshot(&self, recovery_path: &Path, source_path: Option<&Path>, document: &DocumentProjection) -> io::Result<()>;
 }
 
 static DOCUMENT_EXPORT_ADAPTER: OnceLock<Arc<dyn DocumentExportAdapter>> = OnceLock::new();
@@ -38,6 +38,29 @@ impl RichTextEditor {
     };
     let generation = self.edit_generation;
     let document = self.document.clone();
+    if let Some(export_hook) = self.native_export_hook.clone() {
+      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let selection_after = pending_runtime_edits
+        .iter()
+        .rev()
+        .find_map(|edit| edit.selection_after.clone());
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let result = export_hook(output_path.clone(), format, pending_runtime_edits, assets).await;
+        match result {
+          Ok(document) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.replace_document_from_collaboration(document, cx);
+              editor.complete_runtime_edit(selection_after, cx);
+              editor.last_send_document_generation = Some(generation);
+              cx.notify();
+            });
+            Ok(output_path)
+          },
+          Err(error) => Err(error),
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let result = cx
         .background_executor()
@@ -68,6 +91,29 @@ impl RichTextEditor {
     };
     let generation = self.edit_generation;
     let document = self.document.clone();
+    if let Some(export_hook) = self.native_export_hook.clone() {
+      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let selection_after = pending_runtime_edits
+        .iter()
+        .rev()
+        .find_map(|edit| edit.selection_after.clone());
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let result = export_hook(output_path.clone(), format, pending_runtime_edits, assets).await;
+        match result {
+          Ok(document) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.replace_document_from_collaboration(document, cx);
+              editor.complete_runtime_edit(selection_after, cx);
+              editor.last_format_export_generation = Some(generation);
+              cx.notify();
+            });
+            Ok(output_path)
+          },
+          Err(error) => Err(error),
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let result = cx
         .background_executor()
@@ -204,7 +250,7 @@ impl DocumentExportFormat {
 }
 
 #[hotpath::measure]
-fn write_document_export(output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
+fn write_document_export(output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()> {
   if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
     return adapter.write_document_export(output_path, document, format);
   }
@@ -225,7 +271,7 @@ fn write_document_export(output_path: &Path, document: &Document, format: Docume
 }
 
 #[hotpath::measure]
-fn write_native_document(output_path: &Path, document: &Document) -> io::Result<()> {
+fn write_native_document(output_path: &Path, document: &DocumentProjection) -> io::Result<()> {
   if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
     return adapter.write_document_export(output_path, document, DocumentExportFormat::Native);
   }
@@ -239,7 +285,7 @@ fn write_native_document(output_path: &Path, document: &Document) -> io::Result<
 }
 
 #[hotpath::measure]
-fn write_recovery_snapshot(recovery_path: &Path, source_path: Option<&Path>, document: &Document) -> io::Result<()> {
+fn write_recovery_snapshot(recovery_path: &Path, source_path: Option<&Path>, document: &DocumentProjection) -> io::Result<()> {
   if let Some(adapter) = DOCUMENT_RECOVERY_ADAPTER.get() {
     return adapter.write_recovery_snapshot(recovery_path, source_path, document);
   }

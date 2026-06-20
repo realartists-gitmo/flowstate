@@ -41,6 +41,28 @@ impl RichTextEditor {
     let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
       return false;
     };
+    let paragraph_ix = self.table_cell_block_ix;
+    let caret = self.table_cell_caret;
+    let mut new_paragraph_ix = None;
+    self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
+      new_paragraph_ix = split_table_cell_paragraph_at(cell, paragraph_ix, caret);
+    });
+    if let Some(paragraph_ix) = new_paragraph_ix {
+      self.table_cell_block_ix = paragraph_ix;
+      self.table_cell_caret = 0;
+      cx.notify();
+    }
+    true
+  }
+
+  fn edit_table_cell(
+    &mut self,
+    block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    cx: &mut Context<Self>,
+    update: impl FnOnce(&mut TableCell),
+  ) -> bool {
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
       return false;
     };
@@ -52,40 +74,42 @@ impl RichTextEditor {
     else {
       return false;
     };
-    let Some(new_paragraph_ix) = split_table_cell_paragraph_at(cell, self.table_cell_block_ix, self.table_cell_caret) else {
-      return true;
-    };
+    update(cell);
     if updated == table {
-      return true;
+      return false;
     }
     updated.version = updated.version.wrapping_add(1);
-    let before = Block::Table(table);
-    let after = Block::Table(updated);
-    if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
-      *block = after.clone();
-    }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(block_ix),
-      block_ix,
-      after: input_block_from_block(&after),
-    }];
-    self.undo_stack.push(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      semantic_commands: semantic_commands.clone(),
-    });
-    self.redo_stack.clear();
-    self.table_cell_block_ix = new_paragraph_ix;
-    self.table_cell_caret = 0;
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
+    let semantic_commands = self.replace_table_cell_semantic_commands(block_ix, row_ix, cell_ix, &updated);
+    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
     true
+  }
+
+  fn replace_table_cell_semantic_commands(
+    &self,
+    block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    table: &TableBlock,
+  ) -> Vec<SemanticEditCommand> {
+    let Some(table_id) = self.semantic_block_id(block_ix) else {
+      return self.missing_table_identity_semantic_commands(block_ix, "cell replace");
+    };
+    let Some(cell) = table
+      .rows
+      .get(row_ix)
+      .and_then(|row| row.cells.get(cell_ix))
+    else {
+      eprintln!(
+        "skipping table-cell semantic command because block {block_ix} cell {row_ix}:{cell_ix} is out of range"
+      );
+      return Vec::new();
+    };
+    vec![SemanticEditCommand::ReplaceTableCell {
+      table: table_id,
+      row_ix,
+      cell_ix,
+      cell: input_table_cell_from_table_cell(cell),
+    }]
   }
 
   fn insert_text_into_selected_equation(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
@@ -100,24 +124,8 @@ impl RichTextEditor {
       .as_ref()
       .map(|range| range.start)
       .unwrap_or(self.equation_source_caret);
-    self.edit_selected_equation(block_ix, cx, |equation| {
-      let mut source = equation.source.to_string();
-      let insert_at = insert_at.min(source.len());
-      if !source.is_char_boundary(insert_at) {
-        return;
-      }
-      if let Some(range) = selection_range.clone()
-        && range.start <= range.end
-        && range.end <= source.len()
-        && source.is_char_boundary(range.start)
-        && source.is_char_boundary(range.end)
-      {
-        source.replace_range(range, "");
-      }
-      source.insert_str(insert_at, text);
-      equation.source = source.into();
-      equation.version = equation.version.wrapping_add(1);
-    });
+    let range = selection_range.unwrap_or(insert_at..insert_at);
+    self.edit_selected_equation_source_range(block_ix, range, text, cx);
     self.equation_source_caret = insert_at.saturating_add(text.len());
     self.equation_source_anchor = self.equation_source_caret;
     true
@@ -131,14 +139,7 @@ impl RichTextEditor {
     if caret == 0 {
       let mut merged_caret = None;
       let current_paragraph_ix = self.table_cell_block_ix;
-      self.edit_selected_table(cx, |table| {
-        let Some(cell) = table
-          .rows
-          .get_mut(row_ix)
-          .and_then(|row| row.cells.get_mut(cell_ix))
-        else {
-          return;
-        };
+      self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
         merged_caret = merge_table_cell_paragraph_with_previous(cell, current_paragraph_ix);
       });
       if let Some((paragraph_ix, byte)) = merged_caret {
@@ -201,14 +202,7 @@ impl RichTextEditor {
     } else {
       let mut merged_caret = None;
       let current_paragraph_ix = self.table_cell_block_ix;
-      self.edit_selected_table(cx, |table| {
-        let Some(cell) = table
-          .rows
-          .get_mut(row_ix)
-          .and_then(|row| row.cells.get_mut(cell_ix))
-        else {
-          return;
-        };
+      self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
         merged_caret = merge_table_cell_paragraph_with_next(cell, current_paragraph_ix);
       });
       if let Some((paragraph_ix, byte)) = merged_caret {
@@ -237,42 +231,48 @@ impl RichTextEditor {
     let selection_range = self.equation_source_selection_range();
     let caret = self.equation_source_caret;
     let mut next_caret = caret;
-    self.edit_selected_equation(block_ix, cx, |equation| {
-      let mut source = equation.source.to_string();
-      if let Some(range) = selection_range.clone()
-        && range.start <= range.end
-        && range.end <= source.len()
-        && source.is_char_boundary(range.start)
-        && source.is_char_boundary(range.end)
-      {
-        source.replace_range(range.clone(), "");
-        next_caret = range.start;
-        equation.source = source.into();
-        equation.version = equation.version.wrapping_add(1);
-        return;
-      }
+    let Some(source) = self.selected_equation_source() else {
+      return true;
+    };
+    if let Some(range) = selection_range
+      && range.start <= range.end
+      && range.end <= source.len()
+      && source.is_char_boundary(range.start)
+      && source.is_char_boundary(range.end)
+    {
+      next_caret = range.start;
+      self.edit_selected_equation_source_range(block_ix, range, "", cx);
+    } else {
       let caret = caret.min(source.len());
       if caret > 0
         && source.is_char_boundary(caret)
         && let Some((byte, _)) = source[..caret].char_indices().next_back()
       {
-        source.replace_range(byte..caret, "");
         next_caret = byte;
-        equation.source = source.into();
-        equation.version = equation.version.wrapping_add(1);
+        self.edit_selected_equation_source_range(block_ix, byte..caret, "", cx);
       }
-    });
+    }
     self.equation_source_caret = next_caret;
     self.equation_source_anchor = next_caret;
     true
   }
 
-  fn edit_selected_equation(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut EquationBlock)) {
+  fn edit_selected_equation_source_range(&mut self, block_ix: usize, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
     let Some(Block::Equation(equation)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
     let mut updated = equation.clone();
-    update(&mut updated);
+    let mut source = updated.source.to_string();
+    if range.start > range.end
+      || range.end > source.len()
+      || !source.is_char_boundary(range.start)
+      || !source.is_char_boundary(range.end)
+    {
+      return;
+    }
+    source.replace_range(range.clone(), text);
+    updated.source = source.into();
+    updated.version = updated.version.wrapping_add(1);
     if updated == equation {
       return;
     }
@@ -284,11 +284,16 @@ impl RichTextEditor {
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(block_ix),
-      block_ix,
-      after: input_block_from_block(&after),
-    }];
+    let semantic_commands = if let Some(equation_id) = self.semantic_block_id(block_ix) {
+      vec![SemanticEditCommand::ReplaceEquationSourceRange {
+        equation: equation_id,
+        range,
+        text: text.to_string(),
+      }]
+    } else {
+      eprintln!("skipping equation source semantic command because projection block {block_ix} has no durable id");
+      Vec::new()
+    };
     self.undo_stack.push(EditRecord {
       before_selection: self.selection.clone(),
       before_generation,
@@ -310,55 +315,19 @@ impl RichTextEditor {
     cx: &mut Context<Self>,
     update: impl FnOnce(&mut TableCellParagraph),
   ) {
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
-      return;
-    };
-    let mut updated = table.clone();
-    let Some(cell) = updated
-      .rows
-      .get_mut(row_ix)
-      .and_then(|row| row.cells.get_mut(cell_ix))
-    else {
-      return;
-    };
-    let paragraph_ix = table_cell_paragraph_block_ix(cell, self.table_cell_block_ix).unwrap_or_else(|| {
-      cell
-        .blocks
-        .push(TableCellBlock::Paragraph(default_table_cell_paragraph()));
-      cell.blocks.len() - 1
+    let preferred_paragraph_ix = self.table_cell_block_ix;
+    self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
+      let paragraph_ix = table_cell_paragraph_block_ix(cell, preferred_paragraph_ix).unwrap_or_else(|| {
+        cell
+          .blocks
+          .push(TableCellBlock::Paragraph(default_table_cell_paragraph()));
+        cell.blocks.len() - 1
+      });
+      let TableCellBlock::Paragraph(paragraph) = &mut cell.blocks[paragraph_ix] else {
+        return;
+      };
+      update(paragraph);
     });
-    let TableCellBlock::Paragraph(paragraph) = &mut cell.blocks[paragraph_ix] else {
-      return;
-    };
-    update(paragraph);
-    if updated == table {
-      return;
-    }
-    updated.version = updated.version.wrapping_add(1);
-    let before = Block::Table(table);
-    let after = Block::Table(updated);
-    if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
-      *block = after.clone();
-    }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceBlock {
-      block: self.identity_map.block_id(block_ix),
-      block_ix,
-      after: input_block_from_block(&after),
-    }];
-    self.undo_stack.push(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      semantic_commands: semantic_commands.clone(),
-    });
-    self.redo_stack.clear();
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
   }
 
 }

@@ -4,7 +4,7 @@ use std::{
   time::{SystemTime, UNIX_EPOCH},
 };
 
-use flowstate_document::{Document, document_to_loro_db8_bytes, read_db8};
+use flowstate_document::{DocumentProjection, read_db8};
 
 use crate::{embed_db8_bytes_in_pdf, write_docx};
 
@@ -23,13 +23,25 @@ pub fn convert_docx_to_pdf(input: impl AsRef<Path>, output: impl AsRef<Path>) ->
 }
 
 #[hotpath::measure]
-pub fn write_pdf(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
-  let db8 = document_to_loro_db8_bytes(document, "PDF Source")?;
-  write_pdf_with_db8_bytes(path, document, &db8)
+pub fn write_pdf(path: impl AsRef<Path>, document: &DocumentProjection) -> io::Result<()> {
+  let path = path.as_ref();
+  if let Some(parent) = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
+    fs::create_dir_all(parent)?;
+  }
+  let temp_docx = temp_sibling_path(path, "docx");
+  let result = (|| {
+    write_docx(&temp_docx, document)?;
+    convert_docx_to_pdf(&temp_docx, path)
+  })();
+  let _ = fs::remove_file(&temp_docx);
+  result
 }
 
 #[hotpath::measure]
-pub fn write_pdf_with_db8_bytes(path: impl AsRef<Path>, document: &Document, db8_bytes: &[u8]) -> io::Result<()> {
+pub fn write_pdf_with_db8_bytes(path: impl AsRef<Path>, document: &DocumentProjection, db8_bytes: &[u8]) -> io::Result<()> {
   let path = path.as_ref();
   if let Some(parent) = path
     .parent()

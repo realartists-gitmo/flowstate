@@ -13,7 +13,8 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
-  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, ParagraphStyle, RunSemanticStyle, RunStyles, document_from_paragraphs,
+  DocumentParagraphInput, DocumentProjection, DocumentRunInput, DocumentTheme, ParagraphStyle, RunSemanticStyle, RunStyles,
+  document_from_paragraphs,
 };
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
@@ -88,19 +89,19 @@ pub struct DocxConversionReport {
 }
 
 #[hotpath::measure]
-pub fn convert_docx_to_document(path: impl AsRef<Path>) -> io::Result<(Document, DocxConversionReport)> {
+pub fn convert_docx_to_document(path: impl AsRef<Path>) -> io::Result<(DocumentProjection, DocxConversionReport)> {
   let cleaned = clean_docx_path(path)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
 #[hotpath::measure]
-pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(Document, DocxConversionReport)> {
+pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(DocumentProjection, DocxConversionReport)> {
   let cleaned = super::cleaner::clean_docx_bytes(bytes)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
 #[hotpath::measure]
-pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Document, DocxConversionReport)> {
+pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
   let CleanedDocx {
     bytes,
     main_document_xml,

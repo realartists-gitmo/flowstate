@@ -4,8 +4,8 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{
-  AssetId, AssetRecord, Block, BlockId, Document, DocumentOffset, DocumentSpan, InputBlock, InputParagraph, ParagraphId, ParagraphStyle,
-  RunStyles, TextRun,
+  AssetId, AssetRecord, Block, BlockId, DocumentProjection, DocumentOffset, DocumentSpan, InputBlock, InputBlockAlignment, InputImageSizing,
+  EditorSelection, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles, TextRun,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -22,13 +22,13 @@ pub struct DocumentIdentityMap {
 #[hotpath::measure_all]
 impl DocumentIdentityMap {
   #[must_use]
-  pub fn new(document: &Document) -> Self {
+  pub fn new(document: &DocumentProjection) -> Self {
     let mut this = Self::default();
     this.reconcile(document);
     this
   }
 
-  pub fn reconcile(&mut self, document: &Document) {
+  pub fn reconcile(&mut self, document: &DocumentProjection) {
     self.paragraph_ids.clone_from(&document.ids.paragraph_ids);
     self.paragraph_index_by_id.clear();
     for (ix, id) in self.paragraph_ids.iter().enumerate() {
@@ -120,6 +120,7 @@ pub enum SemanticEditCommand {
   InsertBlock {
     block: BlockId,
     block_ix: usize,
+    after: InputBlock,
   },
   DeleteBlock {
     block: BlockId,
@@ -138,12 +139,77 @@ pub enum SemanticEditCommand {
     block_ix: usize,
     after: InputBlock,
   },
-  ReplaceDocument,
+  InsertTableRow {
+    table: BlockId,
+    row_ix: usize,
+    row: InputTableRow,
+  },
+  DeleteTableRow {
+    table: BlockId,
+    row_ix: usize,
+  },
+  MoveTableRow {
+    table: BlockId,
+    from_row_ix: usize,
+    to_row_ix: usize,
+  },
+  InsertTableColumn {
+    table: BlockId,
+    column_ix: usize,
+    width: InputTableColumnWidth,
+    cells: Vec<InputTableCell>,
+  },
+  DeleteTableColumn {
+    table: BlockId,
+    column_ix: usize,
+  },
+  MoveTableColumn {
+    table: BlockId,
+    from_column_ix: usize,
+    to_column_ix: usize,
+  },
+  ReplaceTableCell {
+    table: BlockId,
+    row_ix: usize,
+    cell_ix: usize,
+    cell: InputTableCell,
+  },
+  SetTableCellSpan {
+    table: BlockId,
+    row_ix: usize,
+    cell_ix: usize,
+    row_span: u16,
+    column_span: u16,
+  },
+  ReplaceEquationSourceRange {
+    equation: BlockId,
+    range: Range<usize>,
+    text: String,
+  },
+  ReplaceImageAltText {
+    image: BlockId,
+    text: String,
+  },
+  ReplaceImageCaption {
+    image: BlockId,
+    caption: Option<InputParagraph>,
+  },
+  SetImageLayout {
+    image: BlockId,
+    sizing: InputImageSizing,
+    alignment: InputBlockAlignment,
+  },
+  SetTableColumnWidth {
+    table: BlockId,
+    column_ix: usize,
+    width: InputTableColumnWidth,
+  },
 }
 
 #[derive(Clone, Debug, Default)]
 pub struct CollaborationEdit {
   pub semantic_commands: Vec<SemanticEditCommand>,
+  pub selection_after: Option<EditorSelection>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

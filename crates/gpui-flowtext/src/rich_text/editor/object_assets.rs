@@ -1,5 +1,5 @@
 #[hotpath::measure]
-fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
+fn reserved_object_frame(document: &DocumentProjection, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let object_height = (row_size.height - document.theme.paragraph_after).max(px(1.0));
   let object_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   div()
@@ -16,7 +16,7 @@ fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: 
 }
 
 #[hotpath::measure]
-fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
+fn image_object_frame(document: &DocumentProjection, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let available_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_asset_intrinsic_size(asset);
   let loading = asset.is_loading_placeholder();

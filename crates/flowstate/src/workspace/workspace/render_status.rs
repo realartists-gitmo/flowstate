@@ -346,7 +346,7 @@ impl Workspace {
   }
 }
 
-fn speech_word_count(document: &Document) -> usize {
+fn speech_word_count(document: &DocumentProjection) -> usize {
   document
     .paragraphs
     .iter()

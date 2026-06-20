@@ -105,7 +105,7 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
 
 #[hotpath::measure]
 pub(super) fn paragraph_prep_batch_request(
-  document: &Document,
+  document: &DocumentProjection,
   edit_generation: u64,
   invisibility_mode: bool,
   paragraphs: Vec<usize>,
@@ -218,7 +218,7 @@ fn build_paragraph_prep_from_parts(
 
 #[hotpath::measure]
 pub(super) fn build_paragraph_prep(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   edit_generation: u64,
   invisibility_mode: bool,

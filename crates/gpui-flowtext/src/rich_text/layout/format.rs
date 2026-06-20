@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> EffectiveParagraphFormat {
+pub(super) fn paragraph_format(document: &DocumentProjection, style: ParagraphStyle) -> EffectiveParagraphFormat {
   let theme = &document.theme;
   let zoom = theme.zoom_factor.max(0.01);
   let normal = EffectiveParagraphFormat {
@@ -46,7 +46,7 @@ pub(super) fn paragraph_format(document: &Document, style: ParagraphStyle) -> Ef
 }
 
 #[hotpath::measure]
-pub(super) fn run_format(document: &Document, paragraph: &EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
+pub(super) fn run_format(document: &DocumentProjection, paragraph: &EffectiveParagraphFormat, styles: RunStyles) -> EffectiveRunFormat {
   let theme = &document.theme;
   let zoom = theme.zoom_factor.max(0.01);
   let mut format = EffectiveRunFormat {

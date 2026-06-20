@@ -193,6 +193,34 @@ impl RichTextEditor {
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
+    if let Some(hook) = self.native_undo_hook.clone() {
+      let Some(record) = self.undo_stack.pop() else {
+        return;
+      };
+      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let assets = self.document.assets.assets.values().cloned().collect();
+      cx.spawn(async move |editor, cx| {
+        let result = hook(UndoRedirect::Undo, pending_runtime_edits, assets).await;
+        let _ = editor.update(cx, |editor, cx| match result {
+          Ok(Some(result)) => {
+            editor.document = result.document;
+            editor.identity_map.reconcile(&editor.document);
+            editor.selection = result.selection.unwrap_or_else(|| record.before_selection.clone());
+            editor.emit_selection_changed(cx);
+            editor.edit_generation = record.before_generation;
+            editor.redo_stack.push(record);
+            editor.after_history_restore(cx);
+          },
+          Ok(None) => editor.undo_stack.push(record),
+          Err(error) => {
+            eprintln!("runtime undo failed: {error}");
+            editor.undo_stack.push(record);
+          },
+        });
+      })
+      .detach();
+      return;
+    }
     if let Some(hook) = self.collab_undo_redirect.clone() {
       hook(UndoRedirect::Undo);
       return;
@@ -212,6 +240,34 @@ impl RichTextEditor {
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
+    if let Some(hook) = self.native_undo_hook.clone() {
+      let Some(record) = self.redo_stack.pop() else {
+        return;
+      };
+      let pending_runtime_edits = std::mem::take(&mut self.pending_runtime_edits);
+      let assets = self.document.assets.assets.values().cloned().collect();
+      cx.spawn(async move |editor, cx| {
+        let result = hook(UndoRedirect::Redo, pending_runtime_edits, assets).await;
+        let _ = editor.update(cx, |editor, cx| match result {
+          Ok(Some(result)) => {
+            editor.document = result.document;
+            editor.identity_map.reconcile(&editor.document);
+            editor.selection = result.selection.unwrap_or_else(|| record.after_selection.clone());
+            editor.emit_selection_changed(cx);
+            editor.edit_generation = record.after_generation;
+            editor.undo_stack.push(record);
+            editor.after_history_restore(cx);
+          },
+          Ok(None) => editor.redo_stack.push(record),
+          Err(error) => {
+            eprintln!("runtime redo failed: {error}");
+            editor.redo_stack.push(record);
+          },
+        });
+      })
+      .detach();
+      return;
+    }
     if let Some(hook) = self.collab_undo_redirect.clone() {
       hook(UndoRedirect::Redo);
       return;
@@ -382,6 +438,9 @@ impl RichTextEditor {
   pub fn backspace_command(&mut self, cx: &mut Context<Self>) {
     if !self.can_write_collaboration() {
       cx.notify();
+      return;
+    }
+    if self.backspace_pending_runtime_command(cx) {
       return;
     }
     if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {

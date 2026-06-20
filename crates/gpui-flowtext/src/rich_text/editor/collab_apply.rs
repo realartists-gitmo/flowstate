@@ -6,9 +6,6 @@ impl RichTextEditor {
     if asset_records.is_empty() {
       return;
     }
-    debug_assert!(self.undo_stack.is_empty());
-    debug_assert!(self.redo_stack.is_empty());
-
     self.suppress_collab_capture = self.suppress_collab_capture.saturating_add(1);
     for (id, record) in asset_records {
       self.document.assets.assets.insert(*id, record.clone());
@@ -23,17 +20,20 @@ impl RichTextEditor {
   // Retained for local derived UI-diff helpers; network collaboration applies
   // Loro projection snapshots instead.
   pub fn apply_collab_patches(&mut self, patches: &[CollabPatch], cx: &mut Context<Self>) {
+    self.apply_collab_patches_at_frontier(patches, self.document.frontier.clone(), cx);
+  }
+
+  pub fn apply_collab_patches_at_frontier(&mut self, patches: &[CollabPatch], frontier: Vec<u8>, cx: &mut Context<Self>) {
     if patches.is_empty() {
+      self.document.frontier = frontier;
       return;
     }
-    debug_assert!(self.undo_stack.is_empty());
-    debug_assert!(self.redo_stack.is_empty());
-
     self.suppress_collab_capture = self.suppress_collab_capture.saturating_add(1);
     let mut invalidation: Option<Range<usize>> = None;
     for patch in patches {
       self.apply_one_collab_patch(patch, &mut invalidation);
     }
+    self.document.frontier = frontier;
     self.suppress_collab_capture = self.suppress_collab_capture.saturating_sub(1);
     self.identity_map.reconcile(&self.document);
     self.layout_invalidation_hint = invalidation;
@@ -168,6 +168,80 @@ impl RichTextEditor {
   }
 }
 
+pub fn apply_projection_patches(document: &mut DocumentProjection, patches: &[CollabPatch]) {
+  for patch in patches {
+    match patch {
+      CollabPatch::ParagraphText { row, new, .. } => {
+        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row) {
+          replace_paragraph_content(document, paragraph_ix, new);
+        }
+      },
+      CollabPatch::ParagraphStyle { row, style } => {
+        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row)
+          && let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
+        {
+          paragraph.style = *style;
+          bump_paragraph_version(paragraph);
+          update_paragraph_block(document, paragraph_ix);
+          rebuild_document_sections(document);
+        }
+      },
+      CollabPatch::ParagraphRuns { row, runs } => {
+        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row)
+          && let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
+        {
+          paragraph.runs.clone_from(runs);
+          bump_paragraph_version(paragraph);
+          update_paragraph_block(document, paragraph_ix);
+          rebuild_document_sections(document);
+        }
+      },
+      CollabPatch::ReplaceObjectBlock { row, block } => {
+        let mut blocks = collab_structural_blocks_from_document(document);
+        if *row < blocks.len() {
+          blocks[*row] = block.clone();
+          rebuild_document_from_collab_structural_blocks(document, blocks);
+        }
+      },
+      CollabPatch::InsertBlocks { row, blocks: inserted } => {
+        let mut blocks = collab_structural_blocks_from_document(document);
+        let row = (*row).min(blocks.len());
+        blocks.splice(row..row, inserted.iter().cloned());
+        rebuild_document_from_collab_structural_blocks(document, blocks);
+      },
+      CollabPatch::DeleteBlocks { row, count } => {
+        let mut blocks = collab_structural_blocks_from_document(document);
+        let start = (*row).min(blocks.len());
+        let end = start.saturating_add(*count).min(blocks.len());
+        blocks.drain(start..end);
+        rebuild_document_from_collab_structural_blocks(document, blocks);
+      },
+      CollabPatch::MoveBlock { from, to } => {
+        let mut blocks = collab_structural_blocks_from_document(document);
+        if *from < blocks.len() {
+          let block = blocks.remove(*from);
+          blocks.insert((*to).min(blocks.len()), block);
+          rebuild_document_from_collab_structural_blocks(document, blocks);
+        }
+      },
+      CollabPatch::AssetArrived { id, record } => {
+        document.assets.assets.insert(*id, record.clone());
+      },
+    }
+  }
+}
+
+fn paragraph_ix_for_block_row(document: &DocumentProjection, row: usize) -> Option<usize> {
+  matches!(document.blocks.get(row), Some(Block::Paragraph(_))).then(|| {
+    document
+      .blocks
+      .iter()
+      .take(row)
+      .filter(|block| matches!(block, Block::Paragraph(_)))
+      .count()
+  })
+}
+
 #[hotpath::measure]
 fn selected_block_ix(selection: Option<BlockSelection>) -> Option<usize> {
   match selection {
@@ -185,7 +259,7 @@ fn selected_block_in_range(selection: Option<BlockSelection>, range: Range<usize
 }
 
 #[hotpath::measure]
-fn replace_paragraph_content(document: &mut Document, paragraph_ix: usize, paragraph: &InputParagraph) {
+fn replace_paragraph_content(document: &mut DocumentProjection, paragraph_ix: usize, paragraph: &InputParagraph) {
   if paragraph_ix >= document.paragraphs.len() {
     return;
   }
@@ -208,7 +282,7 @@ fn replace_paragraph_content(document: &mut Document, paragraph_ix: usize, parag
 }
 
 #[hotpath::measure]
-fn collab_structural_blocks_from_document(document: &Document) -> Vec<CollabStructuralBlock> {
+fn collab_structural_blocks_from_document(document: &DocumentProjection) -> Vec<CollabStructuralBlock> {
   let mut paragraph_ix = 0;
   document
     .blocks
@@ -242,7 +316,7 @@ fn collab_structural_blocks_from_document(document: &Document) -> Vec<CollabStru
 }
 
 #[hotpath::measure]
-fn input_paragraph_from_document_paragraph(document: &Document, paragraph_ix: usize, paragraph: &Paragraph) -> InputParagraph {
+fn input_paragraph_from_document_paragraph(document: &DocumentProjection, paragraph_ix: usize, paragraph: &Paragraph) -> InputParagraph {
   let text = paragraph_text(document, paragraph_ix);
   let mut byte = 0;
   InputParagraph {
@@ -264,7 +338,7 @@ fn input_paragraph_from_document_paragraph(document: &Document, paragraph_ix: us
 }
 
 #[hotpath::measure]
-fn rebuild_document_from_collab_structural_blocks(document: &mut Document, blocks: Vec<CollabStructuralBlock>) {
+fn rebuild_document_from_collab_structural_blocks(document: &mut DocumentProjection, blocks: Vec<CollabStructuralBlock>) {
   let assets = document.assets.clone();
   let theme = document.theme.clone();
   let document_id = document.ids.document_id;
@@ -329,13 +403,13 @@ fn remap_byte(byte: usize, delta: &[CollabTextDelta]) -> usize {
 }
 
 #[hotpath::measure]
-fn clamp_selection_to_document(document: &Document, selection: &mut EditorSelection) {
+fn clamp_selection_to_document(document: &DocumentProjection, selection: &mut EditorSelection) {
   selection.anchor = clamp_offset_to_document(document, selection.anchor);
   selection.head = clamp_offset_to_document(document, selection.head);
 }
 
 #[hotpath::measure]
-fn clamp_offset_to_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
+fn clamp_offset_to_document(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   let paragraph = offset.paragraph.min(document.paragraphs.len().saturating_sub(1));
   let byte = document.paragraphs.get(paragraph).map_or(0, paragraph_text_len).min(offset.byte);
   DocumentOffset { paragraph, byte }

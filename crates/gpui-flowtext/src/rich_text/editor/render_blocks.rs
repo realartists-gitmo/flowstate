@@ -1,6 +1,6 @@
 #[hotpath::measure]
 fn render_image_block(
-  document: &Document,
+  document: &DocumentProjection,
   image: &ImageBlock,
   block_ix: usize,
   row_size: Size<Pixels>,
@@ -42,7 +42,7 @@ fn render_image_block(
 
 #[hotpath::measure]
 fn render_loading_image_placeholder(
-  document: &Document,
+  document: &DocumentProjection,
   image: &ImageBlock,
   asset: &AssetRecord,
   row_size: Size<Pixels>,
@@ -131,7 +131,7 @@ fn image_resize_handle(editor: Entity<RichTextEditor>, block_ix: usize, handle: 
 
 #[hotpath::measure]
 fn render_equation_block(
-  document: &Document,
+  document: &DocumentProjection,
   equation: &EquationBlock,
   block_ix: usize,
   row_size: Size<Pixels>,

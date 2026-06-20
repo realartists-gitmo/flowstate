@@ -1,6 +1,6 @@
 #[hotpath::measure]
 fn benchmark_layout_paths(
-  document: &Document,
+  document: &DocumentProjection,
   widths: &[f32],
   iterations: usize,
   include_paint: bool,
@@ -99,7 +99,7 @@ fn benchmark_layout_paths(
 
 #[hotpath::measure]
 fn benchmark_sample_paragraph_layouts(
-  document: &Document,
+  document: &DocumentProjection,
   stats: &DocumentStats,
   widths: &[f32],
   iterations: usize,
@@ -180,7 +180,7 @@ fn repeated(iterations: usize, mut run: impl FnMut()) -> DurationStats {
 }
 
 #[hotpath::measure]
-fn estimate_error(document: &Document, layout: &LayoutState, width: Pixels) -> (f32, f32) {
+fn estimate_error(document: &DocumentProjection, layout: &LayoutState, width: Pixels) -> (f32, f32) {
   let mut total = 0.0f32;
   let mut max = 0.0f32;
   let mut count = 0usize;
@@ -200,7 +200,7 @@ fn estimate_error(document: &Document, layout: &LayoutState, width: Pixels) -> (
 }
 
 #[hotpath::measure]
-fn summarize_layout(document: &Document, layout: &LayoutState) -> LayoutSummary {
+fn summarize_layout(document: &DocumentProjection, layout: &LayoutState) -> LayoutSummary {
   let mut summary = LayoutSummary {
     layout_height: px_to_f32(layout.size.height),
     ..Default::default()

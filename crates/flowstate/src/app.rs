@@ -17,8 +17,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 use crate::app_settings::{load_app_settings, load_keymap};
 use crate::commands::register_keymap;
 use crate::rich_text_element::{
-  Document, DocumentExportAdapter, DocumentExportFormat, DocumentRecoveryAdapter, RichTextEditor, demo_document, set_document_export_adapter,
-  set_document_recovery_adapter, write_db8,
+  DocumentProjection, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter,
 };
 use crate::workspace::open_workspace_window;
 
@@ -39,7 +38,7 @@ pub struct RichTextEditorView {
 #[hotpath::measure_all]
 impl RichTextEditorView {
   /// Create a new editor entity from a loaded document.
-  pub fn new(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+  pub fn new(document: DocumentProjection, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, document_path, cx));
     Self { editor }
   }
@@ -287,7 +286,9 @@ impl Focusable for FlowPromptRenderer {
 /// can call the same maintenance path as the standalone binary.
 #[hotpath::measure]
 pub fn write_demo_document() -> anyhow::Result<()> {
-  write_db8("data/demo.db8", &demo_document())?;
+  let document = demo_document();
+  let mut runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Flowstate Demo")?;
+  runtime.checkpoint_package("Flowstate Demo", Some("data/demo.db8".into()))?;
   Ok(())
 }
 
@@ -305,27 +306,21 @@ impl DocumentExportAdapter for FlowstateFlowtextAdapter {
     }
   }
 
-  fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
+  fn write_document_export(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()> {
     match format {
-      DocumentExportFormat::Native => write_db8(output_path, document),
-      DocumentExportFormat::NativeWithExtension(_) => write_db8(output_path, document),
+      DocumentExportFormat::Native | DocumentExportFormat::NativeWithExtension(_) | DocumentExportFormat::Pdf => Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native Flowstate and PDF source export require the document CRDT runtime",
+      )),
       DocumentExportFormat::Docx => crate::docx_conversion::write_docx(output_path, document),
-      DocumentExportFormat::Pdf => crate::docx_conversion::write_pdf(output_path, document),
     }
-  }
-}
-
-impl DocumentRecoveryAdapter for FlowstateFlowtextAdapter {
-  fn write_recovery_snapshot(&self, recovery_path: &Path, _source_path: Option<&Path>, document: &Document) -> io::Result<()> {
-    write_db8(recovery_path, document)
   }
 }
 
 #[hotpath::measure]
 fn install_flowtext_adapters() {
   let adapter = Arc::new(FlowstateFlowtextAdapter);
-  let _ = set_document_export_adapter(adapter.clone());
-  let _ = set_document_recovery_adapter(adapter);
+  let _ = set_document_export_adapter(adapter);
 }
 
 /// Run the rich text processor by itself for focused component development.
