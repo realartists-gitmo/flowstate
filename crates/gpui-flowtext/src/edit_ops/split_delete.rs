@@ -38,6 +38,7 @@ pub fn split_runs_at(runs: &[TextRun], byte: usize) -> (Vec<TextRun>, Vec<TextRu
 
 #[hotpath::measure]
 pub fn split_paragraph_at(document: &mut DocumentProjection, paragraph_ix: usize, byte: usize) {
+  let byte = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, byte);
   let paragraph = document.paragraphs[paragraph_ix].clone();
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let global = paragraph_range.start + byte;
@@ -77,16 +78,18 @@ pub fn delete_cross_paragraph_range(document: &mut DocumentProjection, range: Ra
 
   let start_ix = range.start.paragraph;
   let end_ix = range.end.paragraph;
+  let start_byte = clamp_paragraph_byte_to_char_boundary(document, start_ix, range.start.byte);
+  let end_byte = clamp_paragraph_byte_to_char_boundary(document, end_ix, range.end.byte);
   let start_para = document.paragraphs[start_ix].clone();
   let end_para = document.paragraphs[end_ix].clone();
   let start_para_range = paragraph_byte_range(document, start_ix);
   let end_para_range = paragraph_byte_range(document, end_ix);
-  let start_global = start_para_range.start + range.start.byte;
-  let end_global = end_para_range.start + range.end.byte;
+  let start_global = start_para_range.start + start_byte;
+  let end_global = end_para_range.start + end_byte;
   let delete_len = end_global - start_global;
 
-  let (left_runs, _) = split_runs_at(&start_para.runs, range.start.byte);
-  let (_, right_runs) = split_runs_at(&end_para.runs, range.end.byte);
+  let (left_runs, _) = split_runs_at(&start_para.runs, start_byte);
+  let (_, right_runs) = split_runs_at(&end_para.runs, end_byte);
   document.text.delete(start_global..end_global);
 
   let mut merged_runs = left_runs;

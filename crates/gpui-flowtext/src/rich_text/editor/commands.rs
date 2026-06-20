@@ -429,6 +429,11 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
+    let before = self.selection.clone();
+    clamp_selection_to_document(&self.document, &mut self.selection);
+    if self.selection != before {
+      self.emit_selection_changed(cx);
+    }
     if self.insert_single_grapheme_fast_path(text, cx) {
       return;
     }

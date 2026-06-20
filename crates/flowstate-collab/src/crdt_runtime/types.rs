@@ -165,6 +165,20 @@ pub enum RuntimeEvent {
   },
 }
 
+impl RuntimeEvent {
+  #[must_use]
+  pub fn frontier(&self) -> Option<&[u8]> {
+    match self {
+      Self::LocalUpdate { frontier, .. }
+      | Self::RemoteUpdateApplied { frontier, .. }
+      | Self::ProjectionUpdated { frontier, .. }
+      | Self::ProjectionPatched { frontier, .. } => Some(frontier),
+      Self::RevisionOpened { document, .. } | Self::RevisionForked { document, .. } => Some(&document.frontier),
+      Self::SelectionRestored { .. } => None,
+    }
+  }
+}
+
 #[derive(Clone, Debug)]
 pub struct RuntimePresenceCaretRequest {
   pub selection: crate::presence::PresenceSelection,

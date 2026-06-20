@@ -29,6 +29,26 @@ pub fn paragraph_byte_range(document: &DocumentProjection, paragraph_ix: usize) 
   start..start + paragraph_text_len(&document.paragraphs[paragraph_ix])
 }
 
+/// Clamp a paragraph-local UTF-8 byte offset to the nearest valid character
+/// boundary at or before it.
+///
+/// Editor coordinates are byte-based. Keeping this normalization at the
+/// document boundary prevents a stale or transformed caret from ever reaching
+/// `crop::Rope` with an interior UTF-8 code-unit offset.
+#[hotpath::measure]
+#[must_use]
+pub fn clamp_paragraph_byte_to_char_boundary(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> usize {
+  let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+    return 0;
+  };
+  let paragraph_start = document.offset_index.paragraph_start(paragraph_ix);
+  let mut byte = byte.min(paragraph_text_len(paragraph));
+  while byte > 0 && !document.text.is_char_boundary(paragraph_start + byte) {
+    byte -= 1;
+  }
+  byte
+}
+
 #[hotpath::measure]
 pub fn refresh_paragraph_range(document: &mut DocumentProjection, paragraph_ix: usize) {
   let range = paragraph_byte_range(document, paragraph_ix);

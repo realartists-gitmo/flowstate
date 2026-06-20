@@ -3,6 +3,7 @@ pub fn insert_text_at(document: &mut DocumentProjection, paragraph_ix: usize, by
   if text.is_empty() {
     return;
   }
+  let byte = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, byte);
   let insert_len = text.len();
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   document.text.insert(paragraph_start + byte, text);
@@ -89,9 +90,12 @@ pub fn insert_text_at(document: &mut DocumentProjection, paragraph_ix: usize, by
 // merged so adjacent same-style fragments coalesce.
 #[hotpath::measure]
 pub fn delete_range_in_paragraph(document: &mut DocumentProjection, paragraph_ix: usize, range: Range<usize>) {
-  if range.start >= range.end {
+  let start = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, range.start);
+  let end = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, range.end);
+  if start >= end {
     return;
   }
+  let range = start..end;
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   document
     .text

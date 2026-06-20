@@ -1,12 +1,13 @@
 use std::ops::Range;
 
 use rustc_hash::FxHashMap;
-use serde::{Deserialize, Serialize};
-
 use super::{
-  AssetId, AssetRecord, Block, BlockId, DocumentProjection, DocumentOffset, DocumentSpan, InputBlock, InputBlockAlignment, InputImageSizing,
-  EditorSelection, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles, TextRun,
+  AssetId, AssetRecord, BlockId, DocumentProjection, DocumentOffset, DocumentSpan, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing,
+  InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles,
+  TextRun,
 };
+
+const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
 #[derive(Clone, Debug, Default)]
 pub struct DocumentIdentityMap {
@@ -163,6 +164,21 @@ pub enum SemanticEditCommand {
     column_ix: usize,
     width: InputTableColumnWidth,
   },
+}
+
+impl SemanticEditCommand {
+  /// Whether the editor's optimistic projection is already the exact visible
+  /// result of this command and can be acknowledged without replaying the
+  /// runtime's projection echo.
+  #[must_use]
+  pub fn can_acknowledge_without_projection_replay(&self) -> bool {
+    match self {
+      Self::InsertText { text, .. } => !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT),
+      Self::DeleteRange { range } => range.start.paragraph == range.end.paragraph,
+      Self::SetParagraphStyle { .. } | Self::SetRunStyles { .. } => true,
+      _ => false,
+    }
+  }
 }
 
 #[derive(Clone, Debug, Default)]

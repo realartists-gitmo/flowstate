@@ -24,7 +24,9 @@ use loro::Subscription as LoroSubscription;
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
-use crate::rich_text_element::{AssetId, AssetRecord, ProjectionPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
+use crate::rich_text_element::{
+  AssetId, AssetRecord, ProjectionPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect,
+};
 
 use super::presence_view;
 
@@ -726,6 +728,11 @@ impl CollabSession {
       return;
     }
 
+    if editor.read(cx).runtime_edit_in_flight() {
+      tracing::trace!(session = %self.session, "deferring local collaboration edit flush until the current runtime batch is acknowledged");
+      return;
+    }
+
     let edits = editor.update(cx, |editor, _| editor.take_pending_session_edits());
     let edit_count = edits.len();
     let base_frontier = edits
@@ -746,6 +753,10 @@ impl CollabSession {
       .find_map(|edit| edit.selection_after.clone());
     let commands = coalesce_collaboration_commands(edits.into_iter().flat_map(|edit| edit.semantic_commands));
     let operation_count = commands.len();
+    let acknowledge_without_projection_replay = !commands.is_empty()
+      && commands
+        .iter()
+        .all(SemanticEditCommand::can_acknowledge_without_projection_replay);
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
       return;
@@ -777,13 +788,15 @@ impl CollabSession {
       };
       let _ = session.update(cx, |session, cx| match result {
         Ok(events) => {
-          if let Err(error) = session.apply_runtime_events(events, true, cx) {
+          if let Err(error) = session.apply_local_runtime_events(
+            events,
+            acknowledge_without_projection_replay,
+            selection_after,
+            cx,
+          ) {
             tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying local runtime projection failed");
             session.detach(DetachReason::Fatal(format!("applying local collaboration edit failed: {error:#}")), cx);
             return;
-          }
-          if let Some(editor) = session.editor.clone() {
-            editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
           }
           session.last_document_activity = Instant::now();
         },
@@ -872,6 +885,44 @@ impl CollabSession {
         | RuntimeEvent::SelectionRestored { .. } => {},
       }
     }
+    Ok(())
+  }
+
+  fn apply_local_runtime_events(
+    &mut self,
+    events: Vec<RuntimeEvent>,
+    acknowledge_without_projection_replay: bool,
+    selection_after: Option<crate::rich_text_element::EditorSelection>,
+    cx: &mut Context<Self>,
+  ) -> Result<()> {
+    if acknowledge_without_projection_replay {
+      let frontier = events
+        .iter()
+        .filter_map(RuntimeEvent::frontier)
+        .last()
+        .map(ToOwned::to_owned);
+
+      // Publish update bytes and advance collaboration version-vector state,
+      // but do not reapply the projection echo of an optimistic text/style
+      // mutation that is already visible in the editor.
+      self.apply_runtime_events(events, false, cx)?;
+      if let Some(editor) = self.editor.clone() {
+        editor.update(cx, |editor, cx| {
+          if let Some(frontier) = frontier {
+            editor.acknowledge_runtime_edit(frontier, None, cx);
+          } else {
+            editor.complete_runtime_edit(None, cx);
+          }
+        });
+      }
+    } else {
+      self.apply_runtime_events(events, true, cx)?;
+      if let Some(editor) = self.editor.clone() {
+        editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
+      }
+    }
+    self.last_self_check = None;
+    self.refresh_external_carets(cx);
     Ok(())
   }
 

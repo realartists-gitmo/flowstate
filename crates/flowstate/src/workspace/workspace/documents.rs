@@ -174,14 +174,23 @@ impl Workspace {
       DocumentRuntimeSource::FromProjection => {
         let imported = flowstate_document::import_document_projection(document, runtime_title)
           .map_err(|error| anyhow::anyhow!("creating canonical Loro document failed: {error}"))?;
-        document = imported.projection.clone();
         let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported)
           .map_err(|error| anyhow::anyhow!("creating canonical Loro runtime failed: {error:#}"))?;
+        document = runtime
+          .projection_snapshot()
+          .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error:#}"))?;
         flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
           .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
       },
-      DocumentRuntimeSource::Runtime(runtime) => flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
-        .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?,
+      DocumentRuntimeSource::Runtime(runtime) => {
+        let local_theme = document.theme.clone();
+        document = runtime
+          .projection_snapshot()
+          .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error:#}"))?;
+        document.theme = local_theme;
+        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
+          .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
+      },
       DocumentRuntimeSource::Handle(runtime) => runtime,
     };
 
@@ -537,6 +546,12 @@ impl Workspace {
   }
 
   fn flush_document_runtime_edits(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
+    // Keep exactly one optimistic command batch in flight. Later keystrokes
+    // remain rendered locally and are rebased onto the acknowledged frontier
+    // when this batch completes.
+    if editor.read(cx).runtime_edit_in_flight() {
+      return;
+    }
     let edits = editor.update(cx, |editor, _| editor.take_pending_runtime_edits());
     if edits.is_empty() {
       return;
@@ -554,6 +569,10 @@ impl Workspace {
       .cloned()
       .collect();
     let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(edits);
+    let acknowledge_without_projection_replay = !commands.is_empty()
+      && commands
+        .iter()
+        .all(crate::rich_text_element::SemanticEditCommand::can_acknowledge_without_projection_replay);
     cx.spawn(async move |workspace, cx| {
       let result = runtime
         .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
@@ -565,7 +584,13 @@ impl Workspace {
         _ => None,
       };
       let _ = workspace.update(cx, |_, cx| match result {
-        Ok(events) => apply_local_runtime_events(&editor, events, selection_after, cx),
+        Ok(events) => apply_local_runtime_events(
+          &editor,
+          events,
+          acknowledge_without_projection_replay,
+          selection_after,
+          cx,
+        ),
         Err(error) => {
           if let Some(document) = stale_snapshot {
             tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
@@ -1670,9 +1695,29 @@ fn flatten_runtime_edit_commands(
 fn apply_local_runtime_events(
   editor: &Entity<RichTextEditor>,
   events: Vec<flowstate_collab::crdt_runtime::RuntimeEvent>,
+  acknowledge_without_projection_replay: bool,
   selection_after: Option<crate::rich_text_element::EditorSelection>,
   cx: &mut Context<Workspace>,
 ) {
+  if acknowledge_without_projection_replay {
+    let frontier = events
+      .iter()
+      .filter_map(flowstate_collab::crdt_runtime::RuntimeEvent::frontier)
+      .last()
+      .map(ToOwned::to_owned);
+    editor.update(cx, |editor, cx| {
+      if let Some(frontier) = frontier {
+        // The visible projection already contains this local text/style batch.
+        // Replaying its runtime echo would shift the live caret twice and can
+        // overwrite keystrokes entered while the request was in flight.
+        editor.acknowledge_runtime_edit(frontier, None, cx);
+      } else {
+        editor.complete_runtime_edit(None, cx);
+      }
+    });
+    return;
+  }
+
   for event in events {
     match event {
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { patches, frontier, .. } => {

@@ -273,12 +273,34 @@ impl RichTextEditor {
       }
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
-      cx.notify();
     }
+    // A completion with newer optimistic edits still queued must wake the host
+    // so it can schedule the next serialized runtime flush.
+    cx.notify();
   }
 
   pub fn begin_runtime_edit(&mut self) {
     self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_add(1);
+  }
+
+  #[must_use]
+  pub fn runtime_edit_in_flight(&self) -> bool {
+    self.runtime_edits_in_flight > 0
+  }
+
+  /// Acknowledge canonical application of an optimistic editor batch.
+  ///
+  /// Local projection patches are echoes of mutations the editor has already
+  /// rendered. Reapplying those patches would transform the live caret twice
+  /// and can overwrite edits typed while the runtime request was in flight.
+  /// Advance only the canonical frontier, then rebase queued semantic commands
+  /// onto that acknowledged state.
+  pub fn acknowledge_runtime_edit(&mut self, frontier: Vec<u8>, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
+    self.document.frontier.clone_from(&frontier);
+    for edit in &mut self.pending_semantic_edits {
+      edit.base_frontier.clone_from(&frontier);
+    }
+    self.complete_runtime_edit(selection, cx);
   }
 
   pub fn restore_runtime_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {

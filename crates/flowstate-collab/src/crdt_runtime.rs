@@ -5543,6 +5543,30 @@ mod tests {
   }
 
   #[test]
+  fn imported_runtime_startup_projection_accepts_the_first_editor_command() -> Result<()> {
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::DocumentTheme::default(),
+      vec![InputBlock::Paragraph(input_paragraph("ready"))],
+    );
+    let imported = flowstate_document::import_document_projection(source, "Imported startup")?;
+    let mut runtime = CrdtRuntime::from_imported_document(imported)?;
+    let startup = runtime.projection_snapshot()?;
+
+    runtime.apply_editor_commands(
+      &startup.frontier,
+      &[EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: 0, byte: 0 },
+        text: "x".to_string(),
+        styles: RunStyles::default(),
+      }],
+      None,
+    )?;
+
+    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "xready");
+    Ok(())
+  }
+
+  #[test]
   fn editor_commands_reject_a_stale_projection_frontier() -> Result<()> {
     let mut runtime = CrdtRuntime::new_empty("Stale frontier")?;
     let base_frontier = runtime.projection_snapshot()?.frontier;

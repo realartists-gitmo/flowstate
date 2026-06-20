@@ -14,8 +14,11 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
         .file_name()
         .map(|name| name.to_string_lossy().to_string());
       let (imported, _) = import_docx_to_loro(path, title.as_deref().unwrap_or("Imported Document"))?;
-      let document = imported.projection.clone();
       let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported).map_err(runtime_io_error)?;
+      // Runtime startup records replica metadata and therefore advances the
+      // canonical frontier. The editor must start from that exact frontier or
+      // its first command is correctly rejected as stale.
+      let document = runtime.projection_snapshot().map_err(runtime_io_error)?;
       return Ok(LoadedDocumentForOpen {
         document,
         runtime,
@@ -48,8 +51,8 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
     },
     Err(error) if runtime_root_io_kind(&error) == Some(std::io::ErrorKind::NotFound) => {
       let imported = flowstate_document::import_document_projection(new_blank_document(), "Flowstate Document")?;
-      let document = imported.projection.clone();
       let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported).map_err(runtime_io_error)?;
+      let document = runtime.projection_snapshot().map_err(runtime_io_error)?;
       (document, runtime)
     },
     Err(error) => return Err(runtime_io_error(error)),

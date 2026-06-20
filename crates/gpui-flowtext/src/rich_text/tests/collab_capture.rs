@@ -668,3 +668,67 @@ fn select_all_emits_selection_changed_once(cx: &mut gpui::TestAppContext) {
   cx.update(|cx| editor.update(cx, |editor, cx| editor.select_all(cx)));
   assert_eq!(selections.borrow().len(), 1);
 }
+
+#[gpui::test]
+fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &mut gpui::TestAppContext) {
+  let mut document = blank_document();
+  document.frontier = vec![1, 2, 3];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      assert!(editor.insert_single_grapheme_fast_path("a", cx));
+      let flushed = editor.take_pending_runtime_edits();
+      assert_eq!(flushed.len(), 1);
+      let acknowledged_selection = flushed[0].selection_after.clone();
+      editor.begin_runtime_edit();
+
+      assert!(editor.insert_single_grapheme_fast_path("b", cx));
+      assert_eq!(paragraph_text(editor.document(), 0), "ab");
+      assert_eq!(editor.selection.head.byte, 2);
+
+      editor.acknowledge_runtime_edit(vec![4, 5, 6], acknowledged_selection, cx);
+
+      assert_eq!(paragraph_text(editor.document(), 0), "ab");
+      assert_eq!(editor.selection.head.byte, 2);
+      assert!(!editor.runtime_edit_in_flight());
+      let queued = editor.take_pending_runtime_edits();
+      assert_eq!(queued.len(), 1);
+      assert_eq!(queued[0].base_frontier, vec![4, 5, 6]);
+      let [SemanticEditCommand::InsertText { at, text, .. }] = queued[0].semantic_commands.as_slice() else {
+        panic!("expected one queued insert command");
+      };
+      assert_eq!(*at, DocumentOffset { paragraph: 0, byte: 1 });
+      assert_eq!(text, "b");
+    });
+  });
+}
+
+#[gpui::test]
+fn text_input_floors_stale_interior_utf8_caret_to_a_character_boundary(cx: &mut gpui::TestAppContext) {
+  let document = document_from_input_blocks(
+    DocumentTheme::default(),
+    vec![InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("a’b")],
+    })],
+  );
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      // The curly apostrophe occupies bytes 1..4. Byte 2 is deliberately an
+      // invalid stale caret inside that scalar value.
+      editor.selection = EditorSelection {
+        anchor: DocumentOffset { paragraph: 0, byte: 2 },
+        head: DocumentOffset { paragraph: 0, byte: 2 },
+      };
+      editor.insert_text_command("x", cx);
+
+      assert_eq!(paragraph_text(editor.document(), 0), "ax’b");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 0, byte: 2 });
+      assert!(editor.document().text.is_char_boundary(global_byte(editor.document(), editor.selection.head)));
+    });
+  });
+}

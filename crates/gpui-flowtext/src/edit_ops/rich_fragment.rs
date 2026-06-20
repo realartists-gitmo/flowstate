@@ -18,7 +18,7 @@ fn insert_single_paragraph_fragment_at(document: &mut DocumentProjection, offset
   let Some(target) = document.paragraphs.get(offset.paragraph) else {
     return offset;
   };
-  let byte = offset.byte.min(paragraph_text_len(target));
+  let byte = clamp_paragraph_byte_to_char_boundary(document, offset.paragraph, offset.byte);
   let paragraph_start = paragraph_byte_range(document, offset.paragraph).start;
   let (left_runs, right_runs) = split_runs_at(&target.runs, byte);
   document.text.insert(paragraph_start + byte, &text);
@@ -45,7 +45,7 @@ fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset:
   let Some(target) = document.paragraphs.get(offset.paragraph).cloned() else {
     return offset;
   };
-  let byte = offset.byte.min(paragraph_text_len(&target));
+  let byte = clamp_paragraph_byte_to_char_boundary(document, offset.paragraph, offset.byte);
   let paragraph_start = paragraph_byte_range(document, offset.paragraph).start;
   let (left_runs, right_runs) = split_runs_at(&target.runs, byte);
   let inserted_text = fragment

@@ -61,6 +61,7 @@ impl RichTextEditor {
         if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row) {
           remap_selection_for_text_delta(&mut self.selection, paragraph_ix, delta_utf8);
           replace_paragraph_content(&mut self.document, paragraph_ix, new);
+          clamp_selection_to_document(&self.document, &mut self.selection);
           extend_invalidation(invalidation, paragraph_ix..paragraph_ix + 1);
         }
       },
@@ -411,7 +412,7 @@ fn clamp_selection_to_document(document: &DocumentProjection, selection: &mut Ed
 #[hotpath::measure]
 fn clamp_offset_to_document(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   let paragraph = offset.paragraph.min(document.paragraphs.len().saturating_sub(1));
-  let byte = document.paragraphs.get(paragraph).map_or(0, paragraph_text_len).min(offset.byte);
+  let byte = clamp_paragraph_byte_to_char_boundary(document, paragraph, offset.byte);
   DocumentOffset { paragraph, byte }
 }
 
