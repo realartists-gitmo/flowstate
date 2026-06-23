@@ -27,7 +27,7 @@ pub enum SectionKind {
   Custom(u8),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DocumentSection {
   pub id: SectionId,
   pub parent_id: Option<SectionId>,

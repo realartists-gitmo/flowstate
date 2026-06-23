@@ -18,6 +18,10 @@ use super::{CollabSession, DetachReason};
 
 impl CollabSession {
   pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
+    if bytes.is_empty() {
+      tracing::trace!(session = %self.session, "skipping empty collaboration update import");
+      return Ok(());
+    }
     if self.runtime.is_none() || self.editor.is_none() {
       tracing::debug!(
         session = %self.session,
@@ -103,6 +107,10 @@ impl CollabSession {
         return Err(error);
       },
     };
+    if self.runtime_vv.is_empty() {
+      tracing::debug!(session = %self.session, from = %from, "ignored collaboration digest until local version vector is initialized");
+      return Ok(());
+    }
     let our_vv = VersionVector::decode(&self.runtime_vv).context("decoding local collaboration version vector failed")?;
     let relation = match sender_vv.partial_cmp(&our_vv) {
       Some(std::cmp::Ordering::Equal) => VersionVectorRelation::Equal,
@@ -160,6 +168,10 @@ impl CollabSession {
   pub(super) fn publish_digest(&self) {
     if self.runtime.is_some() {
       let vv = self.runtime_vv.clone();
+      if vv.is_empty() {
+        tracing::trace!(session = %self.session, "skipping collaboration digest publish until runtime version vector is initialized");
+        return;
+      }
       let vv_bytes = vv.len();
       if let Err(error) = self.net_tx.try_send(NetCommand::Publish {
         session: self.session,
@@ -377,6 +389,10 @@ impl CollabSession {
         match result {
           Ok(Ok(bytes)) => {
             tracing::debug!(session = %session_id, from = %from, bytes = bytes.len(), "collaboration update pull succeeded");
+            if bytes.is_empty() {
+              tracing::trace!(session = %session_id, from = %from, "collaboration update pull returned no missing updates");
+              return;
+            }
             if let Err(error) = session.import_update_bytes(&bytes, cx) {
               tracing::error!(session = %session_id, from = %from, error = %format_args!("{error:#}"), "importing pulled collaboration updates failed");
               session.detach(DetachReason::Fatal(format!("pulling collaboration updates failed: {error:#}")), cx);

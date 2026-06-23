@@ -63,6 +63,11 @@ impl Workspace {
     let runtime = self.document_runtimes.get(&panel_id)?.clone();
 
     tracing::info!(%panel_id, title = %title, "workspace starting collaboration on document");
+    self.flush_document_runtime_edits(panel_id, editor.clone(), cx);
+    if editor.read(cx).runtime_edit_in_flight() {
+      tracing::warn!(%panel_id, "collaboration start deferred because local edits are still being committed to Loro");
+      return None;
+    }
     match crate::collab::start_session_for_panel(panel_id, editor, title, runtime, cx) {
       Ok(session) => {
         tracing::info!(%panel_id, %session, "workspace started collaboration on document");

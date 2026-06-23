@@ -69,20 +69,45 @@ fn document_from_package(package: DocumentPackage) -> io::Result<DocumentProject
   } else {
     document_from_loro(&package.load_loro_doc()?)?
   };
-  for asset in package.assets {
-    let bytes = asset.bytes;
+  attach_package_assets(&mut document, &package.assets);
+  Ok(document)
+}
+
+pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetChunk]) {
+  let referenced = referenced_asset_ids(document);
+  for asset in assets.iter().filter(|asset| referenced.contains(&AssetId(asset.asset_id))) {
+    let bytes = asset.bytes.clone();
     document.assets.assets.insert(
       AssetId(asset.asset_id),
       AssetRecord {
         id: AssetId(asset.asset_id),
-        mime_type: asset.mime_type.into(),
+        mime_type: asset.mime_type.clone().into(),
         original_name: None,
         content_hash: AssetRecord::stable_content_hash(&bytes),
         bytes: Arc::new(bytes),
       },
     );
   }
-  Ok(document)
+  for id in referenced {
+    document.assets.assets.entry(id).or_insert_with(|| AssetRecord {
+      id,
+      mime_type: "application/octet-stream".into(),
+      original_name: None,
+      content_hash: AssetRecord::stable_content_hash(&[]),
+      bytes: Arc::new(Vec::new()),
+    });
+  }
+}
+
+fn referenced_asset_ids(document: &DocumentProjection) -> FxHashSet<AssetId> {
+  document
+    .blocks
+    .iter()
+    .filter_map(|block| match block {
+      Block::Image(image) => Some(image.asset_id),
+      Block::Paragraph(_) | Block::Equation(_) | Block::Table(_) => None,
+    })
+    .collect()
 }
 
 pub fn flowstate_document_theme() -> DocumentTheme {

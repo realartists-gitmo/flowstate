@@ -195,6 +195,7 @@ impl RichTextEditor {
   pub fn undo(&mut self, cx: &mut Context<Self>) {
     if let Some(hook) = self.native_undo_hook.clone() {
       let pending_edits = self.take_pending_semantic_edits();
+      let pending_edits_for_retry = pending_edits.clone();
       let assets = self.document.assets.assets.values().cloned().collect();
       let fallback_selection = self.selection.clone();
       let generation = self.next_edit_generation;
@@ -214,7 +215,9 @@ impl RichTextEditor {
           },
           Ok(None) => {},
           Err(error) => {
+            editor.prepend_pending_semantic_edits(pending_edits_for_retry);
             eprintln!("runtime undo failed: {error}");
+            cx.notify();
           },
         });
       })
@@ -242,6 +245,7 @@ impl RichTextEditor {
   pub fn redo(&mut self, cx: &mut Context<Self>) {
     if let Some(hook) = self.native_undo_hook.clone() {
       let pending_edits = self.take_pending_semantic_edits();
+      let pending_edits_for_retry = pending_edits.clone();
       let assets = self.document.assets.assets.values().cloned().collect();
       let fallback_selection = self.selection.clone();
       let generation = self.next_edit_generation;
@@ -261,7 +265,9 @@ impl RichTextEditor {
           },
           Ok(None) => {},
           Err(error) => {
+            editor.prepend_pending_semantic_edits(pending_edits_for_retry);
             eprintln!("runtime redo failed: {error}");
+            cx.notify();
           },
         });
       })

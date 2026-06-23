@@ -30,12 +30,12 @@ pub const IMAGE_LOADING_PLACEHOLDER_HEIGHT_PX: f32 = 160.0;
 impl AssetRecord {
   #[must_use]
   pub fn stable_content_hash(bytes: &[u8]) -> u64 {
-    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
-    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-    bytes.iter().fold(FNV_OFFSET_BASIS, |hash, byte| {
-      (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
-    })
+    let digest = blake3::hash(bytes);
+    u64::from_le_bytes(
+      digest.as_bytes()[..8]
+        .try_into()
+        .expect("BLAKE3 digest always contains at least eight bytes"),
+    )
   }
 
   #[must_use]

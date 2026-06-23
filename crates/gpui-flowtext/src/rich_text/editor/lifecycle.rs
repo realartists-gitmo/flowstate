@@ -263,6 +263,14 @@ impl RichTextEditor {
     std::mem::take(&mut self.pending_semantic_edits)
   }
 
+  pub fn prepend_pending_semantic_edits(&mut self, mut edits: Vec<SemanticCommandBatch>) {
+    if edits.is_empty() {
+      return;
+    }
+    edits.extend(std::mem::take(&mut self.pending_semantic_edits));
+    self.pending_semantic_edits = edits;
+  }
+
   pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
     self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
     if self.runtime_edits_in_flight == 0 && self.pending_semantic_edits.is_empty() {

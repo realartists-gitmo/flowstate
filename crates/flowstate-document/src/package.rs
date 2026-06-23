@@ -119,10 +119,22 @@ pub struct SearchUnitChunk {
   pub frontier: Vec<u8>,
   pub unit_id: u128,
   pub unit_kind: String,
+  #[serde(default)]
+  pub flow_id: Option<String>,
+  #[serde(default)]
+  pub block_id: Option<String>,
+  #[serde(default)]
+  pub table_id: Option<String>,
+  #[serde(default)]
+  pub cell_id: Option<String>,
   pub heading_path: Vec<String>,
   pub heading: String,
   pub body: String,
   pub insert_text: String,
+  #[serde(default)]
+  pub unit_start_cursor: Vec<u8>,
+  #[serde(default)]
+  pub unit_end_cursor: Vec<u8>,
   pub paragraph_start_cursor: Vec<u8>,
   pub paragraph_end_cursor: Vec<u8>,
 }
@@ -289,6 +301,34 @@ impl DocumentPackage {
     }
   }
 
+  pub fn read_cached_search_units(path: impl AsRef<Path>) -> io::Result<Option<Vec<SearchUnitChunk>>> {
+    let bytes = fs::read(path)?;
+    Self::cached_search_units_from_bytes(&bytes)
+  }
+
+  pub fn cached_search_units_from_bytes(bytes: &[u8]) -> io::Result<Option<Vec<SearchUnitChunk>>> {
+    let (manifest, units) = if bytes.starts_with(JOURNAL_MAGIC) {
+      cached_search_units_from_journal_bytes(bytes)?
+    } else {
+      cached_search_units_from_compact_bytes(bytes)?
+    };
+    if manifest.package_format_version != LORO_PACKAGE_FORMAT_VERSION || manifest.loro_schema_version != LORO_SCHEMA_VERSION {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate cached search package version"));
+    }
+    let Some(search_frontier) = manifest.search_cache_frontier.as_deref() else {
+      return Ok(None);
+    };
+    validate_frontiers(search_frontier, "manifest search cache frontier")?;
+    validate_frontiers(&manifest.latest_frontier, "manifest latest frontier")?;
+    if search_frontier != manifest.latest_frontier.as_slice() {
+      return Ok(None);
+    }
+    if units.iter().any(|unit| unit.frontier != search_frontier) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "search unit frontier does not match package cache frontier"));
+    }
+    Ok(Some(units))
+  }
+
   pub fn append_update_segment(
     &mut self,
     from_frontier: &Frontiers,
@@ -374,15 +414,45 @@ impl DocumentPackage {
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
     doc.commit();
+    let title = title.into();
+    let summary = summary.into();
+    if self.revisions.iter().any(|revision| revision.revision_id == revision_id) {
+      return Ok(revision_id);
+    }
+    let doc_frontier_before_revision_record = doc.state_frontiers();
+    let doc_vv_before_revision_record = doc.state_vv();
     let revision_doc = doc.fork_at(frontiers).map_err(loro_io_error)?;
     let frontier = encode_frontiers(frontiers);
     let version_vector = encode_version_vector(&revision_doc.state_vv());
+    if !loro_revision_exists(doc, revision_id) {
+      crate::loro_schema::record_revision(
+        doc,
+        revision_id,
+        frontier.clone(),
+        &title,
+        &summary,
+        author_user_id,
+      )
+      .map_err(loro_io_error)?;
+      let update = doc
+        .export(ExportMode::updates(&doc_vv_before_revision_record))
+        .map_err(loro_io_error)?;
+      if !update.is_empty() {
+        self.append_update_segment(
+          &doc_frontier_before_revision_record,
+          &doc_vv_before_revision_record,
+          &doc.state_frontiers(),
+          &doc.state_vv(),
+          update,
+        )?;
+      }
+    }
     let revision = PackageRevision {
       revision_id,
       frontier: frontier.clone(),
       version_vector,
-      title: title.into(),
-      summary: summary.into(),
+      title,
+      summary,
       author_user_id,
       replica_id,
       created_at_unix_secs: unix_time_secs(),
@@ -893,6 +963,9 @@ impl DocumentPackage {
     };
     let projection = decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
     let mut document = crate::loro_projection::document_from_projection_blocks(projection);
+    if document.ids.document_id == 0 {
+      document.ids.document_id = self.manifest.document_id;
+    }
     document.frontier = frontier.to_vec();
     Ok(Some(document))
   }
@@ -1011,6 +1084,53 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
     });
   }
   Ok(chunks)
+}
+
+fn cached_search_units_from_compact_bytes(bytes: &[u8]) -> io::Result<(DocumentPackageManifest, Vec<SearchUnitChunk>)> {
+  let chunks = read_chunks(bytes)?;
+  let mut manifest = None;
+  let mut search_units = Vec::new();
+  for chunk in chunks {
+    match chunk.kind {
+      CHUNK_MANIFEST => manifest = Some(decode_chunk(&chunk.payload, "manifest")?),
+      CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(&chunk.payload, "search unit")?),
+      _ => {},
+    }
+  }
+  let manifest = manifest.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package has no manifest"))?;
+  Ok((manifest, search_units))
+}
+
+fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentPackageManifest, Vec<SearchUnitChunk>)> {
+  let mut cached = None;
+  for payload in committed_journal_payloads(bytes)? {
+    if payload.starts_with(PACKAGE_MAGIC) {
+      cached = Some(cached_search_units_from_compact_bytes(payload)?);
+      continue;
+    }
+    let delta = decode_journal_delta(payload)?;
+    let Some((manifest, search_units)) = cached.as_mut() else {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Flowstate package journal delta precedes a full generation",
+      ));
+    };
+    match delta {
+      PackageJournalDelta::Update { manifest: next_manifest, .. }
+      | PackageJournalDelta::Assets { manifest: next_manifest, .. } => {
+        *manifest = next_manifest;
+        if manifest.search_cache_frontier.is_none() {
+          search_units.clear();
+        }
+      },
+    }
+  }
+  cached.ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidData,
+      "Flowstate package journal has no complete full generation",
+    )
+  })
 }
 
 fn write_chunks(chunks: &[Chunk]) -> io::Result<Vec<u8>> {
@@ -1256,6 +1376,22 @@ fn package_map_string(map: &loro::LoroMap, key: &str) -> Option<String> {
     ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
     _ => None,
   }
+}
+
+fn loro_revision_exists(doc: &LoroDoc, revision_id: u128) -> bool {
+  let root = doc.get_map(crate::loro_schema::ROOT);
+  let Some(ValueOrContainer::Container(Container::List(revisions))) = root.get(crate::loro_schema::REVISIONS) else {
+    return false;
+  };
+  for index in 0..revisions.len() {
+    let Some(ValueOrContainer::Container(Container::Map(revision))) = revisions.get(index) else {
+      continue;
+    };
+    if package_map_string(&revision, "id").and_then(|id| id.parse::<u128>().ok()) == Some(revision_id) {
+      return true;
+    }
+  }
+  false
 }
 
 fn package_map_binary(map: &loro::LoroMap, key: &str) -> Option<Vec<u8>> {

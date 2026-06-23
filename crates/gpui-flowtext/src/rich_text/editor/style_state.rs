@@ -281,6 +281,7 @@ impl RichTextEditor {
     cx.notify();
     if let Some(save_hook) = self.native_save_hook.clone() {
       let pending_runtime_edits = self.take_pending_semantic_edits();
+      let pending_runtime_edits_for_retry = pending_runtime_edits.clone();
       let selection_after = pending_runtime_edits
         .iter()
         .rev()
@@ -307,6 +308,7 @@ impl RichTextEditor {
           Err(error) => {
             let message = error.to_string();
             let _ = editor.update(cx, |editor, cx| {
+              editor.prepend_pending_semantic_edits(pending_runtime_edits_for_retry);
               if generation >= editor.saved_generation {
                 editor.save_status = SaveStatus::SaveFailed(message);
               }

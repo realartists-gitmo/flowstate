@@ -82,7 +82,7 @@ impl CrdtRuntimeHandle {
     self.request(|reply| RuntimeRequest::SnapshotBytes { reply }).await
   }
 
-  pub async fn checkpoint_package(&self, title: String, path: Option<PathBuf>) -> Result<()> {
+  pub async fn checkpoint_package(&self, title: String, path: Option<PathBuf>) -> Result<Vec<RuntimeEvent>> {
     self
       .request(|reply| RuntimeRequest::CheckpointPackage { title, path, reply })
       .await
@@ -179,7 +179,7 @@ enum RuntimeRequest {
   CheckpointPackage {
     title: String,
     path: Option<PathBuf>,
-    reply: Sender<Result<()>>,
+    reply: Sender<Result<Vec<RuntimeEvent>>>,
   },
   PackageBytes {
     title: String,

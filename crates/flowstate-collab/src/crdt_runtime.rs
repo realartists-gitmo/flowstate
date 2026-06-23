@@ -381,7 +381,15 @@ impl CrdtRuntime {
       self.undo_checkpoint_pending = true;
       return Ok(());
     }
-    self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")
+    self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
+    self.clear_pending_undo_selection();
+    Ok(())
+  }
+
+  fn clear_pending_undo_selection(&mut self) {
+    if let Ok(mut state) = self.undo_selection.lock() {
+      state.pending_selection = None;
+    }
   }
 
   fn undo_selection_for_editor(&self, selection: &EditorSelection) -> Option<UndoSelectionSnapshot> {
@@ -598,8 +606,22 @@ impl CrdtRuntime {
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     let frontier_before = from_frontier.encode();
+    let mut changed_asset_ids = Vec::new();
     for record in records {
+      let changed = self
+        .projection
+        .assets
+        .assets
+        .get(&record.id)
+        .is_none_or(|existing| asset_record_changed(existing, &record));
+      if !changed {
+        continue;
+      }
+      changed_asset_ids.push(record.id.0.to_string());
       self.projection.assets.assets.insert(record.id, record);
+    }
+    if changed_asset_ids.is_empty() {
+      return Ok(Vec::new());
     }
     flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for asset change")?;
     flowstate_document::loro_import::import_assets(&self.doc, &self.projection).context("recording asset metadata in canonical Loro state")?;
@@ -614,13 +636,7 @@ impl CrdtRuntime {
     let mut invalidation = ProjectionInvalidation {
       frontier_before,
       frontier_after: self.doc.state_frontiers().encode(),
-      changed_assets: self
-        .projection
-        .assets
-        .assets
-        .keys()
-        .map(|id| id.0.to_string())
-        .collect(),
+      changed_assets: changed_asset_ids,
       ..ProjectionInvalidation::default()
     };
     self.merge_subscription_invalidation(&mut invalidation);
@@ -669,6 +685,7 @@ impl CrdtRuntime {
     self.defer_undo_checkpoints = false;
     if result.is_ok() && self.undo_checkpoint_pending {
       self.undo.record_new_checkpoint().context("recording grouped Loro undo checkpoint")?;
+      self.clear_pending_undo_selection();
     }
     self.undo_checkpoint_pending = false;
     result
@@ -1151,7 +1168,7 @@ impl CrdtRuntime {
     self.save_package()
   }
 
-  pub fn checkpoint_package(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<()> {
+  pub fn checkpoint_package(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<Vec<RuntimeEvent>> {
     let revision_id = Uuid::new_v4().as_u128();
     let revision_frontiers = self.doc.state_frontiers();
     let revision_frontier = revision_frontiers.encode();
@@ -1173,20 +1190,40 @@ impl CrdtRuntime {
     let update = self
       .local_update_bytes(&from_vv)
       .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut events = Vec::new();
     if !update.is_empty() {
+      let event_update = update.clone();
       self
         .persist_update_segment(from_frontier, from_vv, update)
         .map_err(|error| io::Error::other(error.to_string()))?;
+      events.push(RuntimeEvent::LocalUpdate {
+        bytes: event_update,
+        frontier: self.doc.state_frontiers().encode(),
+        version_vector: self.doc.state_vv().encode(),
+      });
     }
     if self.package.is_none() {
+      let package_creation_vv = self.doc.state_vv();
       self.package = Some(DocumentPackage::from_loro_snapshot_with_assets(
         &self.doc,
         title,
         assets_from_document(&self.projection),
       )?);
+      let package_creation_update = self
+        .local_update_bytes(&package_creation_vv)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+      if !package_creation_update.is_empty() {
+        events.push(RuntimeEvent::LocalUpdate {
+          bytes: package_creation_update,
+          frontier: self.doc.state_frontiers().encode(),
+          version_vector: self.doc.state_vv().encode(),
+        });
+      }
+      self.last_persisted_frontier = self.doc.state_frontiers();
+      self.last_persisted_vv = self.doc.state_vv();
     }
     let Some(package) = &mut self.package else {
-      return Ok(());
+      return Ok(events);
     };
     package.replace_assets_from_document(&self.projection)?;
     package.rebuild_projection_cache_from_loro(&self.doc)?;
@@ -1205,7 +1242,8 @@ impl CrdtRuntime {
       self.package_path = Some(path);
       self.package_journal_prepared = false;
     }
-    self.save_package()
+    self.save_package()?;
+    Ok(events)
   }
 
   pub fn package_bytes(&mut self, title: &str) -> io::Result<Vec<u8>> {
@@ -2946,8 +2984,8 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
     let column = columns_by_id.ensure_mergeable_map(&column_id)?;
     column.insert("id", column_id.as_str())?;
     column.insert("container_id", column.id().to_string())?;
-    column.insert("container_id", column.id().to_string())?;
-    column.ensure_mergeable_map("attrs")?;
+    let attrs = column.ensure_mergeable_map("attrs")?;
+    column.insert("attrs_container_id", attrs.id().to_string())?;
     write_table_column_width(&column, table.column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto))?;
   }
 
@@ -2957,7 +2995,8 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
     row_map.insert("container_id", row_map.id().to_string())?;
-    row_map.ensure_mergeable_map("attrs")?;
+    let attrs = row_map.ensure_mergeable_map("attrs")?;
+    row_map.insert("attrs_container_id", attrs.id().to_string())?;
     let mut column_ix = 0_usize;
     for (cell_ix, cell) in row.cells.iter().enumerate() {
       let Some(column_id) = column_ids.get(column_ix) else {
@@ -2986,7 +3025,8 @@ fn write_table_cell_map_from_input(
   cell_map.insert("column_id", column_id)?;
   cell_map.insert("row_span", i64::from(cell.row_span))?;
   cell_map.insert("column_span", i64::from(cell.col_span))?;
-  cell_map.ensure_mergeable_map("attrs")?;
+  let attrs = cell_map.ensure_mergeable_map("attrs")?;
+  cell_map.insert("attrs_container_id", attrs.id().to_string())?;
   let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
   let nested_tables_by_id = cell_map.ensure_mergeable_map("nested_tables_by_id")?;
   cell_map.insert("nested_table_order_container_id", nested_table_ids.id().to_string())?;
@@ -3046,7 +3086,8 @@ fn update_table_cell_map_from_input(
   cell_map.insert("column_id", column_id)?;
   cell_map.insert("row_span", i64::from(cell.row_span))?;
   cell_map.insert("column_span", i64::from(cell.col_span))?;
-  cell_map.ensure_mergeable_map("attrs")?;
+  let attrs = cell_map.ensure_mergeable_map("attrs")?;
+  cell_map.insert("attrs_container_id", attrs.id().to_string())?;
   let flow_id = map_string_opt(cell_map, "flow_id").unwrap_or_else(|| format!("{cell_id}.flow"));
   cell_map.insert("flow_id", flow_id.as_str())?;
   let flow = ensure_flow(doc, &flow_id, "table_cell")?;
@@ -3792,19 +3833,14 @@ fn map_binary_opt(map: &LoroMap, key: &str) -> Option<Vec<u8>> {
 }
 
 fn attach_package_assets(document: &mut DocumentProjection, package: &DocumentPackage) {
-  for asset in &package.assets {
-    let bytes = asset.bytes.clone();
-    document.assets.assets.insert(
-      AssetId(asset.asset_id),
-      AssetRecord {
-        id: AssetId(asset.asset_id),
-        mime_type: asset.mime_type.clone().into(),
-        original_name: None,
-        content_hash: AssetRecord::stable_content_hash(&bytes),
-        bytes: Arc::new(bytes),
-      },
-    );
-  }
+  flowstate_document::attach_package_assets(document, &package.assets);
+}
+
+fn asset_record_changed(existing: &AssetRecord, next: &AssetRecord) -> bool {
+  existing.mime_type != next.mime_type
+    || existing.original_name != next.original_name
+    || existing.content_hash != next.content_hash
+    || existing.bytes.as_ref() != next.bytes.as_ref()
 }
 
 fn install_undo_selection_callbacks(undo: &mut UndoManager, state: &Arc<Mutex<UndoSelectionState>>) {
@@ -4050,6 +4086,12 @@ fn insert_table_block(
   let rows_by_id = table.ensure_mergeable_map("rows_by_id")?;
   let columns_by_id = table.ensure_mergeable_map("columns_by_id")?;
   let cells_by_id = table.ensure_mergeable_map("cells_by_id")?;
+  table.insert("container_id", table.id().to_string())?;
+  table.insert("row_order_container_id", row_order.id().to_string())?;
+  table.insert("column_order_container_id", column_order.id().to_string())?;
+  table.insert("rows_container_id", rows_by_id.id().to_string())?;
+  table.insert("columns_container_id", columns_by_id.id().to_string())?;
+  table.insert("cells_container_id", cells_by_id.id().to_string())?;
   let table_id = table_id();
   let mut column_ids = Vec::with_capacity(columns);
 
@@ -4059,7 +4101,9 @@ fn insert_table_block(
     column_ids.push(column_id.clone());
     let column = columns_by_id.ensure_mergeable_map(&column_id)?;
     column.insert("id", column_id.as_str())?;
-    column.ensure_mergeable_map("attrs")?;
+    column.insert("container_id", column.id().to_string())?;
+    let attrs = column.ensure_mergeable_map("attrs")?;
+    column.insert("attrs_container_id", attrs.id().to_string())?;
     let width = column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto);
     match *width {
       InputTableColumnWidth::Auto => column.insert("width_kind", "auto")?,
@@ -4080,7 +4124,8 @@ fn insert_table_block(
     let row = rows_by_id.ensure_mergeable_map(&row_id)?;
     row.insert("id", row_id.as_str())?;
     row.insert("container_id", row.id().to_string())?;
-    row.ensure_mergeable_map("attrs")?;
+    let attrs = row.ensure_mergeable_map("attrs")?;
+    row.insert("attrs_container_id", attrs.id().to_string())?;
     for (column_ix, column_id) in column_ids.iter().enumerate() {
       let cell_id = format!("{row_id}.cell.{column_ix}");
       let cell = cells_by_id.ensure_mergeable_map(&cell_id)?;
@@ -4090,7 +4135,8 @@ fn insert_table_block(
       cell.insert("column_id", column_id.as_str())?;
       cell.insert("row_span", 1_i64)?;
       cell.insert("column_span", 1_i64)?;
-      cell.ensure_mergeable_map("attrs")?;
+      let attrs = cell.ensure_mergeable_map("attrs")?;
+      cell.insert("attrs_container_id", attrs.id().to_string())?;
       let nested_table_ids = cell.ensure_mergeable_movable_list("nested_table_ids")?;
       let nested_tables_by_id = cell.ensure_mergeable_map("nested_tables_by_id")?;
       cell.insert("nested_table_order_container_id", nested_table_ids.id().to_string())?;

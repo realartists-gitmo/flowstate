@@ -60,6 +60,10 @@ pub enum SearchUnitKind {
   Card,
   Cite,
   Paragraph,
+  ImageAlt,
+  ImageCaption,
+  Equation,
+  TableCell,
   FlowNode,
   Document,
 }
@@ -77,6 +81,10 @@ impl SearchUnitKind {
       Self::Card => "card",
       Self::Cite => "cite",
       Self::Paragraph => "paragraph",
+      Self::ImageAlt => "image_alt",
+      Self::ImageCaption => "image_caption",
+      Self::Equation => "equation",
+      Self::TableCell => "table_cell",
       Self::FlowNode => "flow_node",
       Self::Document => "document",
     }
@@ -93,6 +101,10 @@ impl SearchUnitKind {
       "card" => Some(Self::Card),
       "cite" => Some(Self::Cite),
       "paragraph" => Some(Self::Paragraph),
+      "image_alt" => Some(Self::ImageAlt),
+      "image_caption" => Some(Self::ImageCaption),
+      "equation" => Some(Self::Equation),
+      "table_cell" => Some(Self::TableCell),
       "flow_node" => Some(Self::FlowNode),
       "document" => Some(Self::Document),
       _ => None,
@@ -454,7 +466,14 @@ impl TubIndex {
     if !hit.preview_paragraphs.is_empty() {
       return Ok(());
     }
+    if hit.paragraph_start_cursor.is_some() && !hit.insert_text.trim().is_empty() {
+      hit.preview_paragraphs = vec![preview_paragraph_from_text(&hit.insert_text)];
+      return Ok(());
+    }
     let Some(start) = hit.paragraph_start else {
+      if !hit.insert_text.trim().is_empty() {
+        hit.preview_paragraphs = vec![preview_paragraph_from_text(&hit.insert_text)];
+      }
       return Ok(());
     };
     let Some(end) = hit.paragraph_end_exclusive else {
@@ -957,6 +976,16 @@ fn unhex_bytes(value: &str) -> Option<Vec<u8>> {
 }
 
 fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
+  if let Some(units) = DocumentPackage::read_cached_search_units(path)
+    .with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
+  {
+    return Ok(
+      units
+        .iter()
+        .filter_map(|unit| package_search_unit(file_id, path, display_path, file_name, unit))
+        .collect(),
+    );
+  }
   let mut package = DocumentPackage::read(path).with_context(|| format!("reading Flowstate package {}", path.display()))?;
   if package.current_search_units().is_empty() {
     let doc = package.load_loro_doc().with_context(|| format!("loading Loro document {}", path.display()))?;
@@ -1001,9 +1030,35 @@ fn package_search_unit(file_id: &str, path: &Path, display_path: &str, file_name
     insert_text: if unit.insert_text.is_empty() { body } else { unit.insert_text.clone() },
     paragraph_start: None,
     paragraph_end_exclusive: None,
-    paragraph_start_cursor: Some(unit.paragraph_start_cursor.clone()).filter(|cursor| !cursor.is_empty()),
-    paragraph_end_cursor: Some(unit.paragraph_end_cursor.clone()).filter(|cursor| !cursor.is_empty()),
+    paragraph_start_cursor: Some(cursor_for_index(unit)).filter(|cursor| !cursor.is_empty()),
+    paragraph_end_cursor: Some(end_cursor_for_index(unit)).filter(|cursor| !cursor.is_empty()),
   })
+}
+
+fn cursor_for_index(unit: &SearchUnitChunk) -> Vec<u8> {
+  if unit.paragraph_start_cursor.is_empty() {
+    unit.unit_start_cursor.clone()
+  } else {
+    unit.paragraph_start_cursor.clone()
+  }
+}
+
+fn end_cursor_for_index(unit: &SearchUnitChunk) -> Vec<u8> {
+  if unit.paragraph_end_cursor.is_empty() {
+    unit.unit_end_cursor.clone()
+  } else {
+    unit.paragraph_end_cursor.clone()
+  }
+}
+
+fn preview_paragraph_from_text(text: &str) -> InputParagraph {
+  InputParagraph {
+    style: flowstate_document::ParagraphStyle::Normal,
+    runs: vec![InputRun {
+      text: text.to_string(),
+      styles: flowstate_document::RunStyles::default(),
+    }],
+  }
 }
 
 fn input_paragraphs_from_document_range(document: &DocumentProjection, start: usize, end: usize) -> Vec<InputParagraph> {

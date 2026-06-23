@@ -1,9 +1,9 @@
 use std::io;
 
-use gpui_flowtext::{DocumentTheme, InputBlock, InputParagraph, InputTableBlock, InputTableCellBlock, ParagraphStyle, RunSemanticStyle};
-use loro::{LoroDoc, LoroText, cursor::Side};
+use gpui_flowtext::{DocumentTheme, InputBlock, InputParagraph, ParagraphStyle, RunSemanticStyle};
+use loro::{Container, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Side};
 
-use crate::{OBJECT_REPLACEMENT, flowstate_document_theme, package::SearchUnitChunk};
+use crate::{BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, OBJECT_REPLACEMENT, ROOT, ROOT_BODY_FLOW_ID, flowstate_document_theme, package::SearchUnitChunk};
 
 pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier: &[u8]) -> io::Result<Vec<SearchUnitChunk>> {
   let body = crate::loro_schema::body_text(doc);
@@ -21,6 +21,7 @@ pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier:
   for block in &input_blocks {
     builder.push_block(block, &body);
   }
+  builder.push_loro_object_units(doc)?;
   Ok(builder.units)
 }
 
@@ -45,18 +46,7 @@ impl SearchUnitBuilder<'_> {
   fn push_block(&mut self, block: &InputBlock, body: &LoroText) {
     match block {
       InputBlock::Paragraph(paragraph) => self.push_body_paragraph(paragraph, body),
-      InputBlock::Image(image) => {
-        self.push_text_unit("image_alt", &image.alt_text, None);
-        if let Some(caption) = &image.caption {
-          self.push_text_unit("image_caption", &input_paragraph_text(caption), None);
-        }
-      }
-      InputBlock::Equation(equation) => {
-        self.push_text_unit("equation", &equation.source, None);
-      }
-      InputBlock::Table(table) => {
-        self.push_table(table);
-      }
+      InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_) => {},
     }
   }
 
@@ -70,28 +60,114 @@ impl SearchUnitBuilder<'_> {
     }
     let cursor_range = self.body_paragraph_ranges.get(self.body_paragraph_ix).copied();
     self.body_paragraph_ix += 1;
-    self.push_text_unit(paragraph_unit_kind(paragraph), &text, cursor_range.map(|range| cursor_fields(body, range)));
+    self.push_text_unit(
+      paragraph_unit_kind(paragraph),
+      &text,
+      SearchUnitRefs {
+        flow_id: Some(ROOT_BODY_FLOW_ID.to_string()),
+        cursors: cursor_range.map(|range| cursor_fields(body, range)),
+        paragraph_cursors: cursor_range.map(|range| cursor_fields(body, range)),
+        ..SearchUnitRefs::default()
+      },
+    );
   }
 
-  fn push_table(&mut self, table: &InputTableBlock) {
-    for row in &table.rows {
-      for cell in &row.cells {
-        for block in &cell.blocks {
-          match block {
-            InputTableCellBlock::Paragraph(paragraph) => self.push_text_unit("table_cell", &input_paragraph_text(paragraph), None),
-            InputTableCellBlock::Table(table) => self.push_table(table),
+  fn push_loro_object_units(&mut self, doc: &LoroDoc) -> io::Result<()> {
+    let root = doc.get_map(ROOT);
+    let Some(blocks) = child_map(&root, BLOCKS_BY_ID) else {
+      return Ok(());
+    };
+    let Some(flows) = child_map(&root, FLOWS_BY_ID) else {
+      return Ok(());
+    };
+    for block_id in map_keys(&blocks) {
+      let Some(block) = child_map(&blocks, &block_id) else {
+        continue;
+      };
+      match map_string_opt(&block, "kind").as_deref() {
+        Some("image") => self.push_image_units(&flows, &block_id, &block)?,
+        Some("equation") => self.push_equation_units(&flows, &block_id, &block)?,
+        Some("table") => self.push_table_units(&flows, &block_id, None, &block)?,
+        _ => {},
+      }
+    }
+    Ok(())
+  }
+
+  fn push_image_units(&mut self, flows: &LoroMap, block_id: &str, block: &LoroMap) -> io::Result<()> {
+    if let Some(flow_id) = map_string_opt(block, "alt_text_flow_id") {
+      self.push_flow_text_unit(flows, "image_alt", &flow_id, SearchUnitRefs::for_block(block_id))?;
+    }
+    if let Some(flow_id) = map_string_opt(block, "caption_flow_id") {
+      self.push_flow_text_unit(flows, "image_caption", &flow_id, SearchUnitRefs::for_block(block_id))?;
+    }
+    Ok(())
+  }
+
+  fn push_equation_units(&mut self, flows: &LoroMap, block_id: &str, block: &LoroMap) -> io::Result<()> {
+    if let Some(flow_id) = map_string_opt(block, "source_flow_id") {
+      self.push_flow_text_unit(flows, "equation", &flow_id, SearchUnitRefs::for_block(block_id))?;
+    }
+    Ok(())
+  }
+
+  fn push_table_units(&mut self, flows: &LoroMap, block_id: &str, _parent_cell_id: Option<&str>, owner: &LoroMap) -> io::Result<()> {
+    let Some(table) = child_map(owner, "table") else {
+      return Ok(());
+    };
+    let table_id = map_string_opt(owner, "id").unwrap_or_else(|| block_id.to_string());
+    let Some(cells) = child_map(&table, "cells_by_id") else {
+      return Ok(());
+    };
+    for cell_id in map_keys(&cells) {
+      let Some(cell) = child_map(&cells, &cell_id) else {
+        continue;
+      };
+      if let Some(flow_id) = map_string_opt(&cell, "flow_id") {
+        self.push_flow_text_unit(
+          flows,
+          "table_cell",
+          &flow_id,
+          SearchUnitRefs {
+            block_id: Some(block_id.to_string()),
+            table_id: Some(table_id.clone()),
+            cell_id: Some(cell_id.clone()),
+            ..SearchUnitRefs::default()
+          },
+        )?;
+      }
+      if let Some(nested_tables) = child_map(&cell, "nested_tables_by_id") {
+        for nested_id in ordered_ids(&cell, "nested_table_ids") {
+          if let Some(nested) = child_map(&nested_tables, &nested_id) {
+            self.push_table_units(flows, block_id, Some(&cell_id), &nested)?;
           }
         }
       }
     }
+    Ok(())
   }
 
-  fn push_text_unit(&mut self, unit_kind: &str, text: &str, cursors: Option<(Vec<u8>, Vec<u8>)>) {
+  fn push_flow_text_unit(&mut self, flows: &LoroMap, unit_kind: &str, flow_id: &str, mut refs: SearchUnitRefs) -> io::Result<()> {
+    let Some(flow) = child_map(flows, flow_id) else {
+      return Ok(());
+    };
+    let Some(text) = child_text(&flow, FLOW_TEXT_KEY) else {
+      return Ok(());
+    };
+    let body = searchable_flow_text(&text);
+    refs.flow_id = Some(flow_id.to_string());
+    refs.cursors = text_cursor_fields(&text);
+    self.push_text_unit(unit_kind, &body, refs);
+    Ok(())
+  }
+
+  fn push_text_unit(&mut self, unit_kind: &str, text: &str, refs: SearchUnitRefs) {
     let body = normalized_search_text(text);
     if body.is_empty() {
       return;
     }
-    let (paragraph_start_cursor, paragraph_end_cursor) = cursors.unwrap_or_default();
+    let (unit_start_cursor, unit_end_cursor) = refs.cursors.unwrap_or_default();
+    let (paragraph_start_cursor, paragraph_end_cursor) = refs.paragraph_cursors.unwrap_or_default();
     let heading = self.heading_path.last().cloned().unwrap_or_default();
     let unit_id = stable_search_unit_id(self.document_id, self.next_unit_ix, self.frontier, unit_kind, &body);
     self.next_unit_ix += 1;
@@ -99,10 +175,16 @@ impl SearchUnitBuilder<'_> {
       frontier: self.frontier.to_vec(),
       unit_id,
       unit_kind: unit_kind.to_string(),
+      flow_id: refs.flow_id,
+      block_id: refs.block_id,
+      table_id: refs.table_id,
+      cell_id: refs.cell_id,
       heading_path: self.heading_path.clone(),
       heading,
       body: body.clone(),
       insert_text: body,
+      unit_start_cursor,
+      unit_end_cursor,
       paragraph_start_cursor,
       paragraph_end_cursor,
     });
@@ -115,6 +197,25 @@ impl SearchUnitBuilder<'_> {
       self.heading_path.truncate(level + 1);
     }
     self.heading_path[level] = heading;
+  }
+}
+
+#[derive(Default)]
+struct SearchUnitRefs {
+  flow_id: Option<String>,
+  block_id: Option<String>,
+  table_id: Option<String>,
+  cell_id: Option<String>,
+  cursors: Option<(Vec<u8>, Vec<u8>)>,
+  paragraph_cursors: Option<(Vec<u8>, Vec<u8>)>,
+}
+
+impl SearchUnitRefs {
+  fn for_block(block_id: &str) -> Self {
+    Self {
+      block_id: Some(block_id.to_string()),
+      ..Self::default()
+    }
   }
 }
 
@@ -178,12 +279,67 @@ fn cursor_fields(body: &LoroText, range: BodyParagraphRange) -> (Vec<u8>, Vec<u8
   (start_cursor, end_cursor)
 }
 
+fn text_cursor_fields(text: &LoroText) -> Option<(Vec<u8>, Vec<u8>)> {
+  let len = text.len_unicode();
+  if len == 0 {
+    return None;
+  }
+  let start = if text.to_string().starts_with('\n') && len > 1 { 1 } else { 0 };
+  Some((
+    text.get_cursor(start, Side::Left).map(|cursor| cursor.encode()).unwrap_or_default(),
+    text.get_cursor(len, Side::Right).map(|cursor| cursor.encode()).unwrap_or_default(),
+  ))
+}
+
 fn input_paragraph_text(paragraph: &InputParagraph) -> String {
   paragraph.runs.iter().map(|run| run.text.as_str()).collect()
 }
 
 fn normalized_search_text(text: &str) -> String {
   text.chars().filter(|ch| *ch != OBJECT_REPLACEMENT).collect::<String>().trim().to_string()
+}
+
+fn searchable_flow_text(text: &LoroText) -> String {
+  text.to_string().trim_start_matches('\n').replace(OBJECT_REPLACEMENT, " ")
+}
+
+fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
+  parent.get(key).and_then(|value| match value {
+    ValueOrContainer::Container(container) => container.into_map().ok(),
+    ValueOrContainer::Value(_) => None,
+  })
+}
+
+fn child_text(parent: &LoroMap, key: &str) -> Option<LoroText> {
+  parent.get(key).and_then(|value| match value {
+    ValueOrContainer::Container(container) => container.into_text().ok(),
+    ValueOrContainer::Value(_) => None,
+  })
+}
+
+fn map_keys(map: &LoroMap) -> Vec<String> {
+  let mut keys = map.keys().map(|key| key.to_string()).collect::<Vec<_>>();
+  keys.sort();
+  keys
+}
+
+fn map_string_opt(map: &LoroMap, key: &str) -> Option<String> {
+  map.get(key).and_then(|value| match value {
+    ValueOrContainer::Value(LoroValue::String(value)) => Some(value.to_string()),
+    _ => None,
+  })
+}
+
+fn ordered_ids(map: &LoroMap, key: &str) -> Vec<String> {
+  let Some(ValueOrContainer::Container(Container::MovableList(list))) = map.get(key) else {
+    return Vec::new();
+  };
+  (0..list.len())
+    .filter_map(|ix| match list.get(ix) {
+      Some(ValueOrContainer::Value(LoroValue::String(value))) => Some(value.to_string()),
+      _ => None,
+    })
+    .collect()
 }
 
 fn paragraph_unit_kind(paragraph: &InputParagraph) -> &'static str {

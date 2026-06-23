@@ -13,6 +13,7 @@ docxide-pdf = { workspace = true }
 flowstate-document = { workspace = true }
 gpui = { version = "0.2.2", default-features = false }
 hotpath = { workspace = true }
+imagesize = { workspace = true }
 lopdf = { workspace = true }
 quick-xml = { workspace = true }
 rdocx = { workspace = true }

@@ -20,7 +20,7 @@ use flowstate_collab::{
   proto_gossip::GossipMsg,
 };
 use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
-use loro::Subscription as LoroSubscription;
+use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
 use crate::app_settings::load_document_theme;
@@ -631,7 +631,8 @@ impl CollabSession {
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
 
-    let doc = flowstate_document::new_loro_document(&self.title).context("creating Loro-native join document")?;
+    let doc = LoroDoc::new();
+    flowstate_document::loro_schema::configure_text_styles(&doc);
     doc.import_with(snapshot, "remote").context("importing collaboration snapshot failed")?;
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
     let mut document = runtime.projection_snapshot().context("projecting joined Loro-native document")?;
@@ -677,6 +678,9 @@ impl CollabSession {
       tracing::warn!(session = %self.session, error = %error, "queueing collaboration leave-session command failed during detach");
     }
     self.flush_pending_asset_records(cx);
+    if let Some(editor) = self.editor.clone() {
+      self.flush_local_edits(editor, cx);
+    }
 
     if let Some(editor) = self.editor.clone() {
       editor.update(cx, |editor, cx| {
@@ -687,7 +691,6 @@ impl CollabSession {
         editor.set_runtime_capture(true);
         editor.set_own_collaboration_caret_color(None, cx);
         editor.clear_undo_redo_stacks();
-        let _ = editor.take_pending_session_edits();
         editor.set_external_carets(Vec::new(), cx);
       });
     }

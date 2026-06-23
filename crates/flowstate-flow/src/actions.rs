@@ -56,6 +56,9 @@ impl FlowDocument {
   pub fn apply_action(&mut self, action: Action) -> Action {
     match action {
       Action::Add { parent, id, index, value } => {
+        if self.nodes.contains_key(&id) {
+          return Action::Identity;
+        }
         let Some(parent_node) = self.nodes.get(&parent) else {
           return Action::Identity;
         };
@@ -74,6 +77,9 @@ impl FlowDocument {
         Action::Delete { id }
       },
       Action::Delete { id } => {
+        let inverse_replace = self.nodes.get(&id).is_some_and(|node| !node.children.is_empty()).then(|| Action::Replace {
+          new_nodes: self.nodes.clone(),
+        });
         let Some(node) = self.nodes.get(&id).cloned() else {
           return Action::Identity;
         };
@@ -87,13 +93,13 @@ impl FlowDocument {
           return Action::Identity;
         };
         parent.children.remove(index);
-        self.nodes.remove(&id);
-        Action::Add {
+        remove_subtree(&mut self.nodes, &id);
+        inverse_replace.unwrap_or(Action::Add {
           parent: parent_id,
           id,
           index,
           value: node.value,
-        }
+        })
       },
       Action::Update { id, new_value } => {
         let Some(node) = self.nodes.get_mut(&id) else {

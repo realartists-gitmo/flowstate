@@ -1,5 +1,5 @@
 use docx_rs::{
-  AlignmentType, BreakType, Docx, Paragraph as DocxParagraph, Run, Shading, Table as DocxTable, TableCell as DocxTableCell,
+  AlignmentType, BreakType, Docx, Paragraph as DocxParagraph, Pic, Run, Shading, Table as DocxTable, TableCell as DocxTableCell,
   TableRow as DocxTableRow,
 };
 use flowstate_document::{
@@ -17,7 +17,7 @@ pub(super) fn add_block(docx: Docx, document: &DocumentProjection, block: &Block
   match block {
     Block::Paragraph(paragraph) => docx.add_paragraph(export_document_paragraph(document, paragraph, theme)),
     Block::Table(table) => docx.add_table(export_table(table, theme)),
-    Block::Image(image) => docx.add_paragraph(placeholder_paragraph_for_image(document, image, theme)),
+    Block::Image(image) => docx.add_paragraph(export_image(document, image, theme)),
     Block::Equation(equation) => docx.add_paragraph(placeholder_paragraph_for_equation(equation, theme)),
   }
 }
@@ -149,7 +149,23 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme) -> DocxTable {
 }
 
 #[hotpath::measure]
-fn placeholder_paragraph_for_image(document: &DocumentProjection, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
+fn export_image(document: &DocumentProjection, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
+  if let Some(asset) = document.assets.assets.get(&image.asset_id)
+    && !asset.is_loading_placeholder()
+    && asset_is_png(asset.bytes.as_ref())
+  {
+    let (width_px, height_px) = image_dimensions(asset.bytes.as_ref(), image);
+    let paragraph = match image.alignment {
+      flowstate_document::BlockAlignment::Left => DocxParagraph::new(),
+      flowstate_document::BlockAlignment::Center => DocxParagraph::new().align(AlignmentType::Center),
+      flowstate_document::BlockAlignment::Right => DocxParagraph::new().align(AlignmentType::Right),
+    };
+    return paragraph.add_run(
+      Run::new()
+        .fonts(docx_fonts(theme))
+        .add_image(Pic::new_with_dimensions(asset.bytes.as_ref().clone(), width_px, height_px)),
+    );
+  }
   let mut text = image.alt_text.to_string();
   if text.trim().is_empty()
     && let Some(asset) = document.assets.assets.get(&image.asset_id)
@@ -166,6 +182,19 @@ fn placeholder_paragraph_for_image(document: &DocumentProjection, image: &ImageB
       .italic()
       .add_text(format!("[{text}]")),
   )
+}
+
+fn asset_is_png(bytes: &[u8]) -> bool {
+  bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
+}
+
+fn image_dimensions(bytes: &[u8], image: &ImageBlock) -> (u32, u32) {
+  if let flowstate_document::ImageSizing::Fixed { width_px, height_px } = image.sizing {
+    return (width_px.max(1), height_px.unwrap_or(width_px).max(1));
+  }
+  imagesize::blob_size(bytes)
+    .map(|size| (size.width.max(1) as u32, size.height.max(1) as u32))
+    .unwrap_or((640, 480))
 }
 
 #[hotpath::measure]

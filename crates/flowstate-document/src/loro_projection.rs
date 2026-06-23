@@ -1,9 +1,9 @@
-use std::{collections::BTreeMap, io};
+use std::{collections::BTreeMap, io, sync::Arc};
 
 use gpui_flowtext::{
-  AssetId, BlockId, DocumentProjection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
+  AssetId, BlockId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
   InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, document_from_input_blocks,
+  InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, SectionId, SectionKind, document_from_input_blocks,
 };
 use loro::{Container, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
   MARK_STRIKETHROUGH, MAIN_BODY_BLOCK_ID, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
+  SECTIONS_BY_ID,
   flowstate_document_theme,
 };
 
@@ -44,9 +45,13 @@ pub fn object_input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<(BlockId, 
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ProjectionBlocks {
+  #[serde(default)]
+  pub document_id: u128,
   pub blocks: Vec<InputBlock>,
   pub paragraph_ids: Vec<ParagraphId>,
   pub block_ids: Vec<BlockId>,
+  #[serde(default)]
+  pub sections: Vec<DocumentSection>,
 }
 
 fn projection_from_loro(doc: &LoroDoc) -> io::Result<ProjectionBlocks> {
@@ -60,11 +65,17 @@ pub(crate) fn projection_blocks_from_loro(doc: &LoroDoc) -> io::Result<Projectio
 
 pub(crate) fn document_from_projection_blocks(projection: ProjectionBlocks) -> DocumentProjection {
   let mut document = document_from_input_blocks(DocumentTheme::clone(&flowstate_document_theme()), projection.blocks);
+  if projection.document_id != 0 {
+    document.ids.document_id = projection.document_id;
+  }
   if projection.paragraph_ids.len() == document.paragraphs.len() {
     document.ids.paragraph_ids = projection.paragraph_ids;
   }
   if projection.block_ids.len() == document.blocks.len() {
     document.ids.block_ids = projection.block_ids;
+  }
+  if !projection.sections.is_empty() {
+    document.sections = Arc::new(projection.sections);
   }
   document
 }
@@ -98,11 +109,54 @@ impl<'a> Projector<'a> {
       paragraph_ids.push(ParagraphId(loro_id_u128("paragraph.projection.empty")));
       block_ids.push(BlockId(loro_id_u128("block.projection.empty")));
     }
+    let sections = self.sections_for_projection(&paragraph_ids)?;
     Ok(ProjectionBlocks {
+      document_id: crate::loro_schema::document_id(self.doc).map_or(0, |id| id.as_u128()),
       blocks,
       paragraph_ids,
       block_ids,
+      sections,
     })
+  }
+
+  fn sections_for_projection(&self, paragraph_ids: &[ParagraphId]) -> io::Result<Vec<DocumentSection>> {
+    let root = self.doc.get_map(ROOT);
+    let Some(sections_by_id) = child_map(&root, SECTIONS_BY_ID)? else {
+      return Ok(Vec::new());
+    };
+    let paragraph_order = paragraph_ids
+      .iter()
+      .enumerate()
+      .map(|(ix, id)| (id.0, ix))
+      .collect::<BTreeMap<_, _>>();
+    let mut sections = Vec::new();
+    for key in map_keys(&sections_by_id) {
+      let Some(section) = child_map(&sections_by_id, &key)? else {
+        continue;
+      };
+      let Some(start_paragraph) = section_id_field(&section, "start_paragraph_id")? else {
+        continue;
+      };
+      let section_id = map_string_opt(&section, "id")?
+        .and_then(|value| parse_u128(&value))
+        .unwrap_or_else(|| loro_id_u128(&key));
+      let kind_slot = map_i64_opt(&section, "kind_slot")?.and_then(i64_to_u8).unwrap_or(0);
+      sections.push(DocumentSection {
+        id: SectionId(section_id),
+        parent_id: section_id_field(&section, "parent_section_id")?.map(SectionId),
+        kind: SectionKind::Custom(kind_slot),
+        heading_paragraph: section_id_field(&section, "heading_paragraph_id")?.map(ParagraphId),
+        start_paragraph: ParagraphId(start_paragraph),
+        end_paragraph_exclusive: section_id_field(&section, "end_paragraph_exclusive_id")?.map(ParagraphId),
+      });
+    }
+    sections.sort_by_key(|section| {
+      paragraph_order
+        .get(&section.start_paragraph.0)
+        .copied()
+        .unwrap_or(usize::MAX)
+    });
+    Ok(sections)
   }
 
   fn push_flow_blocks(
@@ -706,6 +760,14 @@ fn i64_to_u32(value: i64) -> Option<u32> {
 
 fn i64_to_u16(value: i64) -> Option<u16> {
   u16::try_from(value).ok()
+}
+
+fn i64_to_u8(value: i64) -> Option<u8> {
+  u8::try_from(value).ok()
+}
+
+fn section_id_field(map: &LoroMap, key: &str) -> io::Result<Option<u128>> {
+  Ok(map_string_opt(map, key)?.and_then(|value| parse_u128(&value)))
 }
 
 fn invalid(message: impl Into<String>) -> io::Error {

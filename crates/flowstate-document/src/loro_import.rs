@@ -447,7 +447,8 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     let column = columns_by_id.ensure_mergeable_map(&column_id)?;
     column.insert("id", column_id.as_str())?;
     column.insert("container_id", column.id().to_string())?;
-    column.ensure_mergeable_map("attrs")?;
+    let attrs = column.ensure_mergeable_map("attrs")?;
+    column.insert("attrs_container_id", attrs.id().to_string())?;
     match table.column_widths.get(column_ix) {
       Some(TableColumnWidth::Auto) | None => column.insert("width_kind", "auto")?,
       Some(TableColumnWidth::FixedPx(px)) => {
@@ -467,7 +468,8 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
     row_map.insert("container_id", row_map.id().to_string())?;
-    row_map.ensure_mergeable_map("attrs")?;
+    let attrs = row_map.ensure_mergeable_map("attrs")?;
+    row_map.insert("attrs_container_id", attrs.id().to_string())?;
     let mut column_ix = 0_usize;
     for (cell_ix, cell) in row.cells.iter().enumerate() {
       let cell_id = format!("{row_id}.cell.{cell_ix}");
@@ -479,7 +481,8 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
       cell_map.insert("column_id", column_id.as_str())?;
       cell_map.insert("row_span", i64::from(cell.row_span))?;
       cell_map.insert("column_span", i64::from(cell.col_span))?;
-      cell_map.ensure_mergeable_map("attrs")?;
+      let attrs = cell_map.ensure_mergeable_map("attrs")?;
+      cell_map.insert("attrs_container_id", attrs.id().to_string())?;
       let flow_id = format!("{cell_id}.flow");
       cell_map.insert("flow_id", flow_id.as_str())?;
       let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
