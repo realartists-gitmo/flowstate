@@ -72,7 +72,7 @@ pub fn load_flow_document_or_new(path: impl AsRef<Path>) -> FlowDocument {
         tracing::warn!(path = %path.display(), error = %format_args!("{error:#}"), "failed to load existing .fl0 document; using a new empty document");
       }
       FlowDocument::new()
-    }
+    },
   }
 }
 

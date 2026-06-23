@@ -856,7 +856,10 @@ enum RenderVirtualItem {
 impl RenderVirtualItems {
   fn get(&self, item_ix: usize) -> Option<RenderVirtualItem> {
     match self {
-      Self::DocumentProjection(items) => items.get(item_ix).cloned().map(RenderVirtualItem::DocumentProjection),
+      Self::DocumentProjection(items) => items
+        .get(item_ix)
+        .cloned()
+        .map(RenderVirtualItem::DocumentProjection),
       Self::WithDropPreview(items) => items.get(item_ix).cloned(),
     }
   }

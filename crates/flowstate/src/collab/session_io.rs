@@ -346,7 +346,9 @@ impl CollabSession {
     {
       let session_id = self.session;
       cx.spawn(async move |session, cx| {
-        let result = runtime.apply_editor_commands(Vec::new(), Vec::new(), canonical_records, None).await;
+        let result = runtime
+          .apply_editor_commands(Vec::new(), Vec::new(), canonical_records, None)
+          .await;
         let _ = session.update(cx, |session, cx| match result {
           Ok(events) => {
             if let Err(error) = session.apply_runtime_events(events, true, cx) {

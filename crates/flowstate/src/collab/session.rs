@@ -25,7 +25,7 @@ use uuid::Uuid;
 
 use crate::app_settings::{load_document_theme, load_local_user_identity};
 use crate::rich_text_element::{
-  AssetId, AssetRecord, ProjectionPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect,
+  AssetId, AssetRecord, DocumentProjection, EditorEvent, ProjectionPatch, RichTextEditor, SemanticEditCommand, UndoRedirect,
 };
 
 use super::presence_view;
@@ -167,12 +167,7 @@ fn coalesce_collaboration_commands(commands: impl IntoIterator<Item = SemanticEd
 }
 
 fn merge_adjacent_insert_text(previous: &mut SemanticEditCommand, next: &SemanticEditCommand) -> bool {
-  let SemanticEditCommand::InsertText {
-    at,
-    text,
-    styles,
-  } = previous
-  else {
+  let SemanticEditCommand::InsertText { at, text, styles } = previous else {
     return false;
   };
   let SemanticEditCommand::InsertText {
@@ -660,9 +655,13 @@ impl CollabSession {
 
     let doc = LoroDoc::new();
     flowstate_document::loro_schema::configure_text_styles(&doc);
-    doc.import_with(snapshot, "remote").context("importing collaboration snapshot failed")?;
+    doc
+      .import_with(snapshot, "remote")
+      .context("importing collaboration snapshot failed")?;
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
-    let mut document = runtime.projection_snapshot().context("projecting joined Loro-native document")?;
+    let mut document = runtime
+      .projection_snapshot()
+      .context("projecting joined Loro-native document")?;
     let runtime = CrdtRuntimeHandle::spawn(runtime).context("starting joined collaboration CRDT runtime actor")?;
     // §15/§31: bind this joiner's durable author identity to the joined runtime
     // so their revisions record an author and `users_by_id` is populated. The
@@ -676,7 +675,10 @@ impl CollabSession {
         .background_executor()
         .spawn(async { load_local_user_identity() })
         .await;
-      if let Err(error) = identity_runtime.set_author_identity(user_id, display_name).await {
+      if let Err(error) = identity_runtime
+        .set_author_identity(user_id, display_name)
+        .await
+      {
         tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to joined collaboration runtime failed");
       }
     })
@@ -872,19 +874,11 @@ impl CollabSession {
   pub(super) fn apply_runtime_events(&mut self, events: Vec<RuntimeEvent>, apply_projection: bool, cx: &mut Context<Self>) -> Result<()> {
     for event in events {
       match event {
-        RuntimeEvent::LocalUpdate {
-          bytes,
-          version_vector,
-          ..
-        } => {
+        RuntimeEvent::LocalUpdate { bytes, version_vector, .. } => {
           self.runtime_vv = version_vector;
           self.publish_update_bytes(bytes);
         },
-        RuntimeEvent::RemoteUpdateApplied {
-          pending,
-          version_vector,
-          ..
-        } => {
+        RuntimeEvent::RemoteUpdateApplied { pending, version_vector, .. } => {
           self.runtime_vv = version_vector;
           if let Some(pending) = pending {
             tracing::debug!(
@@ -901,9 +895,7 @@ impl CollabSession {
           }
         },
         RuntimeEvent::ProjectionUpdated {
-          document,
-          version_vector,
-          ..
+          document, version_vector, ..
         } if apply_projection => {
           self.runtime_vv = version_vector;
           self.apply_runtime_projection(*document, cx)?;

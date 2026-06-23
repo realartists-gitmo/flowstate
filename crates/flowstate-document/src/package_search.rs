@@ -3,7 +3,9 @@ use std::io;
 use gpui_flowtext::{DocumentTheme, InputBlock, InputParagraph, ParagraphStyle, RunSemanticStyle};
 use loro::{Container, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Side};
 
-use crate::{BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, OBJECT_REPLACEMENT, ROOT, ROOT_BODY_FLOW_ID, flowstate_document_theme, package::SearchUnitChunk};
+use crate::{
+  BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, OBJECT_REPLACEMENT, ROOT, ROOT_BODY_FLOW_ID, flowstate_document_theme, package::SearchUnitChunk,
+};
 
 pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier: &[u8]) -> io::Result<Vec<SearchUnitChunk>> {
   let body = crate::loro_schema::body_text(doc);
@@ -58,7 +60,10 @@ impl SearchUnitBuilder<'_> {
     {
       self.update_heading_path(level, normalized.clone());
     }
-    let cursor_range = self.body_paragraph_ranges.get(self.body_paragraph_ix).copied();
+    let cursor_range = self
+      .body_paragraph_ranges
+      .get(self.body_paragraph_ix)
+      .copied();
     self.body_paragraph_ix += 1;
     self.push_text_unit(
       paragraph_unit_kind(paragraph),
@@ -242,7 +247,7 @@ fn body_paragraph_cursor_ranges(text: &LoroText) -> Vec<BodyParagraphRange> {
           }
           start = unicode_pos + 1;
           has_text = false;
-        }
+        },
         OBJECT_REPLACEMENT => {
           if has_text {
             ranges.push(BodyParagraphRange { start, end: unicode_pos });
@@ -251,7 +256,7 @@ fn body_paragraph_cursor_ranges(text: &LoroText) -> Vec<BodyParagraphRange> {
           }
           rendered_blocks += 1;
           start = unicode_pos + 1;
-        }
+        },
         _ => has_text = true,
       }
       unicode_pos += 1;
@@ -286,8 +291,14 @@ fn text_cursor_fields(text: &LoroText) -> Option<(Vec<u8>, Vec<u8>)> {
   }
   let start = usize::from(text.to_string().starts_with('\n') && len > 1);
   Some((
-    text.get_cursor(start, Side::Left).map(|cursor| cursor.encode()).unwrap_or_default(),
-    text.get_cursor(len, Side::Right).map(|cursor| cursor.encode()).unwrap_or_default(),
+    text
+      .get_cursor(start, Side::Left)
+      .map(|cursor| cursor.encode())
+      .unwrap_or_default(),
+    text
+      .get_cursor(len, Side::Right)
+      .map(|cursor| cursor.encode())
+      .unwrap_or_default(),
   ))
 }
 
@@ -296,11 +307,19 @@ fn input_paragraph_text(paragraph: &InputParagraph) -> String {
 }
 
 fn normalized_search_text(text: &str) -> String {
-  text.chars().filter(|ch| *ch != OBJECT_REPLACEMENT).collect::<String>().trim().to_string()
+  text
+    .chars()
+    .filter(|ch| *ch != OBJECT_REPLACEMENT)
+    .collect::<String>()
+    .trim()
+    .to_string()
 }
 
 fn searchable_flow_text(text: &LoroText) -> String {
-  text.to_string().trim_start_matches('\n').replace(OBJECT_REPLACEMENT, " ")
+  text
+    .to_string()
+    .trim_start_matches('\n')
+    .replace(OBJECT_REPLACEMENT, " ")
 }
 
 fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
@@ -395,8 +414,12 @@ mod tests {
     let doc = new_loro_document("ranges").map_err(loro_test_error)?;
     let body = crate::loro_schema::body_text(&doc);
     body.insert(1, "before").map_err(loro_test_error)?;
-    body.insert(body.len_unicode(), &OBJECT_REPLACEMENT.to_string()).map_err(loro_test_error)?;
-    body.insert(body.len_unicode(), "after").map_err(loro_test_error)?;
+    body
+      .insert(body.len_unicode(), &OBJECT_REPLACEMENT.to_string())
+      .map_err(loro_test_error)?;
+    body
+      .insert(body.len_unicode(), "after")
+      .map_err(loro_test_error)?;
 
     let ranges = body_paragraph_cursor_ranges(&body);
     assert_eq!(ranges.len(), 2);

@@ -41,7 +41,10 @@ fn schedule_missing_assets_from_metadata(
   assets: Vec<RuntimeAssetMetadata>,
   cx: &mut Context<CollabSession>,
 ) {
-  let assets = assets.into_iter().map(ImageAssetMeta::from).collect::<Vec<_>>();
+  let assets = assets
+    .into_iter()
+    .map(ImageAssetMeta::from)
+    .collect::<Vec<_>>();
   tracing::trace!(session = %session.session, assets = assets.len(), "scanned collaboration image assets");
   if assets.is_empty() {
     return;
@@ -187,5 +190,9 @@ impl ImageAssetMeta {
 }
 
 fn local_cache_hash(content_hash: &[u8; 32]) -> u64 {
-  u64::from_le_bytes(content_hash[..8].try_into().expect("BLAKE3 prefix is exactly eight bytes"))
+  u64::from_le_bytes(
+    content_hash[..8]
+      .try_into()
+      .expect("BLAKE3 prefix is exactly eight bytes"),
+  )
 }

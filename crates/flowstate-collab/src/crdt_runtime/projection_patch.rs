@@ -1,7 +1,7 @@
 use flowstate_document::{
-  Block, ProjectionPatch, ProjectionStructuralBlock, ProjectionTextDelta, DocumentProjection, HighlightStyle, InputBlock, InputParagraph, InputRun,
-  MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, Paragraph,
-  ParagraphStyle, RunSemanticStyle, RunStyles, input_block_from_block, loro_schema::body_text, new_block_id, new_paragraph_id,
+  Block, DocumentProjection, HighlightStyle, InputBlock, InputParagraph, InputRun, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
+  MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, Paragraph, ParagraphStyle, ProjectionPatch, ProjectionStructuralBlock,
+  ProjectionTextDelta, RunSemanticStyle, RunStyles, input_block_from_block, loro_schema::body_text, new_block_id, new_paragraph_id,
   paragraph_text,
 };
 use loro::{LoroDoc, LoroValue};
@@ -168,16 +168,20 @@ fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usi
       })
     });
   ProjectionStructuralBlock {
-    block_id: document.ids.block_ids.get(row).copied().unwrap_or_else(new_block_id),
-    paragraph_id: matches!(&block, InputBlock::Paragraph(_))
-      .then(|| {
-        document
-          .ids
-          .paragraph_ids
-          .get(paragraph_ix)
-          .copied()
-          .unwrap_or_else(new_paragraph_id)
-      }),
+    block_id: document
+      .ids
+      .block_ids
+      .get(row)
+      .copied()
+      .unwrap_or_else(new_block_id),
+    paragraph_id: matches!(&block, InputBlock::Paragraph(_)).then(|| {
+      document
+        .ids
+        .paragraph_ids
+        .get(paragraph_ix)
+        .copied()
+        .unwrap_or_else(new_paragraph_id)
+    }),
     block,
   }
 }
@@ -285,7 +289,10 @@ pub(super) fn remote_body_text_patch(
   let new_paragraph = body_input_paragraph(doc, before_location.paragraph_ix)?;
   let delta_utf8 = text_delta(prefix_in_paragraph, old_changed_len, new_changed_len, trailing_retain);
   let unicode_start = before[..prefix].chars().count();
-  let unicode_len = before_changed.chars().count().max(after_changed.chars().count());
+  let unicode_len = before_changed
+    .chars()
+    .count()
+    .max(after_changed.chars().count());
   let invalidation = ProjectionInvalidation::body_text(frontier_before, frontier_after, unicode_start, unicode_len);
   Some((
     vec![ProjectionPatch::ParagraphText {
@@ -346,10 +353,7 @@ pub(super) fn remote_body_projection_patches(
       return None;
     }
     touched.insert(paragraph_index_at_unicode(after, range.unicode_start));
-    touched.insert(paragraph_index_at_unicode(
-      after,
-      range.unicode_start.saturating_add(range.unicode_len),
-    ));
+    touched.insert(paragraph_index_at_unicode(after, range.unicode_start.saturating_add(range.unicode_len)));
   }
   if touched.is_empty() {
     return Some(Vec::new());
@@ -391,8 +395,16 @@ fn paragraph_projection_patches(
     let old_input = input_paragraph(projection, paragraph_ix, old);
     let new_input = body_input_paragraph(doc, paragraph_ix)?;
     let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-    let old_text = old_input.runs.iter().map(|run| run.text.as_str()).collect::<String>();
-    let new_text = new_input.runs.iter().map(|run| run.text.as_str()).collect::<String>();
+    let old_text = old_input
+      .runs
+      .iter()
+      .map(|run| run.text.as_str())
+      .collect::<String>();
+    let new_text = new_input
+      .runs
+      .iter()
+      .map(|run| run.text.as_str())
+      .collect::<String>();
     if old_text != new_text {
       patches.push(ProjectionPatch::ParagraphText {
         row,
@@ -402,19 +414,13 @@ fn paragraph_projection_patches(
       continue;
     }
     if old_input.style != new_input.style {
-      patches.push(ProjectionPatch::ParagraphStyle {
-        row,
-        style: new_input.style,
-      });
+      patches.push(ProjectionPatch::ParagraphStyle { row, style: new_input.style });
     }
-    let new_runs = flowstate_document::document_from_input_blocks(
-      projection.theme.clone(),
-      vec![InputBlock::Paragraph(new_input)],
-    )
-    .paragraphs
-    .first()?
-    .runs
-    .clone();
+    let new_runs = flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new_input)])
+      .paragraphs
+      .first()?
+      .runs
+      .clone();
     if old.runs != new_runs {
       patches.push(ProjectionPatch::ParagraphRuns { row, runs: new_runs });
     }
@@ -432,11 +438,7 @@ fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroD
       if matches!(block, Block::Paragraph(_)) {
         return None;
       }
-      Some((
-        projection.ids.block_ids.get(row).copied()?,
-        row,
-        input_block_from_block(block),
-      ))
+      Some((projection.ids.block_ids.get(row).copied()?, row, input_block_from_block(block)))
     })
     .collect::<Vec<_>>();
   existing.sort_by_key(|(id, _, _)| id.0);
@@ -485,7 +487,9 @@ fn paragraph_index_at_unicode(body: &str, unicode_index: usize) -> usize {
 }
 
 fn contains_structural_body_char(text: &str) -> bool {
-  text.chars().any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT)
+  text
+    .chars()
+    .any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT)
 }
 
 #[derive(Clone, Copy)]

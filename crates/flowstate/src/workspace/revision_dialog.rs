@@ -1,11 +1,7 @@
 use flowstate_collab::crdt_runtime::RuntimeRevisionInfo;
-use gpui::{
-  App, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString, WeakEntity, Window, div,
-  prelude::*, px,
-};
+use gpui::{App, Context, FocusHandle, Focusable, IntoElement, ParentElement, Render, SharedString, WeakEntity, Window, div, prelude::*, px};
 use gpui_component::{
-  ActiveTheme as _, WindowExt as _,
-  StyledExt as _,
+  ActiveTheme as _, StyledExt as _, WindowExt as _,
   button::{Button, ButtonVariants as _},
   h_flex,
   scroll::ScrollableElement,
@@ -141,11 +137,6 @@ impl Render for RevisionDialog {
     v_flex()
       .max_h(px(520.0))
       .min_h(px(160.0))
-      .child(
-        div()
-          .flex_1()
-          .overflow_y_scrollbar()
-          .child(content),
-      )
+      .child(div().flex_1().overflow_y_scrollbar().child(content))
   }
 }

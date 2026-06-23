@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  DocumentPackage, DocumentProjection, InputParagraph, InputRun, SearchUnitChunk, document_text_slice, paragraph_byte_range,
-  paragraph_text_len, read_db8,
+  DocumentPackage, DocumentProjection, InputParagraph, InputRun, SearchUnitChunk, document_text_slice, paragraph_byte_range, paragraph_text_len,
+  read_db8,
 };
 use ignore::WalkBuilder;
 use notify::{
@@ -110,7 +110,6 @@ impl SearchUnitKind {
       _ => None,
     }
   }
-
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -976,8 +975,8 @@ fn unhex_bytes(value: &str) -> Option<Vec<u8>> {
 }
 
 fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
-  if let Some(units) = DocumentPackage::read_cached_search_units(path)
-    .with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
+  if let Some(units) =
+    DocumentPackage::read_cached_search_units(path).with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
   {
     return Ok(
       units
@@ -988,7 +987,9 @@ fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &s
   }
   let mut package = DocumentPackage::read(path).with_context(|| format!("reading Flowstate package {}", path.display()))?;
   if package.current_search_units().is_empty() {
-    let doc = package.load_loro_doc().with_context(|| format!("loading Loro document {}", path.display()))?;
+    let doc = package
+      .load_loro_doc()
+      .with_context(|| format!("loading Loro document {}", path.display()))?;
     package
       .rebuild_search_units_from_loro(&doc)
       .with_context(|| format!("rebuilding Loro search units {}", path.display()))?;

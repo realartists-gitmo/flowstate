@@ -77,9 +77,13 @@ impl FlowDocument {
         Action::Delete { id }
       },
       Action::Delete { id } => {
-        let inverse_replace = self.nodes.get(&id).is_some_and(|node| !node.children.is_empty()).then(|| Action::Replace {
-          new_nodes: self.nodes.clone(),
-        });
+        let inverse_replace = self
+          .nodes
+          .get(&id)
+          .is_some_and(|node| !node.children.is_empty())
+          .then(|| Action::Replace {
+            new_nodes: self.nodes.clone(),
+          });
         let Some(node) = self.nodes.get(&id).cloned() else {
           return Action::Identity;
         };

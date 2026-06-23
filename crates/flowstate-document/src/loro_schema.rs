@@ -1,8 +1,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use loro::{
-  ContainerTrait as _, ExpandType, LoroDoc, LoroMap, LoroResult, LoroText, LoroValue, StyleConfig, StyleConfigMap,
-  ValueOrContainer, cursor::Side,
+  ContainerTrait as _, ExpandType, LoroDoc, LoroMap, LoroResult, LoroText, LoroValue, StyleConfig, StyleConfigMap, ValueOrContainer,
+  cursor::Side,
 };
 use uuid::Uuid;
 

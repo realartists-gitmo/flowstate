@@ -38,9 +38,7 @@ pub fn start_session_for_panel<T>(
 where
   T: 'static,
 {
-  cx.update_default_global::<CollabManager, _>(|manager, cx| {
-    manager.start_session_for_panel(panel_id, editor, title, runtime, cx)
-  })
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_session_for_panel(panel_id, editor, title, runtime, cx))
 }
 
 pub fn runtime_for_session(session_id: SessionId, cx: &App) -> Option<CrdtRuntimeHandle> {

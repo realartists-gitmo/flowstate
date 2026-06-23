@@ -2,7 +2,9 @@ use std::{borrow::Cow, path::Path, sync::Arc};
 
 use gpui::Pixels;
 
-use crate::{DocumentProjection, DocumentExportFormat, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle};
+use crate::{
+  DocumentExportFormat, DocumentProjection, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct StyleId(pub Cow<'static, str>);

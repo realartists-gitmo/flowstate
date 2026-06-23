@@ -1,25 +1,23 @@
-pub mod package;
-mod package_search;
 pub mod loro_import;
 pub mod loro_projection;
 pub mod loro_schema;
+pub mod package;
+mod package_search;
 
+pub use gpui_flowtext::*;
 pub use loro_import::{
   ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
 };
 pub use loro_projection::{document_from_loro, object_input_blocks_from_loro, section_page_attrs};
-pub use gpui_flowtext::*;
 pub use loro_schema::{
-  BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
-  MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, META,
-  OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, REPLICAS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
-  SECTION_ATTR_COLUMNS, SECTION_ATTR_FOOTER_FLOW_ID, SECTION_ATTR_HEADER_FLOW_ID, SECTION_ATTR_MARGIN_BOTTOM,
-  SECTION_ATTR_MARGIN_LEFT, SECTION_ATTR_MARGIN_RIGHT, SECTION_ATTR_MARGIN_TOP, SECTION_ATTR_ORIENTATION,
-  SECTION_ATTR_PAGE_HEIGHT, SECTION_ATTR_PAGE_NUMBERING_FORMAT, SECTION_ATTR_PAGE_NUMBERING_START, SECTION_ATTR_PAGE_WIDTH,
-  SECTIONS_BY_ID, SENTINEL_NEWLINE, USERS_BY_ID, PageNumberFormat, SectionMargins, SectionOrientation, SectionPageAttrs,
-  SectionPageNumbering, SectionPageSize, document_id, document_schema_version, ensure_section, fork_document_lineage,
-  init_loro_document, new_loro_document, read_section_page_attrs, record_revision, register_replica, register_user,
-  set_section_page_attrs, touch_document_metadata,
+  BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE,
+  MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, META, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID,
+  PageNumberFormat, REPLICAS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, SECTION_ATTR_COLUMNS, SECTION_ATTR_FOOTER_FLOW_ID,
+  SECTION_ATTR_HEADER_FLOW_ID, SECTION_ATTR_MARGIN_BOTTOM, SECTION_ATTR_MARGIN_LEFT, SECTION_ATTR_MARGIN_RIGHT, SECTION_ATTR_MARGIN_TOP,
+  SECTION_ATTR_ORIENTATION, SECTION_ATTR_PAGE_HEIGHT, SECTION_ATTR_PAGE_NUMBERING_FORMAT, SECTION_ATTR_PAGE_NUMBERING_START,
+  SECTION_ATTR_PAGE_WIDTH, SECTIONS_BY_ID, SENTINEL_NEWLINE, SectionMargins, SectionOrientation, SectionPageAttrs, SectionPageNumbering,
+  SectionPageSize, USERS_BY_ID, document_id, document_schema_version, ensure_section, fork_document_lineage, init_loro_document,
+  new_loro_document, read_section_page_attrs, record_revision, register_replica, register_user, set_section_page_attrs, touch_document_metadata,
 };
 pub use package::{
   AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,
@@ -80,7 +78,10 @@ fn document_from_package(package: DocumentPackage) -> io::Result<DocumentProject
 
 pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetChunk]) {
   let referenced = referenced_asset_ids(document);
-  for asset in assets.iter().filter(|asset| referenced.contains(&AssetId(asset.asset_id))) {
+  for asset in assets
+    .iter()
+    .filter(|asset| referenced.contains(&AssetId(asset.asset_id)))
+  {
     let bytes = asset.bytes.clone();
     document.assets.assets.insert(
       AssetId(asset.asset_id),
@@ -94,13 +95,17 @@ pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetC
     );
   }
   for id in referenced {
-    document.assets.assets.entry(id).or_insert_with(|| AssetRecord {
-      id,
-      mime_type: "application/octet-stream".into(),
-      original_name: None,
-      content_hash: AssetRecord::stable_content_hash(&[]),
-      bytes: Arc::new(Vec::new()),
-    });
+    document
+      .assets
+      .assets
+      .entry(id)
+      .or_insert_with(|| AssetRecord {
+        id,
+        mime_type: "application/octet-stream".into(),
+        original_name: None,
+        content_hash: AssetRecord::stable_content_hash(&[]),
+        bytes: Arc::new(Vec::new()),
+      });
   }
 }
 

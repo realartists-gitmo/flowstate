@@ -1,11 +1,10 @@
 use std::ops::Range;
 
-use rustc_hash::FxHashMap;
 use super::{
-  AssetId, AssetRecord, BlockId, DocumentProjection, DocumentOffset, DocumentSpan, EditorSelection, InputBlock, InputBlockAlignment, InputImageSizing,
-  InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles,
-  TextRun,
+  AssetId, AssetRecord, BlockId, DocumentOffset, DocumentProjection, DocumentSpan, EditorSelection, InputBlock, InputBlockAlignment,
+  InputImageSizing, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles, TextRun,
 };
+use rustc_hash::FxHashMap;
 
 const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 

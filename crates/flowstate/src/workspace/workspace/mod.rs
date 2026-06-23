@@ -11,8 +11,8 @@ use std::{
 use gpui::{
   AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
-  SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
-  px,
+  SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div,
+  prelude::*, px,
 };
 #[cfg(target_os = "windows")]
 use gpui::{Bounds, size};

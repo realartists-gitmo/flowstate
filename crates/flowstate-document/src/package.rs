@@ -222,15 +222,8 @@ impl DocumentPackage {
     let revision_id = Uuid::new_v4().as_u128();
     let revision_frontiers = doc.state_frontiers();
     let revision_doc = doc.fork_at(&revision_frontiers).map_err(loro_io_error)?;
-    crate::loro_schema::record_revision(
-      doc,
-      revision_id,
-      encode_frontiers(&revision_frontiers),
-      title,
-      "Initial snapshot",
-      None,
-    )
-    .map_err(loro_io_error)?;
+    crate::loro_schema::record_revision(doc, revision_id, encode_frontiers(&revision_frontiers), title, "Initial snapshot", None)
+      .map_err(loro_io_error)?;
     let snapshot_id = Uuid::new_v4().as_u128();
     let frontier = encode_frontiers(&doc.state_frontiers());
     let version_vector = encode_version_vector(&doc.state_vv());
@@ -263,7 +256,9 @@ impl DocumentPackage {
           snapshot_id: Uuid::new_v4().as_u128(),
           frontier: encode_frontiers(&revision_frontiers),
           version_vector: encode_version_vector(&revision_doc.state_vv()),
-          bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
+          bytes: revision_doc
+            .export(ExportMode::Snapshot)
+            .map_err(loro_io_error)?,
           created_at_unix_secs: now,
         },
       ],
@@ -349,7 +344,10 @@ impl DocumentPackage {
       cached_search_units_from_compact_bytes(bytes)?
     };
     if manifest.package_format_version != LORO_PACKAGE_FORMAT_VERSION || manifest.loro_schema_version != LORO_SCHEMA_VERSION {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate cached search package version"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unsupported Flowstate cached search package version",
+      ));
     }
     let Some(search_frontier) = manifest.search_cache_frontier.as_deref() else {
       return Ok(None);
@@ -360,7 +358,10 @@ impl DocumentPackage {
       return Ok(None);
     }
     if units.iter().any(|unit| unit.frontier != search_frontier) {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "search unit frontier does not match package cache frontier"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "search unit frontier does not match package cache frontier",
+      ));
     }
     Ok(Some(units))
   }
@@ -409,14 +410,7 @@ impl DocumentPackage {
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
-    self.create_named_revision_with_id(
-      doc,
-      Uuid::new_v4().as_u128(),
-      title,
-      summary,
-      author_user_id,
-      replica_id,
-    )
+    self.create_named_revision_with_id(doc, Uuid::new_v4().as_u128(), title, summary, author_user_id, replica_id)
   }
 
   pub fn create_named_revision_with_id(
@@ -428,15 +422,7 @@ impl DocumentPackage {
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<u128> {
-    self.create_named_revision_at_with_id(
-      doc,
-      revision_id,
-      &doc.state_frontiers(),
-      title,
-      summary,
-      author_user_id,
-      replica_id,
-    )
+    self.create_named_revision_at_with_id(doc, revision_id, &doc.state_frontiers(), title, summary, author_user_id, replica_id)
   }
 
   pub fn create_named_revision_at_with_id(
@@ -452,7 +438,11 @@ impl DocumentPackage {
     doc.commit();
     let title = title.into();
     let summary = summary.into();
-    if self.revisions.iter().any(|revision| revision.revision_id == revision_id) {
+    if self
+      .revisions
+      .iter()
+      .any(|revision| revision.revision_id == revision_id)
+    {
       return Ok(revision_id);
     }
     let doc_frontier_before_revision_record = doc.state_frontiers();
@@ -461,15 +451,7 @@ impl DocumentPackage {
     let frontier = encode_frontiers(frontiers);
     let version_vector = encode_version_vector(&revision_doc.state_vv());
     if !loro_revision_exists(doc, revision_id) {
-      crate::loro_schema::record_revision(
-        doc,
-        revision_id,
-        frontier.clone(),
-        &title,
-        &summary,
-        author_user_id,
-      )
-      .map_err(loro_io_error)?;
+      crate::loro_schema::record_revision(doc, revision_id, frontier.clone(), &title, &summary, author_user_id).map_err(loro_io_error)?;
       let update = doc
         .export(ExportMode::updates(&doc_vv_before_revision_record))
         .map_err(loro_io_error)?;
@@ -499,7 +481,9 @@ impl DocumentPackage {
         snapshot_id: Uuid::new_v4().as_u128(),
         frontier: frontier.clone(),
         version_vector: encode_version_vector(&revision_doc.state_vv()),
-        bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
+        bytes: revision_doc
+          .export(ExportMode::Snapshot)
+          .map_err(loro_io_error)?,
         created_at_unix_secs: unix_time_secs(),
       });
     }
@@ -536,14 +520,7 @@ impl DocumentPackage {
     author_user_id: Option<u128>,
     replica_id: Option<u128>,
   ) -> io::Result<(u128, u128)> {
-    self.compact_to_named_snapshot_with_id(
-      doc,
-      Uuid::new_v4().as_u128(),
-      title,
-      summary,
-      author_user_id,
-      replica_id,
-    )
+    self.compact_to_named_snapshot_with_id(doc, Uuid::new_v4().as_u128(), title, summary, author_user_id, replica_id)
   }
 
   pub fn sync_revisions_from_loro(&mut self, doc: &LoroDoc) -> io::Result<usize> {
@@ -559,7 +536,11 @@ impl DocumentPackage {
       let Some(revision_id) = package_map_string(&revision, "id").and_then(|id| id.parse::<u128>().ok()) else {
         continue;
       };
-      if self.revisions.iter().any(|existing| existing.revision_id == revision_id) {
+      if self
+        .revisions
+        .iter()
+        .any(|existing| existing.revision_id == revision_id)
+      {
         continue;
       }
       let Some(frontier) = package_map_binary(&revision, "frontier") else {
@@ -573,7 +554,9 @@ impl DocumentPackage {
           snapshot_id: Uuid::new_v4().as_u128(),
           frontier: frontier.clone(),
           version_vector: version_vector.clone(),
-          bytes: revision_doc.export(ExportMode::Snapshot).map_err(loro_io_error)?,
+          bytes: revision_doc
+            .export(ExportMode::Snapshot)
+            .map_err(loro_io_error)?,
           created_at_unix_secs: package_map_i64(&revision, "timestamp").unwrap_or_else(unix_time_secs),
         });
       }
@@ -590,7 +573,9 @@ impl DocumentPackage {
       added += 1;
     }
     if added > 0 {
-      self.revisions.sort_by_key(|revision| revision.created_at_unix_secs);
+      self
+        .revisions
+        .sort_by_key(|revision| revision.created_at_unix_secs);
       self.manifest.modified_at_unix_secs = unix_time_secs();
       // §19: syncing revisions may add snapshot chunks; keep the index complete.
       self.integrity_index = self.build_integrity_index();
@@ -783,12 +768,8 @@ impl DocumentPackage {
         },
       }
     }
-    let mut package = package.ok_or_else(|| {
-      io::Error::new(
-        io::ErrorKind::InvalidData,
-        "Flowstate package journal has no complete full generation",
-      )
-    })?;
+    let mut package =
+      package.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal has no complete full generation"))?;
     // §19: journal deltas append update segments after the base generation, so
     // rebuild the integrity index over the reconstructed chunk set before
     // validating it for consistency. The manifest's own segment/asset indexes
@@ -909,19 +890,32 @@ impl DocumentPackage {
       .latest_snapshot()
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "latest Loro snapshot is missing"))?;
     if self.loro_update_segments.is_empty() && snapshot.frontier != self.manifest.latest_frontier {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "latest snapshot frontier does not match manifest"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "latest snapshot frontier does not match manifest",
+      ));
     }
     if let Some(last_segment) = self.loro_update_segments.last()
       && last_segment.to_frontier != self.manifest.latest_frontier
     {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "latest update segment frontier does not match manifest"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "latest update segment frontier does not match manifest",
+      ));
     }
     validate_frontiers(&self.manifest.latest_frontier, "manifest latest frontier")?;
     validate_version_vector(&self.manifest.latest_version_vector, "manifest latest version vector")?;
     if let Some(frontier) = &self.manifest.projection_cache_frontier {
       validate_frontiers(frontier, "manifest projection cache frontier")?;
-      if !self.projection_caches.iter().any(|cache| cache.frontier == *frontier) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest projection cache frontier has no cache chunk"));
+      if !self
+        .projection_caches
+        .iter()
+        .any(|cache| cache.frontier == *frontier)
+      {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "manifest projection cache frontier has no cache chunk",
+        ));
       }
     }
     if let Some(frontier) = &self.manifest.search_cache_frontier {
@@ -948,7 +942,10 @@ impl DocumentPackage {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid empty thumbnail chunk"));
       }
       if let Some(revision_id) = thumbnail.revision_id
-        && !self.revisions.iter().any(|revision| revision.revision_id == revision_id)
+        && !self
+          .revisions
+          .iter()
+          .any(|revision| revision.revision_id == revision_id)
       {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "thumbnail references an unknown revision"));
       }
@@ -973,7 +970,10 @@ impl DocumentPackage {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "Loro update segment frontier chain is broken"));
       }
       if segment.from_version_vector != expected_version_vector {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "Loro update segment version-vector chain is broken"));
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "Loro update segment version-vector chain is broken",
+        ));
       }
       expected_frontier = &segment.to_frontier;
       expected_version_vector = &segment.to_version_vector;
@@ -1014,7 +1014,11 @@ impl DocumentPackage {
     if frontier != self.manifest.latest_frontier.as_slice() {
       return Ok(None);
     }
-    let Some(cache) = self.projection_caches.iter().find(|cache| cache.frontier == frontier) else {
+    let Some(cache) = self
+      .projection_caches
+      .iter()
+      .find(|cache| cache.frontier == frontier)
+    else {
       return Ok(None);
     };
     let projection = decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
@@ -1028,9 +1032,17 @@ impl DocumentPackage {
 
   fn validate_manifest_indexes(&self) -> io::Result<()> {
     if self.manifest.update_segment_index.len() != self.loro_update_segments.len() {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest update segment index length mismatch"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "manifest update segment index length mismatch",
+      ));
     }
-    for (index, segment) in self.manifest.update_segment_index.iter().zip(&self.loro_update_segments) {
+    for (index, segment) in self
+      .manifest
+      .update_segment_index
+      .iter()
+      .zip(&self.loro_update_segments)
+    {
       if index.id != segment.segment_id || index.checksum != segment.checksum || index.byte_length != segment.bytes.len() as u64 {
         return Err(io::Error::new(io::ErrorKind::InvalidData, "manifest update segment index mismatch"));
       }
@@ -1101,12 +1113,7 @@ impl DocumentPackage {
   /// §27: record a schema migration event in package metadata. The migration's
   /// Loro document mutation (if any) must be committed separately as an ordinary
   /// Loro change with the `"migration"` origin before/after calling this.
-  pub fn record_schema_migration(
-    &mut self,
-    from_version: u32,
-    to_version: u32,
-    description: impl Into<String>,
-  ) -> io::Result<u128> {
+  pub fn record_schema_migration(&mut self, from_version: u32, to_version: u32, description: impl Into<String>) -> io::Result<u128> {
     if from_version >= to_version || to_version > self.manifest.loro_schema_version {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -1134,7 +1141,10 @@ impl DocumentPackage {
   }
 
   fn snapshot_for_frontier(&self, frontier: &[u8]) -> Option<&LoroSnapshotChunk> {
-    self.loro_snapshots.iter().find(|snapshot| snapshot.frontier == frontier)
+    self
+      .loro_snapshots
+      .iter()
+      .find(|snapshot| snapshot.frontier == frontier)
   }
 
   fn with_manifest_indexes(mut self) -> io::Result<Self> {
@@ -1230,19 +1240,12 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
     let len = read_u64(&mut cursor)?;
     let mut checksum = [0_u8; 32];
     cursor.read_exact(&mut checksum)?;
-    entries.push(ChunkEntry {
-      kind,
-      offset,
-      len,
-      checksum,
-    });
+    entries.push(ChunkEntry { kind, offset, len, checksum });
   }
   let mut chunks = Vec::with_capacity(entries.len());
   for entry in entries {
-    let start = usize::try_from(entry.offset)
-      .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk offset overflows usize"))?;
-    let len = usize::try_from(entry.len)
-      .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk length overflows usize"))?;
+    let start = usize::try_from(entry.offset).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk offset overflows usize"))?;
+    let len = usize::try_from(entry.len).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk length overflows usize"))?;
     let end = start
       .checked_add(len)
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk range overflows usize"))?;
@@ -1253,10 +1256,7 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
     if blake3_hash(&payload) != entry.checksum {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package chunk checksum mismatch"));
     }
-    chunks.push(Chunk {
-      kind: entry.kind,
-      payload,
-    });
+    chunks.push(Chunk { kind: entry.kind, payload });
   }
   Ok(chunks)
 }
@@ -1291,8 +1291,7 @@ fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentP
       ));
     };
     match delta {
-      PackageJournalDelta::Update { manifest: next_manifest, .. }
-      | PackageJournalDelta::Assets { manifest: next_manifest, .. } => {
+      PackageJournalDelta::Update { manifest: next_manifest, .. } | PackageJournalDelta::Assets { manifest: next_manifest, .. } => {
         *manifest = next_manifest;
         if manifest.search_cache_frontier.is_none() {
           search_units.clear();
@@ -1300,18 +1299,16 @@ fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentP
       },
     }
   }
-  cached.ok_or_else(|| {
-    io::Error::new(
-      io::ErrorKind::InvalidData,
-      "Flowstate package journal has no complete full generation",
-    )
-  })
+  cached.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal has no complete full generation"))
 }
 
 fn write_chunks(chunks: &[Chunk]) -> io::Result<Vec<u8>> {
   let table_len = chunks.len() * (4 + 8 + 8 + 32);
   let header_len = PACKAGE_MAGIC.len() + 4 + 4 + table_len;
-  let payload_len = chunks.iter().map(|chunk| chunk.payload.len()).sum::<usize>();
+  let payload_len = chunks
+    .iter()
+    .map(|chunk| chunk.payload.len())
+    .sum::<usize>();
   let mut bytes = Vec::with_capacity(header_len + payload_len);
   bytes.extend_from_slice(PACKAGE_MAGIC);
   write_u32(&mut bytes, PACKAGE_HEADER_VERSION);
@@ -1468,7 +1465,10 @@ fn committed_journal_transactions(bytes: &[u8]) -> io::Result<(Vec<&[u8]>, usize
   let mut cursor = Cursor::new(&bytes[JOURNAL_MAGIC.len()..]);
   let version = read_u32(&mut cursor)?;
   if version != JOURNAL_HEADER_VERSION {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package journal version"));
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "unsupported Flowstate package journal version",
+    ));
   }
   let mut offset = JOURNAL_MAGIC.len() + 4;
   let mut committed = Vec::new();
@@ -1612,19 +1612,26 @@ mod tests {
   fn package_roundtrips_loro_snapshot() -> io::Result<()> {
     let doc = new_loro_document("Roundtrip").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "Hello Loro").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "Hello Loro")
+      .map_err(loro_test_error)?;
     let bytes = loro_db8_bytes(&doc, "Roundtrip")?;
 
     let package = DocumentPackage::from_bytes(&bytes)?;
     assert_eq!(package.manifest.package_format_version, LORO_PACKAGE_FORMAT_VERSION);
     assert_eq!(package.manifest.loro_schema_version, LORO_SCHEMA_VERSION);
     assert_eq!(package.loro_snapshots.len(), 2);
-    assert_eq!(package.manifest.projection_cache_frontier.as_deref(), Some(package.manifest.latest_frontier.as_slice()));
+    assert_eq!(
+      package.manifest.projection_cache_frontier.as_deref(),
+      Some(package.manifest.latest_frontier.as_slice())
+    );
     assert_eq!(package.projection_caches.len(), 1);
 
     let loaded = package.load_loro_doc()?;
     assert_eq!(body_text(&loaded).to_string(), "\nHello Loro");
-    let projected = package.current_projection_document()?.expect("projection cache");
+    let projected = package
+      .current_projection_document()?
+      .expect("projection cache");
     assert_eq!(crate::paragraph_text(&projected, 0), "Hello Loro");
     Ok(())
   }
@@ -1677,8 +1684,8 @@ mod tests {
       })],
     );
     let doc = document_to_loro(&source, "Public facade").map_err(loro_test_error)?;
-    let bytes = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Public facade", crate::loro_import::assets_from_document(&source))?
-      .to_bytes()?;
+    let bytes =
+      DocumentPackage::from_loro_snapshot_with_assets(&doc, "Public facade", crate::loro_import::assets_from_document(&source))?.to_bytes()?;
     let package = DocumentPackage::from_bytes(&bytes)?;
     assert_eq!(package.manifest.package_format_version, LORO_PACKAGE_FORMAT_VERSION);
     let projected = read_db8_bytes(&bytes)?;
@@ -1694,9 +1701,13 @@ mod tests {
     let from_vv = doc.state_vv();
 
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "after save").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "after save")
+      .map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     assert!(package.manifest.projection_cache_frontier.is_none());
     assert!(package.projection_caches.is_empty());
@@ -1713,7 +1724,9 @@ mod tests {
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Projection cache")?;
     package.projection_caches.clear();
 
-    let error = package.validate().expect_err("manifest projection cache frontier must point at a cache chunk");
+    let error = package
+      .validate()
+      .expect_err("manifest projection cache frontier must point at a cache chunk");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
@@ -1725,13 +1738,19 @@ mod tests {
     let from_frontier = doc.state_frontiers();
     let from_vv = doc.state_vv();
 
-    body_text(&doc).insert(1, "update").map_err(loro_test_error)?;
+    body_text(&doc)
+      .insert(1, "update")
+      .map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     package.manifest.update_segment_index[0].byte_length = 0;
 
-    let error = package.validate().expect_err("stale manifest segment index must fail validation");
+    let error = package
+      .validate()
+      .expect_err("stale manifest segment index must fail validation");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
@@ -1751,7 +1770,9 @@ mod tests {
     let mut package = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Assets", vec![asset])?;
     package.manifest.asset_index[0].checksum = [0; 32];
 
-    let error = package.validate().expect_err("stale manifest asset index must fail validation");
+    let error = package
+      .validate()
+      .expect_err("stale manifest asset index must fail validation");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
@@ -1767,7 +1788,9 @@ mod tests {
     let text = body_text(&doc);
     text.insert(1, "after").map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     assert!(package.current_search_units().is_empty());
     let second_revision = package.create_named_revision(&doc, "After", "After text insert", None, None)?;
@@ -1796,7 +1819,9 @@ mod tests {
         .insert(body_text(&doc).len_unicode(), text)
         .map_err(loro_test_error)?;
       doc.commit();
-      let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+      let update = doc
+        .export(ExportMode::updates(&from_vv))
+        .map_err(loro_test_error)?;
       package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     }
 
@@ -1828,7 +1853,10 @@ mod tests {
     assert_eq!(package.search_units.len(), 2);
     assert_eq!(package.search_units[0].body, "Alpha");
     assert_eq!(package.search_units[1].body, "Beta");
-    assert_eq!(package.manifest.search_cache_frontier.as_deref(), Some(package.manifest.latest_frontier.as_slice()));
+    assert_eq!(
+      package.manifest.search_cache_frontier.as_deref(),
+      Some(package.manifest.latest_frontier.as_slice())
+    );
     assert!(!package.search_units[0].paragraph_start_cursor.is_empty());
     assert!(!package.search_units[0].paragraph_end_cursor.is_empty());
     Ok(())
@@ -1970,7 +1998,9 @@ mod tests {
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "projected table is missing"))?;
     let blocks = &projected_table.rows[0].cells[0].blocks;
     assert!(matches!(&blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "outer"));
-    assert!(matches!(&blocks[1], TableCellBlock::Table(table) if matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "inner")));
+    assert!(
+      matches!(&blocks[1], TableCellBlock::Table(table) if matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "inner"))
+    );
     Ok(())
   }
 
@@ -2030,24 +2060,53 @@ mod tests {
     let flows = test_child_map(&root, crate::FLOWS_BY_ID)?;
     let caption_flow = test_child_map(&flows, &caption_flow_id)?;
     let caption_text = test_child_text(&caption_flow, crate::FLOW_TEXT_KEY)?;
-    caption_text.insert(1, "caption text").map_err(loro_test_error)?;
+    caption_text
+      .insert(1, "caption text")
+      .map_err(loro_test_error)?;
     doc.commit();
     let package = DocumentPackage::from_loro_snapshot(&doc, "Search projection")?;
     let units = package.current_search_units();
 
-    assert!(units.iter().any(|unit| unit.unit_kind == "paragraph" && unit.body == "Body"));
-    assert!(units.iter().any(|unit| unit.unit_kind == "image_alt" && unit.body == "diagram alt"));
-    assert!(units.iter().any(|unit| unit.unit_kind == "image_caption" && unit.body == "caption text"));
-    assert!(units.iter().any(|unit| unit.unit_kind == "equation" && unit.body == "x^2"));
-    assert!(units.iter().any(|unit| unit.unit_kind == "table_cell" && unit.body == "cell text"));
-    assert!(units.iter().all(|unit| !unit.body.contains(crate::OBJECT_REPLACEMENT)));
+    assert!(
+      units
+        .iter()
+        .any(|unit| unit.unit_kind == "paragraph" && unit.body == "Body")
+    );
+    assert!(
+      units
+        .iter()
+        .any(|unit| unit.unit_kind == "image_alt" && unit.body == "diagram alt")
+    );
+    assert!(
+      units
+        .iter()
+        .any(|unit| unit.unit_kind == "image_caption" && unit.body == "caption text")
+    );
+    assert!(
+      units
+        .iter()
+        .any(|unit| unit.unit_kind == "equation" && unit.body == "x^2")
+    );
+    assert!(
+      units
+        .iter()
+        .any(|unit| unit.unit_kind == "table_cell" && unit.body == "cell text")
+    );
+    assert!(
+      units
+        .iter()
+        .all(|unit| !unit.body.contains(crate::OBJECT_REPLACEMENT))
+    );
     let body_unit = units
       .iter()
       .find(|unit| unit.unit_kind == "paragraph" && unit.body == "Body")
       .expect("body paragraph search unit should exist");
     assert!(!body_unit.paragraph_start_cursor.is_empty());
     assert!(!body_unit.paragraph_end_cursor.is_empty());
-    assert_eq!(package.manifest.search_cache_frontier.as_deref(), Some(package.manifest.latest_frontier.as_slice()));
+    assert_eq!(
+      package.manifest.search_cache_frontier.as_deref(),
+      Some(package.manifest.latest_frontier.as_slice())
+    );
     Ok(())
   }
 
@@ -2117,11 +2176,18 @@ mod tests {
     );
 
     let doc = document_to_loro(&source, "Structured").map_err(loro_test_error)?;
-    let bytes = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Structured", crate::loro_import::assets_from_document(&source))?
-      .to_bytes()?;
+    let bytes =
+      DocumentPackage::from_loro_snapshot_with_assets(&doc, "Structured", crate::loro_import::assets_from_document(&source))?.to_bytes()?;
     let loaded = read_db8_bytes(&bytes)?;
     assert_eq!(crate::paragraph_text(&loaded, 0), "before");
-    assert_eq!(loaded.assets.assets.get(&asset_id).map(|asset| asset.bytes.as_ref().clone()), Some(asset_bytes));
+    assert_eq!(
+      loaded
+        .assets
+        .assets
+        .get(&asset_id)
+        .map(|asset| asset.bytes.as_ref().clone()),
+      Some(asset_bytes)
+    );
 
     assert!(matches!(
       &loaded.blocks[1],
@@ -2158,15 +2224,20 @@ mod tests {
   fn package_rejects_inconsistent_schema_migration_record() -> io::Result<()> {
     let doc = new_loro_document("Migrations").map_err(loro_test_error)?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Migrations")?;
-    package.manifest.schema_migrations.push(SchemaMigrationRecord {
-      id: 1,
-      from_version: 2,
-      to_version: 1,
-      applied_at_unix_secs: 0,
-      description: "backwards".to_string(),
-    });
+    package
+      .manifest
+      .schema_migrations
+      .push(SchemaMigrationRecord {
+        id: 1,
+        from_version: 2,
+        to_version: 1,
+        applied_at_unix_secs: 0,
+        description: "backwards".to_string(),
+      });
 
-    let error = package.validate().expect_err("a backwards migration record must be rejected");
+    let error = package
+      .validate()
+      .expect_err("a backwards migration record must be rejected");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
@@ -2185,9 +2256,18 @@ mod tests {
     };
     let package = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Integrity", vec![asset])?;
 
-    assert!(package.integrity_index.iter().any(|entry| entry.chunk_kind == CHUNK_ASSET && entry.id == 7));
+    assert!(
+      package
+        .integrity_index
+        .iter()
+        .any(|entry| entry.chunk_kind == CHUNK_ASSET && entry.id == 7)
+    );
     assert_eq!(
-      package.integrity_index.iter().filter(|entry| entry.chunk_kind == CHUNK_LORO_SNAPSHOT).count(),
+      package
+        .integrity_index
+        .iter()
+        .filter(|entry| entry.chunk_kind == CHUNK_LORO_SNAPSHOT)
+        .count(),
       package.loro_snapshots.len(),
     );
 
@@ -2200,10 +2280,15 @@ mod tests {
   fn package_rejects_tampered_integrity_index() -> io::Result<()> {
     let doc = new_loro_document("Integrity").map_err(loro_test_error)?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Integrity")?;
-    let entry = package.integrity_index.first_mut().expect("at least one integrity entry");
+    let entry = package
+      .integrity_index
+      .first_mut()
+      .expect("at least one integrity entry");
     entry.checksum = [0; 32];
 
-    let error = package.validate().expect_err("a tampered integrity entry must be rejected");
+    let error = package
+      .validate()
+      .expect_err("a tampered integrity entry must be rejected");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }

@@ -17,7 +17,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 use crate::app_settings::{load_app_settings, load_keymap};
 use crate::commands::register_keymap;
 use crate::rich_text_element::{
-  DocumentProjection, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter,
+  DocumentExportAdapter, DocumentExportFormat, DocumentProjection, RichTextEditor, demo_document, set_document_export_adapter,
 };
 use crate::workspace::open_workspace_window;
 

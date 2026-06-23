@@ -1,8 +1,4 @@
-use std::{
-  io,
-  path::PathBuf,
-  thread,
-};
+use std::{io, path::PathBuf, thread};
 
 use anyhow::{Context as _, Result, anyhow};
 use async_channel::{Receiver, Sender};
@@ -63,7 +59,9 @@ impl CrdtRuntimeHandle {
   }
 
   pub async fn projection_snapshot(&self) -> Result<DocumentProjection> {
-    self.request(|reply| RuntimeRequest::ProjectionSnapshot { reply }).await
+    self
+      .request(|reply| RuntimeRequest::ProjectionSnapshot { reply })
+      .await
   }
 
   pub async fn oplog_version_vector(&self) -> Result<Vec<u8>> {
@@ -79,7 +77,9 @@ impl CrdtRuntimeHandle {
   }
 
   pub async fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-    self.request(|reply| RuntimeRequest::SnapshotBytes { reply }).await
+    self
+      .request(|reply| RuntimeRequest::SnapshotBytes { reply })
+      .await
   }
 
   pub async fn checkpoint_package(&self, title: String, path: Option<PathBuf>) -> Result<Vec<RuntimeEvent>> {
@@ -107,15 +107,21 @@ impl CrdtRuntimeHandle {
   }
 
   pub async fn asset_metadata(&self) -> Result<Vec<RuntimeAssetMetadata>> {
-    self.request(|reply| RuntimeRequest::AssetMetadata { reply }).await
+    self
+      .request(|reply| RuntimeRequest::AssetMetadata { reply })
+      .await
   }
 
   pub async fn revisions(&self) -> Result<Vec<RuntimeRevisionInfo>> {
-    self.request(|reply| RuntimeRequest::Revisions { reply }).await
+    self
+      .request(|reply| RuntimeRequest::Revisions { reply })
+      .await
   }
 
   pub async fn projection_fallback_stats(&self) -> Result<ProjectionFallbackStats> {
-    self.request(|reply| RuntimeRequest::ProjectionFallbackStats { reply }).await
+    self
+      .request(|reply| RuntimeRequest::ProjectionFallbackStats { reply })
+      .await
   }
 
   pub async fn presence_selection(&self, selection: EditorSelection) -> Result<Option<PresenceSelection>> {
@@ -124,10 +130,7 @@ impl CrdtRuntimeHandle {
       .await
   }
 
-  pub async fn resolve_presence_carets(
-    &self,
-    requests: Vec<RuntimePresenceCaretRequest>,
-  ) -> Result<RuntimePresenceCarets> {
+  pub async fn resolve_presence_carets(&self, requests: Vec<RuntimePresenceCaretRequest>) -> Result<RuntimePresenceCarets> {
     self
       .request(|reply| RuntimeRequest::ResolvePresenceCarets { requests, reply })
       .await
@@ -286,7 +289,9 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
             }
           },
           Err(error) => {
-            let stale_projection = error.downcast_ref::<crate::crdt_runtime::StaleProjectionError>().copied();
+            let stale_projection = error
+              .downcast_ref::<crate::crdt_runtime::StaleProjectionError>()
+              .copied();
             let message = error.to_string();
             for reply in replies {
               let error = stale_projection
@@ -420,7 +425,11 @@ mod tests {
       .await
       .expect_err("stale editor commands must be rejected");
 
-    assert!(error.downcast_ref::<crate::crdt_runtime::StaleProjectionError>().is_some());
+    assert!(
+      error
+        .downcast_ref::<crate::crdt_runtime::StaleProjectionError>()
+        .is_some()
+    );
     Ok(())
   }
 

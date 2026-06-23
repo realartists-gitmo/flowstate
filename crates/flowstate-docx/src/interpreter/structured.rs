@@ -17,11 +17,7 @@
 //! only to host an object are still emitted (kept simple to preserve cursor
 //! alignment) and render as a blank line next to the object.
 
-use std::{
-  io,
-  io::Cursor,
-  sync::Arc,
-};
+use std::{io, io::Cursor, sync::Arc};
 
 use quick_xml::{
   Reader as XmlReader,
@@ -223,12 +219,20 @@ impl StructuredWalker<'_> {
       VerticalMerge::Restart => {
         vertical_open.insert(grid_col, (rows.len(), cells.len()));
         let blocks = self.cell_blocks(cell_node);
-        cells.push(InputTableCell { blocks, row_span: 1, col_span });
+        cells.push(InputTableCell {
+          blocks,
+          row_span: 1,
+          col_span,
+        });
       },
       VerticalMerge::None => {
         vertical_open.remove(&grid_col);
         let blocks = self.cell_blocks(cell_node);
-        cells.push(InputTableCell { blocks, row_span: 1, col_span });
+        cells.push(InputTableCell {
+          blocks,
+          row_span: 1,
+          col_span,
+        });
       },
     }
     grid_col + usize::from(col_span.max(1))
@@ -271,7 +275,9 @@ impl StructuredWalker<'_> {
   fn resolve_image(&mut self, relationship_id: &str) -> Option<AssetId> {
     let package = self.package?;
     let main_part = self.main_part?;
-    let relationship = package.get_part_rels(main_part)?.get_by_id(relationship_id)?;
+    let relationship = package
+      .get_part_rels(main_part)?
+      .get_by_id(relationship_id)?;
     let target = OpcPackage::resolve_rel_target(main_part, &relationship.target);
     let bytes = package.get_part(&target)?;
     let asset_id = asset_id_from_bytes(bytes);
@@ -418,7 +424,11 @@ fn asset_id_from_bytes(bytes: &[u8]) -> AssetId {
 }
 
 fn mime_from_path(path: &str) -> &'static str {
-  let extension = path.rsplit('.').next().unwrap_or_default().to_ascii_lowercase();
+  let extension = path
+    .rsplit('.')
+    .next()
+    .unwrap_or_default()
+    .to_ascii_lowercase();
   match extension.as_str() {
     "png" => "image/png",
     "jpg" | "jpeg" => "image/jpeg",
@@ -453,7 +463,11 @@ struct XmlNode {
 
 impl XmlNode {
   fn attr(&self, local: &str) -> Option<&str> {
-    self.attrs.iter().find(|entry| entry.0 == local).map(|entry| entry.1.as_str())
+    self
+      .attrs
+      .iter()
+      .find(|entry| entry.0 == local)
+      .map(|entry| entry.1.as_str())
   }
 }
 
@@ -534,7 +548,10 @@ fn local_name(name: &[u8]) -> &str {
 }
 
 fn child<'tree>(node: &'tree XmlNode, local: &str) -> Option<&'tree XmlNode> {
-  node.children.iter().find(|candidate| candidate.local == local)
+  node
+    .children
+    .iter()
+    .find(|candidate| candidate.local == local)
 }
 
 fn find_descendant<'tree>(node: &'tree XmlNode, local: &str) -> Option<&'tree XmlNode> {
@@ -618,7 +635,10 @@ mod tests {
       panic!("expected a table block after the intro paragraph");
     };
     assert!(table.style.header_row);
-    assert_eq!(table.column_widths, vec![InputTableColumnWidth::FixedPx(96), InputTableColumnWidth::FixedPx(192)]);
+    assert_eq!(
+      table.column_widths,
+      vec![InputTableColumnWidth::FixedPx(96), InputTableColumnWidth::FixedPx(192)]
+    );
     assert_eq!(table.rows.len(), 1);
     assert_eq!(table.rows[0].cells.len(), 2);
     let InputTableCellBlock::Paragraph(left) = &table.rows[0].cells[0].blocks[0] else {

@@ -36,7 +36,10 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping own collaboration presence refresh because store is missing");
       return;
     }
-    let selection = self.editor.as_ref().map(|editor| editor.read(cx).selection().clone());
+    let selection = self
+      .editor
+      .as_ref()
+      .map(|editor| editor.read(cx).selection().clone());
     let runtime = self.runtime.clone();
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
@@ -111,10 +114,12 @@ impl CollabSession {
       .into_iter()
       .filter(|entry| entry.key != self_key)
       .filter_map(|entry| {
-        entry.selection.map(|selection| RuntimePresenceCaretRequest {
-          selection,
-          color_rgb: entry.color_rgb,
-        })
+        entry
+          .selection
+          .map(|selection| RuntimePresenceCaretRequest {
+            selection,
+            color_rgb: entry.color_rgb,
+          })
       })
       .collect();
     let session_id = self.session;
@@ -123,7 +128,11 @@ impl CollabSession {
       let _ = session.update(cx, |session, cx| match result {
         Ok(resolved) => {
           tracing::trace!(session = %session_id, carets = resolved.carets.len(), "refreshing collaboration external carets");
-          if session.editor.as_ref().is_some_and(|current| current == &editor) {
+          if session
+            .editor
+            .as_ref()
+            .is_some_and(|current| current == &editor)
+          {
             editor.update(cx, |editor, cx| editor.set_external_carets(resolved.carets, cx));
           }
         },

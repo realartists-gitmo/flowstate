@@ -1,18 +1,18 @@
 use std::{collections::BTreeMap, io, sync::Arc};
 
 use gpui_flowtext::{
-  AssetId, BlockId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
-  InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, SectionId, SectionKind, document_from_input_blocks,
+  AssetId, BlockId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock,
+  InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell,
+  InputTableCellBlock, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, SectionId, SectionKind,
+  document_from_input_blocks,
 };
 use loro::{Container, ContainerID, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
 
 use crate::{
-  BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
-  MARK_STRIKETHROUGH, MAIN_BODY_BLOCK_ID, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
-  SECTIONS_BY_ID,
-  flowstate_document_theme,
+  BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
+  MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
+  SECTIONS_BY_ID, flowstate_document_theme,
 };
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
@@ -146,7 +146,9 @@ impl<'a> Projector<'a> {
       let section_id = map_string_opt(&section, "id")?
         .and_then(|value| parse_u128(&value))
         .unwrap_or_else(|| loro_id_u128(&key));
-      let kind_slot = map_i64_opt(&section, "kind_slot")?.and_then(i64_to_u8).unwrap_or(0);
+      let kind_slot = map_i64_opt(&section, "kind_slot")?
+        .and_then(i64_to_u8)
+        .unwrap_or(0);
       // §11: read the section's canonical page attrs from its `attrs` child map
       // (defaults substituted for missing keys) and project them. The section
       // map always exists here, so `page` is always `Some(..)` for determinism.
@@ -226,7 +228,7 @@ impl<'a> Projector<'a> {
               pending_style = style;
               current_boundary = Some(unicode_pos);
             }
-          }
+          },
           OBJECT_REPLACEMENT => {
             if let Some(block) = object_blocks.get(&unicode_pos) {
               if !current.runs.is_empty() {
@@ -250,7 +252,7 @@ impl<'a> Projector<'a> {
               }
               current_boundary = None;
             }
-          }
+          },
           _ => push_char(&mut current, ch, run_styles),
         }
         unicode_pos += 1;
@@ -258,14 +260,7 @@ impl<'a> Projector<'a> {
     }
 
     if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
-      push_paragraph_projection_metadata(
-        self.doc,
-        text,
-        current_boundary,
-        output.len(),
-        paragraph_ids,
-        block_ids,
-      );
+      push_paragraph_projection_metadata(self.doc, text, current_boundary, output.len(), paragraph_ids, block_ids);
       output.push(InputBlock::Paragraph(current));
     }
     Ok(())
@@ -419,8 +414,12 @@ impl<'a> Projector<'a> {
     }
     Ok(InputTableCell {
       blocks,
-      row_span: map_i64_opt(cell, "row_span")?.and_then(i64_to_u16).unwrap_or(1),
-      col_span: map_i64_opt(cell, "column_span")?.and_then(i64_to_u16).unwrap_or(1),
+      row_span: map_i64_opt(cell, "row_span")?
+        .and_then(i64_to_u16)
+        .unwrap_or(1),
+      col_span: map_i64_opt(cell, "column_span")?
+        .and_then(i64_to_u16)
+        .unwrap_or(1),
     })
   }
 
@@ -473,7 +472,13 @@ impl<'a> Projector<'a> {
   }
 
   fn plain_flow_text(&self, flow_id: &str) -> io::Result<String> {
-    Ok(self.flow_text(flow_id)?.to_string().trim_start_matches('\n').to_string())
+    Ok(
+      self
+        .flow_text(flow_id)?
+        .to_string()
+        .trim_start_matches('\n')
+        .to_string(),
+    )
   }
 
   fn caption_paragraph(&self, flow_id: &str) -> io::Result<InputParagraph> {
@@ -574,12 +579,16 @@ fn paragraph_loro_id_at_boundary(doc: &LoroDoc, text: &LoroText, boundary: usize
       child_map(&paragraphs, key)
         .ok()
         .flatten()
-        .and_then(|paragraph| live_cursor_pos(doc, text, &paragraph, "boundary_cursor").or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor")))
+        .and_then(|paragraph| {
+          live_cursor_pos(doc, text, &paragraph, "boundary_cursor").or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"))
+        })
         == Some(boundary)
     })
     .collect::<Vec<_>>();
   if boundary == 0
-    && let Some(ix) = matches.iter().position(|key| key == ROOT_FIRST_PARAGRAPH_ID)
+    && let Some(ix) = matches
+      .iter()
+      .position(|key| key == ROOT_FIRST_PARAGRAPH_ID)
   {
     return Some(matches.swap_remove(ix));
   }
@@ -624,7 +633,11 @@ fn map_keys(map: &LoroMap) -> Vec<String> {
 }
 
 fn loro_id_u128(id: &str) -> u128 {
-  if let Some(value) = id.rsplit('.').next().and_then(|suffix| suffix.parse::<u128>().ok()) {
+  if let Some(value) = id
+    .rsplit('.')
+    .next()
+    .and_then(|suffix| suffix.parse::<u128>().ok())
+  {
     return value;
   }
   let hash = blake3::hash(id.as_bytes());
@@ -723,7 +736,9 @@ fn paragraph_style_from_attrs(attrs: Option<&FxHashMap<String, LoroValue>>) -> O
   let value = attrs?.get(MARK_PARAGRAPH_STYLE)?;
   match value {
     LoroValue::I64(0) => Some(gpui_flowtext::ParagraphStyle::Normal),
-    LoroValue::I64(slot) if *slot > 0 => u8::try_from(*slot - 1).ok().map(gpui_flowtext::ParagraphStyle::Custom),
+    LoroValue::I64(slot) if *slot > 0 => u8::try_from(*slot - 1)
+      .ok()
+      .map(gpui_flowtext::ParagraphStyle::Custom),
     _ => None,
   }
 }
@@ -759,7 +774,9 @@ fn image_sizing(attrs: Option<&LoroMap>) -> io::Result<InputImageSizing> {
   match map_string_opt(attrs, "sizing")?.as_deref() {
     Some("intrinsic") => Ok(InputImageSizing::Intrinsic),
     Some("fixed") => Ok(InputImageSizing::Fixed {
-      width_px: map_i64_opt(attrs, "width_px")?.and_then(i64_to_u32).unwrap_or(640),
+      width_px: map_i64_opt(attrs, "width_px")?
+        .and_then(i64_to_u32)
+        .unwrap_or(640),
       height_px: map_i64_opt(attrs, "height_px")?.and_then(i64_to_u32),
     }),
     Some("fit_width") | None => Ok(InputImageSizing::FitWidth),
@@ -802,8 +819,16 @@ fn equation_display(attrs: Option<&LoroMap>) -> io::Result<InputEquationDisplay>
 
 fn table_column_width(column: &LoroMap) -> io::Result<InputTableColumnWidth> {
   Ok(match map_string_opt(column, "width_kind")?.as_deref() {
-    Some("fixed_px") => InputTableColumnWidth::FixedPx(map_i64_opt(column, "width_px")?.and_then(i64_to_u32).unwrap_or(120)),
-    Some("fraction") => InputTableColumnWidth::Fraction(map_i64_opt(column, "fraction")?.and_then(i64_to_u32).unwrap_or(1)),
+    Some("fixed_px") => InputTableColumnWidth::FixedPx(
+      map_i64_opt(column, "width_px")?
+        .and_then(i64_to_u32)
+        .unwrap_or(120),
+    ),
+    Some("fraction") => InputTableColumnWidth::Fraction(
+      map_i64_opt(column, "fraction")?
+        .and_then(i64_to_u32)
+        .unwrap_or(1),
+    ),
     Some("auto") | None => InputTableColumnWidth::Auto,
     Some(_) => InputTableColumnWidth::Auto,
   })
@@ -980,7 +1005,11 @@ mod tests {
     assert_eq!(gpui_flowtext::paragraph_text(&projected, 1), "after");
     assert!(matches!(
       projected.blocks.as_slice(),
-      [gpui_flowtext::Block::Paragraph(_), gpui_flowtext::Block::Image(_), gpui_flowtext::Block::Paragraph(_)]
+      [
+        gpui_flowtext::Block::Paragraph(_),
+        gpui_flowtext::Block::Image(_),
+        gpui_flowtext::Block::Paragraph(_)
+      ]
     ));
     Ok(())
   }

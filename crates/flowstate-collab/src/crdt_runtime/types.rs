@@ -1,11 +1,11 @@
 use flowstate_document::{
-  ProjectionPatch, DocumentProjection, DocumentPackage, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth,
-  ParagraphStyle, ROOT_BODY_FLOW_ID, RunStyles,
+  DocumentPackage, DocumentProjection, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth, ParagraphStyle,
+  ProjectionPatch, ROOT_BODY_FLOW_ID, RunStyles,
 };
-use std::collections::BTreeMap;
 use gpui_flowtext::{EditorSelection, ExternalCaret};
 use loro::VersionRange;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 #[derive(Clone, Copy, Debug)]
 pub struct StaleProjectionError {
@@ -18,8 +18,7 @@ impl std::fmt::Display for StaleProjectionError {
     write!(
       f,
       "editor command batch was constructed at a stale projection frontier (expected {} bytes, current frontier has {} bytes)",
-      self.expected_frontier_len,
-      self.current_frontier_len,
+      self.expected_frontier_len, self.current_frontier_len,
     )
   }
 }
@@ -253,7 +252,10 @@ impl ProjectionInvalidation {
         unicode_len: 1,
       }],
       changed_blocks: vec![block_kind.to_string()],
-      changed_tables: (block_kind == "table").then(|| block_kind.to_string()).into_iter().collect(),
+      changed_tables: (block_kind == "table")
+        .then(|| block_kind.to_string())
+        .into_iter()
+        .collect(),
       ..Self::default()
     }
   }

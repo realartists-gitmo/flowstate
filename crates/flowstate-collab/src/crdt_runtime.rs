@@ -10,49 +10,39 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, ProjectionPatch, ProjectionStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
-  ImportedLoroDocument,
-  FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, InputBlock, InputBlockAlignment, InputEquationDisplay,
-  InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow,
-  MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
-  OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles,
-  SectionId, SENTINEL_NEWLINE, TableBlock, document_from_loro, import_document_projection,
-  loro_import::assets_from_document,
-  loro_schema::body_text,
-  new_loro_document,
+  AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentProjection,
+  FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock, InputBlockAlignment,
+  InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
+  InputTableRow, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
+  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionPatch, ProjectionStructuralBlock,
+  ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId, TableBlock, document_from_loro,
+  import_document_projection, loro_import::assets_from_document, loro_schema::body_text, new_loro_document,
 };
 use gpui_flowtext::SemanticEditCommand as EditorSemanticCommand;
 use loro::{
-  Container, ContainerID, ExportMode, Frontiers, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription, UndoItemMeta, UndoManager,
-  ValueOrContainer, VersionRange, VersionVector,
+  Container, ContainerID, ExportMode, Frontiers, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
+  UndoItemMeta, UndoManager, ValueOrContainer, VersionRange, VersionVector,
   cursor::{Cursor, Side},
   event::{Diff, DiffEvent},
 };
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
-#[path = "crdt_runtime/types.rs"]
-mod types;
 #[path = "crdt_runtime/projection_patch.rs"]
 mod projection_patch;
-pub use types::{
-  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
-  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity, UndoSelectionDirection,
-  UndoSelectionSnapshot,
-};
+#[path = "crdt_runtime/types.rs"]
+mod types;
+use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
+use gpui_flowtext::{DocumentOffset, EditorSelection, ExternalCaret, apply_projection_patches, global_byte, global_to_document_offset};
+use loro::{ContainerTrait as _, cursor::PosType};
 use projection_patch::{
   body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
 };
 use types::UndoSelectionState;
-use crate::presence::{
-  PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity,
-};
-use gpui_flowtext::{
-  DocumentOffset, EditorSelection, ExternalCaret, apply_projection_patches, global_byte, global_to_document_offset,
-};
-use loro::{
-  ContainerTrait as _,
-  cursor::PosType,
+pub use types::{
+  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
+  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity, UndoSelectionDirection,
+  UndoSelectionSnapshot,
 };
 
 #[derive(Debug)]
@@ -156,7 +146,10 @@ impl ProjectionRuntimeIndex {
       // §24 block anchor index: block id → block index. `block_ids` is parallel
       // to `blocks`, so the first occurrence matches the prior `.position` scans.
       if let Some(block_id) = projection.ids.block_ids.get(block_ix) {
-        index.block_anchor_by_id.entry(*block_id).or_insert(block_ix);
+        index
+          .block_anchor_by_id
+          .entry(*block_id)
+          .or_insert(block_ix);
       }
       match block {
         Block::Paragraph(paragraph) => {
@@ -174,7 +167,10 @@ impl ProjectionRuntimeIndex {
           body_unicode = body_unicode.saturating_add(char_count);
           // §24 paragraph metadata index: paragraph id → paragraph index.
           if let Some(paragraph_id) = projection.ids.paragraph_ids.get(paragraph_ix) {
-            index.paragraph_metadata_by_id.entry(*paragraph_id).or_insert(paragraph_ix);
+            index
+              .paragraph_metadata_by_id
+              .entry(*paragraph_id)
+              .or_insert(paragraph_ix);
           }
           // §24 style interval index: per-paragraph run intervals.
           index
@@ -193,7 +189,11 @@ impl ProjectionRuntimeIndex {
           index.object_placeholder_positions.push(body_unicode);
           // §24 asset reference index: asset id → referencing image block ids.
           if let Some(block_id) = projection.ids.block_ids.get(block_ix) {
-            index.asset_refs_by_id.entry(image.asset_id).or_default().push(*block_id);
+            index
+              .asset_refs_by_id
+              .entry(image.asset_id)
+              .or_default()
+              .push(*block_id);
           }
           index.search_unit_spans.push(SearchUnitSpan {
             paragraph: None,
@@ -217,7 +217,9 @@ impl ProjectionRuntimeIndex {
           index.object_placeholder_positions.push(body_unicode);
           // §24 table row/column/cell index.
           if let Some(block_id) = projection.ids.block_ids.get(block_ix) {
-            index.table_cells_by_block.insert(*block_id, table_index_entry(table));
+            index
+              .table_cells_by_block
+              .insert(*block_id, table_index_entry(table));
           }
           index.search_unit_spans.push(SearchUnitSpan {
             paragraph: None,
@@ -232,7 +234,10 @@ impl ProjectionRuntimeIndex {
 
     // §24 section anchor index: section id → start paragraph id.
     for section in projection.sections.iter() {
-      index.section_anchor_by_id.entry(section.id).or_insert(section.start_paragraph);
+      index
+        .section_anchor_by_id
+        .entry(section.id)
+        .or_insert(section.start_paragraph);
     }
 
     index
@@ -241,7 +246,9 @@ impl ProjectionRuntimeIndex {
   fn body_unicode_for_offset(&self, projection: &DocumentProjection, offset: DocumentOffset) -> Option<usize> {
     let paragraph = projection.paragraphs.get(offset.paragraph)?;
     let paragraph_text = flowstate_document::paragraph_text(projection, offset.paragraph);
-    let byte = offset.byte.min(flowstate_document::paragraph_text_len(paragraph));
+    let byte = offset
+      .byte
+      .min(flowstate_document::paragraph_text_len(paragraph));
     if !paragraph_text.is_char_boundary(byte) {
       return None;
     }
@@ -250,7 +257,10 @@ impl ProjectionRuntimeIndex {
 
   fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize) -> Vec<usize> {
     let mut touched = std::collections::BTreeSet::new();
-    for range in ranges.iter().filter(|range| range.flow_id == ROOT_BODY_FLOW_ID) {
+    for range in ranges
+      .iter()
+      .filter(|range| range.flow_id == ROOT_BODY_FLOW_ID)
+    {
       let start = self.paragraph_at_body_unicode(range.unicode_start, paragraph_count);
       let end = self.paragraph_at_body_unicode(range.unicode_start.saturating_add(range.unicode_len), paragraph_count);
       if let Some(start) = start {
@@ -298,7 +308,11 @@ impl ProjectionRuntimeIndex {
     if let Some(&paragraph_ix) = self.paragraph_metadata_by_id.get(&id) {
       return Some(paragraph_ix);
     }
-    projection.ids.paragraph_ids.iter().position(|candidate| *candidate == id)
+    projection
+      .ids
+      .paragraph_ids
+      .iter()
+      .position(|candidate| *candidate == id)
   }
 
   /// §24 block anchor index lookup: block id → block index in `projection.blocks`.
@@ -309,7 +323,11 @@ impl ProjectionRuntimeIndex {
     if let Some(&block_ix) = self.block_anchor_by_id.get(&id) {
       return Some(block_ix);
     }
-    projection.ids.block_ids.iter().position(|candidate| *candidate == id)
+    projection
+      .ids
+      .block_ids
+      .iter()
+      .position(|candidate| *candidate == id)
   }
 
   /// §24 style interval index lookup: run styles covering `byte` in a paragraph.
@@ -358,8 +376,14 @@ impl ProjectionRuntimeIndex {
             rebuild = true;
             break;
           };
-          let old_len = flowstate_document::paragraph_text(projection, paragraph_ix).chars().count();
-          let new_len = new.runs.iter().map(|run| run.text.chars().count()).sum::<usize>();
+          let old_len = flowstate_document::paragraph_text(projection, paragraph_ix)
+            .chars()
+            .count();
+          let new_len = new
+            .runs
+            .iter()
+            .map(|run| run.text.chars().count())
+            .sum::<usize>();
           text_deltas.push((paragraph_ix, new_len as isize - old_len as isize));
         },
         ProjectionPatch::InsertBlocks { .. } | ProjectionPatch::DeleteBlocks { .. } | ProjectionPatch::MoveBlock { .. } => {
@@ -379,10 +403,18 @@ impl ProjectionRuntimeIndex {
       if delta == 0 {
         continue;
       }
-      for start in self.paragraph_body_unicode_starts.iter_mut().skip(paragraph_ix.saturating_add(1)) {
+      for start in self
+        .paragraph_body_unicode_starts
+        .iter_mut()
+        .skip(paragraph_ix.saturating_add(1))
+      {
         *start = start.saturating_add_signed(delta);
       }
-      for boundary in self.paragraph_boundary_positions.iter_mut().skip(paragraph_ix.saturating_add(1)) {
+      for boundary in self
+        .paragraph_boundary_positions
+        .iter_mut()
+        .skip(paragraph_ix.saturating_add(1))
+      {
         *boundary = boundary.saturating_add_signed(delta);
       }
       let threshold = self
@@ -390,7 +422,11 @@ impl ProjectionRuntimeIndex {
         .get(paragraph_ix)
         .copied()
         .unwrap_or_default();
-      for placeholder in self.object_placeholder_positions.iter_mut().filter(|position| **position > threshold) {
+      for placeholder in self
+        .object_placeholder_positions
+        .iter_mut()
+        .filter(|position| **position > threshold)
+      {
         *placeholder = placeholder.saturating_add_signed(delta);
       }
     }
@@ -453,7 +489,9 @@ impl CrdtRuntime {
     let projection = package
       .current_projection_document()
       .context("reading frontier-matched package projection cache")?;
-    let doc = package.load_loro_doc().context("loading Loro document from package")?;
+    let doc = package
+      .load_loro_doc()
+      .context("loading Loro document from package")?;
     let mut runtime = Self::from_doc_with_projection(doc, Some(package), Some(path.to_path_buf()), projection)?;
     runtime.package_journal_prepared = true;
     Ok(runtime)
@@ -463,13 +501,14 @@ impl CrdtRuntime {
     let projection = package
       .current_projection_document()
       .context("reading frontier-matched package projection cache")?;
-    let doc = package.load_loro_doc().context("loading Loro document from package")?;
+    let doc = package
+      .load_loro_doc()
+      .context("loading Loro document from package")?;
     Self::from_doc_with_projection(doc, Some(package), package_path, projection)
   }
 
   pub fn from_document_projection(document: &DocumentProjection, title: &str) -> Result<Self> {
-    let imported = import_document_projection(document.clone(), title)
-      .context("importing projected document into canonical Loro runtime")?;
+    let imported = import_document_projection(document.clone(), title).context("importing projected document into canonical Loro runtime")?;
     Self::from_imported_document(imported)
   }
 
@@ -513,7 +552,7 @@ impl CrdtRuntime {
       Some(mut projection) if !projection_content_repaired && projection.frontier == frontier_before_startup_metadata => {
         projection.frontier.clone_from(&current_frontier);
         projection
-      }
+      },
       None => document_from_loro(&doc).context("building initial projection from canonical Loro state")?,
       Some(_) => document_from_loro(&doc).context("rebuilding stale initial projection")?,
     };
@@ -601,8 +640,7 @@ impl CrdtRuntime {
   /// their author. Until this is called, `author_user_id` stays `None` and
   /// authorship is left unset (behavior unchanged).
   pub fn set_author_identity(&mut self, user_id: u128, display_name: Option<String>) -> Result<()> {
-    flowstate_document::register_user(&self.doc, user_id, display_name.as_deref())
-      .context("registering durable author identity")?;
+    flowstate_document::register_user(&self.doc, user_id, display_name.as_deref()).context("registering durable author identity")?;
     self.doc.commit();
     self.author_user_id = Some(user_id);
     Ok(())
@@ -631,7 +669,10 @@ impl CrdtRuntime {
       self.undo_checkpoint_pending = true;
       return Ok(());
     }
-    self.undo.record_new_checkpoint().context("recording Loro undo checkpoint")?;
+    self
+      .undo
+      .record_new_checkpoint()
+      .context("recording Loro undo checkpoint")?;
     Ok(())
   }
 
@@ -644,10 +685,18 @@ impl CrdtRuntime {
     let body = body_text(&self.doc);
     let anchor = clamp_projection_offset(&self.projection, selection.anchor);
     let head = clamp_projection_offset(&self.projection, selection.head);
-    let anchor_pos = self.projection_index.body_unicode_for_offset(&self.projection, anchor)?;
-    let head_pos = self.projection_index.body_unicode_for_offset(&self.projection, head)?;
-    let anchor_cursor = body.get_cursor(anchor_pos, side_for_affinity(anchor_affinity))?.encode();
-    let head_cursor = body.get_cursor(head_pos, side_for_affinity(head_affinity))?.encode();
+    let anchor_pos = self
+      .projection_index
+      .body_unicode_for_offset(&self.projection, anchor)?;
+    let head_pos = self
+      .projection_index
+      .body_unicode_for_offset(&self.projection, head)?;
+    let anchor_cursor = body
+      .get_cursor(anchor_pos, side_for_affinity(anchor_affinity))?
+      .encode();
+    let head_cursor = body
+      .get_cursor(head_pos, side_for_affinity(head_affinity))?
+      .encode();
     Some(UndoSelectionSnapshot {
       anchor_cursor,
       head_cursor,
@@ -661,7 +710,11 @@ impl CrdtRuntime {
     })
   }
 
-  pub fn apply_editor_semantic_command(&mut self, projection: &DocumentProjection, command: &EditorSemanticCommand) -> Result<Vec<RuntimeEvent>> {
+  pub fn apply_editor_semantic_command(
+    &mut self,
+    projection: &DocumentProjection,
+    command: &EditorSemanticCommand,
+  ) -> Result<Vec<RuntimeEvent>> {
     self.apply_editor_semantic_command_with_projection(projection, command, true)
   }
 
@@ -673,10 +726,7 @@ impl CrdtRuntime {
     self.apply_editor_semantic_command_with_projection(projection, command, false)
   }
 
-  pub fn try_apply_editor_semantic_command_without_projection(
-    &mut self,
-    command: &EditorSemanticCommand,
-  ) -> Result<Option<Vec<RuntimeEvent>>> {
+  pub fn try_apply_editor_semantic_command_without_projection(&mut self, command: &EditorSemanticCommand) -> Result<Option<Vec<RuntimeEvent>>> {
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     if apply_editor_semantic_command_body_fast_path(&self.doc, &self.projection, &self.projection_index, command)? {
@@ -713,12 +763,7 @@ impl CrdtRuntime {
     let from_vv = self.doc.state_vv();
     if apply_editor_semantic_command(&self.doc, projection, command)? {
       self.record_undo_checkpoint()?;
-      let mut invalidation = editor_command_invalidation(
-        projection,
-        command,
-        from_frontier.encode(),
-        self.doc.state_frontiers().encode(),
-      );
+      let mut invalidation = editor_command_invalidation(projection, command, from_frontier.encode(), self.doc.state_frontiers().encode());
       self.merge_subscription_invalidation(&mut invalidation);
       let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
       if emit_projection {
@@ -831,12 +876,7 @@ impl CrdtRuntime {
     RuntimePresenceCarets { carets }
   }
 
-  fn presence_endpoint(
-    &self,
-    offset: DocumentOffset,
-    affinity: SelectionAffinity,
-    visual_gravity: VisualGravity,
-  ) -> Option<SelectionEndpoint> {
+  fn presence_endpoint(&self, offset: DocumentOffset, affinity: SelectionAffinity, visual_gravity: VisualGravity) -> Option<SelectionEndpoint> {
     let text = body_text(&self.doc);
     let byte = global_byte(&self.projection, offset).min(text.len_utf8());
     let pos = text.convert_pos(byte, PosType::Bytes, PosType::Unicode)?;
@@ -907,11 +947,13 @@ impl CrdtRuntime {
     }
     let current_frontier = self.doc.state_frontiers().encode();
     if !base_frontier.is_empty() && base_frontier != current_frontier.as_slice() {
-      return Err(StaleProjectionError {
-        expected_frontier_len: base_frontier.len(),
-        current_frontier_len: current_frontier.len(),
-      }
-      .into());
+      return Err(
+        StaleProjectionError {
+          expected_frontier_len: base_frontier.len(),
+          current_frontier_len: current_frontier.len(),
+        }
+        .into(),
+      );
     }
     if let Some(selection) = selection_after.and_then(|selection| self.undo_selection_for_editor(selection)) {
       self.set_pending_undo_selection(Some(selection))?;
@@ -920,8 +962,7 @@ impl CrdtRuntime {
     self.undo_checkpoint_pending = false;
     let result = (|| {
       let mut events = Vec::new();
-      flowstate_document::touch_document_metadata(&self.doc)
-        .context("updating canonical document metadata for editor command batch")?;
+      flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for editor command batch")?;
       for command in commands {
         let command_events = if let Some(events) = self.try_apply_editor_semantic_command_without_projection(command)? {
           events
@@ -935,7 +976,10 @@ impl CrdtRuntime {
     })();
     self.defer_undo_checkpoints = false;
     if result.is_ok() && self.undo_checkpoint_pending {
-      self.undo.record_new_checkpoint().context("recording grouped Loro undo checkpoint")?;
+      self
+        .undo
+        .record_new_checkpoint()
+        .context("recording grouped Loro undo checkpoint")?;
     }
     self.undo_checkpoint_pending = false;
     result
@@ -950,10 +994,7 @@ impl CrdtRuntime {
     let mutates_document = match &command {
       SemanticCommand::InsertText { text, .. } => !text.is_empty(),
       SemanticCommand::DeleteRange { unicode_len, .. } => *unicode_len > 0,
-      SemanticCommand::OpenRevision { .. }
-      | SemanticCommand::ForkRevision { .. }
-      | SemanticCommand::Undo
-      | SemanticCommand::Redo => false,
+      SemanticCommand::OpenRevision { .. } | SemanticCommand::ForkRevision { .. } | SemanticCommand::Undo | SemanticCommand::Redo => false,
       _ => true,
     };
     if mutates_document {
@@ -961,17 +1002,15 @@ impl CrdtRuntime {
     }
     let projection_invalidation;
     match command {
-      SemanticCommand::InsertText {
-        unicode_index,
-        text,
-        styles,
-      } => {
+      SemanticCommand::InsertText { unicode_index, text, styles } => {
         if text.is_empty() {
           return Ok(Vec::new());
         }
         let body = body_text(&self.doc);
         let newline_boundaries = inserted_newline_boundaries(unicode_index, &text);
-        body.insert(unicode_index, &text).context("inserting text into Loro body flow")?;
+        body
+          .insert(unicode_index, &text)
+          .context("inserting text into Loro body flow")?;
         let inserted_len = text.chars().count();
         if inserted_len > 0 {
           mark_run_styles(&body, unicode_index..unicode_index + inserted_len, styles).context("marking inserted run styles")?;
@@ -979,17 +1018,10 @@ impl CrdtRuntime {
         repair_paragraph_metadata_after_text_flow_edit(&self.doc, &body, &newline_boundaries, "semantic_insert_text")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_text(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_index,
-          inserted_len,
-        );
-      }
-      SemanticCommand::DeleteRange {
-        unicode_index,
-        unicode_len,
-      } => {
+        projection_invalidation =
+          ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, inserted_len);
+      },
+      SemanticCommand::DeleteRange { unicode_index, unicode_len } => {
         if unicode_len > 0 {
           let body = body_text(&self.doc);
           body
@@ -998,35 +1030,33 @@ impl CrdtRuntime {
           repair_paragraph_metadata_after_text_flow_edit(&self.doc, &body, &[], "semantic_delete_range")?;
           self.doc.commit();
           self.record_undo_checkpoint()?;
-          projection_invalidation = ProjectionInvalidation::body_text(
-            from_frontier.encode(),
-            self.doc.state_frontiers().encode(),
-            unicode_index,
-            unicode_len,
-          );
+          projection_invalidation =
+            ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, unicode_len);
         } else {
           return Ok(Vec::new());
         }
-      }
+      },
       SemanticCommand::SplitParagraph {
         unicode_index,
         inherited_style,
       } => {
         let body = body_text(&self.doc);
-        body.insert(unicode_index, "\n").context("splitting Loro body paragraph")?;
         body
-          .mark(unicode_index..unicode_index + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(inherited_style))
+          .insert(unicode_index, "\n")
+          .context("splitting Loro body paragraph")?;
+        body
+          .mark(
+            unicode_index..unicode_index + 1,
+            MARK_PARAGRAPH_STYLE,
+            paragraph_style_value(inherited_style),
+          )
           .context("marking split paragraph boundary")?;
         repair_paragraph_metadata_after_text_flow_edit(&self.doc, &body, &[unicode_index], "semantic_split_paragraph")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_text(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_index,
-          1,
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, 1);
+      },
       SemanticCommand::SetParagraphStyle {
         boundary_unicode_index,
         style,
@@ -1041,13 +1071,9 @@ impl CrdtRuntime {
           .context("marking paragraph style in Loro body flow")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_style(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          boundary_unicode_index,
-          1,
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_style(from_frontier.encode(), self.doc.state_frontiers().encode(), boundary_unicode_index, 1);
+      },
       SemanticCommand::SetRunStyles { unicode_range, styles } => {
         if unicode_range.is_empty() {
           return Ok(Vec::new());
@@ -1057,13 +1083,9 @@ impl CrdtRuntime {
         mark_run_styles(&body_text(&self.doc), unicode_range, styles).context("marking run styles in Loro body flow")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_style(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_start,
-          unicode_len,
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_style(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_start, unicode_len);
+      },
       SemanticCommand::InsertImage {
         unicode_index,
         asset_id,
@@ -1076,13 +1098,9 @@ impl CrdtRuntime {
           .context("inserting image block into Loro document")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_object(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_index,
-          "image",
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_object(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, "image");
+      },
       SemanticCommand::InsertEquation {
         unicode_index,
         source,
@@ -1091,13 +1109,9 @@ impl CrdtRuntime {
         insert_equation_block(&self.doc, unicode_index, &source, display).context("inserting equation block into Loro document")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_object(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_index,
-          "equation",
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_object(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, "equation");
+      },
       SemanticCommand::InsertTable {
         unicode_index,
         rows,
@@ -1109,20 +1123,16 @@ impl CrdtRuntime {
           .context("inserting table block into Loro document")?;
         self.doc.commit();
         self.record_undo_checkpoint()?;
-        projection_invalidation = ProjectionInvalidation::body_object(
-          from_frontier.encode(),
-          self.doc.state_frontiers().encode(),
-          unicode_index,
-          "table",
-        );
-      }
+        projection_invalidation =
+          ProjectionInvalidation::body_object(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, "table");
+      },
       SemanticCommand::OpenRevision { revision_id } => {
         let document = self.revision_projection(revision_id)?;
         return Ok(vec![RuntimeEvent::RevisionOpened {
           revision_id,
           document: Box::new(document),
         }]);
-      }
+      },
       SemanticCommand::ForkRevision { revision_id } => {
         let (document, package) = self.fork_revision(revision_id)?;
         return Ok(vec![RuntimeEvent::RevisionForked {
@@ -1130,7 +1140,7 @@ impl CrdtRuntime {
           document: Box::new(document),
           package: Box::new(package),
         }]);
-      }
+      },
       SemanticCommand::Undo => {
         if !self.undo.undo().context("applying Loro undo")? {
           return Ok(Vec::new());
@@ -1141,7 +1151,7 @@ impl CrdtRuntime {
           changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
           ..ProjectionInvalidation::default()
         };
-      }
+      },
       SemanticCommand::Redo => {
         if !self.undo.redo().context("applying Loro redo")? {
           return Ok(Vec::new());
@@ -1152,19 +1162,13 @@ impl CrdtRuntime {
           changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
           ..ProjectionInvalidation::default()
         };
-      }
+      },
     }
     let mut projection_invalidation = projection_invalidation;
     self.merge_subscription_invalidation(&mut projection_invalidation);
     let mut events = self.events_after_local_change(from_frontier, from_vv, projection_invalidation.clone(), false)?;
     let after_body = body_text(&self.doc).to_string();
-    if let Some(patches) = remote_body_projection_patches(
-      &before_projection,
-      &before_body,
-      &after_body,
-      &self.doc,
-      &projection_invalidation,
-    ) {
+    if let Some(patches) = remote_body_projection_patches(&before_projection, &before_body, &after_body, &self.doc, &projection_invalidation) {
       self.apply_projection_patch_set(&patches);
       self.projection.frontier = self.doc.state_frontiers().encode();
       events.push(self.projection_patched_event(patches, projection_invalidation));
@@ -1177,16 +1181,10 @@ impl CrdtRuntime {
       };
       events.push(self.projection_change_event(
         &before_projection,
-        ProjectionInvalidation::full_rebuild(
-          projection_invalidation.frontier_before,
-          projection_invalidation.frontier_after,
-          reason,
-        ),
+        ProjectionInvalidation::full_rebuild(projection_invalidation.frontier_before, projection_invalidation.frontier_after, reason),
       )?);
     }
-    if restore_undo_selection
-      && let Some(snapshot) = self.take_restored_undo_selection()
-    {
+    if restore_undo_selection && let Some(snapshot) = self.take_restored_undo_selection() {
       if let Some(selection) = self.resolve_undo_selection(&snapshot) {
         events.push(RuntimeEvent::SelectionRestored { selection });
       } else if let Ok(mut state) = self.undo_selection.lock() {
@@ -1250,7 +1248,10 @@ impl CrdtRuntime {
   }
 
   pub fn fork_revision(&self, revision_id: u128) -> Result<(DocumentProjection, DocumentPackage)> {
-    let package = self.package.as_ref().context("cannot fork revision without a package-backed runtime")?;
+    let package = self
+      .package
+      .as_ref()
+      .context("cannot fork revision without a package-backed runtime")?;
     let revision_doc = package
       .load_revision_loro_doc(revision_id)
       .context("loading revision Loro snapshot for fork")?;
@@ -1265,7 +1266,10 @@ impl CrdtRuntime {
 
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
     let from_frontier = self.doc.state_frontiers();
-    let status = self.doc.import_with(bytes, "remote").context("importing remote Loro update")?;
+    let status = self
+      .doc
+      .import_with(bytes, "remote")
+      .context("importing remote Loro update")?;
     let after_remote_vv = self.doc.state_vv();
     let repair_update = if status.pending.is_none() && repair_missing_paragraph_style_marks(&self.doc)? {
       self.local_update_bytes(&after_remote_vv)?
@@ -1306,12 +1310,7 @@ impl CrdtRuntime {
       let touched_paragraphs = self
         .projection_index
         .paragraphs_for_changed_ranges(&invalidation.changed_text_ranges, self.projection.paragraphs.len());
-      if let Some(patches) = remote_nonstructural_projection_patches(
-        &self.projection,
-        &self.doc,
-        &invalidation,
-        &touched_paragraphs,
-      ) {
+      if let Some(patches) = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs) {
         self.apply_projection_patch_set(&patches);
         self.projection.frontier = self.doc.state_frontiers().encode();
         events.push(self.projection_patched_event(patches, invalidation));
@@ -1321,11 +1320,7 @@ impl CrdtRuntime {
         events.push(self.projection_change_event(&before_projection, invalidation)?);
       }
     } else {
-      let mut invalidation = ProjectionInvalidation::full_rebuild(
-        frontier_before,
-        frontier_after,
-        "remote_update_pending_projection_fallback",
-      );
+      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after, "remote_update_pending_projection_fallback");
       self.merge_subscription_invalidation(&mut invalidation);
       self.refresh_projection()?;
       events.push(self.projection_event(invalidation)?);
@@ -1402,7 +1397,9 @@ impl CrdtRuntime {
     if !invalidation.rebuild_required {
       return;
     }
-    let reason = invalidation.fallback_reason.unwrap_or("unspecified_projection_fallback");
+    let reason = invalidation
+      .fallback_reason
+      .unwrap_or("unspecified_projection_fallback");
     if let Ok(mut counts) = self.projection_fallback_counts.lock() {
       *counts.entry(reason.to_string()).or_default() += 1;
     }
@@ -1444,11 +1441,17 @@ impl CrdtRuntime {
   /// correct without depending on synchronous drain timing around import/checkout.
   fn bump_runtime_epoch(&self) {
     let previous = self.runtime_epoch.fetch_add(1, AtomicOrdering::SeqCst);
-    tracing::trace!(previous_epoch = previous, new_epoch = previous.wrapping_add(1), "Flowstate runtime epoch bumped after full projection rebuild");
+    tracing::trace!(
+      previous_epoch = previous,
+      new_epoch = previous.wrapping_add(1),
+      "Flowstate runtime epoch bumped after full projection rebuild"
+    );
   }
 
   fn apply_projection_patch_set(&mut self, patches: &[ProjectionPatch]) {
-    let rebuild_index = self.projection_index.update_for_patches(&self.projection, patches);
+    let rebuild_index = self
+      .projection_index
+      .update_for_patches(&self.projection, patches);
     apply_projection_patches(&mut self.projection, patches);
     if rebuild_index {
       self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
@@ -1467,17 +1470,9 @@ impl CrdtRuntime {
     let revision_frontier = revision_frontiers.encode();
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
-    flowstate_document::touch_document_metadata(&self.doc)
+    flowstate_document::touch_document_metadata(&self.doc).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    flowstate_document::record_revision(&self.doc, revision_id, revision_frontier, title, "Explicit save", self.author_user_id)
       .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    flowstate_document::record_revision(
-      &self.doc,
-      revision_id,
-      revision_frontier,
-      title,
-      "Explicit save",
-      self.author_user_id,
-    )
-    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     let mut revision_invalidation = ProjectionInvalidation::default();
     self.merge_subscription_invalidation(&mut revision_invalidation);
     let update = self
@@ -1671,11 +1666,17 @@ impl CrdtRuntime {
             deleted_len,
             inserted_structure,
           } if target == body_target => {
-            if inserted_structure || self.projection_index.deleted_range_contains_structure(unicode_start, deleted_len) {
+            if inserted_structure
+              || self
+                .projection_index
+                .deleted_range_contains_structure(unicode_start, deleted_len)
+            {
               invalidation.rebuild_required = true;
               invalidation.fallback_reason = Some("structural_body_text_change");
             }
-            invalidation.changed_flows.push(ROOT_BODY_FLOW_ID.to_string());
+            invalidation
+              .changed_flows
+              .push(ROOT_BODY_FLOW_ID.to_string());
             invalidation.changed_text_ranges.push(ProjectionTextRange {
               flow_id: ROOT_BODY_FLOW_ID.to_string(),
               unicode_start,
@@ -1779,10 +1780,17 @@ impl CrdtRuntime {
       let mut object_units = 0usize;
       let mut styled_units = 0usize;
       for unit_ix in &touched_units {
-        match index.search_unit_spans.get(*unit_ix).and_then(|span| span.paragraph) {
+        match index
+          .search_unit_spans
+          .get(*unit_ix)
+          .and_then(|span| span.paragraph)
+        {
           Some(paragraph_ix) => {
             paragraph_units += 1;
-            if index.run_styles_at(paragraph_ix, 0).is_some_and(|styles| styles != RunStyles::default()) {
+            if index
+              .run_styles_at(paragraph_ix, 0)
+              .is_some_and(|styles| styles != RunStyles::default())
+            {
               styled_units += 1;
             }
           },
@@ -1877,7 +1885,9 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
                 unicode_start: cursor,
                 unicode_len: len,
                 deleted_len: 0,
-                inserted_structure: insert.chars().any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT),
+                inserted_structure: insert
+                  .chars()
+                  .any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT),
               });
               cursor = cursor.saturating_add(len);
             },
@@ -1932,15 +1942,16 @@ fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: 
   }) {
     invalidation.changed_tables.push(target.to_string());
   }
-  if keys.iter().any(|key| {
-    matches!(
-      key.as_str(),
-      "kind" | "flow_id" | "anchor_cursor" | "attrs" | "nested_refs"
-    )
-  }) {
+  if keys
+    .iter()
+    .any(|key| matches!(key.as_str(), "kind" | "flow_id" | "anchor_cursor" | "attrs" | "nested_refs"))
+  {
     invalidation.changed_blocks.push(target.to_string());
   }
-  if keys.iter().any(|key| key == "section_id" || key == "sections_by_id") {
+  if keys
+    .iter()
+    .any(|key| key == "section_id" || key == "sections_by_id")
+  {
     invalidation.changed_sections.push(target.to_string());
   }
 }
@@ -1961,7 +1972,7 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
       repair_paragraph_metadata_after_text_flow_edit(doc, &body, &newline_boundaries, "editor_insert_text")?;
       doc.commit();
       Ok(true)
-    }
+    },
     EditorSemanticCommand::DeleteRange { range } => {
       let start = projection_offset_to_body_unicode_index(projection, range.start);
       let end = projection_offset_to_body_unicode_index(projection, range.end);
@@ -1975,11 +1986,8 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         return Ok(true);
       }
       Ok(false)
-    }
-    EditorSemanticCommand::SplitParagraph {
-      at,
-      inherited_style,
-    } => {
+    },
+    EditorSemanticCommand::SplitParagraph { at, inherited_style } => {
       let unicode_index = projection_offset_to_body_unicode_index(projection, *at);
       let body = body_text(doc);
       body
@@ -1995,9 +2003,14 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
       repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[unicode_index], "editor_split_paragraph")?;
       doc.commit();
       Ok(true)
-    }
+    },
     EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
-      if let Some(paragraph_ix) = projection.ids.paragraph_ids.iter().position(|id| id == paragraph) {
+      if let Some(paragraph_ix) = projection
+        .ids
+        .paragraph_ids
+        .iter()
+        .position(|id| id == paragraph)
+      {
         let boundary = paragraph_boundary_unicode_index(projection, paragraph_ix);
         body_text(doc)
           .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*style))
@@ -2006,13 +2019,14 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         return Ok(true);
       }
       Ok(false)
-    }
-    EditorSemanticCommand::SetRunStyles {
-      paragraph,
-      range,
-      styles,
-    } => {
-      if let Some(paragraph_ix) = projection.ids.paragraph_ids.iter().position(|id| id == paragraph) {
+    },
+    EditorSemanticCommand::SetRunStyles { paragraph, range, styles } => {
+      if let Some(paragraph_ix) = projection
+        .ids
+        .paragraph_ids
+        .iter()
+        .position(|id| id == paragraph)
+      {
         let start = projection_offset_to_body_unicode_index(
           projection,
           flowstate_document::DocumentOffset {
@@ -2034,112 +2048,75 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         }
       }
       Ok(false)
-    }
+    },
     EditorSemanticCommand::JoinParagraphs { first, second } => {
       join_projection_paragraphs(doc, projection, *first, *second).context("joining paragraphs from editor semantic command")
-    }
+    },
     EditorSemanticCommand::ReplaceParagraphSpan { start, before, after } => {
       replace_body_paragraph_span(doc, projection, *start, before, after).context("replacing paragraph span from editor semantic command")
-    }
-    EditorSemanticCommand::InsertBlock {
-      block,
-      block_ix,
-      after,
-    } => {
-      insert_projection_object_block(doc, *block, *block_ix, after).with_context(|| {
-        format!("inserting object block from editor semantic command at projection block {block_ix} ({block:?})")
-      })
-    }
+    },
+    EditorSemanticCommand::InsertBlock { block, block_ix, after } => insert_projection_object_block(doc, *block, *block_ix, after)
+      .with_context(|| format!("inserting object block from editor semantic command at projection block {block_ix} ({block:?})")),
     EditorSemanticCommand::DeleteBlock { block } => {
       delete_projection_object_block(doc, *block).context("deleting object block from editor semantic command")
-    }
+    },
     EditorSemanticCommand::MoveBlock { block, new_block_ix } => {
       move_projection_object_block(doc, *block, *new_block_ix).context("moving object block from editor semantic command")
-    }
-    EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => {
-      replace_projection_object_block(doc, projection, *block, *block_ix, after).with_context(|| {
-        format!("replacing object block from editor semantic command at projection block {block_ix} ({block:?})")
-      })
-    }
-    EditorSemanticCommand::InsertTableRow { table, row_ix, row } => {
-      insert_projection_table_row(doc, *table, *row_ix, row).with_context(|| {
-        format!("inserting table row from editor semantic command at table {table:?}, row {row_ix}")
-      })
-    }
-    EditorSemanticCommand::DeleteTableRow { table, row_ix } => {
-      delete_projection_table_row(doc, *table, *row_ix).with_context(|| {
-        format!("deleting table row from editor semantic command at table {table:?}, row {row_ix}")
-      })
-    }
+    },
+    EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => replace_projection_object_block(doc, projection, *block, *block_ix, after)
+      .with_context(|| format!("replacing object block from editor semantic command at projection block {block_ix} ({block:?})")),
+    EditorSemanticCommand::InsertTableRow { table, row_ix, row } => insert_projection_table_row(doc, *table, *row_ix, row)
+      .with_context(|| format!("inserting table row from editor semantic command at table {table:?}, row {row_ix}")),
+    EditorSemanticCommand::DeleteTableRow { table, row_ix } => delete_projection_table_row(doc, *table, *row_ix)
+      .with_context(|| format!("deleting table row from editor semantic command at table {table:?}, row {row_ix}")),
     EditorSemanticCommand::MoveTableRow {
       table,
       from_row_ix,
       to_row_ix,
-    } => move_projection_table_axis(doc, *table, "row_order", *from_row_ix, *to_row_ix).with_context(|| {
-      format!("moving table row from {from_row_ix} to {to_row_ix} at table {table:?}")
-    }),
+    } => move_projection_table_axis(doc, *table, "row_order", *from_row_ix, *to_row_ix)
+      .with_context(|| format!("moving table row from {from_row_ix} to {to_row_ix} at table {table:?}")),
     EditorSemanticCommand::InsertTableColumn {
       table,
       column_ix,
       width,
       cells,
-    } => insert_projection_table_column(doc, *table, *column_ix, width, cells).with_context(|| {
-      format!("inserting table column from editor semantic command at table {table:?}, column {column_ix}")
-    }),
-    EditorSemanticCommand::DeleteTableColumn { table, column_ix } => {
-      delete_projection_table_column(doc, *table, *column_ix).with_context(|| {
-        format!("deleting table column from editor semantic command at table {table:?}, column {column_ix}")
-      })
-    }
+    } => insert_projection_table_column(doc, *table, *column_ix, width, cells)
+      .with_context(|| format!("inserting table column from editor semantic command at table {table:?}, column {column_ix}")),
+    EditorSemanticCommand::DeleteTableColumn { table, column_ix } => delete_projection_table_column(doc, *table, *column_ix)
+      .with_context(|| format!("deleting table column from editor semantic command at table {table:?}, column {column_ix}")),
     EditorSemanticCommand::MoveTableColumn {
       table,
       from_column_ix,
       to_column_ix,
-    } => move_projection_table_axis(doc, *table, "column_order", *from_column_ix, *to_column_ix).with_context(|| {
-      format!("moving table column from {from_column_ix} to {to_column_ix} at table {table:?}")
-    }),
+    } => move_projection_table_axis(doc, *table, "column_order", *from_column_ix, *to_column_ix)
+      .with_context(|| format!("moving table column from {from_column_ix} to {to_column_ix} at table {table:?}")),
     EditorSemanticCommand::ReplaceTableCell {
       table,
       row_ix,
       cell_ix,
       cell,
-    } => replace_projection_table_cell(doc, *table, *row_ix, *cell_ix, cell).with_context(|| {
-      format!("replacing table cell from editor semantic command at table {table:?}, row {row_ix}, cell {cell_ix}")
-    }),
+    } => replace_projection_table_cell(doc, *table, *row_ix, *cell_ix, cell)
+      .with_context(|| format!("replacing table cell from editor semantic command at table {table:?}, row {row_ix}, cell {cell_ix}")),
     EditorSemanticCommand::SetTableCellSpan {
       table,
       row_ix,
       cell_ix,
       row_span,
       column_span,
-    } => set_projection_table_cell_span(doc, *table, *row_ix, *cell_ix, *row_span, *column_span).with_context(|| {
-      format!("setting table cell span at table {table:?}, row {row_ix}, cell {cell_ix}")
-    }),
+    } => set_projection_table_cell_span(doc, *table, *row_ix, *cell_ix, *row_span, *column_span)
+      .with_context(|| format!("setting table cell span at table {table:?}, row {row_ix}, cell {cell_ix}")),
     EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
-      replace_projection_equation_source_range(doc, *equation, range, text).with_context(|| {
-        format!("replacing equation source range from editor semantic command at equation {equation:?}, range {range:?}")
-      })
-    }
-    EditorSemanticCommand::ReplaceImageAltText { image, text } => {
-      replace_projection_image_alt_text(doc, *image, text).with_context(|| {
-        format!("replacing image alt text from editor semantic command at image {image:?}")
-      })
-    }
-    EditorSemanticCommand::ReplaceImageCaption { image, caption } => {
-      replace_projection_image_caption(doc, *image, caption.as_ref()).with_context(|| {
-        format!("replacing image caption from editor semantic command at image {image:?}")
-      })
-    }
-    EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => {
-      set_projection_image_layout(doc, *image, sizing, *alignment).with_context(|| {
-        format!("setting image layout from editor semantic command at image {image:?}")
-      })
-    }
-    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => {
-      set_projection_table_column_width(doc, *table, *column_ix, width).with_context(|| {
-        format!("setting table column width from editor semantic command at table {table:?}, column {column_ix}")
-      })
-    }
+      replace_projection_equation_source_range(doc, *equation, range, text)
+        .with_context(|| format!("replacing equation source range from editor semantic command at equation {equation:?}, range {range:?}"))
+    },
+    EditorSemanticCommand::ReplaceImageAltText { image, text } => replace_projection_image_alt_text(doc, *image, text)
+      .with_context(|| format!("replacing image alt text from editor semantic command at image {image:?}")),
+    EditorSemanticCommand::ReplaceImageCaption { image, caption } => replace_projection_image_caption(doc, *image, caption.as_ref())
+      .with_context(|| format!("replacing image caption from editor semantic command at image {image:?}")),
+    EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => set_projection_image_layout(doc, *image, sizing, *alignment)
+      .with_context(|| format!("setting image layout from editor semantic command at image {image:?}")),
+    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => set_projection_table_column_width(doc, *table, *column_ix, width)
+      .with_context(|| format!("setting table column width from editor semantic command at table {table:?}, column {column_ix}")),
   }
 }
 
@@ -2221,10 +2198,7 @@ fn apply_editor_semantic_command_body_fast_path(
       }
       Ok(false)
     },
-    EditorSemanticCommand::SplitParagraph {
-      at,
-      inherited_style,
-    } => {
+    EditorSemanticCommand::SplitParagraph { at, inherited_style } => {
       let body = body_text(doc);
       let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
         return Ok(false);
@@ -2263,8 +2237,7 @@ fn apply_editor_semantic_command_body_fast_path(
     | EditorSemanticCommand::ReplaceImageAltText { .. }
     | EditorSemanticCommand::ReplaceImageCaption { .. }
     | EditorSemanticCommand::SetImageLayout { .. }
-    | EditorSemanticCommand::SetTableColumnWidth { .. }
-    => Ok(false),
+    | EditorSemanticCommand::SetTableColumnWidth { .. } => Ok(false),
   }
 }
 
@@ -2275,21 +2248,14 @@ fn incremental_projection_patches_for_command(
   command: &EditorSemanticCommand,
 ) -> Option<Vec<flowstate_document::ProjectionPatch>> {
   match command {
-    EditorSemanticCommand::InsertText { at, text, .. }
-      if !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT) =>
-    {
+    EditorSemanticCommand::InsertText { at, text, .. } if !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT) => {
       let row = flowstate_document::block_ix_for_paragraph(projection, at.paragraph)?;
       let old_len = flowstate_document::paragraph_text_len(projection.paragraphs.get(at.paragraph)?);
       let new = body_input_paragraph(doc, at.paragraph)?;
       Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
         row,
         new,
-        delta_utf8: projection_text_delta(
-          at.byte.min(old_len),
-          0,
-          text.len(),
-          old_len.saturating_sub(at.byte.min(old_len)),
-        ),
+        delta_utf8: projection_text_delta(at.byte.min(old_len), 0, text.len(), old_len.saturating_sub(at.byte.min(old_len))),
       }])
     },
     EditorSemanticCommand::DeleteRange { range } if range.start.paragraph == range.end.paragraph => {
@@ -2310,10 +2276,7 @@ fn incremental_projection_patches_for_command(
       // `paragraph_ids` scan (with an identical linear fallback).
       let paragraph_ix = index.paragraph_index_for_id(projection, *paragraph)?;
       let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle {
-        row,
-        style: *style,
-      }])
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle { row, style: *style }])
     },
     EditorSemanticCommand::SetRunStyles { paragraph, .. } => {
       // §24: O(1) paragraph metadata index lookup replaces the linear
@@ -2323,14 +2286,11 @@ fn incremental_projection_patches_for_command(
       let new = body_input_paragraph(doc, paragraph_ix)?;
       Some(vec![flowstate_document::ProjectionPatch::ParagraphRuns {
         row,
-        runs: flowstate_document::document_from_input_blocks(
-          projection.theme.clone(),
-          vec![InputBlock::Paragraph(new)],
-        )
-        .paragraphs
-        .first()?
-        .runs
-        .clone(),
+        runs: flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new)])
+          .paragraphs
+          .first()?
+          .runs
+          .clone(),
       }])
     },
     _ => structured_projection_patches_for_command(projection, index, command),
@@ -2343,11 +2303,7 @@ fn structured_projection_patches_for_command(
   command: &EditorSemanticCommand,
 ) -> Option<Vec<ProjectionPatch>> {
   match command {
-    EditorSemanticCommand::InsertBlock {
-      block,
-      block_ix,
-      after,
-    } => Some(vec![ProjectionPatch::InsertBlocks {
+    EditorSemanticCommand::InsertBlock { block, block_ix, after } => Some(vec![ProjectionPatch::InsertBlocks {
       row: (*block_ix).min(projection.blocks.len()),
       blocks: vec![ProjectionStructuralBlock {
         block_id: *block,
@@ -2365,11 +2321,7 @@ fn structured_projection_patches_for_command(
       from: index.block_index_for_id(projection, *block)?,
       to: (*new_block_ix).min(projection.blocks.len().saturating_sub(1)),
     }]),
-    EditorSemanticCommand::ReplaceBlock {
-      block,
-      block_ix,
-      after,
-    } => object_replacement_patch(
+    EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => object_replacement_patch(
       projection,
       block
         .and_then(|id| index.block_index_for_id(projection, id))
@@ -2378,7 +2330,9 @@ fn structured_projection_patches_for_command(
     ),
     EditorSemanticCommand::InsertTableRow { table, row_ix, row } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      table_input.rows.insert((*row_ix).min(table_input.rows.len()), row.clone());
+      table_input
+        .rows
+        .insert((*row_ix).min(table_input.rows.len()), row.clone());
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::DeleteTableRow { table, row_ix } => {
@@ -2412,9 +2366,13 @@ fn structured_projection_patches_for_command(
       let column_ix = (*column_ix).min(table_input.column_widths.len());
       table_input.column_widths.insert(column_ix, width.clone());
       for (row_ix, row) in table_input.rows.iter_mut().enumerate() {
-        row
-          .cells
-          .insert(column_ix.min(row.cells.len()), cells.get(row_ix).cloned().unwrap_or_else(empty_input_table_cell));
+        row.cells.insert(
+          column_ix.min(row.cells.len()),
+          cells
+            .get(row_ix)
+            .cloned()
+            .unwrap_or_else(empty_input_table_cell),
+        );
       }
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
@@ -2474,20 +2432,12 @@ fn structured_projection_patches_for_command(
       cell.col_span = (*column_span).max(1);
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
-    EditorSemanticCommand::SetTableColumnWidth {
-      table,
-      column_ix,
-      width,
-    } => {
+    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
       *table_input.column_widths.get_mut(*column_ix)? = width.clone();
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
-    EditorSemanticCommand::ReplaceEquationSourceRange {
-      equation,
-      range,
-      text,
-    } => {
+    EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
       // §24: O(1) block anchor index lookup (linear fallback preserved).
       let block_ix = index.block_index_for_id(projection, *equation)?;
       let InputBlock::Equation(mut equation_input) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
@@ -2515,17 +2465,17 @@ fn structured_projection_patches_for_command(
     EditorSemanticCommand::ReplaceImageCaption { image, caption } => {
       // §24: O(1) block anchor index lookup (linear fallback preserved).
       let block_ix = index.block_index_for_id(projection, *image)?;
-      let InputBlock::Image(mut image_input) = projection.blocks.get(block_ix).map(flowstate_document::input_block_from_block)? else {
+      let InputBlock::Image(mut image_input) = projection
+        .blocks
+        .get(block_ix)
+        .map(flowstate_document::input_block_from_block)?
+      else {
         return None;
       };
       image_input.caption = caption.clone();
       object_replacement_patch(projection, block_ix, InputBlock::Image(image_input))
     },
-    EditorSemanticCommand::SetImageLayout {
-      image,
-      sizing,
-      alignment,
-    } => {
+    EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => {
       // §24: O(1) block anchor index lookup (linear fallback preserved).
       let block_ix = index.block_index_for_id(projection, *image)?;
       let InputBlock::Image(mut image_input) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
@@ -2559,11 +2509,7 @@ fn projected_table_input(
   Some((block_ix, table))
 }
 
-fn object_replacement_patch(
-  projection: &DocumentProjection,
-  block_ix: usize,
-  block: InputBlock,
-) -> Option<Vec<ProjectionPatch>> {
+fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
   Some(vec![ProjectionPatch::ReplaceObjectBlock {
     row: block_ix,
     block: ProjectionStructuralBlock {
@@ -2648,14 +2594,13 @@ fn editor_command_invalidation(
   }
 }
 
-fn insert_projection_object_block(
-  doc: &LoroDoc,
-  block_id: flowstate_document::BlockId,
-  block_ix: usize,
-  input: &InputBlock,
-) -> Result<bool> {
+fn insert_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId, block_ix: usize, input: &InputBlock) -> Result<bool> {
   if matches!(input, InputBlock::Paragraph(_)) {
-    tracing::warn!(block_ix, ?block_id, "skipping InsertBlock for paragraph payload; paragraph edits must use text/paragraph semantic commands");
+    tracing::warn!(
+      block_ix,
+      ?block_id,
+      "skipping InsertBlock for paragraph payload; paragraph edits must use text/paragraph semantic commands"
+    );
     return Ok(false);
   }
 
@@ -2665,7 +2610,11 @@ fn insert_projection_object_block(
     return Ok(false);
   }
   let Some(unicode_index) = object_insert_unicode_pos_for_projection_block(&body, block_ix) else {
-    tracing::warn!(block_ix, ?block_id, "skipping InsertBlock because no Loro insertion point maps to the projection block index");
+    tracing::warn!(
+      block_ix,
+      ?block_id,
+      "skipping InsertBlock because no Loro insertion point maps to the projection block index"
+    );
     return Ok(false);
   };
   insert_input_object_block(doc, unicode_index, block_id, input)?;
@@ -2690,7 +2639,10 @@ fn replace_projection_object_block(
   after: &InputBlock,
 ) -> Result<bool> {
   if matches!(after, InputBlock::Paragraph(_)) {
-    tracing::warn!(block_ix, "skipping ReplaceBlock for paragraph payload; paragraph edits must use text/paragraph semantic commands");
+    tracing::warn!(
+      block_ix,
+      "skipping ReplaceBlock for paragraph payload; paragraph edits must use text/paragraph semantic commands"
+    );
     return Ok(false);
   }
   if block_id.is_none() && projection.blocks.get(block_ix).is_none() {
@@ -2721,7 +2673,10 @@ fn replace_projection_object_block(
     InputBlock::Image(image) => replace_image_block_from_input(doc, &block, image)?,
     InputBlock::Equation(equation) => replace_equation_block_from_input(doc, &block, equation)?,
     InputBlock::Table(table) => {
-      tracing::warn!(block_ix, "applying coarse structured table ReplaceBlock; editor should emit finer table operations later");
+      tracing::warn!(
+        block_ix,
+        "applying coarse structured table ReplaceBlock; editor should emit finer table operations later"
+      );
       replace_table_block_from_input(doc, &block, table)?;
     },
     InputBlock::Paragraph(_) => unreachable!("paragraph payload was handled above"),
@@ -2737,20 +2692,36 @@ fn set_projection_table_column_width(
   width: &InputTableColumnWidth,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the table has no column order");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the table has no column order"
+    );
     return Ok(false);
   };
   let column_ids = movable_list_strings(&column_order);
   let Some(column_id) = column_ids.get(column_ix) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the column index is out of range");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the column index is out of range"
+    );
     return Ok(false);
   };
   let Some(columns_by_id) = child_map(&table, "columns_by_id") else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the table has no columns map");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the table has no columns map"
+    );
     return Ok(false);
   };
   let column = columns_by_id.ensure_mergeable_map(column_id)?;
@@ -2759,14 +2730,13 @@ fn set_projection_table_column_width(
   Ok(true)
 }
 
-fn insert_projection_table_row(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  row_ix: usize,
-  row: &InputTableRow,
-) -> Result<bool> {
+fn insert_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize, row: &InputTableRow) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, row_ix, "skipping table row insert because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      "skipping table row insert because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let row_order = table.ensure_mergeable_movable_list("row_order")?;
@@ -2799,7 +2769,11 @@ fn insert_projection_table_row(
 
 fn delete_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, row_ix, "skipping table row delete because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      "skipping table row delete because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(row_order) = child_movable_list(&table, "row_order") else {
@@ -2839,11 +2813,23 @@ fn move_projection_table_axis(
   to_ix: usize,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, order_key, from_ix, to_ix, "skipping table move because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      order_key,
+      from_ix,
+      to_ix,
+      "skipping table move because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(order) = child_movable_list(&table, order_key) else {
-    tracing::warn!(?table_block_id, order_key, from_ix, to_ix, "skipping table move because its order list is missing");
+    tracing::warn!(
+      ?table_block_id,
+      order_key,
+      from_ix,
+      to_ix,
+      "skipping table move because its order list is missing"
+    );
     return Ok(false);
   };
   if from_ix >= order.len() || to_ix >= order.len() || from_ix == to_ix {
@@ -2862,7 +2848,11 @@ fn insert_projection_table_column(
   cells: &[InputTableCell],
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column insert because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column insert because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let row_order = table.ensure_mergeable_movable_list("row_order")?;
@@ -2903,16 +2893,28 @@ fn insert_projection_table_column(
 
 fn delete_projection_table_column(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, column_ix: usize) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column delete because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column delete because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column delete because the table has no column order");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column delete because the table has no column order"
+    );
     return Ok(false);
   };
   let column_ids = movable_list_strings(&column_order);
   let Some(column_id) = column_ids.get(column_ix) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column delete because the column index is out of range");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column delete because the column index is out of range"
+    );
     return Ok(false);
   };
   let column_id = column_id.clone();
@@ -2943,30 +2945,55 @@ fn replace_projection_table_cell(
   cell: &InputTableCell,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table cell replace because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table cell replace because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(row_order) = child_movable_list(&table, "row_order") else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table cell replace because the table has no row order");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table cell replace because the table has no row order"
+    );
     return Ok(false);
   };
   let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table cell replace because the table has no column order");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table cell replace because the table has no column order"
+    );
     return Ok(false);
   };
   let row_ids = movable_list_strings(&row_order);
   let column_ids = movable_list_strings(&column_order);
   let Some(row_id) = row_ids.get(row_ix) else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table cell replace because the row index is out of range");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table cell replace because the row index is out of range"
+    );
     return Ok(false);
   };
   let Some(column_id) = column_ids.get(cell_ix) else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table cell replace because the cell column index is out of range");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table cell replace because the cell column index is out of range"
+    );
     return Ok(false);
   };
   let cells_by_id = table.ensure_mergeable_map("cells_by_id")?;
-  let cell_id = table_cell_id_by_row_column(&cells_by_id, row_id, column_id)
-    .unwrap_or_else(|| format!("{row_id}.cell.{}", Uuid::new_v4().as_u128()));
+  let cell_id =
+    table_cell_id_by_row_column(&cells_by_id, row_id, column_id).unwrap_or_else(|| format!("{row_id}.cell.{}", Uuid::new_v4().as_u128()));
   let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
   update_table_cell_map_from_input(doc, &cell_map, &cell_id, row_id, column_id, cell)?;
   doc.commit();
@@ -2982,7 +3009,12 @@ fn set_projection_table_cell_span(
   column_span: u16,
 ) -> Result<bool> {
   let Some(cell) = projection_table_cell_map(doc, table_block_id, row_ix, cell_ix) else {
-    tracing::warn!(?table_block_id, row_ix, cell_ix, "skipping table span command because the Loro cell is missing");
+    tracing::warn!(
+      ?table_block_id,
+      row_ix,
+      cell_ix,
+      "skipping table span command because the Loro cell is missing"
+    );
     return Ok(false);
   };
   cell.insert("row_span", i64::from(row_span.max(1)))?;
@@ -2991,15 +3023,14 @@ fn set_projection_table_cell_span(
   Ok(true)
 }
 
-fn projection_table_cell_map(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  row_ix: usize,
-  cell_ix: usize,
-) -> Option<LoroMap> {
+fn projection_table_cell_map(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize, cell_ix: usize) -> Option<LoroMap> {
   let table = projection_table_map_by_block_id(doc, table_block_id)?;
-  let row_id = movable_list_strings(&child_movable_list(&table, "row_order")?).get(row_ix)?.clone();
-  let column_id = movable_list_strings(&child_movable_list(&table, "column_order")?).get(cell_ix)?.clone();
+  let row_id = movable_list_strings(&child_movable_list(&table, "row_order")?)
+    .get(row_ix)?
+    .clone();
+  let column_id = movable_list_strings(&child_movable_list(&table, "column_order")?)
+    .get(cell_ix)?
+    .clone();
   // §28: resolve the cell map directly via the table's stored `cells_container_id`,
   // falling back to map-key traversal when the id is missing/unresolvable.
   let cells_by_id = child_map_by_container_id(doc, &table, "cells_container_id", "cells_by_id")?;
@@ -3015,11 +3046,19 @@ fn replace_projection_equation_source_range(
 ) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, equation_block_id) else {
-    tracing::warn!(?equation_block_id, ?range, "skipping equation source edit because no Loro equation maps to the projected block id");
+    tracing::warn!(
+      ?equation_block_id,
+      ?range,
+      "skipping equation source edit because no Loro equation maps to the projected block id"
+    );
     return Ok(false);
   };
   if map_string_opt(&block, "kind").as_deref() != Some("equation") {
-    tracing::warn!(?equation_block_id, ?range, "skipping equation source edit because the projected block is not an equation");
+    tracing::warn!(
+      ?equation_block_id,
+      ?range,
+      "skipping equation source edit because the projected block is not an equation"
+    );
     return Ok(false);
   }
   let source_flow_id = map_string_opt(&block, "source_flow_id").unwrap_or_else(|| nested_flow_id("equation_source"));
@@ -3029,11 +3068,19 @@ fn replace_projection_equation_source_range(
   let source_text = flow_text(doc, &source_flow)?;
   let before = source_text.to_string();
   let Some(start) = byte_index_to_unicode_index(&before, range.start) else {
-    tracing::warn!(?equation_block_id, ?range, "skipping equation source edit because the start byte is not a source boundary");
+    tracing::warn!(
+      ?equation_block_id,
+      ?range,
+      "skipping equation source edit because the start byte is not a source boundary"
+    );
     return Ok(false);
   };
   let Some(end) = byte_index_to_unicode_index(&before, range.end) else {
-    tracing::warn!(?equation_block_id, ?range, "skipping equation source edit because the end byte is not a source boundary");
+    tracing::warn!(
+      ?equation_block_id,
+      ?range,
+      "skipping equation source edit because the end byte is not a source boundary"
+    );
     return Ok(false);
   };
   if end < start {
@@ -3053,11 +3100,17 @@ fn replace_projection_equation_source_range(
 fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: flowstate_document::BlockId, text: &str) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, image_block_id) else {
-    tracing::warn!(?image_block_id, "skipping image alt text edit because no Loro image maps to the projected block id");
+    tracing::warn!(
+      ?image_block_id,
+      "skipping image alt text edit because no Loro image maps to the projected block id"
+    );
     return Ok(false);
   };
   if map_string_opt(&block, "kind").as_deref() != Some("image") {
-    tracing::warn!(?image_block_id, "skipping image alt text edit because the projected block is not an image");
+    tracing::warn!(
+      ?image_block_id,
+      "skipping image alt text edit because the projected block is not an image"
+    );
     return Ok(false);
   }
   let alt_flow_id = map_string_opt(&block, "alt_text_flow_id").unwrap_or_else(|| nested_flow_id("image_alt"));
@@ -3076,7 +3129,10 @@ fn replace_projection_image_caption(
 ) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, image_block_id) else {
-    tracing::warn!(?image_block_id, "skipping image caption edit because no Loro image maps to the projected block id");
+    tracing::warn!(
+      ?image_block_id,
+      "skipping image caption edit because no Loro image maps to the projected block id"
+    );
     return Ok(false);
   };
   if map_string_opt(&block, "kind").as_deref() != Some("image") {
@@ -3087,7 +3143,14 @@ fn replace_projection_image_caption(
     block.insert("caption_flow_id", caption_flow_id.as_str())?;
     let caption_flow = ensure_flow(doc, &caption_flow_id, "caption")?;
     let text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-    let desired = format!("{SENTINEL_NEWLINE}{}", caption.runs.iter().map(|run| run.text.as_str()).collect::<String>());
+    let desired = format!(
+      "{SENTINEL_NEWLINE}{}",
+      caption
+        .runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>()
+    );
     replace_text_incrementally(&text, &desired)?;
     let len = text.len_unicode();
     for key in [
@@ -3123,7 +3186,10 @@ fn set_projection_image_layout(
 ) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, image_block_id) else {
-    tracing::warn!(?image_block_id, "skipping image layout edit because no Loro image maps to the projected block id");
+    tracing::warn!(
+      ?image_block_id,
+      "skipping image layout edit because no Loro image maps to the projected block id"
+    );
     return Ok(false);
   };
   if map_string_opt(&block, "kind").as_deref() != Some("image") {
@@ -3144,8 +3210,7 @@ fn byte_index_to_unicode_index(value: &str, byte: usize) -> Option<usize> {
 fn table_cell_id_by_row_column(cells_by_id: &LoroMap, row_id: &str, column_id: &str) -> Option<String> {
   map_keys(cells_by_id).into_iter().find(|cell_id| {
     child_map(cells_by_id, cell_id).is_some_and(|cell| {
-      map_string_opt(&cell, "row_id").as_deref() == Some(row_id)
-        && map_string_opt(&cell, "column_id").as_deref() == Some(column_id)
+      map_string_opt(&cell, "row_id").as_deref() == Some(row_id) && map_string_opt(&cell, "column_id").as_deref() == Some(column_id)
     })
   })
 }
@@ -3173,14 +3238,23 @@ fn projection_table_map_by_block_id(doc: &LoroDoc, table_block_id: flowstate_doc
 fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId) -> Result<bool> {
   let body = body_text(doc);
   let Some((key, _, anchor_pos)) = object_loro_block_by_projected_id(doc, &body, block_id) else {
-    tracing::warn!(?block_id, "skipping DeleteBlock because no Loro object block maps to the projected block id");
+    tracing::warn!(
+      ?block_id,
+      "skipping DeleteBlock because no Loro object block maps to the projected block id"
+    );
     return Ok(false);
   };
   if body.to_string().chars().nth(anchor_pos) != Some(OBJECT_REPLACEMENT) {
-    tracing::warn!(?block_id, anchor_pos, "skipping DeleteBlock because the Loro object anchor is no longer live");
+    tracing::warn!(
+      ?block_id,
+      anchor_pos,
+      "skipping DeleteBlock because the Loro object anchor is no longer live"
+    );
     return Ok(false);
   }
-  body.delete(anchor_pos, 1).context("deleting object placeholder from body flow")?;
+  body
+    .delete(anchor_pos, 1)
+    .context("deleting object placeholder from body flow")?;
   doc
     .get_map(ROOT)
     .ensure_mergeable_map(BLOCKS_BY_ID)?
@@ -3193,14 +3267,24 @@ fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
 fn move_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId, new_block_ix: usize) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, anchor_pos)) = object_loro_block_by_projected_id(doc, &body, block_id) else {
-    tracing::warn!(?block_id, new_block_ix, "skipping MoveBlock because no Loro object block maps to the projected block id");
+    tracing::warn!(
+      ?block_id,
+      new_block_ix,
+      "skipping MoveBlock because no Loro object block maps to the projected block id"
+    );
     return Ok(false);
   };
   if body.to_string().chars().nth(anchor_pos) != Some(OBJECT_REPLACEMENT) {
-    tracing::warn!(?block_id, anchor_pos, "skipping MoveBlock because the Loro object anchor is no longer live");
+    tracing::warn!(
+      ?block_id,
+      anchor_pos,
+      "skipping MoveBlock because the Loro object anchor is no longer live"
+    );
     return Ok(false);
   }
-  body.delete(anchor_pos, 1).context("deleting object placeholder before move")?;
+  body
+    .delete(anchor_pos, 1)
+    .context("deleting object placeholder before move")?;
   let insert_pos = object_insert_unicode_pos_for_projection_block(&body, new_block_ix).unwrap_or_else(|| body.len_unicode());
   body
     .insert(insert_pos, &OBJECT_REPLACEMENT.to_string())
@@ -3340,7 +3424,11 @@ fn object_loro_block_at_unicode_pos(doc: &LoroDoc, body: &LoroText, unicode_pos:
 }
 
 fn loro_id_u128(id: &str) -> u128 {
-  if let Some(value) = id.rsplit('.').next().and_then(|suffix| suffix.parse::<u128>().ok()) {
+  if let Some(value) = id
+    .rsplit('.')
+    .next()
+    .and_then(|suffix| suffix.parse::<u128>().ok())
+  {
     return value;
   }
   Uuid::new_v5(&Uuid::NAMESPACE_OID, id.as_bytes()).as_u128()
@@ -3467,7 +3555,13 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
     table
       .rows
       .iter()
-      .map(|row| row.cells.iter().map(|cell| usize::from(cell.col_span.max(1))).sum())
+      .map(|row| {
+        row
+          .cells
+          .iter()
+          .map(|cell| usize::from(cell.col_span.max(1)))
+          .sum()
+      })
       .max()
       .unwrap_or(0),
   );
@@ -3481,7 +3575,13 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
     column.insert("container_id", column.id().to_string())?;
     let attrs = column.ensure_mergeable_map("attrs")?;
     column.insert("attrs_container_id", attrs.id().to_string())?;
-    write_table_column_width(&column, table.column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto))?;
+    write_table_column_width(
+      &column,
+      table
+        .column_widths
+        .get(column_ix)
+        .unwrap_or(&InputTableColumnWidth::Auto),
+    )?;
   }
 
   for (row_ix, row) in table.rows.iter().enumerate() {
@@ -3552,7 +3652,12 @@ fn write_table_cell_map_from_input(
           nested_map.insert("anchor_cursor", cursor.encode())?;
         }
         nested_map.ensure_mergeable_map("attrs")?;
-        write_table_map_from_input(doc, &nested_map.ensure_mergeable_map("table")?, nested, &format!("{cell_id}.nested.{block_ix}"))?;
+        write_table_map_from_input(
+          doc,
+          &nested_map.ensure_mergeable_map("table")?,
+          nested,
+          &format!("{cell_id}.nested.{block_ix}"),
+        )?;
       },
     }
   }
@@ -3699,7 +3804,11 @@ fn append_input_paragraph_text_only(text: &LoroText, paragraph: &InputParagraph)
     text.insert(pos, "\n")?;
     pos
   };
-  text.mark(boundary_pos..boundary_pos + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))?;
+  text.mark(
+    boundary_pos..boundary_pos + 1,
+    MARK_PARAGRAPH_STYLE,
+    paragraph_style_value(paragraph.style),
+  )?;
   for run in &paragraph.runs {
     if run.text.is_empty() {
       continue;
@@ -3761,16 +3870,40 @@ fn join_projection_paragraphs(
   first: flowstate_document::ParagraphId,
   second: flowstate_document::ParagraphId,
 ) -> Result<bool> {
-  let Some(first_ix) = projection.ids.paragraph_ids.iter().position(|id| *id == first) else {
-    tracing::warn!(?first, ?second, "skipping JoinParagraphs because the first paragraph id is absent from the supplied projection");
+  let Some(first_ix) = projection
+    .ids
+    .paragraph_ids
+    .iter()
+    .position(|id| *id == first)
+  else {
+    tracing::warn!(
+      ?first,
+      ?second,
+      "skipping JoinParagraphs because the first paragraph id is absent from the supplied projection"
+    );
     return Ok(false);
   };
-  let Some(second_ix) = projection.ids.paragraph_ids.iter().position(|id| *id == second) else {
-    tracing::warn!(?first, ?second, "skipping JoinParagraphs because the second paragraph id is absent from the supplied projection");
+  let Some(second_ix) = projection
+    .ids
+    .paragraph_ids
+    .iter()
+    .position(|id| *id == second)
+  else {
+    tracing::warn!(
+      ?first,
+      ?second,
+      "skipping JoinParagraphs because the second paragraph id is absent from the supplied projection"
+    );
     return Ok(false);
   };
   if first_ix + 1 != second_ix {
-    tracing::warn!(?first, ?second, first_ix, second_ix, "skipping JoinParagraphs for non-adjacent paragraphs");
+    tracing::warn!(
+      ?first,
+      ?second,
+      first_ix,
+      second_ix,
+      "skipping JoinParagraphs for non-adjacent paragraphs"
+    );
     return Ok(false);
   }
   if !projection_paragraph_blocks_are_adjacent(projection, first_ix, second_ix) {
@@ -3795,7 +3928,9 @@ fn join_projection_paragraphs(
     );
     return Ok(false);
   }
-  body.delete(boundary, 1).context("deleting joined paragraph boundary from Loro body flow")?;
+  body
+    .delete(boundary, 1)
+    .context("deleting joined paragraph boundary from Loro body flow")?;
   repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_join_paragraphs")?;
   doc.commit();
   Ok(true)
@@ -3837,7 +3972,10 @@ fn replace_body_paragraph_span(
     .zip(&replacement_chars)
     .take_while(|(before, after)| before == after)
     .count();
-  let max_suffix = before_chars.len().min(replacement_chars.len()).saturating_sub(common_prefix);
+  let max_suffix = before_chars
+    .len()
+    .min(replacement_chars.len())
+    .saturating_sub(common_prefix);
   let common_suffix = before_chars
     .iter()
     .rev()
@@ -3845,7 +3983,9 @@ fn replace_body_paragraph_span(
     .take(max_suffix)
     .take_while(|(before, after)| before == after)
     .count();
-  let before_changed_len = before_chars.len().saturating_sub(common_prefix + common_suffix);
+  let before_changed_len = before_chars
+    .len()
+    .saturating_sub(common_prefix + common_suffix);
   let replacement_changed_end = replacement_chars.len().saturating_sub(common_suffix);
   let replacement_changed = replacement_chars[common_prefix..replacement_changed_end]
     .iter()
@@ -3853,7 +3993,9 @@ fn replace_body_paragraph_span(
   let body = body_text(doc);
   let start = start.min(body.len_unicode());
   let change_start = start.saturating_add(common_prefix).min(body.len_unicode());
-  let change_end = change_start.saturating_add(before_changed_len).min(body.len_unicode());
+  let change_end = change_start
+    .saturating_add(before_changed_len)
+    .min(body.len_unicode());
   if change_end > change_start {
     body.delete(change_start, change_end - change_start)?;
   }
@@ -3875,7 +4017,12 @@ fn span_paragraph_texts(span: &flowstate_document::DocumentSpan) -> Vec<String> 
     .iter()
     .enumerate()
     .map(|(paragraph_ix, paragraph)| {
-      if paragraph_ix > 0 && span.text.get(offset..).is_some_and(|text| text.starts_with('\n')) {
+      if paragraph_ix > 0
+        && span
+          .text
+          .get(offset..)
+          .is_some_and(|text| text.starts_with('\n'))
+      {
         offset += '\n'.len_utf8();
       }
       let len = flowstate_document::paragraph_text_len(paragraph);
@@ -3930,13 +4077,20 @@ fn mark_paragraph_runs(
 ) -> loro::LoroResult<()> {
   let mut byte_offset = 0_usize;
   for run in runs {
-    let end = byte_offset.saturating_add(run.len).min(paragraph_text.len());
+    let end = byte_offset
+      .saturating_add(run.len)
+      .min(paragraph_text.len());
     let Some(run_text) = paragraph_text.get(byte_offset..end) else {
       break;
     };
     let run_len = run_text.chars().count();
     if run_len > 0 {
-      let run_start = paragraph_start_unicode + paragraph_text.get(..byte_offset).unwrap_or_default().chars().count();
+      let run_start = paragraph_start_unicode
+        + paragraph_text
+          .get(..byte_offset)
+          .unwrap_or_default()
+          .chars()
+          .count();
       mark_run_styles(body, run_start..run_start + run_len, run.styles)?;
     }
     byte_offset = end;
@@ -3952,11 +4106,7 @@ fn inserted_newline_boundaries(start_unicode: usize, text: &str) -> Vec<usize> {
     .collect()
 }
 
-fn persist_body_paragraph_style_mark_repair(
-  doc: &LoroDoc,
-  package: Option<&mut DocumentPackage>,
-  package_path: Option<&Path>,
-) -> Result<bool> {
+fn persist_body_paragraph_style_mark_repair(doc: &LoroDoc, package: Option<&mut DocumentPackage>, package_path: Option<&Path>) -> Result<bool> {
   let from_frontier = doc.state_frontiers();
   let from_vv = doc.state_vv();
   let replica_registered = flowstate_document::register_replica(doc, None)?;
@@ -4003,7 +4153,11 @@ fn repair_missing_paragraph_style_marks(doc: &LoroDoc) -> Result<bool> {
     };
     for boundary in body_paragraph_boundaries_missing_style_mark(&text) {
       text
-        .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(ParagraphStyle::Normal))
+        .mark(
+          boundary..boundary + 1,
+          MARK_PARAGRAPH_STYLE,
+          paragraph_style_value(ParagraphStyle::Normal),
+        )
         .context("repairing missing paragraph style mark")?;
       repaired = true;
     }
@@ -4074,14 +4228,18 @@ fn repair_paragraph_metadata_after_text_flow_edit(
 fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, boundary: usize) -> loro::LoroResult<()> {
   let body_snapshot = body.to_string();
   if !boundary_is_live(&body_snapshot, boundary) {
-    tracing::warn!(boundary, "cannot create paragraph metadata because boundary is not a live paragraph newline");
+    tracing::warn!(
+      boundary,
+      "cannot create paragraph metadata because boundary is not a live paragraph newline"
+    );
     return Ok(());
   }
 
   let root = doc.get_map(ROOT);
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
-  let paragraph_id = paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary).unwrap_or_else(|| new_paragraph_metadata_id(boundary));
+  let paragraph_id =
+    paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary).unwrap_or_else(|| new_paragraph_metadata_id(boundary));
   let paragraph = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph.insert("id", paragraph_id.as_str())?;
   paragraph.insert("container_id", paragraph.id().to_string())?;
@@ -4475,12 +4633,7 @@ fn paragraph_style_value(style: ParagraphStyle) -> i64 {
 }
 
 fn mark_run_styles(text: &loro::LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> loro::LoroResult<()> {
-  for key in [
-    MARK_RUN_SEMANTIC_STYLE,
-    MARK_HIGHLIGHT_STYLE,
-    MARK_DIRECT_UNDERLINE,
-    MARK_STRIKETHROUGH,
-  ] {
+  for key in [MARK_RUN_SEMANTIC_STYLE, MARK_HIGHLIGHT_STYLE, MARK_DIRECT_UNDERLINE, MARK_STRIKETHROUGH] {
     text.unmark(range.clone(), key)?;
   }
   if let RunSemanticStyle::Custom(slot) = styles.semantic {
@@ -4541,7 +4694,7 @@ fn insert_image_block(
       if let Some(height_px) = height_px {
         attrs.insert("height_px", i64::from(height_px))?;
       }
-    }
+    },
   };
   Ok(())
 }
@@ -4622,17 +4775,19 @@ fn insert_table_block(
     column.insert("container_id", column.id().to_string())?;
     let attrs = column.ensure_mergeable_map("attrs")?;
     column.insert("attrs_container_id", attrs.id().to_string())?;
-    let width = column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto);
+    let width = column_widths
+      .get(column_ix)
+      .unwrap_or(&InputTableColumnWidth::Auto);
     match *width {
       InputTableColumnWidth::Auto => column.insert("width_kind", "auto")?,
       InputTableColumnWidth::FixedPx(px) => {
         column.insert("width_kind", "fixed_px")?;
         column.insert("width_px", i64::from(px))?;
-      }
+      },
       InputTableColumnWidth::Fraction(fraction) => {
         column.insert("width_kind", "fraction")?;
         column.insert("fraction", i64::from(fraction))?;
-      }
+      },
     };
   }
 
@@ -4704,14 +4859,7 @@ fn ensure_block(doc: &LoroDoc, kind: &str, flow_id: &str, text: &loro::LoroText,
   ensure_block_with_id(doc, &id, kind, flow_id, text, pos)
 }
 
-fn ensure_block_with_id(
-  doc: &LoroDoc,
-  id: &str,
-  kind: &str,
-  flow_id: &str,
-  text: &loro::LoroText,
-  pos: usize,
-) -> loro::LoroResult<LoroMap> {
+fn ensure_block_with_id(doc: &LoroDoc, id: &str, kind: &str, flow_id: &str, text: &loro::LoroText, pos: usize) -> loro::LoroResult<LoroMap> {
   let root = doc.get_map(ROOT);
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
   let block = blocks.ensure_mergeable_map(id)?;
@@ -4770,13 +4918,15 @@ fn equation_display_name(display: InputEquationDisplay) -> &'static str {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use flowstate_document::{ProjectionPatch, ProjectionTextDelta, DocumentPackage, InputRun, loro_schema::body_text};
+  use flowstate_document::{DocumentPackage, InputRun, ProjectionPatch, ProjectionTextDelta, loro_schema::body_text};
 
   fn live_paragraph_metadata_boundaries(doc: &LoroDoc) -> Vec<usize> {
     let body = body_text(doc);
     let snapshot = body.to_string();
     let root = doc.get_map(ROOT);
-    let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID).expect("paragraph registry");
+    let paragraphs = root
+      .ensure_mergeable_map(PARAGRAPHS_BY_ID)
+      .expect("paragraph registry");
     let mut boundaries = map_keys(&paragraphs)
       .into_iter()
       .filter_map(|key| child_map(&paragraphs, &key))
@@ -4790,7 +4940,9 @@ mod tests {
     let body = body_text(doc);
     let snapshot = body.to_string();
     let root = doc.get_map(ROOT);
-    let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID).expect("block registry");
+    let blocks = root
+      .ensure_mergeable_map(BLOCKS_BY_ID)
+      .expect("block registry");
     let mut boundaries = map_keys(&blocks)
       .into_iter()
       .filter_map(|key| child_map(&blocks, &key))
@@ -4863,7 +5015,11 @@ mod tests {
       styles: RunStyles::default(),
     })?;
     assert!(matches!(events.first(), Some(RuntimeEvent::LocalUpdate { bytes, .. }) if !bytes.is_empty()));
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::ProjectionPatched { .. })));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::ProjectionPatched { .. }))
+    );
     assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "hello");
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
     Ok(())
@@ -4996,7 +5152,11 @@ mod tests {
     let events = target.import_remote_update(&update)?;
 
     assert!(body_paragraph_boundaries_missing_style_mark(&body_text(target.doc())).is_empty());
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     Ok(())
   }
 
@@ -5024,7 +5184,11 @@ mod tests {
     let second = before_join.ids.paragraph_ids[1];
     let events = runtime.apply_editor_semantic_command(&before_join, &EditorSemanticCommand::JoinParagraphs { first, second })?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhelloworld");
     assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0]);
     assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0]);
@@ -5150,7 +5314,11 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     assert_eq!(body_text(runtime.doc()).to_string(), "\nHello\nWorld");
     let projection = runtime.projection_snapshot()?;
     assert_eq!(flowstate_document::paragraph_text(&projection, 0), "Hello");
@@ -5198,7 +5366,11 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     let projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
       panic!("expected image block after ReplaceBlock");
@@ -5252,7 +5424,11 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     let projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
       panic!("expected image block after ReplaceBlock");
@@ -5386,8 +5562,16 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
-    assert!(body_text(runtime.doc()).to_string().contains(OBJECT_REPLACEMENT));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
+    assert!(
+      body_text(runtime.doc())
+        .to_string()
+        .contains(OBJECT_REPLACEMENT)
+    );
     let projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
       panic!("expected inserted image block");
@@ -5422,8 +5606,16 @@ mod tests {
 
     let events = runtime.apply_editor_semantic_command(&projection, &EditorSemanticCommand::DeleteBlock { block: image_block })?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
-    assert!(!body_text(runtime.doc()).to_string().contains(OBJECT_REPLACEMENT));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
+    assert!(
+      !body_text(runtime.doc())
+        .to_string()
+        .contains(OBJECT_REPLACEMENT)
+    );
     let projection = runtime.projection_snapshot()?;
     assert_eq!(projection.blocks.len(), 1);
     assert!(matches!(&projection.blocks[0], flowstate_document::Block::Paragraph(_)));
@@ -5470,7 +5662,11 @@ mod tests {
     let projection = runtime.projection_snapshot()?;
     assert_eq!(projection.blocks.len(), 1);
     assert_eq!(flowstate_document::paragraph_text(&projection, 0), "alega");
-    assert!(!body_text(runtime.doc()).to_string().contains(OBJECT_REPLACEMENT));
+    assert!(
+      !body_text(runtime.doc())
+        .to_string()
+        .contains(OBJECT_REPLACEMENT)
+    );
     Ok(())
   }
 
@@ -5509,7 +5705,11 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     let projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
       panic!("expected moved image at block 1");
@@ -5643,7 +5843,10 @@ mod tests {
     assert!(table.style.header_row);
     assert!(matches!(
       table.column_widths.as_slice(),
-      [flowstate_document::TableColumnWidth::FixedPx(90), flowstate_document::TableColumnWidth::Fraction(1)]
+      [
+        flowstate_document::TableColumnWidth::FixedPx(90),
+        flowstate_document::TableColumnWidth::Fraction(1)
+      ]
     ));
     let flowstate_document::TableCellBlock::Paragraph(cell) = &table.rows[1].cells[0].blocks[0] else {
       panic!("expected paragraph cell after ReplaceBlock");
@@ -5685,7 +5888,11 @@ mod tests {
       },
     )?;
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
     let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
     assert_eq!(
       movable_list_strings(&child_movable_list(&table, "row_order").expect("row order")),
@@ -5701,7 +5908,10 @@ mod tests {
     };
     assert!(matches!(
       table.column_widths.as_slice(),
-      [flowstate_document::TableColumnWidth::Auto, flowstate_document::TableColumnWidth::FixedPx(222)]
+      [
+        flowstate_document::TableColumnWidth::Auto,
+        flowstate_document::TableColumnWidth::FixedPx(222)
+      ]
     ));
     Ok(())
   }
@@ -5730,15 +5940,11 @@ mod tests {
     let initial_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
     let initial_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
 
-    let inserted_row = input_table(
-      vec![vec!["new-a", "new-b"]],
-      Vec::new(),
-      false,
-    )
-    .rows
-    .into_iter()
-    .next()
-    .expect("row");
+    let inserted_row = input_table(vec![vec!["new-a", "new-b"]], Vec::new(), false)
+      .rows
+      .into_iter()
+      .next()
+      .expect("row");
     runtime.apply_editor_semantic_command(
       &projection,
       &EditorSemanticCommand::InsertTableRow {
@@ -5972,21 +6178,23 @@ mod tests {
     package.write(&path)?;
 
     let mut runtime = CrdtRuntime::open_package(&path)?;
-    let opened = runtime.command(SemanticCommand::OpenRevision {
-      revision_id: blank_revision,
-    })?;
+    let opened = runtime.command(SemanticCommand::OpenRevision { revision_id: blank_revision })?;
     assert!(matches!(
       opened.as_slice(),
       [RuntimeEvent::RevisionOpened { document, .. }] if document.paragraphs.first().is_some_and(|paragraph| paragraph.byte_range.is_empty())
     ));
 
-    let forked = runtime.command(SemanticCommand::ForkRevision {
-      revision_id: blank_revision,
-    })?;
+    let forked = runtime.command(SemanticCommand::ForkRevision { revision_id: blank_revision })?;
     let [RuntimeEvent::RevisionForked { document, package, .. }] = forked.as_slice() else {
       panic!("expected fork event");
     };
-    assert_eq!(document.paragraphs.first().map(|paragraph| paragraph.byte_range.clone()), Some(0..0));
+    assert_eq!(
+      document
+        .paragraphs
+        .first()
+        .map(|paragraph| paragraph.byte_range.clone()),
+      Some(0..0)
+    );
     assert!(!package.loro_snapshots.is_empty());
     Ok(())
   }
@@ -6022,7 +6230,14 @@ mod tests {
       panic!("expected one paragraph text patch");
     };
     assert_eq!(*row, 0);
-    assert_eq!(new.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "hello");
+    assert_eq!(
+      new
+        .runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>(),
+      "hello"
+    );
     assert_eq!(delta_utf8, &[ProjectionTextDelta::Insert("hello".len())]);
     assert!(events.iter().all(|event| !matches!(
       event,
@@ -6083,9 +6298,23 @@ mod tests {
       panic!("expected one paragraph text patch");
     };
     assert_eq!(*row, 2);
-    assert_eq!(new.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "omega!");
-    assert_eq!(delta_utf8, &[ProjectionTextDelta::Retain("omega".len()), ProjectionTextDelta::Insert("!".len())]);
-    assert!(events.iter().all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. })));
+    assert_eq!(
+      new
+        .runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>(),
+      "omega!"
+    );
+    assert_eq!(
+      delta_utf8,
+      &[ProjectionTextDelta::Retain("omega".len()), ProjectionTextDelta::Insert("!".len())]
+    );
+    assert!(
+      events
+        .iter()
+        .all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. }))
+    );
     Ok(())
   }
 
@@ -6100,8 +6329,16 @@ mod tests {
       })?
       .expect("text insert should use body fast path");
 
-    assert!(events.iter().any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty())));
-    assert!(events.iter().all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. })));
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
+    assert!(
+      events
+        .iter()
+        .all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. }))
+    );
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
     Ok(())
   }
@@ -6205,23 +6442,11 @@ mod tests {
 
     let mut target = CrdtRuntime::new_empty("Target")?;
     let events = target.import_remote_update(&second_only)?;
-    assert!(matches!(
-      events.first(),
-      Some(RuntimeEvent::RemoteUpdateApplied {
-        pending: Some(_),
-        ..
-      })
-    ));
+    assert!(matches!(events.first(), Some(RuntimeEvent::RemoteUpdateApplied { pending: Some(_), .. })));
 
     let first_update = source.export(ExportMode::updates(&empty_vv))?;
     let events = target.import_remote_update(&first_update)?;
-    assert!(matches!(
-      events.first(),
-      Some(RuntimeEvent::RemoteUpdateApplied {
-        pending: None,
-        ..
-      })
-    ));
+    assert!(matches!(events.first(), Some(RuntimeEvent::RemoteUpdateApplied { pending: None, .. })));
     Ok(())
   }
   #[test]
@@ -6260,7 +6485,11 @@ mod tests {
       assert_eq!(index.paragraph_metadata_by_id.get(id).copied(), Some(expected_ix));
       assert_eq!(
         index.paragraph_index_for_id(&projection, *id),
-        projection.ids.paragraph_ids.iter().position(|candidate| candidate == id),
+        projection
+          .ids
+          .paragraph_ids
+          .iter()
+          .position(|candidate| candidate == id),
       );
     }
     // §24 block anchor index agrees with the linear `block_ids` scan.
@@ -6268,7 +6497,11 @@ mod tests {
       assert_eq!(index.block_anchor_by_id.get(id).copied(), Some(expected_ix));
       assert_eq!(
         index.block_index_for_id(&projection, *id),
-        projection.ids.block_ids.iter().position(|candidate| candidate == id),
+        projection
+          .ids
+          .block_ids
+          .iter()
+          .position(|candidate| candidate == id),
       );
     }
     // Absent ids fall back to `None` through both the index and the scan.
@@ -6339,10 +6572,7 @@ mod tests {
 
     // The style interval covering the paragraph's leading byte carries its run styles.
     assert_eq!(index.run_styles_at(0, 0), Some(styles));
-    assert_eq!(
-      index.run_styles_at(0, 0),
-      projection.paragraphs[0].runs.first().map(|run| run.styles),
-    );
+    assert_eq!(index.run_styles_at(0, 0), projection.paragraphs[0].runs.first().map(|run| run.styles),);
     // Bytes beyond the paragraph text have no covering interval.
     assert_eq!(index.run_styles_at(0, 1_000), None);
     Ok(())
@@ -6376,7 +6606,10 @@ mod tests {
       .position(|block| matches!(block, Block::Image(_)))
       .expect("image block present");
     let image_block_id = projection.ids.block_ids[image_block_ix];
-    let asset_refs = index.asset_refs_by_id.get(&AssetId(7)).expect("asset reference indexed");
+    let asset_refs = index
+      .asset_refs_by_id
+      .get(&AssetId(7))
+      .expect("asset reference indexed");
     assert_eq!(asset_refs.len(), 1);
     assert!(asset_refs.contains(&image_block_id));
 
@@ -6387,7 +6620,10 @@ mod tests {
       .position(|block| matches!(block, Block::Table(_)))
       .expect("table block present");
     let table_block_id = projection.ids.block_ids[table_block_ix];
-    let entry = index.table_cells_by_block.get(&table_block_id).expect("table indexed");
+    let entry = index
+      .table_cells_by_block
+      .get(&table_block_id)
+      .expect("table indexed");
     assert_eq!(entry.row_ids.len(), 2);
     assert_eq!(entry.column_ids.len(), 2);
     assert_eq!(entry.cells.len(), 4);
@@ -6400,7 +6636,11 @@ mod tests {
       .filter(|block| !matches!(block, Block::Paragraph(_)))
       .count();
     assert_eq!(
-      index.search_unit_spans.iter().filter(|span| span.paragraph.is_none()).count(),
+      index
+        .search_unit_spans
+        .iter()
+        .filter(|span| span.paragraph.is_none())
+        .count(),
       object_blocks,
     );
     Ok(())

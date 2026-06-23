@@ -113,7 +113,9 @@ fn node_from_start(event: &BytesStart<'_>) -> Node {
   let mut val = None;
   for attr in event.attributes().flatten() {
     if local_name(attr.key.as_ref()) == "val" {
-      val = std::str::from_utf8(attr.value.as_ref()).ok().map(|value| value.to_owned());
+      val = std::str::from_utf8(attr.value.as_ref())
+        .ok()
+        .map(|value| value.to_owned());
     }
   }
   Node {
@@ -142,7 +144,9 @@ fn latex_from_children(node: &Node) -> String {
 }
 
 fn latex_from_arg(node: &Node, local: &str) -> String {
-  child(node, local).map(latex_from_children).unwrap_or_default()
+  child(node, local)
+    .map(latex_from_children)
+    .unwrap_or_default()
 }
 
 fn latex_from_node(node: &Node) -> String {
@@ -182,11 +186,7 @@ fn latex_from_node(node: &Node) -> String {
     "func" => {
       let name = latex_from_arg(node, "fName");
       let argument = latex_from_arg(node, "e");
-      if argument.is_empty() {
-        name
-      } else {
-        format!("{name} {argument}")
-      }
+      if argument.is_empty() { name } else { format!("{name} {argument}") }
     },
     "acc" => latex_accent(node),
     "bar" => format!("\\overline{{{}}}", latex_from_arg(node, "e")),
@@ -449,7 +449,8 @@ mod tests {
 
   #[test]
   fn math_para_marks_display_and_handles_superscript() {
-    let omml = r"<m:oMathPara><m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath></m:oMathPara>";
+    let omml =
+      r"<m:oMathPara><m:oMath><m:sSup><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sup><m:r><m:t>2</m:t></m:r></m:sup></m:sSup></m:oMath></m:oMathPara>";
     let equations = equations_from_container_bytes(omml.as_bytes());
     assert_eq!(equations.len(), 1);
     assert_eq!(equations[0].source, "x^{2}");

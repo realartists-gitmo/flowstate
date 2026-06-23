@@ -5,14 +5,12 @@ use gpui_flowtext::{
   ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles, TableBlock, TableCellBlock, TableColumnWidth, document_from_paragraphs,
   paragraph_text,
 };
-use loro::{
-  ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, TextDelta, cursor::Side,
-};
+use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, TextDelta, cursor::Side};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
 use crate::{
-  AssetChunk, BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
+  AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
   ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
   loro_schema::{ASSETS_BY_ID, REVISIONS, SectionPageAttrs, write_section_page_attrs},
@@ -52,12 +50,7 @@ pub fn document_to_loro(document: &DocumentProjection, title: &str) -> io::Resul
 
 pub fn write_imported_document_as_loro_db8(path: impl AsRef<Path>, document: &DocumentProjection, title: &str) -> io::Result<()> {
   let imported = import_document_projection(document.clone(), title)?;
-  crate::DocumentPackage::from_loro_snapshot_with_assets(
-    &imported.doc,
-    title,
-    assets_from_document(&imported.projection),
-  )?
-  .write(path)
+  crate::DocumentPackage::from_loro_snapshot_with_assets(&imported.doc, title, assets_from_document(&imported.projection))?.write(path)
 }
 
 pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult<()> {
@@ -78,7 +71,12 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
   plan.write_to(&body_text)?;
 
   let mut paragraph_ix = 0_usize;
-  for (block_ix, (block, position)) in document.blocks.iter().zip(&plan.block_positions).enumerate() {
+  for (block_ix, (block, position)) in document
+    .blocks
+    .iter()
+    .zip(&plan.block_positions)
+    .enumerate()
+  {
     match (block, position) {
       (Block::Paragraph(_), FlowBlockPosition::Paragraph { boundary_pos, .. }) => {
         import_paragraph_record(
@@ -91,7 +89,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           projection_paragraph_id(document, paragraph_ix),
         )?;
         paragraph_ix += 1;
-      }
+      },
       (Block::Image(image), FlowBlockPosition::Object { anchor_pos }) => {
         import_image_block(
           &flows,
@@ -102,7 +100,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           &body_text,
           *anchor_pos,
         )?;
-      }
+      },
       (Block::Equation(equation), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "equation");
         let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, *anchor_pos)?;
@@ -113,12 +111,12 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
         let attrs = block.ensure_mergeable_map("attrs")?;
         attrs.insert("syntax", equation_syntax_name(equation.syntax))?;
         attrs.insert("display", equation_display_name(equation.display))?;
-      }
+      },
       (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
         let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, *anchor_pos)?;
         import_table(&flows, &block, table, &durable_block_id)?;
-      }
+      },
       _ => unreachable!("flow import plan must preserve document block shape"),
     }
   }
@@ -167,7 +165,7 @@ fn import_image_block(
       if let Some(height_px) = height_px {
         attrs.insert("height_px", i64::from(height_px))?;
       }
-    }
+    },
   };
   Ok(())
 }
@@ -204,7 +202,9 @@ fn import_sections(
     let gpui_flowtext::SectionKind::Custom(kind_slot) = section.kind;
     section_map.insert("kind_slot", i64::from(kind_slot))?;
     if let Some(paragraph_ix) = paragraph_indexes.get(&section.start_paragraph).copied()
-      && let Some(boundary_pos) = paragraph_plans.get(paragraph_ix).map(|paragraph| paragraph.boundary_pos)
+      && let Some(boundary_pos) = paragraph_plans
+        .get(paragraph_ix)
+        .map(|paragraph| paragraph.boundary_pos)
       && let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Left)
     {
       section_map.insert("start_cursor", cursor.encode())?;
@@ -329,10 +329,16 @@ impl FlowTextImportPlan {
   }
 
   fn for_document(document: &DocumentProjection) -> Self {
-    let run_count = document.paragraphs.iter().map(|paragraph| paragraph.runs.len()).sum::<usize>();
+    let run_count = document
+      .paragraphs
+      .iter()
+      .map(|paragraph| paragraph.runs.len())
+      .sum::<usize>();
     let mut plan = Self::new(
       document.blocks.len(),
-      run_count.saturating_add(document.blocks.len()).saturating_add(1),
+      run_count
+        .saturating_add(document.blocks.len())
+        .saturating_add(1),
     );
     let mut paragraph_ix = 0_usize;
     for block in document.blocks.iter() {
@@ -341,7 +347,7 @@ impl FlowTextImportPlan {
           let paragraph_body = paragraph_text(document, paragraph_ix);
           plan.push_paragraph(paragraph, &paragraph_body);
           paragraph_ix += 1;
-        }
+        },
         Block::Image(_) | Block::Equation(_) | Block::Table(_) => plan.push_object(),
       }
     }
@@ -354,18 +360,18 @@ impl FlowTextImportPlan {
       0
     } else {
       let boundary_pos = self.unicode_len;
-      push_rich_text_insert(
-        &mut self.delta,
-        "\n",
-        Some(paragraph_style_attributes(paragraph.style)),
-      );
+      push_rich_text_insert(&mut self.delta, "\n", Some(paragraph_style_attributes(paragraph.style)));
       self.unicode_len += 1;
       boundary_pos
     };
 
     self.push_paragraph_body(paragraph_body, &paragraph.runs);
-    self.paragraphs.push(ParagraphTextImportPlan { boundary_pos });
-    self.block_positions.push(FlowBlockPosition::Paragraph { boundary_pos });
+    self
+      .paragraphs
+      .push(ParagraphTextImportPlan { boundary_pos });
+    self
+      .block_positions
+      .push(FlowBlockPosition::Paragraph { boundary_pos });
   }
 
   fn set_initial_paragraph_style(&mut self, style: ParagraphStyle) {
@@ -380,17 +386,10 @@ impl FlowTextImportPlan {
     let mut byte_offset = 0_usize;
     for run in runs {
       let byte_end = byte_offset.saturating_add(run.len);
-      if byte_end > paragraph_body.len()
-        || !paragraph_body.is_char_boundary(byte_offset)
-        || !paragraph_body.is_char_boundary(byte_end)
-      {
+      if byte_end > paragraph_body.len() || !paragraph_body.is_char_boundary(byte_offset) || !paragraph_body.is_char_boundary(byte_end) {
         break;
       }
-      push_rich_text_insert(
-        &mut self.delta,
-        &paragraph_body[byte_offset..byte_end],
-        run_style_attributes(run.styles),
-      );
+      push_rich_text_insert(&mut self.delta, &paragraph_body[byte_offset..byte_end], run_style_attributes(run.styles));
       byte_offset = byte_end;
     }
     if byte_offset < paragraph_body.len() && paragraph_body.is_char_boundary(byte_offset) {
@@ -404,7 +403,9 @@ impl FlowTextImportPlan {
     let object = OBJECT_REPLACEMENT.to_string();
     push_rich_text_insert(&mut self.delta, &object, None);
     self.unicode_len += 1;
-    self.block_positions.push(FlowBlockPosition::Object { anchor_pos });
+    self
+      .block_positions
+      .push(FlowBlockPosition::Object { anchor_pos });
   }
 
   fn write_to(&self, text: &LoroText) -> LoroResult<()> {
@@ -440,11 +441,7 @@ fn run_style_attributes(styles: RunStyles) -> Option<FxHashMap<String, LoroValue
   (!attributes.is_empty()).then_some(attributes)
 }
 
-fn push_rich_text_insert(
-  delta: &mut Vec<TextDelta>,
-  value: &str,
-  attributes: Option<FxHashMap<String, LoroValue>>,
-) {
+fn push_rich_text_insert(delta: &mut Vec<TextDelta>, value: &str, attributes: Option<FxHashMap<String, LoroValue>>) {
   if value.is_empty() {
     return;
   }
@@ -488,7 +485,13 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
     table
       .rows
       .iter()
-      .map(|row| row.cells.iter().map(|cell| usize::from(cell.col_span.max(1))).sum())
+      .map(|row| {
+        row
+          .cells
+          .iter()
+          .map(|cell| usize::from(cell.col_span.max(1)))
+          .sum()
+      })
       .max()
       .unwrap_or(0),
   );
@@ -507,11 +510,11 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
       Some(TableColumnWidth::FixedPx(px)) => {
         column.insert("width_kind", "fixed_px")?;
         column.insert("width_px", i64::from(*px))?;
-      }
+      },
       Some(TableColumnWidth::Fraction(fraction)) => {
         column.insert("width_kind", "fraction")?;
         column.insert("fraction", i64::from(*fraction))?;
-      }
+      },
     };
   }
 
@@ -564,7 +567,12 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
         }
       }
       cell_plan.write_to(&text)?;
-      for (block_ix, (cell_block, position)) in cell.blocks.iter().zip(&cell_plan.block_positions).enumerate() {
+      for (block_ix, (cell_block, position)) in cell
+        .blocks
+        .iter()
+        .zip(&cell_plan.block_positions)
+        .enumerate()
+      {
         let (TableCellBlock::Table(nested), FlowBlockPosition::Object { anchor_pos }) = (cell_block, position) else {
           continue;
         };
@@ -721,7 +729,10 @@ fn projection_paragraph_id(document: &DocumentProjection, paragraph_ix: usize) -
 }
 
 fn fallback_id(kind: &str, ix: usize) -> String {
-  format!("{kind}.{ix}.{}", Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{kind}.{ix}").as_bytes()).as_u128())
+  format!(
+    "{kind}.{ix}.{}",
+    Uuid::new_v5(&Uuid::NAMESPACE_OID, format!("{kind}.{ix}").as_bytes()).as_u128()
+  )
 }
 
 fn nested_flow_id(kind: &str, block_id: &str) -> String {
@@ -870,7 +881,12 @@ mod tests {
     let projected = crate::document_from_loro(&imported.doc)?;
     assert_eq!(paragraph_text(&projected, 0), "styled plain");
     assert_eq!(projected.paragraphs[0].style, ParagraphStyle::Custom(2));
-    assert!(projected.paragraphs[0].runs.iter().any(|run| run.styles == expected));
+    assert!(
+      projected.paragraphs[0]
+        .runs
+        .iter()
+        .any(|run| run.styles == expected)
+    );
     Ok(())
   }
 
