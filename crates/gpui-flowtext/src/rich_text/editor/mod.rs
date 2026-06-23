@@ -203,7 +203,7 @@ impl CollaborationRole {
   }
 }
 
-struct EditRecord {
+pub(super) struct EditRecord {
   before_selection: EditorSelection,
   before_generation: u64,
   after_selection: EditorSelection,

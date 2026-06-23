@@ -151,6 +151,20 @@ impl FlowDocument {
   }
 }
 
+/// Removes `id` and all of its descendants from `nodes`.
+///
+/// Removing each node before recursing into its (former) children keeps the
+/// walk cycle-safe: a malformed child edge pointing back at an already-removed
+/// ancestor short-circuits on the `remove` miss instead of recursing forever.
+#[hotpath::measure]
+fn remove_subtree(nodes: &mut Nodes, id: &NodeId) {
+  if let Some(node) = nodes.remove(id) {
+    for child in &node.children {
+      remove_subtree(nodes, child);
+    }
+  }
+}
+
 #[hotpath::measure]
 pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, placeholder: Option<String>) -> Action {
   Action::Add {

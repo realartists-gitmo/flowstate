@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  AssetId, AssetRecord, BLOCKS_BY_ID, Block, ProjectionPatch, ProjectionStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
+  AssetRecord, BLOCKS_BY_ID, Block, ProjectionPatch, ProjectionStructuralBlock, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentProjection, DocumentPackage,
   ImportedLoroDocument,
   FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, InputBlock, InputBlockAlignment, InputEquationDisplay,
   InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow,

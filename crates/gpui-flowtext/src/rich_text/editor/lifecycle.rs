@@ -538,14 +538,14 @@ mod projection_theme_tests {
   #[test]
   fn replacement_projection_preserves_local_theme_catalog() {
     let mut current = blank_document();
-    current.theme.body_font_size = pt(18.0);
+    current.theme.body_font_size = px(18.0);
     current.theme.custom_highlight_styles.insert(77, CustomHighlightStyle {
       color: rgb(0x0012_3456).into(),
     });
 
     let replacement = projection_with_local_theme(blank_document(), &current.theme);
 
-    assert_eq!(replacement.theme.body_font_size, pt(18.0));
+    assert_eq!(replacement.theme.body_font_size, px(18.0));
     assert!(replacement.theme.custom_highlight_styles.contains_key(&77));
   }
 }

@@ -284,7 +284,7 @@ fn text_cursor_fields(text: &LoroText) -> Option<(Vec<u8>, Vec<u8>)> {
   if len == 0 {
     return None;
   }
-  let start = if text.to_string().starts_with('\n') && len > 1 { 1 } else { 0 };
+  let start = usize::from(text.to_string().starts_with('\n') && len > 1);
   Some((
     text.get_cursor(start, Side::Left).map(|cursor| cursor.encode()).unwrap_or_default(),
     text.get_cursor(len, Side::Right).map(|cursor| cursor.encode()).unwrap_or_default(),

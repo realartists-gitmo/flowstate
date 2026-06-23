@@ -14,9 +14,9 @@ pub struct StaleProjectionError {
 }
 
 impl std::fmt::Display for StaleProjectionError {
-  fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     write!(
-      formatter,
+      f,
       "editor command batch was constructed at a stale projection frontier (expected {} bytes, current frontier has {} bytes)",
       self.expected_frontier_len,
       self.current_frontier_len,

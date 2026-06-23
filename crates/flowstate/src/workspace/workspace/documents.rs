@@ -1,6 +1,6 @@
 enum DocumentRuntimeSource {
   FromProjection,
-  Runtime(flowstate_collab::crdt_runtime::CrdtRuntime),
+  Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
   Handle(flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle),
 }
 
@@ -188,7 +188,7 @@ impl Workspace {
           .projection_snapshot()
           .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error:#}"))?;
         document.theme = local_theme;
-        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
+        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(*runtime)
           .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
       },
       DocumentRuntimeSource::Handle(runtime) => runtime,
@@ -212,6 +212,10 @@ impl Workspace {
             .await
             .map_err(runtime_io_error)?;
           let title = document_package_title_for_path(&path);
+          // The checkpoint's LocalUpdate events are intentionally dropped here:
+          // this UI-agnostic save hook future has no GPUI context to reach the
+          // collaboration session. The workspace re-syncs collaborators after
+          // the save completes via collab::refresh_after_external_checkpoint.
           runtime
             .checkpoint_package(title, Some(path))
             .await
@@ -349,6 +353,9 @@ impl Workspace {
             .apply_editor_commands(base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
+          // LocalUpdate events from this checkpoint are intentionally dropped
+          // (this save hook future has no GPUI context); the workspace re-syncs
+          // collaborators afterwards via collab::refresh_after_external_checkpoint.
           runtime
             .checkpoint_package(document_package_title_for_path(&path), Some(path))
             .await
@@ -520,7 +527,7 @@ impl Workspace {
               document,
               None,
               Some(format!("Revision {revision_id:x}")),
-              DocumentRuntimeSource::Runtime(fork_runtime),
+              DocumentRuntimeSource::Runtime(Box::new(fork_runtime)),
               window,
               cx,
             ) {
@@ -913,7 +920,7 @@ impl Workspace {
           path,
           title,
         } => {
-          let panel = match self.create_document_panel(*document, path, title, DocumentRuntimeSource::Runtime(*runtime), window, cx) {
+          let panel = match self.create_document_panel(*document, path, title, DocumentRuntimeSource::Runtime(runtime), window, cx) {
             Ok(panel) => panel,
             Err(error) => {
               tracing::error!(error = %format_args!("{error:#}"), "restoring document runtime failed");
@@ -1090,7 +1097,7 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) {
-    match self.create_document_panel(document, path, title, DocumentRuntimeSource::Runtime(runtime), window, cx) {
+    match self.create_document_panel(document, path, title, DocumentRuntimeSource::Runtime(Box::new(runtime)), window, cx) {
       Ok(_) => {
         self.persist_temporary_workspace_session(cx);
         cx.notify();
@@ -1285,14 +1292,28 @@ impl Workspace {
         self.prompt_save_active_as(editor, window, cx);
         return;
       }
+      let panel_id = self.active_document_id;
       let save_task = editor.update(cx, |editor, cx| editor.save(cx));
       let window_handle = window.window_handle();
-      cx.spawn(async move |_, cx| {
-        if let Err(error) = save_task.await {
-          let detail = error.to_string();
-          let _ = window_handle.update(cx, |_, window, cx| {
-            window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
-          });
+      cx.spawn(async move |workspace, cx| {
+        match save_task.await {
+          // A successful save checkpoints the runtime, recording a named
+          // revision into Loro. For a collaborating document that op must be
+          // advertised so peers converge promptly; for a solo document the
+          // refresh is a no-op because no session is registered for the panel.
+          Ok(()) => {
+            if let Some(panel_id) = panel_id {
+              let _ = workspace.update(cx, |_, cx| {
+                crate::collab::refresh_after_external_checkpoint(panel_id, cx);
+              });
+            }
+          },
+          Err(error) => {
+            let detail = error.to_string();
+            let _ = window_handle.update(cx, |_, window, cx| {
+              window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
+            });
+          },
         }
       })
       .detach();
@@ -1373,13 +1394,22 @@ impl Workspace {
       .insert(panel_id, generation);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
     cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
-        eprintln!("autosave failed: {error}");
-        let _ = workspace.update(cx, |workspace, _| {
-          if workspace.autosave_document_generations.get(&panel_id) == Some(&generation) {
-            workspace.autosave_document_generations.remove(&panel_id);
-          }
-        });
+      match save_task.await {
+        // Keep collaborating peers in sync with the autosave checkpoint; a
+        // no-op for solo documents (no session registered for the panel).
+        Ok(()) => {
+          let _ = workspace.update(cx, |_, cx| {
+            crate::collab::refresh_after_external_checkpoint(panel_id, cx);
+          });
+        },
+        Err(error) => {
+          eprintln!("autosave failed: {error}");
+          let _ = workspace.update(cx, |workspace, _| {
+            if workspace.autosave_document_generations.get(&panel_id) == Some(&generation) {
+              workspace.autosave_document_generations.remove(&panel_id);
+            }
+          });
+        },
       }
     })
     .detach();
@@ -1442,6 +1472,9 @@ impl Workspace {
                 panel.update(cx, |panel, cx| panel.set_path(path, cx));
               }
               workspace.persist_temporary_workspace_session(cx);
+              // Advertise the save checkpoint to collaborators (no-op when the
+              // panel has no active collaboration session).
+              crate::collab::refresh_after_external_checkpoint(panel_id, cx);
               cx.notify();
             });
           },
@@ -1703,7 +1736,7 @@ fn apply_local_runtime_events(
     let frontier = events
       .iter()
       .filter_map(flowstate_collab::crdt_runtime::RuntimeEvent::frontier)
-      .last()
+      .next_back()
       .map(ToOwned::to_owned);
     editor.update(cx, |editor, cx| {
       if let Some(frontier) = frontier {

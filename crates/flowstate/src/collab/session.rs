@@ -577,6 +577,33 @@ impl CollabSession {
     .detach();
   }
 
+  /// Re-synchronize anti-entropy state after a save/checkpoint that was applied
+  /// to the shared document runtime *outside* this session.
+  ///
+  /// Saving a document runs the editor's native save hook, which calls
+  /// `CrdtRuntimeHandle::checkpoint_package`. Recording that named revision is a
+  /// real Loro mutation: it advances the canonical frontier/version-vector. The
+  /// hook returns the resulting `RuntimeEvent::LocalUpdate` bytes, but the save
+  /// hook future runs without any GPUI context (see `NativeSaveHook`), so it
+  /// cannot route them back into this session. As a result our cached
+  /// `runtime_vv` would go stale and peers would not learn about the new
+  /// revision op until the next periodic digest (~10s).
+  ///
+  /// Re-reading the authoritative oplog version vector and re-publishing a
+  /// digest fixes the staleness and lets anti-entropy converge immediately:
+  /// peers see we are ahead (`SenderHasMissingOps`) and pull the revision op on
+  /// the spot. We intentionally do not re-publish update bytes or re-apply a
+  /// projection here — the checkpoint changed no visible content, and the
+  /// runtime remains the single Loro owner.
+  pub(super) fn refresh_after_external_checkpoint(&mut self, cx: &mut Context<Self>) {
+    if self.runtime.is_none() {
+      tracing::trace!(session = %self.session, "ignoring external checkpoint refresh because the session has no runtime");
+      return;
+    }
+    tracing::debug!(session = %self.session, "refreshing collaboration anti-entropy state after an external document checkpoint");
+    self.refresh_runtime_version_vector(cx);
+  }
+
   pub fn establish_local_peer(&mut self, peer: &flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     if self.presence.is_none() {
       tracing::info!(session = %self.session, peer = %peer, "establishing local collaboration peer presence");
@@ -902,7 +929,7 @@ impl CollabSession {
       let frontier = events
         .iter()
         .filter_map(RuntimeEvent::frontier)
-        .last()
+        .next_back()
         .map(ToOwned::to_owned);
 
       // Publish update bytes and advance collaboration version-vector state,

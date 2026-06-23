@@ -53,7 +53,27 @@ pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
 
 #[hotpath::measure]
 pub fn load_flow_document_or_new(path: impl AsRef<Path>) -> FlowDocument {
-  load_flow_document(path).unwrap_or_else(|_| FlowDocument::new())
+  // A missing file is the normal "new document" path, so it falls back to an empty
+  // document silently. An existing-but-unreadable file (corrupt JSON, unsupported
+  // save version, or other I/O failure) is logged via `tracing::warn!` before the
+  // same fallback, so the failure is observable rather than silently swallowed.
+  //
+  // DATA-LOSS CONCERN (mitigated, not eliminated): the corrupt file is still not
+  // auto-recovered, so the next `save_flow_document` can overwrite it; the warning
+  // at least makes that potential loss visible. Fully surfacing the error would need
+  // a `Result` signature that ripples to every caller (`flow::editor::load_or_new`,
+  // the workspace document loaders, and the `lib.rs` re-export), so the infallible
+  // signature is kept deliberately.
+  let path = path.as_ref();
+  match load_flow_document(path) {
+    Ok(document) => document,
+    Err(error) => {
+      if path.exists() {
+        tracing::warn!(path = %path.display(), error = %format_args!("{error:#}"), "failed to load existing .fl0 document; using a new empty document");
+      }
+      FlowDocument::new()
+    }
+  }
 }
 
 #[hotpath::measure]

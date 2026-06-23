@@ -96,3 +96,24 @@ pub fn session_for_id(session_id: SessionId, cx: &App) -> Option<Entity<CollabSe
 pub fn roster_for_panel(panel_id: Uuid, cx: &App) -> Vec<SessionRosterEntry> {
   CollabManager::global(cx).roster_for_panel(panel_id, cx)
 }
+
+/// Notify the collaboration session for `panel_id` that the document's runtime
+/// was just checkpointed (saved) outside the session.
+///
+/// A save records a named revision into Loro via the runtime's save hook, which
+/// advances the canonical version vector but cannot route the resulting
+/// `LocalUpdate` events back to the session (the save hook future has no GPUI
+/// context). This refreshes the session's cached runtime version vector and
+/// re-publishes an anti-entropy digest so peers converge on the new revision op
+/// promptly. Returns `false` (a harmless no-op) when the panel is not part of an
+/// active collaboration session, so solo-document saves are unaffected.
+pub fn refresh_after_external_checkpoint<T>(panel_id: Uuid, cx: &mut Context<T>) -> bool
+where
+  T: 'static,
+{
+  let Some(session) = session_for_panel(panel_id, cx) else {
+    return false;
+  };
+  session.update(cx, |session, cx| session.refresh_after_external_checkpoint(cx));
+  true
+}

@@ -3066,6 +3066,7 @@ dependencies = [
  "flowstate-document",
  "gpui",
  "hotpath",
+ "imagesize",
  "lopdf",
  "quick-xml 0.36.2",
  "rdocx",
@@ -3085,6 +3086,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
+ "tracing",
  "uuid",
 ]
 
@@ -3820,6 +3822,7 @@ dependencies = [
 name = "gpui-flowtext"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cosmic-text",
  "crop",
  "gpui",

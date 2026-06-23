@@ -398,11 +398,10 @@ fn push_rich_text_insert(
     insert,
     attributes: previous_attributes,
   }) = delta.last_mut()
+    && previous_attributes.as_ref() == attributes.as_ref()
   {
-    if previous_attributes.as_ref() == attributes.as_ref() {
-      insert.push_str(value);
-      return;
-    }
+    insert.push_str(value);
+    return;
   }
   delta.push(TextDelta::Insert {
     insert: value.to_string(),
