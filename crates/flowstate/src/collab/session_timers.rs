@@ -303,7 +303,7 @@ impl CollabSession {
           }
         },
         Err(error) => {
-          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration projection self-check request failed")
+          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration projection self-check request failed");
         },
       });
     })
