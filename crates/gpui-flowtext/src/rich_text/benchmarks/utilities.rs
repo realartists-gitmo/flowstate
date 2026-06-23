@@ -16,10 +16,10 @@ fn top_selection(document: &DocumentProjection) -> Option<EditorSelection> {
   if document.paragraphs.is_empty() {
     return None;
   }
-  Some(EditorSelection {
-    anchor: DocumentOffset { paragraph: 0, byte: 0 },
-    head: first_window_range(document, 3).end,
-  })
+  Some(EditorSelection::range(
+    DocumentOffset { paragraph: 0, byte: 0 },
+    first_window_range(document, 3).end,
+  ))
 }
 
 #[hotpath::measure]

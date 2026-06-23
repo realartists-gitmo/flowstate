@@ -23,7 +23,7 @@ use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
-use crate::app_settings::load_document_theme;
+use crate::app_settings::{load_document_theme, load_local_user_identity};
 use crate::rich_text_element::{
   AssetId, AssetRecord, ProjectionPatch, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect,
 };
@@ -664,6 +664,23 @@ impl CollabSession {
     let runtime = CrdtRuntime::from_doc(doc, None, None).context("creating joined collaboration CRDT runtime")?;
     let mut document = runtime.projection_snapshot().context("projecting joined Loro-native document")?;
     let runtime = CrdtRuntimeHandle::spawn(runtime).context("starting joined collaboration CRDT runtime actor")?;
+    // §15/§31: bind this joiner's durable author identity to the joined runtime
+    // so their revisions record an author and `users_by_id` is populated. The
+    // user-registration op converges to peers via anti-entropy. Fire-and-forget
+    // and non-fatal: a failure must not break the join. This runtime later
+    // reaches `create_document_panel` through the `Handle` source, which
+    // deliberately skips re-binding to avoid a redundant second call.
+    let identity_runtime = runtime.clone();
+    cx.spawn(async move |_, cx| {
+      let (user_id, display_name) = cx
+        .background_executor()
+        .spawn(async { load_local_user_identity() })
+        .await;
+      if let Err(error) = identity_runtime.set_author_identity(user_id, display_name).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to joined collaboration runtime failed");
+      }
+    })
+    .detach();
     document.theme = load_document_theme();
     tracing::info!(
       session = %self.session,

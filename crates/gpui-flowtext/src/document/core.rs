@@ -394,6 +394,9 @@ pub fn document_sections(document: &DocumentProjection) -> Vec<DocumentSection> 
       heading_paragraph: Some(paragraph_id),
       start_paragraph: paragraph_id,
       end_paragraph_exclusive: None,
+      // §11 page attrs are canonical in Loro; the heading outline cannot derive
+      // them, so the flowstate-document projector backfills this field.
+      page: None,
     });
     stack.push((level, id));
   }

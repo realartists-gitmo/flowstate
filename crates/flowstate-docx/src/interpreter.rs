@@ -1,3 +1,6 @@
+mod omml;
+mod structured;
+
 use std::{io, path::Path};
 
 use quick_xml::{
@@ -14,7 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
   DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
-  document_from_paragraphs, flowstate_document_theme, import_paragraphs_as_loro,
+  document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
 };
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
@@ -84,6 +87,9 @@ pub struct DocxConversionReport {
   pub recognition_rules: &'static [RecognitionRule],
   pub paragraphs_imported: usize,
   pub runs_imported: usize,
+  pub tables_imported: usize,
+  pub images_imported: usize,
+  pub equations_imported: usize,
   pub unknown_paragraph_styles: Vec<String>,
   pub unknown_run_styles: Vec<String>,
 }
@@ -102,11 +108,33 @@ pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(DocumentProje
 
 #[hotpath::measure]
 pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
-  let interpreted = interpret_cleaned_docx(cleaned)?;
-  Ok((
-    document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs),
-    interpreted.report,
-  ))
+  let interpreted = interpret_cleaned_docx(&cleaned)?;
+  build_structured_document(&cleaned, interpreted)
+}
+
+/// Walks the cleaned DOCX body into the structured block model (paragraphs,
+/// tables, images, equations) and folds the object counts into the report. When
+/// the body has no tables/images/equations the structured walk is discarded and
+/// the flat paragraph projection is used, preserving the prior behavior exactly.
+#[hotpath::measure]
+fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
+  let structured = structured::interpret_structured(cleaned, &interpreted.paragraphs)?;
+  let mut report = interpreted.report;
+  report.tables_imported = structured.tables_imported;
+  report.images_imported = structured.images_imported;
+  report.equations_imported = structured.equations_imported;
+
+  let has_objects = structured.tables_imported + structured.images_imported + structured.equations_imported > 0;
+  let document = if has_objects {
+    let mut document = document_from_input_blocks(flowstate_document_theme(), structured.blocks);
+    for (asset_id, record) in structured.assets {
+      document.assets.assets.insert(asset_id, record);
+    }
+    document
+  } else {
+    document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs)
+  };
+  Ok((document, report))
 }
 
 /// Imports DOCX semantics directly into the canonical Loro document and returns
@@ -126,9 +154,10 @@ pub fn import_docx_bytes_to_loro(bytes: &[u8], title: &str) -> io::Result<(Impor
 
 #[hotpath::measure]
 pub fn import_cleaned_docx_to_loro(cleaned: CleanedDocx, title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
-  let interpreted = interpret_cleaned_docx(cleaned)?;
-  let imported = import_paragraphs_as_loro(flowstate_document_theme(), interpreted.paragraphs, title)?;
-  Ok((imported, interpreted.report))
+  let interpreted = interpret_cleaned_docx(&cleaned)?;
+  let (document, report) = build_structured_document(&cleaned, interpreted)?;
+  let imported = import_document_projection(document, title)?;
+  Ok((imported, report))
 }
 
 struct InterpretedDocx {
@@ -137,18 +166,12 @@ struct InterpretedDocx {
 }
 
 #[hotpath::measure]
-fn interpret_cleaned_docx(cleaned: CleanedDocx) -> io::Result<InterpretedDocx> {
-  let CleanedDocx {
-    bytes,
-    main_document_xml,
-    report: clean_report,
-  } = cleaned;
-  let docx = RDocxDocument::from_bytes(&bytes).map_err(rdocx_error)?;
-  let direct_properties = match main_document_xml.as_deref() {
+fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> {
+  let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error)?;
+  let direct_properties = match cleaned.main_document_xml.as_deref() {
     Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml)?,
-    None => direct_properties_by_paragraph_package(&bytes)?,
+    None => direct_properties_by_paragraph_package(&cleaned.bytes)?,
   };
-  drop(main_document_xml);
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
@@ -310,10 +333,13 @@ fn interpret_cleaned_docx(cleaned: CleanedDocx) -> io::Result<InterpretedDocx> {
   }
 
   let report = DocxConversionReport {
-    clean: clean_report,
+    clean: cleaned.report.clone(),
     recognition_rules: RECOGNITION_RULES,
     paragraphs_imported: paragraphs.len(),
     runs_imported,
+    tables_imported: 0,
+    images_imported: 0,
+    equations_imported: 0,
     unknown_paragraph_styles,
     unknown_run_styles,
   };

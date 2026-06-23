@@ -49,7 +49,7 @@ impl RichTextEditor {
       self.delete_selection_internal();
     }
     let caret = insert_rich_fragment_at(&mut self.document, self.selection.head, &fragment);
-    self.selection = EditorSelection { anchor: caret, head: caret };
+    self.selection = EditorSelection::collapsed(caret);
     self.emit_selection_changed(cx);
     self.after_text_mutation(cx);
   }
@@ -270,16 +270,10 @@ impl RichTextEditor {
       rebuild_document_offset_index(&mut self.document);
       rebuild_document_sections(&mut self.document);
       let new_paragraph_ix = paragraph_ix.min(self.document.paragraphs.len().saturating_sub(1));
-      self.selection = EditorSelection {
-        anchor: DocumentOffset {
-          paragraph: new_paragraph_ix,
-          byte: 0,
-        },
-        head: DocumentOffset {
-          paragraph: new_paragraph_ix,
-          byte: 0,
-        },
-      };
+      self.selection = EditorSelection::collapsed(DocumentOffset {
+        paragraph: new_paragraph_ix,
+        byte: 0,
+      });
       self.emit_selection_changed(cx);
     }
     Some(block_ix)

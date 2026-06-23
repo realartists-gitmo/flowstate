@@ -15,7 +15,7 @@ use crate::{
   AssetChunk, BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
   ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
-  loro_schema::{ASSETS_BY_ID, REVISIONS},
+  loro_schema::{ASSETS_BY_ID, REVISIONS, SectionPageAttrs, write_section_page_attrs},
 };
 
 /// Canonical result of an external import. The Loro document is authoritative;
@@ -123,7 +123,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
     }
   }
 
-  import_sections(document, &sections, &body_text, &plan.paragraphs)?;
+  import_sections(document, &sections, &flows, &body_text, &plan.paragraphs)?;
   Ok(())
 }
 
@@ -175,6 +175,7 @@ fn import_image_block(
 fn import_sections(
   document: &DocumentProjection,
   sections: &LoroMap,
+  flows: &LoroMap,
   body_text: &LoroText,
   paragraph_plans: &[ParagraphTextImportPlan],
 ) -> LoroResult<()> {
@@ -211,8 +212,61 @@ fn import_sections(
     let attrs = section_map.ensure_mergeable_map("attrs")?;
     section_map.insert("attrs_container_id", attrs.id().to_string())?;
     attrs.insert("source", "paragraph_style_outline")?;
+    // §11/§31: persist this section's page-structure attrs so they round-trip
+    // losslessly through Loro. When the projection carries them on
+    // `DocumentSection::page`, map them field-for-field onto the canonical Loro
+    // mirror and write them (the writer also creates any referenced
+    // header/footer flows via the `flows` map). Page-less sections fall back to
+    // the documented defaults (US Letter, 1-inch margins, 1 column, portrait,
+    // no numbering, no header/footer), matching the read path which always
+    // projects `Some(..)`.
+    let page_attrs = section
+      .page
+      .as_ref()
+      .map_or_else(SectionPageAttrs::default, section_page_attrs_to_loro);
+    write_section_page_attrs(&attrs, flows, &page_attrs)?;
   }
   Ok(())
+}
+
+/// §11: map a section's gpui-flowtext page-structure attrs onto the canonical
+/// Loro mirror (`crate::loro_schema::SectionPageAttrs`) for the import write
+/// path. This is the exact inverse of `loro_projection`'s
+/// `project_section_page_attrs` read mapping; fully-qualified paths disambiguate
+/// the structurally-identical `gpui_flowtext` and `crate::loro_schema` type
+/// names. The owned header/footer flow id strings are cloned because the source
+/// section is borrowed from the projection.
+fn section_page_attrs_to_loro(page: &gpui_flowtext::SectionPageAttrs) -> SectionPageAttrs {
+  SectionPageAttrs {
+    page_size: crate::loro_schema::SectionPageSize {
+      width_twips: page.page_size.width_twips,
+      height_twips: page.page_size.height_twips,
+    },
+    margins: crate::loro_schema::SectionMargins {
+      top_twips: page.margins.top_twips,
+      right_twips: page.margins.right_twips,
+      bottom_twips: page.margins.bottom_twips,
+      left_twips: page.margins.left_twips,
+    },
+    columns: page.columns,
+    orientation: match page.orientation {
+      gpui_flowtext::SectionOrientation::Portrait => crate::loro_schema::SectionOrientation::Portrait,
+      gpui_flowtext::SectionOrientation::Landscape => crate::loro_schema::SectionOrientation::Landscape,
+    },
+    page_numbering: crate::loro_schema::SectionPageNumbering {
+      format: match page.page_numbering.format {
+        gpui_flowtext::PageNumberFormat::None => crate::loro_schema::PageNumberFormat::None,
+        gpui_flowtext::PageNumberFormat::Decimal => crate::loro_schema::PageNumberFormat::Decimal,
+        gpui_flowtext::PageNumberFormat::LowerRoman => crate::loro_schema::PageNumberFormat::LowerRoman,
+        gpui_flowtext::PageNumberFormat::UpperRoman => crate::loro_schema::PageNumberFormat::UpperRoman,
+        gpui_flowtext::PageNumberFormat::LowerAlpha => crate::loro_schema::PageNumberFormat::LowerAlpha,
+        gpui_flowtext::PageNumberFormat::UpperAlpha => crate::loro_schema::PageNumberFormat::UpperAlpha,
+      },
+      start: page.page_numbering.start,
+    },
+    header_flow_id: page.header_flow_id.clone(),
+    footer_flow_id: page.footer_flow_id.clone(),
+  }
 }
 
 fn import_paragraph_record(
@@ -545,11 +599,28 @@ pub fn import_assets(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult
     asset_map.insert("content_hash", hash.to_hex().as_str())?;
     asset_map.insert("mime_type", asset.mime_type.as_ref())?;
     asset_map.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
+    if let Some((width, height)) = image_dimensions(asset.mime_type.as_ref(), &asset.bytes) {
+      // §31/§14: canonical AssetMap dimensions, stored as two i64 keys when derivable.
+      asset_map.insert("dimension_width", width)?;
+      asset_map.insert("dimension_height", height)?;
+    }
     if let Some(original_name) = &asset.original_name {
       asset_map.insert("original_name", original_name.as_ref())?;
     }
   }
   Ok(())
+}
+
+/// Derive an image asset's intrinsic pixel dimensions from its bytes.
+///
+/// Returns `None` for non-image assets or when the size cannot be determined,
+/// in which case the asset map simply omits its `dimension_*` keys (§14).
+fn image_dimensions(mime_type: &str, bytes: &[u8]) -> Option<(i64, i64)> {
+  if !mime_type.starts_with("image/") {
+    return None;
+  }
+  let size = imagesize::blob_size(bytes).ok()?;
+  Some((i64::try_from(size.width).ok()?, i64::try_from(size.height).ok()?))
 }
 
 pub fn assets_from_document(document: &DocumentProjection) -> Vec<AssetChunk> {
@@ -618,11 +689,8 @@ fn replace_text(text: &LoroText, value: &str) -> LoroResult<()> {
 }
 
 fn clear_map(map: &LoroMap) -> LoroResult<()> {
-  let keys = map.keys();
-  for key in keys {
-    map.delete(&key)?;
-  }
-  Ok(())
+  // §29: use Loro's native container clear instead of deleting keys one-by-one.
+  map.clear()
 }
 
 fn clear_movable_list(list: &LoroMovableList) -> LoroResult<()> {
@@ -826,6 +894,58 @@ mod tests {
     assert_eq!(imported.projection.paragraphs.len(), 2_000);
     assert_eq!(imported.projection.frontier, imported.doc.state_frontiers().encode());
     assert_eq!(paragraph_text(&imported.projection, 1_999), "paragraph 1999");
+    Ok(())
+  }
+
+  #[test]
+  fn section_page_attrs_round_trip_through_import_write_path() -> io::Result<()> {
+    let mut source = gpui_flowtext::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![gpui_flowtext::InputBlock::Paragraph(gpui_flowtext::InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![gpui_flowtext::InputRun {
+          text: "section body".to_string(),
+          styles: RunStyles::default(),
+        }],
+      })],
+    );
+    // §11: non-default page structure on the source section must survive the
+    // import write path and be projected back identically.
+    let page = gpui_flowtext::SectionPageAttrs {
+      page_size: gpui_flowtext::SectionPageSize {
+        width_twips: 15_840,
+        height_twips: 12_240,
+      },
+      margins: gpui_flowtext::SectionMargins {
+        top_twips: 720,
+        right_twips: 720,
+        bottom_twips: 1_440,
+        left_twips: 1_440,
+      },
+      columns: 2,
+      orientation: gpui_flowtext::SectionOrientation::Landscape,
+      page_numbering: gpui_flowtext::SectionPageNumbering {
+        format: gpui_flowtext::PageNumberFormat::LowerRoman,
+        start: 3,
+      },
+      header_flow_id: Some("section.s1.header".to_string()),
+      footer_flow_id: Some("section.s1.footer".to_string()),
+    };
+    source.sections = std::sync::Arc::new(vec![gpui_flowtext::DocumentSection {
+      id: gpui_flowtext::SectionId(0x5ec1),
+      parent_id: None,
+      kind: gpui_flowtext::SectionKind::Custom(0),
+      heading_paragraph: None,
+      start_paragraph: source.ids.paragraph_ids[0],
+      end_paragraph_exclusive: None,
+      page: Some(page.clone()),
+    }]);
+
+    let doc = document_to_loro(&source, "Section page attrs")?;
+    let projected = crate::document_from_loro(&doc)?;
+
+    assert_eq!(projected.sections.len(), 1);
+    assert_eq!(projected.sections[0].page, Some(page));
     Ok(())
   }
 }

@@ -133,6 +133,18 @@ impl CrdtRuntimeHandle {
       .await
   }
 
+  /// §15/§31: bind a stable durable author identity to the live runtime so later
+  /// revisions record this user as their author and `users_by_id` is populated.
+  pub async fn set_author_identity(&self, user_id: u128, display_name: Option<String>) -> Result<()> {
+    self
+      .request(|reply| RuntimeRequest::SetAuthorIdentity {
+        user_id,
+        display_name,
+        reply,
+      })
+      .await
+  }
+
   async fn request<T: Send + 'static>(&self, make: impl FnOnce(Sender<Result<T>>) -> RuntimeRequest) -> Result<T> {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     self
@@ -208,6 +220,11 @@ enum RuntimeRequest {
   ResolvePresenceCarets {
     requests: Vec<RuntimePresenceCaretRequest>,
     reply: Sender<Result<RuntimePresenceCarets>>,
+  },
+  SetAuthorIdentity {
+    user_id: u128,
+    display_name: Option<String>,
+    reply: Sender<Result<()>>,
   },
 }
 
@@ -320,6 +337,13 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
       RuntimeRequest::ResolvePresenceCarets { requests, reply } => {
         send_reply(reply, Ok(runtime.resolve_presence_carets(requests)));
       },
+      RuntimeRequest::SetAuthorIdentity {
+        user_id,
+        display_name,
+        reply,
+      } => {
+        send_reply(reply, runtime.set_author_identity(user_id, display_name));
+      },
     }
   }
 }
@@ -397,6 +421,20 @@ mod tests {
       .expect_err("stale editor commands must be rejected");
 
     assert!(error.downcast_ref::<crate::crdt_runtime::StaleProjectionError>().is_some());
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn set_author_identity_round_trips_through_actor() -> Result<()> {
+    let runtime = CrdtRuntime::new_empty("Actor author identity")?;
+    let handle = CrdtRuntimeHandle::spawn(runtime)?;
+
+    handle
+      .set_author_identity(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef, Some("Author".to_string()))
+      .await?;
+
+    // The runtime stays usable after binding the durable author identity.
+    handle.projection_snapshot().await?;
     Ok(())
   }
 }

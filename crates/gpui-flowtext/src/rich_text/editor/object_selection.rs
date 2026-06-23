@@ -45,7 +45,7 @@ impl RichTextEditor {
   #[cfg(test)]
   pub(super) fn set_text_selection_for_test(&mut self, anchor: DocumentOffset, head: DocumentOffset, cx: &mut Context<Self>) {
     self.selected_block = None;
-    self.selection = EditorSelection { anchor, head };
+    self.selection = EditorSelection::range(anchor, head);
     cx.notify();
   }
 
@@ -621,10 +621,10 @@ impl RichTextEditor {
   }
 
   pub(super) fn drag_source_selection(&self) -> Option<EditorSelection> {
-    self.active_text_drag.as_ref().map(|drag| EditorSelection {
-      anchor: drag.source_range.start,
-      head: drag.source_range.end,
-    })
+    self
+      .active_text_drag
+      .as_ref()
+      .map(|drag| EditorSelection::range(drag.source_range.start, drag.source_range.end))
   }
 
   pub(super) fn caret_paint_width(&self) -> Pixels {

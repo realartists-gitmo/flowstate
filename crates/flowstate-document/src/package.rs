@@ -29,6 +29,7 @@ const CHUNK_REVISION_INDEX: u32 = 5;
 const CHUNK_PROJECTION_CACHE: u32 = 6;
 const CHUNK_SEARCH_UNIT: u32 = 7;
 const CHUNK_THUMBNAIL: u32 = 8;
+const CHUNK_INTEGRITY_INDEX: u32 = 9;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentPackage {
@@ -40,6 +41,11 @@ pub struct DocumentPackage {
   pub projection_caches: Vec<ProjectionCacheChunk>,
   pub search_units: Vec<SearchUnitChunk>,
   pub thumbnails: Vec<ThumbnailChunk>,
+  /// §19 named integrity index: one entry per durable chunk (snapshots, update
+  /// segments, assets). Older packages without the index decode to an empty
+  /// vector and still load; new packages always rebuild a complete index.
+  #[serde(default)]
+  pub integrity_index: Vec<IntegrityIndexEntry>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +62,34 @@ pub struct DocumentPackageManifest {
   pub search_cache_frontier: Option<Vec<u8>>,
   pub created_at_unix_secs: i64,
   pub modified_at_unix_secs: i64,
+  /// §27 schema migration log. Empty at schema v1 (no migrations exist yet).
+  /// Future schema bumps append a [`SchemaMigrationRecord`] here, and any Loro
+  /// document mutation a migration performs is an ordinary Loro change committed
+  /// with the `"migration"` origin. Older packages without this field decode to
+  /// an empty vector.
+  #[serde(default)]
+  pub schema_migrations: Vec<SchemaMigrationRecord>,
+}
+
+/// §19 integrity-index entry recording one durable chunk's identity, kind,
+/// BLAKE3 checksum, and byte length so package integrity can be cross-checked
+/// against the actual chunk payloads on read.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct IntegrityIndexEntry {
+  pub chunk_kind: u32,
+  pub id: u128,
+  pub checksum: [u8; 32],
+  pub byte_length: u64,
+}
+
+/// §27 record of a schema migration that was applied to this package.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SchemaMigrationRecord {
+  pub id: u128,
+  pub from_version: u32,
+  pub to_version: u32,
+  pub applied_at_unix_secs: i64,
+  pub description: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -215,6 +249,7 @@ impl DocumentPackage {
         search_cache_frontier: None,
         created_at_unix_secs: now,
         modified_at_unix_secs: now,
+        schema_migrations: Vec::new(),
       },
       loro_snapshots: vec![
         LoroSnapshotChunk {
@@ -247,6 +282,7 @@ impl DocumentPackage {
       projection_caches: Vec::new(),
       search_units: Vec::new(),
       thumbnails: Vec::new(),
+      integrity_index: Vec::new(),
     }
     .with_manifest_indexes()?;
     package.rebuild_projection_cache_from_loro(doc)?;
@@ -469,6 +505,8 @@ impl DocumentPackage {
     }
     self.revisions.push(revision);
     self.manifest.modified_at_unix_secs = unix_time_secs();
+    // §19: a revision may add a snapshot chunk; keep the integrity index complete.
+    self.integrity_index = self.build_integrity_index();
     self.validate()?;
     Ok(revision_id)
   }
@@ -554,6 +592,8 @@ impl DocumentPackage {
     if added > 0 {
       self.revisions.sort_by_key(|revision| revision.created_at_unix_secs);
       self.manifest.modified_at_unix_secs = unix_time_secs();
+      // §19: syncing revisions may add snapshot chunks; keep the index complete.
+      self.integrity_index = self.build_integrity_index();
       self.validate()?;
     }
     Ok(added)
@@ -743,12 +783,17 @@ impl DocumentPackage {
         },
       }
     }
-    let package = package.ok_or_else(|| {
+    let mut package = package.ok_or_else(|| {
       io::Error::new(
         io::ErrorKind::InvalidData,
         "Flowstate package journal has no complete full generation",
       )
     })?;
+    // §19: journal deltas append update segments after the base generation, so
+    // rebuild the integrity index over the reconstructed chunk set before
+    // validating it for consistency. The manifest's own segment/asset indexes
+    // arrive with the delta and remain checked by `validate_manifest_indexes`.
+    package.integrity_index = package.build_integrity_index();
     package.validate()?;
     Ok(package)
   }
@@ -763,6 +808,7 @@ impl DocumentPackage {
     let mut projection_caches = Vec::new();
     let mut search_units = Vec::new();
     let mut thumbnails = Vec::new();
+    let mut integrity_index = Vec::new();
 
     for chunk in chunks {
       match chunk.kind {
@@ -774,6 +820,7 @@ impl DocumentPackage {
         CHUNK_PROJECTION_CACHE => projection_caches.push(decode_chunk(&chunk.payload, "projection cache")?),
         CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(&chunk.payload, "search unit")?),
         CHUNK_THUMBNAIL => thumbnails.push(decode_chunk(&chunk.payload, "thumbnail")?),
+        CHUNK_INTEGRITY_INDEX => integrity_index.push(decode_chunk(&chunk.payload, "integrity index entry")?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown Flowstate package chunk kind")),
       }
     }
@@ -787,6 +834,7 @@ impl DocumentPackage {
       projection_caches,
       search_units,
       thumbnails,
+      integrity_index,
     };
     package.validate()?;
     Ok(package)
@@ -839,6 +887,12 @@ impl DocumentPackage {
       chunks.push(Chunk {
         kind: CHUNK_THUMBNAIL,
         payload: encode_chunk(thumbnail, "thumbnail")?,
+      });
+    }
+    for entry in &self.integrity_index {
+      chunks.push(Chunk {
+        kind: CHUNK_INTEGRITY_INDEX,
+        payload: encode_chunk(entry, "integrity index entry")?,
       });
     }
     write_chunks(&chunks)
@@ -932,6 +986,8 @@ impl DocumentPackage {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "asset hash or length mismatch"));
     }
     self.validate_manifest_indexes()?;
+    self.validate_integrity_index()?;
+    self.validate_schema_migrations()?;
     self.load_loro_doc_unvalidated()?;
     Ok(())
   }
@@ -990,6 +1046,86 @@ impl DocumentPackage {
     Ok(())
   }
 
+  /// §19: cross-check the named integrity index against the actual durable
+  /// chunks. An absent index (older packages) is accepted for backward
+  /// compatibility; a present index must be complete and consistent.
+  fn validate_integrity_index(&self) -> io::Result<()> {
+    if self.integrity_index.is_empty() {
+      return Ok(());
+    }
+    let expected = self.build_integrity_index();
+    if self.integrity_index.len() != expected.len() {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity index entry count mismatch"));
+    }
+    for entry in &self.integrity_index {
+      let actual = match entry.chunk_kind {
+        CHUNK_LORO_SNAPSHOT => self
+          .loro_snapshots
+          .iter()
+          .find(|snapshot| snapshot.snapshot_id == entry.id)
+          .map(|snapshot| (blake3_hash(&snapshot.bytes), snapshot.bytes.len() as u64)),
+        CHUNK_LORO_UPDATE_SEGMENT => self
+          .loro_update_segments
+          .iter()
+          .find(|segment| segment.segment_id == entry.id)
+          .map(|segment| (segment.checksum, segment.bytes.len() as u64)),
+        CHUNK_ASSET => self
+          .assets
+          .iter()
+          .find(|asset| asset.asset_id == entry.id)
+          .map(|asset| (asset.content_hash, asset.byte_length)),
+        _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity index has an unknown chunk kind")),
+      };
+      let Some((checksum, byte_length)) = actual else {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity index references a missing chunk"));
+      };
+      if entry.checksum != checksum || entry.byte_length != byte_length {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity index checksum or length mismatch"));
+      }
+    }
+    Ok(())
+  }
+
+  /// §27: validate the schema migration log. Empty at schema v1. Each record
+  /// must describe a forward migration whose target does not exceed this
+  /// package's schema version.
+  fn validate_schema_migrations(&self) -> io::Result<()> {
+    for migration in &self.manifest.schema_migrations {
+      if migration.from_version >= migration.to_version || migration.to_version > self.manifest.loro_schema_version {
+        return Err(io::Error::new(io::ErrorKind::InvalidData, "inconsistent schema migration record"));
+      }
+    }
+    Ok(())
+  }
+
+  /// §27: record a schema migration event in package metadata. The migration's
+  /// Loro document mutation (if any) must be committed separately as an ordinary
+  /// Loro change with the `"migration"` origin before/after calling this.
+  pub fn record_schema_migration(
+    &mut self,
+    from_version: u32,
+    to_version: u32,
+    description: impl Into<String>,
+  ) -> io::Result<u128> {
+    if from_version >= to_version || to_version > self.manifest.loro_schema_version {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        "schema migration must move forward to a version supported by this package",
+      ));
+    }
+    let migration_id = Uuid::new_v4().as_u128();
+    self.manifest.schema_migrations.push(SchemaMigrationRecord {
+      id: migration_id,
+      from_version,
+      to_version,
+      applied_at_unix_secs: unix_time_secs(),
+      description: description.into(),
+    });
+    self.manifest.modified_at_unix_secs = unix_time_secs();
+    self.validate()?;
+    Ok(migration_id)
+  }
+
   fn latest_snapshot(&self) -> Option<&LoroSnapshotChunk> {
     self
       .loro_snapshots
@@ -1002,6 +1138,13 @@ impl DocumentPackage {
   }
 
   fn with_manifest_indexes(mut self) -> io::Result<Self> {
+    self.refresh_manifest_indexes();
+    Ok(self)
+  }
+
+  /// Rebuild the manifest's update-segment/asset indexes and the §19 integrity
+  /// index from the package's current durable chunks. Infallible and idempotent.
+  fn refresh_manifest_indexes(&mut self) {
     let mut update_segment_index = Vec::with_capacity(self.loro_update_segments.len());
     for segment in &self.loro_update_segments {
       update_segment_index.push(ChunkRef {
@@ -1020,7 +1163,39 @@ impl DocumentPackage {
     }
     self.manifest.update_segment_index = update_segment_index;
     self.manifest.asset_index = asset_index;
-    Ok(self)
+    self.integrity_index = self.build_integrity_index();
+  }
+
+  /// §19: build a complete integrity index covering every durable chunk — Loro
+  /// snapshots, update segments, and assets — with each chunk's id, kind, BLAKE3
+  /// checksum, and byte length.
+  fn build_integrity_index(&self) -> Vec<IntegrityIndexEntry> {
+    let mut entries = Vec::with_capacity(self.loro_snapshots.len() + self.loro_update_segments.len() + self.assets.len());
+    for snapshot in &self.loro_snapshots {
+      entries.push(IntegrityIndexEntry {
+        chunk_kind: CHUNK_LORO_SNAPSHOT,
+        id: snapshot.snapshot_id,
+        checksum: blake3_hash(&snapshot.bytes),
+        byte_length: snapshot.bytes.len() as u64,
+      });
+    }
+    for segment in &self.loro_update_segments {
+      entries.push(IntegrityIndexEntry {
+        chunk_kind: CHUNK_LORO_UPDATE_SEGMENT,
+        id: segment.segment_id,
+        checksum: segment.checksum,
+        byte_length: segment.bytes.len() as u64,
+      });
+    }
+    for asset in &self.assets {
+      entries.push(IntegrityIndexEntry {
+        chunk_kind: CHUNK_ASSET,
+        id: asset.asset_id,
+        checksum: asset.content_hash,
+        byte_length: asset.byte_length,
+      });
+    }
+    entries
   }
 }
 
@@ -1625,7 +1800,10 @@ mod tests {
       package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     }
 
-    assert_eq!(package.loro_update_segments.len(), 2);
+    // Creating the named revision records it into the Loro `revisions` list and
+    // persists that op as its own update segment (Loro-native revisions), so the
+    // two body-text inserts bring the total to three segments.
+    assert_eq!(package.loro_update_segments.len(), 3);
     let snapshot_id = package.compact_update_segments_if_needed(&doc, 1)?;
     assert!(snapshot_id.is_some());
     assert!(package.loro_update_segments.is_empty());
@@ -1964,6 +2142,69 @@ mod tests {
           && matches!(table.column_widths.as_slice(), [crate::TableColumnWidth::FixedPx(144)])
           && matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "cell")
     ));
+    Ok(())
+  }
+
+  #[test]
+  fn package_serializes_empty_schema_migration_log() -> io::Result<()> {
+    let doc = new_loro_document("Migrations").map_err(loro_test_error)?;
+    let bytes = DocumentPackage::from_loro_snapshot(&doc, "Migrations")?.to_bytes()?;
+    let package = DocumentPackage::from_bytes(&bytes)?;
+    assert!(package.manifest.schema_migrations.is_empty());
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_inconsistent_schema_migration_record() -> io::Result<()> {
+    let doc = new_loro_document("Migrations").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Migrations")?;
+    package.manifest.schema_migrations.push(SchemaMigrationRecord {
+      id: 1,
+      from_version: 2,
+      to_version: 1,
+      applied_at_unix_secs: 0,
+      description: "backwards".to_string(),
+    });
+
+    let error = package.validate().expect_err("a backwards migration record must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+  }
+
+  #[test]
+  fn package_integrity_index_covers_durable_chunks() -> io::Result<()> {
+    let doc = new_loro_document("Integrity").map_err(loro_test_error)?;
+    let bytes = b"asset bytes".to_vec();
+    let asset = AssetChunk {
+      asset_id: 7,
+      content_hash: blake3_hash(&bytes),
+      mime_type: "application/octet-stream".to_string(),
+      byte_length: bytes.len() as u64,
+      bytes,
+      metadata: Vec::new(),
+    };
+    let package = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Integrity", vec![asset])?;
+
+    assert!(package.integrity_index.iter().any(|entry| entry.chunk_kind == CHUNK_ASSET && entry.id == 7));
+    assert_eq!(
+      package.integrity_index.iter().filter(|entry| entry.chunk_kind == CHUNK_LORO_SNAPSHOT).count(),
+      package.loro_snapshots.len(),
+    );
+
+    let roundtrip = DocumentPackage::from_bytes(&package.to_bytes()?)?;
+    assert_eq!(roundtrip.integrity_index.len(), package.integrity_index.len());
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_tampered_integrity_index() -> io::Result<()> {
+    let doc = new_loro_document("Integrity").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Integrity")?;
+    let entry = package.integrity_index.first_mut().expect("at least one integrity entry");
+    entry.checksum = [0; 32];
+
+    let error = package.validate().expect_err("a tampered integrity entry must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     Ok(())
   }
 

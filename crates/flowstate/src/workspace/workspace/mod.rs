@@ -36,9 +36,9 @@ use gpui_component::{
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory, load_send_to_document_directory,
-  load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
-  save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_local_user_identity, load_recent_documents, load_send_custom_directory,
+  load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
+  save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
 use crate::commands::CommandId;
 use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};

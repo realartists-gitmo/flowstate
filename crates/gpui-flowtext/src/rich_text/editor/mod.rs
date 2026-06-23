@@ -161,17 +161,96 @@ impl Render for ToolkitTextDrag {
   }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Editor selection (§16).
+///
+/// `anchor`/`head` remain plain [`DocumentOffset`]s so all existing
+/// position/range math keeps working unchanged. Each endpoint additionally
+/// carries an explicit [`SelectionAffinity`] and [`VisualGravity`] describing
+/// the user's intent. These are a genuine, stored part of the selection — the
+/// collaboration runtime reads them directly instead of re-deriving a side from
+/// selection direction.
+///
+/// Construct selections through the helpers below ([`EditorSelection::collapsed`],
+/// [`EditorSelection::range`], [`EditorSelection::moved`]) rather than struct
+/// literals so the affinity/gravity fields are always populated; all default to
+/// neutral.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EditorSelection {
   pub anchor: DocumentOffset,
   pub head: DocumentOffset,
+  /// Affinity of the fixed (anchor) endpoint.
+  pub anchor_affinity: SelectionAffinity,
+  /// Affinity of the moving (head) endpoint. This is the side the caret sits on
+  /// for a collapsed selection.
+  pub head_affinity: SelectionAffinity,
+  /// Visual gravity of the fixed (anchor) endpoint at a soft-wrap seam.
+  pub anchor_gravity: VisualGravity,
+  /// Visual gravity of the moving (head) endpoint at a soft-wrap seam. This is
+  /// the gravity consumed when painting a collapsed caret.
+  pub head_gravity: VisualGravity,
 }
 
 #[hotpath::measure_all]
 impl EditorSelection {
   fn caret() -> Self {
-    let zero = DocumentOffset::default();
-    Self { anchor: zero, head: zero }
+    Self::default()
+  }
+
+  /// Collapsed caret at `offset` with neutral affinity/gravity.
+  #[must_use]
+  pub fn collapsed(offset: DocumentOffset) -> Self {
+    Self {
+      anchor: offset,
+      head: offset,
+      ..Self::default()
+    }
+  }
+
+  /// Collapsed caret at `offset` carrying an explicit affinity/gravity. Used by
+  /// boundary navigation (objects, line edges) where the side/gravity matters
+  /// even though the selection is collapsed.
+  #[must_use]
+  pub fn collapsed_with(offset: DocumentOffset, affinity: SelectionAffinity, gravity: VisualGravity) -> Self {
+    Self {
+      anchor: offset,
+      head: offset,
+      anchor_affinity: affinity,
+      head_affinity: affinity,
+      anchor_gravity: gravity,
+      head_gravity: gravity,
+    }
+  }
+
+  /// Range selection from `anchor` to `head` with neutral affinity/gravity on
+  /// both endpoints.
+  #[must_use]
+  pub fn range(anchor: DocumentOffset, head: DocumentOffset) -> Self {
+    Self {
+      anchor,
+      head,
+      ..Self::default()
+    }
+  }
+
+  /// Apply a caret motion: move `head` to `new_head` carrying the supplied
+  /// affinity/gravity. When `extend` is set the anchor (and its intent) is
+  /// preserved, producing/continuing a range; otherwise the selection collapses
+  /// onto the new head and the anchor mirrors the head's intent. This preserves
+  /// the moving endpoint's affinity across selection extension (§16).
+  #[must_use]
+  pub(super) fn moved(&self, new_head: DocumentOffset, head_affinity: SelectionAffinity, head_gravity: VisualGravity, extend: bool) -> Self {
+    if extend {
+      Self {
+        anchor: self.anchor,
+        head: new_head,
+        anchor_affinity: self.anchor_affinity,
+        head_affinity,
+        anchor_gravity: self.anchor_gravity,
+        head_gravity,
+      }
+    } else {
+      Self::collapsed_with(new_head, head_affinity, head_gravity)
+    }
   }
 
   pub(super) fn normalized(&self) -> Range<DocumentOffset> {
@@ -180,6 +259,13 @@ impl EditorSelection {
 
   pub fn is_caret(&self) -> bool {
     self.anchor == self.head
+  }
+
+  /// Whether two selections occupy the same anchor/head offsets, ignoring
+  /// affinity/gravity. Used by directional movement to detect a true positional
+  /// no-op (preserving the historical offset-based early-return behavior).
+  pub(super) fn same_positions(&self, other: &Self) -> bool {
+    self.anchor == other.anchor && self.head == other.head
   }
 }
 

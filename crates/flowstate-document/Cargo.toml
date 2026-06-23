@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 gpui-flowtext = { workspace = true }
 gpui = { version = "0.2.2", default-features = false }
+imagesize = { workspace = true }
 rustc-hash = { workspace = true }
 blake3 = "1.8.5"
 loro.workspace = true

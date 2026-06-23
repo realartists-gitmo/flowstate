@@ -66,6 +66,39 @@ pub fn load_keymap() -> crate::commands::Keymap {
   }
 }
 
+/// §15/§31: load the stable per-install durable author identity, minting and
+/// persisting a fresh one the first time it is requested.
+///
+/// The returned `(user_id, display_name)` is bound to a live document runtime
+/// via `CrdtRuntimeHandle::set_author_identity` so revisions record their
+/// author and `users_by_id` is populated. Persisting is best-effort: a write
+/// failure is logged but never fatal (the id regenerates on the next launch).
+pub fn load_local_user_identity() -> (u128, Option<String>) {
+  let mut settings = load_app_settings();
+  if settings.local_user_id != 0 {
+    return (settings.local_user_id, settings.local_user_display_name);
+  }
+
+  let user_id = uuid::Uuid::new_v4().as_u128();
+  let display_name = os_username();
+  settings.local_user_id = user_id;
+  settings.local_user_display_name = display_name.clone();
+  if let Err(error) = save_app_settings(settings) {
+    tracing::warn!(error = %error, "persisting generated local user identity failed");
+  }
+  (user_id, display_name)
+}
+
+/// Best-effort OS account name used as the default author display name. Uses
+/// only the standard environment so no extra dependency is introduced.
+fn os_username() -> Option<String> {
+  std::env::var("USER")
+    .or_else(|_| std::env::var("USERNAME"))
+    .ok()
+    .map(|name| name.trim().to_owned())
+    .filter(|name| !name.is_empty())
+}
+
 // Document style appearance is intentionally user-side. The DB8 file keeps
 // semantic assignments only; this app setting decides how those semantics look.
 #[hotpath::measure]

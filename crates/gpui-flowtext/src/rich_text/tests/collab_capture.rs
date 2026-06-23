@@ -118,10 +118,7 @@ fn stale_runtime_caret_style_lookup_is_safe(cx: &mut gpui::TestAppContext) {
 
   cx.update(|cx| {
     editor.update(cx, |editor, _| {
-      editor.selection = EditorSelection {
-        anchor: DocumentOffset { paragraph: 1, byte: 0 },
-        head: DocumentOffset { paragraph: 1, byte: 0 },
-      };
+      editor.selection = EditorSelection::collapsed(DocumentOffset { paragraph: 1, byte: 0 });
       assert_eq!(editor.styles_at_caret(), RunStyles::default());
     });
   });
@@ -720,10 +717,7 @@ fn text_input_floors_stale_interior_utf8_caret_to_a_character_boundary(cx: &mut 
     editor.update(cx, |editor, cx| {
       // The curly apostrophe occupies bytes 1..4. Byte 2 is deliberately an
       // invalid stale caret inside that scalar value.
-      editor.selection = EditorSelection {
-        anchor: DocumentOffset { paragraph: 0, byte: 2 },
-        head: DocumentOffset { paragraph: 0, byte: 2 },
-      };
+      editor.selection = EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: 2 });
       editor.insert_text_command("x", cx);
 
       assert_eq!(paragraph_text(editor.document(), 0), "ax’b");

@@ -418,10 +418,7 @@ impl RichTextEditor {
       }
     }
     let offset = self.hit_test_document_position(position, window, cx);
-    self.selection = EditorSelection {
-      anchor: offset,
-      head: offset,
-    };
+    self.selection = EditorSelection::collapsed(offset);
     self.clear_block_selection();
     self.goal_x = None;
     self.reset_caret_blink(cx);

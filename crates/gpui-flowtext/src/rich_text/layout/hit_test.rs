@@ -44,13 +44,14 @@ pub(super) fn first_line_with_bottom_at_or_after(lines: &[LaidOutLine], y: Pixel
 }
 
 #[hotpath::measure]
-pub(super) fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, origin: Point<Pixels>) -> Option<Bounds<Pixels>> {
+pub(super) fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, gravity: VisualGravity, origin: Point<Pixels>) -> Option<Bounds<Pixels>> {
   // Use locate_line so the caret is drawn on the same visual line that
-  // Up/Down/Home/End navigate from — in particular the wrap-seam bias
-  // (byte at end of line k == start of line k+1 → paint on k+1) must be
-  // identical in both paths, otherwise the caret appears at the wrong
-  // position after the cursor reaches a soft-wrap boundary.
-  let (p_ix, l_ix) = locate_line(layout, offset)?;
+  // Up/Down/Home/End navigate from — in particular the wrap-seam bias must be
+  // identical in both paths, otherwise the caret appears at the wrong position
+  // after the cursor reaches a soft-wrap boundary. The seam choice is now
+  // driven by §16 visual gravity (Upstream → end of upper line, otherwise →
+  // start of lower line).
+  let (p_ix, l_ix) = locate_line(layout, offset, gravity)?;
   let line = layout.paragraphs[p_ix].lines.get(l_ix)?;
   let x = x_for_byte(line, offset.byte);
   Some(Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height)))
@@ -104,11 +105,14 @@ fn line_ix_for_byte(paragraph: &LaidOutParagraph, byte: usize) -> Option<usize> 
 
 // Locate the `LaidOutLine` containing the given offset. Returns
 // `(paragraph_layout_index, line_index)`. When the byte sits exactly on a
-// soft-wrap seam (== end_byte of line k and start_byte of line k+1), we bias
-// to the next line — matching Word's "caret-at-start-of-next-line"
-// convention. This is exactly the disambiguation called out in the plan.
+// soft-wrap seam (== end_byte of line k and start_byte of line k+1), the §16
+// visual `gravity` disambiguates which visual line the caret belongs to:
+// `Upstream` keeps it on the upper line (end of line k); `Downstream`/`Neutral`
+// bias to the lower line (start of line k+1), matching the historical
+// "caret-at-start-of-next-line" convention. This is exactly the disambiguation
+// called out in the plan.
 #[hotpath::measure]
-pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(usize, usize)> {
+pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset, gravity: VisualGravity) -> Option<(usize, usize)> {
   let p_ix = paragraph_layout_index_for_offset(layout, off)?;
   let para = &layout.paragraphs[p_ix];
   let mut low = 0;
@@ -125,8 +129,13 @@ pub(super) fn locate_line(layout: &LayoutState, off: DocumentOffset) -> Option<(
     && off.byte >= line.start_byte
     && off.byte <= line.end_byte
   {
-    // Bias to next line at exact wrap seam.
-    if off.byte == line.end_byte && low + 1 < para.lines.len() && para.lines[low + 1].start_byte == off.byte {
+    // At an exact wrap seam, choose the visual line from gravity. Upstream stays
+    // on the line that ends here (`low`); otherwise bias to the next line.
+    if off.byte == line.end_byte
+      && low + 1 < para.lines.len()
+      && para.lines[low + 1].start_byte == off.byte
+      && !matches!(gravity, VisualGravity::Upstream)
+    {
       return Some((p_ix, low + 1));
     }
     return Some((p_ix, low));

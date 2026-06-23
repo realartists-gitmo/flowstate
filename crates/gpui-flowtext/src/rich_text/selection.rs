@@ -18,7 +18,7 @@ pub(super) fn expand_mouse_selection(
     return expand_drag_selection(document, anchor, head, granularity);
   }
 
-  let exact = EditorSelection { anchor, head };
+  let exact = EditorSelection::range(anchor, head);
   if options.exact || !options.smart_word_selection || same_word_fragment(document, anchor, head) {
     return exact;
   }
@@ -29,15 +29,9 @@ pub(super) fn expand_mouse_selection(
 #[hotpath::measure]
 fn smart_word_selection(document: &DocumentProjection, anchor: DocumentOffset, head: DocumentOffset) -> EditorSelection {
   if head < anchor {
-    EditorSelection {
-      anchor: smart_word_selection_end(document, anchor),
-      head: smart_word_selection_start(document, head),
-    }
+    EditorSelection::range(smart_word_selection_end(document, anchor), smart_word_selection_start(document, head))
   } else {
-    EditorSelection {
-      anchor: smart_word_selection_start(document, anchor),
-      head: smart_word_selection_end(document, head),
-    }
+    EditorSelection::range(smart_word_selection_start(document, anchor), smart_word_selection_end(document, head))
   }
 }
 

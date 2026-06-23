@@ -50,10 +50,7 @@ impl RichTextEditor {
       return;
     }
     let offsets = self.utf16_range_to_document_offsets(range);
-    let selection = EditorSelection {
-      anchor: offsets.start,
-      head: offsets.end,
-    };
+    let selection = EditorSelection::range(offsets.start, offsets.end);
     let before_selection = self.selection.clone();
     self.selection = selection;
     if text.is_empty() {
@@ -147,10 +144,7 @@ impl EntityInputHandler for RichTextEditor {
       .map(|range| marked_range.start + range.start..marked_range.start + range.end)
       .unwrap_or_else(|| marked_range.end..marked_range.end);
     let offsets = self.utf16_range_to_document_offsets(selection_range);
-    let selection = EditorSelection {
-      anchor: offsets.start,
-      head: offsets.end,
-    };
+    let selection = EditorSelection::range(offsets.start, offsets.end);
     if self.selection != selection {
       self.selection = selection;
       self.emit_selection_changed(cx);
@@ -169,7 +163,7 @@ impl EntityInputHandler for RichTextEditor {
     let offsets = self.utf16_range_to_document_offsets(range_utf16);
     let layout = self.layout_for_offset(offsets.start)?;
     let origin = layout.bounds?.origin;
-    caret_bounds(&layout, offsets.start, origin)
+    caret_bounds(&layout, offsets.start, VisualGravity::Neutral, origin)
   }
 
   fn character_index_for_point(&mut self, point: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> Option<usize> {

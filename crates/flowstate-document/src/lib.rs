@@ -7,19 +7,24 @@ pub mod loro_schema;
 pub use loro_import::{
   ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
 };
-pub use loro_projection::{document_from_loro, object_input_blocks_from_loro};
+pub use loro_projection::{document_from_loro, object_input_blocks_from_loro, section_page_attrs};
 pub use gpui_flowtext::*;
 pub use loro_schema::{
   BODY_FLOW_ID, BLOCKS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
   MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, META,
-  OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, SECTIONS_BY_ID, SENTINEL_NEWLINE,
-  document_id, document_schema_version, fork_document_lineage, init_loro_document, new_loro_document, record_revision, register_replica,
-  touch_document_metadata,
+  OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, REPLICAS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
+  SECTION_ATTR_COLUMNS, SECTION_ATTR_FOOTER_FLOW_ID, SECTION_ATTR_HEADER_FLOW_ID, SECTION_ATTR_MARGIN_BOTTOM,
+  SECTION_ATTR_MARGIN_LEFT, SECTION_ATTR_MARGIN_RIGHT, SECTION_ATTR_MARGIN_TOP, SECTION_ATTR_ORIENTATION,
+  SECTION_ATTR_PAGE_HEIGHT, SECTION_ATTR_PAGE_NUMBERING_FORMAT, SECTION_ATTR_PAGE_NUMBERING_START, SECTION_ATTR_PAGE_WIDTH,
+  SECTIONS_BY_ID, SENTINEL_NEWLINE, USERS_BY_ID, PageNumberFormat, SectionMargins, SectionOrientation, SectionPageAttrs,
+  SectionPageNumbering, SectionPageSize, document_id, document_schema_version, ensure_section, fork_document_lineage,
+  init_loro_document, new_loro_document, read_section_page_attrs, record_revision, register_replica, register_user,
+  set_section_page_attrs, touch_document_metadata,
 };
 pub use package::{
-  AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, LORO_PACKAGE_FORMAT_VERSION,
-  LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, SearchUnitChunk, ThumbnailChunk, loro_db8_bytes, read_loro_db8,
-  write_loro_db8,
+  AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,
+  LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, SchemaMigrationRecord, SearchUnitChunk,
+  ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
 };
 
 use std::{io, path::Path, sync::Arc};

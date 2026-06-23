@@ -239,10 +239,14 @@ impl RichTextEditor {
         .map(|paragraph| DocumentOffset { paragraph, byte: 0 }),
     };
     if let Some(offset) = offset {
-      self.selection = EditorSelection {
-        anchor: offset,
-        head: offset,
+      // §16 object boundary: collapsing leftward lands after the preceding
+      // paragraph's content (After); rightward lands before the following
+      // paragraph's content (Before).
+      let affinity = match dir {
+        HDir::Left => SelectionAffinity::After,
+        HDir::Right => SelectionAffinity::Before,
       };
+      self.selection = EditorSelection::collapsed_with(offset, affinity, VisualGravity::Neutral);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       cx.notify();

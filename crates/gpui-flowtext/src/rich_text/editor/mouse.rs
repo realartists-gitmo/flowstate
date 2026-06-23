@@ -36,15 +36,11 @@ impl RichTextEditor {
       _ => SelectionGranularity::Paragraph,
     };
     let before_selection = self.selection.clone();
+    // Mouse placement carries no explicit affinity/gravity (§16): clicks/drags
+    // produce neutral endpoints.
     self.selection = match self.drag_granularity {
-      SelectionGranularity::Character if event.modifiers.shift => EditorSelection {
-        anchor: self.selection.anchor,
-        head: offset,
-      },
-      SelectionGranularity::Character => EditorSelection {
-        anchor: offset,
-        head: offset,
-      },
+      SelectionGranularity::Character if event.modifiers.shift => EditorSelection::range(self.selection.anchor, offset),
+      SelectionGranularity::Character => EditorSelection::collapsed(offset),
       SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
       SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
@@ -82,6 +78,7 @@ impl RichTextEditor {
         paragraph: paragraph_ix,
         byte: paragraph_text_len(paragraph),
       },
+      VisualGravity::Neutral,
       origin,
     ) else {
       return false;
@@ -166,7 +163,7 @@ impl RichTextEditor {
       self.autoscroll_for_drag(event.position);
       self.ensure_drag_autoscroll_task(cx);
       let drop = self.hit_test_document_position(event.position, window, cx);
-      let selection = EditorSelection { anchor: drop, head: drop };
+      let selection = EditorSelection::collapsed(drop);
       if self.selection != selection {
         self.selection = selection;
         self.scroll_head_into_view();
@@ -241,7 +238,7 @@ impl RichTextEditor {
       self.clear_drop_preview();
       let caret = self.hit_test_document_position(event.position, window, cx);
       let before_selection = self.selection.clone();
-      self.selection = EditorSelection { anchor: caret, head: caret };
+      self.selection = EditorSelection::collapsed(caret);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       if self.selection != before_selection {
@@ -266,10 +263,7 @@ impl RichTextEditor {
     if offset_in_range(drop, drag.source_range.clone()) {
       self.clear_drop_preview();
       let before_selection = self.selection.clone();
-      self.selection = EditorSelection {
-        anchor: drag.source_range.start,
-        head: drag.source_range.end,
-      };
+      self.selection = EditorSelection::range(drag.source_range.start, drag.source_range.end);
       if self.selection != before_selection {
         self.emit_selection_changed(cx);
       }
@@ -277,10 +271,7 @@ impl RichTextEditor {
       return;
     }
     let before_document = self.document.clone();
-    let before_selection = EditorSelection {
-      anchor: drag.source_range.start,
-      head: drag.source_range.end,
-    };
+    let before_selection = EditorSelection::range(drag.source_range.start, drag.source_range.end);
     let before_generation = self.edit_generation;
     let after_generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
@@ -293,10 +284,7 @@ impl RichTextEditor {
     self.delete_selection_internal();
     let inserted_start = adjusted_drop;
     let inserted_end = insert_rich_fragment_at(&mut self.document, inserted_start, &drag.fragment);
-    self.selection = EditorSelection {
-      anchor: inserted_end,
-      head: inserted_end,
-    };
+    self.selection = EditorSelection::collapsed(inserted_end);
     self.emit_selection_changed(cx);
     let paragraph_delta = self.document.paragraphs.len() as isize - before_document.paragraphs.len() as isize;
     let after_count = before_span
@@ -411,7 +399,7 @@ impl RichTextEditor {
     let Some(bounds) = layout.bounds else {
       return;
     };
-    let Some(caret) = caret_bounds(&layout, self.selection.head, bounds.origin) else {
+    let Some(caret) = caret_bounds(&layout, self.selection.head, self.selection.head_gravity, bounds.origin) else {
       return;
     };
     scroll_rect_into_view(&self.scroll_handle, caret, px(4.0));

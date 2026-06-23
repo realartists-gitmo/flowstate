@@ -152,7 +152,7 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme) -> DocxTable {
 fn export_image(document: &DocumentProjection, image: &ImageBlock, theme: &DocumentTheme) -> DocxParagraph {
   if let Some(asset) = document.assets.assets.get(&image.asset_id)
     && !asset.is_loading_placeholder()
-    && asset_is_png(asset.bytes.as_ref())
+    && asset_is_embeddable_image(asset.bytes.as_ref())
   {
     let (width_px, height_px) = image_dimensions(asset.bytes.as_ref(), image);
     let paragraph = match image.alignment {
@@ -184,8 +184,13 @@ fn export_image(document: &DocumentProjection, image: &ImageBlock, theme: &Docum
   )
 }
 
-fn asset_is_png(bytes: &[u8]) -> bool {
-  bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10])
+/// OOXML natively supports PNG and JPEG image parts (see docx content-type
+/// defaults), so both are embedded directly; other formats fall back to an
+/// alt-text run.
+fn asset_is_embeddable_image(bytes: &[u8]) -> bool {
+  let is_png = bytes.starts_with(&[137, 80, 78, 71, 13, 10, 26, 10]);
+  let is_jpeg = bytes.starts_with(&[0xFF, 0xD8, 0xFF]);
+  is_png || is_jpeg
 }
 
 fn image_dimensions(bytes: &[u8], image: &ImageBlock) -> (u32, u32) {

@@ -14,11 +14,40 @@ use dirs::{config_dir, data_dir};
 #[serde(default)]
 pub struct AppSettings {
   pub theme_name: Option<String>,
+  // §15/§31: a stable per-install durable author identity. Serialized as a
+  // string because a v4 UUID rendered as `u128` overflows TOML's signed 64-bit
+  // integer range. A value of `0` means "not generated yet";
+  // `load_local_user_identity` mints one and persists it on first read. Kept
+  // ahead of the table-valued fields below so TOML serialization stays valid.
+  #[serde(with = "local_user_id_serde")]
+  pub local_user_id: u128,
+  pub local_user_display_name: Option<String>,
   pub document_theme: Option<DocumentThemeSettings>,
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
   pub keymap: Vec<crate::commands::KeymapEntry>,
+}
+
+/// Serde adapter that stores `local_user_id` as a string. TOML integers are
+/// signed 64-bit, so a 128-bit identity cannot round-trip as a native integer.
+mod local_user_id_serde {
+  use serde::{Deserialize, Deserializer, Serializer};
+
+  pub fn serialize<S>(value: &u128, serializer: S) -> Result<S::Ok, S::Error>
+  where
+    S: Serializer,
+  {
+    serializer.serialize_str(&value.to_string())
+  }
+
+  pub fn deserialize<'de, D>(deserializer: D) -> Result<u128, D::Error>
+  where
+    D: Deserializer<'de>,
+  {
+    let raw = String::deserialize(deserializer)?;
+    raw.parse::<u128>().map_err(serde::de::Error::custom)
+  }
 }
 
 #[derive(Clone, Deserialize, Serialize)]

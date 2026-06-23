@@ -35,7 +35,7 @@ impl RichTextEditor {
       byte: caret.byte + text.len(),
     };
     insert_text_at(&mut self.document, caret.paragraph, caret.byte, text, styles);
-    self.selection = EditorSelection { anchor: after, head: after };
+    self.selection = EditorSelection::collapsed(after);
     self.emit_selection_changed(cx);
 
     if self.local_history_enabled() {

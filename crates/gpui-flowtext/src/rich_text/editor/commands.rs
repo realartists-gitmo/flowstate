@@ -160,16 +160,10 @@ impl RichTextEditor {
       // Outline navigation should place the insertion caret at the start of
       // the target paragraph, matching what the user just selected in the nav.
       let before_selection = self.selection.clone();
-      self.selection = EditorSelection {
-        anchor: DocumentOffset {
-          paragraph: paragraph_ix,
-          byte: 0,
-        },
-        head: DocumentOffset {
-          paragraph: paragraph_ix,
-          byte: 0,
-        },
-      };
+      self.selection = EditorSelection::collapsed(DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: 0,
+      });
       self.goal_x = None;
       self.reset_caret_blink(cx);
       if self.selection != before_selection {
@@ -364,13 +358,13 @@ impl RichTextEditor {
     }
     let last = self.document.paragraphs.len() - 1;
     let last_len = paragraph_text_len(&self.document.paragraphs[last]);
-    let selection = EditorSelection {
-      anchor: DocumentOffset { paragraph: 0, byte: 0 },
-      head: DocumentOffset {
+    let selection = EditorSelection::range(
+      DocumentOffset { paragraph: 0, byte: 0 },
+      DocumentOffset {
         paragraph: last,
         byte: last_len,
       },
-    };
+    );
     if self.selection == selection {
       self.goal_x = None;
       return;
@@ -383,19 +377,19 @@ impl RichTextEditor {
   }
 
   pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_left(self.selection.head), false, cx);
+    self.move_to_offset(self.word_left(self.selection.head), SelectionAffinity::Before, VisualGravity::Neutral, false, cx);
   }
 
   pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_right(self.selection.head), false, cx);
+    self.move_to_offset(self.word_right(self.selection.head), SelectionAffinity::After, VisualGravity::Neutral, false, cx);
   }
 
   pub fn select_word_left(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_left(self.selection.head), true, cx);
+    self.move_to_offset(self.word_left(self.selection.head), SelectionAffinity::Before, VisualGravity::Neutral, true, cx);
   }
 
   pub fn select_word_right(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_right(self.selection.head), true, cx);
+    self.move_to_offset(self.word_right(self.selection.head), SelectionAffinity::After, VisualGravity::Neutral, true, cx);
   }
 
   pub fn page_up(&mut self, cx: &mut Context<Self>) {
@@ -415,19 +409,19 @@ impl RichTextEditor {
   }
 
   pub fn move_document_start(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(DocumentOffset::default(), false, cx);
+    self.move_to_offset(DocumentOffset::default(), SelectionAffinity::Before, VisualGravity::Neutral, false, cx);
   }
 
   pub fn move_document_end(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(document_end(&self.document), false, cx);
+    self.move_to_offset(document_end(&self.document), SelectionAffinity::After, VisualGravity::Neutral, false, cx);
   }
 
   pub fn select_document_start(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(DocumentOffset::default(), true, cx);
+    self.move_to_offset(DocumentOffset::default(), SelectionAffinity::Before, VisualGravity::Neutral, true, cx);
   }
 
   pub fn select_document_end(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(document_end(&self.document), true, cx);
+    self.move_to_offset(document_end(&self.document), SelectionAffinity::After, VisualGravity::Neutral, true, cx);
   }
 
   pub fn insert_text_command(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -489,7 +483,7 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let head = editor.selection.head;
         let anchor = editor.word_left(head);
-        editor.selection = EditorSelection { anchor, head };
+        editor.selection = EditorSelection::range(anchor, head);
       }
       editor.delete_selection_internal();
       editor.after_text_mutation(cx);
@@ -501,7 +495,7 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let anchor = editor.selection.head;
         let head = editor.word_right(anchor);
-        editor.selection = EditorSelection { anchor, head };
+        editor.selection = EditorSelection::range(anchor, head);
       }
       editor.delete_selection_internal();
       editor.after_text_mutation(cx);

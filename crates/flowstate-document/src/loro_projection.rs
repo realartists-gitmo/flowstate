@@ -5,7 +5,7 @@ use gpui_flowtext::{
   InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
   InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, SectionId, SectionKind, document_from_input_blocks,
 };
-use loro::{Container, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
+use loro::{Container, ContainerID, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
 
 use crate::{
@@ -119,6 +119,12 @@ impl<'a> Projector<'a> {
     })
   }
 
+  /// Project a `DocumentSection` for each Loro section, including its §11 page
+  /// structure (page size, margins, columns, orientation, page numbering,
+  /// header/footer flow ids). The canonical attrs live in Loro and are read
+  /// back via [`crate::loro_schema::read_section_page_attrs`] (which substitutes
+  /// documented defaults for missing keys), then mapped field-for-field onto the
+  /// gpui-flowtext projection mirror `gpui_flowtext::SectionPageAttrs`.
   fn sections_for_projection(&self, paragraph_ids: &[ParagraphId]) -> io::Result<Vec<DocumentSection>> {
     let root = self.doc.get_map(ROOT);
     let Some(sections_by_id) = child_map(&root, SECTIONS_BY_ID)? else {
@@ -141,6 +147,13 @@ impl<'a> Projector<'a> {
         .and_then(|value| parse_u128(&value))
         .unwrap_or_else(|| loro_id_u128(&key));
       let kind_slot = map_i64_opt(&section, "kind_slot")?.and_then(i64_to_u8).unwrap_or(0);
+      // §11: read the section's canonical page attrs from its `attrs` child map
+      // (defaults substituted for missing keys) and project them. The section
+      // map always exists here, so `page` is always `Some(..)` for determinism.
+      let canonical_page = match child_map(&section, "attrs")? {
+        Some(attrs) => crate::loro_schema::read_section_page_attrs(&attrs),
+        None => crate::loro_schema::SectionPageAttrs::default(),
+      };
       sections.push(DocumentSection {
         id: SectionId(section_id),
         parent_id: section_id_field(&section, "parent_section_id")?.map(SectionId),
@@ -148,6 +161,7 @@ impl<'a> Projector<'a> {
         heading_paragraph: section_id_field(&section, "heading_paragraph_id")?.map(ParagraphId),
         start_paragraph: ParagraphId(start_paragraph),
         end_paragraph_exclusive: section_id_field(&section, "end_paragraph_exclusive_id")?.map(ParagraphId),
+        page: Some(project_section_page_attrs(canonical_page)),
       });
     }
     sections.sort_by_key(|section| {
@@ -326,9 +340,17 @@ impl<'a> Projector<'a> {
   }
 
   fn table_from_map(&self, table: &LoroMap) -> io::Result<InputTableBlock> {
-    let columns = child_map(table, "columns_by_id")?.ok_or_else(|| invalid("table has no column map"))?;
-    let rows_by_id = child_map(table, "rows_by_id")?.ok_or_else(|| invalid("table has no row map"))?;
-    let cells_by_id = child_map(table, "cells_by_id")?.ok_or_else(|| invalid("table has no cell map"))?;
+    // §28: resolve the table's child containers through their stored raw
+    // container ids, falling back to key traversal when unavailable.
+    let columns = self
+      .resolve_child_map(table, "columns_container_id", "columns_by_id")?
+      .ok_or_else(|| invalid("table has no column map"))?;
+    let rows_by_id = self
+      .resolve_child_map(table, "rows_container_id", "rows_by_id")?
+      .ok_or_else(|| invalid("table has no row map"))?;
+    let cells_by_id = self
+      .resolve_child_map(table, "cells_container_id", "cells_by_id")?
+      .ok_or_else(|| invalid("table has no cell map"))?;
     let column_ids = ordered_ids(table, "column_order")?;
     let column_positions = column_ids
       .iter()
@@ -429,7 +451,25 @@ impl<'a> Projector<'a> {
 
   fn flow_text(&self, flow_id: &str) -> io::Result<LoroText> {
     let flow = child_map(&self.flows, flow_id)?.ok_or_else(|| invalid(format!("missing flow `{flow_id}`")))?;
+    // §28: prefer direct resolution via the flow's stored raw container id, and
+    // only fall back to map-key traversal when the id is missing/unresolvable.
+    if let Some(container_id) = map_string_opt(&flow, "text_container_id")?
+      && let Some(text) = resolve_text_by_container_id(self.doc, &container_id)
+    {
+      return Ok(text);
+    }
     child_text(&flow, FLOW_TEXT_KEY)?.ok_or_else(|| invalid(format!("flow `{flow_id}` has no text")))
+  }
+
+  /// §28: resolve a child container map by its stored raw container id, falling
+  /// back to direct map-key traversal when the id is missing/unresolvable.
+  fn resolve_child_map(&self, owner: &LoroMap, container_id_key: &str, fallback_key: &str) -> io::Result<Option<LoroMap>> {
+    if let Some(container_id) = map_string_opt(owner, container_id_key)?
+      && let Some(map) = resolve_map_by_container_id(self.doc, &container_id)
+    {
+      return Ok(Some(map));
+    }
+    child_map(owner, fallback_key)
   }
 
   fn plain_flow_text(&self, flow_id: &str) -> io::Result<String> {
@@ -607,6 +647,25 @@ fn child_text(parent: &LoroMap, key: &str) -> io::Result<Option<LoroText>> {
   }))
 }
 
+/// §28: centralized resolution of a stored raw Loro container id string.
+///
+/// Parses the durable `*_container_id` string into a [`ContainerID`] and fetches
+/// the live container directly from the document for efficient runtime access.
+/// Returns `None` when the id is missing/unparseable or the container is
+/// absent/detached/deleted, so callers can fall back to map-key traversal.
+fn resolve_container(doc: &LoroDoc, container_id: &str) -> Option<Container> {
+  let container = doc.get_container(ContainerID::try_from(container_id).ok()?)?;
+  (container.is_attached() && !container.is_deleted()).then_some(container)
+}
+
+fn resolve_map_by_container_id(doc: &LoroDoc, container_id: &str) -> Option<LoroMap> {
+  resolve_container(doc, container_id)?.into_map().ok()
+}
+
+fn resolve_text_by_container_id(doc: &LoroDoc, container_id: &str) -> Option<LoroText> {
+  resolve_container(doc, container_id)?.into_text().ok()
+}
+
 fn ordered_ids(map: &LoroMap, key: &str) -> io::Result<Vec<String>> {
   let Some(ValueOrContainer::Container(container)) = map.get(key) else {
     return Ok(Vec::new());
@@ -770,6 +829,65 @@ fn section_id_field(map: &LoroMap, key: &str) -> io::Result<Option<u128>> {
   Ok(map_string_opt(map, key)?.and_then(|value| parse_u128(&value)))
 }
 
+/// §11: read a section's page-structure attributes back from the canonical Loro
+/// document, substituting documented defaults for any missing keys. Returns
+/// `None` only when the named section does not exist.
+///
+/// `DocumentProjection` now carries these attrs on `DocumentSection::page`,
+/// populated from canonical Loro during projection (see
+/// [`Projector::sections_for_projection`]). This helper remains the direct,
+/// single-section read-back path for callers that only need one section's attrs
+/// without projecting the whole document. The canonical values always live in
+/// Loro and round-trip losslessly.
+#[must_use]
+pub fn section_page_attrs(doc: &LoroDoc, section_id: &str) -> Option<crate::loro_schema::SectionPageAttrs> {
+  let root = doc.get_map(ROOT);
+  let sections = child_map(&root, SECTIONS_BY_ID).ok().flatten()?;
+  let section = child_map(&sections, section_id).ok().flatten()?;
+  let attrs = child_map(&section, "attrs").ok().flatten()?;
+  Some(crate::loro_schema::read_section_page_attrs(&attrs))
+}
+
+/// §11: map canonical Loro page-structure attrs
+/// (`crate::loro_schema::SectionPageAttrs`) onto the gpui-flowtext projection
+/// mirror (`gpui_flowtext::SectionPageAttrs`). gpui-flowtext cannot depend on
+/// `flowstate-document`, so the two types are defined field-for-field
+/// identically and this is a direct copy. Fully-qualified paths disambiguate the
+/// clashing type names. Takes the canonical attrs by value so the owned
+/// header/footer flow id strings move rather than clone.
+fn project_section_page_attrs(attrs: crate::loro_schema::SectionPageAttrs) -> gpui_flowtext::SectionPageAttrs {
+  gpui_flowtext::SectionPageAttrs {
+    page_size: gpui_flowtext::SectionPageSize {
+      width_twips: attrs.page_size.width_twips,
+      height_twips: attrs.page_size.height_twips,
+    },
+    margins: gpui_flowtext::SectionMargins {
+      top_twips: attrs.margins.top_twips,
+      right_twips: attrs.margins.right_twips,
+      bottom_twips: attrs.margins.bottom_twips,
+      left_twips: attrs.margins.left_twips,
+    },
+    columns: attrs.columns,
+    orientation: match attrs.orientation {
+      crate::loro_schema::SectionOrientation::Portrait => gpui_flowtext::SectionOrientation::Portrait,
+      crate::loro_schema::SectionOrientation::Landscape => gpui_flowtext::SectionOrientation::Landscape,
+    },
+    page_numbering: gpui_flowtext::SectionPageNumbering {
+      format: match attrs.page_numbering.format {
+        crate::loro_schema::PageNumberFormat::None => gpui_flowtext::PageNumberFormat::None,
+        crate::loro_schema::PageNumberFormat::Decimal => gpui_flowtext::PageNumberFormat::Decimal,
+        crate::loro_schema::PageNumberFormat::LowerRoman => gpui_flowtext::PageNumberFormat::LowerRoman,
+        crate::loro_schema::PageNumberFormat::UpperRoman => gpui_flowtext::PageNumberFormat::UpperRoman,
+        crate::loro_schema::PageNumberFormat::LowerAlpha => gpui_flowtext::PageNumberFormat::LowerAlpha,
+        crate::loro_schema::PageNumberFormat::UpperAlpha => gpui_flowtext::PageNumberFormat::UpperAlpha,
+      },
+      start: attrs.page_numbering.start,
+    },
+    header_flow_id: attrs.header_flow_id,
+    footer_flow_id: attrs.footer_flow_id,
+  }
+}
+
 fn invalid(message: impl Into<String>) -> io::Error {
   io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
@@ -865,5 +983,19 @@ mod tests {
       [gpui_flowtext::Block::Paragraph(_), gpui_flowtext::Block::Image(_), gpui_flowtext::Block::Paragraph(_)]
     ));
     Ok(())
+  }
+
+  #[test]
+  fn section_page_attrs_read_back_from_loro() {
+    let doc = crate::loro_schema::new_loro_document("Sections").expect("new Loro document");
+    let expected = crate::loro_schema::SectionPageAttrs {
+      columns: 3,
+      orientation: crate::loro_schema::SectionOrientation::Landscape,
+      ..crate::loro_schema::SectionPageAttrs::default()
+    };
+    crate::loro_schema::set_section_page_attrs(&doc, "section.alpha", &expected).expect("set section page attrs");
+
+    assert_eq!(section_page_attrs(&doc, "section.alpha"), Some(expected));
+    assert_eq!(section_page_attrs(&doc, "section.missing"), None);
   }
 }

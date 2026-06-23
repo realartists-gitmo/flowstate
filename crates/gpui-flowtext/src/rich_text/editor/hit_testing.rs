@@ -90,7 +90,9 @@ impl RichTextEditor {
       let Some(layout) = self.layout_for_offset(head) else {
         return;
       };
-      let Some((p_ix, l_ix)) = locate_line(&layout, head) else {
+      // Resolve the caret's current visual line using its stored gravity so the
+      // line edges we snap to match where the caret is actually painted.
+      let Some((p_ix, l_ix)) = locate_line(&layout, head, self.selection.head_gravity) else {
         return;
       };
       let line = &layout.paragraphs[p_ix].lines[l_ix];
@@ -100,9 +102,17 @@ impl RichTextEditor {
       paragraph: head.paragraph,
       byte: new_byte,
     };
-    let anchor = if extend { self.selection.anchor } else { new };
-    let selection = EditorSelection { anchor, head: new };
-    if self.selection == selection {
+    // §16: line-start gravitates downstream (start of the lower visual line),
+    // line-end gravitates upstream (end of the upper visual line). This is the
+    // canonical wrap-seam case — without Upstream gravity, "End" on a wrapped
+    // line would otherwise paint at the start of the next visual line.
+    let (affinity, gravity) = if start {
+      (SelectionAffinity::Before, VisualGravity::Downstream)
+    } else {
+      (SelectionAffinity::After, VisualGravity::Upstream)
+    };
+    let selection = self.selection.moved(new, affinity, gravity, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = None;
       return;
     }
@@ -156,7 +166,7 @@ impl RichTextEditor {
       paragraph: caret.paragraph,
       byte: caret.byte + text.len(),
     };
-    self.selection = EditorSelection { anchor: new, head: new };
+    self.selection = EditorSelection::collapsed(new);
     self.after_text_mutation(cx);
   }
 
@@ -175,10 +185,7 @@ impl RichTextEditor {
       // paragraphs are dropped wholesale.
       delete_cross_paragraph_range(&mut self.document, range.clone());
     }
-    self.selection = EditorSelection {
-      anchor: range.start,
-      head: range.start,
-    };
+    self.selection = EditorSelection::collapsed(range.start);
     true
   }
 
@@ -221,7 +228,7 @@ impl RichTextEditor {
         paragraph: prev_ix,
         byte: prev_len,
       };
-      self.selection = EditorSelection { anchor: new, head: new };
+      self.selection = EditorSelection::collapsed(new);
     } else {
       let prev = prev_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
       delete_range_in_paragraph(&mut self.document, caret.paragraph, prev..caret.byte);
@@ -229,7 +236,7 @@ impl RichTextEditor {
         paragraph: caret.paragraph,
         byte: prev,
       };
-      self.selection = EditorSelection { anchor: new, head: new };
+      self.selection = EditorSelection::collapsed(new);
     }
     self.after_text_mutation(cx);
   }
@@ -288,7 +295,7 @@ impl RichTextEditor {
       clear_whole_paragraph_formatting(&mut self.document, new.paragraph);
       rebuild_document_sections(&mut self.document);
     }
-    self.selection = EditorSelection { anchor: new, head: new };
+    self.selection = EditorSelection::collapsed(new);
     self.after_text_mutation(cx);
   }
 }

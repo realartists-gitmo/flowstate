@@ -45,10 +45,7 @@ impl RichTextEditor {
     let before_span = capture_document_span(&self.document, offset.paragraph..offset.paragraph + 1);
     let inserted_end = insert_rich_fragment_at(&mut self.document, offset, fragment);
     let after_span = capture_document_span(&self.document, offset.paragraph..inserted_end.paragraph + 1);
-    self.selection = EditorSelection {
-      anchor: inserted_end,
-      head: inserted_end,
-    };
+    self.selection = EditorSelection::collapsed(inserted_end);
     self.emit_selection_changed(cx);
     let semantic_commands = vec![SemanticEditCommand::ReplaceParagraphSpan {
       start: Some(DocumentOffset {

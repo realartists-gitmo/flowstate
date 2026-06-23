@@ -1,9 +1,8 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn move_to_offset(&mut self, new_head: DocumentOffset, extend: bool, cx: &mut Context<Self>) {
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+  fn move_to_offset(&mut self, new_head: DocumentOffset, head_affinity: SelectionAffinity, head_gravity: VisualGravity, extend: bool, cx: &mut Context<Self>) {
+    let selection = self.selection.moved(new_head, head_affinity, head_gravity, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = None;
       return;
     }
@@ -40,7 +39,7 @@ impl RichTextEditor {
     let new_offset = clamp_scroll_offset(&self.scroll_handle, point(old_offset.x, old_offset.y + signed_delta));
     self.scroll_handle.set_offset(new_offset);
 
-    let Some(caret) = caret_bounds(&layout, head, bounds.origin) else {
+    let Some(caret) = caret_bounds(&layout, head, self.selection.head_gravity, bounds.origin) else {
       cx.notify();
       return;
     };
@@ -51,7 +50,7 @@ impl RichTextEditor {
     let target = self
       .hit_test_cached_position(point(caret.origin.x, target_y))
       .unwrap_or_else(|| layout.hit_test(point(caret.origin.x, target_y)));
-    self.move_to_offset(target, extend, cx);
+    self.move_to_offset(target, SelectionAffinity::Neutral, VisualGravity::Neutral, extend, cx);
   }
 
   pub(super) fn after_text_mutation(&mut self, cx: &mut Context<Self>) {

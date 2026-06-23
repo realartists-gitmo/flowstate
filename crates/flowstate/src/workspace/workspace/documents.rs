@@ -170,6 +170,11 @@ impl Workspace {
       .as_deref()
       .or_else(|| path.as_deref().and_then(Path::file_name).and_then(|name| name.to_str()))
       .unwrap_or("Flowstate Document");
+    // §15/§31: freshly spawned runtimes get the durable author identity bound
+    // below. A `Handle` is an already-live collaboration runtime that registered
+    // its identity at join time (see `CollabSession::finish_join_snapshot`), so
+    // re-binding it here would be a redundant second call on the same runtime.
+    let mut register_author_identity = true;
     let runtime = match runtime {
       DocumentRuntimeSource::FromProjection => {
         let imported = flowstate_document::import_document_projection(document, runtime_title)
@@ -191,8 +196,28 @@ impl Workspace {
         flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(*runtime)
           .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
       },
-      DocumentRuntimeSource::Handle(runtime) => runtime,
+      DocumentRuntimeSource::Handle(runtime) => {
+        register_author_identity = false;
+        runtime
+      },
     };
+
+    if register_author_identity {
+      // Fire-and-forget: a failure to register author identity must never block
+      // or break opening the document. The settings read/persist happens on a
+      // background thread to keep the foreground non-blocking.
+      let identity_runtime = runtime.clone();
+      cx.spawn(async move |_, cx| {
+        let (user_id, display_name) = cx
+          .background_executor()
+          .spawn(async { load_local_user_identity() })
+          .await;
+        if let Err(error) = identity_runtime.set_author_identity(user_id, display_name).await {
+          tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to document runtime failed");
+        }
+      })
+      .detach();
+    }
 
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
     let smart_word_selection = load_smart_word_selection();

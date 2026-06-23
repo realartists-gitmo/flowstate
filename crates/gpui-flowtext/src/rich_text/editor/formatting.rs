@@ -130,10 +130,7 @@ impl RichTextEditor {
       blocks: Vec::new(),
       assets: Vec::new(),
     };
-    self.selection = EditorSelection {
-      anchor: range.start,
-      head: range.end,
-    };
+    self.selection = EditorSelection::range(range.start, range.end);
     self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
   }
 

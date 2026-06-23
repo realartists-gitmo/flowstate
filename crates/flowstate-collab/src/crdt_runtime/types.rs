@@ -208,6 +208,12 @@ pub struct ProjectionInvalidation {
   pub changed_sections: Vec<String>,
   pub rebuild_required: bool,
   pub fallback_reason: Option<&'static str>,
+  /// §23: set when at least one drained, in-epoch subscription summary carried a
+  /// remote origin (e.g. an imported update). Lets downstream consumers bias
+  /// toward conservative handling/telemetry without forcing a full rebuild for
+  /// ordinary remote text edits (the incremental remote fast paths still apply).
+  /// Defaults to `false` via `Default` for every existing constructor.
+  pub has_remote_origin: bool,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

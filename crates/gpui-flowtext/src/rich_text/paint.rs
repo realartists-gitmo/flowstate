@@ -100,7 +100,7 @@ pub(super) fn paint_layout(
   if let Some(selection) = selection
     && selection.is_caret()
     && show_caret
-    && let Some(mut caret) = caret_bounds(layout, selection.head, bounds.origin)
+    && let Some(mut caret) = caret_bounds(layout, selection.head, selection.head_gravity, bounds.origin)
     && caret.intersects(&content_mask)
   {
     caret.size.width = caret_width;
@@ -108,7 +108,8 @@ pub(super) fn paint_layout(
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
-    if let Some(mut caret) = caret_bounds(layout, external_caret.offset, bounds.origin)
+    // Remote carets carry no gravity; render with the neutral wrap-seam bias.
+    if let Some(mut caret) = caret_bounds(layout, external_caret.offset, VisualGravity::Neutral, bounds.origin)
       && caret.intersects(&content_mask)
     {
       caret.size.width = caret_width;
@@ -529,10 +530,7 @@ fn paint_search_highlights(
     if highlight.end.paragraph < visible_start || highlight.start.paragraph > visible_end {
       continue;
     }
-    let selection = EditorSelection {
-      anchor: highlight.start,
-      head: highlight.end,
-    };
+    let selection = EditorSelection::range(highlight.start, highlight.end);
     paint_text_range_fill(
       layout,
       &selection,

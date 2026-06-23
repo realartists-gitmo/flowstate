@@ -30,10 +30,7 @@ impl RichTextEditor {
     };
 
     let before_selection = self.selection.clone();
-    self.selection = EditorSelection {
-      anchor: range.start,
-      head: range.end,
-    };
+    self.selection = EditorSelection::range(range.start, range.end);
     if self.selection != before_selection {
       self.emit_selection_changed(cx);
     }
@@ -86,10 +83,7 @@ impl RichTextEditor {
       }
 
       for range in cross_paragraph_ranges.into_iter().rev() {
-        editor.selection = EditorSelection {
-          anchor: range.start,
-          head: range.end,
-        };
+        editor.selection = EditorSelection::range(range.start, range.end);
         editor.insert_text(replacement, cx);
         final_caret = Some(editor.selection.head);
       }
@@ -109,7 +103,7 @@ impl RichTextEditor {
         replace_paragraph_blocks(&mut editor.document, start, replacements.len(), &replacements);
       }
       if let Some(caret) = final_caret {
-        editor.selection = EditorSelection { anchor: caret, head: caret };
+        editor.selection = EditorSelection::collapsed(caret);
       }
       editor.after_text_mutation(cx);
     });

@@ -71,13 +71,13 @@ fn double_click_at_text_paragraph_end_selects_only_that_paragraph() {
 
   assert_eq!(
     selection,
-    EditorSelection {
-      anchor: DocumentOffset { paragraph: 0, byte: 0 },
-      head: DocumentOffset {
+    EditorSelection::range(
+      DocumentOffset { paragraph: 0, byte: 0 },
+      DocumentOffset {
         paragraph: 0,
         byte: "first paragraph".len(),
       },
-    }
+    )
   );
 }
 
@@ -106,10 +106,7 @@ fn double_click_empty_paragraph_selects_only_empty_paragraph() {
 
   assert_eq!(
     selection,
-    EditorSelection {
-      anchor: DocumentOffset { paragraph: 1, byte: 0 },
-      head: DocumentOffset { paragraph: 1, byte: 0 },
-    }
+    EditorSelection::collapsed(DocumentOffset { paragraph: 1, byte: 0 })
   );
 }
 

@@ -102,9 +102,15 @@ impl RichTextEditor {
         }
       },
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+    // §16: a rightward step parks the caret after the preceding glyph, a
+    // leftward step before the following glyph. Gravity stays neutral — arrow
+    // motion keeps the historical wrap-seam bias.
+    let head_affinity = match dir {
+      HDir::Left => SelectionAffinity::Before,
+      HDir::Right => SelectionAffinity::After,
+    };
+    let selection = self.selection.moved(new_head, head_affinity, VisualGravity::Neutral, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = None;
       return;
     }
@@ -165,7 +171,7 @@ impl RichTextEditor {
       let Some(layout) = self.layout_for_offset(head) else {
         return;
       };
-      let Some((p_ix, l_ix)) = locate_line(&layout, head) else {
+      let Some((p_ix, l_ix)) = locate_line(&layout, head, self.selection.head_gravity) else {
         cx.notify();
         return;
       };
@@ -188,9 +194,10 @@ impl RichTextEditor {
       };
       (new_head, cur_x)
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+    // Vertical motion lands on a fresh column position; reset to neutral
+    // affinity/gravity.
+    let selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = Some(used_goal_x);
       return;
     }
@@ -253,8 +260,7 @@ impl RichTextEditor {
       paragraph: target_paragraph,
       byte: target_byte,
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    self.selection = EditorSelection { anchor, head: new_head };
+    self.selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
     self.goal_x = Some(goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
