@@ -561,6 +561,7 @@ impl Default for RichTextEditorConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalCaret {
   pub offset: DocumentOffset,
+  pub visual_gravity: VisualGravity,
   pub color_rgb: u32,
 }
 

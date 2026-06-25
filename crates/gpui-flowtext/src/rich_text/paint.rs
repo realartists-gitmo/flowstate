@@ -108,8 +108,7 @@ pub(super) fn paint_layout(
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
-    // Remote carets carry no gravity; render with the neutral wrap-seam bias.
-    if let Some(mut caret) = caret_bounds(layout, external_caret.offset, VisualGravity::Neutral, bounds.origin)
+    if let Some(mut caret) = caret_bounds(layout, external_caret.offset, external_caret.visual_gravity, bounds.origin)
       && caret.intersects(&content_mask)
     {
       caret.size.width = caret_width;

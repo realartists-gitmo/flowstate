@@ -130,6 +130,9 @@ pub struct CollabSession {
   direct_pump_started: bool,
   undo_pump_started: bool,
   presence_refresh_pending: bool,
+  presence_refresh_generation: u64,
+  external_caret_refresh_pending: bool,
+  external_caret_refresh_generation: u64,
   timers_started: bool,
   endpoint_online: bool,
   zero_neighbors_since: Option<Instant>,
@@ -231,6 +234,9 @@ impl CollabSession {
       direct_pump_started: false,
       undo_pump_started: false,
       presence_refresh_pending: false,
+      presence_refresh_generation: 0,
+      external_caret_refresh_pending: false,
+      external_caret_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -279,6 +285,9 @@ impl CollabSession {
       direct_pump_started: false,
       undo_pump_started: false,
       presence_refresh_pending: false,
+      presence_refresh_generation: 0,
+      external_caret_refresh_pending: false,
+      external_caret_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -760,6 +769,9 @@ impl CollabSession {
     self.last_probe_failed = false;
     self.join_neighbor_tx = None;
     self.presence_refresh_pending = false;
+    self.presence_refresh_generation = self.presence_refresh_generation.wrapping_add(1);
+    self.external_caret_refresh_pending = false;
+    self.external_caret_refresh_generation = self.external_caret_refresh_generation.wrapping_add(1);
     self.phase = SessionPhase::Detached(reason);
     if user_left {
       cx.emit(SessionNotice::LeftSession);
@@ -1042,6 +1054,7 @@ impl CollabSession {
     }
     self.anti_entropy.on_neighbor_up();
     self.mark_online(cx);
+    self.publish_presence_snapshot();
     self.publish_digest();
     asset_transfer::schedule_missing_assets(self, Some(peer), cx);
     cx.notify();

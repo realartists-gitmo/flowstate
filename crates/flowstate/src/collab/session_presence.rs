@@ -9,6 +9,7 @@ use gpui::{Context, Timer};
 use super::{CollabSession, SessionNotice};
 
 const PRESENCE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
+const EXTERNAL_CARET_REFRESH_DEBOUNCE: Duration = Duration::from_millis(16);
 
 impl CollabSession {
   pub(super) fn apply_presence(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
@@ -42,6 +43,8 @@ impl CollabSession {
       .map(|editor| editor.read(cx).selection().clone());
     let runtime = self.runtime.clone();
     let session_id = self.session;
+    self.presence_refresh_generation = self.presence_refresh_generation.wrapping_add(1);
+    let generation = self.presence_refresh_generation;
     cx.spawn(async move |session, cx| {
       let selection = match (runtime, selection) {
         (Some(runtime), Some(selection)) => runtime.presence_selection(selection).await,
@@ -49,6 +52,10 @@ impl CollabSession {
       };
       let _ = session.update(cx, |session, cx| match selection {
         Ok(selection) => {
+          if session.presence_refresh_generation != generation {
+            tracing::trace!(session = %session_id, generation, current_generation = session.presence_refresh_generation, "skipping stale own collaboration presence refresh");
+            return;
+          }
           let state = PresenceState {
             name: default_presence_name(),
             selection,
@@ -96,6 +103,21 @@ impl CollabSession {
   }
 
   pub(super) fn refresh_external_carets(&mut self, cx: &mut Context<Self>) {
+    if self.external_caret_refresh_pending {
+      return;
+    }
+    self.external_caret_refresh_pending = true;
+    cx.spawn(async move |session, cx| {
+      Timer::after(EXTERNAL_CARET_REFRESH_DEBOUNCE).await;
+      let _ = session.update(cx, |session, cx| {
+        session.external_caret_refresh_pending = false;
+        session.refresh_external_carets_now(cx);
+      });
+    })
+    .detach();
+  }
+
+  fn refresh_external_carets_now(&mut self, cx: &mut Context<Self>) {
     let Some(presence) = &self.presence else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
@@ -109,7 +131,7 @@ impl CollabSession {
       return;
     };
     let self_key = presence.self_key().to_string();
-    let requests = presence
+    let requests: Vec<RuntimePresenceCaretRequest> = presence
       .roster()
       .into_iter()
       .filter(|entry| entry.key != self_key)
@@ -123,10 +145,21 @@ impl CollabSession {
       })
       .collect();
     let session_id = self.session;
+    self.external_caret_refresh_generation = self.external_caret_refresh_generation.wrapping_add(1);
+    let generation = self.external_caret_refresh_generation;
+    if requests.is_empty() {
+      tracing::trace!(session = %self.session, "clearing collaboration external carets because no remote selections are present");
+      editor.update(cx, |editor, cx| editor.set_external_carets(Vec::new(), cx));
+      return;
+    }
     cx.spawn(async move |session, cx| {
       let result = runtime.resolve_presence_carets(requests).await;
       let _ = session.update(cx, |session, cx| match result {
         Ok(resolved) => {
+          if session.external_caret_refresh_generation != generation {
+            tracing::trace!(session = %session_id, generation, current_generation = session.external_caret_refresh_generation, "skipping stale collaboration external caret refresh");
+            return;
+          }
           tracing::trace!(session = %session_id, carets = resolved.carets.len(), "refreshing collaboration external carets");
           if session
             .editor
@@ -146,8 +179,8 @@ impl CollabSession {
 
   pub(super) fn publish_presence_snapshot(&self) {
     if let Some(presence) = &self.presence {
-      let bytes = presence.encode_all();
-      tracing::debug!(session = %self.session, bytes = bytes.len(), "publishing collaboration presence snapshot");
+      let bytes = presence.encode_self();
+      tracing::debug!(session = %self.session, bytes = bytes.len(), "publishing own collaboration presence snapshot");
       self.publish_presence_bytes(bytes);
     } else {
       tracing::trace!(session = %self.session, "skipping collaboration presence snapshot because store is missing");

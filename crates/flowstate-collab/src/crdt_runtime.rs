@@ -33,7 +33,7 @@ mod projection_patch;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
-use gpui_flowtext::{DocumentOffset, EditorSelection, ExternalCaret, apply_projection_patches, global_byte, global_to_document_offset};
+use gpui_flowtext::{DocumentOffset, EditorSelection, ExternalCaret, apply_projection_patches};
 use loro::{ContainerTrait as _, cursor::PosType};
 use projection_patch::{
   body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
@@ -255,6 +255,25 @@ impl ProjectionRuntimeIndex {
     Some(*self.paragraph_body_unicode_starts.get(offset.paragraph)? + paragraph_text[..byte].chars().count())
   }
 
+  fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
+    let paragraph_ix = self.paragraph_at_body_unicode(unicode, projection.paragraphs.len())?;
+    let paragraph_start = self
+      .paragraph_body_unicode_starts
+      .get(paragraph_ix)
+      .copied()
+      .unwrap_or_default();
+    let local_unicode = unicode.saturating_sub(paragraph_start);
+    let paragraph_text = flowstate_document::paragraph_text(projection, paragraph_ix);
+    let byte = paragraph_text
+      .char_indices()
+      .nth(local_unicode)
+      .map_or(paragraph_text.len(), |(byte, _)| byte);
+    Some(DocumentOffset {
+      paragraph: paragraph_ix,
+      byte,
+    })
+  }
+
   fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize) -> Vec<usize> {
     let mut touched = std::collections::BTreeSet::new();
     for range in ranges
@@ -428,6 +447,13 @@ impl ProjectionRuntimeIndex {
         .filter(|position| **position > threshold)
       {
         *placeholder = placeholder.saturating_add_signed(delta);
+      }
+      for span in &mut self.search_unit_spans {
+        if span.paragraph == Some(paragraph_ix) {
+          span.unicode_len = span.unicode_len.saturating_add_signed(delta);
+        } else if span.unicode_start > threshold {
+          span.unicode_start = span.unicode_start.saturating_add_signed(delta);
+        }
       }
     }
     false
@@ -691,12 +717,8 @@ impl CrdtRuntime {
     let head_pos = self
       .projection_index
       .body_unicode_for_offset(&self.projection, head)?;
-    let anchor_cursor = body
-      .get_cursor(anchor_pos, side_for_affinity(anchor_affinity))?
-      .encode();
-    let head_cursor = body
-      .get_cursor(head_pos, side_for_affinity(head_affinity))?
-      .encode();
+    let anchor_cursor = cursor_for_boundary(&body, anchor_pos, anchor_affinity)?.encode();
+    let head_cursor = cursor_for_boundary(&body, head_pos, head_affinity)?.encode();
     Some(UndoSelectionSnapshot {
       anchor_cursor,
       head_cursor,
@@ -866,9 +888,10 @@ impl CrdtRuntime {
           return None;
         }
         let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
-        let byte = text.convert_pos(resolved.current.pos, PosType::Unicode, PosType::Bytes)?;
+        let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
         Some(ExternalCaret {
-          offset: global_to_document_offset(&self.projection, byte),
+          offset: self.projection_index.offset_for_body_unicode(&self.projection, unicode)?,
+          visual_gravity: gpui_gravity_from_presence(request.selection.head.visual_gravity),
           color_rgb: request.color_rgb,
         })
       })
@@ -878,15 +901,13 @@ impl CrdtRuntime {
 
   fn presence_endpoint(&self, offset: DocumentOffset, affinity: SelectionAffinity, visual_gravity: VisualGravity) -> Option<SelectionEndpoint> {
     let text = body_text(&self.doc);
-    let byte = global_byte(&self.projection, offset).min(text.len_utf8());
-    let pos = text.convert_pos(byte, PosType::Bytes, PosType::Unicode)?;
-    text
-      .get_cursor(pos, side_for_affinity(affinity))
-      .map(|cursor| SelectionEndpoint {
-        cursor: cursor.encode(),
-        affinity,
-        visual_gravity,
-      })
+    let offset = clamp_projection_offset(&self.projection, offset);
+    let pos = self.projection_index.body_unicode_for_offset(&self.projection, offset)?;
+    cursor_for_boundary(&text, pos, affinity).map(|cursor| SelectionEndpoint {
+      cursor: cursor.encode(),
+      affinity,
+      visual_gravity,
+    })
   }
 
   pub fn merge_asset_records(&mut self, records: Vec<AssetRecord>) -> Result<Vec<RuntimeEvent>> {
@@ -1224,8 +1245,10 @@ impl CrdtRuntime {
       return None;
     }
     let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
-    let byte = body.convert_pos(resolved.current.pos, PosType::Unicode, PosType::Bytes)?;
-    let offset = global_to_document_offset(&self.projection, byte);
+    let unicode = resolved_cursor_boundary_unicode(&body, &resolved)?;
+    let offset = self
+      .projection_index
+      .offset_for_body_unicode(&self.projection, unicode)?;
     self
       .projection_index
       .cursor_resolution_cache
@@ -4590,11 +4613,33 @@ fn selection_direction(anchor: DocumentOffset, head: DocumentOffset) -> Selectio
   }
 }
 
-fn side_for_affinity(affinity: SelectionAffinity) -> Side {
+fn cursor_for_boundary(text: &LoroText, unicode_pos: usize, affinity: SelectionAffinity) -> Option<Cursor> {
+  let len = text.len_unicode();
+  let pos = unicode_pos.min(len);
   match affinity {
-    SelectionAffinity::Before => Side::Left,
-    SelectionAffinity::After => Side::Right,
-    SelectionAffinity::Neutral => Side::Middle,
+    SelectionAffinity::Before if pos > 0 => text.get_cursor(pos - 1, Side::Right),
+    SelectionAffinity::Before => text.get_cursor(0, Side::Left),
+    SelectionAffinity::After if pos < len => text.get_cursor(pos, Side::Left),
+    SelectionAffinity::After => text.get_cursor(len, Side::Right),
+    SelectionAffinity::Neutral => text.get_cursor(pos, Side::Middle),
+  }
+}
+
+fn resolved_cursor_boundary_unicode(text: &LoroText, resolved: &loro::cursor::PosQueryResult) -> Option<usize> {
+  let event_len = text.convert_pos(text.len_utf8(), PosType::Bytes, PosType::Event)?;
+  let event_pos = resolved
+    .current
+    .pos
+    .saturating_add(usize::from(resolved.current.side == Side::Right))
+    .min(event_len);
+  text.convert_pos(event_pos, PosType::Event, PosType::Unicode)
+}
+
+fn gpui_gravity_from_presence(gravity: VisualGravity) -> gpui_flowtext::VisualGravity {
+  match gravity {
+    VisualGravity::Upstream => gpui_flowtext::VisualGravity::Upstream,
+    VisualGravity::Downstream => gpui_flowtext::VisualGravity::Downstream,
+    VisualGravity::Neutral => gpui_flowtext::VisualGravity::Neutral,
   }
 }
 
@@ -6667,6 +6712,74 @@ mod tests {
       styles: RunStyles::default(),
     })?;
     assert!(runtime.projection_index.cursor_resolution_cache.is_empty());
+    Ok(())
+  }
+
+  #[test]
+  fn presence_after_affinity_sticks_to_following_text_across_inserts() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Presence")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "ab".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let offset = DocumentOffset { paragraph: 0, byte: 1 };
+    let selection = EditorSelection::collapsed_with(
+      offset,
+      gpui_flowtext::SelectionAffinity::After,
+      gpui_flowtext::VisualGravity::Downstream,
+    );
+    let presence = runtime
+      .presence_selection(&selection)
+      .expect("presence selection should encode");
+
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 2,
+      text: "X".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let carets = runtime.resolve_presence_carets(vec![RuntimePresenceCaretRequest {
+      selection: presence,
+      color_rgb: 0xabcdef,
+    }]);
+
+    assert_eq!(carets.carets.len(), 1);
+    assert_eq!(carets.carets[0].offset, DocumentOffset { paragraph: 0, byte: 2 });
+    assert_eq!(carets.carets[0].visual_gravity, gpui_flowtext::VisualGravity::Downstream);
+    Ok(())
+  }
+
+  #[test]
+  fn presence_before_affinity_sticks_to_preceding_text_across_inserts() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Presence")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "ab".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let offset = DocumentOffset { paragraph: 0, byte: 1 };
+    let selection = EditorSelection::collapsed_with(
+      offset,
+      gpui_flowtext::SelectionAffinity::Before,
+      gpui_flowtext::VisualGravity::Upstream,
+    );
+    let presence = runtime
+      .presence_selection(&selection)
+      .expect("presence selection should encode");
+
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 2,
+      text: "X".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let carets = runtime.resolve_presence_carets(vec![RuntimePresenceCaretRequest {
+      selection: presence,
+      color_rgb: 0xabcdef,
+    }]);
+
+    assert_eq!(carets.carets.len(), 1);
+    assert_eq!(carets.carets[0].offset, offset);
+    assert_eq!(carets.carets[0].visual_gravity, gpui_flowtext::VisualGravity::Upstream);
     Ok(())
   }
 }

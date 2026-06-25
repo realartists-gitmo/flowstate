@@ -22,15 +22,17 @@ pub enum ObjectAffinity {
 ///
 /// * [`SelectionAffinity::Before`] — the endpoint belongs to the content
 ///   *before* the offset (e.g. the caret arrived by moving Left, or sits at the
-///   trailing edge of the preceding glyph). Maps to a left/upstream cursor side.
+///   trailing edge of the preceding glyph). Stable cursors anchor to that
+///   preceding glyph when one exists.
 /// * [`SelectionAffinity::After`] — the endpoint belongs to the content *after*
 ///   the offset (e.g. the caret arrived by moving Right, or sits at the leading
-///   edge of the following glyph). Maps to a right/downstream cursor side.
+///   edge of the following glyph). Stable cursors anchor to that following glyph
+///   when one exists.
 /// * [`SelectionAffinity::Neutral`] — no strong side was expressed (fresh edit
 ///   result, mouse placement, programmatic selection). Maps to a middle cursor
 ///   side.
 ///
-/// The collaboration runtime maps these onto Loro cursor `Side` values when
+/// The collaboration runtime maps these onto Loro stable cursor boundaries when
 /// encoding presence/undo cursors instead of guessing from selection direction.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub enum SelectionAffinity {
