@@ -970,12 +970,16 @@ impl CrdtRuntime {
     if commands.is_empty() {
       return Ok(Vec::new());
     }
-    let current_frontier = self.doc.state_frontiers().encode();
-    if !base_frontier.is_empty() && base_frontier != current_frontier.as_slice() {
+    // Editor commands are authored against the visible projection frontier, not
+    // necessarily the raw Loro doc frontier. Metadata-only commits such as
+    // author registration can advance the doc without changing visible content;
+    // treating those as stale causes optimistic typing to flash and roll back.
+    let current_projection_frontier = self.projection.frontier.clone();
+    if !base_frontier.is_empty() && base_frontier != current_projection_frontier.as_slice() {
       return Err(
         StaleProjectionError {
           expected_frontier_len: base_frontier.len(),
-          current_frontier_len: current_frontier.len(),
+          current_frontier_len: current_projection_frontier.len(),
         }
         .into(),
       );
@@ -6413,6 +6417,28 @@ mod tests {
     )?;
 
     assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "xready");
+    Ok(())
+  }
+
+  #[test]
+  fn editor_commands_accept_projection_frontier_after_metadata_only_commit() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Metadata frontier")?;
+    let base_frontier = runtime.projection_snapshot()?.frontier;
+    runtime.set_author_identity(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef, Some("Author".to_string()))?;
+    assert_ne!(runtime.doc.state_frontiers().encode(), base_frontier);
+    assert_eq!(runtime.projection_snapshot()?.frontier, base_frontier);
+
+    runtime.apply_editor_commands(
+      &base_frontier,
+      &[EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: 0, byte: 0 },
+        text: "x".to_string(),
+        styles: RunStyles::default(),
+      }],
+      None,
+    )?;
+
+    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "x");
     Ok(())
   }
 
