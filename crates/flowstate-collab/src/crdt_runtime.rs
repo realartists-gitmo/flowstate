@@ -890,7 +890,9 @@ impl CrdtRuntime {
         let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
         let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
         Some(ExternalCaret {
-          offset: self.projection_index.offset_for_body_unicode(&self.projection, unicode)?,
+          offset: self
+            .projection_index
+            .offset_for_body_unicode(&self.projection, unicode)?,
           visual_gravity: gpui_gravity_from_presence(request.selection.head.visual_gravity),
           color_rgb: request.color_rgb,
         })
@@ -902,7 +904,9 @@ impl CrdtRuntime {
   fn presence_endpoint(&self, offset: DocumentOffset, affinity: SelectionAffinity, visual_gravity: VisualGravity) -> Option<SelectionEndpoint> {
     let text = body_text(&self.doc);
     let offset = clamp_projection_offset(&self.projection, offset);
-    let pos = self.projection_index.body_unicode_for_offset(&self.projection, offset)?;
+    let pos = self
+      .projection_index
+      .body_unicode_for_offset(&self.projection, offset)?;
     cursor_for_boundary(&text, pos, affinity).map(|cursor| SelectionEndpoint {
       cursor: cursor.encode(),
       affinity,
@@ -6724,11 +6728,7 @@ mod tests {
       styles: RunStyles::default(),
     })?;
     let offset = DocumentOffset { paragraph: 0, byte: 1 };
-    let selection = EditorSelection::collapsed_with(
-      offset,
-      gpui_flowtext::SelectionAffinity::After,
-      gpui_flowtext::VisualGravity::Downstream,
-    );
+    let selection = EditorSelection::collapsed_with(offset, gpui_flowtext::SelectionAffinity::After, gpui_flowtext::VisualGravity::Downstream);
     let presence = runtime
       .presence_selection(&selection)
       .expect("presence selection should encode");
@@ -6758,11 +6758,7 @@ mod tests {
       styles: RunStyles::default(),
     })?;
     let offset = DocumentOffset { paragraph: 0, byte: 1 };
-    let selection = EditorSelection::collapsed_with(
-      offset,
-      gpui_flowtext::SelectionAffinity::Before,
-      gpui_flowtext::VisualGravity::Upstream,
-    );
+    let selection = EditorSelection::collapsed_with(offset, gpui_flowtext::SelectionAffinity::Before, gpui_flowtext::VisualGravity::Upstream);
     let presence = runtime
       .presence_selection(&selection)
       .expect("presence selection should encode");
