@@ -605,6 +605,11 @@ impl Workspace {
       && commands
         .iter()
         .all(crate::rich_text_element::SemanticEditCommand::can_acknowledge_without_projection_replay);
+    let retry_edit = (!commands.is_empty()).then(|| crate::rich_text_element::SemanticCommandBatch {
+      base_frontier: base_frontier.clone(),
+      semantic_commands: commands.clone(),
+      selection_after: selection_after.clone(),
+    });
     cx.spawn(async move |workspace, cx| {
       let result = runtime
         .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
@@ -627,8 +632,7 @@ impl Workspace {
           if let Some(document) = stale_snapshot {
             tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
             editor.update(cx, |editor, cx| {
-              editor.replace_document_projection(document, cx);
-              editor.complete_runtime_edit(None, cx);
+              editor.replace_document_projection_replaying_pending(document, retry_edit.into_iter().collect(), None, cx);
             });
           } else {
             tracing::error!(%panel_id, error = %error, "failed to apply editor edits to Loro runtime");
@@ -1776,6 +1780,11 @@ fn apply_local_runtime_events(
     return;
   }
 
+  let frontier = events
+    .iter()
+    .filter_map(flowstate_collab::crdt_runtime::RuntimeEvent::frontier)
+    .next_back()
+    .map(ToOwned::to_owned);
   for event in events {
     match event {
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { patches, frontier, .. } => {
@@ -1793,7 +1802,13 @@ fn apply_local_runtime_events(
       },
     }
   }
-  editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
+  editor.update(cx, |editor, cx| {
+    if let Some(frontier) = frontier {
+      editor.complete_runtime_edit_replaying_pending(frontier, Vec::new(), selection_after, cx);
+    } else {
+      editor.complete_runtime_edit(selection_after, cx);
+    }
+  });
 }
 
 fn coalesce_document_runtime_commands(

@@ -25,7 +25,8 @@ use uuid::Uuid;
 
 use crate::app_settings::{load_document_theme, load_local_user_identity};
 use crate::rich_text_element::{
-  AssetId, AssetRecord, DocumentProjection, EditorEvent, ProjectionPatch, RichTextEditor, SemanticEditCommand, UndoRedirect,
+  AssetId, AssetRecord, DocumentProjection, EditorEvent, ProjectionPatch, RichTextEditor, SemanticCommandBatch, SemanticEditCommand,
+  UndoRedirect,
 };
 
 use super::presence_view;
@@ -837,6 +838,11 @@ impl CollabSession {
       .cloned()
       .collect();
     let session_id = self.session;
+    let retry_edit = (!commands.is_empty()).then(|| SemanticCommandBatch {
+      base_frontier: base_frontier.clone(),
+      semantic_commands: commands.clone(),
+      selection_after: selection_after.clone(),
+    });
     cx.spawn(async move |session, cx| {
       let result = runtime
         .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
@@ -866,8 +872,7 @@ impl CollabSession {
             tracing::debug!(session = %session_id, "discarding stale optimistic projection and restoring the canonical collaboration projection");
             if let Some(editor) = session.editor.clone() {
               editor.update(cx, |editor, cx| {
-                editor.replace_document_projection(document, cx);
-                editor.complete_runtime_edit(None, cx);
+                editor.replace_document_projection_replaying_pending(document, retry_edit.into_iter().collect(), None, cx);
               });
             }
           } else {
@@ -967,9 +972,20 @@ impl CollabSession {
         });
       }
     } else {
+      let frontier = events
+        .iter()
+        .filter_map(RuntimeEvent::frontier)
+        .next_back()
+        .map(ToOwned::to_owned);
       self.apply_runtime_events(events, true, cx)?;
       if let Some(editor) = self.editor.clone() {
-        editor.update(cx, |editor, cx| editor.complete_runtime_edit(selection_after, cx));
+        editor.update(cx, |editor, cx| {
+          if let Some(frontier) = frontier {
+            editor.complete_runtime_edit_replaying_pending(frontier, Vec::new(), selection_after, cx);
+          } else {
+            editor.complete_runtime_edit(selection_after, cx);
+          }
+        });
       }
     }
     self.last_self_check = None;

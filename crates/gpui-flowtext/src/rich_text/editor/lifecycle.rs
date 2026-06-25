@@ -311,6 +311,84 @@ impl RichTextEditor {
     self.complete_runtime_edit(selection, cx);
   }
 
+  pub fn complete_runtime_edit_replaying_pending(
+    &mut self,
+    frontier: Vec<u8>,
+    retry_edits: Vec<SemanticCommandBatch>,
+    selection: Option<EditorSelection>,
+    cx: &mut Context<Self>,
+  ) {
+    let mut edits = retry_edits;
+    edits.extend(std::mem::take(&mut self.pending_semantic_edits));
+    if !edits.iter().any(|edit| !edit.semantic_commands.is_empty()) {
+      self.document.frontier.clone_from(&frontier);
+      self.complete_runtime_edit(selection, cx);
+      return;
+    }
+
+    let mut document = self.document.clone();
+    let mut replayed = Vec::with_capacity(edits.len());
+    let mut replayed_selection = None;
+    let mut rejected = 0usize;
+    for mut edit in edits {
+      if edit.semantic_commands.is_empty() {
+        continue;
+      }
+      let mut candidate = document.clone();
+      if edit
+        .semantic_commands
+        .iter()
+        .all(|command| replay_semantic_command_on_projection(&mut candidate, command))
+      {
+        edit.base_frontier.clone_from(&frontier);
+        if let Some(selection) = &edit.selection_after {
+          replayed_selection = Some(selection.clone());
+        }
+        document = candidate;
+        replayed.push(edit);
+      } else {
+        rejected += 1;
+      }
+    }
+
+    if rejected > 0 {
+      eprintln!("dropped {rejected} unrebasable optimistic editor batch(es) after canonical runtime replay");
+    }
+
+    document.frontier.clone_from(&frontier);
+    let theme = self.document.theme.clone();
+    self.document = projection_with_local_theme(document, &theme);
+    self.identity_map.reconcile(&self.document);
+    self.pending_semantic_edits = replayed;
+    if let Some(selection) = replayed_selection {
+      self.selection = selection;
+      clamp_selection_to_document(&self.document, &mut self.selection);
+      self.emit_selection_changed(cx);
+    }
+    self.after_text_mutation(cx);
+    let selection = if self.pending_semantic_edits.is_empty() { selection } else { None };
+    self.complete_runtime_edit(selection, cx);
+  }
+
+  pub fn replace_document_projection_replaying_pending(
+    &mut self,
+    document: DocumentProjection,
+    retry_edits: Vec<SemanticCommandBatch>,
+    selection: Option<EditorSelection>,
+    cx: &mut Context<Self>,
+  ) {
+    let has_replay = retry_edits.iter().any(|edit| !edit.semantic_commands.is_empty())
+      || self.pending_semantic_edits.iter().any(|edit| !edit.semantic_commands.is_empty());
+    let theme = self.document.theme.clone();
+    self.document = projection_with_local_theme(document, &theme);
+    self.identity_map.reconcile(&self.document);
+    if !has_replay {
+      self.after_text_mutation(cx);
+    }
+    let frontier = self.document.frontier.clone();
+    self.complete_runtime_edit_replaying_pending(frontier, retry_edits, selection, cx);
+  }
+
   pub fn restore_runtime_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {
     self.selection = selection;
     clamp_selection_to_document(&self.document, &mut self.selection);
@@ -528,6 +606,399 @@ impl RichTextEditor {
       .filter(|caret| caret.offset.paragraph == paragraph_ix)
       .cloned()
       .collect()
+  }
+}
+
+fn replay_semantic_command_on_projection(document: &mut DocumentProjection, command: &SemanticEditCommand) -> bool {
+  match command {
+    SemanticEditCommand::InsertText { at, text, styles } => {
+      if !valid_document_offset(document, *at) {
+        return false;
+      }
+      insert_text_at(document, at.paragraph, at.byte, text, *styles);
+      true
+    },
+    SemanticEditCommand::DeleteRange { range } => {
+      if range.start > range.end || !valid_document_offset(document, range.start) || !valid_document_offset(document, range.end) {
+        return false;
+      }
+      if range.start.paragraph == range.end.paragraph {
+        delete_range_in_paragraph(document, range.start.paragraph, range.start.byte..range.end.byte);
+      } else {
+        delete_cross_paragraph_range(document, range.clone());
+      }
+      true
+    },
+    SemanticEditCommand::SplitParagraph { at, inherited_style } => {
+      if !valid_document_offset(document, *at) {
+        return false;
+      }
+      split_paragraph_at(document, at.paragraph, at.byte);
+      let mut updated_style = false;
+      if let Some(paragraph) = paragraphs_mut(document).get_mut(at.paragraph + 1)
+        && paragraph.style != *inherited_style
+      {
+        paragraph.style = *inherited_style;
+        bump_paragraph_version(paragraph);
+        updated_style = true;
+      }
+      if updated_style {
+        update_paragraph_block(document, at.paragraph + 1);
+        rebuild_document_sections(document);
+      }
+      true
+    },
+    SemanticEditCommand::JoinParagraphs { first, second } => {
+      let Some(first_ix) = paragraph_index_for_id(document, *first) else {
+        return false;
+      };
+      let Some(second_ix) = paragraph_index_for_id(document, *second) else {
+        return false;
+      };
+      if first_ix + 1 != second_ix {
+        return false;
+      }
+      let byte = paragraph_text_len(&document.paragraphs[first_ix]);
+      delete_cross_paragraph_range(
+        document,
+        DocumentOffset { paragraph: first_ix, byte }..DocumentOffset {
+          paragraph: second_ix,
+          byte: 0,
+        },
+      );
+      true
+    },
+    SemanticEditCommand::SetParagraphStyle { paragraph, style } => {
+      let Some(paragraph_ix) = paragraph_index_for_id(document, *paragraph) else {
+        return false;
+      };
+      let mut updated_style = false;
+      if let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
+        && paragraph.style != *style
+      {
+        paragraph.style = *style;
+        bump_paragraph_version(paragraph);
+        updated_style = true;
+      }
+      if updated_style {
+        update_paragraph_block(document, paragraph_ix);
+        rebuild_document_sections(document);
+      }
+      true
+    },
+    SemanticEditCommand::SetRunStyles { paragraph, range, styles } => {
+      let Some(paragraph_ix) = paragraph_index_for_id(document, *paragraph) else {
+        return false;
+      };
+      let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+        return false;
+      };
+      if range.start > range.end || range.end > paragraph_text_len(paragraph) {
+        return false;
+      }
+      mutate_runs_in_range(
+        document,
+        DocumentOffset {
+          paragraph: paragraph_ix,
+          byte: range.start,
+        }..DocumentOffset {
+          paragraph: paragraph_ix,
+          byte: range.end,
+        },
+        |run_styles| *run_styles = *styles,
+      );
+      true
+    },
+    SemanticEditCommand::ReplaceParagraphSpan { start, before, after } => {
+      let start_paragraph = start
+        .map(|offset| offset.paragraph)
+        .unwrap_or(before.start_paragraph)
+        .min(document.paragraphs.len());
+      let old_count = before
+        .paragraphs
+        .len()
+        .min(document.paragraphs.len().saturating_sub(start_paragraph));
+      let current = capture_document_span(document, start_paragraph..start_paragraph + old_count);
+      let mut replacement = after.clone();
+      replacement.start_paragraph = start_paragraph;
+      apply_document_span_replacement(document, &current, &replacement);
+      true
+    },
+    SemanticEditCommand::InsertBlock { block, block_ix, after } => {
+      let mut blocks = projection_structural_blocks_from_document(document);
+      let row = (*block_ix).min(blocks.len());
+      blocks.insert(row, structural_block_for_input(*block, None, after.clone()));
+      rebuild_document_from_projection_structural_blocks(document, blocks);
+      true
+    },
+    SemanticEditCommand::DeleteBlock { block } => {
+      let Some(block_ix) = document.ids.block_ids.iter().position(|id| id == block) else {
+        return false;
+      };
+      let mut blocks = projection_structural_blocks_from_document(document);
+      if block_ix >= blocks.len() {
+        return false;
+      }
+      blocks.remove(block_ix);
+      rebuild_document_from_projection_structural_blocks(document, blocks);
+      true
+    },
+    SemanticEditCommand::MoveBlock { block, new_block_ix } => {
+      let Some(block_ix) = document.ids.block_ids.iter().position(|id| id == block) else {
+        return false;
+      };
+      let mut blocks = projection_structural_blocks_from_document(document);
+      if block_ix >= blocks.len() {
+        return false;
+      }
+      let block = blocks.remove(block_ix);
+      blocks.insert((*new_block_ix).min(blocks.len()), block);
+      rebuild_document_from_projection_structural_blocks(document, blocks);
+      true
+    },
+    SemanticEditCommand::ReplaceBlock { block, block_ix, after } => {
+      let row = block
+        .and_then(|block| document.ids.block_ids.iter().position(|id| *id == block))
+        .unwrap_or(*block_ix);
+      let mut blocks = projection_structural_blocks_from_document(document);
+      if row >= blocks.len() {
+        return false;
+      }
+      let block_id = block.unwrap_or(blocks[row].block_id);
+      blocks[row] = structural_block_for_input(block_id, blocks[row].paragraph_id, after.clone());
+      rebuild_document_from_projection_structural_blocks(document, blocks);
+      true
+    },
+    SemanticEditCommand::InsertTableRow { table, row_ix, row } => replay_table_edit(document, *table, |table| {
+      table
+        .rows
+        .insert((*row_ix).min(table.rows.len()), table_row_from_input_row(row));
+      true
+    }),
+    SemanticEditCommand::DeleteTableRow { table, row_ix } => replay_table_edit(document, *table, |table| {
+      if *row_ix >= table.rows.len() {
+        return false;
+      }
+      table.rows.remove(*row_ix);
+      true
+    }),
+    SemanticEditCommand::MoveTableRow {
+      table,
+      from_row_ix,
+      to_row_ix,
+    } => replay_table_edit(document, *table, |table| {
+      if *from_row_ix >= table.rows.len() || *to_row_ix >= table.rows.len() {
+        return false;
+      }
+      let row = table.rows.remove(*from_row_ix);
+      table.rows.insert(*to_row_ix, row);
+      true
+    }),
+    SemanticEditCommand::InsertTableColumn {
+      table,
+      column_ix,
+      width,
+      cells,
+    } => replay_table_edit(document, *table, |table| {
+      let column_ix = (*column_ix).min(table.column_widths.len());
+      table.column_widths.insert(column_ix, table_column_width_from_input_width(width));
+      for (row_ix, row) in table.rows.iter_mut().enumerate() {
+        row.cells.insert(
+          column_ix.min(row.cells.len()),
+          cells
+            .get(row_ix)
+            .map(table_cell_from_input_cell)
+            .unwrap_or_else(default_table_cell),
+        );
+      }
+      true
+    }),
+    SemanticEditCommand::DeleteTableColumn { table, column_ix } => replay_table_edit(document, *table, |table| {
+      if *column_ix >= table.column_widths.len() {
+        return false;
+      }
+      table.column_widths.remove(*column_ix);
+      for row in &mut table.rows {
+        if *column_ix < row.cells.len() {
+          row.cells.remove(*column_ix);
+        }
+      }
+      true
+    }),
+    SemanticEditCommand::MoveTableColumn {
+      table,
+      from_column_ix,
+      to_column_ix,
+    } => replay_table_edit(document, *table, |table| {
+      if *from_column_ix >= table.column_widths.len() || *to_column_ix >= table.column_widths.len() {
+        return false;
+      }
+      let width = table.column_widths.remove(*from_column_ix);
+      table.column_widths.insert(*to_column_ix, width);
+      for row in &mut table.rows {
+        if *from_column_ix < row.cells.len() && *to_column_ix < row.cells.len() {
+          let cell = row.cells.remove(*from_column_ix);
+          row.cells.insert(*to_column_ix, cell);
+        }
+      }
+      true
+    }),
+    SemanticEditCommand::ReplaceTableCell {
+      table,
+      row_ix,
+      cell_ix,
+      cell,
+    } => replay_table_edit(document, *table, |table| {
+      let Some(row) = table.rows.get_mut(*row_ix) else {
+        return false;
+      };
+      let Some(target) = row.cells.get_mut(*cell_ix) else {
+        return false;
+      };
+      *target = table_cell_from_input_cell(cell);
+      true
+    }),
+    SemanticEditCommand::SetTableCellSpan {
+      table,
+      row_ix,
+      cell_ix,
+      row_span,
+      column_span,
+    } => replay_table_edit(document, *table, |table| {
+      let Some(row) = table.rows.get_mut(*row_ix) else {
+        return false;
+      };
+      let Some(cell) = row.cells.get_mut(*cell_ix) else {
+        return false;
+      };
+      cell.row_span = (*row_span).max(1);
+      cell.col_span = (*column_span).max(1);
+      true
+    }),
+    SemanticEditCommand::SetTableColumnWidth { table, column_ix, width } => replay_table_edit(document, *table, |table| {
+      let Some(column) = table.column_widths.get_mut(*column_ix) else {
+        return false;
+      };
+      *column = table_column_width_from_input_width(width);
+      true
+    }),
+    SemanticEditCommand::ReplaceEquationSourceRange { equation, range, text } => {
+      let Some(block_ix) = document.ids.block_ids.iter().position(|id| id == equation) else {
+        return false;
+      };
+      let Some(Block::Equation(equation)) = Arc::make_mut(&mut document.blocks).get_mut(block_ix) else {
+        return false;
+      };
+      let mut source = equation.source.to_string();
+      if range.start > range.end || range.end > source.len() || !source.is_char_boundary(range.start) || !source.is_char_boundary(range.end) {
+        return false;
+      }
+      source.replace_range(range.clone(), text);
+      equation.source = source.into();
+      equation.version = equation.version.wrapping_add(1);
+      true
+    },
+    SemanticEditCommand::ReplaceImageAltText { image, text } => replay_image_edit(document, *image, |image| {
+      image.alt_text = text.clone().into();
+      true
+    }),
+    SemanticEditCommand::ReplaceImageCaption { image, caption } => replay_image_edit(document, *image, |image| {
+      image.caption = caption.as_ref().map(paragraph_from_input_paragraph);
+      true
+    }),
+    SemanticEditCommand::SetImageLayout { image, sizing, alignment } => replay_image_edit(document, *image, |image| {
+      image.sizing = image_sizing_from_input_sizing(sizing);
+      image.alignment = alignment_from_input_alignment(*alignment);
+      true
+    }),
+  }
+}
+
+fn valid_document_offset(document: &DocumentProjection, offset: DocumentOffset) -> bool {
+  let Some(paragraph) = document.paragraphs.get(offset.paragraph) else {
+    return false;
+  };
+  if offset.byte > paragraph_text_len(paragraph) {
+    return false;
+  }
+  document
+    .text
+    .is_char_boundary(paragraph_byte_range(document, offset.paragraph).start + offset.byte)
+}
+
+fn structural_block_for_input(block_id: BlockId, paragraph_id: Option<ParagraphId>, block: InputBlock) -> ProjectionStructuralBlock {
+  ProjectionStructuralBlock {
+    block_id,
+    paragraph_id: match &block {
+      InputBlock::Paragraph(_) => Some(paragraph_id.unwrap_or_else(new_paragraph_id)),
+      InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_) => None,
+    },
+    block,
+  }
+}
+
+fn replay_table_edit(document: &mut DocumentProjection, table_id: BlockId, edit: impl FnOnce(&mut TableBlock) -> bool) -> bool {
+  let Some(block_ix) = document.ids.block_ids.iter().position(|id| *id == table_id) else {
+    return false;
+  };
+  let Some(Block::Table(table)) = Arc::make_mut(&mut document.blocks).get_mut(block_ix) else {
+    return false;
+  };
+  if !edit(table) {
+    return false;
+  }
+  table.version = table.version.wrapping_add(1);
+  true
+}
+
+fn replay_image_edit(document: &mut DocumentProjection, image_id: BlockId, edit: impl FnOnce(&mut ImageBlock) -> bool) -> bool {
+  let Some(block_ix) = document.ids.block_ids.iter().position(|id| *id == image_id) else {
+    return false;
+  };
+  let Some(Block::Image(image)) = Arc::make_mut(&mut document.blocks).get_mut(block_ix) else {
+    return false;
+  };
+  if !edit(image) {
+    return false;
+  }
+  image.version = image.version.wrapping_add(1);
+  true
+}
+
+fn table_row_from_input_row(row: &InputTableRow) -> TableRow {
+  TableRow {
+    cells: row.cells.iter().map(table_cell_from_input_cell).collect(),
+  }
+}
+
+fn table_cell_from_input_cell(cell: &InputTableCell) -> TableCell {
+  TableCell {
+    blocks: cell
+      .blocks
+      .iter()
+      .map(|block| match block {
+        InputTableCellBlock::Paragraph(paragraph) => TableCellBlock::Paragraph(table_cell_paragraph_from_input_paragraph(paragraph)),
+        InputTableCellBlock::Table(table) => TableCellBlock::Table(table_from_input_table(table)),
+      })
+      .collect(),
+    row_span: cell.row_span,
+    col_span: cell.col_span,
+  }
+}
+
+fn table_column_width_from_input_width(width: &InputTableColumnWidth) -> TableColumnWidth {
+  match *width {
+    InputTableColumnWidth::Auto => TableColumnWidth::Auto,
+    InputTableColumnWidth::FixedPx(px) => TableColumnWidth::FixedPx(px),
+    InputTableColumnWidth::Fraction(fraction) => TableColumnWidth::Fraction(fraction),
+  }
+}
+
+fn image_sizing_from_input_sizing(sizing: &InputImageSizing) -> ImageSizing {
+  match *sizing {
+    InputImageSizing::Intrinsic => ImageSizing::Intrinsic,
+    InputImageSizing::FitWidth => ImageSizing::FitWidth,
+    InputImageSizing::Fixed { width_px, height_px } => ImageSizing::Fixed { width_px, height_px },
   }
 }
 

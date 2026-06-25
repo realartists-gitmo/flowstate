@@ -703,6 +703,79 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
 }
 
 #[gpui::test]
+fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases_it(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("a")],
+    }],
+  );
+  document.frontier = vec![1, 2, 3];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 1 },
+        DocumentOffset { paragraph: 0, byte: 1 },
+        cx,
+      );
+      editor.insert_paragraph_break_command(cx);
+      let flushed = editor.take_pending_runtime_edits();
+      assert_eq!(flushed.len(), 1);
+      assert!(matches!(
+        flushed[0].semantic_commands.as_slice(),
+        [SemanticEditCommand::SplitParagraph { .. }]
+      ));
+      let acknowledged_selection = flushed[0].selection_after.clone();
+      editor.begin_runtime_edit();
+
+      assert!(editor.insert_single_grapheme_fast_path("b", cx));
+      assert!(editor.insert_single_grapheme_fast_path("c", cx));
+      assert!(editor.insert_single_grapheme_fast_path("d", cx));
+      assert_eq!(paragraph_text(editor.document(), 0), "a");
+      assert_eq!(paragraph_text(editor.document(), 1), "bcd");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 1, byte: 3 });
+
+      let mut canonical = document_from_input(
+        DocumentTheme::default(),
+        vec![
+          InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![plain("a")],
+          },
+          InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: Vec::new(),
+          },
+        ],
+      );
+      canonical.frontier = vec![4, 5, 6];
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection, cx);
+
+      assert_eq!(paragraph_text(editor.document(), 0), "a");
+      assert_eq!(paragraph_text(editor.document(), 1), "bcd");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 1, byte: 3 });
+      assert!(!editor.runtime_edit_in_flight());
+      let queued = editor.take_pending_runtime_edits();
+      assert_eq!(queued.len(), 3);
+      for edit in &queued {
+        assert_eq!(edit.base_frontier, vec![4, 5, 6]);
+      }
+      for (edit, (expected_text, expected_byte)) in queued.iter().zip([("b", 0), ("c", 1), ("d", 2)]) {
+        let [SemanticEditCommand::InsertText { at, text, .. }] = edit.semantic_commands.as_slice() else {
+          panic!("expected one queued insert command");
+        };
+        assert_eq!(*at, DocumentOffset { paragraph: 1, byte: expected_byte });
+        assert_eq!(text, expected_text);
+      }
+    });
+  });
+}
+
+#[gpui::test]
 fn text_input_floors_stale_interior_utf8_caret_to_a_character_boundary(cx: &mut gpui::TestAppContext) {
   let document = document_from_input_blocks(
     DocumentTheme::default(),
