@@ -270,6 +270,6 @@ pub fn constrain_index(index: usize, len: usize) -> usize {
 }
 
 #[hotpath::measure]
-fn is_false(value: &bool) -> bool {
+const fn is_false(value: &bool) -> bool {
   !*value
 }

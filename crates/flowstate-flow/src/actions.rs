@@ -188,7 +188,7 @@ pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, plac
 }
 
 #[hotpath::measure]
-pub fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) -> Action {
+pub const fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) -> Action {
   Action::Add {
     parent,
     id,
@@ -207,7 +207,7 @@ pub fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) 
 
 #[hotpath::measure]
 #[must_use]
-pub fn new_update_action(id: NodeId, new_value: NodeValue) -> Action {
+pub const fn new_update_action(id: NodeId, new_value: NodeValue) -> Action {
   Action::Update { id, new_value }
 }
 
