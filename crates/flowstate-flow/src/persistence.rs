@@ -1,16 +1,18 @@
-use std::fs;
-use std::path::Path;
+use std::{fs, path::Path};
 
 use anyhow::{Context as _, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::actions::{Action, new_box_action};
 use crate::document::{BoxNode, Flow, FlowDocument, NodeId, NodeValue, Nodes, ROOT_ID, new_box_id, new_flow_id};
 
 pub const CURRENT_SAVE_VERSION: u32 = 1;
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+const MAX_FL0_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SaveableFlowDocument {
   pub nodes: Nodes,
   pub version: u32,
@@ -45,6 +47,15 @@ pub fn load_nodes(data: Value) -> Result<Nodes> {
 #[hotpath::measure]
 pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
   let path = path.as_ref();
+  let metadata = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+  if metadata.len() > MAX_FL0_BYTES {
+    bail!(
+      "refusing to read {}: file too large ({} bytes > {} bytes)",
+      path.display(),
+      metadata.len(),
+      MAX_FL0_BYTES
+    );
+  }
   let text = fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
   let value: Value = serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))?;
   let nodes = load_nodes(value)?;
@@ -53,23 +64,24 @@ pub fn load_flow_document(path: impl AsRef<Path>) -> Result<FlowDocument> {
 
 #[hotpath::measure]
 pub fn load_flow_document_or_new(path: impl AsRef<Path>) -> FlowDocument {
-  // A missing file is the normal "new document" path, so it falls back to an empty
-  // document silently. An existing-but-unreadable file (corrupt JSON, unsupported
-  // save version, or other I/O failure) is logged via `tracing::warn!` before the
-  // same fallback, so the failure is observable rather than silently swallowed.
-  //
-  // DATA-LOSS CONCERN (mitigated, not eliminated): the corrupt file is still not
-  // auto-recovered, so the next `save_flow_document` can overwrite it; the warning
-  // at least makes that potential loss visible. Fully surfacing the error would need
-  // a `Result` signature that ripples to every caller (`flow::editor::load_or_new`,
-  // the workspace document loaders, and the `lib.rs` re-export), so the infallible
-  // signature is kept deliberately.
   let path = path.as_ref();
   match load_flow_document(path) {
     Ok(document) => document,
     Err(error) => {
       if path.exists() {
-        tracing::warn!(path = %path.display(), error = %format_args!("{error:#}"), "failed to load existing .fl0 document; using a new empty document");
+        let quarantine = path.with_file_name(format!(
+          "{}.corrupt.{}",
+          path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("flowstate.fl0"),
+          Uuid::new_v4()
+        ));
+        if let Err(rename_error) = fs::rename(path, &quarantine) {
+          tracing::warn!(path = %path.display(), quarantine = %quarantine.display(), error = %format_args!("{error:#}"), rename_error = %rename_error, "failed to quarantine existing .fl0 document; using a new empty document");
+        } else {
+          tracing::warn!(path = %path.display(), quarantine = %quarantine.display(), error = %format_args!("{error:#}"), "failed to load existing .fl0 document; quarantined it and using a new empty document");
+        }
       }
       FlowDocument::new()
     },
@@ -86,7 +98,17 @@ pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> Re
     fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
   }
   let text = get_json(document)?;
-  fs::write(path, text).with_context(|| format!("failed to write {}", path.display()))
+  let temp_path = path.with_file_name(format!(
+    ".{}.{}.tmp",
+    path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or("flowstate"),
+    Uuid::new_v4()
+  ));
+  fs::write(&temp_path, text).with_context(|| format!("failed to write temporary {}", temp_path.display()))?;
+  fs::rename(&temp_path, path).with_context(|| format!("failed to atomically replace {} with {}", path.display(), temp_path.display()))?;
+  Ok(())
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -117,52 +139,76 @@ struct OldBox {
 
 #[hotpath::measure]
 fn upgrade_0_1(saved: Value) -> Result<SaveableFlowDocument> {
+  #[derive(Debug)]
+  enum LegacyNode {
+    Flow(OldFlow),
+    Box(OldBox),
+  }
+
   let old_flows: Vec<OldFlow> = serde_json::from_value(saved).context("invalid legacy debate-flow document")?;
   let mut document = FlowDocument::new();
-  for (index, old_flow) in old_flows.into_iter().enumerate() {
-    let flow_id = new_flow_id();
-    let add_flow = Action::Add {
-      parent: ROOT_ID.to_owned(),
-      id: flow_id.clone(),
-      index,
-      value: NodeValue::Flow(Flow {
-        content: old_flow.content,
-        invert: old_flow.invert,
-        columns: old_flow.columns,
-      }),
-    };
-    document.apply_action(add_flow);
-    for (box_index, old_box) in old_flow.children.into_iter().enumerate() {
-      upgrade_0_1_add_boxes_rec(&mut document, flow_id.clone(), flow_id.clone(), old_box, box_index);
+  let mut pending = Vec::new();
+  for (index, old_flow) in old_flows.into_iter().enumerate().rev() {
+    pending.push((ROOT_ID.to_owned(), index, LegacyNode::Flow(old_flow)));
+  }
+
+  let mut processed_nodes = 0usize;
+  const MAX_LEGACY_NODES: usize = 100_000;
+  while let Some((parent_id, index, node)) = pending.pop() {
+    processed_nodes += 1;
+    if processed_nodes > MAX_LEGACY_NODES {
+      bail!("legacy .fl0 document is too deeply nested or large to upgrade safely");
+    }
+
+    match node {
+      LegacyNode::Flow(old_flow) => {
+        let flow_id = new_flow_id();
+        let add_flow = Action::Add {
+          parent: parent_id,
+          id: flow_id.clone(),
+          index,
+          value: NodeValue::Flow(Flow {
+            content: old_flow.content,
+            invert: old_flow.invert,
+            columns: old_flow.columns,
+          }),
+        };
+        document.apply_action(add_flow);
+        for (box_index, child) in old_flow.children.into_iter().enumerate().rev() {
+          pending.push((flow_id.clone(), box_index, LegacyNode::Box(child)));
+        }
+      },
+      LegacyNode::Box(old_box) => {
+        let id = new_box_id();
+        let flow_id = document
+          .parent_flow_id(&parent_id)
+          .unwrap_or_else(|| parent_id.clone());
+        let add = Action::Add {
+          parent: parent_id,
+          id: id.clone(),
+          index,
+          value: NodeValue::Box(BoxNode {
+            content: old_box.content,
+            flow_id: flow_id.clone(),
+            placeholder: old_box.placeholder,
+            empty: old_box.empty,
+            crossed: old_box.crossed,
+            bold: false,
+            is_extension: false,
+          }),
+        };
+        document.apply_action(add);
+        for (child_index, child) in old_box.children.into_iter().enumerate().rev() {
+          pending.push((id.clone(), child_index, LegacyNode::Box(child)));
+        }
+      },
     }
   }
+
   Ok(SaveableFlowDocument {
     nodes: document.nodes,
     version: CURRENT_SAVE_VERSION,
   })
-}
-
-#[hotpath::measure]
-fn upgrade_0_1_add_boxes_rec(document: &mut FlowDocument, flow_id: NodeId, parent_id: NodeId, old_box: OldBox, index: usize) {
-  let id = new_box_id();
-  let add = Action::Add {
-    parent: parent_id,
-    id: id.clone(),
-    index,
-    value: NodeValue::Box(BoxNode {
-      content: old_box.content,
-      flow_id: flow_id.clone(),
-      placeholder: old_box.placeholder,
-      empty: old_box.empty,
-      crossed: old_box.crossed,
-      bold: false,
-      is_extension: false,
-    }),
-  };
-  document.apply_action(add);
-  for (child_index, child) in old_box.children.into_iter().enumerate() {
-    upgrade_0_1_add_boxes_rec(document, flow_id.clone(), id.clone(), child, child_index);
-  }
 }
 
 #[allow(dead_code, reason = "Legacy save migration helper is retained for older persisted flow documents.")]
@@ -174,6 +220,49 @@ fn _new_empty_box(parent_id: NodeId, flow_id: NodeId, index: usize) -> Action {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::{path::PathBuf, time::SystemTime};
+
+  fn test_dir(name: &str) -> PathBuf {
+    let unique = format!(
+      "{name}-{}-{}",
+      std::process::id(),
+      SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    );
+    let path = std::env::temp_dir().join(unique);
+    fs::create_dir_all(&path).unwrap();
+    path
+  }
+
+  #[test]
+  fn rejects_oversized_documents_before_reading() {
+    let dir = test_dir("flowstate-fl0-size");
+    let path = dir.join("oversized.fl0");
+    fs::write(&path, vec![b'{'; (MAX_FL0_BYTES as usize) + 1]).unwrap();
+
+    let error = load_flow_document(&path).unwrap_err();
+    assert!(error.to_string().contains("file too large"));
+  }
+
+  #[test]
+  fn quarantines_bad_existing_document_on_fallback() {
+    let dir = test_dir("flowstate-fl0-corrupt");
+    let path = dir.join("broken.fl0");
+    fs::write(&path, b"{not json").unwrap();
+
+    let document = load_flow_document_or_new(&path);
+    assert!(document.flow_ids().is_empty());
+    assert!(!path.exists());
+    assert!(fs::read_dir(&dir).unwrap().any(|entry| {
+      entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .starts_with("broken.fl0.corrupt.")
+    }));
+  }
 
   #[test]
   #[hotpath::measure]

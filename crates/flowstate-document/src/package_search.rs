@@ -316,10 +316,8 @@ fn normalized_search_text(text: &str) -> String {
 }
 
 fn searchable_flow_text(text: &LoroText) -> String {
-  text
-    .to_string()
-    .trim_start_matches('\n')
-    .replace(OBJECT_REPLACEMENT, " ")
+  let text = text.to_string();
+  text.strip_prefix('\n').unwrap_or(&text).replace(OBJECT_REPLACEMENT, " ")
 }
 
 fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {
@@ -425,6 +423,16 @@ mod tests {
     assert_eq!(ranges.len(), 2);
     assert_eq!(ranges[0].start..ranges[0].end, 1..7);
     assert_eq!(ranges[1].start..ranges[1].end, 8..13);
+    Ok(())
+  }
+
+  #[test]
+  fn searchable_flow_text_preserves_one_leading_sentinel_newline() -> io::Result<()> {
+    let doc = new_loro_document("text").map_err(loro_test_error)?;
+    let body = crate::loro_schema::body_text(&doc);
+    body.insert(1, "\n\nalpha").map_err(loro_test_error)?;
+
+    assert_eq!(searchable_flow_text(&body), "\nalpha");
     Ok(())
   }
 

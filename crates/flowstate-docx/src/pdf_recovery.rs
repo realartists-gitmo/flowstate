@@ -1,7 +1,15 @@
-use std::{fs, io, path::Path};
+use std::{
+  fs,
+  io::{self, Cursor, Read},
+  path::{Path, PathBuf},
+  sync::atomic::{AtomicU64, Ordering},
+  time::{SystemTime, UNIX_EPOCH},
+};
 
 use flowstate_document::DocumentPackage;
 use lopdf::{Dictionary, Document as PdfDocument, Object, ObjectId, Stream, dictionary};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 const PAYLOAD_NAME: &str = "flowstate-loro-source.db8.zst";
 const PAYLOAD_DESCRIPTION: &str = "Flowstate Loro-native DB8 source package";
@@ -9,6 +17,8 @@ const PAYLOAD_MIME_TYPE: &str = "application/x-flowstate-loro-db8+zstd";
 const PAYLOAD_MAGIC: &[u8; 8] = b"FSL8ZST\0";
 const PAYLOAD_VERSION: u32 = 1;
 const ZSTD_LEVEL: i32 = 3;
+const MAX_PAYLOAD_COMPRESSED_LEN: usize = 64 * 1024 * 1024;
+const MAX_PAYLOAD_UNCOMPRESSED_LEN: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FlowstatePdfPayloadInfo {
@@ -40,16 +50,22 @@ pub fn embed_db8_bytes_in_pdf(
     fs::create_dir_all(parent)?;
   }
 
+  let temp_output_pdf = temp_sibling_path(output_pdf, "pdf");
   let payload = encode_payload(db8_bytes)?;
   let info = FlowstatePdfPayloadInfo {
     original_len: db8_bytes.len() as u64,
     compressed_len: payload.len() as u64,
   };
 
-  let mut pdf = PdfDocument::load(input_pdf).map_err(pdf_error)?;
-  attach_payload(&mut pdf, payload, db8_bytes.len() as u64)?;
-  pdf.save(output_pdf)?;
-  Ok(info)
+  let result = (|| {
+    let mut pdf = PdfDocument::load(input_pdf).map_err(pdf_error)?;
+    attach_payload(&mut pdf, payload, db8_bytes.len() as u64)?;
+    pdf.save(&temp_output_pdf)?;
+    fs::rename(&temp_output_pdf, output_pdf)?;
+    Ok(info)
+  })();
+  let _ = fs::remove_file(&temp_output_pdf);
+  result
 }
 
 #[hotpath::measure]
@@ -107,8 +123,29 @@ fn decode_payload(payload: &[u8]) -> io::Result<Vec<u8>> {
       .try_into()
       .expect("length slice has fixed length"),
   );
-  let decompressed = zstd::bulk::decompress(&payload[header_len..], original_len as usize).map_err(io::Error::other)?;
-  if decompressed.len() as u64 != original_len {
+  let compressed = &payload[header_len..];
+  if compressed.len() > MAX_PAYLOAD_COMPRESSED_LEN {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "Flowstate PDF payload exceeds the compressed size limit",
+    ));
+  }
+  let original_len = usize::try_from(original_len)
+    .ok()
+    .filter(|len| *len <= MAX_PAYLOAD_UNCOMPRESSED_LEN)
+    .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate PDF payload exceeds the uncompressed size limit"))?;
+
+  let mut decompressed = vec![0; original_len];
+  let mut decoder = zstd::stream::read::Decoder::new(Cursor::new(compressed)).map_err(io::Error::other)?;
+  decoder.read_exact(&mut decompressed).map_err(|error| {
+    if error.kind() == io::ErrorKind::UnexpectedEof {
+      io::Error::new(io::ErrorKind::InvalidData, "Flowstate PDF payload length mismatch")
+    } else {
+      error
+    }
+  })?;
+  let mut extra = [0u8; 1];
+  if decoder.read(&mut extra).map_err(io::Error::other)? != 0 {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate PDF payload length mismatch"));
   }
   DocumentPackage::from_bytes(&decompressed)?;
@@ -270,4 +307,58 @@ fn object_string_equals(object: &Object, expected: &[u8]) -> bool {
 #[hotpath::measure]
 fn pdf_error(error: lopdf::Error) -> io::Error {
   io::Error::other(error)
+}
+
+#[hotpath::measure]
+fn temp_sibling_path(target: &Path, extension: &str) -> PathBuf {
+  let dir = target
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+    .unwrap_or_else(|| Path::new("."));
+  let stem = target
+    .file_stem()
+    .and_then(|stem| stem.to_str())
+    .unwrap_or("flowstate-export");
+  let nanos = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .map_or(0, |duration| duration.as_nanos());
+  let pid = std::process::id();
+  let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+  dir.join(format!(".{stem}.{pid}.{nanos}.{sequence}.tmp.{extension}"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn decode_payload_rejects_length_mismatch() {
+    let doc = flowstate_document::loro_schema::new_loro_document("payload").expect("new document");
+    let bytes = DocumentPackage::from_loro_snapshot(&doc, "payload")
+      .expect("package")
+      .to_bytes()
+      .expect("bytes");
+    let mut payload = encode_payload(&bytes).expect("payload");
+    let len_offset = PAYLOAD_MAGIC.len() + 4;
+    let original_len = u64::from_be_bytes(
+      payload[len_offset..len_offset + 8]
+        .try_into()
+        .expect("fixed length"),
+    );
+    payload[len_offset..len_offset + 8].copy_from_slice(&(original_len - 1).to_be_bytes());
+
+    let error = decode_payload(&payload).expect_err("mismatch must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+  }
+
+  #[test]
+  fn decode_payload_rejects_oversized_uncompressed_length() {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(PAYLOAD_MAGIC);
+    payload.extend_from_slice(&PAYLOAD_VERSION.to_be_bytes());
+    payload.extend_from_slice(&((MAX_PAYLOAD_UNCOMPRESSED_LEN as u64) + 1).to_be_bytes());
+
+    let error = decode_payload(&payload).expect_err("oversized payload must be rejected");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+  }
 }

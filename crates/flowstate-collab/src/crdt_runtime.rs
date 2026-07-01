@@ -4278,7 +4278,7 @@ fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, b
   if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
     paragraph.insert("start_cursor", cursor.encode())?;
   }
-  if let Some(cursor) = body.get_cursor(boundary, Side::Right) {
+  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
     paragraph.insert("boundary_cursor", cursor.encode())?;
   }
   let paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
@@ -4365,6 +4365,25 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
   let mut pruned = ParagraphMetadataPrune::default();
 
+  let mut block_boundary_by_paragraph = FxHashMap::<String, usize>::default();
+  for key in map_keys(&blocks) {
+    let Some(block) = child_map(&blocks, &key) else {
+      continue;
+    };
+    if map_string_opt(&block, "kind").as_deref() != Some("paragraph") {
+      continue;
+    }
+    let Some(paragraph_id) = map_string_opt(&block, "paragraph_id") else {
+      continue;
+    };
+    let Some(boundary) = live_cursor_pos(doc, &body_snapshot, &block, "anchor_cursor") else {
+      continue;
+    };
+    block_boundary_by_paragraph
+      .entry(paragraph_id)
+      .or_insert(boundary);
+  }
+
   let mut paragraph_by_boundary = BTreeMap::<usize, String>::new();
   let mut paragraphs_to_delete = Vec::new();
   for key in map_keys(&paragraphs) {
@@ -4373,9 +4392,14 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
       pruned.stale_paragraphs += 1;
       continue;
     };
-    let Some(boundary) = live_cursor_pos(doc, &body_snapshot, &paragraph, "boundary_cursor")
+    let boundary = live_cursor_pos(doc, &body_snapshot, &paragraph, "boundary_cursor")
       .or_else(|| live_cursor_pos(doc, &body_snapshot, &paragraph, "start_cursor"))
-    else {
+      .or_else(|| {
+        let boundary = block_boundary_by_paragraph.get(&key).copied()?;
+        repair_paragraph_boundary_cursors(body, &paragraph, boundary).ok()?;
+        Some(boundary)
+      });
+    let Some(boundary) = boundary else {
       paragraphs_to_delete.push(key);
       pruned.stale_paragraphs += 1;
       continue;
@@ -4427,6 +4451,16 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
   }
 
   Ok(pruned)
+}
+
+fn repair_paragraph_boundary_cursors(body: &loro::LoroText, paragraph: &LoroMap, boundary: usize) -> loro::LoroResult<()> {
+  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
+    paragraph.insert("boundary_cursor", cursor.encode())?;
+  }
+  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
+    paragraph.insert("start_cursor", cursor.encode())?;
+  }
+  Ok(())
 }
 
 fn prefer_paragraph_metadata_key(boundary: usize, existing: &str, candidate: &str) -> bool {
@@ -5245,6 +5279,79 @@ mod tests {
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhelloworld");
     assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0]);
     assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0]);
+    Ok(())
+  }
+
+  #[test]
+  fn insert_into_empty_paragraph_before_text_preserves_following_paragraph_identity() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "before".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    runtime.command(SemanticCommand::SplitParagraph {
+      unicode_index: 7,
+      inherited_style: flowstate_document::ParagraphStyle::Normal,
+    })?;
+    runtime.command(SemanticCommand::SplitParagraph {
+      unicode_index: 8,
+      inherited_style: flowstate_document::ParagraphStyle::Normal,
+    })?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 9,
+      text: "after".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    let before_insert = runtime.projection_snapshot()?;
+    assert_eq!(before_insert.paragraphs.len(), 3);
+    assert_eq!(flowstate_document::paragraph_text(&before_insert, 0), "before");
+    assert_eq!(flowstate_document::paragraph_text(&before_insert, 1), "");
+    assert_eq!(flowstate_document::paragraph_text(&before_insert, 2), "after");
+    let following_id = before_insert.ids.paragraph_ids[2];
+    {
+      let body = body_text(runtime.doc());
+      let snapshot = body.to_string();
+      let root = runtime.doc().get_map(ROOT);
+      let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+      let mut rewrote_following_boundary_cursor = false;
+      for key in map_keys(&paragraphs) {
+        let Some(paragraph) = child_map(&paragraphs, &key) else {
+          continue;
+        };
+        if live_cursor_pos(runtime.doc(), &snapshot, &paragraph, "boundary_cursor") == Some(8) {
+          if let Some(cursor) = body.get_cursor(8, Side::Right) {
+            paragraph.insert("boundary_cursor", cursor.encode())?;
+            rewrote_following_boundary_cursor = true;
+          }
+        }
+      }
+      assert!(rewrote_following_boundary_cursor);
+      runtime.doc().commit();
+    }
+
+    let events = runtime.apply_editor_semantic_command(
+      &before_insert,
+      &EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: 1, byte: 0 },
+        text: "X".to_string(),
+        styles: RunStyles::default(),
+      },
+    )?;
+
+    assert!(
+      events
+        .iter()
+        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
+    );
+    assert_eq!(body_text(runtime.doc()).to_string(), "\nbefore\nX\nafter");
+    assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0, 7, 9]);
+    assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0, 7, 9]);
+    let after_insert = runtime.projection_snapshot()?;
+    assert_eq!(after_insert.ids.paragraph_ids[2], following_id);
+    assert_eq!(flowstate_document::paragraph_text(&after_insert, 1), "X");
+    assert_eq!(flowstate_document::paragraph_text(&after_insert, 2), "after");
     Ok(())
   }
 

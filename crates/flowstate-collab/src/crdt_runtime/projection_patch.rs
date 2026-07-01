@@ -22,6 +22,9 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
   }
 
   if let Some((from, to)) = single_block_move(before_ids, after_ids) {
+    if !retained_blocks_unchanged(before, after) {
+      return None;
+    }
     patches.push(ProjectionPatch::MoveBlock { from, to });
     return Some(patches);
   }
@@ -41,6 +44,9 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
       row: prefix,
       blocks: structural_blocks(after, prefix..after_end),
     });
+  }
+  if !retained_edge_blocks_unchanged(before, after, prefix, suffix) {
+    return None;
   }
   Some(patches)
 }
@@ -201,18 +207,94 @@ fn single_block_move(before: &[flowstate_document::BlockId], after: &[flowstate_
   if before.len() != after.len() || before.len() < 2 {
     return None;
   }
-  for from in 0..before.len() {
-    let mut candidate = before.to_vec();
-    let id = candidate.remove(from);
-    for to in 0..=candidate.len() {
-      let mut moved = candidate.clone();
-      moved.insert(to, id);
-      if moved == after {
-        return Some((from, to));
+
+  let mut before_positions = FxHashMap::default();
+  for (index, id) in before.iter().copied().enumerate() {
+    if before_positions.insert(id, index).is_some() {
+      return None;
+    }
+  }
+
+  let mut moved = None;
+  for (after_index, id) in after.iter().copied().enumerate() {
+    let before_index = *before_positions.get(&id)?;
+    if before_index != after_index {
+      match moved {
+        Some((existing_id, _, _)) if existing_id != id => return None,
+        Some(_) => {},
+        None => moved = Some((id, before_index, after_index)),
       }
     }
   }
-  None
+
+  let (moved_id, from, _) = moved?;
+  let mut candidate = before.to_vec();
+  candidate.remove(from);
+  let to = after.iter().position(|id| *id == moved_id)?;
+  candidate.insert(to, moved_id);
+  (candidate == after).then_some((from, to))
+}
+
+fn retained_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjection) -> bool {
+  let mut before_blocks = FxHashMap::default();
+  for row in 0..before.ids.block_ids.len() {
+    let Some(id) = before.ids.block_ids.get(row).copied() else {
+      return false;
+    };
+    let Some(block) = input_block_at(before, row) else {
+      return false;
+    };
+    before_blocks.insert(id, block);
+  }
+  for row in 0..after.ids.block_ids.len() {
+    let Some(id) = after.ids.block_ids.get(row).copied() else {
+      return false;
+    };
+    let Some(before_block) = before_blocks.get(&id) else {
+      return false;
+    };
+    let Some(after_block) = input_block_at(after, row) else {
+      return false;
+    };
+    if before_block != &after_block {
+      return false;
+    }
+  }
+  true
+}
+
+fn retained_edge_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjection, prefix: usize, suffix: usize) -> bool {
+  let before_len = before.ids.block_ids.len();
+  let after_len = after.ids.block_ids.len();
+  for row in 0..prefix {
+    if input_block_at(before, row) != input_block_at(after, row) {
+      return false;
+    }
+  }
+  for offset in 0..suffix {
+    let before_row = before_len.saturating_sub(suffix) + offset;
+    let after_row = after_len.saturating_sub(suffix) + offset;
+    if input_block_at(before, before_row) != input_block_at(after, after_row) {
+      return false;
+    }
+  }
+  true
+}
+
+fn input_block_at(document: &DocumentProjection, row: usize) -> Option<InputBlock> {
+  let block = document.blocks.get(row)?;
+  match block {
+    Block::Paragraph(paragraph) => {
+      let paragraph_ix = document
+        .blocks
+        .iter()
+        .take(row)
+        .filter(|block| matches!(block, Block::Paragraph(_)))
+        .count();
+      Some(InputBlock::Paragraph(input_paragraph(document, paragraph_ix, paragraph)))
+    },
+    _ => Some(input_block_from_block(block)),
+  }
 }
 
 fn common_id_prefix(left: &[flowstate_document::BlockId], right: &[flowstate_document::BlockId]) -> usize {

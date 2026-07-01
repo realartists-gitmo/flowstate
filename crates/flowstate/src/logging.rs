@@ -1,6 +1,7 @@
 use std::{
-  env,
+  env, fs,
   path::{Path, PathBuf},
+  time::{Duration, SystemTime},
 };
 
 use anyhow::{Context as _, Result};
@@ -28,10 +29,10 @@ impl LoggingGuard {
     &self.directory
   }
 }
-
 pub fn init() -> Result<LoggingGuard> {
   let directory = log_directory();
-  std::fs::create_dir_all(&directory).with_context(|| format!("creating log directory {} failed", directory.display()))?;
+  fs::create_dir_all(&directory).with_context(|| format!("creating log directory {} failed", directory.display()))?;
+  prune_log_files(&directory)?;
   let file_appender = tracing_appender::rolling::daily(&directory, "flowstate.log");
   let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
@@ -127,4 +128,61 @@ fn log_directory() -> PathBuf {
   env::var_os("FLOWSTATE_LOG_DIR")
     .map(PathBuf::from)
     .unwrap_or_else(|| flowstate_data_dir().join("logs"))
+}
+const MAX_LOG_FILES: usize = 14;
+const MAX_LOG_AGE: Duration = Duration::from_hours(336);
+
+fn prune_log_files(directory: &Path) -> Result<()> {
+  let mut candidates = Vec::new();
+  let now = SystemTime::now();
+  for entry in fs::read_dir(directory).with_context(|| format!("reading log directory {} failed", directory.display()))? {
+    let entry = entry?;
+    let path = entry.path();
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+      continue;
+    };
+    if !name.starts_with("flowstate.log.") {
+      continue;
+    }
+    let metadata = entry.metadata()?;
+    let modified = metadata.modified().ok();
+    let age = modified.and_then(|modified| now.duration_since(modified).ok());
+    if age.is_some_and(|age| age > MAX_LOG_AGE) {
+      let _ = fs::remove_file(&path);
+      continue;
+    }
+    candidates.push((path, modified.unwrap_or(SystemTime::UNIX_EPOCH)));
+  }
+
+  if candidates.len() > MAX_LOG_FILES {
+    candidates.sort_by_key(|(_, modified)| *modified);
+    for (path, _) in candidates.drain(..candidates.len() - MAX_LOG_FILES) {
+      let _ = fs::remove_file(path);
+    }
+  }
+  Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn prunes_excess_log_files() {
+    let dir = tempfile::tempdir().unwrap();
+    for index in 0..20 {
+      let path = dir.path().join(format!("flowstate.log.{index}"));
+      fs::write(&path, index.to_string()).unwrap();
+    }
+
+    prune_log_files(dir.path()).unwrap();
+
+    let retained = fs::read_dir(dir.path())
+      .unwrap()
+      .filter_map(|entry| entry.ok())
+      .map(|entry| entry.file_name())
+      .filter(|name| name.to_string_lossy().starts_with("flowstate.log."))
+      .count();
+    assert!(retained <= MAX_LOG_FILES);
+  }
 }

@@ -156,10 +156,12 @@ async fn update_message(direct_state: &DirectServeState, session: SessionId, byt
     return Ok(inline);
   }
 
-  let len = bytes.len() as u64;
-  let blob = direct_state.insert_blob(session, bytes).await;
+  let blob = direct_state.insert_blob(session, bytes).await?;
   tracing::debug!(%session, ?blob, update_bytes, "collaboration update exceeded gossip limit; publishing blob announcement");
-  Ok(GossipMsg::UpdateAvailable { blob, len })
+  Ok(GossipMsg::UpdateAvailable {
+    blob,
+    len: update_bytes as u64,
+  })
 }
 
 async fn handle_event(event: Event, session: SessionId, local_peer: EndpointId, evt_tx: &Sender<NetEvent>) -> Result<()> {

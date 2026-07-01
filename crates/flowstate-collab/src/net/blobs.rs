@@ -35,14 +35,16 @@ impl BlobOutbox {
     }
   }
 
-  #[must_use]
-  pub fn insert(&mut self, bytes: Vec<u8>) -> BlobId {
+  pub fn insert(&mut self, bytes: Vec<u8>) -> Option<BlobId> {
     let id = BlobId::new();
-    self.insert_with_id(id, bytes);
-    id
+    self.insert_with_id(id, bytes).then_some(id)
   }
 
-  pub fn insert_with_id(&mut self, id: BlobId, bytes: Vec<u8>) {
+  pub fn insert_with_id(&mut self, id: BlobId, bytes: Vec<u8>) -> bool {
+    if bytes.len() > self.max_bytes {
+      return false;
+    }
+
     if let Some((_, existing)) = self
       .entries
       .iter_mut()
@@ -54,12 +56,13 @@ impl BlobOutbox {
         .saturating_add(bytes.len());
       *existing = bytes;
       self.trim();
-      return;
+      return true;
     }
 
     self.total_bytes = self.total_bytes.saturating_add(bytes.len());
     self.entries.push_back((id, bytes));
     self.trim();
+    true
   }
 
   #[must_use]
@@ -100,20 +103,15 @@ impl BlobOutbox {
 mod tests {
   use std::num::NonZeroUsize;
 
-  use crate::BlobId;
-
-  use super::BlobOutbox;
-
+  use crate::{BlobId, net::blobs::BlobOutbox};
   #[test]
-  fn insert_with_id_replaces_existing_payload_and_total() {
-    let mut outbox = BlobOutbox::new(NonZeroUsize::new(4).expect("non-zero max blobs"), 1024);
+  fn insert_with_id_rejects_oversized_payloads_before_insertion() {
+    let mut outbox = BlobOutbox::new(NonZeroUsize::new(4).expect("non-zero max blobs"), 2);
     let id = BlobId(7);
 
-    outbox.insert_with_id(id, vec![1, 2, 3]);
-    outbox.insert_with_id(id, vec![4, 5]);
-
-    assert_eq!(outbox.len(), 1);
-    assert_eq!(outbox.total_bytes(), 2);
-    assert_eq!(outbox.get(id), Some([4, 5].as_slice()));
+    assert!(!outbox.insert_with_id(id, vec![1, 2, 3]));
+    assert!(outbox.is_empty());
+    assert_eq!(outbox.total_bytes(), 0);
+    assert_eq!(outbox.get(id), None);
   }
 }

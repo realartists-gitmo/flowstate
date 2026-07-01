@@ -1,12 +1,15 @@
 use std::{
   fs, io,
   path::{Path, PathBuf},
+  sync::atomic::{AtomicU64, Ordering},
   time::{SystemTime, UNIX_EPOCH},
 };
 
 use flowstate_document::{DocumentProjection, read_db8};
 
 use crate::{embed_db8_bytes_in_pdf, write_docx};
+
+static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[hotpath::measure]
 pub fn convert_docx_to_pdf(input: impl AsRef<Path>, output: impl AsRef<Path>) -> io::Result<()> {
@@ -19,7 +22,15 @@ pub fn convert_docx_to_pdf(input: impl AsRef<Path>, output: impl AsRef<Path>) ->
     fs::create_dir_all(parent)?;
   }
 
-  docxide_pdf::convert_docx_to_pdf(input, output).map_err(|error| io::Error::other(format!("failed to convert DOCX to PDF: {error}")))
+  let temp_output = temp_sibling_path(output, "pdf");
+  let result = (|| {
+    docxide_pdf::convert_docx_to_pdf(input, &temp_output)
+      .map_err(|error| io::Error::other(format!("failed to convert DOCX to PDF: {error}")))?;
+    fs::rename(&temp_output, output)?;
+    Ok(())
+  })();
+  let _ = fs::remove_file(&temp_output);
+  result
 }
 
 #[hotpath::measure]
@@ -83,7 +94,21 @@ fn temp_sibling_path(target: &Path, extension: &str) -> PathBuf {
     .unwrap_or("flowstate-export");
   let nanos = SystemTime::now()
     .duration_since(UNIX_EPOCH)
-    .map(|duration| duration.as_nanos())
-    .unwrap_or_default();
-  dir.join(format!(".{stem}.{nanos}.tmp.{extension}"))
+    .map_or(0, |duration| duration.as_nanos());
+  let pid = std::process::id();
+  let sequence = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
+  dir.join(format!(".{stem}.{pid}.{nanos}.{sequence}.tmp.{extension}"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn temp_sibling_path_uses_unique_names() {
+    let path = Path::new("exports/report.pdf");
+    let a = temp_sibling_path(path, "pdf");
+    let b = temp_sibling_path(path, "pdf");
+    assert_ne!(a, b);
+  }
 }

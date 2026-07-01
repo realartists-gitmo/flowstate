@@ -84,7 +84,20 @@ pub struct SessionIdParseError;
 
 impl fmt::Display for SessionIdParseError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str("expected a 64-character lowercase hex session id")
+    f.write_str("expected a 64-character hex session id")
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::SessionId;
+
+  #[test]
+  fn parses_uppercase_session_id_hex() {
+    let parsed = "0123456789ABCDEFFEDCBA98765432100123456789ABCDEFFEDCBA9876543210"
+      .parse::<SessionId>()
+      .expect("uppercase hex should parse");
+    assert_eq!(parsed.to_string(), "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210");
   }
 }
 

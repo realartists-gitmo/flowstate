@@ -26,6 +26,7 @@ use crate::{
 use super::{PullProgress, blobs::BlobOutbox};
 
 const DIRECT_SERVE_CONCURRENCY: usize = 4;
+const DIRECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 static CLIENT_ENDPOINT: OnceLock<StdRwLock<Option<Endpoint>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
@@ -84,16 +85,20 @@ impl DirectServeState {
     tracing::debug!(%session, replaced, handler_count = inner.handlers.len(), "registered collaboration direct session handler");
   }
 
-  pub async fn insert_blob(&self, session: SessionId, bytes: Vec<u8>) -> BlobId {
+  #[allow(
+    clippy::significant_drop_tightening,
+    reason = "write guard scope is intentionally tight and no await occurs while held"
+  )]
+  pub async fn insert_blob(&self, session: SessionId, bytes: Vec<u8>) -> Result<BlobId> {
     let byte_len = bytes.len();
     let (blob, outbox_len, outbox_bytes) = {
       let mut inner = self.inner.write().await;
       inner.attached.insert(session);
       let outbox = inner.blobs.entry(session).or_default();
-      let blob = outbox.insert(bytes);
+      let blob = BlobId::new();
+      ensure!(outbox.insert_with_id(blob, bytes), "collaboration direct blob exceeds outbox capacity");
       let outbox_len = outbox.len();
       let outbox_bytes = outbox.total_bytes();
-      drop(inner);
       (blob, outbox_len, outbox_bytes)
     };
     tracing::debug!(
@@ -104,7 +109,7 @@ impl DirectServeState {
       outbox_bytes,
       "stored collaboration direct blob for peer pull",
     );
-    blob
+    Ok(blob)
   }
 
   async fn serve(&self, request: DirectRequest) -> ServeOutcome {
@@ -354,17 +359,21 @@ where
     tracing::warn!(%session, request_kind, "collaboration direct session request channel closed");
     return ServeOutcome::Header(DirectResponseHeader::NotAttached);
   }
-  match reply_rx.recv().await {
-    Ok(Ok(bytes)) => {
+  match timeout(DIRECT_RESPONSE_TIMEOUT, reply_rx.recv()).await {
+    Ok(Ok(Ok(bytes))) => {
       tracing::trace!(%session, request_kind, bytes = bytes.len(), "collaboration direct session returned payload");
       ServeOutcome::Payload(bytes)
     },
-    Ok(Err(error)) => {
+    Ok(Ok(Err(error))) => {
       tracing::warn!(%session, request_kind, error = %format_args!("{error:#}"), "collaboration direct session failed to produce payload");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
-    Err(error) => {
+    Ok(Err(error)) => {
       tracing::warn!(%session, request_kind, error = %error, "collaboration direct session payload reply channel closed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(_) => {
+      tracing::warn!(%session, request_kind, ?DIRECT_RESPONSE_TIMEOUT, "collaboration direct session payload timed out");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
   }
@@ -380,17 +389,21 @@ async fn request_asset(requests: Sender<DirectServeRequest>, session: SessionId,
     tracing::warn!(%session, asset, "collaboration direct asset request channel closed");
     return ServeOutcome::Header(DirectResponseHeader::NotAttached);
   }
-  match reply_rx.recv().await {
-    Ok(Ok(asset_bytes)) => {
+  match timeout(DIRECT_RESPONSE_TIMEOUT, reply_rx.recv()).await {
+    Ok(Ok(Ok(asset_bytes))) => {
       tracing::trace!(%session, asset, bytes = asset_bytes.bytes.len(), "collaboration direct session returned asset");
       ServeOutcome::Payload(asset_bytes.bytes)
     },
-    Ok(Err(error)) => {
+    Ok(Ok(Err(error))) => {
       tracing::warn!(%session, asset, error = %format_args!("{error:#}"), "collaboration direct session failed to produce asset");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
-    Err(error) => {
+    Ok(Err(error)) => {
       tracing::warn!(%session, asset, error = %error, "collaboration direct asset reply channel closed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(_) => {
+      tracing::warn!(%session, asset, ?DIRECT_RESPONSE_TIMEOUT, "collaboration direct asset timed out");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
   }
@@ -450,6 +463,7 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
 
 async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let total_len_usize = usize::try_from(total_len).context("direct payload is too large for this platform")?;
+  ensure!(total_len_usize <= MAX_FRAME_LEN, "direct payload exceeds {MAX_FRAME_LEN} bytes");
   tracing::trace!(
     payload_bytes = total_len_usize,
     chunk_bytes = MAX_PAYLOAD_CHUNK_LEN,

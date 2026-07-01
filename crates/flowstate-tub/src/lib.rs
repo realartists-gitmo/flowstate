@@ -49,7 +49,7 @@ impl FileKind {
   }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum SearchUnitKind {
   File,
   Pocket,
@@ -66,11 +66,12 @@ pub enum SearchUnitKind {
   TableCell,
   FlowNode,
   Document,
+  Unknown(String),
 }
 
 impl SearchUnitKind {
   #[must_use]
-  pub const fn as_str(self) -> &'static str {
+  pub fn as_str(&self) -> &str {
     match self {
       Self::File => "file",
       Self::Pocket => "pocket",
@@ -87,28 +88,29 @@ impl SearchUnitKind {
       Self::TableCell => "table_cell",
       Self::FlowNode => "flow_node",
       Self::Document => "document",
+      Self::Unknown(value) => value.as_str(),
     }
   }
 
   fn from_str(value: &str) -> Option<Self> {
-    match value {
-      "file" => Some(Self::File),
-      "pocket" => Some(Self::Pocket),
-      "hat" => Some(Self::Hat),
-      "block" => Some(Self::BlockSection),
-      "tag" => Some(Self::TagSection),
-      "analytic" => Some(Self::Analytic),
-      "card" => Some(Self::Card),
-      "cite" => Some(Self::Cite),
-      "paragraph" => Some(Self::Paragraph),
-      "image_alt" => Some(Self::ImageAlt),
-      "image_caption" => Some(Self::ImageCaption),
-      "equation" => Some(Self::Equation),
-      "table_cell" => Some(Self::TableCell),
-      "flow_node" => Some(Self::FlowNode),
-      "document" => Some(Self::Document),
-      _ => None,
-    }
+    Some(match value {
+      "file" => Self::File,
+      "pocket" => Self::Pocket,
+      "hat" => Self::Hat,
+      "block" => Self::BlockSection,
+      "tag" => Self::TagSection,
+      "analytic" => Self::Analytic,
+      "card" => Self::Card,
+      "cite" => Self::Cite,
+      "paragraph" => Self::Paragraph,
+      "image_alt" => Self::ImageAlt,
+      "image_caption" => Self::ImageCaption,
+      "equation" => Self::Equation,
+      "table_cell" => Self::TableCell,
+      "flow_node" => Self::FlowNode,
+      "document" => Self::Document,
+      _ => Self::Unknown(value.to_owned()),
+    })
   }
 }
 
@@ -234,14 +236,14 @@ impl TubIndex {
       let path = canonicalize_file(path)?;
       seen_paths.insert(path.clone());
       let metadata = fs::metadata(&path)?;
+      let size_bytes = metadata.len();
+      let modified_ns = modified_ns(&metadata);
       let display_path = display_path_for(&self.root, &path);
       let parent_display_path = parent_display_path(&display_path);
       let file_name = path
         .file_name()
         .map_or_else(|| display_path.clone(), |name| name.to_string_lossy().to_string());
-      let size_bytes = metadata.len();
-      let modified_ns = modified_ns(&metadata);
-      let fingerprint = fingerprint(size_bytes, modified_ns);
+      let fingerprint = fingerprint(size_bytes, modified_ns, kind, &path)?;
       let existing = existing.get(&path);
       let file_id = existing.map_or_else(|| stable_file_id(&self.root, &path), |record| record.file_id.clone());
 
@@ -386,7 +388,7 @@ impl TubIndex {
     } else {
       kinds
     };
-    let allowed = kinds.iter().copied().collect::<HashSet<_>>();
+    let allowed = kinds.iter().cloned().collect::<HashSet<_>>();
     let mut hits = Vec::with_capacity(limit);
 
     for file in self.list_files()? {
@@ -439,7 +441,7 @@ impl TubIndex {
       &query,
       &tantivy::collector::TopDocs::with_limit(limit.saturating_mul(8).max(limit)).order_by_score(),
     )?;
-    let allowed = allowed_kinds.iter().copied().collect::<HashSet<_>>();
+    let allowed = allowed_kinds.iter().cloned().collect::<HashSet<_>>();
     let mut hits = Vec::new();
 
     for (score, address) in top_docs {
@@ -993,9 +995,6 @@ fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &s
     package
       .rebuild_search_units_from_loro(&doc)
       .with_context(|| format!("rebuilding Loro search units {}", path.display()))?;
-    package
-      .write(path)
-      .with_context(|| format!("writing refreshed Loro search units {}", path.display()))?;
   }
   Ok(
     package
@@ -1007,7 +1006,7 @@ fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &s
 }
 
 fn package_search_unit(file_id: &str, path: &Path, display_path: &str, file_name: &str, unit: &SearchUnitChunk) -> Option<IndexUnit> {
-  let unit_kind = SearchUnitKind::from_str(&unit.unit_kind).unwrap_or(SearchUnitKind::Paragraph);
+  let unit_kind = SearchUnitKind::from_str(&unit.unit_kind)?;
   let body = unit.body.trim().to_string();
   if body.is_empty() {
     return None;
@@ -1190,8 +1189,30 @@ fn modified_ns(metadata: &fs::Metadata) -> u64 {
   .expect("nanosecond timestamp is clamped to u64::MAX")
 }
 
-fn fingerprint(size_bytes: u64, modified_ns: u64) -> String {
-  format!("{size_bytes}:{modified_ns}")
+fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -> Result<String> {
+  let mut fingerprint = format!("{size_bytes}:{modified_ns}");
+  if kind == FileKind::Db8
+    && let Some((frontier, unit_count)) = cached_search_metadata(path)?
+  {
+    fingerprint.push(':');
+    fingerprint.push_str(&frontier);
+    fingerprint.push(':');
+    fingerprint.push_str(&unit_count.to_string());
+  }
+  Ok(fingerprint)
+}
+
+fn cached_search_metadata(path: &Path) -> Result<Option<(String, usize)>> {
+  let Some(units) =
+    DocumentPackage::read_cached_search_units(path).with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
+  else {
+    return Ok(None);
+  };
+  let frontier = units
+    .first()
+    .map(|unit| hex_bytes(&unit.frontier))
+    .unwrap_or_default();
+  Ok(Some((frontier, units.len())))
 }
 
 fn stable_file_id(root: &Path, path: &Path) -> String {
@@ -1292,5 +1313,17 @@ fn emit_tree_dir(relative_dir: &Path, depth: usize, context: &mut TreeEmitContex
         file_kind: Some(file.kind),
       });
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn unknown_search_unit_kind_is_preserved() {
+    let kind = SearchUnitKind::from_str("mystery_kind").expect("unknown kind should be preserved");
+    assert_eq!(kind.as_str(), "mystery_kind");
+    assert!(matches!(kind, SearchUnitKind::Unknown(value) if value == "mystery_kind"));
   }
 }

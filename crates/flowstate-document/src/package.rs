@@ -1,4 +1,5 @@
 use std::{
+  collections::HashSet,
   fs::{self, OpenOptions},
   io::{self, Cursor, Read as _, Seek as _, SeekFrom, Write as _},
   path::Path,
@@ -30,6 +31,9 @@ const CHUNK_PROJECTION_CACHE: u32 = 6;
 const CHUNK_SEARCH_UNIT: u32 = 7;
 const CHUNK_THUMBNAIL: u32 = 8;
 const CHUNK_INTEGRITY_INDEX: u32 = 9;
+
+const PACKAGE_CHUNK_TABLE_ENTRY_BYTES: usize = 4 + 8 + 8 + 32;
+const MAX_PACKAGE_CHUNK_COUNT: usize = 1_048_576;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentPackage {
@@ -316,12 +320,14 @@ impl DocumentPackage {
     }
     Ok(doc)
   }
-
   pub fn replace_assets_from_document(&mut self, document: &crate::DocumentProjection) -> io::Result<()> {
-    self.assets = crate::loro_import::assets_from_document(document);
-    self.manifest.modified_at_unix_secs = unix_time_secs();
-    *self = self.clone().with_manifest_indexes()?;
-    self.validate()
+    let mut next = self.clone();
+    next.assets = crate::loro_import::assets_from_document(document);
+    next.manifest.modified_at_unix_secs = unix_time_secs();
+    next.refresh_manifest_indexes();
+    next.validate()?;
+    *self = next;
+    Ok(())
   }
 
   pub fn current_search_units(&self) -> &[SearchUnitChunk] {
@@ -380,7 +386,8 @@ impl DocumentPackage {
     let segment_id = Uuid::new_v4().as_u128();
     let now = unix_time_secs();
     let checksum = blake3_hash(&bytes);
-    self.loro_update_segments.push(LoroUpdateSegmentChunk {
+    let mut next = self.clone();
+    next.loro_update_segments.push(LoroUpdateSegmentChunk {
       segment_id,
       from_frontier: encode_frontiers(from_frontier),
       from_version_vector: encode_version_vector(from_version_vector),
@@ -390,15 +397,16 @@ impl DocumentPackage {
       checksum,
       created_at_unix_secs: now,
     });
-    self.manifest.latest_frontier = encode_frontiers(to_frontier);
-    self.manifest.latest_version_vector = encode_version_vector(to_version_vector);
-    self.manifest.projection_cache_frontier = None;
-    self.projection_caches.clear();
-    self.manifest.search_cache_frontier = None;
-    self.search_units.clear();
-    self.manifest.modified_at_unix_secs = now;
-    self.clone().with_manifest_indexes()?.validate()?;
-    *self = self.clone().with_manifest_indexes()?;
+    next.manifest.latest_frontier = encode_frontiers(to_frontier);
+    next.manifest.latest_version_vector = encode_version_vector(to_version_vector);
+    next.manifest.projection_cache_frontier = None;
+    next.projection_caches.clear();
+    next.manifest.search_cache_frontier = None;
+    next.search_units.clear();
+    next.manifest.modified_at_unix_secs = now;
+    next.refresh_manifest_indexes();
+    next.validate()?;
+    *self = next;
     Ok(segment_id)
   }
 
@@ -605,32 +613,34 @@ impl DocumentPackage {
     let frontier = encode_frontiers(&doc.state_frontiers());
     let version_vector = encode_version_vector(&doc.state_vv());
     let bytes = doc.export(ExportMode::Snapshot).map_err(loro_io_error)?;
-    self.loro_snapshots.push(LoroSnapshotChunk {
+    let mut next = self.clone();
+    next.loro_snapshots.push(LoroSnapshotChunk {
       snapshot_id,
       frontier: frontier.clone(),
       version_vector,
       bytes,
       created_at_unix_secs: now,
     });
-    self.loro_update_segments.clear();
-    self.manifest.latest_snapshot_id = snapshot_id;
-    self.manifest.latest_frontier = frontier;
-    self.manifest.latest_version_vector = encode_version_vector(&doc.state_vv());
-    self.manifest.modified_at_unix_secs = now;
-    let retained_revision_frontiers = self
+    next.loro_update_segments.clear();
+    next.manifest.latest_snapshot_id = snapshot_id;
+    next.manifest.latest_frontier = frontier;
+    next.manifest.latest_version_vector = encode_version_vector(&doc.state_vv());
+    next.manifest.modified_at_unix_secs = now;
+    let retained_revision_frontiers = next
       .revisions
       .iter()
       .map(|revision| revision.frontier.clone())
       .collect::<Vec<_>>();
-    self.loro_snapshots.retain(|snapshot| {
+    next.loro_snapshots.retain(|snapshot| {
       snapshot.snapshot_id == snapshot_id
         || retained_revision_frontiers
           .iter()
           .any(|frontier| frontier.as_slice() == snapshot.frontier.as_slice())
     });
-    *self = self.clone().with_manifest_indexes()?;
-    self.rebuild_projection_cache_from_loro(doc)?;
-    self.rebuild_search_units_from_loro(doc)?;
+    next.refresh_manifest_indexes();
+    next.rebuild_projection_cache_from_loro(doc)?;
+    next.rebuild_search_units_from_loro(doc)?;
+    *self = next;
     Ok(snapshot_id)
   }
 
@@ -1062,12 +1072,22 @@ impl DocumentPackage {
   /// chunks. An absent index (older packages) is accepted for backward
   /// compatibility; a present index must be complete and consistent.
   fn validate_integrity_index(&self) -> io::Result<()> {
+    // §19: an empty integrity index is the legacy compatibility case for older
+    // packages that predate the named index. Preserve that behavior explicitly.
     if self.integrity_index.is_empty() {
       return Ok(());
     }
     let expected = self.build_integrity_index();
     if self.integrity_index.len() != expected.len() {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "integrity index entry count mismatch"));
+    }
+    let expected = Self::integrity_index_key_set(&expected)?;
+    let actual = Self::integrity_index_key_set(&self.integrity_index)?;
+    if actual != expected {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "integrity index entries do not match durable chunks",
+      ));
     }
     for entry in &self.integrity_index {
       let actual = match entry.chunk_kind {
@@ -1207,6 +1227,19 @@ impl DocumentPackage {
     }
     entries
   }
+
+  fn integrity_index_key_set(entries: &[IntegrityIndexEntry]) -> io::Result<HashSet<(u32, u128)>> {
+    let mut keys = HashSet::with_capacity(entries.len());
+    for entry in entries {
+      if !keys.insert((entry.chunk_kind, entry.id)) {
+        return Err(io::Error::new(
+          io::ErrorKind::InvalidData,
+          "integrity index contains duplicate chunk identity",
+        ));
+      }
+    }
+    Ok(keys)
+  }
 }
 
 pub fn read_loro_db8(path: impl AsRef<Path>) -> io::Result<LoroDoc> {
@@ -1233,6 +1266,11 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package header version"));
   }
   let chunk_count = read_u32(&mut cursor)?;
+  if usize::try_from(chunk_count).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "package chunk count overflows usize"))?
+    > MAX_PACKAGE_CHUNK_COUNT
+  {
+    return Err(io::Error::new(io::ErrorKind::InvalidData, "too many package chunks"));
+  }
   let mut entries = Vec::with_capacity(chunk_count as usize);
   for _ in 0..chunk_count {
     let kind = read_u32(&mut cursor)?;
@@ -1246,6 +1284,9 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
   for entry in entries {
     let start = usize::try_from(entry.offset).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk offset overflows usize"))?;
     let len = usize::try_from(entry.len).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk length overflows usize"))?;
+    if len > MAX_PACKAGE_CHUNK_COUNT.saturating_mul(PACKAGE_CHUNK_TABLE_ENTRY_BYTES) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "package chunk length is unreasonably large"));
+    }
     let end = start
       .checked_add(len)
       .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "chunk range overflows usize"))?;
@@ -1335,6 +1376,12 @@ fn encode_chunk<T: Serialize>(value: &T, label: &'static str) -> io::Result<Vec<
 }
 
 fn decode_chunk<'a, T: Deserialize<'a>>(bytes: &'a [u8], label: &'static str) -> io::Result<T> {
+  if bytes.len() > MAX_PACKAGE_CHUNK_COUNT.saturating_mul(PACKAGE_CHUNK_TABLE_ENTRY_BYTES) {
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      format!("decoding {label} failed: chunk too large"),
+    ));
+  }
   postcard::from_bytes(bytes).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, format!("decoding {label} failed: {error}")))
 }
 
@@ -1752,6 +1799,89 @@ mod tests {
       .validate()
       .expect_err("stale manifest segment index must fail validation");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+  }
+
+  #[test]
+  fn package_rejects_duplicate_integrity_index_entries() -> io::Result<()> {
+    let doc = new_loro_document("Integrity").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Integrity")?;
+    package.integrity_index[1].chunk_kind = package.integrity_index[0].chunk_kind;
+    package.integrity_index[1].id = package.integrity_index[0].id;
+
+    let error = package
+      .validate()
+      .expect_err("duplicate integrity entries must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    Ok(())
+  }
+
+  #[test]
+  fn package_replace_assets_is_failure_atomic() -> io::Result<()> {
+    let source = crate::document_from_input_blocks(
+      crate::flowstate_document_theme(),
+      vec![InputBlock::Paragraph(InputParagraph {
+        style: crate::ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "asset".to_string(),
+          styles: RunStyles::default(),
+        }],
+      })],
+    );
+    let doc = document_to_loro(&source, "Atomic assets").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot_with_assets(&doc, "Atomic assets", crate::loro_import::assets_from_document(&source))?;
+    let previous_modified_at = package.manifest.modified_at_unix_secs;
+    package.manifest.package_format_version = 0;
+
+    let error = package
+      .replace_assets_from_document(&source)
+      .expect_err("invalid package version must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(package.manifest.modified_at_unix_secs, previous_modified_at);
+    assert_eq!(package.manifest.package_format_version, 0);
+    Ok(())
+  }
+
+  #[test]
+  fn package_append_update_segment_is_failure_atomic() -> io::Result<()> {
+    let doc = new_loro_document("Atomic update").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Atomic update")?;
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    body_text(&doc).insert(1, "x").map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
+    let previous_segments = package.loro_update_segments.len();
+    let previous_latest_frontier = package.manifest.latest_frontier.clone();
+    package.manifest.package_format_version = 0;
+
+    let error = package
+      .append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)
+      .expect_err("invalid package version must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(package.loro_update_segments.len(), previous_segments);
+    assert_eq!(package.manifest.latest_frontier, previous_latest_frontier);
+    assert_eq!(package.manifest.package_format_version, 0);
+    Ok(())
+  }
+
+  #[test]
+  fn package_compact_to_snapshot_is_failure_atomic() -> io::Result<()> {
+    let doc = new_loro_document("Atomic compact").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Atomic compact")?;
+    let previous_snapshots = package.loro_snapshots.len();
+    let previous_update_segments = package.loro_update_segments.len();
+    package.manifest.package_format_version = 0;
+
+    let error = package
+      .compact_to_snapshot(&doc)
+      .expect_err("invalid package version must fail validation");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(package.loro_snapshots.len(), previous_snapshots);
+    assert_eq!(package.loro_update_segments.len(), previous_update_segments);
+    assert_eq!(package.manifest.package_format_version, 0);
     Ok(())
   }
 

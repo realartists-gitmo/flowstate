@@ -566,7 +566,7 @@ fn ensure_initial_paragraph(paragraphs: &LoroMap, blocks: &LoroMap, body: &LoroT
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     paragraph.insert("start_cursor", cursor.encode())?;
   }
-  if let Some(cursor) = body.get_cursor(0, Side::Right) {
+  if let Some(cursor) = body.get_cursor(0, Side::Left) {
     paragraph.insert("boundary_cursor", cursor.encode())?;
   }
   let paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;

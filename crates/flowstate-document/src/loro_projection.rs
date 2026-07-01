@@ -304,7 +304,7 @@ impl<'a> Projector<'a> {
   fn image_block(&self, block: &LoroMap) -> io::Result<InputImageBlock> {
     let attrs = child_map(block, "attrs")?;
     Ok(InputImageBlock {
-      asset_id: AssetId(parse_u128(&map_string(block, "asset_id")?).unwrap_or_default()),
+      asset_id: AssetId(parse_u128(&map_string(block, "asset_id")?).ok_or_else(|| invalid("image block has invalid asset_id"))?),
       alt_text: map_string_opt(block, "alt_text_flow_id")?
         .map(|flow_id| self.plain_flow_text(&flow_id))
         .transpose()?
@@ -472,13 +472,8 @@ impl<'a> Projector<'a> {
   }
 
   fn plain_flow_text(&self, flow_id: &str) -> io::Result<String> {
-    Ok(
-      self
-        .flow_text(flow_id)?
-        .to_string()
-        .trim_start_matches('\n')
-        .to_string(),
-    )
+    let text = self.flow_text(flow_id)?.to_string();
+    Ok(text.strip_prefix('\n').unwrap_or(text.as_str()).to_string())
   }
 
   fn caption_paragraph(&self, flow_id: &str) -> io::Result<InputParagraph> {
