@@ -33,16 +33,18 @@ mod projection_patch;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
-use gpui_flowtext::{DocumentOffset, EditorSelection, ExternalCaret, apply_projection_patches};
+use gpui_flowtext::{
+  DocumentOffset, EditorSelection, ExternalCaret, ProjectionPatchBatch, apply_projection_patch_batch, replay_semantic_command_on_projection,
+};
 use loro::{ContainerTrait as _, cursor::PosType};
 use projection_patch::{
   body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
 };
 use types::UndoSelectionState;
 pub use types::{
-  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
-  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity, UndoSelectionDirection,
-  UndoSelectionSnapshot,
+  EditorCommitResult, ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent,
+  RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity,
+  UndoSelectionDirection, UndoSelectionSnapshot,
 };
 
 #[derive(Debug)]
@@ -390,8 +392,14 @@ impl ProjectionRuntimeIndex {
     let mut rebuild = false;
     for patch in patches {
       match patch {
-        ProjectionPatch::ParagraphText { row, new, .. } => {
-          let Some(paragraph_ix) = paragraph_index_for_block_row(projection, *row) else {
+        ProjectionPatch::ParagraphText {
+          block_id,
+          paragraph_id,
+          row_hint,
+          new,
+          ..
+        } => {
+          let Some(paragraph_ix) = paragraph_index_for_patch(projection, *block_id, *paragraph_id, *row_hint) else {
             rebuild = true;
             break;
           };
@@ -469,6 +477,25 @@ fn paragraph_index_for_block_row(projection: &DocumentProjection, row: usize) ->
       .filter(|block| matches!(block, Block::Paragraph(_)))
       .count()
   })
+}
+
+fn paragraph_index_for_patch(
+  projection: &DocumentProjection,
+  block_id: flowstate_document::BlockId,
+  paragraph_id: flowstate_document::ParagraphId,
+  row_hint: usize,
+) -> Option<usize> {
+  let row = if projection.ids.block_ids.get(row_hint).copied() == Some(block_id) {
+    row_hint
+  } else {
+    projection
+      .ids
+      .block_ids
+      .iter()
+      .position(|id| *id == block_id)?
+  };
+  let paragraph_ix = paragraph_index_for_block_row(projection, row)?;
+  (projection.ids.paragraph_ids.get(paragraph_ix).copied() == Some(paragraph_id)).then_some(paragraph_ix)
 }
 
 /// §24 style interval index builder: maps a paragraph's runs to byte-offset
@@ -665,11 +692,31 @@ impl CrdtRuntime {
   /// Loro replica to that user, and stores the id so later revisions record it as
   /// their author. Until this is called, `author_user_id` stays `None` and
   /// authorship is left unset (behavior unchanged).
-  pub fn set_author_identity(&mut self, user_id: u128, display_name: Option<String>) -> Result<()> {
+  pub fn set_author_identity(&mut self, user_id: u128, display_name: Option<String>) -> Result<Vec<RuntimeEvent>> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
     flowstate_document::register_user(&self.doc, user_id, display_name.as_deref()).context("registering durable author identity")?;
     self.doc.commit();
     self.author_user_id = Some(user_id);
-    Ok(())
+
+    let update = match self.local_update_bytes(&from_vv) {
+      Ok(update) => update,
+      Err(error) => {
+        tracing::error!(%error, "exporting committed author-identity update failed; later synchronization must recover it");
+        return Ok(Vec::new());
+      },
+    };
+    if update.is_empty() {
+      return Ok(Vec::new());
+    }
+    if let Err(error) = self.persist_update_segment(from_frontier, from_vv, update.clone()) {
+      tracing::error!(%error, "persisting committed author-identity update failed");
+    }
+    Ok(vec![RuntimeEvent::LocalUpdate {
+      bytes: update,
+      frontier: self.doc.state_frontiers().encode(),
+      version_vector: self.doc.state_vv().encode(),
+    }])
   }
 
   pub fn set_pending_undo_selection(&mut self, selection: Option<UndoSelectionSnapshot>) -> Result<()> {
@@ -702,21 +749,16 @@ impl CrdtRuntime {
     Ok(())
   }
 
-  fn undo_selection_for_editor(&self, selection: &EditorSelection) -> Option<UndoSelectionSnapshot> {
+  fn undo_selection_for_projection(&self, projection: &DocumentProjection, selection: &EditorSelection) -> Option<UndoSelectionSnapshot> {
     let direction = selection_direction(selection.anchor, selection.head);
-    // §16: source affinity from the editor selection's stored intent rather
-    // than re-deriving it from selection direction.
     let anchor_affinity = SelectionAffinity::from(selection.anchor_affinity);
     let head_affinity = SelectionAffinity::from(selection.head_affinity);
     let body = body_text(&self.doc);
-    let anchor = clamp_projection_offset(&self.projection, selection.anchor);
-    let head = clamp_projection_offset(&self.projection, selection.head);
-    let anchor_pos = self
-      .projection_index
-      .body_unicode_for_offset(&self.projection, anchor)?;
-    let head_pos = self
-      .projection_index
-      .body_unicode_for_offset(&self.projection, head)?;
+    let anchor = clamp_projection_offset(projection, selection.anchor);
+    let head = clamp_projection_offset(projection, selection.head);
+    let projection_index = ProjectionRuntimeIndex::from_projection(projection);
+    let anchor_pos = projection_index.body_unicode_for_offset(projection, anchor)?;
+    let head_pos = projection_index.body_unicode_for_offset(projection, head)?;
     let anchor_cursor = cursor_for_boundary(&body, anchor_pos, anchor_affinity)?.encode();
     let head_cursor = cursor_for_boundary(&body, head_pos, head_affinity)?.encode();
     Some(UndoSelectionSnapshot {
@@ -752,6 +794,7 @@ impl CrdtRuntime {
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     if apply_editor_semantic_command_body_fast_path(&self.doc, &self.projection, &self.projection_index, command)? {
+      self.doc.commit();
       self.record_undo_checkpoint()?;
       let mut invalidation = ProjectionInvalidation::body_text(
         from_frontier.encode(),
@@ -784,6 +827,7 @@ impl CrdtRuntime {
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     if apply_editor_semantic_command(&self.doc, projection, command)? {
+      self.doc.commit();
       self.record_undo_checkpoint()?;
       let mut invalidation = editor_command_invalidation(projection, command, from_frontier.encode(), self.doc.state_frontiers().encode());
       self.merge_subscription_invalidation(&mut invalidation);
@@ -915,65 +959,32 @@ impl CrdtRuntime {
   }
 
   pub fn merge_asset_records(&mut self, records: Vec<AssetRecord>) -> Result<Vec<RuntimeEvent>> {
-    if records.is_empty() {
-      return Ok(Vec::new());
-    }
-    let before = self.projection.clone();
-    let from_frontier = self.doc.state_frontiers();
-    let from_vv = self.doc.state_vv();
-    let frontier_before = from_frontier.encode();
-    let mut changed_asset_ids = Vec::new();
-    for record in records {
-      let changed = self
-        .projection
-        .assets
-        .assets
-        .get(&record.id)
-        .is_none_or(|existing| asset_record_changed(existing, &record));
-      if !changed {
-        continue;
-      }
-      changed_asset_ids.push(record.id.0.to_string());
-      self.projection.assets.assets.insert(record.id, record);
-    }
-    if changed_asset_ids.is_empty() {
-      return Ok(Vec::new());
-    }
-    flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for asset change")?;
-    flowstate_document::loro_import::import_assets(&self.doc, &self.projection).context("recording asset metadata in canonical Loro state")?;
-    refresh_image_asset_metadata(&self.doc).context("refreshing image asset integrity metadata")?;
-    self.doc.commit();
-    if let Some(package) = &mut self.package {
-      package.replace_assets_from_document(&self.projection)?;
-      if let Some(path) = &self.package_path {
-        package.append_assets_to_path(path)?;
-      }
-    }
-    let mut invalidation = ProjectionInvalidation {
-      frontier_before,
-      frontier_after: self.doc.state_frontiers().encode(),
-      changed_assets: changed_asset_ids,
-      ..ProjectionInvalidation::default()
-    };
-    self.merge_subscription_invalidation(&mut invalidation);
-    let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
-    events.push(self.projection_change_event(&before, invalidation)?);
-    Ok(events)
+    let base_frontier = self.projection.frontier.clone();
+    Ok(
+      self
+        .apply_editor_transaction(Uuid::new_v4().as_u128(), &base_frontier, &[], &records, None)?
+        .events,
+    )
   }
 
   pub fn apply_editor_commands(
     &mut self,
+    transaction_id: u128,
     base_frontier: &[u8],
     commands: &[EditorSemanticCommand],
     selection_after: Option<&EditorSelection>,
-  ) -> Result<Vec<RuntimeEvent>> {
-    if commands.is_empty() {
-      return Ok(Vec::new());
-    }
-    // Editor commands are authored against the visible projection frontier, not
-    // necessarily the raw Loro doc frontier. Metadata-only commits such as
-    // author registration can advance the doc without changing visible content;
-    // treating those as stale causes optimistic typing to flash and roll back.
+  ) -> Result<EditorCommitResult> {
+    self.apply_editor_transaction(transaction_id, base_frontier, commands, &[], selection_after)
+  }
+
+  pub fn apply_editor_transaction(
+    &mut self,
+    transaction_id: u128,
+    base_frontier: &[u8],
+    commands: &[EditorSemanticCommand],
+    asset_records: &[AssetRecord],
+    selection_after: Option<&EditorSelection>,
+  ) -> Result<EditorCommitResult> {
     let current_projection_frontier = self.projection.frontier.clone();
     if !base_frontier.is_empty() && base_frontier != current_projection_frontier.as_slice() {
       return Err(
@@ -984,34 +995,192 @@ impl CrdtRuntime {
         .into(),
       );
     }
-    if let Some(selection) = selection_after.and_then(|selection| self.undo_selection_for_editor(selection)) {
-      self.set_pending_undo_selection(Some(selection))?;
-    }
-    self.defer_undo_checkpoints = true;
-    self.undo_checkpoint_pending = false;
-    let result = (|| {
-      let mut events = Vec::new();
-      flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for editor command batch")?;
-      for command in commands {
-        let command_events = if let Some(events) = self.try_apply_editor_semantic_command_without_projection(command)? {
-          events
-        } else {
-          let projection = self.projection.clone();
-          self.apply_editor_semantic_command_with_projection(&projection, command, true)?
-        };
-        events.extend(command_events);
+
+    let mut predicted_projection = self.projection.clone();
+    for (command_ix, command) in commands.iter().enumerate() {
+      if editor_semantic_command_is_noop(command) {
+        continue;
       }
-      Ok(events)
-    })();
-    self.defer_undo_checkpoints = false;
-    if result.is_ok() && self.undo_checkpoint_pending {
-      self
-        .undo
-        .record_new_checkpoint()
-        .context("recording grouped Loro undo checkpoint")?;
+      if !replay_semantic_command_on_projection(&mut predicted_projection, command) {
+        anyhow::bail!("editor command {command_ix} failed stable-identity preflight: {command:?}");
+      }
     }
-    self.undo_checkpoint_pending = false;
-    result
+    let asset_merge = merge_asset_records_into_projection(&mut predicted_projection, asset_records);
+    let commands_change_document = commands
+      .iter()
+      .any(|command| !editor_semantic_command_is_noop(command));
+    if !commands_change_document && !asset_merge.any_changed {
+      return Ok(EditorCommitResult {
+        transaction_id,
+        base_frontier: current_projection_frontier.clone(),
+        new_frontier: current_projection_frontier,
+        events: Vec::new(),
+      });
+    }
+
+    if commands
+      .iter()
+      .any(editor_semantic_command_requires_staging_validation)
+      || asset_merge.metadata_changed
+    {
+      let staging_doc = self.doc.fork();
+      let mut staging_projection = self.projection.clone();
+      for (command_ix, command) in commands.iter().enumerate() {
+        if editor_semantic_command_is_noop(command) {
+          continue;
+        }
+        let applied = apply_editor_semantic_command(&staging_doc, &staging_projection, command)
+          .with_context(|| format!("validating editor command {command_ix} against staged canonical state"))?;
+        if !applied {
+          anyhow::bail!("editor command {command_ix} was rejected by staged canonical validation: {command:?}");
+        }
+        let replayed = replay_semantic_command_on_projection(&mut staging_projection, command);
+        debug_assert!(replayed, "preflighted editor command must replay on staged projection");
+      }
+      staging_projection.assets = predicted_projection.assets.clone();
+      if asset_merge.metadata_changed {
+        flowstate_document::loro_import::import_assets(&staging_doc, &staging_projection)
+          .context("validating canonical asset metadata in staged editor transaction")?;
+        refresh_image_asset_metadata(&staging_doc).context("validating image asset metadata in staged editor transaction")?;
+      }
+    }
+
+    let mut staged_package = self.package.clone();
+    if asset_merge.any_changed
+      && let Some(package) = staged_package.as_mut()
+    {
+      package.replace_assets_from_document(&predicted_projection)?;
+      if let Some(path) = &self.package_path {
+        package.append_assets_to_path(path)?;
+      }
+    }
+
+    if !commands_change_document && !asset_merge.metadata_changed {
+      self.projection.assets = predicted_projection.assets;
+      if asset_merge.any_changed {
+        self.package = staged_package;
+      }
+      return Ok(EditorCommitResult {
+        transaction_id,
+        base_frontier: current_projection_frontier.clone(),
+        new_frontier: current_projection_frontier,
+        events: Vec::new(),
+      });
+    }
+
+    let batch_projection_before = self.projection.clone();
+    let batch_frontier_before = self.doc.state_frontiers();
+    let batch_vv_before = self.doc.state_vv();
+    flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for grouped editor transaction")?;
+    let mut working_projection = self.projection.clone();
+
+    for (command_ix, command) in commands.iter().enumerate() {
+      if editor_semantic_command_is_noop(command) {
+        continue;
+      }
+      let applied = apply_editor_semantic_command(&self.doc, &working_projection, command)
+        .with_context(|| format!("applying editor command {command_ix} inside grouped Loro transaction"))?;
+      if !applied {
+        anyhow::bail!("editor command {command_ix} was rejected after successful preflight: {command:?}");
+      }
+      let replayed = replay_semantic_command_on_projection(&mut working_projection, command);
+      debug_assert!(replayed, "preflighted editor command must replay on the working projection");
+    }
+    working_projection.assets = predicted_projection.assets.clone();
+    if asset_merge.metadata_changed {
+      flowstate_document::loro_import::import_assets(&self.doc, &working_projection)
+        .context("recording asset metadata in grouped editor transaction")?;
+      refresh_image_asset_metadata(&self.doc).context("refreshing image asset metadata in grouped editor transaction")?;
+    }
+    let undo_selection = selection_after.and_then(|selection| self.undo_selection_for_projection(&working_projection, selection));
+    self.set_pending_undo_selection(undo_selection)?;
+    self.doc.commit();
+
+    let mut invalidation = ProjectionInvalidation::full_rebuild(
+      batch_projection_before.frontier.clone(),
+      self.doc.state_frontiers().encode(),
+      "editor_command_batch_projection",
+    );
+    invalidation.changed_assets = asset_merge.changed_asset_ids;
+    self.merge_subscription_invalidation(&mut invalidation);
+
+    let mut authoritative_projection = match document_from_loro(&self.doc) {
+      Ok(projection) => projection,
+      Err(error) => {
+        tracing::error!(%error, "canonical projection materialization failed after committed editor transaction; using the prevalidated projection");
+        let mut projection = predicted_projection.clone();
+        projection.frontier = self.doc.state_frontiers().encode();
+        projection
+      },
+    };
+    authoritative_projection.assets = predicted_projection.assets;
+    authoritative_projection.theme = self.projection.theme.clone();
+    self.projection = authoritative_projection;
+    self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
+    self.bump_runtime_epoch();
+    if asset_merge.any_changed {
+      self.package = staged_package;
+    }
+    if let Err(error) = self.record_undo_checkpoint() {
+      tracing::error!(%error, "recording undo checkpoint failed after committed editor transaction");
+    }
+
+    debug_assert_eq!(
+      self.projection.ids.paragraph_ids, predicted_projection.ids.paragraph_ids,
+      "canonical paragraph identities diverged from preflighted editor transaction {transaction_id}: {commands:?}",
+    );
+    debug_assert_eq!(
+      self.projection.ids.block_ids, predicted_projection.ids.block_ids,
+      "canonical block identities diverged from preflighted editor transaction {transaction_id}: {commands:?}",
+    );
+
+    let mut events = Vec::new();
+    match self.local_update_bytes(&batch_vv_before) {
+      Ok(update) if !update.is_empty() => {
+        if let Err(error) = self.persist_update_segment(batch_frontier_before, batch_vv_before, update.clone()) {
+          tracing::error!(%error, "persisting committed editor transaction update segment failed");
+        }
+        events.push(RuntimeEvent::LocalUpdate {
+          bytes: update,
+          frontier: self.doc.state_frontiers().encode(),
+          version_vector: self.doc.state_vv().encode(),
+        });
+      },
+      Ok(_) => {},
+      Err(error) => {
+        tracing::error!(%error, "exporting committed editor transaction update failed; later synchronization must recover it");
+      },
+    }
+
+    invalidation
+      .frontier_after
+      .clone_from(&self.projection.frontier);
+    if let Some(patches) = projection_patches_between(&batch_projection_before, &self.projection) {
+      events.push(RuntimeEvent::ProjectionPatched {
+        batch: ProjectionPatchBatch {
+          transaction_id,
+          base_frontier: batch_projection_before.frontier.clone(),
+          new_frontier: self.projection.frontier.clone(),
+          patches,
+        },
+        invalidation,
+        version_vector: self.doc.state_vv().encode(),
+      });
+    } else {
+      events.push(RuntimeEvent::ProjectionUpdated {
+        document: Box::new(self.projection.clone()),
+        invalidation,
+        frontier: self.projection.frontier.clone(),
+        version_vector: self.doc.state_vv().encode(),
+      });
+    }
+
+    Ok(EditorCommitResult {
+      transaction_id,
+      base_frontier: batch_projection_before.frontier,
+      new_frontier: self.projection.frontier.clone(),
+      events,
+    })
   }
 
   pub fn command(&mut self, command: SemanticCommand) -> Result<Vec<RuntimeEvent>> {
@@ -1402,9 +1571,13 @@ impl CrdtRuntime {
     if let Some(patches) = projection_patches_between(before, &self.projection) {
       self.record_projection_fallback(&invalidation);
       return Ok(RuntimeEvent::ProjectionPatched {
-        patches,
+        batch: ProjectionPatchBatch {
+          transaction_id: uuid::Uuid::new_v4().as_u128(),
+          base_frontier: before.frontier.clone(),
+          new_frontier: self.doc.state_frontiers().encode(),
+          patches,
+        },
         invalidation,
-        frontier: self.doc.state_frontiers().encode(),
         version_vector: self.doc.state_vv().encode(),
       });
     }
@@ -1417,9 +1590,13 @@ impl CrdtRuntime {
 
   fn projection_patched_event(&self, patches: Vec<flowstate_document::ProjectionPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
     RuntimeEvent::ProjectionPatched {
-      patches,
+      batch: ProjectionPatchBatch {
+        transaction_id: uuid::Uuid::new_v4().as_u128(),
+        base_frontier: invalidation.frontier_before.clone(),
+        new_frontier: self.doc.state_frontiers().encode(),
+        patches,
+      },
       invalidation,
-      frontier: self.doc.state_frontiers().encode(),
       version_vector: self.doc.state_vv().encode(),
     }
   }
@@ -1450,9 +1627,13 @@ impl CrdtRuntime {
   }
 
   fn refresh_projection(&mut self) -> Result<()> {
+    let current_assets = self.projection.assets.clone();
     let mut projection = document_from_loro(&self.doc).context("refreshing projection from canonical Loro state")?;
     if let Some(package) = &self.package {
       attach_package_assets(&mut projection, package);
+    }
+    for (id, record) in current_assets.assets {
+      projection.assets.assets.insert(id, record);
     }
     projection.theme = self.projection.theme.clone();
     self.projection = projection;
@@ -1483,7 +1664,19 @@ impl CrdtRuntime {
     let rebuild_index = self
       .projection_index
       .update_for_patches(&self.projection, patches);
-    apply_projection_patches(&mut self.projection, patches);
+    let batch = ProjectionPatchBatch {
+      transaction_id: uuid::Uuid::new_v4().as_u128(),
+      base_frontier: self.projection.frontier.clone(),
+      new_frontier: self.doc.state_frontiers().encode(),
+      patches: patches.to_vec(),
+    };
+    if let Err(error) = apply_projection_patch_batch(&mut self.projection, &batch) {
+      tracing::warn!(%error, "incremental runtime projection patch failed; refreshing projection");
+      if let Err(error) = self.refresh_projection() {
+        tracing::error!(%error, "refreshing projection after patch failure failed");
+      }
+      return;
+    }
     if rebuild_index {
       self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
     }
@@ -1987,6 +2180,39 @@ fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: 
   }
 }
 
+fn editor_semantic_command_is_noop(command: &EditorSemanticCommand) -> bool {
+  match command {
+    EditorSemanticCommand::InsertText { text, .. } => text.is_empty(),
+    EditorSemanticCommand::DeleteRange { range } => range.start == range.end,
+    EditorSemanticCommand::SetRunStyles { range, .. } => range.start == range.end,
+    _ => false,
+  }
+}
+
+fn editor_semantic_command_requires_staging_validation(command: &EditorSemanticCommand) -> bool {
+  matches!(
+    command,
+    EditorSemanticCommand::ReplaceParagraphSpan { .. }
+      | EditorSemanticCommand::InsertBlock { .. }
+      | EditorSemanticCommand::DeleteBlock { .. }
+      | EditorSemanticCommand::MoveBlock { .. }
+      | EditorSemanticCommand::ReplaceBlock { .. }
+      | EditorSemanticCommand::InsertTableRow { .. }
+      | EditorSemanticCommand::DeleteTableRow { .. }
+      | EditorSemanticCommand::MoveTableRow { .. }
+      | EditorSemanticCommand::InsertTableColumn { .. }
+      | EditorSemanticCommand::DeleteTableColumn { .. }
+      | EditorSemanticCommand::MoveTableColumn { .. }
+      | EditorSemanticCommand::ReplaceTableCell { .. }
+      | EditorSemanticCommand::SetTableCellSpan { .. }
+      | EditorSemanticCommand::ReplaceEquationSourceRange { .. }
+      | EditorSemanticCommand::ReplaceImageAltText { .. }
+      | EditorSemanticCommand::ReplaceImageCaption { .. }
+      | EditorSemanticCommand::SetImageLayout { .. }
+      | EditorSemanticCommand::SetTableColumnWidth { .. }
+  )
+}
+
 pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProjection, command: &EditorSemanticCommand) -> Result<bool> {
   match command {
     EditorSemanticCommand::InsertText { at, text, styles } => {
@@ -2001,7 +2227,6 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         mark_run_styles(&body, unicode_index..unicode_index + inserted_len, *styles).context("marking inserted run styles")?;
       }
       repair_paragraph_metadata_after_text_flow_edit(doc, &body, &newline_boundaries, "editor_insert_text")?;
-      doc.commit();
       Ok(true)
     },
     EditorSemanticCommand::DeleteRange { range } => {
@@ -2013,12 +2238,27 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
           .delete(start, end - start)
           .context("deleting projection-scoped text range from Loro body flow")?;
         repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range")?;
-        doc.commit();
         return Ok(true);
       }
       Ok(false)
     },
-    EditorSemanticCommand::SplitParagraph { at, inherited_style } => {
+    EditorSemanticCommand::SplitParagraph {
+      at,
+      source_paragraph,
+      source_block,
+      new_paragraph,
+      new_block,
+      inherited_style,
+    } => {
+      if projection.ids.paragraph_ids.get(at.paragraph).copied() != Some(*source_paragraph) {
+        return Ok(false);
+      }
+      let Some(source_block_ix) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph) else {
+        return Ok(false);
+      };
+      if projection.ids.block_ids.get(source_block_ix).copied() != Some(*source_block) {
+        return Ok(false);
+      }
       let unicode_index = projection_offset_to_body_unicode_index(projection, *at);
       let body = body_text(doc);
       body
@@ -2031,8 +2271,7 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
           paragraph_style_value(*inherited_style),
         )
         .context("marking split paragraph style")?;
-      repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[unicode_index], "editor_split_paragraph")?;
-      doc.commit();
+      repair_paragraph_metadata_after_stable_split(doc, &body, unicode_index, *new_paragraph, *new_block, "editor_split_paragraph")?;
       Ok(true)
     },
     EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
@@ -2046,7 +2285,6 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         body_text(doc)
           .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*style))
           .context("marking paragraph style from editor semantic command")?;
-        doc.commit();
         return Ok(true);
       }
       Ok(false)
@@ -2074,7 +2312,6 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         );
         if end > start {
           mark_run_styles(&body_text(doc), start..end, *styles).context("marking run styles from editor semantic command")?;
-          doc.commit();
           return Ok(true);
         }
       }
@@ -2208,7 +2445,6 @@ fn apply_editor_semantic_command_body_fast_path(
         mark_run_styles(&body, unicode_index..unicode_index + inserted_len, *styles).context("marking inserted run styles")?;
       }
       repair_paragraph_metadata_after_text_flow_edit(doc, &body, &newline_boundaries, "editor_insert_text_fast_path")?;
-      doc.commit();
       Ok(true)
     },
     EditorSemanticCommand::DeleteRange { range } => {
@@ -2224,12 +2460,27 @@ fn apply_editor_semantic_command_body_fast_path(
           .delete(start, end - start)
           .context("deleting text from Loro body flow without projection snapshot")?;
         repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range_fast_path")?;
-        doc.commit();
         return Ok(true);
       }
       Ok(false)
     },
-    EditorSemanticCommand::SplitParagraph { at, inherited_style } => {
+    EditorSemanticCommand::SplitParagraph {
+      at,
+      source_paragraph,
+      source_block,
+      new_paragraph,
+      new_block,
+      inherited_style,
+    } => {
+      if projection.ids.paragraph_ids.get(at.paragraph).copied() != Some(*source_paragraph) {
+        return Ok(false);
+      }
+      let Some(source_block_ix) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph) else {
+        return Ok(false);
+      };
+      if projection.ids.block_ids.get(source_block_ix).copied() != Some(*source_block) {
+        return Ok(false);
+      }
       let body = body_text(doc);
       let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
         return Ok(false);
@@ -2244,8 +2495,7 @@ fn apply_editor_semantic_command_body_fast_path(
           paragraph_style_value(*inherited_style),
         )
         .context("marking split paragraph style")?;
-      repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[unicode_index], "editor_split_paragraph_fast_path")?;
-      doc.commit();
+      repair_paragraph_metadata_after_stable_split(doc, &body, unicode_index, *new_paragraph, *new_block, "editor_split_paragraph_fast_path")?;
       Ok(true)
     },
     EditorSemanticCommand::SetParagraphStyle { .. }
@@ -2284,7 +2534,9 @@ fn incremental_projection_patches_for_command(
       let old_len = flowstate_document::paragraph_text_len(projection.paragraphs.get(at.paragraph)?);
       let new = body_input_paragraph(doc, at.paragraph)?;
       Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
-        row,
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: projection.ids.paragraph_ids[at.paragraph],
+        row_hint: row,
         new,
         delta_utf8: projection_text_delta(at.byte.min(old_len), 0, text.len(), old_len.saturating_sub(at.byte.min(old_len))),
       }])
@@ -2297,7 +2549,9 @@ fn incremental_projection_patches_for_command(
       let end = range.end.byte.min(old_len).max(start);
       let new = body_input_paragraph(doc, paragraph_ix)?;
       Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
-        row,
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+        row_hint: row,
         new,
         delta_utf8: projection_text_delta(start, end - start, 0, old_len.saturating_sub(end)),
       }])
@@ -2307,7 +2561,12 @@ fn incremental_projection_patches_for_command(
       // `paragraph_ids` scan (with an identical linear fallback).
       let paragraph_ix = index.paragraph_index_for_id(projection, *paragraph)?;
       let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle { row, style: *style }])
+      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle {
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: *paragraph,
+        row_hint: row,
+        style: *style,
+      }])
     },
     EditorSemanticCommand::SetRunStyles { paragraph, .. } => {
       // §24: O(1) paragraph metadata index lookup replaces the linear
@@ -2316,7 +2575,9 @@ fn incremental_projection_patches_for_command(
       let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
       let new = body_input_paragraph(doc, paragraph_ix)?;
       Some(vec![flowstate_document::ProjectionPatch::ParagraphRuns {
-        row,
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: *paragraph,
+        row_hint: row,
         runs: flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new)])
           .paragraphs
           .first()?
@@ -2335,7 +2596,8 @@ fn structured_projection_patches_for_command(
 ) -> Option<Vec<ProjectionPatch>> {
   match command {
     EditorSemanticCommand::InsertBlock { block, block_ix, after } => Some(vec![ProjectionPatch::InsertBlocks {
-      row: (*block_ix).min(projection.blocks.len()),
+      before: projection.ids.block_ids.get(*block_ix).copied(),
+      row_hint: (*block_ix).min(projection.blocks.len()),
       blocks: vec![ProjectionStructuralBlock {
         block_id: *block,
         paragraph_id: None,
@@ -2345,12 +2607,14 @@ fn structured_projection_patches_for_command(
     // §24: O(1) block anchor index lookups replace the linear `block_ids` scans
     // (each with an identical linear fallback for ids absent from the index).
     EditorSemanticCommand::DeleteBlock { block } => Some(vec![ProjectionPatch::DeleteBlocks {
-      row: index.block_index_for_id(projection, *block)?,
-      count: 1,
+      block_ids: vec![*block],
+      row_hint: index.block_index_for_id(projection, *block)?,
     }]),
     EditorSemanticCommand::MoveBlock { block, new_block_ix } => Some(vec![ProjectionPatch::MoveBlock {
-      from: index.block_index_for_id(projection, *block)?,
-      to: (*new_block_ix).min(projection.blocks.len().saturating_sub(1)),
+      block_id: *block,
+      before: projection.ids.block_ids.get(*new_block_ix).copied(),
+      from_hint: index.block_index_for_id(projection, *block)?,
+      to_hint: (*new_block_ix).min(projection.blocks.len().saturating_sub(1)),
     }]),
     EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => object_replacement_patch(
       projection,
@@ -2542,7 +2806,8 @@ fn projected_table_input(
 
 fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
   Some(vec![ProjectionPatch::ReplaceObjectBlock {
-    row: block_ix,
+    block_id: *projection.ids.block_ids.get(block_ix)?,
+    row_hint: block_ix,
     block: ProjectionStructuralBlock {
       block_id: *projection.ids.block_ids.get(block_ix)?,
       paragraph_id: None,
@@ -2649,7 +2914,6 @@ fn insert_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
     return Ok(false);
   };
   insert_input_object_block(doc, unicode_index, block_id, input)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -2712,7 +2976,6 @@ fn replace_projection_object_block(
     },
     InputBlock::Paragraph(_) => unreachable!("paragraph payload was handled above"),
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -2757,7 +3020,6 @@ fn set_projection_table_column_width(
   };
   let column = columns_by_id.ensure_mergeable_map(column_id)?;
   write_table_column_width(&column, width)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -2794,7 +3056,6 @@ fn insert_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document
     let cell = row.cells.get(column_ix).unwrap_or(&empty_cell);
     write_table_cell_map_from_input(doc, &cell_map, &cell_id, &row_id, column_id, cell)?;
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -2832,7 +3093,6 @@ fn delete_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document
       }
     }
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -2867,7 +3127,6 @@ fn move_projection_table_axis(
     return Ok(false);
   }
   order.mov(from_ix, to_ix)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -2918,7 +3177,6 @@ fn insert_projection_table_column(
     let cell = cells.get(row_ix).unwrap_or(&empty_cell);
     write_table_cell_map_from_input(doc, &cell_map, &cell_id, row_id, &column_id, cell)?;
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -2964,7 +3222,6 @@ fn delete_projection_table_column(doc: &LoroDoc, table_block_id: flowstate_docum
       }
     }
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -3027,7 +3284,6 @@ fn replace_projection_table_cell(
     table_cell_id_by_row_column(&cells_by_id, row_id, column_id).unwrap_or_else(|| format!("{row_id}.cell.{}", Uuid::new_v4().as_u128()));
   let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
   update_table_cell_map_from_input(doc, &cell_map, &cell_id, row_id, column_id, cell)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -3050,7 +3306,6 @@ fn set_projection_table_cell_span(
   };
   cell.insert("row_span", i64::from(row_span.max(1)))?;
   cell.insert("column_span", i64::from(column_span.max(1)))?;
-  doc.commit();
   Ok(true)
 }
 
@@ -3124,7 +3379,6 @@ fn replace_projection_equation_source_range(
   if !replacement.is_empty() {
     source_text.insert(start, replacement)?;
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -3149,7 +3403,6 @@ fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: flowstate_do
   let alt_flow = ensure_flow(doc, &alt_flow_id, "alt_text")?;
   // §28: resolve the alt-text flow's text via its stored `text_container_id`.
   replace_text_incrementally(&flow_text(doc, &alt_flow)?, text)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -3205,7 +3458,6 @@ fn replace_projection_image_caption(
   } else {
     block.delete("caption_flow_id")?;
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -3230,7 +3482,6 @@ fn set_projection_image_layout(
   let attrs = block.ensure_mergeable_map("attrs")?;
   attrs.insert("alignment", alignment_name(alignment))?;
   write_image_sizing_attrs(&attrs, sizing)?;
-  doc.commit();
   Ok(true)
 }
 
@@ -3291,7 +3542,6 @@ fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
     .ensure_mergeable_map(BLOCKS_BY_ID)?
     .delete(&key)
     .context("deleting object block metadata")?;
-  doc.commit();
   Ok(true)
 }
 
@@ -3323,7 +3573,6 @@ fn move_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::Blo
   if let Some(cursor) = body.get_cursor(insert_pos, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  doc.commit();
   Ok(true)
 }
 
@@ -3948,6 +4197,14 @@ fn join_projection_paragraphs(
     return Ok(false);
   }
 
+  let Some(second_block_ix) = flowstate_document::block_ix_for_paragraph(projection, second_ix) else {
+    return Ok(false);
+  };
+  let Some(second_block) = projection.ids.block_ids.get(second_block_ix).copied() else {
+    return Ok(false);
+  };
+  delete_projection_paragraph_metadata(doc, second, second_block)?;
+
   let boundary = paragraph_boundary_unicode_index(projection, second_ix);
   let body = body_text(doc);
   if !boundary_is_live(&body.to_string(), boundary) {
@@ -3963,8 +4220,31 @@ fn join_projection_paragraphs(
     .delete(boundary, 1)
     .context("deleting joined paragraph boundary from Loro body flow")?;
   repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_join_paragraphs")?;
-  doc.commit();
   Ok(true)
+}
+
+fn delete_projection_paragraph_metadata(doc: &LoroDoc, paragraph_id: ParagraphId, block_id: BlockId) -> loro::LoroResult<()> {
+  let root = doc.get_map(ROOT);
+  let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+  for key in map_keys(&paragraphs) {
+    let id = child_map(&paragraphs, &key)
+      .and_then(|paragraph| map_string_opt(&paragraph, "id"))
+      .unwrap_or_else(|| key.clone());
+    if loro_id_u128(&id) == paragraph_id.0 {
+      paragraphs.delete(&key)?;
+    }
+  }
+
+  let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+  for key in map_keys(&blocks) {
+    let id = child_map(&blocks, &key)
+      .and_then(|block| map_string_opt(&block, "id"))
+      .unwrap_or_else(|| key.clone());
+    if loro_id_u128(&id) == block_id.0 {
+      blocks.delete(&key)?;
+    }
+  }
+  Ok(())
 }
 
 fn projection_paragraph_blocks_are_adjacent(projection: &DocumentProjection, first_ix: usize, second_ix: usize) -> bool {
@@ -4037,7 +4317,6 @@ fn replace_body_paragraph_span(
   mark_replacement_span(&body, first_boundary, start, after, &paragraph_texts)?;
   let boundaries = replacement_span_boundaries(first_boundary, start, &paragraph_texts);
   repair_paragraph_metadata_after_text_flow_edit(doc, &body, &boundaries, "editor_replace_paragraph_span")?;
-  doc.commit();
   Ok(true)
 }
 
@@ -4256,7 +4535,56 @@ fn repair_paragraph_metadata_after_text_flow_edit(
   Ok(())
 }
 
+fn repair_paragraph_metadata_after_stable_split(
+  doc: &LoroDoc,
+  body: &loro::LoroText,
+  boundary: usize,
+  paragraph_id: flowstate_document::ParagraphId,
+  block_id: flowstate_document::BlockId,
+  reason: &'static str,
+) -> loro::LoroResult<()> {
+  ensure_paragraph_metadata_at_boundary_with_ids(doc, body, boundary, paragraph_id, block_id)?;
+  let pruned = prune_stale_paragraph_metadata(doc, body)?;
+  if pruned.changed() {
+    tracing::warn!(
+      reason,
+      stale_paragraphs = pruned.stale_paragraphs,
+      duplicate_paragraphs = pruned.duplicate_paragraphs,
+      stale_blocks = pruned.stale_blocks,
+      duplicate_blocks = pruned.duplicate_blocks,
+      "pruned stale Loro paragraph metadata after stable split",
+    );
+  }
+  Ok(())
+}
+
 fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, boundary: usize) -> loro::LoroResult<()> {
+  ensure_paragraph_metadata_at_boundary_with_keys(doc, body, boundary, None, None)
+}
+
+fn ensure_paragraph_metadata_at_boundary_with_ids(
+  doc: &LoroDoc,
+  body: &loro::LoroText,
+  boundary: usize,
+  paragraph_id: flowstate_document::ParagraphId,
+  block_id: flowstate_document::BlockId,
+) -> loro::LoroResult<()> {
+  ensure_paragraph_metadata_at_boundary_with_keys(
+    doc,
+    body,
+    boundary,
+    Some(format!("paragraph.{}", paragraph_id.0)),
+    Some(format!("paragraph_block.{}", block_id.0)),
+  )
+}
+
+fn ensure_paragraph_metadata_at_boundary_with_keys(
+  doc: &LoroDoc,
+  body: &loro::LoroText,
+  boundary: usize,
+  forced_paragraph_id: Option<String>,
+  forced_block_id: Option<String>,
+) -> loro::LoroResult<()> {
   let body_snapshot = body.to_string();
   if !boundary_is_live(&body_snapshot, boundary) {
     tracing::warn!(
@@ -4269,8 +4597,9 @@ fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, b
   let root = doc.get_map(ROOT);
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
-  let paragraph_id =
-    paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary).unwrap_or_else(|| new_paragraph_metadata_id(boundary));
+  let paragraph_id = forced_paragraph_id
+    .or_else(|| paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary))
+    .unwrap_or_else(|| new_paragraph_metadata_id(boundary));
   let paragraph = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph.insert("id", paragraph_id.as_str())?;
   paragraph.insert("container_id", paragraph.id().to_string())?;
@@ -4284,7 +4613,9 @@ fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, b
   let paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
   paragraph.insert("attrs_container_id", paragraph_attrs.id().to_string())?;
 
-  let block_id = paragraph_block_key_at_boundary(doc, &body_snapshot, &blocks, boundary).unwrap_or_else(|| new_paragraph_block_id(boundary));
+  let block_id = forced_block_id
+    .or_else(|| paragraph_block_key_at_boundary(doc, &body_snapshot, &blocks, boundary))
+    .unwrap_or_else(|| new_paragraph_block_id(boundary));
   let block = blocks.ensure_mergeable_map(&block_id)?;
   block.insert("id", block_id.as_str())?;
   block.insert("container_id", block.id().to_string())?;
@@ -4592,11 +4923,37 @@ fn attach_package_assets(document: &mut DocumentProjection, package: &DocumentPa
   flowstate_document::attach_package_assets(document, &package.assets);
 }
 
-fn asset_record_changed(existing: &AssetRecord, next: &AssetRecord) -> bool {
-  existing.mime_type != next.mime_type
-    || existing.original_name != next.original_name
-    || existing.content_hash != next.content_hash
-    || existing.bytes.as_ref() != next.bytes.as_ref()
+#[derive(Debug, Default)]
+struct AssetMergeSummary {
+  any_changed: bool,
+  metadata_changed: bool,
+  changed_asset_ids: Vec<String>,
+}
+
+fn merge_asset_records_into_projection(projection: &mut DocumentProjection, records: &[AssetRecord]) -> AssetMergeSummary {
+  let mut summary = AssetMergeSummary::default();
+  for record in records {
+    let existing = projection.assets.assets.get(&record.id);
+    let metadata_changed = existing.is_none_or(|existing| asset_record_metadata_changed(existing, record));
+    let bytes_changed = existing.is_none_or(|existing| existing.bytes.as_ref() != record.bytes.as_ref());
+    if !metadata_changed && !bytes_changed {
+      continue;
+    }
+    summary.any_changed = true;
+    if metadata_changed {
+      summary.metadata_changed = true;
+      let id = record.id.0.to_string();
+      if !summary.changed_asset_ids.contains(&id) {
+        summary.changed_asset_ids.push(id);
+      }
+    }
+    projection.assets.assets.insert(record.id, record.clone());
+  }
+  summary
+}
+
+fn asset_record_metadata_changed(existing: &AssetRecord, next: &AssetRecord) -> bool {
+  existing.mime_type != next.mime_type || existing.original_name != next.original_name || existing.content_hash != next.content_hash
 }
 
 fn install_undo_selection_callbacks(undo: &mut UndoManager, state: &Arc<Mutex<UndoSelectionState>>) {
@@ -5310,26 +5667,27 @@ mod tests {
     assert_eq!(flowstate_document::paragraph_text(&before_insert, 1), "");
     assert_eq!(flowstate_document::paragraph_text(&before_insert, 2), "after");
     let following_id = before_insert.ids.paragraph_ids[2];
-    {
+    let rewrote_following_boundary_cursor = {
       let body = body_text(runtime.doc());
       let snapshot = body.to_string();
       let root = runtime.doc().get_map(ROOT);
       let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
-      let mut rewrote_following_boundary_cursor = false;
+      let mut rewrote = false;
       for key in map_keys(&paragraphs) {
         let Some(paragraph) = child_map(&paragraphs, &key) else {
           continue;
         };
-        if live_cursor_pos(runtime.doc(), &snapshot, &paragraph, "boundary_cursor") == Some(8) {
-          if let Some(cursor) = body.get_cursor(8, Side::Right) {
-            paragraph.insert("boundary_cursor", cursor.encode())?;
-            rewrote_following_boundary_cursor = true;
-          }
+        if live_cursor_pos(runtime.doc(), &snapshot, &paragraph, "boundary_cursor") == Some(8)
+          && let Some(cursor) = body.get_cursor(8, Side::Right)
+        {
+          paragraph.insert("boundary_cursor", cursor.encode())?;
+          rewrote = true;
         }
       }
-      assert!(rewrote_following_boundary_cursor);
       runtime.doc().commit();
-    }
+      rewrote
+    };
+    assert!(rewrote_following_boundary_cursor);
 
     let events = runtime.apply_editor_semantic_command(
       &before_insert,
@@ -6376,7 +6734,7 @@ mod tests {
     let patches = events
       .iter()
       .find_map(|event| match event {
-        RuntimeEvent::ProjectionPatched { patches, .. } => Some(patches),
+        RuntimeEvent::ProjectionPatched { batch, .. } => Some(&batch.patches),
         RuntimeEvent::LocalUpdate { .. }
         | RuntimeEvent::RemoteUpdateApplied { .. }
         | RuntimeEvent::RevisionOpened { .. }
@@ -6386,10 +6744,15 @@ mod tests {
       })
       .expect("remote import should emit a projection patch");
 
-    let [ProjectionPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
+    let [
+      ProjectionPatch::ParagraphText {
+        row_hint, new, delta_utf8, ..
+      },
+    ] = patches.as_slice()
+    else {
       panic!("expected one paragraph text patch");
     };
-    assert_eq!(*row, 0);
+    assert_eq!(*row_hint, 0);
     assert_eq!(
       new
         .runs
@@ -6444,7 +6807,7 @@ mod tests {
     let patches = events
       .iter()
       .find_map(|event| match event {
-        RuntimeEvent::ProjectionPatched { patches, .. } => Some(patches),
+        RuntimeEvent::ProjectionPatched { batch, .. } => Some(&batch.patches),
         RuntimeEvent::LocalUpdate { .. }
         | RuntimeEvent::RemoteUpdateApplied { .. }
         | RuntimeEvent::RevisionOpened { .. }
@@ -6454,10 +6817,15 @@ mod tests {
       })
       .expect("remote import should emit a projection patch");
 
-    let [ProjectionPatch::ParagraphText { row, new, delta_utf8 }] = patches.as_slice() else {
+    let [
+      ProjectionPatch::ParagraphText {
+        row_hint, new, delta_utf8, ..
+      },
+    ] = patches.as_slice()
+    else {
       panic!("expected one paragraph text patch");
     };
-    assert_eq!(*row, 2);
+    assert_eq!(*row_hint, 2);
     assert_eq!(
       new
         .runs
@@ -6514,6 +6882,7 @@ mod tests {
     let startup = runtime.projection_snapshot()?;
 
     runtime.apply_editor_commands(
+      1,
       &startup.frontier,
       &[EditorSemanticCommand::InsertText {
         at: DocumentOffset { paragraph: 0, byte: 0 },
@@ -6536,6 +6905,7 @@ mod tests {
     assert_eq!(runtime.projection_snapshot()?.frontier, base_frontier);
 
     runtime.apply_editor_commands(
+      1,
       &base_frontier,
       &[EditorSemanticCommand::InsertText {
         at: DocumentOffset { paragraph: 0, byte: 0 },
@@ -6561,6 +6931,7 @@ mod tests {
 
     let error = runtime
       .apply_editor_commands(
+        1,
         &base_frontier,
         &[EditorSemanticCommand::InsertText {
           at: DocumentOffset { paragraph: 0, byte: 0 },
@@ -6596,6 +6967,7 @@ mod tests {
     let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
 
     runtime.apply_editor_commands(
+      1,
       &[],
       &[EditorSemanticCommand::InsertText {
         at: DocumentOffset { paragraph: 1, byte: 2 },
@@ -6912,3 +7284,7 @@ mod tests {
     Ok(())
   }
 }
+
+#[cfg(test)]
+#[path = "crdt_runtime/editor_transaction_tests.rs"]
+mod editor_transaction_tests;

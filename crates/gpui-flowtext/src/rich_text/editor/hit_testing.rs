@@ -116,6 +116,7 @@ impl RichTextEditor {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
     self.selection = selection;
     self.goal_x = None;
     self.scroll_head_into_view();

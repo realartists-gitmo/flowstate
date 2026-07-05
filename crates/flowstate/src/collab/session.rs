@@ -7,7 +7,7 @@ use std::{
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
   SessionId,
-  crdt_runtime::{CrdtRuntime, RuntimeEvent},
+  crdt_runtime::{CrdtRuntime, EditorCommitResult, RuntimeEvent},
   crdt_runtime_actor::CrdtRuntimeHandle,
   ids::PeerId,
   net::{
@@ -24,10 +24,7 @@ use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
 use crate::app_settings::{load_document_theme, load_local_user_identity};
-use crate::rich_text_element::{
-  AssetId, AssetRecord, DocumentProjection, EditorEvent, ProjectionPatch, RichTextEditor, SemanticCommandBatch, SemanticEditCommand,
-  UndoRedirect,
-};
+use crate::rich_text_element::{AssetId, AssetRecord, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
 
 use super::presence_view;
 
@@ -680,16 +677,24 @@ impl CollabSession {
     // reaches `create_document_panel` through the `Handle` source, which
     // deliberately skips re-binding to avoid a redundant second call.
     let identity_runtime = runtime.clone();
-    cx.spawn(async move |_, cx| {
+    cx.spawn(async move |session, cx| {
       let (user_id, display_name) = cx
         .background_executor()
         .spawn(async { load_local_user_identity() })
         .await;
-      if let Err(error) = identity_runtime
+      match identity_runtime
         .set_author_identity(user_id, display_name)
         .await
       {
-        tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to joined collaboration runtime failed");
+        Ok(events) => {
+          let applied = session.update(cx, |session, cx| session.apply_runtime_events(events, false, cx));
+          if let Ok(Err(error)) = applied {
+            tracing::warn!(error = %format_args!("{error:#}"), "publishing durable author identity update failed");
+          }
+        },
+        Err(error) => {
+          tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to joined collaboration runtime failed");
+        },
       }
     })
     .detach();
@@ -797,6 +802,12 @@ impl CollabSession {
 
     let edits = editor.update(cx, |editor, _| editor.take_pending_session_edits());
     let edit_count = edits.len();
+    let retry_edits = edits.clone();
+    let transaction_id = edits
+      .iter()
+      .find(|edit| edit.transaction_id != 0)
+      .map(|edit| edit.transaction_id)
+      .unwrap_or_else(|| Uuid::new_v4().as_u128());
     let base_frontier = edits
       .iter()
       .find(|edit| !edit.semantic_commands.is_empty())
@@ -813,12 +824,12 @@ impl CollabSession {
       .iter()
       .rev()
       .find_map(|edit| edit.selection_after.clone());
+    let stable_selection_after = edits
+      .iter()
+      .rev()
+      .find_map(|edit| edit.stable_selection_after.clone());
     let commands = coalesce_collaboration_commands(edits.into_iter().flat_map(|edit| edit.semantic_commands));
     let operation_count = commands.len();
-    let acknowledge_without_projection_replay = !commands.is_empty()
-      && commands
-        .iter()
-        .all(SemanticEditCommand::can_acknowledge_without_projection_replay);
     if edit_count == 0 || operation_count == 0 {
       tracing::trace!(session = %self.session, edit_count, operation_count, "no local collaboration edits to flush");
       return;
@@ -826,9 +837,10 @@ impl CollabSession {
     tracing::debug!(session = %self.session, edit_count, operation_count, "flushing local collaboration edits into Loro");
     let Some(runtime) = self.runtime.clone() else {
       tracing::warn!(session = %self.session, edit_count, operation_count, "cannot flush local collaboration edits because Loro doc is missing");
+      editor.update(cx, |editor, _| editor.prepend_pending_semantic_edits(retry_edits));
       return;
     };
-    editor.update(cx, |editor, _| editor.begin_runtime_edit());
+    editor.update(cx, |editor, _| editor.begin_runtime_edit(transaction_id));
     let assets = editor
       .read(cx)
       .document()
@@ -838,52 +850,118 @@ impl CollabSession {
       .cloned()
       .collect();
     let session_id = self.session;
-    let retry_edit = (!commands.is_empty()).then(|| SemanticCommandBatch {
-      base_frontier: base_frontier.clone(),
-      semantic_commands: commands.clone(),
-      selection_after: selection_after.clone(),
-    });
     cx.spawn(async move |session, cx| {
       let result = runtime
-        .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
+        .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after.clone())
         .await;
-      let stale_snapshot = match &result {
-        Err(error) if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() => {
-          runtime.projection_snapshot().await.ok()
-        },
-        _ => None,
-      };
-      let _ = session.update(cx, |session, cx| match result {
-        Ok(events) => {
-          if let Err(error) = session.apply_local_runtime_events(
-            events,
-            acknowledge_without_projection_replay,
-            selection_after,
-            cx,
-          ) {
-            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying local runtime projection failed");
-            session.detach(DetachReason::Fatal(format!("applying local collaboration edit failed: {error:#}")), cx);
-            return;
+      match result {
+        Ok(commit) => {
+          let applied = session.update(cx, |session, cx| {
+            let result = session.apply_local_runtime_events(commit, stable_selection_after.clone(), cx);
+            if result.is_ok() {
+              session.last_document_activity = Instant::now();
+            }
+            result
+          });
+          let materialization_error = match applied {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("{error:#}")),
+            Err(error) => {
+              tracing::debug!(session = %session_id, %error, "collaboration session disappeared while applying local commit");
+              return;
+            },
+          };
+          if let Some(detail) = materialization_error {
+            tracing::warn!(session = %session_id, error = %detail, "local committed projection failed; repairing from canonical runtime snapshot");
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| {
+                      editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
+                      editor.complete_runtime_edit(None, cx);
+                    });
+                  }
+                  session.last_document_activity = Instant::now();
+                  session.last_self_check = None;
+                  session.refresh_external_carets(cx);
+                });
+              },
+              Err(error) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  }
+                  session.detach(
+                    DetachReason::Fatal(format!("canonical projection repair failed after local commit: {error:#}")),
+                    cx,
+                  );
+                });
+              },
+            }
           }
-          session.last_document_activity = Instant::now();
         },
         Err(error) => {
-          if let Some(document) = stale_snapshot {
-            tracing::debug!(session = %session_id, "discarding stale optimistic projection and restoring the canonical collaboration projection");
-            if let Some(editor) = session.editor.clone() {
-              editor.update(cx, |editor, cx| {
-                editor.replace_document_projection_replaying_pending(document, retry_edit.into_iter().collect(), None, cx);
-              });
+          let stale = error
+            .downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>()
+            .is_some();
+          if stale {
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                tracing::debug!(session = %session_id, "rebasing stale optimistic collaboration transaction on canonical projection");
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| {
+                      editor.replace_document_projection_replaying_pending(document, retry_edits, None, cx);
+                      editor.complete_runtime_edit(None, cx);
+                    });
+                  }
+                });
+              },
+              Err(snapshot_error) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  }
+                  session.detach(
+                    DetachReason::Fatal(format!("canonical projection repair failed after stale local transaction: {snapshot_error:#}")),
+                    cx,
+                  );
+                });
+              },
             }
           } else {
-            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "capturing local collaboration edit failed");
-            if let Some(editor) = session.editor.clone() {
-              editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "local collaboration transaction was rejected; restoring canonical projection");
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| {
+                      editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
+                      editor.complete_runtime_edit(None, cx);
+                    });
+                  }
+                  session.last_self_check = None;
+                  session.refresh_external_carets(cx);
+                });
+              },
+              Err(snapshot_error) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Some(editor) = session.editor.clone() {
+                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  }
+                  session.detach(
+                    DetachReason::Fatal(format!(
+                      "canonical projection repair failed after rejected local transaction: {snapshot_error:#}; original error: {error:#}"
+                    )),
+                    cx,
+                  );
+                });
+              },
             }
-            session.detach(DetachReason::Fatal(format!("capturing local collaboration edit failed: {error:#}")), cx);
           }
         },
-      });
+      }
     })
     .detach();
   }
@@ -917,14 +995,9 @@ impl CollabSession {
           self.runtime_vv = version_vector;
           self.apply_runtime_projection(*document, cx)?;
         },
-        RuntimeEvent::ProjectionPatched {
-          patches,
-          frontier,
-          version_vector,
-          ..
-        } if apply_projection => {
+        RuntimeEvent::ProjectionPatched { batch, version_vector, .. } if apply_projection => {
           self.runtime_vv = version_vector;
-          self.apply_runtime_patches(patches, frontier, cx);
+          self.apply_runtime_patches(batch, cx)?;
         },
         RuntimeEvent::RevisionOpened { document, .. } if apply_projection => {
           self.apply_runtime_projection(*document, cx)?;
@@ -946,61 +1019,41 @@ impl CollabSession {
 
   fn apply_local_runtime_events(
     &mut self,
-    events: Vec<RuntimeEvent>,
-    acknowledge_without_projection_replay: bool,
-    selection_after: Option<crate::rich_text_element::EditorSelection>,
+    commit: EditorCommitResult,
+    selection_after: Option<crate::rich_text_element::StableEditorSelection>,
     cx: &mut Context<Self>,
   ) -> Result<()> {
-    if acknowledge_without_projection_replay {
-      let frontier = events
-        .iter()
-        .filter_map(RuntimeEvent::frontier)
-        .next_back()
-        .map(ToOwned::to_owned);
-
-      // Publish update bytes and advance collaboration version-vector state,
-      // but do not reapply the projection echo of an optimistic text/style
-      // mutation that is already visible in the editor.
-      self.apply_runtime_events(events, false, cx)?;
-      if let Some(editor) = self.editor.clone() {
-        editor.update(cx, |editor, cx| {
-          if let Some(frontier) = frontier {
-            editor.acknowledge_runtime_edit(frontier, None, cx);
-          } else {
-            editor.complete_runtime_edit(None, cx);
-          }
-        });
-      }
-    } else {
-      let frontier = events
-        .iter()
-        .filter_map(RuntimeEvent::frontier)
-        .next_back()
-        .map(ToOwned::to_owned);
-      self.apply_runtime_events(events, true, cx)?;
-      if let Some(editor) = self.editor.clone() {
-        editor.update(cx, |editor, cx| {
-          if let Some(frontier) = frontier {
-            editor.complete_runtime_edit_replaying_pending(frontier, Vec::new(), selection_after, cx);
-          } else {
-            editor.complete_runtime_edit(selection_after, cx);
-          }
-        });
-      }
+    if commit.projection_event_count() > 1 {
+      bail!(
+        "local editor transaction {} returned multiple projection transitions",
+        commit.transaction_id
+      );
+    }
+    let frontier = commit.new_frontier;
+    self.apply_runtime_events(commit.events, true, cx)?;
+    if let Some(editor) = self.editor.clone() {
+      editor
+        .update(cx, |editor, cx| {
+          editor.complete_runtime_edit_after_materialization(commit.transaction_id, frontier, selection_after, cx)
+        })
+        .map_err(anyhow::Error::new)?;
     }
     self.last_self_check = None;
     self.refresh_external_carets(cx);
     Ok(())
   }
 
-  fn apply_runtime_patches(&mut self, patches: Vec<ProjectionPatch>, frontier: Vec<u8>, cx: &mut Context<Self>) {
+  fn apply_runtime_patches(&mut self, batch: flowstate_document::ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<()> {
     let Some(editor) = self.editor.clone() else {
-      return;
+      return Ok(());
     };
-    editor.update(cx, |editor, cx| editor.apply_projection_patches_at_frontier(&patches, frontier, cx));
+    editor
+      .update(cx, |editor, cx| editor.apply_projection_patch_batch(&batch, cx))
+      .map_err(anyhow::Error::new)?;
     self.last_document_activity = Instant::now();
     self.last_self_check = None;
     self.refresh_external_carets(cx);
+    Ok(())
   }
 
   fn apply_runtime_projection(&mut self, mut document: DocumentProjection, cx: &mut Context<Self>) -> Result<()> {
@@ -1010,7 +1063,9 @@ impl CollabSession {
     let current = editor.read(cx).document().clone();
     document.assets = current.assets;
     document.theme = current.theme;
-    editor.update(cx, |editor, cx| editor.replace_document_projection(document, cx));
+    editor.update(cx, |editor, cx| {
+      editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
+    });
     self.last_document_activity = Instant::now();
     self.last_self_check = None;
     self.refresh_external_carets(cx);

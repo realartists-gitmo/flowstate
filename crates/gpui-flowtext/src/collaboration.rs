@@ -2,11 +2,10 @@ use std::ops::Range;
 
 use super::{
   AssetId, AssetRecord, BlockId, DocumentOffset, DocumentProjection, DocumentSpan, EditorSelection, InputBlock, InputBlockAlignment,
-  InputImageSizing, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles, TextRun,
+  InputImageSizing, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles,
+  SelectionAffinity, TextRun, VisualGravity, paragraph_text, paragraph_text_len,
 };
 use rustc_hash::FxHashMap;
-
-const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 
 #[derive(Clone, Debug, Default)]
 pub struct DocumentIdentityMap {
@@ -61,6 +60,10 @@ pub enum SemanticEditCommand {
   },
   SplitParagraph {
     at: DocumentOffset,
+    source_paragraph: ParagraphId,
+    source_block: BlockId,
+    new_paragraph: ParagraphId,
+    new_block: BlockId,
     inherited_style: ParagraphStyle,
   },
   JoinParagraphs {
@@ -165,26 +168,128 @@ pub enum SemanticEditCommand {
   },
 }
 
-impl SemanticEditCommand {
-  /// Whether the editor's optimistic projection is already the exact visible
-  /// result of this command and can be acknowledged without replaying the
-  /// runtime's projection echo.
+#[derive(Clone, Debug, Default)]
+pub struct SemanticCommandBatch {
+  pub transaction_id: u128,
+  pub selection_movement_epoch: u64,
+  pub base_frontier: Vec<u8>,
+  pub semantic_commands: Vec<SemanticEditCommand>,
+  pub selection_after: Option<EditorSelection>,
+  pub stable_selection_after: Option<StableEditorSelection>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StableSelectionEndpoint {
+  paragraph_id: ParagraphId,
+  paragraph_hint: usize,
+  previous_paragraph: Option<(ParagraphId, usize)>,
+  next_paragraph: Option<ParagraphId>,
+  byte: usize,
+  affinity: SelectionAffinity,
+  gravity: VisualGravity,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StableEditorSelection {
+  anchor: StableSelectionEndpoint,
+  head: StableSelectionEndpoint,
+}
+
+impl StableSelectionEndpoint {
   #[must_use]
-  pub fn can_acknowledge_without_projection_replay(&self) -> bool {
-    match self {
-      Self::InsertText { text, .. } => !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT),
-      Self::DeleteRange { range } => range.start.paragraph == range.end.paragraph,
-      Self::SetParagraphStyle { .. } | Self::SetRunStyles { .. } => true,
-      _ => false,
+  pub fn capture(document: &DocumentProjection, offset: DocumentOffset, affinity: SelectionAffinity, gravity: VisualGravity) -> Option<Self> {
+    let paragraph_id = document.ids.paragraph_ids.get(offset.paragraph).copied()?;
+    let previous_paragraph = offset.paragraph.checked_sub(1).and_then(|paragraph| {
+      Some((
+        *document.ids.paragraph_ids.get(paragraph)?,
+        paragraph_text_len(document.paragraphs.get(paragraph)?),
+      ))
+    });
+    let next_paragraph = document.ids.paragraph_ids.get(offset.paragraph + 1).copied();
+    Some(Self {
+      paragraph_id,
+      paragraph_hint: offset.paragraph,
+      previous_paragraph,
+      next_paragraph,
+      byte: offset.byte,
+      affinity,
+      gravity,
+    })
+  }
+
+  #[must_use]
+  pub fn resolve(&self, document: &DocumentProjection) -> DocumentOffset {
+    if let Some(paragraph) = document
+      .ids
+      .paragraph_ids
+      .iter()
+      .position(|candidate| *candidate == self.paragraph_id)
+    {
+      return DocumentOffset {
+        paragraph,
+        byte: clamp_paragraph_byte_to_char_boundary(document, paragraph, self.byte),
+      };
+    }
+
+    let prefer_next = matches!(self.affinity, SelectionAffinity::After) || matches!(self.gravity, VisualGravity::Downstream);
+    let previous = self.previous_paragraph.and_then(|(id, old_len)| {
+      let paragraph = document.ids.paragraph_ids.iter().position(|candidate| *candidate == id)?;
+      Some(DocumentOffset {
+        paragraph,
+        byte: clamp_paragraph_byte_to_char_boundary(document, paragraph, old_len.saturating_add(self.byte)),
+      })
+    });
+    let next = self.next_paragraph.and_then(|id| {
+      let paragraph = document.ids.paragraph_ids.iter().position(|candidate| *candidate == id)?;
+      Some(DocumentOffset { paragraph, byte: 0 })
+    });
+    if prefer_next {
+      if let Some(offset) = next.or(previous) {
+        return offset;
+      }
+    } else if let Some(offset) = previous.or(next) {
+      return offset;
+    }
+
+    let paragraph = self.paragraph_hint.min(document.paragraphs.len().saturating_sub(1));
+    DocumentOffset {
+      paragraph,
+      byte: clamp_paragraph_byte_to_char_boundary(document, paragraph, self.byte),
     }
   }
 }
 
-#[derive(Clone, Debug, Default)]
-pub struct SemanticCommandBatch {
-  pub base_frontier: Vec<u8>,
-  pub semantic_commands: Vec<SemanticEditCommand>,
-  pub selection_after: Option<EditorSelection>,
+impl StableEditorSelection {
+  #[must_use]
+  pub fn capture(document: &DocumentProjection, selection: &EditorSelection) -> Option<Self> {
+    Some(Self {
+      anchor: StableSelectionEndpoint::capture(document, selection.anchor, selection.anchor_affinity, selection.anchor_gravity)?,
+      head: StableSelectionEndpoint::capture(document, selection.head, selection.head_affinity, selection.head_gravity)?,
+    })
+  }
+
+  #[must_use]
+  pub fn resolve(&self, document: &DocumentProjection) -> EditorSelection {
+    EditorSelection {
+      anchor: self.anchor.resolve(document),
+      head: self.head.resolve(document),
+      anchor_affinity: self.anchor.affinity,
+      head_affinity: self.head.affinity,
+      anchor_gravity: self.anchor.gravity,
+      head_gravity: self.head.gravity,
+    }
+  }
+}
+
+fn clamp_paragraph_byte_to_char_boundary(document: &DocumentProjection, paragraph: usize, byte: usize) -> usize {
+  let Some(text) = document.paragraphs.get(paragraph).map(|_| paragraph_text(document, paragraph)) else {
+    return 0;
+  };
+  let mut byte = byte.min(text.len());
+  while byte > 0 && !text.is_char_boundary(byte) {
+    byte -= 1;
+  }
+  byte
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -202,35 +307,107 @@ pub struct ProjectionStructuralBlock {
 }
 
 #[derive(Clone, Debug)]
+pub struct ProjectionPatchBatch {
+  /// Unique id for diagnostics and duplicate-delivery detection. It is not part
+  /// of document semantics; the frontier pair is the authoritative ordering.
+  pub transaction_id: u128,
+  /// Frontier of the materialized document this delta must be applied to.
+  pub base_frontier: Vec<u8>,
+  /// Frontier represented after every patch has been applied successfully.
+  pub new_frontier: Vec<u8>,
+  pub patches: Vec<ProjectionPatch>,
+}
+
+impl ProjectionPatchBatch {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.patches.is_empty()
+  }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectionApplyError {
+  StaleFrontier { expected: Vec<u8>, actual: Vec<u8> },
+  MissingBlock { block_id: BlockId, row_hint: usize },
+  WrongBlockKind { block_id: BlockId, expected: &'static str },
+  MissingParagraph { paragraph_id: ParagraphId, block_id: BlockId },
+  DuplicateBlockId(BlockId),
+  DuplicateParagraphId(ParagraphId),
+  InvalidAnchor(BlockId),
+  InvalidStructuralPatch(&'static str),
+  UnexpectedTransaction { expected: Option<u128>, actual: u128 },
+}
+
+impl std::fmt::Display for ProjectionApplyError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::StaleFrontier { expected, actual } => write!(
+        f,
+        "materialized document frontier mismatch (expected {} bytes, actual {} bytes)",
+        expected.len(),
+        actual.len()
+      ),
+      Self::MissingBlock { block_id, row_hint } => write!(f, "projection patch target block {} is missing (row hint {row_hint})", block_id.0),
+      Self::WrongBlockKind { block_id, expected } => write!(f, "projection patch target block {} is not {expected}", block_id.0),
+      Self::MissingParagraph { paragraph_id, block_id } => {
+        write!(f, "projection paragraph {} is not attached to block {}", paragraph_id.0, block_id.0)
+      },
+      Self::DuplicateBlockId(id) => write!(f, "projection patch would create duplicate block id {}", id.0),
+      Self::DuplicateParagraphId(id) => write!(f, "projection patch would create duplicate paragraph id {}", id.0),
+      Self::InvalidAnchor(id) => write!(f, "projection insertion anchor block {} is missing", id.0),
+      Self::InvalidStructuralPatch(reason) => f.write_str(reason),
+      Self::UnexpectedTransaction { expected, actual } => {
+        write!(f, "runtime transaction acknowledgement mismatch (expected {expected:?}, actual {actual})")
+      },
+    }
+  }
+}
+
+impl std::error::Error for ProjectionApplyError {}
+
+#[derive(Clone, Debug)]
 pub enum ProjectionPatch {
   ParagraphText {
-    row: usize,
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
     new: InputParagraph,
     delta_utf8: Vec<ProjectionTextDelta>,
   },
   ParagraphStyle {
-    row: usize,
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
     style: ParagraphStyle,
   },
   ParagraphRuns {
-    row: usize,
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
     runs: Vec<TextRun>,
   },
   ReplaceObjectBlock {
-    row: usize,
+    block_id: BlockId,
+    row_hint: usize,
     block: ProjectionStructuralBlock,
   },
   InsertBlocks {
-    row: usize,
+    /// Insert immediately before this stable block id, or append when `None`.
+    before: Option<BlockId>,
+    row_hint: usize,
     blocks: Vec<ProjectionStructuralBlock>,
   },
   DeleteBlocks {
-    row: usize,
-    count: usize,
+    block_ids: Vec<BlockId>,
+    row_hint: usize,
   },
   MoveBlock {
-    from: usize,
-    to: usize,
+    block_id: BlockId,
+    /// Place the moved block immediately before this id, or at the end when
+    /// `None`. The anchor is interpreted after removing `block_id`.
+    before: Option<BlockId>,
+    from_hint: usize,
+    to_hint: usize,
   },
   AssetArrived {
     id: AssetId,

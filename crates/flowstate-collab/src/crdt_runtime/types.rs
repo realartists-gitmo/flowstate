@@ -1,6 +1,6 @@
 use flowstate_document::{
   DocumentPackage, DocumentProjection, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth, ParagraphStyle,
-  ProjectionPatch, ROOT_BODY_FLOW_ID, RunStyles,
+  ProjectionPatchBatch, ROOT_BODY_FLOW_ID, RunStyles,
 };
 use gpui_flowtext::{EditorSelection, ExternalCaret};
 use loro::VersionRange;
@@ -127,6 +127,30 @@ pub enum SemanticCommand {
 }
 
 #[derive(Debug)]
+pub struct EditorCommitResult {
+  pub transaction_id: u128,
+  pub base_frontier: Vec<u8>,
+  pub new_frontier: Vec<u8>,
+  pub events: Vec<RuntimeEvent>,
+}
+
+impl EditorCommitResult {
+  #[must_use]
+  pub fn projection_event_count(&self) -> usize {
+    self
+      .events
+      .iter()
+      .filter(|event| {
+        matches!(
+          event,
+          RuntimeEvent::ProjectionPatched { .. } | RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::RevisionOpened { .. }
+        )
+      })
+      .count()
+  }
+}
+
+#[derive(Debug)]
 pub enum RuntimeEvent {
   LocalUpdate {
     bytes: Vec<u8>,
@@ -157,9 +181,8 @@ pub enum RuntimeEvent {
     version_vector: Vec<u8>,
   },
   ProjectionPatched {
-    patches: Vec<ProjectionPatch>,
+    batch: ProjectionPatchBatch,
     invalidation: ProjectionInvalidation,
-    frontier: Vec<u8>,
     version_vector: Vec<u8>,
   },
 }
@@ -168,10 +191,10 @@ impl RuntimeEvent {
   #[must_use]
   pub fn frontier(&self) -> Option<&[u8]> {
     match self {
-      Self::LocalUpdate { frontier, .. }
-      | Self::RemoteUpdateApplied { frontier, .. }
-      | Self::ProjectionUpdated { frontier, .. }
-      | Self::ProjectionPatched { frontier, .. } => Some(frontier),
+      Self::LocalUpdate { frontier, .. } | Self::RemoteUpdateApplied { frontier, .. } | Self::ProjectionUpdated { frontier, .. } => {
+        Some(frontier)
+      },
+      Self::ProjectionPatched { batch, .. } => Some(&batch.new_frontier),
       Self::RevisionOpened { document, .. } | Self::RevisionForked { document, .. } => Some(&document.frontier),
       Self::SelectionRestored { .. } => None,
     }

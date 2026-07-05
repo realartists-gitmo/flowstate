@@ -114,6 +114,7 @@ impl RichTextEditor {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
     self.selection = selection;
     self.goal_x = None;
     let width = self.current_layout_width();
@@ -201,6 +202,7 @@ impl RichTextEditor {
       self.goal_x = Some(used_goal_x);
       return;
     }
+    self.note_explicit_selection_movement();
     self.selection = selection;
     // Preserve the goal x across the move so repeated Up/Down stays on a
     // straight column.
@@ -260,6 +262,7 @@ impl RichTextEditor {
       paragraph: target_paragraph,
       byte: target_byte,
     };
+    self.note_explicit_selection_movement();
     self.selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
     self.goal_x = Some(goal_x);
     self.scroll_head_into_view();

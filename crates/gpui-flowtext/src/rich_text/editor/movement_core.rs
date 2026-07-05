@@ -6,6 +6,7 @@ impl RichTextEditor {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
     self.selection = selection;
     self.emit_selection_changed(cx);
     self.goal_x = None;

@@ -398,7 +398,7 @@ impl RichTextEditor {
     if self.collapsed_section_ids.is_empty() {
       return false;
     }
-    self.document.sections.iter().any(|section| {
+    self.document.outline.iter().any(|section| {
       if !self.collapsed_section_ids.contains(&section.id) {
         return false;
       }

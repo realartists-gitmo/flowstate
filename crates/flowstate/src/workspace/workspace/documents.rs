@@ -231,9 +231,9 @@ impl Workspace {
       editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
         let runtime = save_runtime.clone();
         Box::pin(async move {
-          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           let title = document_package_title_for_path(&path);
@@ -251,9 +251,9 @@ impl Workspace {
       editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
         let runtime = export_runtime.clone();
         Box::pin(async move {
-          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           match format {
@@ -281,9 +281,9 @@ impl Workspace {
       editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
         let runtime = undo_runtime.clone();
         Box::pin(async move {
-          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           let command = match redirect {
@@ -373,9 +373,9 @@ impl Workspace {
       editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
         let runtime = save_runtime.clone();
         Box::pin(async move {
-          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           // LocalUpdate events from this checkpoint are intentionally dropped
@@ -391,9 +391,9 @@ impl Workspace {
       editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
         let runtime = export_runtime.clone();
         Box::pin(async move {
-          let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
           runtime
-            .apply_editor_commands(base_frontier, commands, assets, selection_after)
+            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
             .await
             .map_err(runtime_io_error)?;
           match format {
@@ -422,9 +422,9 @@ impl Workspace {
         editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
           let runtime = undo_runtime.clone();
           Box::pin(async move {
-            let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(pending_edits);
+            let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
             runtime
-              .apply_editor_commands(base_frontier, commands, assets, selection_after)
+              .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
               .await
               .map_err(runtime_io_error)?;
             let command = match redirect {
@@ -589,9 +589,12 @@ impl Workspace {
       return;
     }
     let Some(runtime) = self.document_runtimes.get(&panel_id).cloned() else {
+      editor.update(cx, |editor, _| editor.prepend_pending_semantic_edits(edits));
       return;
     };
-    editor.update(cx, |editor, _| editor.begin_runtime_edit());
+    let retry_edits = edits.clone();
+    let (transaction_id, base_frontier, commands, selection_after, stable_selection_after) = flatten_runtime_edit_commands(edits);
+    editor.update(cx, |editor, _| editor.begin_runtime_edit(transaction_id));
     let assets = editor
       .read(cx)
       .document()
@@ -600,46 +603,80 @@ impl Workspace {
       .values()
       .cloned()
       .collect();
-    let (base_frontier, commands, selection_after) = flatten_runtime_edit_commands(edits);
-    let acknowledge_without_projection_replay = !commands.is_empty()
-      && commands
-        .iter()
-        .all(crate::rich_text_element::SemanticEditCommand::can_acknowledge_without_projection_replay);
-    let retry_edit = (!commands.is_empty()).then(|| crate::rich_text_element::SemanticCommandBatch {
-      base_frontier: base_frontier.clone(),
-      semantic_commands: commands.clone(),
-      selection_after: selection_after.clone(),
-    });
     cx.spawn(async move |workspace, cx| {
       let result = runtime
-        .apply_editor_commands(base_frontier, commands, assets, selection_after.clone())
+        .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after.clone())
         .await;
-      let stale_snapshot = match &result {
-        Err(error) if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() => {
-          runtime.projection_snapshot().await.ok()
-        },
-        _ => None,
-      };
-      let _ = workspace.update(cx, |_, cx| match result {
-        Ok(events) => apply_local_runtime_events(
-          &editor,
-          events,
-          acknowledge_without_projection_replay,
-          selection_after,
-          cx,
-        ),
-        Err(error) => {
-          if let Some(document) = stale_snapshot {
-            tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
-            editor.update(cx, |editor, cx| {
-              editor.replace_document_projection_replaying_pending(document, retry_edit.into_iter().collect(), None, cx);
-            });
-          } else {
-            tracing::error!(%panel_id, error = %error, "failed to apply editor edits to Loro runtime");
-            editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+      match result {
+        Ok(commit) => {
+          let applied = workspace.update(cx, |_, cx| {
+            apply_local_runtime_commit(&editor, commit, stable_selection_after.clone(), cx)
+          });
+          if !matches!(applied, Ok(Ok(()))) {
+            let detail = match applied {
+              Ok(Err(error)) => error,
+              Err(error) => error.to_string(),
+              Ok(Ok(())) => unreachable!(),
+            };
+            tracing::warn!(%panel_id, error = %detail, "local committed projection could not be materialized; repairing from canonical snapshot");
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| {
+                    editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
+                    editor.complete_runtime_edit(None, cx);
+                  });
+                });
+              },
+              Err(error) => {
+                tracing::error!(%panel_id, %error, "failed to obtain canonical projection after local materialization failure");
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                });
+              },
+            }
           }
         },
-      });
+        Err(error) => {
+          if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() {
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| {
+                    editor.replace_document_projection_replaying_pending(document, retry_edits, None, cx);
+                    editor.complete_runtime_edit(None, cx);
+                  });
+                });
+              },
+              Err(snapshot_error) => {
+                tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after stale editor transaction");
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                });
+              },
+            }
+          } else {
+            tracing::error!(%panel_id, error = %error, "editor transaction was rejected; restoring canonical Loro projection");
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| {
+                    editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
+                    editor.complete_runtime_edit(None, cx);
+                  });
+                });
+              },
+              Err(snapshot_error) => {
+                tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after rejected editor transaction");
+                let _ = workspace.update(cx, |_, cx| {
+                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                });
+              },
+            }
+          }
+        },
+      }
     })
     .detach();
   }
@@ -1727,14 +1764,21 @@ fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 fn flatten_runtime_edit_commands(
   edits: Vec<crate::rich_text_element::SemanticCommandBatch>,
 ) -> (
+  u128,
   Vec<u8>,
   Vec<crate::rich_text_element::SemanticEditCommand>,
   Option<crate::rich_text_element::EditorSelection>,
+  Option<crate::rich_text_element::StableEditorSelection>,
 ) {
+  let mut transaction_id = None;
   let mut base_frontier = None;
   let mut commands = Vec::new();
   let mut selection_after = None;
+  let mut stable_selection_after = None;
   for edit in edits {
+    if transaction_id.is_none() && edit.transaction_id != 0 {
+      transaction_id = Some(edit.transaction_id);
+    }
     if !edit.semantic_commands.is_empty() {
       if let Some(existing) = &base_frontier {
         debug_assert_eq!(existing, &edit.base_frontier, "queued editor commands must share one projection frontier");
@@ -1746,53 +1790,44 @@ fn flatten_runtime_edit_commands(
     if edit.selection_after.is_some() {
       selection_after = edit.selection_after;
     }
+    if edit.stable_selection_after.is_some() {
+      stable_selection_after = edit.stable_selection_after;
+    }
   }
   (
+    transaction_id.unwrap_or_else(|| Uuid::new_v4().as_u128()),
     base_frontier.unwrap_or_default(),
     coalesce_document_runtime_commands(commands),
     selection_after,
+    stable_selection_after,
   )
 }
 
-fn apply_local_runtime_events(
+fn apply_local_runtime_commit(
   editor: &Entity<RichTextEditor>,
-  events: Vec<flowstate_collab::crdt_runtime::RuntimeEvent>,
-  acknowledge_without_projection_replay: bool,
-  selection_after: Option<crate::rich_text_element::EditorSelection>,
+  commit: flowstate_collab::crdt_runtime::EditorCommitResult,
+  selection_after: Option<crate::rich_text_element::StableEditorSelection>,
   cx: &mut Context<Workspace>,
-) {
-  if acknowledge_without_projection_replay {
-    let frontier = events
-      .iter()
-      .filter_map(flowstate_collab::crdt_runtime::RuntimeEvent::frontier)
-      .next_back()
-      .map(ToOwned::to_owned);
-    editor.update(cx, |editor, cx| {
-      if let Some(frontier) = frontier {
-        // The visible projection already contains this local text/style batch.
-        // Replaying its runtime echo would shift the live caret twice and can
-        // overwrite keystrokes entered while the request was in flight.
-        editor.acknowledge_runtime_edit(frontier, None, cx);
-      } else {
-        editor.complete_runtime_edit(None, cx);
-      }
-    });
-    return;
+) -> Result<(), String> {
+  if commit.projection_event_count() > 1 {
+    return Err(format!(
+      "local editor transaction {} returned multiple projection transitions",
+      commit.transaction_id
+    ));
   }
-
-  let frontier = events
-    .iter()
-    .filter_map(flowstate_collab::crdt_runtime::RuntimeEvent::frontier)
-    .next_back()
-    .map(ToOwned::to_owned);
-  for event in events {
+  let frontier = commit.new_frontier;
+  for event in commit.events {
     match event {
-      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { patches, frontier, .. } => {
-        editor.update(cx, |editor, cx| editor.apply_projection_patches_at_frontier(&patches, frontier, cx));
+      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { batch, .. } => {
+        editor
+          .update(cx, |editor, cx| editor.apply_projection_patch_batch(&batch, cx))
+          .map_err(|error| error.to_string())?;
       },
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { document, .. }
       | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionOpened { document, .. } => {
-        editor.update(cx, |editor, cx| editor.replace_document_projection(*document, cx));
+        editor.update(cx, |editor, cx| {
+          editor.replace_document_projection_replaying_pending(*document, Vec::new(), None, cx);
+        });
       },
       flowstate_collab::crdt_runtime::RuntimeEvent::LocalUpdate { .. }
       | flowstate_collab::crdt_runtime::RuntimeEvent::RemoteUpdateApplied { .. }
@@ -1802,13 +1837,12 @@ fn apply_local_runtime_events(
       },
     }
   }
-  editor.update(cx, |editor, cx| {
-    if let Some(frontier) = frontier {
-      editor.complete_runtime_edit_replaying_pending(frontier, Vec::new(), selection_after, cx);
-    } else {
-      editor.complete_runtime_edit(selection_after, cx);
-    }
-  });
+  editor
+    .update(cx, |editor, cx| {
+      editor.complete_runtime_edit_after_materialization(commit.transaction_id, frontier, selection_after, cx)
+    })
+    .map_err(|error| error.to_string())?;
+  Ok(())
 }
 
 fn coalesce_document_runtime_commands(

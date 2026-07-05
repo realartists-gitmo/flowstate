@@ -433,16 +433,16 @@ fn collapse_heading_kind(document: &DocumentProjection, paragraph_ix: usize, sec
   Some(style.section_kind.unwrap_or(slot))
 }
 
-fn section_at_heading(document: &DocumentProjection, paragraph_ix: usize, heading_kind: u8) -> Option<&DocumentSection> {
-  document.sections.iter().find(|section| {
+fn section_at_heading(document: &DocumentProjection, paragraph_ix: usize, heading_kind: u8) -> Option<&DocumentOutlineNode> {
+  document.outline.iter().find(|section| {
     let SectionKind::Custom(section_kind) = section.kind;
     section_kind == heading_kind && paragraph_index_for_id(document, section.start_paragraph) == Some(paragraph_ix)
   })
 }
 
-fn enclosing_section<'a>(document: &'a DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<&'a DocumentSection> {
+fn enclosing_section<'a>(document: &'a DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<&'a DocumentOutlineNode> {
   document
-    .sections
+    .outline
     .iter()
     .filter(|section| {
       let SectionKind::Custom(slot) = section.kind;

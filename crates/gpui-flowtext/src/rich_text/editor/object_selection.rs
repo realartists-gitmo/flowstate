@@ -45,6 +45,7 @@ impl RichTextEditor {
   #[cfg(test)]
   pub(super) fn set_text_selection_for_test(&mut self, anchor: DocumentOffset, head: DocumentOffset, cx: &mut Context<Self>) {
     self.selected_block = None;
+    self.note_explicit_selection_movement();
     self.selection = EditorSelection::range(anchor, head);
     cx.notify();
   }

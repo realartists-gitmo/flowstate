@@ -92,6 +92,8 @@ impl RichTextEditor {
       self.redo_stack.clear();
     }
     self.capture_semantic_edit(SemanticCommandBatch {
+      transaction_id: 0,
+      selection_movement_epoch: 0,
       base_frontier: self.document.frontier.clone(),
       semantic_commands: vec![SemanticEditCommand::InsertText {
         at: caret,
@@ -99,6 +101,7 @@ impl RichTextEditor {
         styles,
       }],
       selection_after: Some(self.selection.clone()),
+      stable_selection_after: None,
     });
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.suppress_mutation_notify += 1;
@@ -303,8 +306,15 @@ impl RichTextEditor {
         }
       })
       .unwrap_or(ParagraphStyle::Normal);
+    let source_paragraph = self.document.ids.paragraph_ids[caret.paragraph];
+    let source_block_ix = block_ix_for_paragraph(&self.document, caret.paragraph).unwrap_or(caret.paragraph);
+    let source_block = self.document.ids.block_ids[source_block_ix];
     let semantic_commands = vec![SemanticEditCommand::SplitParagraph {
       at: caret,
+      source_paragraph,
+      source_block,
+      new_paragraph: self.document.ids.paragraph_ids[caret.paragraph + 1],
+      new_block: self.document.ids.block_ids[source_block_ix + 1],
       inherited_style,
     }];
     let record = EditRecord {
@@ -332,9 +342,12 @@ impl RichTextEditor {
     let runtime_owned = semantic_commands.is_some_and(|commands| !commands.is_empty()) && self.command_capture_enabled();
     if runtime_owned {
       self.capture_semantic_edit(SemanticCommandBatch {
+        transaction_id: 0,
+        selection_movement_epoch: 0,
         base_frontier: self.document.frontier.clone(),
         semantic_commands: semantic_commands.unwrap_or_default().to_vec(),
         selection_after: Some(self.selection.clone()),
+        stable_selection_after: None,
       });
     }
 

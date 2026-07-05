@@ -46,6 +46,21 @@ pub struct DocumentSection {
   pub page: Option<SectionPageAttrs>,
 }
 
+/// Derived heading hierarchy for navigation and collapse UI.
+///
+/// Unlike [`DocumentSection`], this type is never canonical document state and
+/// deliberately carries no page-layout payload. It may be rebuilt at any time
+/// from paragraph styles and stable paragraph ids.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentOutlineNode {
+  pub id: SectionId,
+  pub parent_id: Option<SectionId>,
+  pub kind: SectionKind,
+  pub heading_paragraph: ParagraphId,
+  pub start_paragraph: ParagraphId,
+  pub end_paragraph_exclusive: Option<ParagraphId>,
+}
+
 /// US Letter width in twips (8.5in x 1440). Mirrors the `flowstate-document`
 /// Loro encoding so projection mapping is a trivial field-by-field copy (§11).
 const DEFAULT_PAGE_WIDTH_TWIPS: i64 = 12_240;

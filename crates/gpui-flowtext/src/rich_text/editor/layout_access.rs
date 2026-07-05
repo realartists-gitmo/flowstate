@@ -246,6 +246,7 @@ impl RichTextEditor {
         HDir::Left => SelectionAffinity::After,
         HDir::Right => SelectionAffinity::Before,
       };
+      self.note_explicit_selection_movement();
       self.selection = EditorSelection::collapsed_with(offset, affinity, VisualGravity::Neutral);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);

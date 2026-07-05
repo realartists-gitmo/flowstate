@@ -46,7 +46,10 @@ pub struct DocumentProjection {
   pub blocks: Arc<Vec<Block>>,
   pub assets: AssetStore,
   pub ids: DocumentIds,
+  /// Canonical page/document sections projected from the CRDT.
   pub sections: Arc<Vec<DocumentSection>>,
+  /// Disposable heading hierarchy derived from paragraph styles.
+  pub outline: Arc<Vec<DocumentOutlineNode>>,
   // Auxiliary Fenwick-tree index over per-paragraph byte widths. Kept in sync
   // with `paragraphs` by the edit helpers in `edit_ops`. Not part of the
   // public API.
@@ -352,19 +355,25 @@ pub fn remove_block_ids(document: &mut DocumentProjection, range: Range<usize>) 
 }
 
 #[hotpath::measure]
-pub fn rebuild_document_sections(document: &mut DocumentProjection) {
+pub fn rebuild_document_outline(document: &mut DocumentProjection) {
   reconcile_document_ids(document);
-  document.sections = Arc::new(document_sections(document));
+  document.outline = Arc::new(document_outline(document));
 }
 
-/// Computes the heading outline purely from paragraph styles, order, and ids.
-/// Pure (no `reconcile_document_ids`); callers that need id reconciliation use
-/// [`rebuild_document_sections`]. Because the outline never depends on paragraph
-/// text/runs, content-only edits can skip recomputation entirely.
+/// Compatibility name retained for existing edit primitives. This rebuilds
+/// only the derived heading outline; canonical `document.sections` are never
+/// modified.
+#[hotpath::measure]
+pub fn rebuild_document_sections(document: &mut DocumentProjection) {
+  rebuild_document_outline(document);
+}
+
+/// Computes the disposable heading hierarchy purely from paragraph styles,
+/// order, and stable paragraph ids.
 #[hotpath::measure]
 #[must_use]
-pub fn document_sections(document: &DocumentProjection) -> Vec<DocumentSection> {
-  let mut sections: Vec<DocumentSection> = Vec::new();
+pub fn document_outline(document: &DocumentProjection) -> Vec<DocumentOutlineNode> {
+  let mut outline: Vec<DocumentOutlineNode> = Vec::new();
   let mut stack: Vec<(usize, SectionId)> = Vec::new();
 
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
@@ -375,38 +384,27 @@ pub fn document_sections(document: &DocumentProjection) -> Vec<DocumentSection> 
       .last()
       .is_some_and(|(ancestor_level, _)| *ancestor_level >= level)
     {
-      if let Some((_, section_id)) = stack.pop() {
-        for section in sections
-          .iter_mut()
-          .filter(|section| section.id == section_id)
-        {
-          section.end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
-        }
+      if let Some((_, node_id)) = stack.pop()
+        && let Some(node) = outline.iter_mut().find(|node| node.id == node_id)
+      {
+        node.end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
       }
     }
     let paragraph_id = paragraph_id_at(document, paragraph_ix).unwrap_or_else(new_paragraph_id);
     let parent_id = stack.last().map(|(_, id)| *id);
     let id = section_id_for_heading(paragraph_id, kind);
-    sections.push(DocumentSection {
+    outline.push(DocumentOutlineNode {
       id,
       parent_id,
       kind,
-      heading_paragraph: Some(paragraph_id),
+      heading_paragraph: paragraph_id,
       start_paragraph: paragraph_id,
       end_paragraph_exclusive: None,
-      // §11 page attrs are canonical in Loro; the heading outline cannot derive
-      // them, so the flowstate-document projector backfills this field.
-      page: None,
     });
     stack.push((level, id));
   }
 
-  for (_, section_id) in stack {
-    if let Some(section) = sections.iter_mut().find(|section| section.id == section_id) {
-      section.end_paragraph_exclusive = None;
-    }
-  }
-  sections
+  outline
 }
 
 /// Whether the paragraph at `paragraph_ix` carries a heading (section) style.
@@ -420,7 +418,7 @@ pub fn paragraph_is_heading(document: &DocumentProjection, paragraph_ix: usize) 
 }
 
 /// Whether any paragraph in `range` (clamped to the paragraph count) is a heading.
-/// Lets callers decide whether a content edit can skip [`rebuild_document_sections`].
+/// Lets callers decide whether a content edit can skip [`rebuild_document_outline`].
 #[hotpath::measure]
 #[must_use]
 pub fn range_contains_heading(document: &DocumentProjection, range: Range<usize>) -> bool {

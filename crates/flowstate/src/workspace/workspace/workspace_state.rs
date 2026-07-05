@@ -765,7 +765,7 @@ fn selected_fragment_or_enclosing_section(
 
 fn enclosing_section_bounds(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {
   document
-    .sections
+    .outline
     .iter()
     .filter_map(|section| {
       let SectionKind::Custom(slot) = section.kind;

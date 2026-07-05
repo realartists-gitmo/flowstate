@@ -30,8 +30,13 @@ impl RichTextEditor {
         .map(|name| SharedString::from(name.to_string_lossy().to_string())),
       recovery_path: document_path.as_deref().map(recovery_path_for_document),
       document_path,
+      committed_document: document.clone(),
       document,
       selection: EditorSelection::caret(),
+      selection_movement_epoch: 0,
+      runtime_edit_selection_epoch: None,
+      next_local_transaction_id: 1,
+      runtime_transaction_in_flight: None,
       config: RichTextEditorConfig::default(),
       edit_generation: 0,
       saved_generation,
@@ -149,8 +154,13 @@ impl RichTextEditor {
     self.document_path = None;
     self.recovery_path = None;
     self.document = blank_document();
+    self.committed_document = self.document.clone();
     self.identity_map = DocumentIdentityMap::new(&self.document);
     self.selection = EditorSelection::caret();
+    self.selection_movement_epoch = 0;
+    self.runtime_edit_selection_epoch = None;
+    self.next_local_transaction_id = 1;
+    self.runtime_transaction_in_flight = None;
     self.edit_generation = 0;
     self.saved_generation = 0;
     self.next_edit_generation = 1;
@@ -169,6 +179,8 @@ impl RichTextEditor {
     self.redo_stack = Vec::new();
     self.pending_semantic_edits.clear();
     self.runtime_edits_in_flight = 0;
+    self.runtime_edit_selection_epoch = None;
+    self.runtime_transaction_in_flight = None;
     self.command_capture_route = CommandCaptureRoute::Disabled;
     self.native_save_hook = None;
     self.native_export_hook = None;
@@ -271,65 +283,24 @@ impl RichTextEditor {
     self.pending_semantic_edits = edits;
   }
 
-  pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
-    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
-    if self.runtime_edits_in_flight == 0 && self.pending_semantic_edits.is_empty() {
-      if let Some(selection) = selection {
-        self.selection = selection;
-        clamp_selection_to_document(&self.document, &mut self.selection);
-        self.emit_selection_changed(cx);
-      }
-      self.scroll_head_into_view();
-      self.reset_caret_blink(cx);
-    }
-    // A completion with newer optimistic edits still queued must wake the host
-    // so it can schedule the next serialized runtime flush.
-    cx.notify();
-  }
-
-  pub fn begin_runtime_edit(&mut self) {
-    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_add(1);
-  }
-
-  #[must_use]
-  pub fn runtime_edit_in_flight(&self) -> bool {
-    self.runtime_edits_in_flight > 0
-  }
-
-  /// Acknowledge canonical application of an optimistic editor batch.
-  ///
-  /// Local projection patches are echoes of mutations the editor has already
-  /// rendered. Reapplying those patches would transform the live caret twice
-  /// and can overwrite edits typed while the runtime request was in flight.
-  /// Advance only the canonical frontier, then rebase queued semantic commands
-  /// onto that acknowledged state.
-  pub fn acknowledge_runtime_edit(&mut self, frontier: Vec<u8>, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
-    self.document.frontier.clone_from(&frontier);
-    for edit in &mut self.pending_semantic_edits {
-      edit.base_frontier.clone_from(&frontier);
-    }
-    self.complete_runtime_edit(selection, cx);
-  }
-
-  pub fn complete_runtime_edit_replaying_pending(
+  pub(super) fn rebuild_visible_from_committed(
     &mut self,
-    frontier: Vec<u8>,
     retry_edits: Vec<SemanticCommandBatch>,
     selection: Option<EditorSelection>,
     cx: &mut Context<Self>,
   ) {
+    let stable_live_selection = StableEditorSelection::capture(&self.document, &self.selection);
+    let preserve_explicit_live_selection = self
+      .runtime_edit_selection_epoch
+      .is_some_and(|epoch| epoch != self.selection_movement_epoch);
+    let frontier = self.committed_document.frontier.clone();
     let mut edits = retry_edits;
     edits.extend(std::mem::take(&mut self.pending_semantic_edits));
-    if !edits.iter().any(|edit| !edit.semantic_commands.is_empty()) {
-      self.document.frontier.clone_from(&frontier);
-      self.complete_runtime_edit(selection, cx);
-      return;
-    }
-
-    let mut document = self.document.clone();
+    let mut document = self.committed_document.clone();
     let mut replayed = Vec::with_capacity(edits.len());
     let mut replayed_selection = None;
     let mut rejected = 0usize;
+
     for mut edit in edits {
       if edit.semantic_commands.is_empty() {
         continue;
@@ -341,8 +312,8 @@ impl RichTextEditor {
         .all(|command| replay_semantic_command_on_projection(&mut candidate, command))
       {
         edit.base_frontier.clone_from(&frontier);
-        if let Some(selection) = &edit.selection_after {
-          replayed_selection = Some(selection.clone());
+        if let Some(selection) = &edit.stable_selection_after {
+          replayed_selection = Some((edit.selection_movement_epoch, selection.clone()));
         }
         document = candidate;
         replayed.push(edit);
@@ -352,7 +323,7 @@ impl RichTextEditor {
     }
 
     if rejected > 0 {
-      eprintln!("dropped {rejected} unrebasable optimistic editor batch(es) after canonical runtime replay");
+      eprintln!("dropped {rejected} unrebasable optimistic editor batch(es) after canonical replay");
     }
 
     document.frontier.clone_from(&frontier);
@@ -360,14 +331,91 @@ impl RichTextEditor {
     self.document = projection_with_local_theme(document, &theme);
     self.identity_map.reconcile(&self.document);
     self.pending_semantic_edits = replayed;
-    if let Some(selection) = replayed_selection {
+
+    let next_selection = match (preserve_explicit_live_selection, replayed_selection, selection) {
+      (true, Some((epoch, selection)), _) if epoch == self.selection_movement_epoch => Some(selection.resolve(&self.document)),
+      (true, _, _) => stable_live_selection.map(|selection| selection.resolve(&self.document)),
+      (false, Some((_, selection)), _) => Some(selection.resolve(&self.document)),
+      (false, None, Some(selection)) => Some(selection),
+      (false, None, None) => stable_live_selection.map(|selection| selection.resolve(&self.document)),
+    };
+    if let Some(selection) = next_selection {
       self.selection = selection;
       clamp_selection_to_document(&self.document, &mut self.selection);
       self.emit_selection_changed(cx);
     }
     self.after_text_mutation(cx);
-    let selection = if self.pending_semantic_edits.is_empty() { selection } else { None };
+  }
+
+  pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
+    let selection = if self
+      .runtime_edit_selection_epoch
+      .is_some_and(|epoch| epoch != self.selection_movement_epoch)
+    {
+      None
+    } else {
+      selection
+    };
+    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
+    if self.runtime_edits_in_flight == 0 && self.pending_semantic_edits.is_empty() {
+      if let Some(selection) = selection {
+        self.selection = selection;
+        clamp_selection_to_document(&self.document, &mut self.selection);
+        self.emit_selection_changed(cx);
+      }
+      self.scroll_head_into_view();
+      self.reset_caret_blink(cx);
+    }
+    if self.runtime_edits_in_flight == 0 {
+      self.runtime_edit_selection_epoch = None;
+      self.runtime_transaction_in_flight = None;
+    }
+    // A completion with newer optimistic edits still queued must wake the host
+    // so it can schedule the next serialized runtime flush.
+    cx.notify();
+  }
+
+  pub fn begin_runtime_edit(&mut self, transaction_id: u128) {
+    if self.runtime_edits_in_flight == 0 {
+      self.runtime_edit_selection_epoch = Some(self.selection_movement_epoch);
+      self.runtime_transaction_in_flight = Some(transaction_id);
+    }
+    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_add(1);
+  }
+
+  #[must_use]
+  pub fn runtime_edit_in_flight(&self) -> bool {
+    self.runtime_edits_in_flight > 0
+  }
+
+  /// Complete a local runtime transaction only after its authoritative projection
+  /// has already been materialized into `committed_document`.
+  pub fn complete_runtime_edit_after_materialization(
+    &mut self,
+    transaction_id: u128,
+    expected_frontier: Vec<u8>,
+    selection: Option<StableEditorSelection>,
+    cx: &mut Context<Self>,
+  ) -> Result<(), ProjectionApplyError> {
+    if self.runtime_transaction_in_flight != Some(transaction_id) {
+      return Err(ProjectionApplyError::UnexpectedTransaction {
+        expected: self.runtime_transaction_in_flight,
+        actual: transaction_id,
+      });
+    }
+    if self.committed_document.frontier != expected_frontier {
+      return Err(ProjectionApplyError::StaleFrontier {
+        expected: expected_frontier,
+        actual: self.committed_document.frontier.clone(),
+      });
+    }
+    let selection = if self.pending_semantic_edits.is_empty() {
+      selection.map(|selection| selection.resolve(&self.document))
+    } else {
+      None
+    };
     self.complete_runtime_edit(selection, cx);
+    Ok(())
   }
 
   pub fn replace_document_projection_replaying_pending(
@@ -377,16 +425,9 @@ impl RichTextEditor {
     selection: Option<EditorSelection>,
     cx: &mut Context<Self>,
   ) {
-    let has_replay = retry_edits.iter().any(|edit| !edit.semantic_commands.is_empty())
-      || self.pending_semantic_edits.iter().any(|edit| !edit.semantic_commands.is_empty());
     let theme = self.document.theme.clone();
-    self.document = projection_with_local_theme(document, &theme);
-    self.identity_map.reconcile(&self.document);
-    if !has_replay {
-      self.after_text_mutation(cx);
-    }
-    let frontier = self.document.frontier.clone();
-    self.complete_runtime_edit_replaying_pending(frontier, retry_edits, selection, cx);
+    self.committed_document = projection_with_local_theme(document, &theme);
+    self.rebuild_visible_from_committed(retry_edits, selection, cx);
   }
 
   pub fn restore_runtime_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {
@@ -431,10 +472,23 @@ impl RichTextEditor {
     self.command_capture_route = route;
   }
 
-  pub(super) fn capture_semantic_edit(&mut self, edit: SemanticCommandBatch) {
+  pub(super) fn capture_semantic_edit(&mut self, mut edit: SemanticCommandBatch) {
     if self.command_capture_route.is_enabled() && self.suppress_command_capture == 0 {
+      if edit.transaction_id == 0 {
+        edit.transaction_id = self.next_local_transaction_id;
+        self.next_local_transaction_id = self.next_local_transaction_id.wrapping_add(1).max(1);
+      }
+      edit.selection_movement_epoch = self.selection_movement_epoch;
+      edit.stable_selection_after = edit
+        .selection_after
+        .as_ref()
+        .and_then(|selection| StableEditorSelection::capture(&self.document, selection));
       self.pending_semantic_edits.push(edit);
     }
+  }
+
+  pub(super) fn note_explicit_selection_movement(&mut self) {
+    self.selection_movement_epoch = self.selection_movement_epoch.wrapping_add(1);
   }
 
   pub(super) fn command_capture_enabled(&self) -> bool {
@@ -521,7 +575,8 @@ impl RichTextEditor {
   }
 
   pub fn replace_document_projection(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
-    self.document = projection_with_local_theme(document, &self.document.theme);
+    self.committed_document = projection_with_local_theme(document, &self.document.theme);
+    self.document = self.committed_document.clone();
     self.identity_map.reconcile(&self.document);
     self.after_text_mutation(cx);
   }
@@ -609,7 +664,7 @@ impl RichTextEditor {
   }
 }
 
-fn replay_semantic_command_on_projection(document: &mut DocumentProjection, command: &SemanticEditCommand) -> bool {
+pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, command: &SemanticEditCommand) -> bool {
   match command {
     SemanticEditCommand::InsertText { at, text, styles } => {
       if !valid_document_offset(document, *at) {
@@ -629,11 +684,34 @@ fn replay_semantic_command_on_projection(document: &mut DocumentProjection, comm
       }
       true
     },
-    SemanticEditCommand::SplitParagraph { at, inherited_style } => {
+    SemanticEditCommand::SplitParagraph {
+      at,
+      source_paragraph,
+      source_block,
+      new_paragraph,
+      new_block,
+      inherited_style,
+    } => {
       if !valid_document_offset(document, *at) {
         return false;
       }
+      if document.ids.paragraph_ids.get(at.paragraph).copied() != Some(*source_paragraph) {
+        return false;
+      }
+      let Some(source_block_ix) = block_ix_for_paragraph(document, at.paragraph) else {
+        return false;
+      };
+      if document.ids.block_ids.get(source_block_ix).copied() != Some(*source_block)
+        || document.ids.paragraph_ids.contains(new_paragraph)
+        || document.ids.block_ids.contains(new_block)
+      {
+        return false;
+      }
       split_paragraph_at(document, at.paragraph, at.byte);
+      document.ids.paragraph_ids[at.paragraph + 1] = *new_paragraph;
+      if let Some(new_block_ix) = block_ix_for_paragraph(document, at.paragraph + 1) {
+        document.ids.block_ids[new_block_ix] = *new_block;
+      }
       let mut updated_style = false;
       if let Some(paragraph) = paragraphs_mut(document).get_mut(at.paragraph + 1)
         && paragraph.style != *inherited_style

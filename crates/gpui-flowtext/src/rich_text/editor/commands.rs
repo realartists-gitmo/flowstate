@@ -160,6 +160,7 @@ impl RichTextEditor {
       // Outline navigation should place the insertion caret at the start of
       // the target paragraph, matching what the user just selected in the nav.
       let before_selection = self.selection.clone();
+      self.note_explicit_selection_movement();
       self.selection = EditorSelection::collapsed(DocumentOffset {
         paragraph: paragraph_ix,
         byte: 0,
@@ -187,6 +188,7 @@ impl RichTextEditor {
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
+    self.note_explicit_selection_movement();
     if let Some(hook) = self.native_undo_hook.clone() {
       let pending_edits = self.take_pending_semantic_edits();
       let pending_edits_for_retry = pending_edits.clone();
@@ -237,6 +239,7 @@ impl RichTextEditor {
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
+    self.note_explicit_selection_movement();
     if let Some(hook) = self.native_undo_hook.clone() {
       let pending_edits = self.take_pending_semantic_edits();
       let pending_edits_for_retry = pending_edits.clone();
@@ -369,6 +372,7 @@ impl RichTextEditor {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
     self.selection = selection;
     self.goal_x = None;
     self.reset_caret_blink(cx);

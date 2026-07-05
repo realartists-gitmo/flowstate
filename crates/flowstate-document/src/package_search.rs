@@ -317,7 +317,18 @@ fn normalized_search_text(text: &str) -> String {
 
 fn searchable_flow_text(text: &LoroText) -> String {
   let text = text.to_string();
-  text.strip_prefix('\n').unwrap_or(&text).replace(OBJECT_REPLACEMENT, " ")
+  let searchable = text
+    .strip_prefix('\n')
+    .unwrap_or(&text)
+    .replace(OBJECT_REPLACEMENT, " ");
+  let Some(without_first_newline) = searchable.strip_prefix('\n') else {
+    return searchable;
+  };
+  let content = without_first_newline.trim_start_matches('\n');
+  let mut normalized = String::with_capacity(content.len() + 1);
+  normalized.push('\n');
+  normalized.push_str(content);
+  normalized
 }
 
 fn child_map(parent: &LoroMap, key: &str) -> Option<LoroMap> {

@@ -132,9 +132,13 @@ fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAp
     editor.update(cx, |editor, cx| {
       assert!(!editor.pending_scroll_head_after_layout_for_test());
       let before_generation = editor.edit_generation();
+      let block_id = editor.document().ids.block_ids[0];
+      let paragraph_id = editor.document().ids.paragraph_ids[0];
       editor.apply_projection_patches(
         &[ProjectionPatch::ParagraphText {
-          row: 0,
+          block_id,
+          paragraph_id,
+          row_hint: 0,
           new: InputParagraph {
             style: ParagraphStyle::Normal,
             runs: vec![plain("remote")],
@@ -147,6 +151,228 @@ fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAp
       assert!(editor.edit_generation() > before_generation);
     });
   });
+}
+
+#[test]
+fn projection_patch_batch_uses_stable_ids_over_row_hints() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("first")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("second")],
+      },
+    ],
+  );
+  document.frontier = vec![1];
+  let block_id = document.ids.block_ids[1];
+  let paragraph_id = document.ids.paragraph_ids[1];
+  let batch = ProjectionPatchBatch {
+    transaction_id: 7,
+    base_frontier: document.frontier.clone(),
+    new_frontier: vec![2],
+    patches: vec![ProjectionPatch::ParagraphText {
+      block_id,
+      paragraph_id,
+      row_hint: 0,
+      new: InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("changed")],
+      },
+      delta_utf8: vec![ProjectionTextDelta::Delete("second".len()), ProjectionTextDelta::Insert("changed".len())],
+    }],
+  };
+
+  apply_projection_patch_batch(&mut document, &batch).expect("stable ids should resolve stale row hints");
+
+  assert_eq!(paragraph_text(&document, 0), "first");
+  assert_eq!(paragraph_text(&document, 1), "changed");
+  assert_eq!(document.frontier, vec![2]);
+}
+
+#[test]
+fn projection_patch_batch_is_atomic_on_apply_error() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("before")],
+    }],
+  );
+  document.frontier = vec![1];
+  let original = document.clone();
+  let batch = ProjectionPatchBatch {
+    transaction_id: 8,
+    base_frontier: document.frontier.clone(),
+    new_frontier: vec![2],
+    patches: vec![
+      ProjectionPatch::ParagraphText {
+        block_id: document.ids.block_ids[0],
+        paragraph_id: document.ids.paragraph_ids[0],
+        row_hint: 0,
+        new: InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("after")],
+        },
+        delta_utf8: vec![ProjectionTextDelta::Delete("before".len()), ProjectionTextDelta::Insert("after".len())],
+      },
+      ProjectionPatch::DeleteBlocks {
+        block_ids: vec![BlockId(u128::MAX)],
+        row_hint: 0,
+      },
+    ],
+  };
+
+  let error = apply_projection_patch_batch(&mut document, &batch).expect_err("missing stable id should reject the full batch");
+
+  assert!(matches!(error, ProjectionApplyError::MissingBlock { .. }));
+  assert_eq!(paragraph_text(&document, 0), paragraph_text(&original, 0));
+  assert_eq!(document.frontier, original.frontier);
+}
+
+#[test]
+fn projection_patch_batch_moves_blocks_by_stable_anchor() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("first")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("second")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("third")],
+      },
+    ],
+  );
+  document.frontier = vec![1];
+  let moved_block = document.ids.block_ids[2];
+  let before_block = document.ids.block_ids[1];
+  let batch = ProjectionPatchBatch {
+    transaction_id: 9,
+    base_frontier: document.frontier.clone(),
+    new_frontier: vec![2],
+    patches: vec![ProjectionPatch::MoveBlock {
+      block_id: moved_block,
+      before: Some(before_block),
+      from_hint: 0,
+      to_hint: 0,
+    }],
+  };
+
+  apply_projection_patch_batch(&mut document, &batch).expect("stable ids should resolve stale move hints");
+
+  assert_eq!(paragraph_text(&document, 0), "first");
+  assert_eq!(paragraph_text(&document, 1), "third");
+  assert_eq!(paragraph_text(&document, 2), "second");
+  assert_eq!(document.ids.block_ids[1], moved_block);
+  assert_eq!(document.ids.block_ids[2], before_block);
+  assert_eq!(document.frontier, vec![2]);
+}
+
+#[test]
+fn section_page_metadata_survives_outline_recompute_and_block_move() {
+  let mut theme = DocumentTheme::default();
+  theme.set_custom_paragraph_style(
+    0,
+    CustomParagraphStyle {
+      font_size: gpui::px(18.0),
+      font_family: None,
+      color: gpui::black(),
+      bold: true,
+      italic: false,
+      underline: ThemeUnderline::None,
+      align: CustomParagraphAlign::Left,
+      spacing_before: gpui::px(0.0),
+      spacing_after: gpui::px(0.0),
+      border: None,
+      section_kind: Some(0),
+      section_level: Some(1),
+    },
+  );
+  let mut document = document_from_input(
+    theme,
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Custom(0),
+        runs: vec![plain("Heading")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("Body")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("Tail")],
+      },
+    ],
+  );
+  let page = SectionPageAttrs {
+    page_size: SectionPageSize {
+      width_twips: 10_080,
+      height_twips: 12_960,
+    },
+    margins: SectionMargins {
+      top_twips: 720,
+      right_twips: 900,
+      bottom_twips: 720,
+      left_twips: 900,
+    },
+    columns: 2,
+    orientation: SectionOrientation::Landscape,
+    page_numbering: SectionPageNumbering {
+      format: PageNumberFormat::UpperRoman,
+      start: 7,
+    },
+    header_flow_id: Some("flow.header".to_string()),
+    footer_flow_id: Some("flow.footer".to_string()),
+  };
+  let heading_paragraph = document.ids.paragraph_ids[0];
+  std::sync::Arc::make_mut(&mut document.sections).push(DocumentSection {
+    id: SectionId(1),
+    parent_id: None,
+    kind: SectionKind::Custom(0),
+    heading_paragraph: Some(heading_paragraph),
+    start_paragraph: heading_paragraph,
+    end_paragraph_exclusive: None,
+    page: Some(page.clone()),
+  });
+
+  rebuild_document_sections(&mut document);
+
+  assert_eq!(document.sections[0].page, Some(page.clone()));
+  assert_eq!(document.sections[0].heading_paragraph, Some(heading_paragraph));
+  assert!(!document.outline.is_empty());
+
+  document.frontier = vec![1];
+  let moved_block = document.ids.block_ids[2];
+  let before_block = document.ids.block_ids[1];
+  let batch = ProjectionPatchBatch {
+    transaction_id: 10,
+    base_frontier: document.frontier.clone(),
+    new_frontier: vec![2],
+    patches: vec![ProjectionPatch::MoveBlock {
+      block_id: moved_block,
+      before: Some(before_block),
+      from_hint: 2,
+      to_hint: 1,
+    }],
+  };
+
+  apply_projection_patch_batch(&mut document, &batch).expect("block move should preserve canonical section metadata");
+
+  assert_eq!(document.sections[0].page, Some(page));
+  assert_eq!(document.sections[0].heading_paragraph, Some(document.ids.paragraph_ids[0]));
+  assert_eq!(paragraph_text(&document, 1), "Tail");
+  assert_eq!(paragraph_text(&document, 2), "Body");
 }
 
 #[gpui::test]
@@ -678,14 +904,27 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
       assert!(editor.insert_single_grapheme_fast_path("a", cx));
       let flushed = editor.take_pending_runtime_edits();
       assert_eq!(flushed.len(), 1);
+      let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
-      editor.begin_runtime_edit();
+      let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
+      editor.begin_runtime_edit(transaction_id);
 
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       assert_eq!(paragraph_text(editor.document(), 0), "ab");
       assert_eq!(editor.selection.head.byte, 2);
 
-      editor.acknowledge_runtime_edit(vec![4, 5, 6], acknowledged_selection, cx);
+      let mut canonical = document_from_input(
+        DocumentTheme::default(),
+        vec![InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("a")],
+        }],
+      );
+      canonical.frontier = vec![4, 5, 6];
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
+      editor
+        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .expect("canonical runtime projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "ab");
       assert_eq!(editor.selection.head.byte, 2);
@@ -698,6 +937,59 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
       };
       assert_eq!(*at, DocumentOffset { paragraph: 0, byte: 1 });
       assert_eq!(text, "b");
+    });
+  });
+}
+
+#[gpui::test]
+fn explicit_selection_movement_during_runtime_commit_is_preserved(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("a")],
+    }],
+  );
+  document.frontier = vec![1, 2, 3];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 1 },
+        DocumentOffset { paragraph: 0, byte: 1 },
+        cx,
+      );
+      assert!(editor.insert_single_grapheme_fast_path("b", cx));
+      let flushed = editor.take_pending_runtime_edits();
+      let transaction_id = flushed[0].transaction_id;
+      let acknowledged_selection = flushed[0].selection_after.clone();
+      let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
+      editor.begin_runtime_edit(transaction_id);
+
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 0 },
+        DocumentOffset { paragraph: 0, byte: 0 },
+        cx,
+      );
+
+      let mut canonical = document_from_input(
+        DocumentTheme::default(),
+        vec![InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("ab")],
+        }],
+      );
+      canonical.frontier = vec![4, 5, 6];
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
+      editor
+        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .expect("canonical runtime projection must be materialized before completion");
+
+      assert_eq!(paragraph_text(editor.document(), 0), "ab");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 0, byte: 0 });
+      assert!(!editor.runtime_edit_in_flight());
     });
   });
 }
@@ -729,8 +1021,10 @@ fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases
         flushed[0].semantic_commands.as_slice(),
         [SemanticEditCommand::SplitParagraph { .. }]
       ));
+      let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
-      editor.begin_runtime_edit();
+      let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
+      editor.begin_runtime_edit(transaction_id);
 
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       assert!(editor.insert_single_grapheme_fast_path("c", cx));
@@ -753,7 +1047,10 @@ fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases
         ],
       );
       canonical.frontier = vec![4, 5, 6];
-      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection, cx);
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
+      editor
+        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .expect("canonical structural projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "a");
       assert_eq!(paragraph_text(editor.document(), 1), "bcd");
@@ -771,6 +1068,122 @@ fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases
         assert_eq!(*at, DocumentOffset { paragraph: 1, byte: expected_byte });
         assert_eq!(text, expected_text);
       }
+    });
+  });
+}
+
+#[gpui::test]
+fn structural_acknowledgement_replays_newer_enter_and_text_at_the_latest_endpoint(cx: &mut gpui::TestAppContext) {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("a")],
+    }],
+  );
+  document.frontier = vec![1, 2, 3];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      editor.set_text_selection_for_test(
+        DocumentOffset { paragraph: 0, byte: 1 },
+        DocumentOffset { paragraph: 0, byte: 1 },
+        cx,
+      );
+      editor.insert_paragraph_break_command(cx);
+      let flushed = editor.take_pending_runtime_edits();
+      let [SemanticEditCommand::SplitParagraph {
+        new_paragraph,
+        new_block,
+        ..
+      }] = flushed[0].semantic_commands.as_slice()
+      else {
+        panic!("expected the first batch to contain one paragraph split");
+      };
+      let first_new_paragraph = *new_paragraph;
+      let first_new_block = *new_block;
+      let transaction_id = flushed[0].transaction_id;
+      let acknowledged_selection = flushed[0].selection_after.clone();
+      let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
+      editor.begin_runtime_edit(transaction_id);
+
+      assert!(editor.insert_single_grapheme_fast_path("b", cx));
+      editor.insert_paragraph_break_command(cx);
+      assert!(editor.insert_single_grapheme_fast_path("d", cx));
+      assert_eq!(paragraph_text(editor.document(), 0), "a");
+      assert_eq!(paragraph_text(editor.document(), 1), "b");
+      assert_eq!(paragraph_text(editor.document(), 2), "d");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 2, byte: 1 });
+
+      let mut canonical = document_from_input(
+        DocumentTheme::default(),
+        vec![
+          InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![plain("a")],
+          },
+          InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: Vec::new(),
+          },
+        ],
+      );
+      canonical.ids.paragraph_ids[1] = first_new_paragraph;
+      canonical.ids.block_ids[1] = first_new_block;
+      canonical.frontier = vec![4, 5, 6];
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
+      editor
+        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .expect("canonical structural projection must be materialized before completion");
+
+      assert_eq!(paragraph_text(editor.document(), 0), "a");
+      assert_eq!(paragraph_text(editor.document(), 1), "b");
+      assert_eq!(paragraph_text(editor.document(), 2), "d");
+      assert_eq!(editor.selection.head, DocumentOffset { paragraph: 2, byte: 1 });
+      assert!(!editor.runtime_edit_in_flight());
+
+      let queued = editor.take_pending_runtime_edits();
+      assert_eq!(queued.len(), 3);
+      assert!(queued.iter().all(|edit| edit.base_frontier == vec![4, 5, 6]));
+      assert!(matches!(queued[0].semantic_commands.as_slice(), [SemanticEditCommand::InsertText { text, .. }] if text == "b"));
+      assert!(matches!(queued[1].semantic_commands.as_slice(), [SemanticEditCommand::SplitParagraph { .. }]));
+      assert!(matches!(queued[2].semantic_commands.as_slice(), [SemanticEditCommand::InsertText { text, .. }] if text == "d"));
+    });
+  });
+}
+
+#[gpui::test]
+fn runtime_acknowledgement_rejects_unexpected_transaction(cx: &mut gpui::TestAppContext) {
+  let mut document = blank_document();
+  document.frontier = vec![1, 2, 3];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document.clone(), None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      assert!(editor.insert_single_grapheme_fast_path("a", cx));
+      let flushed = editor.take_pending_runtime_edits();
+      let transaction_id = flushed[0].transaction_id;
+      let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
+      editor.begin_runtime_edit(transaction_id);
+
+      let mut canonical = document_from_input(
+        DocumentTheme::default(),
+        vec![InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("a")],
+        }],
+      );
+      canonical.frontier = vec![4, 5, 6];
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), None, cx);
+
+      let error = editor
+        .complete_runtime_edit_after_materialization(transaction_id + 1, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .expect_err("acknowledgement for a different transaction must be rejected");
+      assert!(matches!(error, ProjectionApplyError::UnexpectedTransaction { expected, actual } if expected == Some(transaction_id) && actual == transaction_id + 1));
+      assert!(editor.runtime_edit_in_flight());
     });
   });
 }

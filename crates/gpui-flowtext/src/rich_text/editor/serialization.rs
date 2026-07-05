@@ -136,6 +136,7 @@ pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputB
     assets: AssetStore::default(),
     ids: document_ids_for_shape(paragraph_count, block_count),
     sections: Arc::new(Vec::new()),
+    outline: Arc::new(Vec::new()),
     offset_index,
     theme,
   };
@@ -292,7 +293,11 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
 #[hotpath::measure]
 fn input_table_row_from_table_row(row: &TableRow) -> InputTableRow {
   InputTableRow {
-    cells: row.cells.iter().map(input_table_cell_from_table_cell).collect(),
+    cells: row
+      .cells
+      .iter()
+      .map(input_table_cell_from_table_cell)
+      .collect(),
   }
 }
 

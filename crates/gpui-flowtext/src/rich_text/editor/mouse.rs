@@ -47,6 +47,7 @@ impl RichTextEditor {
     self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
     if self.selection != before_selection {
+      self.note_explicit_selection_movement();
       self.emit_selection_changed(cx);
     }
     cx.notify();
@@ -165,6 +166,7 @@ impl RichTextEditor {
       let drop = self.hit_test_document_position(event.position, window, cx);
       let selection = EditorSelection::collapsed(drop);
       if self.selection != selection {
+        self.note_explicit_selection_movement();
         self.selection = selection;
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
@@ -199,6 +201,7 @@ impl RichTextEditor {
       },
     );
     if self.selection != selection {
+      self.note_explicit_selection_movement();
       self.selection = selection;
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);

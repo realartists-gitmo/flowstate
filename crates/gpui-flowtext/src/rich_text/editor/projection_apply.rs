@@ -9,6 +9,7 @@ impl RichTextEditor {
     self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
     for (id, record) in asset_records {
       self.document.assets.assets.insert(*id, record.clone());
+      self.committed_document.assets.assets.insert(*id, record.clone());
     }
     self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
     let generation = self.next_edit_generation;
@@ -20,20 +21,41 @@ impl RichTextEditor {
   // Retained for local derived UI-diff helpers; network collaboration applies
   // Loro projection snapshots instead.
   pub fn apply_projection_patches(&mut self, patches: &[ProjectionPatch], cx: &mut Context<Self>) {
-    self.apply_projection_patches_at_frontier(patches, self.document.frontier.clone(), cx);
+    let batch = ProjectionPatchBatch {
+      transaction_id: 0,
+      base_frontier: self.document.frontier.clone(),
+      new_frontier: self.document.frontier.clone(),
+      patches: patches.to_vec(),
+    };
+    if let Err(error) = self.apply_projection_patch_batch(&batch, cx) {
+      eprintln!("failed to apply derived projection patch batch: {error}");
+    }
   }
 
-  pub fn apply_projection_patches_at_frontier(&mut self, patches: &[ProjectionPatch], frontier: Vec<u8>, cx: &mut Context<Self>) {
-    if patches.is_empty() {
-      self.document.frontier = frontier;
-      return;
+  pub fn apply_projection_patch_batch(&mut self, batch: &ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<(), ProjectionApplyError> {
+    if self.committed_document.frontier != batch.base_frontier {
+      return Err(ProjectionApplyError::StaleFrontier {
+        expected: batch.base_frontier.clone(),
+        actual: self.committed_document.frontier.clone(),
+      });
     }
-    self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
+    let stable_selection = StableEditorSelection::capture(&self.document, &self.selection);
+    let mut document = self.committed_document.clone();
     let mut invalidation: Option<Range<usize>> = None;
-    for patch in patches {
-      self.apply_one_projection_patch(patch, &mut invalidation);
+    if !batch.is_empty() {
+      apply_projection_patches_to_document(&mut document, &batch.patches, Some(&mut invalidation))?;
     }
-    self.document.frontier = frontier;
+    document.frontier.clone_from(&batch.new_frontier);
+    self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
+    self.committed_document = document;
+    self.rebuild_visible_from_committed(Vec::new(), None, cx);
+    if self.runtime_edit_selection_epoch.is_none()
+      && self.pending_semantic_edits.is_empty()
+      && let Some(selection) = stable_selection
+    {
+      self.selection = selection.resolve(&self.document);
+      self.emit_selection_changed(cx);
+    }
     self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
     self.identity_map.reconcile(&self.document);
     self.layout_invalidation_hint = invalidation;
@@ -43,7 +65,9 @@ impl RichTextEditor {
     // Remote collaboration patches should update this editor in place, but
     // should not scroll the viewport as if the local user typed the change.
     self.after_formatting_mutation(cx);
+    self.pending_scroll_head_after_layout = false;
     self.layout_invalidation_hint = None;
+    Ok(())
   }
 
   pub fn projection_apply_deferred(&self) -> bool {
@@ -54,182 +78,284 @@ impl RichTextEditor {
       || self.ime_composition_active()
   }
 
-  fn apply_one_projection_patch(&mut self, patch: &ProjectionPatch, invalidation: &mut Option<Range<usize>>) {
-    match patch {
-      ProjectionPatch::ParagraphText { row, new, delta_utf8 } => {
-        self.remap_object_text_selection_for_delta(*row, delta_utf8);
-        if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row) {
-          remap_selection_for_text_delta(&mut self.selection, paragraph_ix, delta_utf8);
-          replace_paragraph_content(&mut self.document, paragraph_ix, new);
-          clamp_selection_to_document(&self.document, &mut self.selection);
-          extend_invalidation(invalidation, paragraph_ix..paragraph_ix + 1);
-        }
-      },
-      ProjectionPatch::ParagraphStyle { row, style } => {
-        if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row)
-          && let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix)
-        {
-          paragraph.style = *style;
-          bump_paragraph_version(paragraph);
-          update_paragraph_block(&mut self.document, paragraph_ix);
-          rebuild_document_sections(&mut self.document);
-          extend_invalidation(invalidation, paragraph_ix..paragraph_ix + 1);
-        }
-      },
-      ProjectionPatch::ParagraphRuns { row, runs } => {
-        if let Some(paragraph_ix) = self.paragraph_ix_for_block(*row)
-          && let Some(paragraph) = paragraphs_mut(&mut self.document).get_mut(paragraph_ix)
-        {
-          paragraph.runs.clone_from(runs);
-          bump_paragraph_version(paragraph);
-          update_paragraph_block(&mut self.document, paragraph_ix);
-          rebuild_document_sections(&mut self.document);
-          extend_invalidation(invalidation, paragraph_ix..paragraph_ix + 1);
-        }
-      },
-      ProjectionPatch::ReplaceObjectBlock { row, block } => {
-        let mut blocks = projection_structural_blocks_from_document(&self.document);
-        if *row < blocks.len() {
-          if selected_block_in_range(self.selected_block, *row..row.saturating_add(1)) {
-            self.clear_remote_object_editing_state();
-          }
-          blocks[*row] = block.clone();
-          rebuild_document_from_projection_structural_blocks(&mut self.document, blocks);
-          clamp_selection_to_document(&self.document, &mut self.selection);
-          extend_invalidation(invalidation, 0..self.document.paragraphs.len());
-        }
-      },
-      ProjectionPatch::InsertBlocks { row, blocks: inserted } => {
-        let mut blocks = projection_structural_blocks_from_document(&self.document);
-        let row = (*row).min(blocks.len());
-        if selected_block_ix(self.selected_block).is_some_and(|block_ix| block_ix >= row) {
-          self.clear_remote_object_editing_state();
-        }
-        blocks.splice(row..row, inserted.iter().cloned());
-        rebuild_document_from_projection_structural_blocks(&mut self.document, blocks);
-        clamp_selection_to_document(&self.document, &mut self.selection);
-        extend_invalidation(invalidation, 0..self.document.paragraphs.len());
-      },
-      ProjectionPatch::DeleteBlocks { row, count } => {
-        let mut blocks = projection_structural_blocks_from_document(&self.document);
-        let start = (*row).min(blocks.len());
-        let end = start.saturating_add(*count).min(blocks.len());
-        if selected_block_ix(self.selected_block).is_some_and(|block_ix| block_ix >= start) {
-          self.clear_remote_object_editing_state();
-        }
-        blocks.drain(start..end);
-        rebuild_document_from_projection_structural_blocks(&mut self.document, blocks);
-        clamp_selection_to_document(&self.document, &mut self.selection);
-        extend_invalidation(invalidation, 0..self.document.paragraphs.len());
-      },
-      ProjectionPatch::MoveBlock { from, to } => {
-        let mut blocks = projection_structural_blocks_from_document(&self.document);
-        if *from < blocks.len() {
-          let first = (*from).min(*to);
-          let last = (*from).max(*to);
-          if selected_block_ix(self.selected_block).is_some_and(|block_ix| (first..=last).contains(&block_ix)) {
-            self.clear_remote_object_editing_state();
-          }
-          let block = blocks.remove(*from);
-          blocks.insert((*to).min(blocks.len()), block);
-          rebuild_document_from_projection_structural_blocks(&mut self.document, blocks);
-          clamp_selection_to_document(&self.document, &mut self.selection);
-          extend_invalidation(invalidation, 0..self.document.paragraphs.len());
-        }
-      },
-      ProjectionPatch::AssetArrived { id, record } => {
-        self.document.assets.assets.insert(*id, record.clone());
-      },
-    }
-  }
-
-  fn clear_remote_object_editing_state(&mut self) {
-    self.selected_block = None;
-    self.image_resize_drag = None;
-    self.table_column_resize_drag = None;
-    self.table_cell_block_ix = 0;
-    self.table_cell_anchor = 0;
-    self.table_cell_caret = 0;
-    self.equation_source_anchor = 0;
-    self.equation_source_caret = 0;
-  }
-
-  fn remap_object_text_selection_for_delta(&mut self, row: usize, delta: &[ProjectionTextDelta]) {
-    match self.selected_block {
-      Some(BlockSelection::TableCell { block_ix, .. }) if block_ix == row => {
-        self.table_cell_anchor = remap_byte(self.table_cell_anchor, delta);
-        self.table_cell_caret = remap_byte(self.table_cell_caret, delta);
-      },
-      Some(BlockSelection::Equation(block_ix)) if block_ix == row => {
-        self.equation_source_anchor = remap_byte(self.equation_source_anchor, delta);
-        self.equation_source_caret = remap_byte(self.equation_source_caret, delta);
-      },
-      Some(BlockSelection::Image(_) | BlockSelection::Equation(_) | BlockSelection::Table(_) | BlockSelection::TableCell { .. }) | None => {},
-    }
-  }
 }
 
-pub fn apply_projection_patches(document: &mut DocumentProjection, patches: &[ProjectionPatch]) {
+pub fn apply_projection_patch_batch(document: &mut DocumentProjection, batch: &ProjectionPatchBatch) -> Result<(), ProjectionApplyError> {
+  if document.frontier != batch.base_frontier {
+    return Err(ProjectionApplyError::StaleFrontier {
+      expected: batch.base_frontier.clone(),
+      actual: document.frontier.clone(),
+    });
+  }
+  let mut candidate = document.clone();
+  apply_projection_patches_to_document(&mut candidate, &batch.patches, None)?;
+  candidate.frontier.clone_from(&batch.new_frontier);
+  *document = candidate;
+  Ok(())
+}
+
+pub fn apply_projection_patches(document: &mut DocumentProjection, patches: &[ProjectionPatch]) -> Result<(), ProjectionApplyError> {
+  let mut candidate = document.clone();
+  apply_projection_patches_to_document(&mut candidate, patches, None)?;
+  *document = candidate;
+  Ok(())
+}
+
+fn apply_projection_patches_to_document(
+  document: &mut DocumentProjection,
+  patches: &[ProjectionPatch],
+  invalidation: Option<&mut Option<Range<usize>>>,
+) -> Result<(), ProjectionApplyError> {
+  let original_outline = document.outline.clone();
+  let mut structural_blocks: Option<Vec<ProjectionStructuralBlock>> = None;
+  let mut structural_changed = false;
+  let mut outline_dirty = false;
+  let mut paragraph_invalidation: Option<Range<usize>> = None;
+
   for patch in patches {
     match patch {
-      ProjectionPatch::ParagraphText { row, new, .. } => {
-        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row) {
+      ProjectionPatch::ParagraphText {
+        block_id,
+        paragraph_id,
+        row_hint,
+        new,
+        ..
+      } => {
+        let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
+          let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
+          let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
+          let target = blocks
+            .get_mut(row)
+            .ok_or(ProjectionApplyError::MissingBlock {
+              block_id: *block_id,
+              row_hint: *row_hint,
+            })?;
+          if target.paragraph_id != Some(*paragraph_id) {
+            return Err(ProjectionApplyError::MissingParagraph {
+              paragraph_id: *paragraph_id,
+              block_id: *block_id,
+            });
+          }
+          let InputBlock::Paragraph(old) = &target.block else {
+            return Err(ProjectionApplyError::WrongBlockKind {
+              block_id: *block_id,
+              expected: "a paragraph",
+            });
+          };
+          outline_dirty |= old.style != new.style;
+          target.block = InputBlock::Paragraph(new.clone());
+          paragraph_ix
+        } else {
+          let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+          outline_dirty |= document.paragraphs[paragraph_ix].style != new.style;
           replace_paragraph_content(document, paragraph_ix, new);
-        }
+          paragraph_ix
+        };
+        extend_invalidation(&mut paragraph_invalidation, paragraph_ix..paragraph_ix + 1);
       },
-      ProjectionPatch::ParagraphStyle { row, style } => {
-        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row)
-          && let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
-        {
+      ProjectionPatch::ParagraphStyle {
+        block_id,
+        paragraph_id,
+        row_hint,
+        style,
+      } => {
+        let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
+          let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
+          let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
+          let target = blocks
+            .get_mut(row)
+            .ok_or(ProjectionApplyError::MissingBlock {
+              block_id: *block_id,
+              row_hint: *row_hint,
+            })?;
+          if target.paragraph_id != Some(*paragraph_id) {
+            return Err(ProjectionApplyError::MissingParagraph {
+              paragraph_id: *paragraph_id,
+              block_id: *block_id,
+            });
+          }
+          let InputBlock::Paragraph(paragraph) = &mut target.block else {
+            return Err(ProjectionApplyError::WrongBlockKind {
+              block_id: *block_id,
+              expected: "a paragraph",
+            });
+          };
+          outline_dirty |= paragraph.style != *style;
+          paragraph.style = *style;
+          paragraph_ix
+        } else {
+          let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+          let paragraph = paragraphs_mut(document)
+            .get_mut(paragraph_ix)
+            .ok_or(ProjectionApplyError::MissingParagraph {
+              paragraph_id: *paragraph_id,
+              block_id: *block_id,
+            })?;
+          outline_dirty |= paragraph.style != *style;
           paragraph.style = *style;
           bump_paragraph_version(paragraph);
           update_paragraph_block(document, paragraph_ix);
-          rebuild_document_sections(document);
-        }
+          paragraph_ix
+        };
+        extend_invalidation(&mut paragraph_invalidation, paragraph_ix..paragraph_ix + 1);
       },
-      ProjectionPatch::ParagraphRuns { row, runs } => {
-        if let Some(paragraph_ix) = paragraph_ix_for_block_row(document, *row)
-          && let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix)
-        {
+      ProjectionPatch::ParagraphRuns {
+        block_id,
+        paragraph_id,
+        row_hint,
+        runs,
+      } => {
+        let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
+          let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
+          let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
+          let target = blocks
+            .get_mut(row)
+            .ok_or(ProjectionApplyError::MissingBlock {
+              block_id: *block_id,
+              row_hint: *row_hint,
+            })?;
+          if target.paragraph_id != Some(*paragraph_id) {
+            return Err(ProjectionApplyError::MissingParagraph {
+              paragraph_id: *paragraph_id,
+              block_id: *block_id,
+            });
+          }
+          let InputBlock::Paragraph(paragraph) = &mut target.block else {
+            return Err(ProjectionApplyError::WrongBlockKind {
+              block_id: *block_id,
+              expected: "a paragraph",
+            });
+          };
+          let text = input_paragraph_text(paragraph);
+          paragraph.runs = input_runs_from_text_runs(&text, runs)?;
+          paragraph_ix
+        } else {
+          let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+          let text = paragraph_text(document, paragraph_ix);
+          validate_text_runs(&text, runs)?;
+          let paragraph = paragraphs_mut(document)
+            .get_mut(paragraph_ix)
+            .ok_or(ProjectionApplyError::MissingParagraph {
+              paragraph_id: *paragraph_id,
+              block_id: *block_id,
+            })?;
           paragraph.runs.clone_from(runs);
           bump_paragraph_version(paragraph);
           update_paragraph_block(document, paragraph_ix);
-          rebuild_document_sections(document);
-        }
+          paragraph_ix
+        };
+        extend_invalidation(&mut paragraph_invalidation, paragraph_ix..paragraph_ix + 1);
       },
-      ProjectionPatch::ReplaceObjectBlock { row, block } => {
-        let mut blocks = projection_structural_blocks_from_document(document);
-        if *row < blocks.len() {
-          blocks[*row] = block.clone();
-          rebuild_document_from_projection_structural_blocks(document, blocks);
+      ProjectionPatch::ReplaceObjectBlock {
+        block_id,
+        row_hint,
+        block,
+      } => {
+        let blocks = structural_blocks
+          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
+        let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
+        if blocks[row].paragraph_id.is_some() || block.paragraph_id.is_some() {
+          return Err(ProjectionApplyError::WrongBlockKind {
+            block_id: *block_id,
+            expected: "an object block",
+          });
         }
+        if block.block_id != *block_id {
+          return Err(ProjectionApplyError::InvalidStructuralPatch(
+            "object replacement must preserve the target block id",
+          ));
+        }
+        blocks[row] = block.clone();
+        structural_changed = true;
       },
-      ProjectionPatch::InsertBlocks { row, blocks: inserted } => {
-        let mut blocks = projection_structural_blocks_from_document(document);
-        let row = (*row).min(blocks.len());
+      ProjectionPatch::InsertBlocks {
+        before,
+        row_hint,
+        blocks: inserted,
+      } => {
+        let blocks = structural_blocks
+          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
+        let row = anchor_ix_for_insert_blocks(blocks, *before, *row_hint)?;
         blocks.splice(row..row, inserted.iter().cloned());
-        rebuild_document_from_projection_structural_blocks(document, blocks);
+        structural_changed = true;
+        outline_dirty = true;
       },
-      ProjectionPatch::DeleteBlocks { row, count } => {
-        let mut blocks = projection_structural_blocks_from_document(document);
-        let start = (*row).min(blocks.len());
-        let end = start.saturating_add(*count).min(blocks.len());
-        blocks.drain(start..end);
-        rebuild_document_from_projection_structural_blocks(document, blocks);
-      },
-      ProjectionPatch::MoveBlock { from, to } => {
-        let mut blocks = projection_structural_blocks_from_document(document);
-        if *from < blocks.len() {
-          let block = blocks.remove(*from);
-          blocks.insert((*to).min(blocks.len()), block);
-          rebuild_document_from_projection_structural_blocks(document, blocks);
+      ProjectionPatch::DeleteBlocks { block_ids, row_hint } => {
+        let blocks = structural_blocks
+          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
+        let mut rows = block_ids
+          .iter()
+          .map(|block_id| structural_block_ix_for_patch(blocks, *block_id, *row_hint))
+          .collect::<Result<Vec<_>, _>>()?;
+        rows.sort_unstable();
+        for window in rows.windows(2) {
+          if window[0] == window[1] {
+            return Err(ProjectionApplyError::DuplicateBlockId(blocks[window[0]].block_id));
+          }
         }
+        for row in rows.into_iter().rev() {
+          blocks.remove(row);
+        }
+        structural_changed = true;
+        outline_dirty = true;
+      },
+      ProjectionPatch::MoveBlock {
+        block_id,
+        before,
+        from_hint,
+        to_hint,
+      } => {
+        let blocks = structural_blocks
+          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
+        let from = structural_block_ix_for_patch(blocks, *block_id, *from_hint)?;
+        let block = blocks.remove(from);
+        let to = anchor_ix_for_insert_blocks(blocks, *before, *to_hint)?;
+        blocks.insert(to, block);
+        structural_changed = true;
+        outline_dirty = true;
       },
       ProjectionPatch::AssetArrived { id, record } => {
         document.assets.assets.insert(*id, record.clone());
       },
     }
   }
+
+  if let Some(blocks) = structural_blocks {
+    validate_structural_blocks(&blocks)?;
+    rebuild_document_from_projection_structural_blocks(document, blocks);
+    if !outline_dirty {
+      document.outline = original_outline;
+    }
+  } else if outline_dirty {
+    rebuild_document_sections(document);
+  }
+
+  if let Some(invalidation) = invalidation {
+    if structural_changed {
+      extend_invalidation(invalidation, 0..document.paragraphs.len());
+    } else if let Some(range) = paragraph_invalidation {
+      extend_invalidation(invalidation, range);
+    }
+  }
+  Ok(())
+}
+
+fn structural_block_ix_for_patch(
+  blocks: &[ProjectionStructuralBlock],
+  block_id: BlockId,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  if blocks.get(row_hint).is_some_and(|block| block.block_id == block_id) {
+    return Ok(row_hint);
+  }
+  blocks
+    .iter()
+    .position(|block| block.block_id == block_id)
+    .ok_or(ProjectionApplyError::MissingBlock { block_id, row_hint })
+}
+
+fn paragraph_ix_for_structural_row(blocks: &[ProjectionStructuralBlock], row: usize) -> usize {
+  blocks.iter().take(row).filter(|block| block.paragraph_id.is_some()).count()
 }
 
 fn paragraph_ix_for_block_row(document: &DocumentProjection, row: usize) -> Option<usize> {
@@ -243,20 +369,105 @@ fn paragraph_ix_for_block_row(document: &DocumentProjection, row: usize) -> Opti
   })
 }
 
-#[hotpath::measure]
-fn selected_block_ix(selection: Option<BlockSelection>) -> Option<usize> {
-  match selection {
-    Some(BlockSelection::Image(block_ix)
-    | BlockSelection::Equation(block_ix)
-    | BlockSelection::Table(block_ix)
-    | BlockSelection::TableCell { block_ix, .. }) => Some(block_ix),
-    None => None,
+fn paragraph_ix_for_patch(
+  document: &DocumentProjection,
+  block_id: BlockId,
+  paragraph_id: ParagraphId,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  let row = block_ix_for_patch(document, block_id, row_hint)?;
+  let paragraph_ix = paragraph_ix_for_block_row(document, row).ok_or(ProjectionApplyError::WrongBlockKind {
+    block_id,
+    expected: "a paragraph",
+  })?;
+  if document.ids.paragraph_ids.get(paragraph_ix).copied() != Some(paragraph_id) {
+    return Err(ProjectionApplyError::MissingParagraph { paragraph_id, block_id });
   }
+  Ok(paragraph_ix)
 }
 
-#[hotpath::measure]
-fn selected_block_in_range(selection: Option<BlockSelection>, range: Range<usize>) -> bool {
-  selected_block_ix(selection).is_some_and(|block_ix| range.contains(&block_ix))
+fn block_ix_for_patch(document: &DocumentProjection, block_id: BlockId, row_hint: usize) -> Result<usize, ProjectionApplyError> {
+  if document.ids.block_ids.get(row_hint).copied() == Some(block_id) {
+    return Ok(row_hint);
+  }
+  document
+    .ids
+    .block_ids
+    .iter()
+    .position(|id| *id == block_id)
+    .ok_or(ProjectionApplyError::MissingBlock { block_id, row_hint })
+}
+
+fn anchor_ix_for_insert_blocks(
+  blocks: &[ProjectionStructuralBlock],
+  before: Option<BlockId>,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  let Some(before) = before else {
+    return Ok(blocks.len());
+  };
+  if blocks.get(row_hint).is_some_and(|block| block.block_id == before) {
+    return Ok(row_hint);
+  }
+  blocks
+    .iter()
+    .position(|block| block.block_id == before)
+    .ok_or(ProjectionApplyError::InvalidAnchor(before))
+}
+
+fn validate_text_runs(text: &str, runs: &[TextRun]) -> Result<(), ProjectionApplyError> {
+  let mut byte = 0usize;
+  for run in runs {
+    let end = byte
+      .checked_add(run.len)
+      .ok_or(ProjectionApplyError::InvalidStructuralPatch("paragraph run lengths overflow"))?;
+    if end > text.len() || !text.is_char_boundary(byte) || !text.is_char_boundary(end) {
+      return Err(ProjectionApplyError::InvalidStructuralPatch(
+        "paragraph run lengths do not align to UTF-8 boundaries",
+      ));
+    }
+    byte = end;
+  }
+  if byte != text.len() {
+    return Err(ProjectionApplyError::InvalidStructuralPatch(
+      "paragraph runs do not cover the complete paragraph text",
+    ));
+  }
+  Ok(())
+}
+
+fn input_runs_from_text_runs(text: &str, runs: &[TextRun]) -> Result<Vec<InputRun>, ProjectionApplyError> {
+  validate_text_runs(text, runs)?;
+  let mut byte = 0usize;
+  Ok(
+    runs
+      .iter()
+      .map(|run| {
+        let start = byte;
+        byte += run.len;
+        InputRun {
+          text: text[start..byte].to_string(),
+          styles: run.styles,
+        }
+      })
+      .collect(),
+  )
+}
+
+fn validate_structural_blocks(blocks: &[ProjectionStructuralBlock]) -> Result<(), ProjectionApplyError> {
+  let mut block_ids = rustc_hash::FxHashSet::default();
+  let mut paragraph_ids = rustc_hash::FxHashSet::default();
+  for block in blocks {
+    if !block_ids.insert(block.block_id) {
+      return Err(ProjectionApplyError::DuplicateBlockId(block.block_id));
+    }
+    if let Some(paragraph_id) = block.paragraph_id
+      && !paragraph_ids.insert(paragraph_id)
+    {
+      return Err(ProjectionApplyError::DuplicateParagraphId(paragraph_id));
+    }
+  }
+  Ok(())
 }
 
 #[hotpath::measure]
@@ -268,18 +479,11 @@ fn replace_paragraph_content(document: &mut DocumentProjection, paragraph_ix: us
   let byte_range = paragraph_byte_range(document, paragraph_ix);
   document.text.delete(byte_range.clone());
   document.text.insert(byte_range.start, &text);
-  let old_style = document.paragraphs[paragraph_ix].style;
   let mut replacement = paragraph_from_input_paragraph(paragraph);
   replacement.version = document.paragraphs[paragraph_ix].version.wrapping_add(1);
   replacement.byte_range = byte_range.clone();
   paragraphs_mut(document)[paragraph_ix] = replacement;
-  // Single in-place paragraph update (count unchanged): shift the offset index
-  // and the block in place. The section outline can only change if this
-  // paragraph's style changed.
   update_paragraph_offsets_after_len_change(document, paragraph_ix);
-  if old_style != paragraph.style {
-    rebuild_document_sections(document);
-  }
 }
 
 #[hotpath::measure]
@@ -342,6 +546,7 @@ fn input_paragraph_from_document_paragraph(document: &DocumentProjection, paragr
 fn rebuild_document_from_projection_structural_blocks(document: &mut DocumentProjection, blocks: Vec<ProjectionStructuralBlock>) {
   let assets = document.assets.clone();
   let theme = document.theme.clone();
+  let frontier = document.frontier.clone();
   let document_id = document.ids.document_id;
   let input_blocks = blocks
     .iter()
@@ -357,6 +562,8 @@ fn rebuild_document_from_projection_structural_blocks(document: &mut DocumentPro
     .collect::<Vec<_>>();
   let mut rebuilt = document_from_input_blocks(theme, input_blocks);
   rebuilt.assets = assets;
+  rebuilt.frontier = frontier;
+  rebuilt.sections = document.sections.clone();
   rebuilt.ids.document_id = document_id;
   rebuilt.ids.block_ids = block_ids;
   rebuilt.ids.paragraph_ids = paragraph_ids;
@@ -366,42 +573,6 @@ fn rebuild_document_from_projection_structural_blocks(document: &mut DocumentPro
   *document = rebuilt;
 }
 
-#[hotpath::measure]
-fn remap_selection_for_text_delta(selection: &mut EditorSelection, paragraph_ix: usize, delta: &[ProjectionTextDelta]) {
-  if selection.anchor.paragraph == paragraph_ix {
-    selection.anchor.byte = remap_byte(selection.anchor.byte, delta);
-  }
-  if selection.head.paragraph == paragraph_ix {
-    selection.head.byte = remap_byte(selection.head.byte, delta);
-  }
-}
-
-#[hotpath::measure]
-fn remap_byte(byte: usize, delta: &[ProjectionTextDelta]) -> usize {
-  let mut old = 0usize;
-  let mut new = 0usize;
-  for item in delta {
-    match *item {
-      ProjectionTextDelta::Retain(len) => {
-        if byte <= old + len {
-          return new + (byte - old);
-        }
-        old += len;
-        new += len;
-      },
-      ProjectionTextDelta::Insert(len) => {
-        new += len;
-      },
-      ProjectionTextDelta::Delete(len) => {
-        if byte <= old + len {
-          return new;
-        }
-        old += len;
-      },
-    }
-  }
-  new + byte.saturating_sub(old)
-}
 
 #[hotpath::measure]
 fn clamp_selection_to_document(document: &DocumentProjection, selection: &mut EditorSelection) {

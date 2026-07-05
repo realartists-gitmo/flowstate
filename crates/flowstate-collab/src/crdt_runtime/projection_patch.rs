@@ -25,7 +25,12 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
     if !retained_blocks_unchanged(before, after) {
       return None;
     }
-    patches.push(ProjectionPatch::MoveBlock { from, to });
+    patches.push(ProjectionPatch::MoveBlock {
+      block_id: before_ids[from],
+      before: after_ids.get(to + 1).copied(),
+      from_hint: from,
+      to_hint: to,
+    });
     return Some(patches);
   }
 
@@ -35,13 +40,14 @@ pub(super) fn projection_patches_between(before: &DocumentProjection, after: &Do
   let after_end = after_ids.len().saturating_sub(suffix);
   if before_end > prefix {
     patches.push(ProjectionPatch::DeleteBlocks {
-      row: prefix,
-      count: before_end - prefix,
+      block_ids: before_ids[prefix..before_end].to_vec(),
+      row_hint: prefix,
     });
   }
   if after_end > prefix {
     patches.push(ProjectionPatch::InsertBlocks {
-      row: prefix,
+      before: after_ids.get(after_end).copied(),
+      row_hint: prefix,
       blocks: structural_blocks(after, prefix..after_end),
     });
   }
@@ -76,7 +82,8 @@ fn append_same_shape_patches(before: &DocumentProjection, after: &DocumentProjec
       (Block::Image(_) | Block::Equation(_) | Block::Table(_), Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
         if before_block != after_block {
           patches.push(ProjectionPatch::ReplaceObjectBlock {
-            row,
+            block_id: before.ids.block_ids[row],
+            row_hint: row,
             block: structural_block(after, row, after_paragraph_ix),
           });
         }
@@ -102,7 +109,9 @@ fn append_paragraph_patch(
   let after_text = paragraph_text(after, after_paragraph_ix);
   if before_text != after_text {
     patches.push(ProjectionPatch::ParagraphText {
-      row,
+      block_id: before.ids.block_ids[row],
+      paragraph_id: before.ids.paragraph_ids[before_paragraph_ix],
+      row_hint: row,
       new: input_paragraph(after, after_paragraph_ix, after_paragraph),
       delta_utf8: text_delta_between(&before_text, &after_text),
     });
@@ -110,13 +119,17 @@ fn append_paragraph_patch(
   }
   if before_paragraph.style != after_paragraph.style {
     patches.push(ProjectionPatch::ParagraphStyle {
-      row,
+      block_id: before.ids.block_ids[row],
+      paragraph_id: before.ids.paragraph_ids[before_paragraph_ix],
+      row_hint: row,
       style: after_paragraph.style,
     });
   }
   if before_paragraph.runs != after_paragraph.runs {
     patches.push(ProjectionPatch::ParagraphRuns {
-      row,
+      block_id: before.ids.block_ids[row],
+      paragraph_id: before.ids.paragraph_ids[before_paragraph_ix],
+      row_hint: row,
       runs: after_paragraph.runs.clone(),
     });
   }
@@ -376,9 +389,12 @@ pub(super) fn remote_body_text_patch(
     .count()
     .max(after_changed.chars().count());
   let invalidation = ProjectionInvalidation::body_text(frontier_before, frontier_after, unicode_start, unicode_len);
+  let row = flowstate_document::block_ix_for_paragraph(projection, before_location.paragraph_ix)?;
   Some((
     vec![ProjectionPatch::ParagraphText {
-      row: flowstate_document::block_ix_for_paragraph(projection, before_location.paragraph_ix)?,
+      block_id: projection.ids.block_ids[row],
+      paragraph_id: projection.ids.paragraph_ids[before_location.paragraph_ix],
+      row_hint: row,
       new: new_paragraph,
       delta_utf8,
     }],
@@ -489,14 +505,21 @@ fn paragraph_projection_patches(
       .collect::<String>();
     if old_text != new_text {
       patches.push(ProjectionPatch::ParagraphText {
-        row,
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+        row_hint: row,
         delta_utf8: text_delta_between(&old_text, &new_text),
         new: new_input,
       });
       continue;
     }
     if old_input.style != new_input.style {
-      patches.push(ProjectionPatch::ParagraphStyle { row, style: new_input.style });
+      patches.push(ProjectionPatch::ParagraphStyle {
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+        row_hint: row,
+        style: new_input.style,
+      });
     }
     let new_runs = flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new_input)])
       .paragraphs
@@ -504,7 +527,12 @@ fn paragraph_projection_patches(
       .runs
       .clone();
     if old.runs != new_runs {
-      patches.push(ProjectionPatch::ParagraphRuns { row, runs: new_runs });
+      patches.push(ProjectionPatch::ParagraphRuns {
+        block_id: projection.ids.block_ids[row],
+        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+        row_hint: row,
+        runs: new_runs,
+      });
     }
   }
   Some(patches)
@@ -538,7 +566,8 @@ fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroD
       .zip(projected)
       .filter_map(|((block_id, row, before), (_, after))| {
         (before != after).then_some(ProjectionPatch::ReplaceObjectBlock {
-          row,
+          block_id,
+          row_hint: row,
           block: ProjectionStructuralBlock {
             block_id,
             paragraph_id: None,

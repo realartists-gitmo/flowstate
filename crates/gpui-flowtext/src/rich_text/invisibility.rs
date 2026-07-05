@@ -113,6 +113,7 @@ pub(super) fn invisibility_projected_document(document: &DocumentProjection, par
     assets: document.assets.clone(),
     ids: document_ids_for_shape(paragraphs.len(), 1),
     sections: Arc::new(Vec::new()),
+    outline: Arc::new(Vec::new()),
     offset_index: ParagraphOffsetIndex::new(&paragraphs),
     theme: document.theme.clone(),
   };

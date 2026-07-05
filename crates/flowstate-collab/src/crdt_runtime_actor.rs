@@ -7,8 +7,8 @@ use gpui_flowtext::{EditorSelection, SemanticEditCommand as EditorSemanticComman
 use loro::{ExportMode, VersionVector};
 
 use crate::crdt_runtime::{
-  CrdtRuntime, ProjectionFallbackStats, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets,
-  RuntimeRevisionInfo, SemanticCommand,
+  CrdtRuntime, EditorCommitResult, ProjectionFallbackStats, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
+  RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand,
 };
 use crate::presence::PresenceSelection;
 
@@ -30,13 +30,15 @@ impl CrdtRuntimeHandle {
 impl CrdtRuntimeHandle {
   pub async fn apply_editor_commands(
     &self,
+    transaction_id: u128,
     base_frontier: Vec<u8>,
     commands: Vec<EditorSemanticCommand>,
     assets: Vec<AssetRecord>,
     selection_after: Option<EditorSelection>,
-  ) -> Result<Vec<RuntimeEvent>> {
+  ) -> Result<EditorCommitResult> {
     self
       .request(|reply| RuntimeRequest::ApplyEditorCommands {
+        transaction_id,
         base_frontier,
         commands,
         assets,
@@ -138,7 +140,7 @@ impl CrdtRuntimeHandle {
 
   /// §15/§31: bind a stable durable author identity to the live runtime so later
   /// revisions record this user as their author and `users_by_id` is populated.
-  pub async fn set_author_identity(&self, user_id: u128, display_name: Option<String>) -> Result<()> {
+  pub async fn set_author_identity(&self, user_id: u128, display_name: Option<String>) -> Result<Vec<RuntimeEvent>> {
     self
       .request(|reply| RuntimeRequest::SetAuthorIdentity {
         user_id,
@@ -164,11 +166,12 @@ impl CrdtRuntimeHandle {
 
 enum RuntimeRequest {
   ApplyEditorCommands {
+    transaction_id: u128,
     base_frontier: Vec<u8>,
     commands: Vec<EditorSemanticCommand>,
     assets: Vec<AssetRecord>,
     selection_after: Option<EditorSelection>,
-    reply: Sender<Result<Vec<RuntimeEvent>>>,
+    reply: Sender<Result<EditorCommitResult>>,
   },
   Command {
     command: SemanticCommand,
@@ -227,80 +230,26 @@ enum RuntimeRequest {
   SetAuthorIdentity {
     user_id: u128,
     display_name: Option<String>,
-    reply: Sender<Result<()>>,
+    reply: Sender<Result<Vec<RuntimeEvent>>>,
   },
 }
 
 fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
-  let mut deferred = None;
-  loop {
-    let request = match deferred.take() {
-      Some(request) => request,
-      None => match receiver.recv_blocking() {
-        Ok(request) => request,
-        Err(_) => break,
-      },
-    };
+  while let Ok(request) = receiver.recv_blocking() {
     match request {
       RuntimeRequest::ApplyEditorCommands {
+        transaction_id,
         base_frontier,
-        mut commands,
-        mut assets,
-        mut selection_after,
+        commands,
+        assets,
+        selection_after,
         reply,
       } => {
-        let mut replies = vec![reply];
-        while let Ok(next) = receiver.try_recv() {
-          match next {
-            RuntimeRequest::ApplyEditorCommands {
-              base_frontier: next_base_frontier,
-              commands: next_commands,
-              assets: next_assets,
-              selection_after: next_selection,
-              reply,
-            } if next_base_frontier == base_frontier => {
-              commands.extend(next_commands);
-              assets.extend(next_assets);
-              if next_selection.is_some() {
-                selection_after = next_selection;
-              }
-              replies.push(reply);
-            },
-            other => {
-              deferred = Some(other);
-              break;
-            },
-          }
-        }
         let commands = coalesce_editor_commands(commands);
-        let result: Result<Vec<RuntimeEvent>> = (|| {
-          let mut events = runtime.apply_editor_commands(&base_frontier, &commands, selection_after.as_ref())?;
-          events.extend(runtime.merge_asset_records(assets)?);
-          Ok(events)
-        })();
-        match result {
-          Ok(events) => {
-            let final_reply = replies.pop();
-            for reply in replies {
-              send_reply(reply, Ok(Vec::new()));
-            }
-            if let Some(reply) = final_reply {
-              send_reply(reply, Ok(events));
-            }
-          },
-          Err(error) => {
-            let stale_projection = error
-              .downcast_ref::<crate::crdt_runtime::StaleProjectionError>()
-              .copied();
-            let message = error.to_string();
-            for reply in replies {
-              let error = stale_projection
-                .map(anyhow::Error::new)
-                .unwrap_or_else(|| anyhow!(message.clone()));
-              send_reply(reply, Err(error));
-            }
-          },
-        }
+        send_reply(
+          reply,
+          runtime.apply_editor_transaction(transaction_id, &base_frontier, &commands, &assets, selection_after.as_ref()),
+        );
       },
       RuntimeRequest::Command { command, reply } => send_reply(reply, runtime.command(command)),
       RuntimeRequest::ImportRemoteUpdate { bytes, reply } => send_reply(reply, runtime.import_remote_update(&bytes)),
@@ -413,6 +362,7 @@ mod tests {
 
     let error = handle
       .apply_editor_commands(
+        1,
         base_frontier,
         vec![EditorSemanticCommand::InsertText {
           at: DocumentOffset { paragraph: 0, byte: 0 },

@@ -5,9 +5,7 @@ fn item_lookup_for_virtual_items(items: &[VirtualItem], paragraph_count: usize) 
 
   for (item_ix, item) in items.iter().enumerate() {
     match item {
-      VirtualItem::ParagraphChunk {
-        paragraph_ix, ..
-      } => {
+      VirtualItem::ParagraphChunk { paragraph_ix, .. } => {
         if let Some(range) = paragraph_chunk_item_ranges.get_mut(*paragraph_ix) {
           if range.start == range.end {
             *range = item_ix..item_ix + 1;
@@ -47,12 +45,14 @@ fn patch_item_lookup_for_paragraph_range(
     }
   }
 
-  for (relative_item_ix, item) in items.get(replace_start..replace_start + new_len)?.iter().enumerate() {
+  for (relative_item_ix, item) in items
+    .get(replace_start..replace_start + new_len)?
+    .iter()
+    .enumerate()
+  {
     let item_ix = replace_start + relative_item_ix;
     match item {
-      VirtualItem::ParagraphChunk {
-        paragraph_ix, ..
-      } if range.contains(paragraph_ix) => {
+      VirtualItem::ParagraphChunk { paragraph_ix, .. } if range.contains(paragraph_ix) => {
         if let Some(chunk_range) = paragraph_chunk_item_ranges.get_mut(*paragraph_ix) {
           if chunk_range.start == chunk_range.end {
             *chunk_range = item_ix..item_ix + 1;
@@ -126,6 +126,7 @@ fn detach_document_for_background_write(document: &DocumentProjection) -> Docume
     assets: document.assets.clone(),
     ids: document.ids.clone(),
     sections: Arc::new(document.sections.as_ref().clone()),
+    outline: Arc::new(document.outline.as_ref().clone()),
     offset_index: document.offset_index.clone(),
     theme: document.theme.clone(),
   }
@@ -139,4 +140,3 @@ fn floor_char_boundary(text: &str, mut byte: usize) -> usize {
   }
   byte
 }
-

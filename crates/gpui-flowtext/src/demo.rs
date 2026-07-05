@@ -106,6 +106,7 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
     blocks: Arc::new(blocks),
     assets: AssetStore::default(),
     sections: Arc::new(Vec::new()),
+    outline: Arc::new(Vec::new()),
     offset_index,
     theme,
   };

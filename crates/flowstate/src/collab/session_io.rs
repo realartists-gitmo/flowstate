@@ -11,6 +11,7 @@ use flowstate_collab::{
 };
 use gpui::Context;
 use loro::VersionVector;
+use uuid::Uuid;
 
 use crate::rich_text_element::{AssetId, AssetRecord, UndoRedirect};
 
@@ -45,20 +46,50 @@ impl CollabSession {
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
       let result = runtime.import_remote_update(bytes).await;
-      let _ = session.update(cx, |session, cx| match result {
+      match result {
         Ok(events) => {
-          if let Err(error) = session.apply_runtime_events(events, true, cx) {
-            tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "applying remote collaboration projection failed");
-            session.detach(DetachReason::Fatal(format!("applying collaboration update failed: {error:#}")), cx);
+          let applied = session.update(cx, |session, cx| session.apply_runtime_events(events, true, cx));
+          let projection_error = match applied {
+            Ok(Ok(())) => None,
+            Ok(Err(error)) => Some(format!("{error:#}")),
+            Err(error) => {
+              tracing::debug!(session = %session_id, %error, "collaboration session disappeared while applying remote update");
+              return;
+            },
+          };
+          if let Some(detail) = projection_error {
+            tracing::warn!(session = %session_id, bytes = bytes_len, error = %detail, "remote projection materialization failed; repairing from canonical runtime snapshot");
+            match runtime.projection_snapshot().await {
+              Ok(document) => {
+                let _ = session.update(cx, |session, cx| {
+                  if let Err(error) = session.apply_runtime_projection(document, cx) {
+                    session.detach(
+                      DetachReason::Fatal(format!("applying canonical collaboration repair failed: {error:#}")),
+                      cx,
+                    );
+                  }
+                });
+              },
+              Err(error) => {
+                let _ = session.update(cx, |session, cx| {
+                  session.detach(
+                    DetachReason::Fatal(format!("fetching canonical collaboration repair failed: {error:#}")),
+                    cx,
+                  );
+                });
+              },
+            }
           } else {
             tracing::debug!(session = %session_id, bytes = bytes_len, "remote collaboration update imported and projected");
           }
         },
         Err(error) => {
           tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "remote collaboration update import failed");
-          session.detach(DetachReason::Fatal(format!("importing collaboration update failed: {error:#}")), cx);
+          let _ = session.update(cx, |session, cx| {
+            session.detach(DetachReason::Fatal(format!("importing collaboration update failed: {error:#}")), cx);
+          });
         },
-      });
+      }
     })
     .detach();
     Ok(())
@@ -347,11 +378,11 @@ impl CollabSession {
       let session_id = self.session;
       cx.spawn(async move |session, cx| {
         let result = runtime
-          .apply_editor_commands(Vec::new(), Vec::new(), canonical_records, None)
+          .apply_editor_commands(Uuid::new_v4().as_u128(), Vec::new(), Vec::new(), canonical_records, None)
           .await;
         let _ = session.update(cx, |session, cx| match result {
-          Ok(events) => {
-            if let Err(error) = session.apply_runtime_events(events, true, cx) {
+          Ok(commit) => {
+            if let Err(error) = session.apply_runtime_events(commit.events, true, cx) {
               tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "projecting fetched collaboration assets failed");
             }
           },
