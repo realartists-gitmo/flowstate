@@ -289,6 +289,37 @@ impl ProjectionRuntimeIndex {
     Some(unicode)
   }
 
+  /// Like [`body_unicode_for_offset`], but returns a position in the ACTUAL live Loro
+  /// body flow rather than the projection's coordinate space. Use this whenever the
+  /// result feeds a Loro body mutation or a Loro cursor: `push_flow_blocks` can
+  /// coalesce an object-adjacent empty paragraph out of the projection while its
+  /// boundary newline stays PHYSICALLY in the body, so the projection-derived index
+  /// runs short of the live body by one unicode per coalesced empty. Resolving the
+  /// paragraph's start from its durable boundary cursor keeps the position in Loro
+  /// space, so an edit lands where the projection intends instead of the phantom slot
+  /// (which would materialize the coalesced paragraph and diverge the incremental
+  /// projection from the full rebuild). Falls back to the projection-space start when
+  /// the durable record can't be resolved (e.g. the boundary-0 sentinel).
+  fn body_unicode_for_offset_in_loro(&self, doc: &LoroDoc, projection: &DocumentProjection, offset: DocumentOffset) -> Option<usize> {
+    let paragraph = projection.paragraphs.get(offset.paragraph)?;
+    let paragraph_text = flowstate_document::paragraph_text(projection, offset.paragraph);
+    let byte = offset
+      .byte
+      .min(flowstate_document::paragraph_text_len(paragraph));
+    if !paragraph_text.is_char_boundary(byte) {
+      return None;
+    }
+    let paragraph_start = projection
+      .ids
+      .paragraph_ids
+      .get(offset.paragraph)
+      .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
+      .or_else(|| self.paragraph_body_unicode_starts.get(offset.paragraph).copied())?;
+    let unicode = paragraph_start + paragraph_text[..byte].chars().count();
+    fidelity::event(FidelityClass::Caret, "offset->unicode-loro", || format!("offset={offset:?} byte={byte} -> body_unicode={unicode}"));
+    Some(unicode)
+  }
+
   fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
     // FS-170: the body-unicode slot immediately AFTER a block-object placeholder
     // is the interstitial paragraph boundary. A caret resting there is "after the
@@ -2855,7 +2886,7 @@ fn fidelity_class_for_defect(defect: &ProjectionDefect) -> FidelityClass {
 pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProjection, command: &EditorSemanticCommand) -> Result<bool> {
   match command {
     EditorSemanticCommand::InsertText { at, text, styles } => {
-      let unicode_index = projection_offset_to_body_unicode_index(projection, *at);
+      let unicode_index = projection_offset_to_loro_body_unicode_index(doc, projection, *at);
       let body = body_text(doc);
       let newline_boundaries = inserted_newline_boundaries(unicode_index, text);
       body
@@ -2869,8 +2900,8 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
       Ok(true)
     },
     EditorSemanticCommand::DeleteRange { range } => {
-      let start = projection_offset_to_body_unicode_index(projection, range.start);
-      let end = projection_offset_to_body_unicode_index(projection, range.end);
+      let start = projection_offset_to_loro_body_unicode_index(doc, projection, range.start);
+      let end = projection_offset_to_loro_body_unicode_index(doc, projection, range.end);
       // §5 sentinel protection (preflight): clamp/reject a range that would delete
       // the boundary-0 sentinel newline before mutating the body.
       if let Some((start, len)) = sentinel_protected_delete_range(start, end.saturating_sub(start)) {
@@ -2901,7 +2932,7 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
       if projection.ids.block_ids.get(source_block_ix).copied() != Some(*source_block) {
         return Ok(false);
       }
-      let unicode_index = projection_offset_to_body_unicode_index(projection, *at);
+      let unicode_index = projection_offset_to_loro_body_unicode_index(doc, projection, *at);
       let body = body_text(doc);
       body
         .insert(unicode_index, "\n")
@@ -3086,7 +3117,7 @@ fn apply_editor_semantic_command_body_fast_path(
   match command {
     EditorSemanticCommand::InsertText { at, text, styles } => {
       let body = body_text(doc);
-      let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
+      let Some(unicode_index) = projection_index.body_unicode_for_offset_in_loro(doc, projection, *at) else {
         return Ok(false);
       };
       let newline_boundaries = inserted_newline_boundaries(unicode_index, text);
@@ -3102,10 +3133,10 @@ fn apply_editor_semantic_command_body_fast_path(
     },
     EditorSemanticCommand::DeleteRange { range } => {
       let body = body_text(doc);
-      let Some(start) = projection_index.body_unicode_for_offset(projection, range.start) else {
+      let Some(start) = projection_index.body_unicode_for_offset_in_loro(doc, projection, range.start) else {
         return Ok(false);
       };
-      let Some(end) = projection_index.body_unicode_for_offset(projection, range.end) else {
+      let Some(end) = projection_index.body_unicode_for_offset_in_loro(doc, projection, range.end) else {
         return Ok(false);
       };
       // §5 sentinel protection (preflight): clamp/reject a range that would delete
@@ -3138,7 +3169,7 @@ fn apply_editor_semantic_command_body_fast_path(
         return Ok(false);
       }
       let body = body_text(doc);
-      let Some(unicode_index) = projection_index.body_unicode_for_offset(projection, *at) else {
+      let Some(unicode_index) = projection_index.body_unicode_for_offset_in_loro(doc, projection, *at) else {
         return Ok(false);
       };
       body
@@ -4006,6 +4037,35 @@ fn object_insert_unicode_pos_for_projection_block(body: &LoroText, target_block_
   (block_ix <= target_block_ix).then_some(last_pos)
 }
 
+/// Live start (unicode) of the paragraph identified by `paragraph_id` in the actual
+/// Loro body flow, resolved from its durable boundary cursor — the paragraph's text
+/// begins just past its boundary newline. Coalescing-agnostic: unlike the
+/// projection-derived body-unicode index, this reflects boundary newlines that are
+/// physically present in the body even when the projection has coalesced that
+/// paragraph out of view (an object-adjacent empty paragraph). Returns `None` when
+/// the durable record or its cursor cannot be resolved, so callers fall back to the
+/// projection-space start.
+fn paragraph_body_start_in_loro(doc: &LoroDoc, paragraph_id: ParagraphId) -> Option<usize> {
+  let root = doc.get_map(ROOT);
+  let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID).ok()?;
+  for key in map_keys(&paragraphs) {
+    if loro_id_u128(&key) != paragraph_id.0 {
+      continue;
+    }
+    let paragraph = child_map(&paragraphs, &key)?;
+    for field in ["boundary_cursor", "start_cursor"] {
+      if let Some(bytes) = map_binary_opt(&paragraph, field)
+        && let Ok(cursor) = Cursor::decode(&bytes)
+        && let Ok(resolved) = doc.get_cursor_pos(&cursor)
+      {
+        return Some(resolved.current.pos.saturating_add(1));
+      }
+    }
+    return None;
+  }
+  None
+}
+
 fn object_loro_block_by_projected_id(doc: &LoroDoc, body: &LoroText, block_id: flowstate_document::BlockId) -> Option<(String, LoroMap, usize)> {
   let root = doc.get_map(ROOT);
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID).ok()?;
@@ -4454,6 +4514,17 @@ fn clear_movable_list(list: &LoroMovableList) -> loro::LoroResult<()> {
 fn projection_offset_to_body_unicode_index(projection: &DocumentProjection, offset: flowstate_document::DocumentOffset) -> usize {
   ProjectionRuntimeIndex::from_projection(projection)
     .body_unicode_for_offset(projection, offset)
+    .unwrap_or(1)
+}
+
+/// Loro-space counterpart of [`projection_offset_to_body_unicode_index`], for callers
+/// that feed the result into a live Loro body mutation (`insert`/`delete`/`mark`).
+/// Resolves via each paragraph's durable boundary cursor so coalesced object-adjacent
+/// empty paragraphs (dropped from the projection but still present in the body) don't
+/// shift the position; see [`ProjectionRuntimeIndex::body_unicode_for_offset_in_loro`].
+fn projection_offset_to_loro_body_unicode_index(doc: &LoroDoc, projection: &DocumentProjection, offset: flowstate_document::DocumentOffset) -> usize {
+  ProjectionRuntimeIndex::from_projection(projection)
+    .body_unicode_for_offset_in_loro(doc, projection, offset)
     .unwrap_or(1)
 }
 

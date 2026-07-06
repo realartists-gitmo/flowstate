@@ -171,7 +171,6 @@ fn grouped_enter_text_batch_is_one_loro_change_and_preserves_client_ids() -> Res
 //       real empty paragraph survives and the projection mirrors Loro; OR
 //   (c) prune a coalesced empty paragraph's '\n'/records from Loro so it matches.
 // Un-ignore once chosen+implemented; this then asserts the convergence invariant.
-#[ignore = "reproduces incremental-vs-full divergence: projection<->Loro body-unicode coordinate mismatch from coalescing an object-adjacent empty paragraph"]
 #[test]
 fn object_adjacent_empty_paragraph_incremental_matches_full_rebuild() -> Result<()> {
   fn para(text: &str) -> flowstate_document::InputBlock {
