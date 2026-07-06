@@ -452,6 +452,12 @@ fn generate_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: us
 /// real signal is the post-drain projection equality across all peers and the
 /// incremental-vs-full materializer equivalence per peer.
 fn run_convergence_fuzz(peer_count: usize, base: &LoroDoc, steps: u64, seed_init: u64) -> Result<()> {
+  run_convergence_fuzz_with(peer_count, base, steps, seed_init, generate_command)
+}
+
+type CommandGenerator = fn(&mut u64, &DocumentProjection, usize, u64) -> Option<EditorSemanticCommand>;
+
+fn run_convergence_fuzz_with(peer_count: usize, base: &LoroDoc, steps: u64, seed_init: u64, generator: CommandGenerator) -> Result<()> {
   let mut peers = seeded_peers_from_loro(peer_count, base)?;
   synchronize_until_converged(&mut peers)?;
   let mut queues: Vec<PeerQueues> = vec![vec![Vec::new(); peer_count]; peer_count];
@@ -467,7 +473,7 @@ fn run_convergence_fuzz(peer_count: usize, base: &LoroDoc, steps: u64, seed_init
       let projection = peers[peer_ix].projection_snapshot()?;
       let mut command = None;
       for _ in 0..8 {
-        if let Some(candidate) = generate_command(&mut seed, &projection, peer_ix, op_seq) {
+        if let Some(candidate) = generator(&mut seed, &projection, peer_ix, op_seq) {
           command = Some(candidate);
           break;
         }
@@ -762,29 +768,39 @@ fn object_block_indices(projection: &DocumentProjection) -> Vec<usize> {
     .collect()
 }
 
-/// Object block-structure command generator, restricted to the subset that converges
-/// under my positioning fix: InsertBlock (non-leading) and ReplaceBlock, interleaved
-/// with paragraph coordinate stress. Three object-structural cases are deliberately
-/// EXCLUDED because they still diverge — all rooted in the sentinel-first-paragraph /
-/// coalesced-phantom-empty interaction (see docs/collab-object-block-positioning.md):
-/// (1) making an object the new LEADING block (index 0); (2) MoveBlock whose source or
-/// target touches the leading block; (3) DeleteBlock of an object with a coalesced
-/// phantom empty (materializes the empty in the canonical rebuild but not the
-/// incremental replay). Re-add each as the shared root is fixed.
-fn block_stress_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+/// Full object block-structure command generator: InsertBlock / DeleteBlock / MoveBlock /
+/// ReplaceBlock at ANY position (including the leading index 0), interleaved with
+/// paragraph coordinate stress. Exercises the object coalescing + sentinel-first-region
+/// paths that the incremental replay cannot model — now that object-bearing docs adopt the
+/// canonical rebuild as their prediction (crdt_runtime.rs), the runtime converges over the
+/// whole object-structural surface.
+fn object_structural_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
   // ~40% object block ops, else paragraph coordinate stress (keeps objects churning).
   if (next_seed(seed) >> 32) % 100 >= 40 {
     return coordinate_stress_command(seed, projection, peer_ix, op_seq);
   }
   let block_count = projection.blocks.len();
   let objects = object_block_indices(projection);
-  match (next_seed(seed) >> 32) % 2 {
-    // InsertBlock at a random non-leading projection block index (1..=len).
+  match (next_seed(seed) >> 32) % 4 {
+    // InsertBlock at any projection block index (0..=len; 0 = new leading block).
     0 => Some(EditorSemanticCommand::InsertBlock {
       block: BlockId(fresh_id(peer_ix, op_seq, 3)),
-      block_ix: 1 + ((next_seed(seed) >> 32) as usize) % block_count,
+      block_ix: ((next_seed(seed) >> 32) as usize) % (block_count + 1),
       after: fuzz_object_input(seed),
     }),
+    // DeleteBlock an existing object.
+    1 if !objects.is_empty() => {
+      let ix = objects[((next_seed(seed) >> 32) as usize) % objects.len()];
+      Some(EditorSemanticCommand::DeleteBlock { block: projection.ids.block_ids[ix] })
+    },
+    // MoveBlock an existing object to any index (including 0).
+    2 if !objects.is_empty() && block_count > 1 => {
+      let ix = objects[((next_seed(seed) >> 32) as usize) % objects.len()];
+      Some(EditorSemanticCommand::MoveBlock {
+        block: projection.ids.block_ids[ix],
+        new_block_ix: ((next_seed(seed) >> 32) as usize) % block_count,
+      })
+    },
     // ReplaceBlock an existing object with a fresh object.
     _ if !objects.is_empty() => {
       let ix = objects[((next_seed(seed) >> 32) as usize) % objects.len()];
@@ -798,14 +814,11 @@ fn block_stress_command(seed: &mut u64, projection: &DocumentProjection, peer_ix
   }
 }
 
-/// Regression for BUG #1 (object block positioning, crdt_runtime.rs): the Loro-side
-/// object insert/move used a raw body walk that miscounted coalesced phantom empties,
-/// so it placed an object at a body position off by N from the coalescing-aware
-/// projection block index — diverging the canonical rebuild's block ids from the
-/// incremental replay. Fixed by resolving the lead position from the projection block
-/// structure + durable cursors (`projection_block_lead_pos_in_loro`). Drives
-/// Insert/Move/Replace at non-leading positions on the object-bearing structural fixture
-/// and asserts incremental == fresh after every op.
+/// Single-peer regression for the object block-structure ops. Combines the positioning fix
+/// (`projection_block_lead_pos_in_loro`) with the object-doc canonical-prediction adoption:
+/// drives Insert/Delete/Move/Replace at all positions on the object-bearing structural
+/// fixture and asserts the incrementally-maintained projection equals a fresh
+/// `document_from_loro` after every op.
 #[test]
 fn object_block_positioning_single_peer() -> Result<()> {
   for seed_init in [0x1u64, 0x2, 0x3, 0x7, 0x11, 0xB2, 0xC3, 0x2222] {
@@ -815,7 +828,7 @@ fn object_block_positioning_single_peer() -> Result<()> {
     let mut history: Vec<String> = Vec::new();
     for op_seq in 0..300u64 {
       let projection = peer.projection_snapshot()?;
-      let Some(command) = block_stress_command(&mut seed, &projection, 0, op_seq) else {
+      let Some(command) = object_structural_command(&mut seed, &projection, 0, op_seq) else {
         continue;
       };
       let transaction_id = u128::from(op_seq + 1);
@@ -824,10 +837,25 @@ fn object_block_positioning_single_peer() -> Result<()> {
       }
       history.push(format!("APPLY {command:?}"));
       if !assert_incremental_matches_fresh(std::slice::from_ref(&peer), 0, &format!("after op {op_seq}"), &history)? {
-        panic!("BUG #1 divergence at seed={seed_init:#x} op_seq={op_seq}");
+        panic!("object block-structure divergence at seed={seed_init:#x} op_seq={op_seq}");
       }
     }
     eprintln!("block-positioning ok seed={seed_init:#x} ops={}", history.len());
+  }
+  Ok(())
+}
+
+/// N-peer convergence over the FULL object block-structure surface (Insert/Delete/Move/
+/// Replace at all positions) plus paragraph coordinate stress, seeded from the
+/// object-bearing structural fixture, with out-of-order delivery. Asserts every peer's
+/// projection converges AND each peer's incremental projection equals a fresh rebuild.
+#[test]
+fn npeer_fuzz_object_structural_ops() -> Result<()> {
+  for peer_count in 2..=4 {
+    for seed in [0x1111u64, 0x2222, 0xB2] {
+      let base = structural_fixture()?;
+      run_convergence_fuzz_with(peer_count, &base, 120, seed, object_structural_command)?;
+    }
   }
   Ok(())
 }
