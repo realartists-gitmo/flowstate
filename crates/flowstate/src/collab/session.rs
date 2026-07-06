@@ -625,11 +625,14 @@ impl CollabSession {
           new_vv.len(),
         )
       });
-      if enforce_monotonic && !self.runtime_vv.is_empty() && !new_vv.is_empty() {
-        if let (Ok(old), Ok(new)) = (
+      if enforce_monotonic
+        && !self.runtime_vv.is_empty()
+        && !new_vv.is_empty()
+        && let (Ok(old), Ok(new)) = (
           loro::VersionVector::decode(&self.runtime_vv),
           loro::VersionVector::decode(&new_vv),
-        ) {
+        )
+      {
           let relation = new.partial_cmp(&old);
           fidelity::check(
             matches!(relation, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
