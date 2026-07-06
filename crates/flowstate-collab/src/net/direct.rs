@@ -4,7 +4,7 @@ use std::{
   time::Duration,
 };
 
-use anyhow::{Context as _, Result, anyhow, ensure};
+use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_channel::Sender;
 use iroh::{
   Endpoint, EndpointId,
@@ -20,7 +20,8 @@ use crate::{
   capability::{SessionCapability, unix_now},
   ids::{BlobId, SessionId},
   proto_direct::{
-    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame, encode_frame,
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, MAX_PAYLOAD_LEN, decode_frame,
+    encode_frame,
   },
 };
 
@@ -514,26 +515,38 @@ async fn write_payload(send: &mut SendStream, payload: &[u8]) -> Result<()> {
 
 async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let total_len_usize = usize::try_from(total_len).context("direct payload is too large for this platform")?;
-  ensure!(total_len_usize <= MAX_FRAME_LEN, "direct payload exceeds {MAX_FRAME_LEN} bytes");
+  ensure!(total_len_usize <= MAX_PAYLOAD_LEN, "direct payload exceeds {MAX_PAYLOAD_LEN} bytes");
   tracing::trace!(
     payload_bytes = total_len_usize,
     chunk_bytes = MAX_PAYLOAD_CHUNK_LEN,
     "reading collaboration direct payload"
   );
-  let mut payload = vec![0; total_len_usize];
-  let mut offset = 0;
+  // Reserve the exact buffer up front so the whole payload lands in one allocation with
+  // no reallocation on the happy path, but do NOT zero-fill it (as `vec![0; len]` would):
+  // the reserved pages are only committed as chunks are copied in, which keeps large
+  // snapshots — up to 1 GiB here — off the hot path's zeroing cost. `with_capacity` is a
+  // virtual reservation, so a peer that overstates `total_len` cannot force a physical
+  // commit beyond the bytes it actually sends.
+  let mut payload = Vec::with_capacity(total_len_usize);
   if let Some(progress) = progress {
     let _ = progress.try_send(PullProgress { got: 0, total: total_len });
   }
-  while offset < total_len_usize {
-    let next = (offset + MAX_PAYLOAD_CHUNK_LEN).min(total_len_usize);
-    recv.read_exact(&mut payload[offset..next]).await?;
-    offset = next;
-    if let Some(progress) = progress {
-      let _ = progress.try_send(PullProgress {
-        got: offset as u64,
-        total: total_len,
-      });
+  while payload.len() < total_len_usize {
+    let remaining = total_len_usize - payload.len();
+    match recv.read_chunk(remaining).await? {
+      Some(bytes) => {
+        payload.extend_from_slice(&bytes);
+        if let Some(progress) = progress {
+          let _ = progress.try_send(PullProgress {
+            got: payload.len() as u64,
+            total: total_len,
+          });
+        }
+      },
+      None => bail!(
+        "direct payload ended early: expected {total_len_usize} bytes, received {}",
+        payload.len()
+      ),
     }
   }
   Ok(payload)

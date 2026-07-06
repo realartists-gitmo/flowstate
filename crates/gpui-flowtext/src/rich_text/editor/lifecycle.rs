@@ -107,6 +107,8 @@ impl RichTextEditor {
       chunk_prefetch_queue: VecDeque::new(),
       paragraph_height_cache: vec![None; paragraph_count],
       paragraph_height_cache_revision: 0,
+      scroll_materialize_signature: None,
+      scroll_materialize_stall_frames: 0,
       item_sizes_cache: None,
       pending_item_sizes_patch_range: None,
       layout_invalidation_hint: None,
@@ -290,6 +292,10 @@ impl RichTextEditor {
     selection: Option<EditorSelection>,
     cx: &mut Context<Self>,
   ) {
+    // §hang-watchdog: this O(document) reconcile runs on every applied collab
+    // update; on a 6000-paragraph doc that streams in over many updates it is a
+    // prime suspect for the multi-second freezes (it does not log while running).
+    let rebuild_started = std::time::Instant::now();
     // The local caret is authoritative live state. Capture it against the
     // pre-rebuild document so it can be re-anchored onto the rebuilt one; we
     // never re-derive the caret from a replayed batch's recorded position, which
@@ -365,6 +371,13 @@ impl RichTextEditor {
         .unwrap_or(live_selection)
     };
     clamp_selection_to_document(&self.document, &mut self.selection);
+    let rebuild_ms = rebuild_started.elapsed().as_millis();
+    if rebuild_ms > 150 {
+      tracing::warn!("slow reconcile rebuild (hang watchdog): {rebuild_ms}ms, paragraphs={}", self.document.paragraphs.len());
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Reconcile, "slow-rebuild", || {
+        format!("rebuild_visible_from_committed took {rebuild_ms}ms (paragraphs={})", self.document.paragraphs.len())
+      });
+    }
     if flowstate_fidelity::enabled() {
       let (pre_paras, pre_len) = fid_size_before.unwrap_or((0, 0));
       let (post_paras, post_len) = self.fidelity_document_size();
@@ -1054,90 +1067,106 @@ pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, 
       rebuild_document_from_projection_structural_blocks(document, blocks);
       true
     },
-    SemanticEditCommand::InsertTableRow { table, row_ix, row } => replay_table_edit(document, *table, |table| {
-      table
-        .rows
-        .insert((*row_ix).min(table.rows.len()), table_row_from_input_row(row));
-      true
-    }),
-    SemanticEditCommand::DeleteTableRow { table, row_ix } => replay_table_edit(document, *table, |table| {
-      if *row_ix >= table.rows.len() {
-        return false;
-      }
-      table.rows.remove(*row_ix);
-      true
-    }),
-    SemanticEditCommand::MoveTableRow {
+    SemanticEditCommand::InsertTableRow {
       table,
-      from_row_ix,
-      to_row_ix,
+      new_row_id,
+      after_row,
+      row,
     } => replay_table_edit(document, *table, |table| {
-      if *from_row_ix >= table.rows.len() || *to_row_ix >= table.rows.len() {
+      if table.rows.iter().any(|existing| existing.id == *new_row_id) {
         return false;
       }
-      let row = table.rows.remove(*from_row_ix);
-      table.rows.insert(*to_row_ix, row);
+      let pos = table_row_insert_pos(table, *after_row).min(table.rows.len());
+      table.rows.insert(pos, table_row_from_input_row(row));
+      true
+    }),
+    SemanticEditCommand::DeleteTableRow { table, row_id } => replay_table_edit(document, *table, |table| {
+      let Some(ix) = table_row_index(table, *row_id) else {
+        return false;
+      };
+      table.rows.remove(ix);
+      true
+    }),
+    SemanticEditCommand::MoveTableRow { table, row_id, after_row } => replay_table_edit(document, *table, |table| {
+      let Some(from) = table_row_index(table, *row_id) else {
+        return false;
+      };
+      let row = table.rows.remove(from);
+      let pos = table_row_insert_pos(table, *after_row).min(table.rows.len());
+      table.rows.insert(pos, row);
       true
     }),
     SemanticEditCommand::InsertTableColumn {
       table,
-      column_ix,
+      new_column_id,
+      after_column,
       width,
       cells,
     } => replay_table_edit(document, *table, |table| {
-      let column_ix = (*column_ix).min(table.column_widths.len());
-      table.column_widths.insert(column_ix, table_column_width_from_input_width(width));
-      for (row_ix, row) in table.rows.iter_mut().enumerate() {
-        row.cells.insert(
-          column_ix.min(row.cells.len()),
-          cells
-            .get(row_ix)
-            .map(table_cell_from_input_cell)
-            .unwrap_or_else(default_table_cell),
-        );
+      if table.columns.iter().any(|column| column.id == *new_column_id) {
+        return false;
+      }
+      let pos = table_column_insert_pos(table, *after_column).min(table.columns.len());
+      table.columns.insert(
+        pos,
+        TableColumn {
+          id: *new_column_id,
+          width: table_column_width_from_input_width(width),
+        },
+      );
+      for row in &mut table.rows {
+        let cell = cells
+          .iter()
+          .find(|cell| cell.row_id == row.id)
+          .map(table_cell_from_input_cell)
+          .unwrap_or_else(|| default_table_cell(row.id, *new_column_id));
+        let cell_pos = pos.min(row.cells.len());
+        row.cells.insert(cell_pos, cell);
       }
       true
     }),
-    SemanticEditCommand::DeleteTableColumn { table, column_ix } => replay_table_edit(document, *table, |table| {
-      if *column_ix >= table.column_widths.len() {
+    SemanticEditCommand::DeleteTableColumn { table, column_id } => replay_table_edit(document, *table, |table| {
+      let Some(ix) = table_column_index(table, *column_id) else {
         return false;
-      }
-      table.column_widths.remove(*column_ix);
+      };
+      table.columns.remove(ix);
       for row in &mut table.rows {
-        if *column_ix < row.cells.len() {
-          row.cells.remove(*column_ix);
+        if let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
+          row.cells.remove(cell_ix);
         }
       }
       true
     }),
     SemanticEditCommand::MoveTableColumn {
       table,
-      from_column_ix,
-      to_column_ix,
+      column_id,
+      after_column,
     } => replay_table_edit(document, *table, |table| {
-      if *from_column_ix >= table.column_widths.len() || *to_column_ix >= table.column_widths.len() {
+      let Some(from) = table_column_index(table, *column_id) else {
         return false;
-      }
-      let width = table.column_widths.remove(*from_column_ix);
-      table.column_widths.insert(*to_column_ix, width);
+      };
+      let column = table.columns.remove(from);
+      let pos = table_column_insert_pos(table, *after_column).min(table.columns.len());
+      table.columns.insert(pos, column);
       for row in &mut table.rows {
-        if *from_column_ix < row.cells.len() && *to_column_ix < row.cells.len() {
-          let cell = row.cells.remove(*from_column_ix);
-          row.cells.insert(*to_column_ix, cell);
+        if let Some(cell_from) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
+          let cell = row.cells.remove(cell_from);
+          let cell_pos = pos.min(row.cells.len());
+          row.cells.insert(cell_pos, cell);
         }
       }
       true
     }),
     SemanticEditCommand::ReplaceTableCell {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       cell,
     } => replay_table_edit(document, *table, |table| {
-      let Some(row) = table.rows.get_mut(*row_ix) else {
+      let Some(row) = table.rows.iter_mut().find(|row| row.id == *row_id) else {
         return false;
       };
-      let Some(target) = row.cells.get_mut(*cell_ix) else {
+      let Some(target) = row.cells.iter_mut().find(|target| target.column_id == *column_id) else {
         return false;
       };
       *target = table_cell_from_input_cell(cell);
@@ -1145,15 +1174,15 @@ pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, 
     }),
     SemanticEditCommand::SetTableCellSpan {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       row_span,
       column_span,
     } => replay_table_edit(document, *table, |table| {
-      let Some(row) = table.rows.get_mut(*row_ix) else {
+      let Some(row) = table.rows.iter_mut().find(|row| row.id == *row_id) else {
         return false;
       };
-      let Some(cell) = row.cells.get_mut(*cell_ix) else {
+      let Some(cell) = row.cells.iter_mut().find(|cell| cell.column_id == *column_id) else {
         return false;
       };
       cell.row_span = (*row_span).max(1);
@@ -1161,10 +1190,10 @@ pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, 
       true
     }),
     SemanticEditCommand::SetTableColumnWidth { table, column_ix, width } => replay_table_edit(document, *table, |table| {
-      let Some(column) = table.column_widths.get_mut(*column_ix) else {
+      let Some(column) = table.columns.get_mut(*column_ix) else {
         return false;
       };
-      *column = table_column_width_from_input_width(width);
+      column.width = table_column_width_from_input_width(width);
       true
     }),
     SemanticEditCommand::ReplaceEquationSourceRange { equation, range, text } => {
@@ -1252,12 +1281,16 @@ fn replay_image_edit(document: &mut DocumentProjection, image_id: BlockId, edit:
 
 fn table_row_from_input_row(row: &InputTableRow) -> TableRow {
   TableRow {
+    id: row.id,
     cells: row.cells.iter().map(table_cell_from_input_cell).collect(),
   }
 }
 
 fn table_cell_from_input_cell(cell: &InputTableCell) -> TableCell {
   TableCell {
+    id: cell.id,
+    row_id: cell.row_id,
+    column_id: cell.column_id,
     blocks: cell
       .blocks
       .iter()
@@ -1268,6 +1301,41 @@ fn table_cell_from_input_cell(cell: &InputTableCell) -> TableCell {
       .collect(),
     row_span: cell.row_span,
     col_span: cell.col_span,
+  }
+}
+
+/// §P2b table position resolution shared by every id-addressed replay case.
+/// Mirrors the canonical apply in flowstate-collab so the optimistic projection
+/// and the merged Loro state stay byte-identical.
+fn table_row_index(table: &TableBlock, row_id: RowId) -> Option<usize> {
+  table.rows.iter().position(|row| row.id == row_id)
+}
+
+fn table_row_insert_pos(table: &TableBlock, after_row: Option<RowId>) -> usize {
+  match after_row {
+    None => 0,
+    Some(anchor) => table
+      .rows
+      .iter()
+      .position(|row| row.id == anchor)
+      .map(|ix| ix + 1)
+      .unwrap_or(table.rows.len()),
+  }
+}
+
+fn table_column_index(table: &TableBlock, column_id: ColumnId) -> Option<usize> {
+  table.columns.iter().position(|column| column.id == column_id)
+}
+
+fn table_column_insert_pos(table: &TableBlock, after_column: Option<ColumnId>) -> usize {
+  match after_column {
+    None => 0,
+    Some(anchor) => table
+      .columns
+      .iter()
+      .position(|column| column.id == anchor)
+      .map(|ix| ix + 1)
+      .unwrap_or(table.columns.len()),
   }
 }
 

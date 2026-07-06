@@ -41,7 +41,11 @@ fn insert_blocks_operation_undo_redo_preserves_inserted_table_and_equation() {
   let blocks = vec![
     Block::Table(TableBlock {
       rows: vec![TableRow {
+        id: RowId(1),
         cells: vec![TableCell {
+          id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+          row_id: RowId(1),
+          column_id: ColumnId(1),
           blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
             paragraph: Paragraph {
               style: ParagraphStyle::Normal,
@@ -55,7 +59,10 @@ fn insert_blocks_operation_undo_redo_preserves_inserted_table_and_equation() {
           col_span: 1,
         }],
       }],
-      column_widths: vec![TableColumnWidth::Fraction(1)],
+      columns: vec![TableColumn {
+        id: ColumnId(1),
+        width: TableColumnWidth::Fraction(1),
+      }],
       style: TableStyle { header_row: false },
       version: 0,
     }),
@@ -93,7 +100,11 @@ fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
   );
   let before = Block::Table(TableBlock {
     rows: vec![TableRow {
+      id: RowId(1),
       cells: vec![TableCell {
+        id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+        row_id: RowId(1),
+        column_id: ColumnId(1),
         blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
           paragraph: Paragraph {
             style: ParagraphStyle::Normal,
@@ -107,7 +118,10 @@ fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
         col_span: 1,
       }],
     }],
-    column_widths: vec![TableColumnWidth::Fraction(1)],
+    columns: vec![TableColumn {
+      id: ColumnId(1),
+      width: TableColumnWidth::Fraction(1),
+    }],
     style: TableStyle { header_row: false },
     version: 0,
   });
@@ -137,7 +151,11 @@ fn replace_block_operation_undo_redo_preserves_table_shape_changes() {
 fn table_cell_text_edit_is_a_replace_block_history_operation() {
   let before = Block::Table(TableBlock {
     rows: vec![TableRow {
+      id: RowId(1),
       cells: vec![TableCell {
+        id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+        row_id: RowId(1),
+        column_id: ColumnId(1),
         blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
           paragraph: Paragraph {
             style: ParagraphStyle::Normal,
@@ -151,7 +169,10 @@ fn table_cell_text_edit_is_a_replace_block_history_operation() {
         col_span: 1,
       }],
     }],
-    column_widths: vec![TableColumnWidth::Fraction(1)],
+    columns: vec![TableColumn {
+      id: ColumnId(1),
+      width: TableColumnWidth::Fraction(1),
+    }],
     style: TableStyle { header_row: false },
     version: 0,
   });
@@ -260,6 +281,9 @@ fn table_cell_paragraph_clipboard_conversion_preserves_text_and_styles() {
 fn splitting_table_cell_paragraph_preserves_text_and_run_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
   let mut cell = TableCell {
+    id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+    row_id: RowId(1),
+    column_id: ColumnId(1),
     blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
       paragraph: Paragraph {
         style: ParagraphStyle::Normal,
@@ -305,6 +329,9 @@ fn splitting_table_cell_paragraph_preserves_text_and_run_styles() {
 fn merging_table_cell_paragraphs_preserves_boundary_caret_and_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
   let mut cell = TableCell {
+    id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+    row_id: RowId(1),
+    column_id: ColumnId(1),
     blocks: vec![
       TableCellBlock::Paragraph(TableCellParagraph {
         paragraph: Paragraph {
@@ -354,6 +381,9 @@ fn inserting_rich_paragraphs_into_table_cell_preserves_tail_and_styles() {
   let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
   let cite = RunStyles::default().with(RunStyle::Semantic(1));
   let mut cell = TableCell {
+    id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+    row_id: RowId(1),
+    column_id: ColumnId(1),
     blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
       paragraph: Paragraph {
         style: ParagraphStyle::Normal,

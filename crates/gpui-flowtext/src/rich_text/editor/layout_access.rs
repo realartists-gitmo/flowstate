@@ -425,6 +425,33 @@ impl RichTextEditor {
   }
 
   fn prepare_render_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> RenderLayoutSnapshot {
+    // §hang-watchdog: time the whole render. The freeze shows as multi-second
+    // gaps between render passes; timing the render tells us whether the stall is
+    // INSIDE the render (this logs a `slow-render`) or between renders (collab /
+    // projection apply — then this stays quiet and the collab path is the cause).
+    // Logged always (not gated on `enabled()`), at WARN, so it survives even with
+    // fidelity tracing off and can't be lost to a dropped-under-load JSONL buffer.
+    let render_started = std::time::Instant::now();
+    // §hang-probe: one line per render-layout pass capturing the virtualization
+    // state that drives the scroll-materialization loop. In a freeze this fires
+    // continuously; diffing consecutive lines shows WHICH field changes each
+    // iteration (the invalidation source): a drifting `scroll_y` means the stall
+    // guard's signature never settles (scroll-anchor restoration), a bumping
+    // `layout_gen`/`height_rev` means a per-frame cache clear, etc.
+    if flowstate_fidelity::enabled() {
+      let scroll_px: f32 = (-self.scroll_handle.offset().y).max(px(0.0)).into();
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "render-layout-pass", || {
+        format!(
+          "scroll_y={scroll_px:.1} edit_gen={} layout_gen={} height_rev={} measured_w={:?} item_cache={} stall={}",
+          self.edit_generation,
+          self.layout_generation,
+          self.paragraph_height_cache_revision,
+          self.measured_item_width,
+          self.item_sizes_cache.is_some(),
+          self.scroll_materialize_stall_frames,
+        )
+      });
+    }
     let hide_until_viewport_measured = self.scroll_handle.bounds().size.width <= px(1.0);
     let mut item_sizes = self.paragraph_item_sizes(window, cx);
     let has_startup_layout_width = self.measured_item_width.is_some() || self.document.paragraphs.is_empty();
@@ -452,6 +479,14 @@ impl RichTextEditor {
       .map(|cache| cache.items.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let (items, item_sizes) = self.render_items_with_drop_preview(base_items, item_sizes, width, window, cx);
+    let render_ms = render_started.elapsed().as_millis();
+    if render_ms > 150 {
+      let paragraphs = self.document.paragraphs.len();
+      tracing::warn!("slow editor render pass (hang watchdog): {render_ms}ms, paragraphs={paragraphs}");
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "slow-render", || {
+        format!("render took {render_ms}ms (paragraphs={paragraphs})")
+      });
+    }
     RenderLayoutSnapshot {
       width,
       item_sizes,

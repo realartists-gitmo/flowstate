@@ -3,28 +3,17 @@ impl RichTextEditor {
   pub fn insert_default_table(&mut self, rows: usize, columns: usize, cx: &mut Context<Self>) {
     let rows = rows.clamp(1, 20);
     let columns = columns.clamp(1, 12);
+    let column_ids: Vec<ColumnId> = (0..columns).map(|_| ColumnId(uuid::Uuid::new_v4().as_u128())).collect();
     let table = TableBlock {
       rows: (0..rows)
-        .map(|_| TableRow {
-          cells: (0..columns)
-            .map(|_| TableCell {
-              blocks: vec![TableCellBlock::Paragraph(TableCellParagraph {
-                paragraph: Paragraph {
-                  style: ParagraphStyle::Normal,
-                  byte_range: 0..0,
-                  runs: Vec::new(),
-                  version: 0,
-                },
-                text: String::new(),
-              })],
-              row_span: 1,
-              col_span: 1,
-            })
-            .collect(),
-        })
+        .map(|_| default_table_row(RowId(uuid::Uuid::new_v4().as_u128()), &column_ids))
         .collect(),
-      column_widths: (0..columns)
-        .map(|_| TableColumnWidth::Fraction(1))
+      columns: column_ids
+        .iter()
+        .map(|&id| TableColumn {
+          id,
+          width: TableColumnWidth::Fraction(1),
+        })
         .collect(),
       style: TableStyle { header_row: false },
       version: 0,
@@ -44,25 +33,26 @@ impl RichTextEditor {
       return;
     };
     let mut updated = table.clone();
-    let columns = updated
-      .rows
-      .iter()
-      .map(|row| row.cells.len())
-      .max()
-      .unwrap_or(1)
-      .max(updated.column_widths.len())
-      .max(1);
     let insert_ix = target_row
       .map(|row| row + 1)
       .unwrap_or(updated.rows.len())
       .min(updated.rows.len());
-    let row = default_table_row(columns);
+    // Durable anchor: the row currently before the insertion point in the local
+    // model (`None` when inserting at the head), mirroring the canonical apply.
+    let after_row = insert_ix
+      .checked_sub(1)
+      .and_then(|ix| table.rows.get(ix))
+      .map(|row| row.id);
+    let column_ids: Vec<ColumnId> = table.columns.iter().map(|column| column.id).collect();
+    let new_row_id = RowId(uuid::Uuid::new_v4().as_u128());
+    let row = default_table_row(new_row_id, &column_ids);
     updated.rows.insert(insert_ix, row.clone());
     updated.version = updated.version.wrapping_add(1);
     let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
       vec![SemanticEditCommand::InsertTableRow {
         table: table_id,
-        row_ix: insert_ix,
+        new_row_id,
+        after_row,
         row: input_table_row_from_table_row(&row),
       }]
     } else {
@@ -88,11 +78,12 @@ impl RichTextEditor {
     let row_ix = target_row
       .unwrap_or(table.rows.len() - 1)
       .min(table.rows.len() - 1);
+    let row_id = table.rows[row_ix].id;
     let mut updated = table.clone();
     updated.rows.remove(row_ix);
     updated.version = updated.version.wrapping_add(1);
     let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
-      vec![SemanticEditCommand::DeleteTableRow { table: table_id, row_ix }]
+      vec![SemanticEditCommand::DeleteTableRow { table: table_id, row_id }]
     } else {
       self.missing_table_identity_semantic_commands(block_ix, "row delete")
     };
@@ -113,13 +104,26 @@ impl RichTextEditor {
     let mut updated = table.clone();
     let insert_ix = target_column
       .map(|column| column + 1)
-      .unwrap_or(updated.column_widths.len())
-      .min(updated.column_widths.len());
+      .unwrap_or(updated.columns.len())
+      .min(updated.columns.len());
+    // Durable anchor: the column currently before the insertion point (`None` at
+    // the head), resolved from the local model like the canonical apply.
+    let after_column = insert_ix
+      .checked_sub(1)
+      .and_then(|ix| table.columns.get(ix))
+      .map(|column| column.id);
+    let new_column_id = ColumnId(uuid::Uuid::new_v4().as_u128());
     let width = TableColumnWidth::Fraction(1);
-    updated.column_widths.insert(insert_ix, width.clone());
+    updated.columns.insert(
+      insert_ix,
+      TableColumn {
+        id: new_column_id,
+        width: width.clone(),
+      },
+    );
     let mut inserted_cells = Vec::with_capacity(updated.rows.len());
     for row in &mut updated.rows {
-      let cell = default_table_cell();
+      let cell = default_table_cell(row.id, new_column_id);
       inserted_cells.push(input_table_cell_from_table_cell(&cell));
       let cell_ix = insert_ix.min(row.cells.len());
       row.cells.insert(cell_ix, cell);
@@ -128,7 +132,8 @@ impl RichTextEditor {
     let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
       vec![SemanticEditCommand::InsertTableColumn {
         table: table_id,
-        column_ix: insert_ix,
+        new_column_id,
+        after_column,
         width: input_table_column_width_from_table_column_width(&width),
         cells: inserted_cells,
       }]
@@ -150,19 +155,21 @@ impl RichTextEditor {
       return;
     };
     let mut updated = table.clone();
-    let mut structured_column_ix = None;
-    if updated.column_widths.len() > 1 {
+    let mut structured_column_id = None;
+    if updated.columns.len() > 1 {
       let column_ix = target_column
-        .unwrap_or(updated.column_widths.len() - 1)
-        .min(updated.column_widths.len() - 1);
-      updated.column_widths.remove(column_ix);
+        .unwrap_or(updated.columns.len() - 1)
+        .min(updated.columns.len() - 1);
+      let removed_column_id = updated.columns[column_ix].id;
+      updated.columns.remove(column_ix);
       for row in &mut updated.rows {
-        if row.cells.len() > 1 {
-          let cell_ix = column_ix.min(row.cells.len() - 1);
+        if row.cells.len() > 1
+          && let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == removed_column_id)
+        {
           row.cells.remove(cell_ix);
         }
       }
-      structured_column_ix = Some(column_ix);
+      structured_column_id = Some(removed_column_id);
     } else {
       for row in &mut updated.rows {
         if row.cells.len() > 1 {
@@ -177,8 +184,8 @@ impl RichTextEditor {
       return;
     }
     updated.version = updated.version.wrapping_add(1);
-    let semantic_commands = if let (Some(table_id), Some(column_ix)) = (self.semantic_block_id(block_ix), structured_column_ix) {
-      vec![SemanticEditCommand::DeleteTableColumn { table: table_id, column_ix }]
+    let semantic_commands = if let (Some(table_id), Some(column_id)) = (self.semantic_block_id(block_ix), structured_column_id) {
+      vec![SemanticEditCommand::DeleteTableColumn { table: table_id, column_id }]
     } else {
       self.missing_table_identity_semantic_commands(block_ix, "column delete")
     };
@@ -204,24 +211,27 @@ impl RichTextEditor {
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
       return;
     };
-    if target_column >= table.column_widths.len() {
+    if target_column >= table.columns.len() {
       return;
     }
     let mut updated = table.clone();
-    let current = match updated.column_widths[target_column] {
+    let current = match updated.columns[target_column].width {
       TableColumnWidth::FixedPx(width) => width as i32,
       TableColumnWidth::Fraction(_) | TableColumnWidth::Auto => 120,
     };
-    updated.column_widths[target_column] = TableColumnWidth::FixedPx((current + delta_px).clamp(32, 1600) as u32);
+    updated.columns[target_column].width = TableColumnWidth::FixedPx((current + delta_px).clamp(32, 1600) as u32);
     if updated == table {
       return;
     }
     updated.version = updated.version.wrapping_add(1);
+    // §P2b: `SetTableColumnWidth` is the one table command that stays positional
+    // (`column_ix`); the canonical apply resolves the index against `column_order`
+    // to the durable column id at apply time.
     let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
       vec![SemanticEditCommand::SetTableColumnWidth {
         table: table_id,
         column_ix: target_column,
-        width: input_table_column_width_from_table_column_width(&updated.column_widths[target_column]),
+        width: input_table_column_width_from_table_column_width(&updated.columns[target_column].width),
       }]
     } else {
       self.missing_table_identity_semantic_commands(block_ix, "column width")

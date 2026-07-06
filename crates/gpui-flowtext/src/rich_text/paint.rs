@@ -287,7 +287,7 @@ fn paint_table_block(
       }
       let cell_selected = matches!(
         selected_block,
-        Some(BlockSelection::TableCell { block_ix, row_ix: selected_row, cell_ix: selected_cell })
+        Some(BlockSelection::TableCell { block_ix, row_ix: selected_row, cell_ix: selected_cell, .. })
           if block_ix == table.block_ix && selected_row == row_ix && selected_cell == cell_ix
       );
       window.paint_quad(fill(

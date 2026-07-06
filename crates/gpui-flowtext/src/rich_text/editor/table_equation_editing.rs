@@ -11,7 +11,7 @@ impl RichTextEditor {
   }
 
   fn insert_text_into_selected_table_cell(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     if text.is_empty() {
@@ -38,7 +38,7 @@ impl RichTextEditor {
   }
 
   fn split_selected_table_cell_paragraph(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     let paragraph_ix = self.table_cell_block_ix;
@@ -102,10 +102,12 @@ impl RichTextEditor {
       tracing::warn!(block_ix, row_ix, cell_ix, "dropping table-cell semantic command: cell is out of range; local and canonical state will diverge until repair");
       return Vec::new();
     };
+    // Resolve the durable coordinate from the id-bearing model at the edited
+    // cell's position (§P2b); the cell already carries these ids.
     vec![SemanticEditCommand::ReplaceTableCell {
       table: table_id,
-      row_ix,
-      cell_ix,
+      row_id: cell.row_id,
+      column_id: cell.column_id,
       cell: input_table_cell_from_table_cell(cell),
     }]
   }
@@ -130,7 +132,7 @@ impl RichTextEditor {
   }
 
   fn backspace_selected_table_cell(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     let caret = self.table_cell_caret;
@@ -177,7 +179,7 @@ impl RichTextEditor {
   }
 
   fn delete_forward_selected_table_cell(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     let Some(text) = self.selected_table_cell_text() else {

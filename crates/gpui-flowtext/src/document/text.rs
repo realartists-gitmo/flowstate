@@ -12,6 +12,58 @@ pub struct ParagraphId(pub u128);
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct BlockId(pub u128);
 
+/// Durable identity of a table row (§P2b). Minted once at row creation and
+/// carried through canonical Loro (`row_order` / `rows_by_id`), the projection,
+/// and every editor command so concurrent structural table edits converge on
+/// the same row instead of resolving a stale positional index against a merged
+/// order.
+///
+/// INVARIANT: like every durable id ([`ParagraphId`], [`BlockId`], `AssetId`),
+/// a `RowId` must be GLOBALLY UNIQUE within a document — never reused across two
+/// tables. A cell's identity is [`CellId::from_coordinate`] of `(row_id,
+/// column_id)`, and cell text flows share one global registry keyed by that id,
+/// so two tables reusing a `(row, column)` coordinate would collide their flows
+/// and lose text. Mint from `uuid::Uuid::new_v4().as_u128()` (editors/paste) or
+/// a per-document-unique seed (importers); only [`ColumnId`] may be table-local
+/// because a globally-unique `RowId` already makes every coordinate unique.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct RowId(pub u128);
+
+/// Durable identity of a table column (§P2b). See [`RowId`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct ColumnId(pub u128);
+
+/// Durable identity of a table cell (§P2b). Deterministic from its
+/// `(RowId, ColumnId)` coordinate via [`CellId::from_coordinate`] so two peers
+/// that concurrently materialize the same coordinate address the identical Loro
+/// container (last-writer-wins merge, never a duplicate).
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
+pub struct CellId(pub u128);
+
+impl CellId {
+  /// Deterministic cell identity for a `(row, column)` coordinate (§P2b).
+  ///
+  /// The id is a BLAKE3 mix of the two u128 ids — deliberately NOT the string
+  /// `"{row}.{column}"`, because the canonical `loro_id_u128` decoder parses
+  /// only the trailing numeric segment of a dotted id and would collapse every
+  /// cell in a column onto the same id. Mixing both halves keeps every
+  /// coordinate distinct while staying a pure function of the coordinate, so
+  /// any peer (or the topology-repair pass) that needs cell `(R, C)` derives the
+  /// identical [`CellId`] and `ensure`s the same Loro container.
+  #[must_use]
+  pub fn from_coordinate(row: RowId, column: ColumnId) -> Self {
+    let mut input = [0_u8; 32];
+    input[..16].copy_from_slice(&row.0.to_le_bytes());
+    input[16..].copy_from_slice(&column.0.to_le_bytes());
+    let digest = blake3::hash(&input);
+    Self(u128::from_le_bytes(
+      digest.as_bytes()[..16]
+        .try_into()
+        .expect("BLAKE3 digest always contains at least sixteen bytes"),
+    ))
+  }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SectionId(pub u128);
 
@@ -303,17 +355,30 @@ pub enum InputEquationDisplay {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableBlock {
   pub rows: Vec<InputTableRow>,
-  pub column_widths: Vec<InputTableColumnWidth>,
+  /// Ordered columns, each carrying its durable [`ColumnId`] and width (§P2b).
+  /// Replaces the id-less `column_widths` list so column identity survives
+  /// concurrent insert/remove/reorder.
+  pub columns: Vec<InputTableColumn>,
   pub style: InputTableStyle,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct InputTableColumn {
+  pub id: ColumnId,
+  pub width: InputTableColumnWidth,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableRow {
+  pub id: RowId,
   pub cells: Vec<InputTableCell>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct InputTableCell {
+  pub id: CellId,
+  pub row_id: RowId,
+  pub column_id: ColumnId,
   pub blocks: Vec<InputTableCellBlock>,
   pub row_span: u16,
   pub col_span: u16,

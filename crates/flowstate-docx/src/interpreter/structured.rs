@@ -28,8 +28,9 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use crate::cleaner::CleanedDocx;
 use flowstate_document::{
-  AssetId, AssetRecord, DocumentParagraphInput, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun,
-  InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RunStyles,
+  AssetId, AssetRecord, CellId, ColumnId, DocumentParagraphInput, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing,
+  InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow,
+  InputTableStyle, ParagraphStyle, RowId, RunStyles,
 };
 
 use super::omml;
@@ -165,6 +166,9 @@ impl StructuredWalker<'_> {
     let mut rows: Vec<InputTableRow> = Vec::new();
     let mut header_row = false;
     let mut first_row = true;
+    // Widest row in grid columns, so the durable columns cover every cell's
+    // grid position even when a row spans more columns than `tblGrid` declares.
+    let mut grid_width = 0_usize;
     // grid column -> (row index, cell index) of the cell that started a vertical
     // merge, so continuation cells fold into its `row_span` instead of emitting.
     let mut vertical_open: FxHashMap<usize, (usize, usize)> = FxHashMap::default();
@@ -177,19 +181,37 @@ impl StructuredWalker<'_> {
         first_row = false;
         header_row = row_is_header(row_node);
       }
+      // Deterministic row id, seeded per-table so row ids are GLOBALLY unique
+      // across every table in the document. Cell identity is derived from
+      // `(row_id, column_id)`, and cell text flows live in one global registry,
+      // so two tables that reused a `(row, column)` coordinate would collide
+      // their flows and lose text. A distinct per-table high-bit seed keeps
+      // every cell coordinate unique while columns stay 1-based (below).
+      let row_id = RowId(((self.tables_imported as u128) << 40) | (rows.len() as u128 + 1));
       let mut cells: Vec<InputTableCell> = Vec::new();
       let mut grid_col = 0_usize;
       for cell_node in &row_node.children {
         if cell_node.local == "tc" {
-          grid_col = self.add_table_cell(cell_node, grid_col, &mut rows, &mut cells, &mut vertical_open);
+          grid_col = self.add_table_cell(cell_node, row_id, grid_col, &mut rows, &mut cells, &mut vertical_open);
         }
       }
-      rows.push(InputTableRow { cells });
+      grid_width = grid_width.max(grid_col);
+      rows.push(InputTableRow { id: row_id, cells });
     }
+
+    // Columns carry durable ids and widths; pad any grid position past the
+    // declared widths with `Auto` so every cell's `column_id` resolves.
+    let column_count = column_widths.len().max(grid_width);
+    let columns = (0..column_count)
+      .map(|index| InputTableColumn {
+        id: ColumnId(index as u128 + 1),
+        width: column_widths.get(index).cloned().unwrap_or(InputTableColumnWidth::Auto),
+      })
+      .collect();
 
     InputTableBlock {
       rows,
-      column_widths,
+      columns,
       style: InputTableStyle { header_row },
     }
   }
@@ -201,12 +223,15 @@ impl StructuredWalker<'_> {
   fn add_table_cell(
     &mut self,
     cell_node: &XmlNode,
+    row_id: RowId,
     grid_col: usize,
     rows: &mut [InputTableRow],
     cells: &mut Vec<InputTableCell>,
     vertical_open: &mut FxHashMap<usize, (usize, usize)>,
   ) -> usize {
     let col_span = cell_grid_span(cell_node);
+    // The cell's durable column is the sequential id of its starting grid column.
+    let column_id = ColumnId(grid_col as u128 + 1);
     match cell_vertical_merge(cell_node) {
       VerticalMerge::Continue => {
         if let Some(&(row_ix, cell_ix)) = vertical_open.get(&grid_col)
@@ -220,6 +245,9 @@ impl StructuredWalker<'_> {
         vertical_open.insert(grid_col, (rows.len(), cells.len()));
         let blocks = self.cell_blocks(cell_node);
         cells.push(InputTableCell {
+          id: CellId::from_coordinate(row_id, column_id),
+          row_id,
+          column_id,
           blocks,
           row_span: 1,
           col_span,
@@ -229,6 +257,9 @@ impl StructuredWalker<'_> {
         vertical_open.remove(&grid_col);
         let blocks = self.cell_blocks(cell_node);
         cells.push(InputTableCell {
+          id: CellId::from_coordinate(row_id, column_id),
+          row_id,
+          column_id,
           blocks,
           row_span: 1,
           col_span,
@@ -636,8 +667,17 @@ mod tests {
     };
     assert!(table.style.header_row);
     assert_eq!(
-      table.column_widths,
-      vec![InputTableColumnWidth::FixedPx(96), InputTableColumnWidth::FixedPx(192)]
+      table.columns,
+      vec![
+        InputTableColumn {
+          id: ColumnId(1),
+          width: InputTableColumnWidth::FixedPx(96),
+        },
+        InputTableColumn {
+          id: ColumnId(2),
+          width: InputTableColumnWidth::FixedPx(192),
+        },
+      ]
     );
     assert_eq!(table.rows.len(), 1);
     assert_eq!(table.rows[0].cells.len(), 2);

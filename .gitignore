@@ -8,3 +8,6 @@ perf.data
 /VIRTUALIZED_VIEWPORT_PLAN.md
 flamegraph
 .pi/
+
+# Local dev logs (flowstate::logging default dir; per-run timestamped files)
+flowstate-logs/

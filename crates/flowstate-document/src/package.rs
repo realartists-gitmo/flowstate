@@ -1785,9 +1785,10 @@ mod tests {
 
   use super::*;
   use crate::{
-    AssetId, AssetRecord, Block, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax,
-    InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
-    InputTableRow, InputTableStyle, RunStyles, TableCellBlock, document_from_loro, document_to_loro,
+    AssetId, AssetRecord, Block, CellId, ColumnId, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
+    InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
+    InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, RowId, RunStyles, TableCellBlock, document_from_loro,
+    document_to_loro,
     loro_schema::{body_text, new_loro_document},
     read_db8_bytes,
   };
@@ -2136,8 +2137,12 @@ mod tests {
       crate::flowstate_document_theme(),
       vec![InputBlock::Table(InputTableBlock {
         rows: vec![InputTableRow {
+          id: RowId(1),
           cells: vec![
             InputTableCell {
+              id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+              row_id: RowId(1),
+              column_id: ColumnId(1),
               blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
                 style: crate::ParagraphStyle::Normal,
                 runs: vec![InputRun {
@@ -2149,6 +2154,9 @@ mod tests {
               col_span: 1,
             },
             InputTableCell {
+              id: CellId::from_coordinate(RowId(1), ColumnId(2)),
+              row_id: RowId(1),
+              column_id: ColumnId(2),
               blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
                 style: crate::ParagraphStyle::Normal,
                 runs: vec![InputRun {
@@ -2161,7 +2169,16 @@ mod tests {
             },
           ],
         }],
-        column_widths: vec![InputTableColumnWidth::Auto, InputTableColumnWidth::Auto],
+        columns: vec![
+          InputTableColumn {
+            id: ColumnId(1),
+            width: InputTableColumnWidth::Auto,
+          },
+          InputTableColumn {
+            id: ColumnId(2),
+            width: InputTableColumnWidth::Auto,
+          },
+        ],
         style: InputTableStyle { header_row: false },
       })],
     );
@@ -2209,8 +2226,15 @@ mod tests {
   #[test]
   fn nested_tables_use_stable_list_refs_and_project_by_anchor_cursor() -> io::Result<()> {
     let nested_table = InputTableBlock {
+      // Distinct ids from the outer table: row/column ids are globally unique
+      // durable ids, so the inner and outer cells must not collide on a shared
+      // coordinate (which would collide their global cell text flows).
       rows: vec![InputTableRow {
+        id: RowId(2),
         cells: vec![InputTableCell {
+          id: CellId::from_coordinate(RowId(2), ColumnId(2)),
+          row_id: RowId(2),
+          column_id: ColumnId(2),
           blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
             style: crate::ParagraphStyle::Normal,
             runs: vec![InputRun {
@@ -2222,14 +2246,21 @@ mod tests {
           col_span: 1,
         }],
       }],
-      column_widths: vec![InputTableColumnWidth::Auto],
+      columns: vec![InputTableColumn {
+        id: ColumnId(2),
+        width: InputTableColumnWidth::Auto,
+      }],
       style: InputTableStyle { header_row: false },
     };
     let source = crate::document_from_input_blocks(
       crate::flowstate_document_theme(),
       vec![InputBlock::Table(InputTableBlock {
         rows: vec![InputTableRow {
+          id: RowId(1),
           cells: vec![InputTableCell {
+            id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+            row_id: RowId(1),
+            column_id: ColumnId(1),
             blocks: vec![
               InputTableCellBlock::Paragraph(InputParagraph {
                 style: crate::ParagraphStyle::Normal,
@@ -2244,7 +2275,10 @@ mod tests {
             col_span: 1,
           }],
         }],
-        column_widths: vec![InputTableColumnWidth::Auto],
+        columns: vec![InputTableColumn {
+          id: ColumnId(1),
+          width: InputTableColumnWidth::Auto,
+        }],
         style: InputTableStyle { header_row: false },
       })],
     );
@@ -2304,7 +2338,11 @@ mod tests {
         }),
         InputBlock::Table(InputTableBlock {
           rows: vec![InputTableRow {
+            id: RowId(1),
             cells: vec![InputTableCell {
+              id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+              row_id: RowId(1),
+              column_id: ColumnId(1),
               blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
                 style: crate::ParagraphStyle::Normal,
                 runs: vec![InputRun {
@@ -2316,7 +2354,10 @@ mod tests {
               col_span: 1,
             }],
           }],
-          column_widths: vec![InputTableColumnWidth::Auto],
+          columns: vec![InputTableColumn {
+            id: ColumnId(1),
+            width: InputTableColumnWidth::Auto,
+          }],
           style: InputTableStyle { header_row: false },
         }),
       ],
@@ -2415,7 +2456,11 @@ mod tests {
         }),
         InputBlock::Table(InputTableBlock {
           rows: vec![InputTableRow {
+            id: RowId(1),
             cells: vec![InputTableCell {
+              id: CellId::from_coordinate(RowId(1), ColumnId(1)),
+              row_id: RowId(1),
+              column_id: ColumnId(1),
               blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
                 style: crate::ParagraphStyle::Normal,
                 runs: vec![InputRun {
@@ -2427,7 +2472,10 @@ mod tests {
               col_span: 1,
             }],
           }],
-          column_widths: vec![InputTableColumnWidth::FixedPx(144)],
+          columns: vec![InputTableColumn {
+            id: ColumnId(1),
+            width: InputTableColumnWidth::FixedPx(144),
+          }],
           style: InputTableStyle { header_row: true },
         }),
       ],
@@ -2473,7 +2521,13 @@ mod tests {
       &loaded.blocks[3],
       Block::Table(table)
         if table.style.header_row
-          && matches!(table.column_widths.as_slice(), [crate::TableColumnWidth::FixedPx(144)])
+          && matches!(
+            table.columns.as_slice(),
+            [crate::TableColumn {
+              width: crate::TableColumnWidth::FixedPx(144),
+              ..
+            }]
+          )
           && matches!(&table.rows[0].cells[0].blocks[0], TableCellBlock::Paragraph(paragraph) if paragraph.text == "cell")
     ));
     Ok(())

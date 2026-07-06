@@ -11,7 +11,7 @@ fn layout_table_block(
   let table_left = document.theme.pageless_inset_x;
   let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let column_count = table
-    .column_widths
+    .columns
     .len()
     .max(
       table
@@ -81,8 +81,9 @@ fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_
   let mut auto_count = 0usize;
   for ix in 0..column_count {
     match table
-      .column_widths
+      .columns
       .get(ix)
+      .map(|column| &column.width)
       .unwrap_or(&TableColumnWidth::Fraction(1))
     {
       TableColumnWidth::FixedPx(width) => fixed_total += px(*width as f32),
@@ -95,8 +96,9 @@ fn resolved_table_column_widths(table: &TableBlock, table_width: Pixels, column_
   (0..column_count)
     .map(|ix| {
       match table
-        .column_widths
+        .columns
         .get(ix)
+        .map(|column| &column.width)
         .unwrap_or(&TableColumnWidth::Fraction(1))
       {
         TableColumnWidth::FixedPx(width) => px(*width as f32).max(px(8.0)),

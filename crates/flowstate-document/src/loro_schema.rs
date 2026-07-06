@@ -39,6 +39,71 @@ pub const MARK_STRIKETHROUGH: &str = "strikethrough";
 pub const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 pub const SENTINEL_NEWLINE: &str = "\n";
 
+// §P2b durable-table containers (plan §12). Centralized so the writer, the
+// projector, and the collab runtime address the identical child containers.
+pub const TABLE_KEY: &str = "table";
+pub const TABLE_ROW_ORDER: &str = "row_order";
+pub const TABLE_COLUMN_ORDER: &str = "column_order";
+pub const TABLE_ROWS_BY_ID: &str = "rows_by_id";
+pub const TABLE_COLUMNS_BY_ID: &str = "columns_by_id";
+pub const TABLE_CELLS_BY_ID: &str = "cells_by_id";
+
+/// Loro string id for a durable table row (§P2b): `row.{u128}`. The dotted form
+/// ends in the row's unique numeric id so the canonical `loro_id_u128` decoder
+/// (which parses the trailing segment) round-trips it.
+#[must_use]
+pub fn row_loro_id(row: gpui_flowtext::RowId) -> String {
+  format!("row.{}", row.0)
+}
+
+/// Loro string id for a durable table column (§P2b): `column.{u128}`.
+#[must_use]
+pub fn column_loro_id(column: gpui_flowtext::ColumnId) -> String {
+  format!("column.{}", column.0)
+}
+
+/// Loro string id for a durable table cell (§P2b): `cell.{u128}` where the u128
+/// is the deterministic [`gpui_flowtext::CellId`] mix of its coordinate.
+#[must_use]
+pub fn cell_loro_id(cell: gpui_flowtext::CellId) -> String {
+  format!("cell.{}", cell.0)
+}
+
+/// Loro string id for the cell at coordinate `(row, column)` (§P2b).
+#[must_use]
+pub fn cell_loro_id_for(row: gpui_flowtext::RowId, column: gpui_flowtext::ColumnId) -> String {
+  cell_loro_id(gpui_flowtext::CellId::from_coordinate(row, column))
+}
+
+/// Cell text flow id for a cell string id (§P2b): `{cell_id}.flow`.
+#[must_use]
+pub fn cell_flow_loro_id(cell_loro_id: &str) -> String {
+  format!("{cell_loro_id}.flow")
+}
+
+/// Parse the trailing numeric segment of a dotted Loro id into a `u128`.
+fn parse_trailing_u128(id: &str) -> Option<u128> {
+  id.rsplit('.').next().and_then(|segment| segment.parse().ok())
+}
+
+/// Decode a `row.{u128}` Loro id into a [`gpui_flowtext::RowId`] (§P2b).
+#[must_use]
+pub fn parse_row_loro_id(id: &str) -> Option<gpui_flowtext::RowId> {
+  parse_trailing_u128(id).map(gpui_flowtext::RowId)
+}
+
+/// Decode a `column.{u128}` Loro id into a [`gpui_flowtext::ColumnId`] (§P2b).
+#[must_use]
+pub fn parse_column_loro_id(id: &str) -> Option<gpui_flowtext::ColumnId> {
+  parse_trailing_u128(id).map(gpui_flowtext::ColumnId)
+}
+
+/// Decode a `cell.{u128}` Loro id into a [`gpui_flowtext::CellId`] (§P2b).
+#[must_use]
+pub fn parse_cell_loro_id(id: &str) -> Option<gpui_flowtext::CellId> {
+  parse_trailing_u128(id).map(gpui_flowtext::CellId)
+}
+
 /// §11 page-structure attribute keys stored on a `SectionMap`'s `attrs` map.
 ///
 /// Encoding (documented and locked):

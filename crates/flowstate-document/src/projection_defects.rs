@@ -63,6 +63,46 @@ pub enum ProjectionDefect {
   /// anchored to it. Projecting skips the character; the runtime deletes the
   /// orphan character canonically once no block claims it.
   OrphanObjectPlaceholder { flow_id: String, unicode_pos: usize },
+  /// FS-010: a table grid that is not a well-formed full rectangle — a missing
+  /// `(row, column)` cell (the concurrent add-row × add-column gap), a duplicate
+  /// coordinate, an out-of-bounds cell span, or a cell orphaned from the
+  /// `row_order` / `column_order`. The projector normalizes the grid
+  /// deterministically (synthesize / clamp / drop) so every peer reads the same
+  /// full grid, and the runtime applies the matching idempotent canonical repair
+  /// (ensure the coordinate cell / clamp the span / delete the orphan). The
+  /// `row_id` / `column_id` are the durable u128 coordinate ids (`None` when the
+  /// defect is not tied to a single coordinate).
+  TableTopology {
+    table_block_key: String,
+    row_id: Option<u128>,
+    column_id: Option<u128>,
+    kind: TableTopologyKind,
+  },
+}
+
+/// The specific table-grid anomaly carried by [`ProjectionDefect::TableTopology`]
+/// (§P2b / FS-010). Mirrors `table_topology::TableTopologyDefect` but stays a
+/// flat, id-type-free enum so `projection_defects` does not depend on the id
+/// newtypes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableTopologyKind {
+  MissingCell,
+  DuplicateCoordinate,
+  InvalidSpan,
+  OrphanCell,
+}
+
+impl TableTopologyKind {
+  /// Short stable discriminator used in the defect's stable key.
+  #[must_use]
+  pub const fn as_str(self) -> &'static str {
+    match self {
+      Self::MissingCell => "missing_cell",
+      Self::DuplicateCoordinate => "duplicate_coordinate",
+      Self::InvalidSpan => "invalid_span",
+      Self::OrphanCell => "orphan_cell",
+    }
+  }
 }
 
 impl ProjectionDefect {
@@ -77,6 +117,7 @@ impl ProjectionDefect {
       Self::InvalidAssetId { .. } => "invalid_asset_id",
       Self::MissingParagraphStyleMark { .. } => "missing_paragraph_style_mark",
       Self::OrphanObjectPlaceholder { .. } => "orphan_object_placeholder",
+      Self::TableTopology { .. } => "table_topology",
     }
   }
 
@@ -109,6 +150,16 @@ impl ProjectionDefect {
       },
       Self::OrphanObjectPlaceholder { flow_id, unicode_pos } => {
         format!("{}:{flow_id}:{unicode_pos}", self.class())
+      },
+      Self::TableTopology {
+        table_block_key,
+        row_id,
+        column_id,
+        kind,
+      } => {
+        let row = row_id.map_or_else(|| "none".to_string(), |id| id.to_string());
+        let column = column_id.map_or_else(|| "none".to_string(), |id| id.to_string());
+        format!("{}:{table_block_key}:{}:{row}:{column}", self.class(), kind.as_str())
       },
     }
   }

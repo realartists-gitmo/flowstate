@@ -787,7 +787,17 @@ pub(super) enum BlockSelection {
   Image(usize),
   Equation(usize),
   Table(usize),
-  TableCell { block_ix: usize, row_ix: usize, cell_ix: usize },
+  /// A selected table cell (§P2b). `row_ix`/`cell_ix` stay for positional access
+  /// by the layout/paint/caret readers, while `row_id`/`column_id` carry the
+  /// durable identity resolved from the id-bearing model at selection time so
+  /// structural emission and replay address the cell by id, not by a stale index.
+  TableCell {
+    block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    row_id: RowId,
+    column_id: ColumnId,
+  },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -795,6 +805,8 @@ pub(super) struct TableCellCaret {
   pub(super) block_ix: usize,
   pub(super) row_ix: usize,
   pub(super) cell_ix: usize,
+  pub(super) row_id: RowId,
+  pub(super) column_id: ColumnId,
   pub(super) paragraph_block_ix: usize,
   pub(super) anchor: usize,
   pub(super) byte: usize,
@@ -1079,6 +1091,16 @@ pub struct RichTextEditor {
   chunk_prefetch_queue: VecDeque<usize>,
   paragraph_height_cache: Vec<Option<ParagraphHeightCacheEntry>>,
   paragraph_height_cache_revision: u64,
+  // Convergence backstop for the scroll-materialization render loop. Records the
+  // (rounded scroll-y, edit_generation) of the last render-path materialization
+  // pass and how many consecutive passes ran at that unchanged signature. A large
+  // document whose item-size cache cannot be incrementally patched
+  // (`document_has_object_blocks`) re-runs a full O(doc) rebuild + `cx.notify()`
+  // every render; if materialization never "sticks" it loops forever and freezes
+  // the window. Any real scroll or edit changes the signature and resets the
+  // count, so this caps ONLY the pathological non-converging loop.
+  scroll_materialize_signature: Option<(i32, u64)>,
+  scroll_materialize_stall_frames: u32,
   item_sizes_cache: Option<ItemSizesCache>,
   pending_item_sizes_patch_range: Option<Range<usize>>,
   layout_invalidation_hint: Option<Range<usize>>,

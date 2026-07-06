@@ -6,7 +6,16 @@ use crate::ids::{BlobId, SessionId};
 use crate::proto_gossip::PROTOCOL_VERSION;
 
 pub const DIRECT_ALPN: &[u8] = b"flowstate/collab-direct/0";
+/// Ceiling for the small serialized control frames (`DirectRequest` /
+/// `DirectResponseHeader`). These are metadata, so 2 MiB is generous.
 pub const MAX_FRAME_LEN: usize = 2 * 1024 * 1024;
+/// Ceiling for a streamed bulk payload (snapshots, update batches, assets).
+/// Unlike a control frame, a payload is delivered in chunks and can be large:
+/// a collaboration snapshot is the full CRDT document state and grows with the
+/// document. 1 GiB is a generous upper bound that still caps a misbehaving peer's
+/// self-declared length. This is intentionally separate from `MAX_FRAME_LEN` —
+/// reusing the frame ceiling here would defeat the chunked streaming entirely.
+pub const MAX_PAYLOAD_LEN: usize = 1024 * 1024 * 1024;
 pub const MAX_PAYLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]

@@ -569,18 +569,31 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
       editor.set_session_capture(true);
       editor.select_table_cell_for_test(0, 0, 0, cx);
 
+      // Durable ids of the original row 0 / column 0, captured before edits so we
+      // can assert the id-addressed commands anchor against them (§P2b).
+      let row0_id = editor.table_row_id_for_test(0, 0);
+      let column0_id = editor.table_column_id_for_test(0, 0);
+
       editor.insert_row_after_selected_table(cx);
       let edits = editor.take_pending_session_edits();
-      let [SemanticEditCommand::InsertTableRow { row_ix, row, .. }] = edits[0].semantic_commands.as_slice() else {
+      let [SemanticEditCommand::InsertTableRow {
+        new_row_id,
+        after_row,
+        row,
+        ..
+      }] = edits[0].semantic_commands.as_slice() else {
         panic!("expected one semantic InsertTableRow command, got {:?}", edits[0].semantic_commands);
       };
-      assert_eq!(*row_ix, 1);
+      assert_eq!(*after_row, Some(row0_id));
+      assert_eq!(row.id, *new_row_id);
       assert_eq!(row.cells.len(), 2);
+      assert!(row.cells.iter().all(|cell| cell.row_id == *new_row_id));
 
       editor.insert_column_after_selected_table(cx);
       let edits = editor.take_pending_session_edits();
       let [SemanticEditCommand::InsertTableColumn {
-        column_ix,
+        new_column_id,
+        after_column,
         width,
         cells,
         ..
@@ -590,26 +603,27 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
           edits[0].semantic_commands
         );
       };
-      assert_eq!(*column_ix, 1);
+      assert_eq!(*after_column, Some(column0_id));
       assert!(matches!(width, InputTableColumnWidth::Fraction(1)));
       assert_eq!(cells.len(), 3);
+      assert!(cells.iter().all(|cell| cell.column_id == *new_column_id));
 
       editor.delete_last_row_from_selected_table(cx);
       let edits = editor.take_pending_session_edits();
-      let [SemanticEditCommand::DeleteTableRow { row_ix, .. }] = edits[0].semantic_commands.as_slice() else {
+      let [SemanticEditCommand::DeleteTableRow { row_id, .. }] = edits[0].semantic_commands.as_slice() else {
         panic!("expected one semantic DeleteTableRow command, got {:?}", edits[0].semantic_commands);
       };
-      assert_eq!(*row_ix, 0);
+      assert_eq!(*row_id, row0_id);
 
       editor.delete_last_column_from_selected_table(cx);
       let edits = editor.take_pending_session_edits();
-      let [SemanticEditCommand::DeleteTableColumn { column_ix, .. }] = edits[0].semantic_commands.as_slice() else {
+      let [SemanticEditCommand::DeleteTableColumn { column_id, .. }] = edits[0].semantic_commands.as_slice() else {
         panic!(
           "expected one semantic DeleteTableColumn command, got {:?}",
           edits[0].semantic_commands
         );
       };
-      assert_eq!(*column_ix, 0);
+      assert_eq!(*column_id, column0_id);
     });
   });
 }
@@ -618,26 +632,27 @@ fn table_structure_edits_emit_structured_semantic_commands(cx: &mut gpui::TestAp
 fn table_cell_text_edit_emits_cell_scoped_semantic_command(cx: &mut gpui::TestAppContext) {
   let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(blank_document(), None, cx)));
 
-  let edits = cx.update(|cx| {
+  let (edits, expected_ids) = cx.update(|cx| {
     editor.update(cx, |editor, cx| {
       editor.insert_default_table(2, 2, cx);
       editor.set_session_capture(true);
       editor.select_table_cell_for_test(0, 0, 0, cx);
+      let expected_ids = editor.table_cell_ids_for_test(0, 0, 0);
       editor.insert_plain_text_from_toolkit("cell", cx);
-      editor.take_pending_session_edits()
+      (editor.take_pending_session_edits(), expected_ids)
     })
   });
 
   assert_eq!(edits.len(), 1);
   let [SemanticEditCommand::ReplaceTableCell {
-    row_ix,
-    cell_ix,
+    row_id,
+    column_id,
     cell,
     ..
   }] = edits[0].semantic_commands.as_slice() else {
     panic!("expected one semantic ReplaceTableCell command, got {:?}", edits[0].semantic_commands);
   };
-  assert_eq!((*row_ix, *cell_ix), (0, 0));
+  assert_eq!((*row_id, *column_id), expected_ids);
   let InputTableCellBlock::Paragraph(paragraph) = &cell.blocks[0] else {
     panic!("expected paragraph cell payload");
   };

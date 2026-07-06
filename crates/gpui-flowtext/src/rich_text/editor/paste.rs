@@ -152,6 +152,7 @@ impl RichTextEditor {
       block_ix,
       row_ix,
       cell_ix,
+      ..
     }) = self.selected_block
     else {
       return false;
@@ -230,7 +231,7 @@ impl RichTextEditor {
   }
 
   fn selected_table_cell(&self) -> Option<&TableCell> {
-    let BlockSelection::TableCell { block_ix, row_ix, cell_ix } = self.selected_block? else {
+    let BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. } = self.selected_block? else {
       return None;
     };
     let Block::Table(table) = self.document.blocks.get(block_ix)? else {
@@ -254,7 +255,7 @@ impl RichTextEditor {
   }
 
   fn clear_selected_table_cell(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
@@ -267,7 +268,7 @@ impl RichTextEditor {
   }
 
   fn move_selected_table_cell(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
@@ -289,7 +290,14 @@ impl RichTextEditor {
     let Some(&(row_ix, cell_ix)) = positions.get(next) else {
       return false;
     };
-    self.selected_block = Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix });
+    let (row_id, column_id) = table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix);
+    self.selected_block = Some(BlockSelection::TableCell {
+      block_ix,
+      row_ix,
+      cell_ix,
+      row_id,
+      column_id,
+    });
     self.table_cell_block_ix = 0;
     self.table_cell_caret = self
       .selected_table_cell_text()

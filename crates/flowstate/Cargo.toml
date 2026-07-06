@@ -26,6 +26,7 @@ hotpath = { workspace = true }
 loro = { workspace = true }
 memchr = "2.8.1"
 mimalloc = { workspace = true }
+notify = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -38,6 +39,7 @@ tracing-subscriber = { workspace = true, features = ["json"] }
 atomicwrites = "0.4.4"
 blake3 = "1.8.5"
 flowstate-fidelity.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [features]
 hotpath = [
@@ -60,7 +62,7 @@ hotpath-alloc = [
   "flowstate-docx/hotpath-alloc",
   "flowstate-flow/hotpath-alloc",
 ]
-profiler = ["hotpath", "hotpath-alloc"]
+profiler = ["hotpath", "hotpath-alloc", "hotpath-cpu"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { workspace = true }

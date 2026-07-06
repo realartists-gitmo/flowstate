@@ -302,6 +302,7 @@ mod tests {
   }
 
   #[gpui::test]
+  #[ignore = "slow reconcile-race soak (~66s); the fast enter_char_spam repro runs by default. Run explicitly or via CI --include-ignored"]
   fn caret_soak_optimistic_reconcile_race_holds_invariants(cx: &mut gpui::TestAppContext) {
     let _serial = serial();
     fidelity::set_enabled(true);

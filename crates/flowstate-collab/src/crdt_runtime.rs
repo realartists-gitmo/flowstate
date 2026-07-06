@@ -10,14 +10,15 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentProjection,
-  FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock, InputBlockAlignment,
-  InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
-  InputTableRow, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
-  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionDefect, ProjectionPatch,
-  ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId,
-  TableBlock, document_from_loro, document_from_loro_with_defects, import_document_projection, loro_import::assets_from_document,
-  loro_schema::body_text, new_loro_document,
+  AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, CellId, ColumnId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage,
+  DocumentProjection, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock,
+  InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock,
+  InputTableColumn, InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
+  MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId,
+  ParagraphStyle, ProjectionDefect, ProjectionPatch, ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RowId,
+  RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId, TableBlock, cell_loro_id, cell_loro_id_for, column_loro_id, document_from_loro,
+  document_from_loro_with_defects, import_document_projection, loro_import::assets_from_document, loro_schema::body_text, new_loro_document,
+  row_loro_id,
 };
 use gpui_flowtext::SemanticEditCommand as EditorSemanticCommand;
 use loro::{
@@ -43,6 +44,8 @@ const PROJECTION_REPAIR_ATTEMPT_CAP: u64 = 3;
 mod projection_patch;
 #[path = "crdt_runtime/projection_repair.rs"]
 mod projection_repair;
+#[path = "crdt_runtime/table_ops.rs"]
+mod table_ops;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
@@ -105,18 +108,18 @@ struct StyleInterval {
   styles: RunStyles,
 }
 
-/// §24 table row/column/cell index entry for one table block.
+/// §24/§P2b table row/column/cell index entry for one table block.
 ///
-/// The projection's [`TableBlock`] does not expose durable row/column/cell ids
-/// (`TableRow`/`TableCell` carry no identifiers), so rows and columns are keyed
-/// by positional index and `cells` records the `(row_ix, col_ix)` coordinate of
-/// every materialized cell. This positional fallback is intentional and matches
-/// the §24 note for projections without durable table ids.
+/// The projection's [`TableBlock`] now carries durable [`RowId`]/[`ColumnId`]/
+/// [`CellId`] identifiers, so the index is keyed by those durable ids rather than
+/// positional indices: `cells` maps each `(RowId, ColumnId)` coordinate to the
+/// cell's deterministic [`CellId`]. This keeps the diagnostic invalidation index
+/// stable under concurrent structural table edits (insert/remove/reorder).
 #[derive(Clone, Debug, Default)]
 struct TableIndexEntry {
-  row_ids: Vec<usize>,
-  column_ids: Vec<usize>,
-  cells: Vec<(usize, usize)>,
+  row_ids: Vec<RowId>,
+  column_ids: Vec<ColumnId>,
+  cells: FxHashMap<(RowId, ColumnId), CellId>,
 }
 
 /// §24 search unit span: a lightweight body-unicode range for one search unit.
@@ -287,6 +290,25 @@ impl ProjectionRuntimeIndex {
   }
 
   fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
+    // FS-170: the body-unicode slot immediately AFTER a block-object placeholder
+    // is the interstitial paragraph boundary. A caret resting there is "after the
+    // object" and belongs to the FOLLOWING paragraph's start — not the preceding
+    // paragraph's end, which the object's own slot (`position`) already resolves
+    // to. Without this redirect both sides of the object collapse onto the same
+    // offset (the `object-side-collapse` fidelity violation). Only fires when a
+    // paragraph actually starts just past the boundary (an object between two
+    // paragraphs); a trailing object falls through to the normal clamp.
+    if unicode > 0 && self.object_placeholder_positions.contains(&(unicode - 1)) {
+      let following_start = unicode + 1;
+      if let Ok(start_ix) = self.paragraph_body_unicode_starts.binary_search(&following_start) {
+        let paragraph_ix = start_ix.min(projection.paragraphs.len().saturating_sub(1));
+        let offset = DocumentOffset { paragraph: paragraph_ix, byte: 0 };
+        fidelity::event(FidelityClass::Caret, "unicode->offset-after-object", || {
+          format!("body_unicode={unicode} -> offset={offset:?}")
+        });
+        return Some(offset);
+      }
+    }
     let paragraph_ix = self.paragraph_at_body_unicode(unicode, projection.paragraphs.len())?;
     let paragraph_start = self
       .paragraph_body_unicode_starts
@@ -571,17 +593,19 @@ fn style_intervals_for_paragraph(paragraph: &Paragraph) -> Vec<StyleInterval> {
   intervals
 }
 
-/// §24 table row/column/cell index builder. The projection exposes no durable
-/// row/column/cell ids, so rows and columns are keyed by positional index and
-/// each materialized cell records its `(row_ix, col_ix)` coordinate.
+/// §24/§P2b table row/column/cell index builder, keyed by the model's durable
+/// [`RowId`]/[`ColumnId`]/[`CellId`] identifiers so the index survives concurrent
+/// structural table edits.
 fn table_index_entry(table: &TableBlock) -> TableIndexEntry {
-  let mut cells = Vec::new();
-  for (row_ix, row) in table.rows.iter().enumerate() {
-    cells.extend((0..row.cells.len()).map(|col_ix| (row_ix, col_ix)));
+  let mut cells = FxHashMap::default();
+  for row in &table.rows {
+    for cell in &row.cells {
+      cells.insert((cell.row_id, cell.column_id), cell.id);
+    }
   }
   TableIndexEntry {
-    row_ids: (0..table.rows.len()).collect(),
-    column_ids: (0..table.column_widths.len()).collect(),
+    row_ids: table.rows.iter().map(|row| row.id).collect(),
+    column_ids: table.columns.iter().map(|column| column.id).collect(),
     cells,
   }
 }
@@ -646,6 +670,14 @@ impl CrdtRuntime {
     projection: Option<DocumentProjection>,
     repair_paragraph_style_marks: bool,
   ) -> Result<Self> {
+    // Every `CrdtRuntime` marks paragraph/run styles on its canonical body text,
+    // and `text.mark(..)` errors ("Style configuration missing") unless the doc
+    // has been style-configured. `new_loro_document` and the package loaders
+    // configure the docs they build, but a runtime can also be constructed from a
+    // bare `LoroDoc` received over the network or restored elsewhere; guarantee
+    // the invariant here so no construction path can leave marking broken. The
+    // call is idempotent, so re-configuring an already-configured doc is a no-op.
+    flowstate_document::loro_schema::configure_text_styles(&doc);
     let frontier_before_startup_metadata = doc.state_frontiers().encode();
     let projection_content_repaired = if repair_paragraph_style_marks {
       persist_body_paragraph_style_mark_repair(&doc, package.as_mut(), package_path.as_deref())?
@@ -1686,10 +1718,22 @@ impl CrdtRuntime {
       events.push(self.projection_event(invalidation)?);
     }
     if status.pending.is_none() {
-      if let Some(package) = &mut self.package {
-        package.sync_revisions_from_loro(&self.doc)?;
+      // The remote update has already merged into the canonical Loro doc above;
+      // durability (revision sync + update-segment persistence) is a SECONDARY
+      // concern and MUST NOT be able to discard a successful merge. Propagating a
+      // persist error here (`?`) previously made the caller drop the whole import
+      // (session_io) so the peer never projected the remote edits/presence — a
+      // one-directional-sync failure. Log and keep the merge in memory instead;
+      // the segment persistence self-heals (re-snapshots) in `persist_update_segment`.
+      if let Some(package) = &mut self.package
+        && let Err(error) = package.sync_revisions_from_loro(&self.doc)
+      {
+        tracing::error!(%error, "syncing revisions after remote import failed; kept the merged update in memory");
       }
-      self.persist_update_from_last_frontier()?;
+      if let Err(error) = self.persist_update_from_last_frontier() {
+        tracing::error!(%error, "persisting merged remote update failed; kept the merge in memory (durability degraded until the next successful save)");
+        fidelity::event(FidelityClass::Persistence, "remote-persist-failed", || format!("{error:#}"));
+      }
     }
     Ok(events)
   }
@@ -2474,18 +2518,38 @@ impl CrdtRuntime {
 
   fn persist_update_segment(&mut self, from_frontier: Frontiers, from_vv: VersionVector, update: Vec<u8>) -> Result<()> {
     if let Some(package) = &mut self.package {
-      package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update)?;
-      let compacted = package.compact_update_segments_if_needed(&self.doc, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD)?;
-      if let Some(path) = &self.package_path {
-        if compacted.is_some() {
-          package.write(path)?;
-          self.package_journal_prepared = true;
-        } else if self.package_journal_prepared {
-          package.append_latest_update_to_prepared_path(path)?;
-        } else {
-          package.append_latest_update_to_path(path)?;
-          self.package_journal_prepared = true;
-        }
+      match package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update) {
+        Ok(_) => {
+          let compacted = package.compact_update_segments_if_needed(&self.doc, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD)?;
+          if let Some(path) = &self.package_path {
+            if compacted.is_some() {
+              package.write(path)?;
+              self.package_journal_prepared = true;
+            } else if self.package_journal_prepared {
+              package.append_latest_update_to_prepared_path(path)?;
+            } else {
+              package.append_latest_update_to_path(path)?;
+              self.package_journal_prepared = true;
+            }
+          }
+        },
+        Err(error) => {
+          // The linear update-segment chain cannot represent this frontier
+          // transition — most often a concurrent multi-head merge whose
+          // `from_frontier` does not chain from the last persisted head. Rather
+          // than fail the persist (and, before the caller was hardened, lose the
+          // already-merged remote update), re-base the whole package onto a fresh
+          // snapshot of the current doc: a snapshot is always a valid, complete
+          // save. Fine-grained update-segment history folds into the snapshot;
+          // document data and convergence are preserved.
+          tracing::warn!(%error, "update-segment chain rejected a merge; re-basing the package onto a fresh snapshot");
+          fidelity::event(FidelityClass::Persistence, "segment-chain-resnapshot", || format!("{error:#}"));
+          package.compact_to_snapshot(&self.doc)?;
+          if let Some(path) = &self.package_path {
+            package.write(path)?;
+            self.package_journal_prepared = true;
+          }
+        },
       }
     }
     self.last_persisted_frontier = self.doc.state_frontiers();
@@ -2730,7 +2794,8 @@ fn fidelity_class_for_defect(defect: &ProjectionDefect) -> FidelityClass {
     ProjectionDefect::MissingParagraphStyleMark { .. }
     | ProjectionDefect::UnresolvedObjectAnchor { .. }
     | ProjectionDefect::CollidingObjectAnchors { .. }
-    | ProjectionDefect::OrphanObjectPlaceholder { .. } => FidelityClass::Structure,
+    | ProjectionDefect::OrphanObjectPlaceholder { .. }
+    | ProjectionDefect::TableTopology { .. } => FidelityClass::Structure,
   }
 }
 
@@ -2866,46 +2931,48 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
     },
     EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => replace_projection_object_block(doc, projection, *block, *block_ix, after)
       .with_context(|| format!("replacing object block from editor semantic command at projection block {block_ix} ({block:?})")),
-    EditorSemanticCommand::InsertTableRow { table, row_ix, row } => insert_projection_table_row(doc, *table, *row_ix, row)
-      .with_context(|| format!("inserting table row from editor semantic command at table {table:?}, row {row_ix}")),
-    EditorSemanticCommand::DeleteTableRow { table, row_ix } => delete_projection_table_row(doc, *table, *row_ix)
-      .with_context(|| format!("deleting table row from editor semantic command at table {table:?}, row {row_ix}")),
-    EditorSemanticCommand::MoveTableRow {
+    EditorSemanticCommand::InsertTableRow {
       table,
-      from_row_ix,
-      to_row_ix,
-    } => move_projection_table_axis(doc, *table, "row_order", *from_row_ix, *to_row_ix)
-      .with_context(|| format!("moving table row from {from_row_ix} to {to_row_ix} at table {table:?}")),
+      new_row_id,
+      after_row,
+      row,
+    } => table_ops::insert_table_row(doc, *table, *new_row_id, *after_row, row)
+      .with_context(|| format!("inserting table row {new_row_id:?} from editor semantic command at table {table:?}")),
+    EditorSemanticCommand::DeleteTableRow { table, row_id } => table_ops::delete_table_row(doc, *table, *row_id)
+      .with_context(|| format!("deleting table row {row_id:?} from editor semantic command at table {table:?}")),
+    EditorSemanticCommand::MoveTableRow { table, row_id, after_row } => table_ops::move_table_row(doc, *table, *row_id, *after_row)
+      .with_context(|| format!("moving table row {row_id:?} after {after_row:?} at table {table:?}")),
     EditorSemanticCommand::InsertTableColumn {
       table,
-      column_ix,
+      new_column_id,
+      after_column,
       width,
       cells,
-    } => insert_projection_table_column(doc, *table, *column_ix, width, cells)
-      .with_context(|| format!("inserting table column from editor semantic command at table {table:?}, column {column_ix}")),
-    EditorSemanticCommand::DeleteTableColumn { table, column_ix } => delete_projection_table_column(doc, *table, *column_ix)
-      .with_context(|| format!("deleting table column from editor semantic command at table {table:?}, column {column_ix}")),
+    } => table_ops::insert_table_column(doc, *table, *new_column_id, *after_column, width, cells)
+      .with_context(|| format!("inserting table column {new_column_id:?} from editor semantic command at table {table:?}")),
+    EditorSemanticCommand::DeleteTableColumn { table, column_id } => table_ops::delete_table_column(doc, *table, *column_id)
+      .with_context(|| format!("deleting table column {column_id:?} from editor semantic command at table {table:?}")),
     EditorSemanticCommand::MoveTableColumn {
       table,
-      from_column_ix,
-      to_column_ix,
-    } => move_projection_table_axis(doc, *table, "column_order", *from_column_ix, *to_column_ix)
-      .with_context(|| format!("moving table column from {from_column_ix} to {to_column_ix} at table {table:?}")),
+      column_id,
+      after_column,
+    } => table_ops::move_table_column(doc, *table, *column_id, *after_column)
+      .with_context(|| format!("moving table column {column_id:?} after {after_column:?} at table {table:?}")),
     EditorSemanticCommand::ReplaceTableCell {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       cell,
-    } => replace_projection_table_cell(doc, *table, *row_ix, *cell_ix, cell)
-      .with_context(|| format!("replacing table cell from editor semantic command at table {table:?}, row {row_ix}, cell {cell_ix}")),
+    } => table_ops::replace_table_cell(doc, *table, *row_id, *column_id, cell)
+      .with_context(|| format!("replacing table cell ({row_id:?},{column_id:?}) from editor semantic command at table {table:?}")),
     EditorSemanticCommand::SetTableCellSpan {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       row_span,
       column_span,
-    } => set_projection_table_cell_span(doc, *table, *row_ix, *cell_ix, *row_span, *column_span)
-      .with_context(|| format!("setting table cell span at table {table:?}, row {row_ix}, cell {cell_ix}")),
+    } => table_ops::set_table_cell_span(doc, *table, *row_id, *column_id, *row_span, *column_span)
+      .with_context(|| format!("setting table cell span at table {table:?}, cell ({row_id:?},{column_id:?})")),
     EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
       replace_projection_equation_source_range(doc, *equation, range, text)
         .with_context(|| format!("replacing equation source range from editor semantic command at equation {equation:?}, range {range:?}"))
@@ -2916,7 +2983,7 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
       .with_context(|| format!("replacing image caption from editor semantic command at image {image:?}")),
     EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => set_projection_image_layout(doc, *image, sizing, *alignment)
       .with_context(|| format!("setting image layout from editor semantic command at image {image:?}")),
-    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => set_projection_table_column_width(doc, *table, *column_ix, width)
+    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => table_ops::set_table_column_width(doc, *table, *column_ix, width)
       .with_context(|| format!("setting table column width from editor semantic command at table {table:?}, column {column_ix}")),
   }
 }
@@ -3159,113 +3226,122 @@ fn structured_projection_patches_for_command(
         .unwrap_or(*block_ix),
       after.clone(),
     ),
-    EditorSemanticCommand::InsertTableRow { table, row_ix, row } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      table_input
-        .rows
-        .insert((*row_ix).min(table_input.rows.len()), row.clone());
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::DeleteTableRow { table, row_ix } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if *row_ix >= table_input.rows.len() {
-        return None;
-      }
-      table_input.rows.remove(*row_ix);
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::MoveTableRow {
+    EditorSemanticCommand::InsertTableRow {
       table,
-      from_row_ix,
-      to_row_ix,
+      new_row_id,
+      after_row,
+      row,
     } => {
+      // §P2b: mutate the id-bearing InputTableBlock by the SAME id + anchor the
+      // canonical apply uses, so the optimistic prediction is byte-identical.
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if *from_row_ix >= table_input.rows.len() || *to_row_ix >= table_input.rows.len() {
-        return None;
+      if !table_input.rows.iter().any(|existing| existing.id == *new_row_id) {
+        let pos = input_table_row_insert_pos(&table_input, *after_row);
+        table_input.rows.insert(pos, row.clone());
       }
-      let row = table_input.rows.remove(*from_row_ix);
-      table_input.rows.insert(*to_row_ix, row);
+      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
+    },
+    EditorSemanticCommand::DeleteTableRow { table, row_id } => {
+      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
+      let pos = table_input.rows.iter().position(|row| row.id == *row_id)?;
+      table_input.rows.remove(pos);
+      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
+    },
+    EditorSemanticCommand::MoveTableRow { table, row_id, after_row } => {
+      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
+      let from = table_input.rows.iter().position(|row| row.id == *row_id)?;
+      let row = table_input.rows.remove(from);
+      let pos = input_table_row_insert_pos(&table_input, *after_row);
+      table_input.rows.insert(pos.min(table_input.rows.len()), row);
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::InsertTableColumn {
       table,
-      column_ix,
+      new_column_id,
+      after_column,
       width,
       cells,
     } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let column_ix = (*column_ix).min(table_input.column_widths.len());
-      table_input.column_widths.insert(column_ix, width.clone());
-      for (row_ix, row) in table_input.rows.iter_mut().enumerate() {
-        row.cells.insert(
-          column_ix.min(row.cells.len()),
-          cells
+      if !table_input.columns.iter().any(|existing| existing.id == *new_column_id) {
+        let pos = input_table_column_insert_pos(&table_input, *after_column);
+        table_input.columns.insert(pos, InputTableColumn {
+          id: *new_column_id,
+          width: width.clone(),
+        });
+        for (row_ix, row) in table_input.rows.iter_mut().enumerate() {
+          let row_id = row.id;
+          let cell = cells
             .get(row_ix)
             .cloned()
-            .unwrap_or_else(empty_input_table_cell),
-        );
+            .unwrap_or_else(|| empty_input_table_cell(row_id, *new_column_id));
+          let cell_pos = pos.min(row.cells.len());
+          row.cells.insert(cell_pos, cell);
+        }
       }
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
-    EditorSemanticCommand::DeleteTableColumn { table, column_ix } => {
+    EditorSemanticCommand::DeleteTableColumn { table, column_id } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if *column_ix >= table_input.column_widths.len() {
-        return None;
-      }
-      table_input.column_widths.remove(*column_ix);
+      let pos = table_input.columns.iter().position(|column| column.id == *column_id)?;
+      table_input.columns.remove(pos);
       for row in &mut table_input.rows {
-        if *column_ix < row.cells.len() {
-          row.cells.remove(*column_ix);
+        if let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
+          row.cells.remove(cell_ix);
+        } else if pos < row.cells.len() {
+          row.cells.remove(pos);
         }
       }
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::MoveTableColumn {
       table,
-      from_column_ix,
-      to_column_ix,
+      column_id,
+      after_column,
     } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if *from_column_ix >= table_input.column_widths.len() || *to_column_ix >= table_input.column_widths.len() {
-        return None;
-      }
-      let width = table_input.column_widths.remove(*from_column_ix);
-      table_input.column_widths.insert(*to_column_ix, width);
+      let from = table_input.columns.iter().position(|column| column.id == *column_id)?;
+      let column = table_input.columns.remove(from);
+      let pos = input_table_column_insert_pos(&table_input, *after_column);
+      table_input.columns.insert(pos.min(table_input.columns.len()), column);
       for row in &mut table_input.rows {
-        if *from_column_ix < row.cells.len() && *to_column_ix < row.cells.len() {
-          let cell = row.cells.remove(*from_column_ix);
-          row.cells.insert(*to_column_ix, cell);
+        if let Some(cell_from) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
+          let cell = row.cells.remove(cell_from);
+          let cell_to = pos.min(row.cells.len());
+          row.cells.insert(cell_to, cell);
         }
       }
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::ReplaceTableCell {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       cell,
     } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let target = table_input.rows.get_mut(*row_ix)?.cells.get_mut(*cell_ix)?;
+      let row = table_input.rows.iter_mut().find(|row| row.id == *row_id)?;
+      let target = row.cells.iter_mut().find(|existing| existing.column_id == *column_id)?;
       *target = cell.clone();
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::SetTableCellSpan {
       table,
-      row_ix,
-      cell_ix,
+      row_id,
+      column_id,
       row_span,
       column_span,
     } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let cell = table_input.rows.get_mut(*row_ix)?.cells.get_mut(*cell_ix)?;
+      let row = table_input.rows.iter_mut().find(|row| row.id == *row_id)?;
+      let cell = row.cells.iter_mut().find(|cell| cell.column_id == *column_id)?;
       cell.row_span = (*row_span).max(1);
       cell.col_span = (*column_span).max(1);
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => {
       let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      *table_input.column_widths.get_mut(*column_ix)? = width.clone();
+      table_input.columns.get_mut(*column_ix)?.width = width.clone();
       object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
     },
     EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
@@ -3338,6 +3414,33 @@ fn projected_table_input(
     return None;
   };
   Some((block_ix, table))
+}
+
+/// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] row list:
+/// `None` => head; a present `after_row` => immediately after it; an absent anchor
+/// (concurrently deleted) => tail. Matches the canonical apply's row resolution.
+fn input_table_row_insert_pos(table: &InputTableBlock, after_row: Option<RowId>) -> usize {
+  match after_row {
+    None => 0,
+    Some(anchor) => table
+      .rows
+      .iter()
+      .position(|row| row.id == anchor)
+      .map_or(table.rows.len(), |ix| ix + 1),
+  }
+}
+
+/// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] column list.
+/// See [`input_table_row_insert_pos`].
+fn input_table_column_insert_pos(table: &InputTableBlock, after_column: Option<ColumnId>) -> usize {
+  match after_column {
+    None => 0,
+    Some(anchor) => table
+      .columns
+      .iter()
+      .position(|column| column.id == anchor)
+      .map_or(table.columns.len(), |ix| ix + 1),
+  }
 }
 
 fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
@@ -3515,351 +3618,6 @@ fn replace_projection_object_block(
   Ok(true)
 }
 
-fn set_projection_table_column_width(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  column_ix: usize,
-  width: &InputTableColumnWidth,
-) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column width command because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column width command because the table has no column order"
-    );
-    return Ok(false);
-  };
-  let column_ids = movable_list_strings(&column_order);
-  let Some(column_id) = column_ids.get(column_ix) else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column width command because the column index is out of range"
-    );
-    return Ok(false);
-  };
-  let Some(columns_by_id) = child_map(&table, "columns_by_id") else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column width command because the table has no columns map"
-    );
-    return Ok(false);
-  };
-  let column = columns_by_id.ensure_mergeable_map(column_id)?;
-  write_table_column_width(&column, width)?;
-  Ok(true)
-}
-
-fn insert_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize, row: &InputTableRow) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      "skipping table row insert because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let row_order = table.ensure_mergeable_movable_list("row_order")?;
-  let column_order = table.ensure_mergeable_movable_list("column_order")?;
-  let rows_by_id = table.ensure_mergeable_map("rows_by_id")?;
-  let cells_by_id = table.ensure_mergeable_map("cells_by_id")?;
-  let column_ids = movable_list_strings(&column_order);
-  if column_ids.is_empty() {
-    tracing::warn!(?table_block_id, row_ix, "skipping table row insert because the table has no columns");
-    return Ok(false);
-  }
-
-  let row_id = format!("row.{}", Uuid::new_v4().as_u128());
-  row_order.insert(row_ix.min(row_order.len()), row_id.as_str())?;
-  let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
-  row_map.insert("id", row_id.as_str())?;
-  row_map.insert("container_id", row_map.id().to_string())?;
-  row_map.ensure_mergeable_map("attrs")?;
-
-  let empty_cell = empty_input_table_cell();
-  for (column_ix, column_id) in column_ids.iter().enumerate() {
-    let cell_id = format!("{row_id}.cell.{}", Uuid::new_v4().as_u128());
-    let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
-    let cell = row.cells.get(column_ix).unwrap_or(&empty_cell);
-    write_table_cell_map_from_input(doc, &cell_map, &cell_id, &row_id, column_id, cell)?;
-  }
-  Ok(true)
-}
-
-fn delete_projection_table_row(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      "skipping table row delete because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let Some(row_order) = child_movable_list(&table, "row_order") else {
-    tracing::warn!(?table_block_id, row_ix, "skipping table row delete because the table has no row order");
-    return Ok(false);
-  };
-  let row_ids = movable_list_strings(&row_order);
-  let Some(row_id) = row_ids.get(row_ix) else {
-    tracing::warn!(?table_block_id, row_ix, "skipping table row delete because the row index is out of range");
-    return Ok(false);
-  };
-  let row_id = row_id.clone();
-  row_order.delete(row_ix, 1)?;
-  if let Some(rows_by_id) = child_map(&table, "rows_by_id") {
-    rows_by_id.delete(&row_id)?;
-  }
-  if let Some(cells_by_id) = child_map(&table, "cells_by_id") {
-    for cell_id in map_keys(&cells_by_id) {
-      let delete_cell = child_map(&cells_by_id, &cell_id)
-        .and_then(|cell| map_string_opt(&cell, "row_id"))
-        .as_deref()
-        == Some(row_id.as_str());
-      if delete_cell {
-        cells_by_id.delete(&cell_id)?;
-      }
-    }
-  }
-  Ok(true)
-}
-
-fn move_projection_table_axis(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  order_key: &'static str,
-  from_ix: usize,
-  to_ix: usize,
-) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      order_key,
-      from_ix,
-      to_ix,
-      "skipping table move because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let Some(order) = child_movable_list(&table, order_key) else {
-    tracing::warn!(
-      ?table_block_id,
-      order_key,
-      from_ix,
-      to_ix,
-      "skipping table move because its order list is missing"
-    );
-    return Ok(false);
-  };
-  if from_ix >= order.len() || to_ix >= order.len() || from_ix == to_ix {
-    return Ok(false);
-  }
-  order.mov(from_ix, to_ix)?;
-  Ok(true)
-}
-
-fn insert_projection_table_column(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  column_ix: usize,
-  width: &InputTableColumnWidth,
-  cells: &[InputTableCell],
-) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column insert because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let row_order = table.ensure_mergeable_movable_list("row_order")?;
-  let column_order = table.ensure_mergeable_movable_list("column_order")?;
-  let rows_by_id = table.ensure_mergeable_map("rows_by_id")?;
-  let columns_by_id = table.ensure_mergeable_map("columns_by_id")?;
-  let cells_by_id = table.ensure_mergeable_map("cells_by_id")?;
-  table.insert("container_id", table.id().to_string())?;
-  table.insert("row_order_container_id", row_order.id().to_string())?;
-  table.insert("column_order_container_id", column_order.id().to_string())?;
-  table.insert("rows_container_id", rows_by_id.id().to_string())?;
-  table.insert("columns_container_id", columns_by_id.id().to_string())?;
-  table.insert("cells_container_id", cells_by_id.id().to_string())?;
-  let row_ids = movable_list_strings(&row_order);
-  if row_ids.is_empty() {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column insert because the table has no rows");
-    return Ok(false);
-  }
-
-  let column_id = format!("column.{}", Uuid::new_v4().as_u128());
-  column_order.insert(column_ix.min(column_order.len()), column_id.as_str())?;
-  let column = columns_by_id.ensure_mergeable_map(&column_id)?;
-  column.insert("id", column_id.as_str())?;
-  column.insert("container_id", column.id().to_string())?;
-  column.ensure_mergeable_map("attrs")?;
-  write_table_column_width(&column, width)?;
-
-  let empty_cell = empty_input_table_cell();
-  for (row_ix, row_id) in row_ids.iter().enumerate() {
-    let cell_id = format!("{row_id}.cell.{}", Uuid::new_v4().as_u128());
-    let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
-    let cell = cells.get(row_ix).unwrap_or(&empty_cell);
-    write_table_cell_map_from_input(doc, &cell_map, &cell_id, row_id, &column_id, cell)?;
-  }
-  Ok(true)
-}
-
-fn delete_projection_table_column(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, column_ix: usize) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column delete because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column delete because the table has no column order"
-    );
-    return Ok(false);
-  };
-  let column_ids = movable_list_strings(&column_order);
-  let Some(column_id) = column_ids.get(column_ix) else {
-    tracing::warn!(
-      ?table_block_id,
-      column_ix,
-      "skipping table column delete because the column index is out of range"
-    );
-    return Ok(false);
-  };
-  let column_id = column_id.clone();
-  column_order.delete(column_ix, 1)?;
-  if let Some(columns_by_id) = child_map(&table, "columns_by_id") {
-    columns_by_id.delete(&column_id)?;
-  }
-  if let Some(cells_by_id) = child_map(&table, "cells_by_id") {
-    for cell_id in map_keys(&cells_by_id) {
-      let delete_cell = child_map(&cells_by_id, &cell_id)
-        .and_then(|cell| map_string_opt(&cell, "column_id"))
-        .as_deref()
-        == Some(column_id.as_str());
-      if delete_cell {
-        cells_by_id.delete(&cell_id)?;
-      }
-    }
-  }
-  Ok(true)
-}
-
-fn replace_projection_table_cell(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  row_ix: usize,
-  cell_ix: usize,
-  cell: &InputTableCell,
-) -> Result<bool> {
-  let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table cell replace because no Loro table maps to the projected block id"
-    );
-    return Ok(false);
-  };
-  let Some(row_order) = child_movable_list(&table, "row_order") else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table cell replace because the table has no row order"
-    );
-    return Ok(false);
-  };
-  let Some(column_order) = child_movable_list(&table, "column_order") else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table cell replace because the table has no column order"
-    );
-    return Ok(false);
-  };
-  let row_ids = movable_list_strings(&row_order);
-  let column_ids = movable_list_strings(&column_order);
-  let Some(row_id) = row_ids.get(row_ix) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table cell replace because the row index is out of range"
-    );
-    return Ok(false);
-  };
-  let Some(column_id) = column_ids.get(cell_ix) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table cell replace because the cell column index is out of range"
-    );
-    return Ok(false);
-  };
-  let cells_by_id = table.ensure_mergeable_map("cells_by_id")?;
-  let cell_id =
-    table_cell_id_by_row_column(&cells_by_id, row_id, column_id).unwrap_or_else(|| format!("{row_id}.cell.{}", Uuid::new_v4().as_u128()));
-  let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
-  update_table_cell_map_from_input(doc, &cell_map, &cell_id, row_id, column_id, cell)?;
-  Ok(true)
-}
-
-fn set_projection_table_cell_span(
-  doc: &LoroDoc,
-  table_block_id: flowstate_document::BlockId,
-  row_ix: usize,
-  cell_ix: usize,
-  row_span: u16,
-  column_span: u16,
-) -> Result<bool> {
-  let Some(cell) = projection_table_cell_map(doc, table_block_id, row_ix, cell_ix) else {
-    tracing::warn!(
-      ?table_block_id,
-      row_ix,
-      cell_ix,
-      "skipping table span command because the Loro cell is missing"
-    );
-    return Ok(false);
-  };
-  cell.insert("row_span", i64::from(row_span.max(1)))?;
-  cell.insert("column_span", i64::from(column_span.max(1)))?;
-  Ok(true)
-}
-
-fn projection_table_cell_map(doc: &LoroDoc, table_block_id: flowstate_document::BlockId, row_ix: usize, cell_ix: usize) -> Option<LoroMap> {
-  let table = projection_table_map_by_block_id(doc, table_block_id)?;
-  let row_id = movable_list_strings(&child_movable_list(&table, "row_order")?)
-    .get(row_ix)?
-    .clone();
-  let column_id = movable_list_strings(&child_movable_list(&table, "column_order")?)
-    .get(cell_ix)?
-    .clone();
-  // §28: resolve the cell map directly via the table's stored `cells_container_id`,
-  // falling back to map-key traversal when the id is missing/unresolvable.
-  let cells_by_id = child_map_by_container_id(doc, &table, "cells_container_id", "cells_by_id")?;
-  let cell_id = table_cell_id_by_row_column(&cells_by_id, &row_id, &column_id)?;
-  child_map(&cells_by_id, &cell_id)
-}
-
 fn replace_projection_equation_source_range(
   doc: &LoroDoc,
   equation_block_id: flowstate_document::BlockId,
@@ -4025,16 +3783,16 @@ fn byte_index_to_unicode_index(value: &str, byte: usize) -> Option<usize> {
   (byte <= value.len() && value.is_char_boundary(byte)).then(|| value[..byte].chars().count())
 }
 
-fn table_cell_id_by_row_column(cells_by_id: &LoroMap, row_id: &str, column_id: &str) -> Option<String> {
-  map_keys(cells_by_id).into_iter().find(|cell_id| {
-    child_map(cells_by_id, cell_id).is_some_and(|cell| {
-      map_string_opt(&cell, "row_id").as_deref() == Some(row_id) && map_string_opt(&cell, "column_id").as_deref() == Some(column_id)
-    })
-  })
-}
-
-fn empty_input_table_cell() -> InputTableCell {
+/// §P2b: the deterministic empty cell for the `(row_id, column_id)` coordinate.
+/// Its [`CellId`] is derived from the coordinate so a peer that fills a
+/// grid-gap cell addresses the identical Loro container (LWW merge, never a
+/// duplicate). Used as the fallback when a structural command's carried cell
+/// list is shorter than the grid.
+fn empty_input_table_cell(row_id: RowId, column_id: ColumnId) -> InputTableCell {
   InputTableCell {
+    id: CellId::from_coordinate(row_id, column_id),
+    row_id,
+    column_id,
     blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
       style: ParagraphStyle::Normal,
       runs: Vec::new(),
@@ -4328,7 +4086,9 @@ fn replace_equation_block_from_input(doc: &LoroDoc, block: &LoroMap, equation: &
 fn replace_table_block_from_input(doc: &LoroDoc, block: &LoroMap, table: &InputTableBlock) -> Result<()> {
   block.insert("kind", "table")?;
   let table_map = block.ensure_mergeable_map("table")?;
-  write_table_map_from_input(doc, &table_map, table, &table_id())
+  // §P2b: the create-only writer reuses the carried durable ids and writes into
+  // the same durable-block-keyed container, so it no longer rekeys the table.
+  write_table_map_from_input(doc, &table_map, table)
 }
 
 fn write_image_sizing_attrs(attrs: &LoroMap, sizing: &InputImageSizing) -> Result<()> {
@@ -4348,7 +4108,15 @@ fn write_image_sizing_attrs(attrs: &LoroMap, sizing: &InputImageSizing) -> Resul
   Ok(())
 }
 
-fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputTableBlock, prefix: &str) -> Result<()> {
+/// §P2b create-only whole-table writer, mirroring `loro_import::import_table`.
+///
+/// Every column / row / cell is addressed by its carried durable id via `ensure_*`
+/// and its `*_loro_id` string, and an id is only pushed into an order list when it
+/// is not already present. There is no positional `{prefix}.row.{ix}` scheme and
+/// no clear + repopulate, so concurrent creation of the same id merges (Loro LWW)
+/// instead of duplicating, and re-applying the same input rewrites in place
+/// (which is what lets `replace_table_block_from_input` reuse existing ids).
+fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputTableBlock) -> Result<()> {
   table_map.insert("header_row", table.style.header_row)?;
   let row_order = table_map.ensure_mergeable_movable_list("row_order")?;
   let column_order = table_map.ensure_mergeable_movable_list("column_order")?;
@@ -4361,62 +4129,38 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
   table_map.insert("rows_container_id", rows_by_id.id().to_string())?;
   table_map.insert("columns_container_id", columns_by_id.id().to_string())?;
   table_map.insert("cells_container_id", cells_by_id.id().to_string())?;
-  clear_movable_list(&row_order)?;
-  clear_movable_list(&column_order)?;
-  clear_map(&rows_by_id)?;
-  clear_map(&columns_by_id)?;
-  clear_map(&cells_by_id)?;
 
-  let column_count = table.column_widths.len().max(
-    table
-      .rows
-      .iter()
-      .map(|row| {
-        row
-          .cells
-          .iter()
-          .map(|cell| usize::from(cell.col_span.max(1)))
-          .sum()
-      })
-      .max()
-      .unwrap_or(0),
-  );
-  let mut column_ids = Vec::with_capacity(column_count);
-  for column_ix in 0..column_count {
-    let column_id = format!("{prefix}.column.{column_ix}");
-    column_order.push(column_id.as_str())?;
-    column_ids.push(column_id.clone());
-    let column = columns_by_id.ensure_mergeable_map(&column_id)?;
-    column.insert("id", column_id.as_str())?;
-    column.insert("container_id", column.id().to_string())?;
-    let attrs = column.ensure_mergeable_map("attrs")?;
-    column.insert("attrs_container_id", attrs.id().to_string())?;
-    write_table_column_width(
-      &column,
-      table
-        .column_widths
-        .get(column_ix)
-        .unwrap_or(&InputTableColumnWidth::Auto),
-    )?;
+  let existing_columns = movable_list_strings(&column_order);
+  for column in &table.columns {
+    let column_id = column_loro_id(column.id);
+    if !existing_columns.iter().any(|id| id == &column_id) {
+      column_order.push(column_id.as_str())?;
+    }
+    let column_map = columns_by_id.ensure_mergeable_map(&column_id)?;
+    column_map.insert("id", column_id.as_str())?;
+    column_map.insert("container_id", column_map.id().to_string())?;
+    let attrs = column_map.ensure_mergeable_map("attrs")?;
+    column_map.insert("attrs_container_id", attrs.id().to_string())?;
+    write_table_column_width(&column_map, &column.width)?;
   }
 
-  for (row_ix, row) in table.rows.iter().enumerate() {
-    let row_id = format!("{prefix}.row.{row_ix}");
-    row_order.push(row_id.as_str())?;
+  let existing_rows = movable_list_strings(&row_order);
+  for row in &table.rows {
+    let row_id = row_loro_id(row.id);
+    if !existing_rows.iter().any(|id| id == &row_id) {
+      row_order.push(row_id.as_str())?;
+    }
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
     row_map.insert("container_id", row_map.id().to_string())?;
     let attrs = row_map.ensure_mergeable_map("attrs")?;
     row_map.insert("attrs_container_id", attrs.id().to_string())?;
-    let mut column_ix = 0_usize;
-    for (cell_ix, cell) in row.cells.iter().enumerate() {
-      let Some(column_id) = column_ids.get(column_ix) else {
-        break;
-      };
-      let cell_id = format!("{row_id}.cell.{cell_ix}");
+    for cell in &row.cells {
+      let cell_id = cell_loro_id(cell.id);
+      let cell_row_id = row_loro_id(cell.row_id);
+      let cell_column_id = column_loro_id(cell.column_id);
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
-      write_table_cell_map_from_input(doc, &cell_map, &cell_id, &row_id, column_id, cell)?;
-      column_ix += usize::from(cell.col_span.max(1));
+      write_table_cell_map_from_input(doc, &cell_map, &cell_id, &cell_row_id, &cell_column_id, cell, true)?;
     }
   }
   Ok(())
@@ -4429,6 +4173,12 @@ fn write_table_cell_map_from_input(
   row_id: &str,
   column_id: &str,
   cell: &InputTableCell,
+  // §P2b: when `false`, ensure the (empty) cell flow container but write no
+  // sentinel `\n` or block content. The topology-repair pass uses this so two
+  // peers concurrently materializing the SAME missing coordinate converge to an
+  // empty flow (one empty paragraph) instead of racing two `\n` inserts into the
+  // same deterministic flow (which would merge to `\n\n` = two empty paragraphs).
+  seed_flow: bool,
 ) -> Result<()> {
   cell_map.insert("id", cell_id)?;
   cell_map.insert("container_id", cell_map.id().to_string())?;
@@ -4450,6 +4200,11 @@ fn write_table_cell_map_from_input(
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
   cell_map.insert("flow_container_id", flow.id().to_string())?;
   cell_map.insert("text_container_id", text.id().to_string())?;
+  if !seed_flow {
+    // Empty cell flow: the projector reads it back as a single empty paragraph,
+    // and doing no text insert keeps concurrent coordinate-cell repair idempotent.
+    return Ok(());
+  }
   replace_text(&text, SENTINEL_NEWLINE)?;
   text.mark(0..1, MARK_PARAGRAPH_STYLE, 0_i64)?;
   for (block_ix, cell_block) in cell.blocks.iter().enumerate() {
@@ -4468,12 +4223,7 @@ fn write_table_cell_map_from_input(
           nested_map.insert("anchor_cursor", cursor.encode())?;
         }
         nested_map.ensure_mergeable_map("attrs")?;
-        write_table_map_from_input(
-          doc,
-          &nested_map.ensure_mergeable_map("table")?,
-          nested,
-          &format!("{cell_id}.nested.{block_ix}"),
-        )?;
+        write_table_map_from_input(doc, &nested_map.ensure_mergeable_map("table")?, nested)?;
       },
     }
   }
@@ -4494,7 +4244,7 @@ fn update_table_cell_map_from_input(
     .any(|block| matches!(block, InputTableCellBlock::Table(_)))
   {
     tracing::warn!(cell_id, "using full table-cell rebuild fallback for nested table structure");
-    return write_table_cell_map_from_input(doc, cell_map, cell_id, row_id, column_id, cell);
+    return write_table_cell_map_from_input(doc, cell_map, cell_id, row_id, column_id, cell, true);
   }
   cell_map.insert("id", cell_id)?;
   cell_map.insert("container_id", cell_map.id().to_string())?;
@@ -5544,23 +5294,8 @@ fn container_by_id(doc: &LoroDoc, container_id: &str) -> Option<Container> {
   (container.is_attached() && !container.is_deleted()).then_some(container)
 }
 
-fn container_map_by_id(doc: &LoroDoc, container_id: &str) -> Option<LoroMap> {
-  container_by_id(doc, container_id)?.into_map().ok()
-}
-
 fn container_text_by_id(doc: &LoroDoc, container_id: &str) -> Option<LoroText> {
   container_by_id(doc, container_id)?.into_text().ok()
-}
-
-/// §28: resolve a child container map, preferring the owner's stored raw
-/// `*_container_id` and falling back to direct map-key traversal.
-fn child_map_by_container_id(doc: &LoroDoc, owner: &LoroMap, container_id_key: &str, fallback_key: &str) -> Option<LoroMap> {
-  if let Some(container_id) = map_string_opt(owner, container_id_key)
-    && let Some(map) = container_map_by_id(doc, &container_id)
-  {
-    return Some(map);
-  }
-  child_map(owner, fallback_key)
 }
 
 /// §28: resolve a flow's canonical `LoroText`, preferring direct resolution via
@@ -5893,49 +5628,41 @@ fn insert_table_block(
   table.insert("rows_container_id", rows_by_id.id().to_string())?;
   table.insert("columns_container_id", columns_by_id.id().to_string())?;
   table.insert("cells_container_id", cells_by_id.id().to_string())?;
-  let table_id = table_id();
-  let mut column_ids = Vec::with_capacity(columns);
 
+  // §P2b: a dimensions-only `InsertTable` is a genuinely-new table, so mint fresh
+  // durable row/column ids (mirroring the import path) and address every
+  // container by its `*_loro_id` string. The deterministic `cell_loro_id_for`
+  // keeps each coordinate's cell id a pure function of `(row, column)`.
+  let mut minted_columns: Vec<(ColumnId, String)> = Vec::with_capacity(columns);
   for column_ix in 0..columns {
-    let column_id = format!("{table_id}.column.{column_ix}");
-    column_order.push(column_id.as_str())?;
-    column_ids.push(column_id.clone());
-    let column = columns_by_id.ensure_mergeable_map(&column_id)?;
-    column.insert("id", column_id.as_str())?;
+    let column_id = ColumnId(Uuid::new_v4().as_u128());
+    let column_id_str = column_loro_id(column_id);
+    column_order.push(column_id_str.as_str())?;
+    let column = columns_by_id.ensure_mergeable_map(&column_id_str)?;
+    column.insert("id", column_id_str.as_str())?;
     column.insert("container_id", column.id().to_string())?;
     let attrs = column.ensure_mergeable_map("attrs")?;
     column.insert("attrs_container_id", attrs.id().to_string())?;
-    let width = column_widths
-      .get(column_ix)
-      .unwrap_or(&InputTableColumnWidth::Auto);
-    match *width {
-      InputTableColumnWidth::Auto => column.insert("width_kind", "auto")?,
-      InputTableColumnWidth::FixedPx(px) => {
-        column.insert("width_kind", "fixed_px")?;
-        column.insert("width_px", i64::from(px))?;
-      },
-      InputTableColumnWidth::Fraction(fraction) => {
-        column.insert("width_kind", "fraction")?;
-        column.insert("fraction", i64::from(fraction))?;
-      },
-    };
+    write_table_column_width(&column, column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto))?;
+    minted_columns.push((column_id, column_id_str));
   }
 
-  for row_ix in 0..rows {
-    let row_id = format!("{table_id}.row.{row_ix}");
-    row_order.push(row_id.as_str())?;
-    let row = rows_by_id.ensure_mergeable_map(&row_id)?;
-    row.insert("id", row_id.as_str())?;
+  for _ in 0..rows {
+    let row_id = RowId(Uuid::new_v4().as_u128());
+    let row_id_str = row_loro_id(row_id);
+    row_order.push(row_id_str.as_str())?;
+    let row = rows_by_id.ensure_mergeable_map(&row_id_str)?;
+    row.insert("id", row_id_str.as_str())?;
     row.insert("container_id", row.id().to_string())?;
     let attrs = row.ensure_mergeable_map("attrs")?;
     row.insert("attrs_container_id", attrs.id().to_string())?;
-    for (column_ix, column_id) in column_ids.iter().enumerate() {
-      let cell_id = format!("{row_id}.cell.{column_ix}");
-      let cell = cells_by_id.ensure_mergeable_map(&cell_id)?;
-      cell.insert("id", cell_id.as_str())?;
+    for (column_id, column_id_str) in &minted_columns {
+      let cell_id_str = cell_loro_id_for(row_id, *column_id);
+      let cell = cells_by_id.ensure_mergeable_map(&cell_id_str)?;
+      cell.insert("id", cell_id_str.as_str())?;
       cell.insert("container_id", cell.id().to_string())?;
-      cell.insert("row_id", row_id.as_str())?;
-      cell.insert("column_id", column_id.as_str())?;
+      cell.insert("row_id", row_id_str.as_str())?;
+      cell.insert("column_id", column_id_str.as_str())?;
       cell.insert("row_span", 1_i64)?;
       cell.insert("column_span", 1_i64)?;
       let attrs = cell.ensure_mergeable_map("attrs")?;
@@ -5944,7 +5671,7 @@ fn insert_table_block(
       let nested_tables_by_id = cell.ensure_mergeable_map("nested_tables_by_id")?;
       cell.insert("nested_table_order_container_id", nested_table_ids.id().to_string())?;
       cell.insert("nested_tables_container_id", nested_tables_by_id.id().to_string())?;
-      let flow_id = format!("{cell_id}.flow");
+      let flow_id = format!("{cell_id_str}.flow");
       cell.insert("flow_id", flow_id.as_str())?;
       let flow = ensure_flow(doc, &flow_id, "table_cell")?;
       let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
@@ -6026,10 +5753,6 @@ fn nested_flow_id(kind: &str) -> String {
   format!("{kind}.{}", Uuid::new_v4().as_u128())
 }
 
-fn table_id() -> String {
-  format!("table.{}", Uuid::new_v4().as_u128())
-}
-
 fn alignment_name(alignment: InputBlockAlignment) -> &'static str {
   match alignment {
     InputBlockAlignment::Left => "left",
@@ -6093,21 +5816,55 @@ mod tests {
     }
   }
 
+  /// §P2b test fixture id rule: mint deterministic local ids (`ColumnId(ix + 1)`,
+  /// `RowId(ix + 1)`) so the built table is stable and internally consistent, and
+  /// derive each cell's [`CellId`] from its coordinate.
+  fn fixture_row_id(row_ix: usize) -> flowstate_document::RowId {
+    flowstate_document::RowId(u128::try_from(row_ix).expect("row index fits u128") + 1)
+  }
+
+  fn fixture_column_id(column_ix: usize) -> flowstate_document::ColumnId {
+    flowstate_document::ColumnId(u128::try_from(column_ix).expect("column index fits u128") + 1)
+  }
+
   fn input_table(rows: Vec<Vec<&str>>, column_widths: Vec<flowstate_document::InputTableColumnWidth>, header_row: bool) -> InputTableBlock {
     InputTableBlock {
       rows: rows
         .into_iter()
-        .map(|row| flowstate_document::InputTableRow {
-          cells: row.into_iter().map(input_table_cell).collect(),
+        .enumerate()
+        .map(|(row_ix, row)| {
+          let row_id = fixture_row_id(row_ix);
+          flowstate_document::InputTableRow {
+            id: row_id,
+            cells: row
+              .into_iter()
+              .enumerate()
+              .map(|(column_ix, text)| input_table_cell(row_id, fixture_column_id(column_ix), text))
+              .collect(),
+          }
         })
         .collect(),
-      column_widths,
+      columns: column_widths
+        .into_iter()
+        .enumerate()
+        .map(|(column_ix, width)| flowstate_document::InputTableColumn {
+          id: fixture_column_id(column_ix),
+          width,
+        })
+        .collect(),
       style: flowstate_document::InputTableStyle { header_row },
     }
   }
 
-  fn input_table_cell(text: &str) -> flowstate_document::InputTableCell {
+  fn input_table_cell(
+    row_id: flowstate_document::RowId,
+    column_id: flowstate_document::ColumnId,
+    text: &str,
+  ) -> flowstate_document::InputTableCell {
     flowstate_document::InputTableCell {
+      id: flowstate_document::CellId::from_coordinate(row_id, column_id),
+      row_id,
+      column_id,
       blocks: vec![InputTableCellBlock::Paragraph(input_paragraph(text))],
       row_span: 1,
       col_span: 1,
@@ -6628,6 +6385,58 @@ mod tests {
     Ok(())
   }
 
+  // FS-170: a caret can rest on either side of a block object; the two sides
+  // must resolve to DISTINCT document offsets (the "before" side to the previous
+  // paragraph's end, the "after" side to the following paragraph's start).
+  // Before the decode fix both collapsed onto the previous paragraph's end,
+  // sending remote/undo carets to the wrong side of the object.
+  #[test]
+  fn object_between_paragraphs_resolves_distinct_caret_sides() -> Result<()> {
+    flowstate_fidelity::set_enabled(true);
+    let _ = flowstate_fidelity::take_violations();
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![
+        flowstate_document::InputBlock::Paragraph(input_paragraph("before")),
+        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
+          asset_id: flowstate_document::AssetId(1),
+          alt_text: "img".to_string(),
+          caption: None,
+          sizing: flowstate_document::InputImageSizing::Intrinsic,
+          alignment: flowstate_document::InputBlockAlignment::Left,
+        }),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("after")),
+      ],
+    );
+    let doc = flowstate_document::document_to_loro(&source, "Object sides")?;
+    let runtime = CrdtRuntime::from_doc(doc, None, None)?;
+
+    let index = &runtime.projection_index;
+    assert_eq!(index.object_placeholder_positions.len(), 1, "exactly one block-object placeholder");
+    let position = index.object_placeholder_positions[0];
+    let before = index
+      .offset_for_body_unicode(&runtime.projection, position)
+      .expect("object slot resolves");
+    let after = index
+      .offset_for_body_unicode(&runtime.projection, position + 1)
+      .expect("post-object slot resolves");
+    assert_ne!(before, after, "the two sides of a block object must resolve to distinct offsets (FS-170)");
+    // "after object" belongs to the following paragraph's start; "before" to the
+    // preceding paragraph's end. Paragraph indices skip the object block, so the
+    // "after" paragraph is index 1.
+    assert_eq!(after.paragraph, 1, "the after-object caret is the following paragraph");
+    assert_eq!(after.byte, 0, "at the following paragraph's start");
+    assert_eq!(before.paragraph, 0, "the before-object caret is the preceding paragraph");
+
+    let violations = flowstate_fidelity::take_violations();
+    flowstate_fidelity::set_enabled(false);
+    assert!(
+      !violations.iter().any(|violation| violation.contains("object-side-collapse")),
+      "no object-side-collapse violation must fire: {violations:?}"
+    );
+    Ok(())
+  }
+
   #[test]
   fn editor_replace_block_updates_image_metadata() -> Result<()> {
     let source = flowstate_document::document_from_input_blocks(
@@ -7139,8 +6948,13 @@ mod tests {
     assert_eq!(table.rows.len(), 2);
     assert_eq!(table.rows[0].cells.len(), 2);
     assert!(table.style.header_row);
+    let column_widths = table
+      .columns
+      .iter()
+      .map(|column| column.width.clone())
+      .collect::<Vec<_>>();
     assert!(matches!(
-      table.column_widths.as_slice(),
+      column_widths.as_slice(),
       [
         flowstate_document::TableColumnWidth::FixedPx(90),
         flowstate_document::TableColumnWidth::Fraction(1)
@@ -7204,8 +7018,13 @@ mod tests {
     let flowstate_document::Block::Table(table) = &projection.blocks[1] else {
       panic!("expected table block after column width command");
     };
+    let column_widths = table
+      .columns
+      .iter()
+      .map(|column| column.width.clone())
+      .collect::<Vec<_>>();
     assert!(matches!(
-      table.column_widths.as_slice(),
+      column_widths.as_slice(),
       [
         flowstate_document::TableColumnWidth::Auto,
         flowstate_document::TableColumnWidth::FixedPx(222)
@@ -7238,16 +7057,22 @@ mod tests {
     let initial_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
     let initial_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
 
-    let inserted_row = input_table(vec![vec!["new-a", "new-b"]], Vec::new(), false)
-      .rows
-      .into_iter()
-      .next()
-      .expect("row");
+    // §P2b: the source table carried deterministic fixture ids, so the imported
+    // canonical order lists are `row.1/row.2` and `column.1/column.2`.
+    let new_row_id = flowstate_document::RowId(100);
+    let inserted_row = flowstate_document::InputTableRow {
+      id: new_row_id,
+      cells: vec![
+        input_table_cell(new_row_id, fixture_column_id(0), "new-a"),
+        input_table_cell(new_row_id, fixture_column_id(1), "new-b"),
+      ],
+    };
     runtime.apply_editor_semantic_command(
       &projection,
       &EditorSemanticCommand::InsertTableRow {
         table: table_block_id,
-        row_ix: 1,
+        new_row_id,
+        after_row: Some(fixture_row_id(0)),
         row: inserted_row,
       },
     )?;
@@ -7267,22 +7092,33 @@ mod tests {
       initial_rows.len() + 1
     );
 
+    let new_column_id = flowstate_document::ColumnId(100);
     runtime.apply_editor_semantic_command(
       &projection,
       &EditorSemanticCommand::InsertTableColumn {
         table: table_block_id,
-        column_ix: 1,
+        new_column_id,
+        after_column: Some(fixture_column_id(0)),
         width: flowstate_document::InputTableColumnWidth::FixedPx(88),
-        cells: vec![input_table_cell("x"), input_table_cell("y"), input_table_cell("z")],
+        cells: vec![
+          input_table_cell(fixture_row_id(0), new_column_id, "x"),
+          input_table_cell(new_row_id, new_column_id, "y"),
+          input_table_cell(fixture_row_id(1), new_column_id, "z"),
+        ],
       },
     )?;
     projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
       panic!("expected table block after column insert");
     };
-    assert_eq!(table_projection.column_widths.len(), 3);
+    let column_widths = table_projection
+      .columns
+      .iter()
+      .map(|column| column.width.clone())
+      .collect::<Vec<_>>();
+    assert_eq!(column_widths.len(), 3);
     assert!(matches!(
-      table_projection.column_widths.as_slice(),
+      column_widths.as_slice(),
       [
         flowstate_document::TableColumnWidth::Auto,
         flowstate_document::TableColumnWidth::FixedPx(88),
@@ -7301,7 +7137,7 @@ mod tests {
       &projection,
       &EditorSemanticCommand::DeleteTableRow {
         table: table_block_id,
-        row_ix: 1,
+        row_id: new_row_id,
       },
     )?;
     projection = runtime.projection_snapshot()?;
@@ -7315,14 +7151,14 @@ mod tests {
       &projection,
       &EditorSemanticCommand::DeleteTableColumn {
         table: table_block_id,
-        column_ix: 1,
+        column_id: new_column_id,
       },
     )?;
     let projection = runtime.projection_snapshot()?;
     let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
       panic!("expected table block after column delete");
     };
-    assert_eq!(table_projection.column_widths.len(), 2);
+    assert_eq!(table_projection.columns.len(), 2);
     assert_eq!(projected_table_cell_text(table_projection, 0, 1), "b");
     assert_eq!(projected_table_cell_text(table_projection, 1, 1), "d");
     Ok(())
@@ -7352,13 +7188,16 @@ mod tests {
     let before_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
     let before_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
 
+    // Row index 1 / column index 0 of the fixture map to `RowId(2)` / `ColumnId(1)`.
+    let target_row = fixture_row_id(1);
+    let target_column = fixture_column_id(0);
     runtime.apply_editor_semantic_command(
       &projection,
       &EditorSemanticCommand::ReplaceTableCell {
         table: table_block_id,
-        row_ix: 1,
-        cell_ix: 0,
-        cell: input_table_cell("changed"),
+        row_id: target_row,
+        column_id: target_column,
+        cell: input_table_cell(target_row, target_column, "changed"),
       },
     )?;
 
@@ -7455,9 +7294,9 @@ mod tests {
         if table.rows.len() == 2
           && table.rows[0].cells.len() == 2
           && table.style.header_row
-          && matches!(table.column_widths.as_slice(), [
-            flowstate_document::TableColumnWidth::FixedPx(120),
-            flowstate_document::TableColumnWidth::Fraction(1)
+          && matches!(table.columns.as_slice(), [
+            flowstate_document::TableColumn { width: flowstate_document::TableColumnWidth::FixedPx(120), .. },
+            flowstate_document::TableColumn { width: flowstate_document::TableColumnWidth::Fraction(1), .. }
           ])
     ));
     Ok(())
@@ -7961,7 +7800,17 @@ mod tests {
     assert_eq!(entry.row_ids.len(), 2);
     assert_eq!(entry.column_ids.len(), 2);
     assert_eq!(entry.cells.len(), 4);
-    assert!(entry.cells.contains(&(1, 1)));
+    // §P2b: the index is keyed by the model's durable ids, so every projected
+    // cell's `(row_id, column_id)` coordinate resolves to its deterministic
+    // `CellId` (the fresh table minted uuid row/column ids, so probe by them).
+    let Block::Table(table) = &projection.blocks[table_block_ix] else {
+      panic!("expected table block");
+    };
+    for row in &table.rows {
+      for cell in &row.cells {
+        assert_eq!(entry.cells.get(&(cell.row_id, cell.column_id)), Some(&cell.id));
+      }
+    }
 
     // §24 search unit index: every object block contributes a paragraph-less span.
     let object_blocks = projection
@@ -8074,3 +7923,6 @@ mod multi_peer_convergence_tests;
 #[cfg(test)]
 #[path = "crdt_runtime/projection_repair_tests.rs"]
 mod projection_repair_tests;
+#[cfg(test)]
+#[path = "crdt_runtime/table_convergence_tests.rs"]
+mod table_convergence_tests;

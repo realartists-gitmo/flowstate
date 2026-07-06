@@ -25,14 +25,18 @@
 //!   value and Loro LWW converges them.
 
 use anyhow::{Context as _, Result};
-use flowstate_document::ProjectionDefect;
+use flowstate_document::{
+  ColumnId, ProjectionDefect, RowId, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_KEY, TABLE_ROW_ORDER, TableTopologyKind, cell_loro_id_for,
+  column_loro_id, row_loro_id,
+};
 use flowstate_fidelity as fidelity;
 use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroText, cursor::Cursor};
 
 use super::{
   BLOCKS_BY_ID, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_PARAGRAPH_STYLE, OBJECT_REPLACEMENT, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID,
-  ROOT_FIRST_PARAGRAPH_ID, body_text, child_map, ensure_paragraph_metadata_at_boundary_with_keys, flow_text, map_binary_opt, map_keys,
-  map_string_opt, paragraph_style_value,
+  ROOT_FIRST_PARAGRAPH_ID, body_text, child_map, child_movable_list, empty_input_table_cell, ensure_paragraph_metadata_at_boundary_with_keys,
+  flow_text, map_binary_opt, map_i64_opt, map_keys, map_string_opt, movable_list_strings, paragraph_style_value,
+  write_table_cell_map_from_input,
 };
 
 /// Apply the single canonical repair for one projection defect.
@@ -62,6 +66,12 @@ pub(super) fn apply_projection_repair(doc: &LoroDoc, defect: &ProjectionDefect) 
     } => repair_displaced_object_block(doc, flow_id, kept_block_key, displaced_block_key),
     ProjectionDefect::OrphanObjectPlaceholder { flow_id, unicode_pos } => repair_orphan_object_placeholder(doc, flow_id, *unicode_pos),
     ProjectionDefect::InvalidAssetId { block_key, .. } => repair_invalid_asset_id(doc, block_key),
+    ProjectionDefect::TableTopology {
+      table_block_key,
+      row_id,
+      column_id,
+      kind,
+    } => repair_table_topology(doc, table_block_key, *row_id, *column_id, *kind),
   };
   // §fidelity: record the canonical mutation this defect produced (Ok(true)); a
   // convergent no-op (Ok(false)) or error is left to the caller's telemetry.
@@ -256,6 +266,104 @@ fn repair_invalid_asset_id(doc: &LoroDoc, block_key: &str) -> Result<bool> {
     .insert("asset_id", asset_id.as_str())
     .context("recovering asset id from content hash for InvalidAssetId defect")?;
   Ok(true)
+}
+
+/// FS-010 / §P2b: a table grid that is not a well-formed full rectangle. The
+/// projector already normalized it deterministically (every peer reads the same
+/// grid), so here we apply the matching **idempotent, convergent** canonical
+/// mutation, keyed on the deterministic `(row, column)` coordinate cell id so two
+/// peers repairing the same coordinate address the identical Loro container and
+/// Loro LWW merges them:
+/// * `MissingCell` — ensure the coordinate cell (with an empty cell flow) when it
+///   is truly absent (check-before-write avoids clobbering a healed cell).
+/// * `InvalidSpan`  — clamp the cell's `row_span`/`column_span` into the grid
+///   bounds (`>= 1`, `<=` the cells remaining below/right of it).
+/// * `OrphanCell`   — delete the coordinate cell.
+/// * `DuplicateCoordinate` — cannot occur with deterministic cell ids (the same
+///   key merges), so it is a no-op.
+fn repair_table_topology(
+  doc: &LoroDoc,
+  table_block_key: &str,
+  row_id: Option<u128>,
+  column_id: Option<u128>,
+  kind: TableTopologyKind,
+) -> Result<bool> {
+  if matches!(kind, TableTopologyKind::DuplicateCoordinate) {
+    return Ok(false);
+  }
+  // Every remaining kind is tied to a single coordinate; without both ids there
+  // is nothing addressable to repair.
+  let (Some(row_id), Some(column_id)) = (row_id, column_id) else {
+    return Ok(false);
+  };
+  let row_id = RowId(row_id);
+  let column_id = ColumnId(column_id);
+  let Some(table) = resolve_table_map(doc, table_block_key) else {
+    return Ok(false);
+  };
+  let cells_by_id = table.ensure_mergeable_map(TABLE_CELLS_BY_ID)?;
+  let cell_id_str = cell_loro_id_for(row_id, column_id);
+  match kind {
+    TableTopologyKind::MissingCell => {
+      // Check-before-write: a concurrent edit (or a peer's repair) may already
+      // have materialized the cell — leave its content alone.
+      if child_map(&cells_by_id, &cell_id_str).is_some() {
+        return Ok(false);
+      }
+      let cell_map = cells_by_id.ensure_mergeable_map(&cell_id_str)?;
+      let empty = empty_input_table_cell(row_id, column_id);
+      write_table_cell_map_from_input(doc, &cell_map, &cell_id_str, &row_loro_id(row_id), &column_loro_id(column_id), &empty, false)
+        .context("materializing missing table cell for TableTopology defect")?;
+      Ok(true)
+    },
+    TableTopologyKind::InvalidSpan => {
+      let Some(cell) = child_map(&cells_by_id, &cell_id_str) else {
+        return Ok(false);
+      };
+      let row_ids = child_movable_list(&table, TABLE_ROW_ORDER)
+        .map(|list| movable_list_strings(&list))
+        .unwrap_or_default();
+      let column_ids = child_movable_list(&table, TABLE_COLUMN_ORDER)
+        .map(|list| movable_list_strings(&list))
+        .unwrap_or_default();
+      let (Some(row_ix), Some(column_ix)) = (
+        row_ids.iter().position(|id| id == &row_loro_id(row_id)),
+        column_ids.iter().position(|id| id == &column_loro_id(column_id)),
+      ) else {
+        return Ok(false);
+      };
+      let max_row_span = i64::try_from(row_ids.len() - row_ix).unwrap_or(1).max(1);
+      let max_column_span = i64::try_from(column_ids.len() - column_ix).unwrap_or(1).max(1);
+      let row_span = map_i64_opt(&cell, "row_span").unwrap_or(1).clamp(1, max_row_span);
+      let column_span = map_i64_opt(&cell, "column_span").unwrap_or(1).clamp(1, max_column_span);
+      cell.insert("row_span", row_span)?;
+      cell.insert("column_span", column_span)?;
+      Ok(true)
+    },
+    TableTopologyKind::OrphanCell => {
+      if child_map(&cells_by_id, &cell_id_str).is_none() {
+        return Ok(false);
+      }
+      cells_by_id
+        .delete(&cell_id_str)
+        .context("deleting orphan table cell for TableTopology defect")?;
+      Ok(true)
+    },
+    TableTopologyKind::DuplicateCoordinate => Ok(false),
+  }
+}
+
+/// Resolve a table block's canonical `table` child map from the projector-reported
+/// block id (the block's `id` field / map key), mirroring the object-anchor
+/// repairs' block resolution.
+fn resolve_table_map(doc: &LoroDoc, table_block_key: &str) -> Option<LoroMap> {
+  let root = doc.get_map(ROOT);
+  let blocks = child_map(&root, BLOCKS_BY_ID)?;
+  let block = find_block_by_id(&blocks, table_block_key)?;
+  if map_string_opt(&block, "kind").as_deref() != Some("table") {
+    return None;
+  }
+  child_map(&block, TABLE_KEY)
 }
 
 /// Resolve a flow's canonical text container by flow id (via `flows_by_id`).

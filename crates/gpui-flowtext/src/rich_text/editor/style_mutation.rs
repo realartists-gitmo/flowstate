@@ -1,7 +1,7 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn toggle_underline_kind(&mut self, explicit_direct: Option<bool>, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       let Some(selection_range) = self.table_cell_selection_range() else {
         return;
       };
@@ -96,7 +96,7 @@ impl RichTextEditor {
   }
 
   fn toggle_semantic_style(&mut self, semantic: RunSemanticStyle, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       let Some(selection_range) = self.table_cell_selection_range() else {
         return;
       };
@@ -149,7 +149,7 @@ impl RichTextEditor {
   }
 
   fn set_highlight_internal(&mut self, highlight: Option<HighlightStyle>, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       let Some(selection_range) = self.table_cell_selection_range() else {
         return;
       };

@@ -121,9 +121,23 @@ impl RichTextEditor {
           .valid_chunk_cache_entry(paragraph_ix, width)
           .map(|entry| entry.chunks.len())
           .unwrap_or(before);
-        changed |= after != before;
+        let progressed = after != before;
+        changed |= progressed;
         if self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
-          self.chunk_prefetch_queue.push_back(paragraph_ix);
+          if progressed {
+            self.chunk_prefetch_queue.push_back(paragraph_ix);
+          } else {
+            // The paragraph still reports "needs prefetch" but ensuring the next
+            // chunk added NOTHING (`after == before`) — the chunker cannot advance
+            // it to `complete`. Re-queuing it here would keep the queue non-empty,
+            // which reschedules the `on_next_frame` prefetch below every frame:
+            // a continuous re-render with no state change that FREEZES the window
+            // (observed on large documents with object blocks). Drop it instead so
+            // the queue can drain; the paragraph renders with the chunks it has.
+            flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "prefetch-no-progress", || {
+              format!("paragraph {paragraph_ix} needs prefetch but chunking made no progress ({before} chunks); dropped to break the render loop")
+            });
+          }
         }
       }
       if start.elapsed() >= budget {

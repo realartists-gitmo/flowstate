@@ -279,13 +279,12 @@ pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
 
 #[hotpath::measure]
 pub fn active_keys_for(id: CommandId) -> Vec<String> {
-  let keymap = crate::app_settings::load_keymap();
-  keymap
-    .entries
-    .iter()
-    .filter(|entry| entry.command == id)
-    .map(|entry| entry.key.clone())
-    .collect()
+  crate::app_settings::load_keys_for_command(id)
+}
+
+#[hotpath::measure]
+pub fn active_first_key_for(id: CommandId) -> Option<String> {
+  crate::app_settings::load_first_key_for_command(id)
 }
 
 #[hotpath::measure]

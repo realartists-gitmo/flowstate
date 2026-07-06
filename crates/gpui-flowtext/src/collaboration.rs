@@ -1,9 +1,9 @@
 use std::ops::Range;
 
 use super::{
-  AssetId, AssetRecord, BlockId, DocumentOffset, DocumentProjection, DocumentSpan, EditorSelection, InputBlock, InputBlockAlignment,
-  InputImageSizing, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId, ParagraphStyle, RunStyles,
-  SelectionAffinity, TextRun, VisualGravity, paragraph_text, paragraph_text_len,
+  AssetId, AssetRecord, BlockId, ColumnId, DocumentOffset, DocumentProjection, DocumentSpan, EditorSelection, InputBlock,
+  InputBlockAlignment, InputImageSizing, InputParagraph, InputTableCell, InputTableColumnWidth, InputTableRow, ParagraphId,
+  ParagraphStyle, RowId, RunStyles, SelectionAffinity, TextRun, VisualGravity, paragraph_text, paragraph_text_len,
 };
 use rustc_hash::FxHashMap;
 
@@ -101,45 +101,57 @@ pub enum SemanticEditCommand {
     block_ix: usize,
     after: InputBlock,
   },
+  /// Insert `row` after the row with id `after_row` (or at the head when
+  /// `after_row` is `None`). The emitter mints `new_row_id` so the optimistic
+  /// predict, the canonical apply, and the remote replay all agree on the new
+  /// row's identity (§P2b, mirrors `SplitParagraph`'s `new_paragraph`). If
+  /// `after_row` was concurrently deleted the resolver falls back to the tail
+  /// deterministically so peers still converge.
   InsertTableRow {
     table: BlockId,
-    row_ix: usize,
+    new_row_id: RowId,
+    after_row: Option<RowId>,
     row: InputTableRow,
   },
   DeleteTableRow {
     table: BlockId,
-    row_ix: usize,
+    row_id: RowId,
   },
   MoveTableRow {
     table: BlockId,
-    from_row_ix: usize,
-    to_row_ix: usize,
+    row_id: RowId,
+    after_row: Option<RowId>,
   },
+  /// Insert a new column (id `new_column_id`) after the column `after_column`
+  /// (or at the head when `None`). `cells` carries one new cell per existing
+  /// row, each already stamped with its `(row_id, new_column_id)` coordinate id
+  /// by the emitter.
   InsertTableColumn {
     table: BlockId,
-    column_ix: usize,
+    new_column_id: ColumnId,
+    after_column: Option<ColumnId>,
     width: InputTableColumnWidth,
     cells: Vec<InputTableCell>,
   },
   DeleteTableColumn {
     table: BlockId,
-    column_ix: usize,
+    column_id: ColumnId,
   },
   MoveTableColumn {
     table: BlockId,
-    from_column_ix: usize,
-    to_column_ix: usize,
+    column_id: ColumnId,
+    after_column: Option<ColumnId>,
   },
   ReplaceTableCell {
     table: BlockId,
-    row_ix: usize,
-    cell_ix: usize,
+    row_id: RowId,
+    column_id: ColumnId,
     cell: InputTableCell,
   },
   SetTableCellSpan {
     table: BlockId,
-    row_ix: usize,
-    cell_ix: usize,
+    row_id: RowId,
+    column_id: ColumnId,
     row_span: u16,
     column_span: u16,
   },

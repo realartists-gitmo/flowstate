@@ -219,7 +219,7 @@ fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: 
     .max()
     .unwrap_or_default();
   report.check(
-    table.column_widths.is_empty() || table.column_widths.len() == widest_row,
+    table.columns.is_empty() || table.columns.len() == widest_row,
     format!("{label} column width count should match widest row when explicit widths are present"),
   );
   for (row_ix, row) in table.rows.iter().enumerate() {

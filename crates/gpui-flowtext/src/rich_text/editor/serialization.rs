@@ -275,13 +275,12 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
       .iter()
       .map(input_table_row_from_table_row)
       .collect(),
-    column_widths: table
-      .column_widths
+    columns: table
+      .columns
       .iter()
-      .map(|width| match *width {
-        TableColumnWidth::Auto => InputTableColumnWidth::Auto,
-        TableColumnWidth::FixedPx(px) => InputTableColumnWidth::FixedPx(px),
-        TableColumnWidth::Fraction(fraction) => InputTableColumnWidth::Fraction(fraction),
+      .map(|column| InputTableColumn {
+        id: column.id,
+        width: input_table_column_width_from_table_column_width(&column.width),
       })
       .collect(),
     style: InputTableStyle {
@@ -293,6 +292,7 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
 #[hotpath::measure]
 fn input_table_row_from_table_row(row: &TableRow) -> InputTableRow {
   InputTableRow {
+    id: row.id,
     cells: row
       .cells
       .iter()
@@ -304,6 +304,9 @@ fn input_table_row_from_table_row(row: &TableRow) -> InputTableRow {
 #[hotpath::measure]
 fn input_table_cell_from_table_cell(cell: &TableCell) -> InputTableCell {
   InputTableCell {
+    id: cell.id,
+    row_id: cell.row_id,
+    column_id: cell.column_id,
     blocks: cell
       .blocks
       .iter()
@@ -333,10 +336,14 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
       .rows
       .iter()
       .map(|row| TableRow {
+        id: row.id,
         cells: row
           .cells
           .iter()
           .map(|cell| TableCell {
+            id: cell.id,
+            row_id: cell.row_id,
+            column_id: cell.column_id,
             blocks: cell
               .blocks
               .iter()
@@ -351,13 +358,12 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
           .collect(),
       })
       .collect(),
-    column_widths: table
-      .column_widths
+    columns: table
+      .columns
       .iter()
-      .map(|width| match *width {
-        InputTableColumnWidth::Auto => TableColumnWidth::Auto,
-        InputTableColumnWidth::FixedPx(px) => TableColumnWidth::FixedPx(px),
-        InputTableColumnWidth::Fraction(fraction) => TableColumnWidth::Fraction(fraction),
+      .map(|column| TableColumn {
+        id: column.id,
+        width: table_column_width_from_input_width(&column.width),
       })
       .collect(),
     style: TableStyle {

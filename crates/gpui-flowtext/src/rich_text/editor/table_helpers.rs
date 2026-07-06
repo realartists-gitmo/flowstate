@@ -1,17 +1,45 @@
 #[hotpath::measure]
-fn default_table_row(columns: usize) -> TableRow {
+fn default_table_row(row_id: RowId, column_ids: &[ColumnId]) -> TableRow {
   TableRow {
-    cells: (0..columns).map(|_| default_table_cell()).collect(),
+    id: row_id,
+    cells: column_ids
+      .iter()
+      .map(|&column_id| default_table_cell(row_id, column_id))
+      .collect(),
   }
 }
 
 #[hotpath::measure]
-fn default_table_cell() -> TableCell {
+fn default_table_cell(row_id: RowId, column_id: ColumnId) -> TableCell {
   TableCell {
+    id: CellId::from_coordinate(row_id, column_id),
+    row_id,
+    column_id,
     blocks: vec![TableCellBlock::Paragraph(default_table_cell_paragraph())],
     row_span: 1,
     col_span: 1,
   }
+}
+
+/// Resolve the durable `(RowId, ColumnId)` for a cell at a positional
+/// `(row_ix, cell_ix)` from the id-bearing projection model (§P2b). Used when
+/// constructing an id-carrying [`BlockSelection::TableCell`]. Falls back to the
+/// zero sentinel when the coordinate cannot be resolved (e.g. an empty table),
+/// which the emission paths treat as "no durable identity".
+#[hotpath::measure]
+fn table_cell_ids_at(document: &DocumentProjection, block_ix: usize, row_ix: usize, cell_ix: usize) -> (RowId, ColumnId) {
+  let Some(Block::Table(table)) = document.blocks.get(block_ix) else {
+    return (RowId(0), ColumnId(0));
+  };
+  let row_id = table.rows.get(row_ix).map(|row| row.id).unwrap_or(RowId(0));
+  let column_id = table
+    .rows
+    .get(row_ix)
+    .and_then(|row| row.cells.get(cell_ix))
+    .map(|cell| cell.column_id)
+    .or_else(|| table.columns.get(cell_ix).map(|column| column.id))
+    .unwrap_or(ColumnId(0));
+  (row_id, column_id)
 }
 
 #[hotpath::measure]
@@ -28,16 +56,16 @@ fn table_column_count(table: &TableBlock) -> usize {
     })
     .max()
     .unwrap_or(0)
-    .max(table.column_widths.len())
+    .max(table.columns.len())
 }
 
 #[hotpath::measure]
 fn fixed_table_column_widths_from_layout(table: &TableBlock, layout: &LaidOutTable) -> Vec<u32> {
   let column_count = table_column_count(table).max(1);
   let mut widths = vec![120; column_count];
-  for (ix, width) in table.column_widths.iter().enumerate() {
+  for (ix, column) in table.columns.iter().enumerate() {
     if ix < widths.len()
-      && let TableColumnWidth::FixedPx(width) = width
+      && let TableColumnWidth::FixedPx(width) = &column.width
     {
       widths[ix] = *width;
     }
@@ -58,7 +86,7 @@ fn fixed_table_column_widths_from_layout(table: &TableBlock, layout: &LaidOutTab
     let cell_width: f32 = cell_layout.bounds.size.width.into();
     let per_column = (cell_width / span as f32).max(32.0).round() as u32;
     for ix in logical_column_ix..logical_column_ix.saturating_add(span).min(widths.len()) {
-      if !matches!(table.column_widths.get(ix), Some(TableColumnWidth::FixedPx(_))) {
+      if !matches!(table.columns.get(ix).map(|column| &column.width), Some(TableColumnWidth::FixedPx(_))) {
         widths[ix] = per_column;
       }
     }

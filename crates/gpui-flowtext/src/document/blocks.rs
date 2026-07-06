@@ -93,18 +93,32 @@ pub enum EquationDisplay {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableBlock {
   pub rows: Vec<TableRow>,
-  pub column_widths: Vec<TableColumnWidth>,
+  /// Ordered columns, each with its durable [`ColumnId`] and width (§P2b).
+  /// Replaces the id-less `column_widths` list; read a width as
+  /// `columns[i].width`.
+  pub columns: Vec<TableColumn>,
   pub style: TableStyle,
   pub version: u64,
 }
 
+/// A table column carrying its durable identity and rendered width (§P2b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableColumn {
+  pub id: ColumnId,
+  pub width: TableColumnWidth,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRow {
+  pub id: RowId,
   pub cells: Vec<TableCell>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableCell {
+  pub id: CellId,
+  pub row_id: RowId,
+  pub column_id: ColumnId,
   pub blocks: Vec<TableCellBlock>,
   pub row_span: u16,
   pub col_span: u16,

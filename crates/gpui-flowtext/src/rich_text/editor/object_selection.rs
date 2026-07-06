@@ -39,7 +39,32 @@ impl RichTextEditor {
 
   #[cfg(test)]
   pub(super) fn select_table_cell_for_test(&mut self, block_ix: usize, row_ix: usize, cell_ix: usize, cx: &mut Context<Self>) {
-    self.select_block(BlockSelection::TableCell { block_ix, row_ix, cell_ix }, cx);
+    let (row_id, column_id) = table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix);
+    self.select_block(
+      BlockSelection::TableCell {
+        block_ix,
+        row_ix,
+        cell_ix,
+        row_id,
+        column_id,
+      },
+      cx,
+    );
+  }
+
+  #[cfg(test)]
+  pub(super) fn table_cell_ids_for_test(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> (RowId, ColumnId) {
+    table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix)
+  }
+
+  #[cfg(test)]
+  pub(super) fn table_row_id_for_test(&self, block_ix: usize, row_ix: usize) -> RowId {
+    table_cell_ids_at(&self.document, block_ix, row_ix, 0).0
+  }
+
+  #[cfg(test)]
+  pub(super) fn table_column_id_for_test(&self, block_ix: usize, column_ix: usize) -> ColumnId {
+    table_cell_ids_at(&self.document, block_ix, 0, column_ix).1
   }
 
   #[cfg(test)]
@@ -133,7 +158,14 @@ impl RichTextEditor {
     for (row_ix, row) in table.rows.iter().enumerate() {
       for (cell_ix, cell) in row.cells.iter().enumerate() {
         if cell.bounds.contains(&document_point) {
-          let selection = BlockSelection::TableCell { block_ix, row_ix, cell_ix };
+          let (row_id, column_id) = table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix);
+          let selection = BlockSelection::TableCell {
+            block_ix,
+            row_ix,
+            cell_ix,
+            row_id,
+            column_id,
+          };
           let mut fallback = (selection, 0, 0);
           for block in &cell.blocks {
             if let LaidOutBlock::Paragraph(paragraph) = block {
@@ -228,19 +260,22 @@ impl RichTextEditor {
       .len()
       .max(table_column_count(table))
       .max(1);
-    while table.column_widths.len() < column_count {
-      table.column_widths.push(TableColumnWidth::FixedPx(120));
+    while table.columns.len() < column_count {
+      table.columns.push(TableColumn {
+        id: ColumnId(uuid::Uuid::new_v4().as_u128()),
+        width: TableColumnWidth::FixedPx(120),
+      });
     }
     for (ix, width) in drag.start_widths.iter().copied().enumerate() {
-      if ix < table.column_widths.len() {
-        table.column_widths[ix] = TableColumnWidth::FixedPx(width);
+      if ix < table.columns.len() {
+        table.columns[ix].width = TableColumnWidth::FixedPx(width);
       }
     }
     let Some(start_width) = drag.start_widths.get(drag.column_ix).copied() else {
       self.table_column_resize_drag = None;
       return true;
     };
-    table.column_widths[drag.column_ix] = TableColumnWidth::FixedPx((start_width as f32 + delta).clamp(32.0, 1600.0).round() as u32);
+    table.columns[drag.column_ix].width = TableColumnWidth::FixedPx((start_width as f32 + delta).clamp(32.0, 1600.0).round() as u32);
     table.version = drag.before.version.wrapping_add(1);
     self.invalidate_document_layout_caches();
     cx.notify();
@@ -264,14 +299,14 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let semantic_commands = if let Some(table_id) = self.semantic_block_id(drag.block_ix) {
       after
-        .column_widths
+        .columns
         .iter()
         .enumerate()
-        .filter(|(column_ix, width)| drag.before.column_widths.get(*column_ix) != Some(*width))
-        .map(|(column_ix, width)| SemanticEditCommand::SetTableColumnWidth {
+        .filter(|(column_ix, column)| drag.before.columns.get(*column_ix).map(|before| &before.width) != Some(&column.width))
+        .map(|(column_ix, column)| SemanticEditCommand::SetTableColumnWidth {
           table: table_id,
           column_ix,
-          width: input_table_column_width_from_table_column_width(width),
+          width: input_table_column_width_from_table_column_width(&column.width),
         })
         .collect::<Vec<_>>()
     } else {
@@ -638,13 +673,22 @@ impl RichTextEditor {
     if !self.focus_handle.is_focused(window) {
       return None;
     }
-    let BlockSelection::TableCell { block_ix, row_ix, cell_ix } = self.selected_block? else {
+    let BlockSelection::TableCell {
+      block_ix,
+      row_ix,
+      cell_ix,
+      row_id,
+      column_id,
+    } = self.selected_block?
+    else {
       return None;
     };
     Some(TableCellCaret {
       block_ix,
       row_ix,
       cell_ix,
+      row_id,
+      column_id,
       paragraph_block_ix: self.table_cell_block_ix,
       anchor: self.table_cell_anchor,
       byte: self.table_cell_caret,

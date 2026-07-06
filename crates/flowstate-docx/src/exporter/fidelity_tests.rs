@@ -24,10 +24,10 @@ use std::{
 };
 
 use flowstate_document::{
-  AssetId, AssetRecord, DocumentProjection, DocumentSection, InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay,
-  InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RunStyles, SectionId, SectionKind, document_from_input_blocks,
-  flowstate_document_theme,
+  AssetId, AssetRecord, CellId, ColumnId, DocumentProjection, DocumentSection, InputBlock, InputBlockAlignment, InputEquationBlock,
+  InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell,
+  InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId, RunStyles, SectionId,
+  SectionKind, document_from_input_blocks, flowstate_document_theme,
 };
 
 use crate::{write_docx, write_pdf};
@@ -66,8 +66,11 @@ fn paragraph_block(text: &str) -> InputBlock {
   })
 }
 
-fn text_cell(text: &str, row_span: u16, col_span: u16) -> InputTableCell {
+fn text_cell(row_id: RowId, column_id: ColumnId, text: &str, row_span: u16, col_span: u16) -> InputTableCell {
   InputTableCell {
+    id: CellId::from_coordinate(row_id, column_id),
+    row_id,
+    column_id,
     blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
       style: ParagraphStyle::Normal,
       runs: vec![InputRun {
@@ -110,16 +113,28 @@ fn table_spans_grid_and_header_are_emitted() {
   let table = InputBlock::Table(InputTableBlock {
     rows: vec![
       InputTableRow {
-        cells: vec![text_cell("Header", 1, 2)],
+        id: RowId(1),
+        cells: vec![text_cell(RowId(1), ColumnId(1), "Header", 1, 2)],
       },
       InputTableRow {
-        cells: vec![text_cell("A", 2, 1), text_cell("B", 1, 1)],
+        id: RowId(2),
+        cells: vec![text_cell(RowId(2), ColumnId(1), "A", 2, 1), text_cell(RowId(2), ColumnId(2), "B", 1, 1)],
       },
       InputTableRow {
-        cells: vec![text_cell("C", 1, 1)],
+        id: RowId(3),
+        cells: vec![text_cell(RowId(3), ColumnId(1), "C", 1, 1)],
       },
     ],
-    column_widths: vec![InputTableColumnWidth::Fraction(1), InputTableColumnWidth::Fraction(1)],
+    columns: vec![
+      InputTableColumn {
+        id: ColumnId(1),
+        width: InputTableColumnWidth::Fraction(1),
+      },
+      InputTableColumn {
+        id: ColumnId(2),
+        width: InputTableColumnWidth::Fraction(1),
+      },
+    ],
     style: InputTableStyle { header_row: true },
   });
   let document = document_from_input_blocks(flowstate_document_theme(), vec![paragraph_block("Intro"), table]);

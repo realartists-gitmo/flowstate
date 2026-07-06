@@ -105,7 +105,7 @@ pub(super) fn estimate_structural_block_item_height(document: &DocumentProjectio
 fn table_placeholder_height(document: &DocumentProjection, table: &TableBlock, width: Pixels) -> Pixels {
   let line_height = (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * document.theme.line_spacing).max(px(16.0));
   let column_count = table
-    .column_widths
+    .columns
     .len()
     .max(
       table
@@ -156,7 +156,7 @@ fn layout_table_block_without_text(document: &DocumentProjection, table: &TableB
   let table_left = document.theme.pageless_inset_x;
   let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let column_count = table
-    .column_widths
+    .columns
     .len()
     .max(
       table

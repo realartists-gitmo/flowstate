@@ -4,13 +4,9 @@ use std::{
   time::{Duration, SystemTime},
 };
 
-use std::sync::Mutex;
-
 use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
-
-use crate::app_settings::flowstate_data_dir;
 
 /// Default filter: only the most serious events (errors), for every target.
 /// Raise Flowstate's own verbosity with `FLOWSTATE_LOG_LEVEL`, or take full
@@ -23,6 +19,8 @@ const FLOWSTATE_TARGETS: [&str; 3] = ["flowstate", "flowstate_collab", "gpui_flo
 
 pub struct LoggingGuard {
   _guard: WorkerGuard,
+  // Kept alive so the fidelity JSONL background writer flushes on shutdown.
+  _fidelity_guard: Option<WorkerGuard>,
   directory: PathBuf,
 }
 
@@ -35,7 +33,12 @@ pub fn init() -> Result<LoggingGuard> {
   let directory = log_directory();
   fs::create_dir_all(&directory).with_context(|| format!("creating log directory {} failed", directory.display()))?;
   prune_log_files(&directory)?;
-  let file_appender = tracing_appender::rolling::daily(&directory, "flowstate.log");
+  // One unique, sortable, human-readable stamp per run so successive runs never
+  // clobber each other's logs. (The old `rolling::daily` produced a single
+  // `flowstate.log.<date>` that every run on the same day appended to, which made
+  // it impossible to tell one run's logs from another's.)
+  let run_stamp = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
+  let file_appender = tracing_appender::rolling::never(&directory, format!("flowstate-{run_stamp}.log"));
   let (writer, guard) = tracing_appender::non_blocking(file_appender);
 
   // Optionally mirror logs to stdout (handy when running from a terminal).
@@ -52,18 +55,31 @@ pub fn init() -> Result<LoggingGuard> {
   // (and violations/markers, matched by the `fidelity` target prefix) as
   // machine-parseable JSON lines to a dedicated file, so an automated agent gets
   // exactly one JSON object per event without scraping the human log format.
-  let fidelity_json_layer = trace_fidelity_enabled()
-    .then(|| directory.join("flowstate-fidelity.jsonl"))
+  // The fidelity JSONL sink MUST be non-blocking. Fidelity `event()`s fire from
+  // the render/layout hot path (per visible paragraph, per decoration, per caret),
+  // so a blocking `Mutex<File>` writer would stall the MAIN thread on file I/O
+  // once per event — on a large document that is thousands of synchronous writes
+  // per frame, which froze the window. A background worker (like the human log)
+  // keeps the UI thread free; the returned guard flushes it on shutdown.
+  let (fidelity_writer, fidelity_guard) = match trace_fidelity_enabled()
+    .then(|| directory.join(format!("flowstate-fidelity-{run_stamp}.jsonl")))
     .and_then(|path| fs::File::create(&path).ok())
-    .map(|file| {
-      fmt::layer()
-        .json()
-        .flatten_event(true)
-        .with_current_span(false)
-        .with_span_list(false)
-        .with_writer(Mutex::new(file))
-        .with_filter(EnvFilter::new("fidelity=debug"))
-    });
+  {
+    Some(file) => {
+      let (writer, guard) = tracing_appender::non_blocking(file);
+      (Some(writer), Some(guard))
+    },
+    None => (None, None),
+  };
+  let fidelity_json_layer = fidelity_writer.map(|writer| {
+    fmt::layer()
+      .json()
+      .flatten_event(true)
+      .with_current_span(false)
+      .with_span_list(false)
+      .with_writer(writer)
+      .with_filter(EnvFilter::new("fidelity=debug"))
+  });
 
   tracing_subscriber::registry()
     .with(env_filter())
@@ -82,7 +98,22 @@ pub fn init() -> Result<LoggingGuard> {
     .try_init()
     .context("initializing flowstate logging failed")?;
 
-  Ok(LoggingGuard { _guard: guard, directory })
+  // Tell the operator where THIS run's logs are, on stderr, so a terminal run
+  // shows the exact paths without grepping.
+  if trace_fidelity_enabled() {
+    eprintln!(
+      "flowstate: logs → {}/flowstate-{run_stamp}.log + flowstate-fidelity-{run_stamp}.jsonl (fidelity tracing ON)",
+      directory.display()
+    );
+  } else {
+    eprintln!("flowstate: logs → {}/flowstate-{run_stamp}.log", directory.display());
+  }
+
+  Ok(LoggingGuard {
+    _guard: guard,
+    _fidelity_guard: fidelity_guard,
+    directory,
+  })
 }
 
 /// Resolves the log filter from the environment, in precedence order:
@@ -171,9 +202,16 @@ fn is_truthy(value: &str) -> bool {
 }
 
 fn log_directory() -> PathBuf {
-  env::var_os("FLOWSTATE_LOG_DIR")
-    .map(PathBuf::from)
-    .unwrap_or_else(|| flowstate_data_dir().join("logs"))
+  // `FLOWSTATE_LOG_DIR` still wins when set. Otherwise default to a
+  // `flowstate-logs/` directory under the current working directory — for the
+  // usual `cargo run` from the repo root that puts logs right in the repo (and
+  // it's git-ignored) instead of a hidden platform data dir under `/tmp`-style
+  // paths, which is far easier to find during development.
+  env::var_os("FLOWSTATE_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| {
+    env::current_dir()
+      .unwrap_or_else(|_| PathBuf::from("."))
+      .join("flowstate-logs")
+  })
 }
 const MAX_LOG_FILES: usize = 14;
 const MAX_LOG_AGE: Duration = Duration::from_hours(336);
@@ -187,7 +225,11 @@ fn prune_log_files(directory: &Path) -> Result<()> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
       continue;
     };
-    if !name.starts_with("flowstate.log.") {
+    // Prune this run's per-run files (`flowstate-<stamp>.log`,
+    // `flowstate-fidelity-<stamp>.jsonl`) and any legacy `flowstate.log.<date>`.
+    let extension = path.extension().and_then(|extension| extension.to_str());
+    let is_run_log = name.starts_with("flowstate-") && matches!(extension, Some("log" | "jsonl"));
+    if !is_run_log && !name.starts_with("flowstate.log.") {
       continue;
     }
     let metadata = entry.metadata()?;

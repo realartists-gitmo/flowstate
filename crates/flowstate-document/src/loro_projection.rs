@@ -2,10 +2,10 @@ use std::{collections::BTreeMap, io, sync::Arc};
 
 use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui_flowtext::{
-  AssetId, BlockId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock,
-  InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell,
-  InputTableCellBlock, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle, RunStyles, SectionId, SectionKind,
-  document_from_input_blocks,
+  AssetId, BlockId, CellId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment,
+  InputEquationBlock, InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock,
+  InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle,
+  RunStyles, SectionId, SectionKind, document_from_input_blocks,
 };
 use loro::{Container, ContainerID, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
 use rustc_hash::FxHashMap;
@@ -13,7 +13,9 @@ use rustc_hash::FxHashMap;
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
   MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
-  SECTIONS_BY_ID, flowstate_document_theme, projection_defects::ProjectionDefect,
+  SECTIONS_BY_ID, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER, flowstate_document_theme,
+  parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id, table_topology,
+  projection_defects::{ProjectionDefect, TableTopologyKind},
 };
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
@@ -239,6 +241,14 @@ impl<'a> Projector<'a> {
     let mut unicode_pos = 0_usize;
     let mut current_boundary = None;
 
+    // §perf: resolve this flow's boundary→id maps ONCE (only for the id sinks that
+    // are actually collected — cell flows pass `None` and skip the build), then do
+    // O(1) lookups per boundary below. Replaces a per-boundary full rescan of every
+    // paragraph/block record — an O(records²·chars) blow-up that pegged the CRDT
+    // actor thread at 100% CPU and never returned when materializing a large document.
+    let paragraph_index = paragraph_ids.as_ref().map(|_| paragraph_ids_by_boundary(self.doc, text));
+    let paragraph_block_index = block_ids.as_ref().map(|_| paragraph_block_ids_by_boundary(self.doc, text));
+
     for item in text.to_delta() {
       let loro::TextDelta::Insert { insert, attributes } = item else {
         continue;
@@ -276,8 +286,8 @@ impl<'a> Projector<'a> {
               current_boundary = Some(unicode_pos);
             } else {
               push_paragraph_projection_metadata(
-                self.doc,
-                text,
+                paragraph_index.as_ref(),
+                paragraph_block_index.as_ref(),
                 flow_id,
                 current_boundary,
                 output.len(),
@@ -295,8 +305,8 @@ impl<'a> Projector<'a> {
             if let Some(block) = object_blocks.get(&unicode_pos) {
               if !current.runs.is_empty() {
                 push_paragraph_projection_metadata(
-                  self.doc,
-                  text,
+                  paragraph_index.as_ref(),
+                  paragraph_block_index.as_ref(),
                   flow_id,
                   current_boundary,
                   output.len(),
@@ -332,7 +342,16 @@ impl<'a> Projector<'a> {
     }
 
     if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
-      push_paragraph_projection_metadata(self.doc, text, flow_id, current_boundary, output.len(), paragraph_ids, block_ids, defects);
+      push_paragraph_projection_metadata(
+        paragraph_index.as_ref(),
+        paragraph_block_index.as_ref(),
+        flow_id,
+        current_boundary,
+        output.len(),
+        paragraph_ids,
+        block_ids,
+        defects,
+      );
       output.push(InputBlock::Paragraph(current));
     }
     Ok(())
@@ -446,69 +465,110 @@ impl<'a> Projector<'a> {
   }
 
   fn table_block(&self, owner: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableBlock> {
-    let table = child_map(owner, "table")?.ok_or_else(|| invalid("table block has no table map"))?;
-    self.table_from_map(&table, defects)
+    let table = child_map(owner, TABLE_KEY)?.ok_or_else(|| invalid("table block has no table map"))?;
+    let block_key = map_string_opt(owner, "id")?.unwrap_or_default();
+    self.table_from_map(&table, &block_key, defects)
   }
 
-  fn table_from_map(&self, table: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableBlock> {
+  fn table_from_map(&self, table: &LoroMap, block_key: &str, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableBlock> {
     // §28: resolve the table's child containers through their stored raw
     // container ids, falling back to key traversal when unavailable.
-    let columns = self
-      .resolve_child_map(table, "columns_container_id", "columns_by_id")?
+    let columns_map = self
+      .resolve_child_map(table, "columns_container_id", TABLE_COLUMNS_BY_ID)?
       .ok_or_else(|| invalid("table has no column map"))?;
-    let rows_by_id = self
-      .resolve_child_map(table, "rows_container_id", "rows_by_id")?
-      .ok_or_else(|| invalid("table has no row map"))?;
     let cells_by_id = self
-      .resolve_child_map(table, "cells_container_id", "cells_by_id")?
+      .resolve_child_map(table, "cells_container_id", TABLE_CELLS_BY_ID)?
       .ok_or_else(|| invalid("table has no cell map"))?;
-    let column_ids = ordered_ids(table, "column_order")?;
-    let column_positions = column_ids
-      .iter()
-      .enumerate()
-      .map(|(ix, column_id)| (column_id.clone(), ix))
-      .collect::<BTreeMap<_, _>>();
-    let column_widths = column_ids
-      .iter()
-      .map(|column_id| {
-        let column = child_map(&columns, column_id)?.ok_or_else(|| invalid(format!("missing table column `{column_id}`")))?;
-        table_column_width(&column)
-      })
-      .collect::<io::Result<Vec<_>>>()?;
 
-    let mut rows = Vec::new();
-    for row_id in ordered_ids(table, "row_order")? {
-      let _row = child_map(&rows_by_id, &row_id)?.ok_or_else(|| invalid(format!("missing table row `{row_id}`")))?;
-      let mut row_cells = Vec::new();
-      let mut cells_by_column = BTreeMap::new();
-      for cell_id in cells_by_id.keys().map(|key| key.to_string()) {
-        let Some(cell) = child_map(&cells_by_id, &cell_id)? else {
-          continue;
+    // §P2b: read the durable ordered ids, then build the column list carrying
+    // each column's durable id + width. Malformed ids (never produced by our
+    // writers) are skipped so a single bad id can't sink the whole table.
+    let mut columns = Vec::new();
+    let mut column_ids = Vec::new();
+    for column_id_str in ordered_ids(table, TABLE_COLUMN_ORDER)? {
+      let Some(column_id) = parse_column_loro_id(&column_id_str) else {
+        continue;
+      };
+      let column = child_map(&columns_map, &column_id_str)?.ok_or_else(|| invalid(format!("missing table column `{column_id_str}`")))?;
+      columns.push(InputTableColumn {
+        id: column_id,
+        width: table_column_width(&column)?,
+      });
+      column_ids.push(column_id);
+    }
+    let mut row_ids = Vec::new();
+    for row_id_str in ordered_ids(table, TABLE_ROW_ORDER)? {
+      if let Some(row_id) = parse_row_loro_id(&row_id_str) {
+        row_ids.push(row_id);
+      }
+    }
+
+    // Read every stored cell into a raw record (for topology normalization) and
+    // keep its container keyed by coordinate for block projection.
+    let mut raw = Vec::new();
+    let mut cell_maps: FxHashMap<(u128, u128), LoroMap> = FxHashMap::default();
+    for cell_key in cells_by_id.keys().map(|key| key.to_string()) {
+      let Some(cell) = child_map(&cells_by_id, &cell_key)? else {
+        continue;
+      };
+      let (Some(row_id), Some(column_id)) = (
+        map_string_opt(&cell, "row_id")?.as_deref().and_then(parse_row_loro_id),
+        map_string_opt(&cell, "column_id")?.as_deref().and_then(parse_column_loro_id),
+      ) else {
+        continue;
+      };
+      let cell_id = parse_cell_loro_id(&cell_key).unwrap_or_else(|| CellId::from_coordinate(row_id, column_id));
+      raw.push(table_topology::RawCellRecord {
+        row_id,
+        column_id,
+        cell_id,
+        row_span: map_i64_opt(&cell, "row_span")?.and_then(i64_to_u16).unwrap_or(1),
+        col_span: map_i64_opt(&cell, "column_span")?.and_then(i64_to_u16).unwrap_or(1),
+      });
+      cell_maps.insert((row_id.0, column_id.0), cell);
+    }
+
+    // §P2b/FS-010: normalize to a full, well-formed grid + a defect list, so
+    // every peer reads the identical grid and the runtime repairs the canonical
+    // state. `normalize` returns exactly `row_ids.len() * column_ids.len()`
+    // cells, row-major.
+    let normalized = table_topology::normalize(&row_ids, &column_ids, &raw);
+    for defect in &normalized.defects {
+      defects.push(map_topology_defect(block_key, defect));
+    }
+
+    let column_count = column_ids.len();
+    let mut rows = Vec::with_capacity(row_ids.len());
+    for (row_index, &row_id) in row_ids.iter().enumerate() {
+      let mut cells = Vec::with_capacity(column_count);
+      for (col_index, &column_id) in column_ids.iter().enumerate() {
+        let normalized_cell = &normalized.cells[row_index * column_count + col_index];
+        let blocks = match cell_maps.get(&(row_id.0, column_id.0)) {
+          Some(cell_map) if !normalized_cell.synthesized => self.table_cell_blocks(cell_map, defects)?,
+          _ => vec![InputTableCellBlock::Paragraph(empty_input_paragraph())],
         };
-        if map_string_opt(&cell, "row_id")?.as_deref() != Some(row_id.as_str()) {
-          continue;
-        }
-        let column_id = map_string(&cell, "column_id")?;
-        if let Some(column_ix) = column_positions.get(&column_id) {
-          cells_by_column.insert(*column_ix, cell);
-        }
+        cells.push(InputTableCell {
+          id: normalized_cell.cell_id,
+          row_id,
+          column_id,
+          blocks,
+          row_span: normalized_cell.row_span,
+          col_span: normalized_cell.col_span,
+        });
       }
-      for (_, cell) in cells_by_column {
-        row_cells.push(self.table_cell(&cell, defects)?);
-      }
-      rows.push(InputTableRow { cells: row_cells });
+      rows.push(InputTableRow { id: row_id, cells });
     }
 
     Ok(InputTableBlock {
       rows,
-      column_widths,
+      columns,
       style: InputTableStyle {
         header_row: map_bool_opt(table, "header_row")?.unwrap_or(false),
       },
     })
   }
 
-  fn table_cell(&self, cell: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableCell> {
+  fn table_cell_blocks(&self, cell: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<Vec<InputTableCellBlock>> {
     let flow_id = map_string(cell, "flow_id")?;
     let flow = self.flow_text(&flow_id)?;
     let object_blocks = self.cell_nested_tables(cell, &flow)?;
@@ -523,20 +583,9 @@ impl<'a> Projector<'a> {
       })
       .collect::<io::Result<Vec<_>>>()?;
     if blocks.is_empty() {
-      blocks.push(InputTableCellBlock::Paragraph(InputParagraph {
-        style: gpui_flowtext::ParagraphStyle::Normal,
-        runs: Vec::new(),
-      }));
+      blocks.push(InputTableCellBlock::Paragraph(empty_input_paragraph()));
     }
-    Ok(InputTableCell {
-      blocks,
-      row_span: map_i64_opt(cell, "row_span")?
-        .and_then(i64_to_u16)
-        .unwrap_or(1),
-      col_span: map_i64_opt(cell, "column_span")?
-        .and_then(i64_to_u16)
-        .unwrap_or(1),
-    })
+    Ok(blocks)
   }
 
   fn cell_nested_tables(&self, cell: &LoroMap, flow: &LoroText) -> io::Result<BTreeMap<usize, LoroMap>> {
@@ -728,10 +777,10 @@ fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   });
 }
 
-#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs doc, text, flow/boundary context, id pools and defect sink")]
+#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs the prebuilt boundary indexes, flow/boundary context, id pools and defect sink")]
 fn push_paragraph_projection_metadata(
-  doc: &LoroDoc,
-  text: &LoroText,
+  paragraph_index: Option<&FxHashMap<usize, String>>,
+  paragraph_block_index: Option<&FxHashMap<usize, String>>,
   flow_id: &str,
   boundary: Option<usize>,
   block_ix: usize,
@@ -742,7 +791,7 @@ fn push_paragraph_projection_metadata(
   if let Some(paragraph_ids) = paragraph_ids {
     // §5/FS-004: a boundary with no durable paragraph metadata gets a fabricated,
     // projection-only id and is reported so the runtime writes a real record.
-    let id = match boundary.and_then(|boundary| paragraph_loro_id_at_boundary(doc, text, boundary)) {
+    let id = match boundary.and_then(|boundary| paragraph_index.and_then(|index| index.get(&boundary)).cloned()) {
       Some(id) => id,
       None => {
         let fabricated_id = format!("paragraph.projection.{block_ix}");
@@ -758,7 +807,7 @@ fn push_paragraph_projection_metadata(
   }
   if let Some(block_ids) = block_ids {
     // §5/FS-005: mirror the paragraph-metadata report for the paragraph block registry.
-    let id = match boundary.and_then(|boundary| paragraph_block_loro_id_at_boundary(doc, text, boundary)) {
+    let id = match boundary.and_then(|boundary| paragraph_block_index.and_then(|index| index.get(&boundary)).cloned()) {
       Some(id) => id,
       None => {
         let fabricated_id = format!("paragraph_block.projection.{block_ix}");
@@ -774,50 +823,73 @@ fn push_paragraph_projection_metadata(
   }
 }
 
-fn paragraph_loro_id_at_boundary(doc: &LoroDoc, text: &LoroText, boundary: usize) -> Option<String> {
+/// Build a `boundary position → paragraph metadata loro id` index for `text` in a
+/// SINGLE pass over the paragraph registry. Projecting a flow calls this once and
+/// then does O(1) lookups per boundary — replacing the former
+/// `paragraph_loro_id_at_boundary` which rescanned every paragraph record for each
+/// boundary, an O(paragraphs²·chars) hot path that hung the CRDT actor thread when
+/// materializing a large document.
+///
+/// Selection matches the previous scan exactly: keys are visited in sorted order
+/// (via [`map_keys`]) so the lexicographically-smallest id wins a shared boundary,
+/// except boundary 0 always prefers `ROOT_FIRST_PARAGRAPH_ID` when it anchors there.
+fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
+  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
-  let paragraphs = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten()?;
-  let mut matches = map_keys(&paragraphs)
-    .into_iter()
-    .filter(|key| {
-      child_map(&paragraphs, key)
-        .ok()
-        .flatten()
-        .and_then(|paragraph| {
-          live_cursor_pos(doc, text, &paragraph, "boundary_cursor").or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"))
-        })
-        == Some(boundary)
-    })
-    .collect::<Vec<_>>();
-  if boundary == 0
-    && let Some(ix) = matches
-      .iter()
-      .position(|key| key == ROOT_FIRST_PARAGRAPH_ID)
-  {
-    return Some(matches.swap_remove(ix));
+  let Some(paragraphs) = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten() else {
+    return index;
+  };
+  let mut root_first_at_zero = false;
+  for key in map_keys(&paragraphs) {
+    let Some(paragraph) = child_map(&paragraphs, &key).ok().flatten() else {
+      continue;
+    };
+    let Some(pos) = live_cursor_pos(doc, text, &paragraph, "boundary_cursor")
+      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"))
+    else {
+      continue;
+    };
+    if pos == 0 && key.as_str() == ROOT_FIRST_PARAGRAPH_ID {
+      root_first_at_zero = true;
+    }
+    index.entry(pos).or_insert(key);
   }
-  matches.into_iter().next()
+  if root_first_at_zero {
+    index.insert(0, ROOT_FIRST_PARAGRAPH_ID.to_string());
+  }
+  index
 }
 
-fn paragraph_block_loro_id_at_boundary(doc: &LoroDoc, text: &LoroText, boundary: usize) -> Option<String> {
+/// Build a `boundary position → paragraph *block* loro id` index for `text` in a
+/// single pass over the block registry (paragraph-kind blocks only). Companion to
+/// [`paragraph_ids_by_boundary`] with the same one-pass rationale and selection
+/// rule, except boundary 0 prefers `MAIN_BODY_BLOCK_ID`.
+fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
+  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
-  let blocks = child_map(&root, BLOCKS_BY_ID).ok().flatten()?;
-  let mut matches = map_keys(&blocks)
-    .into_iter()
-    .filter(|key| {
-      let Some(block) = child_map(&blocks, key).ok().flatten() else {
-        return false;
-      };
-      map_string_opt(&block, "kind").ok().flatten().as_deref() == Some("paragraph")
-        && live_cursor_pos(doc, text, &block, "anchor_cursor") == Some(boundary)
-    })
-    .collect::<Vec<_>>();
-  if boundary == 0
-    && let Some(ix) = matches.iter().position(|key| key == MAIN_BODY_BLOCK_ID)
-  {
-    return Some(matches.swap_remove(ix));
+  let Some(blocks) = child_map(&root, BLOCKS_BY_ID).ok().flatten() else {
+    return index;
+  };
+  let mut main_body_at_zero = false;
+  for key in map_keys(&blocks) {
+    let Some(block) = child_map(&blocks, &key).ok().flatten() else {
+      continue;
+    };
+    if map_string_opt(&block, "kind").ok().flatten().as_deref() != Some("paragraph") {
+      continue;
+    }
+    let Some(pos) = live_cursor_pos(doc, text, &block, "anchor_cursor") else {
+      continue;
+    };
+    if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
+      main_body_at_zero = true;
+    }
+    index.entry(pos).or_insert(key);
   }
-  matches.into_iter().next()
+  if main_body_at_zero {
+    index.insert(0, MAIN_BODY_BLOCK_ID.to_string());
+  }
+  index
 }
 
 fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str) -> Option<usize> {
@@ -827,7 +899,14 @@ fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str) -> 
     return None;
   }
   let pos = doc.get_cursor_pos(&cursor).ok()?.current.pos;
-  (text.to_string().chars().nth(pos).is_some()).then_some(pos)
+  // §perf: `pos` is a live Unicode-code-point index into `text`; validate it is in
+  // range with an O(1) length check. This previously materialized the ENTIRE flow
+  // string (`text.to_string()`) on every call — and this function runs once per
+  // paragraph/block record per boundary, so on a large document it became an
+  // O(records²·chars) allocation storm that pegged the CRDT actor thread at 100%
+  // CPU and never returned (the large-document collab/editor hang). See
+  // `paragraph_ids_by_boundary` for the companion per-boundary-scan removal.
+  (pos < text.len_unicode()).then_some(pos)
 }
 
 fn map_keys(map: &LoroMap) -> Vec<String> {
@@ -1038,6 +1117,33 @@ fn table_column_width(column: &LoroMap) -> io::Result<InputTableColumnWidth> {
   })
 }
 
+/// Map a pure [`table_topology`] grid defect onto a [`ProjectionDefect`] the
+/// runtime repair pipeline understands (§P2b / FS-010).
+fn map_topology_defect(block_key: &str, defect: &table_topology::TableTopologyDefect) -> ProjectionDefect {
+  use table_topology::TableTopologyDefect as Defect;
+  let (row_id, column_id, kind) = match defect {
+    Defect::MissingCell { row_id, column_id } => (row_id.0, column_id.0, TableTopologyKind::MissingCell),
+    Defect::DuplicateCoordinate { row_id, column_id } => (row_id.0, column_id.0, TableTopologyKind::DuplicateCoordinate),
+    Defect::InvalidSpan { row_id, column_id } => (row_id.0, column_id.0, TableTopologyKind::InvalidSpan),
+    Defect::OrphanCell { row_id, column_id } => (row_id.0, column_id.0, TableTopologyKind::OrphanCell),
+  };
+  ProjectionDefect::TableTopology {
+    table_block_key: block_key.to_string(),
+    row_id: Some(row_id),
+    column_id: Some(column_id),
+    kind,
+  }
+}
+
+/// The deterministic empty cell/quarantine paragraph the projector emits for a
+/// synthesized or empty table cell.
+fn empty_input_paragraph() -> InputParagraph {
+  InputParagraph {
+    style: gpui_flowtext::ParagraphStyle::Normal,
+    runs: Vec::new(),
+  }
+}
+
 fn parse_u128(value: &str) -> Option<u128> {
   value.parse::<u128>().ok()
 }
@@ -1154,8 +1260,8 @@ mod tests {
     let body = body_text(&doc);
     let root = doc.get_map(ROOT);
     let blocks = child_map(&root, BLOCKS_BY_ID)?.expect("blocks map");
-    let first_paragraph_id = paragraph_loro_id_at_boundary(&doc, &body, 0).expect("first paragraph id");
-    let first_block_id = paragraph_block_loro_id_at_boundary(&doc, &body, 0).expect("first paragraph block id");
+    let first_paragraph_id = paragraph_ids_by_boundary(&doc, &body).get(&0).cloned().expect("first paragraph id");
+    let first_block_id = paragraph_block_ids_by_boundary(&doc, &body).get(&0).cloned().expect("first paragraph block id");
     let image_id = map_keys(&blocks)
       .into_iter()
       .find(|key| {

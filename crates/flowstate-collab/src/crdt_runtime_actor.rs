@@ -238,8 +238,44 @@ enum RuntimeRequest {
   },
 }
 
+/// The request the CRDT actor is currently executing, shared with the hang
+/// watchdog thread. `None` between requests (the actor is idle, blocked in
+/// `recv_blocking`).
+struct InFlightRequest {
+  kind: &'static str,
+  started: std::time::Instant,
+  seq: u64,
+}
+
 fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
+  // §hang-watchdog: the CRDT actor runs on its own thread and logs almost nothing,
+  // yet a large-document collab session pegs it at ~100% CPU and never returns.
+  // Two failure shapes need distinguishing:
+  //   (a) a request FLOOD — many fast requests of one kind (a self-sustaining
+  //       request feedback loop). Caught by the between-requests heartbeat below.
+  //   (b) a SINGLE request that never returns — an infinite/quadratic loop inside
+  //       one handler. `recv_blocking` never wakes, so the loop-body heartbeat can
+  //       NEVER fire; only a SEPARATE thread can observe it. That is the watchdog
+  //       thread below, which names the stuck handler even while it spins.
+  // All watchdog output uses `error!` because the default log level is `error`
+  // (a `warn!` here is filtered out and silently produces nothing).
+  let in_flight: std::sync::Arc<std::sync::Mutex<Option<InFlightRequest>>> =
+    std::sync::Arc::new(std::sync::Mutex::new(None));
+  spawn_hang_watchdog(std::sync::Arc::downgrade(&in_flight));
+
+  let mut request_counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
+  let mut total_requests: u64 = 0;
+  let mut last_progress = std::time::Instant::now();
   while let Ok(request) = receiver.recv_blocking() {
+    let kind = runtime_request_kind(&request);
+    if last_progress.elapsed() >= std::time::Duration::from_millis(250) {
+      tracing::error!("CRDT actor busy (hang watchdog): entering {kind}; {total_requests} requests so far {request_counts:?}");
+      last_progress = std::time::Instant::now();
+    }
+    if let Ok(mut slot) = in_flight.lock() {
+      *slot = Some(InFlightRequest { kind, started: std::time::Instant::now(), seq: total_requests + 1 });
+    }
+    let request_started = std::time::Instant::now();
     match request {
       RuntimeRequest::ApplyEditorCommands {
         transaction_id,
@@ -303,6 +339,68 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
         send_reply(reply, runtime.set_author_identity(user_id, display_name));
       },
     }
+    if let Ok(mut slot) = in_flight.lock() {
+      *slot = None;
+    }
+    let request_ms = request_started.elapsed().as_millis();
+    total_requests += 1;
+    *request_counts.entry(kind).or_insert(0) += 1;
+    if request_ms > 250 {
+      tracing::error!("slow CRDT actor request (hang watchdog): {kind} took {request_ms}ms (request #{total_requests})");
+    }
+  }
+}
+
+/// Watches the actor's in-flight request from a separate thread so a handler
+/// stuck in an infinite loop (never returning to `recv_blocking`) is still named
+/// in the log. Exits when the actor loop drops its `Arc` (the `Weak` fails to
+/// upgrade). See `runtime_loop`'s §hang-watchdog note for why this must be a
+/// distinct thread.
+fn spawn_hang_watchdog(in_flight: std::sync::Weak<std::sync::Mutex<Option<InFlightRequest>>>) {
+  let _ = std::thread::Builder::new()
+    .name("flowstate-crdt-hang-watchdog".to_string())
+    .spawn(move || {
+      let mut last_reported_seq: Option<u64> = None;
+      loop {
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let Some(slot) = in_flight.upgrade() else {
+          break;
+        };
+        let Ok(guard) = slot.lock() else {
+          continue;
+        };
+        if let Some(current) = guard.as_ref() {
+          let elapsed_ms = current.started.elapsed().as_millis();
+          if elapsed_ms > 1000 {
+            // Fires every 500ms while the SAME request stays in-flight, so the log
+            // shows the handler is spinning (not just slow). `first-seen` marks the
+            // transition so the culprit stands out from the repeats.
+            let marker = if last_reported_seq == Some(current.seq) { "still stuck" } else { "STUCK (first-seen)" };
+            tracing::error!(
+              "CRDT actor {marker}: request #{} kind={} has not returned in {elapsed_ms}ms — likely an infinite/quadratic loop inside this handler",
+              current.seq,
+              current.kind,
+            );
+            last_reported_seq = Some(current.seq);
+          }
+        }
+      }
+    });
+}
+
+/// Short stable name of a runtime request, for the actor-loop hang watchdog.
+fn runtime_request_kind(request: &RuntimeRequest) -> &'static str {
+  match request {
+    RuntimeRequest::ApplyEditorCommands { .. } => "apply-editor-commands",
+    RuntimeRequest::Command { .. } => "command",
+    RuntimeRequest::ImportRemoteUpdate { .. } => "import-remote-update",
+    RuntimeRequest::ProjectionSnapshot { .. } => "projection-snapshot",
+    RuntimeRequest::OplogVersionVector { .. } => "oplog-version-vector",
+    RuntimeRequest::ExportUpdatesFor { .. } => "export-updates-for",
+    RuntimeRequest::SnapshotBytes { .. } => "snapshot-bytes",
+    RuntimeRequest::ResolvePresenceCarets { .. } => "resolve-presence-carets",
+    RuntimeRequest::PresenceSelection { .. } => "presence-selection",
+    _ => "other",
   }
 }
 

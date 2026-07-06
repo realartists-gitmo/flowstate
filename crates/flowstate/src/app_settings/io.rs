@@ -1,6 +1,121 @@
+use std::{
+  collections::HashMap,
+  sync::{Mutex, OnceLock},
+};
+
+use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
+
+type CommandKeyCache = HashMap<crate::commands::CommandId, Vec<String>>;
+
+#[derive(Clone)]
+struct CachedAppSettings {
+  path: PathBuf,
+  settings: AppSettings,
+  effective_keymap: crate::commands::Keymap,
+  keys_by_command: CommandKeyCache,
+}
+
+static APP_SETTINGS_CACHE: OnceLock<Mutex<Option<CachedAppSettings>>> = OnceLock::new();
+static APP_SETTINGS_WATCHER: OnceLock<Mutex<Option<RecommendedWatcher>>> = OnceLock::new();
+
+fn app_settings_cache() -> &'static Mutex<Option<CachedAppSettings>> {
+  APP_SETTINGS_CACHE.get_or_init(|| Mutex::new(None))
+}
+
+fn invalidate_app_settings_cache() {
+  if let Ok(mut cache) = app_settings_cache().lock() {
+    *cache = None;
+  }
+}
+
+fn start_app_settings_watcher(path: &std::path::Path) {
+  let Some(parent) = path.parent().map(PathBuf::from) else {
+    return;
+  };
+  if let Err(error) = fs::create_dir_all(&parent) {
+    tracing::warn!(error = %error, path = %parent.display(), "failed to create app settings directory for watcher");
+    return;
+  }
+  let watcher_slot = APP_SETTINGS_WATCHER.get_or_init(|| Mutex::new(None));
+  let Ok(mut watcher_slot) = watcher_slot.lock() else {
+    return;
+  };
+  if watcher_slot.is_some() {
+    return;
+  }
+
+  let watcher = RecommendedWatcher::new(
+    move |event: notify::Result<notify::Event>| {
+      if event.is_ok() {
+        invalidate_app_settings_cache();
+      }
+    },
+    NotifyConfig::default(),
+  );
+  let Ok(mut watcher) = watcher else {
+    tracing::warn!(path = %parent.display(), "failed to create app settings watcher");
+    return;
+  };
+  if let Err(error) = watcher.watch(&parent, RecursiveMode::NonRecursive) {
+    tracing::warn!(error = %error, path = %parent.display(), "failed to watch app settings directory");
+    return;
+  }
+  *watcher_slot = Some(watcher);
+}
+
+fn effective_keymap_for(settings: &AppSettings) -> crate::commands::Keymap {
+  if settings.keymap.is_empty() {
+    crate::commands::Keymap::defaults()
+  } else {
+    crate::commands::Keymap {
+      entries: settings.keymap.clone(),
+    }
+  }
+}
+
+fn keys_by_command_for(keymap: &crate::commands::Keymap) -> CommandKeyCache {
+  let mut keys = CommandKeyCache::new();
+  for entry in &keymap.entries {
+    keys
+      .entry(entry.command)
+      .or_default()
+      .push(entry.key.clone());
+  }
+  keys
+}
+
+fn cached_settings_from(settings: AppSettings, path: PathBuf) -> CachedAppSettings {
+  let effective_keymap = effective_keymap_for(&settings);
+  let keys_by_command = keys_by_command_for(&effective_keymap);
+  CachedAppSettings {
+    path,
+    settings,
+    effective_keymap,
+    keys_by_command,
+  }
+}
+
 #[hotpath::measure]
 pub fn load_app_settings() -> AppSettings {
-  load_app_settings_from_path(settings_path()).unwrap_or_default()
+  load_cached_app_settings().settings
+}
+
+fn load_cached_app_settings() -> CachedAppSettings {
+  let path = settings_path();
+  start_app_settings_watcher(&path);
+
+  if let Ok(cache) = app_settings_cache().lock()
+    && let Some(cached) = cache.as_ref().filter(|cached| cached.path == path)
+  {
+    return cached.clone();
+  }
+
+  let settings = load_app_settings_from_path(path.clone()).unwrap_or_default();
+  let cached = cached_settings_from(settings, path);
+  if let Ok(mut cache) = app_settings_cache().lock() {
+    *cache = Some(cached.clone());
+  }
+  cached
 }
 
 fn load_app_settings_from_path(path: PathBuf) -> io::Result<AppSettings> {
@@ -58,12 +173,24 @@ pub fn load_keymap_entries() -> Vec<crate::commands::KeymapEntry> {
 }
 
 pub fn load_keymap() -> crate::commands::Keymap {
-  let entries = load_keymap_entries();
-  if entries.is_empty() {
-    crate::commands::Keymap::defaults()
-  } else {
-    crate::commands::Keymap { entries }
-  }
+  load_cached_app_settings().effective_keymap
+}
+
+#[hotpath::measure]
+pub fn load_keys_for_command(command: crate::commands::CommandId) -> Vec<String> {
+  load_cached_app_settings()
+    .keys_by_command
+    .get(&command)
+    .cloned()
+    .unwrap_or_default()
+}
+
+#[hotpath::measure]
+pub fn load_first_key_for_command(command: crate::commands::CommandId) -> Option<String> {
+  load_cached_app_settings()
+    .keys_by_command
+    .get(&command)
+    .and_then(|keys| keys.first().cloned())
 }
 
 /// §15/§31: load the stable per-install durable author identity, minting and
@@ -168,7 +295,14 @@ pub fn save_keymap_entries(keymap: Vec<crate::commands::KeymapEntry>) -> io::Res
 
 #[hotpath::measure]
 pub fn save_app_settings(settings: AppSettings) -> io::Result<()> {
-  save_app_settings_to_path(&settings, settings_path())
+  let path = settings_path();
+  start_app_settings_watcher(&path);
+  save_app_settings_to_path(&settings, path.clone())?;
+  let cached = cached_settings_from(settings, path);
+  if let Ok(mut cache) = app_settings_cache().lock() {
+    *cache = Some(cached);
+  }
+  Ok(())
 }
 
 fn save_app_settings_to_path(settings: &AppSettings, path: PathBuf) -> io::Result<()> {

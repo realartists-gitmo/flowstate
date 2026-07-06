@@ -1113,6 +1113,9 @@ impl CollabSession {
   }
 
   pub(super) fn apply_runtime_events(&mut self, events: Vec<RuntimeEvent>, apply_projection: bool, cx: &mut Context<Self>) -> Result<()> {
+    // §hang-watchdog: the main-thread handler for each incoming collab update.
+    let apply_started = std::time::Instant::now();
+    let event_count = events.len();
     for event in events {
       fidelity::event(FidelityClass::Projection, "apply-runtime-event", || {
         format!("session={} kind={} apply_projection={apply_projection}", self.session, runtime_event_kind(&event))
@@ -1162,6 +1165,10 @@ impl CollabSession {
         | RuntimeEvent::RevisionOpened { .. }
         | RuntimeEvent::SelectionRestored { .. } => {},
       }
+    }
+    let apply_ms = apply_started.elapsed().as_millis();
+    if apply_ms > 150 {
+      tracing::warn!("slow collab apply_runtime_events (hang watchdog): {apply_ms}ms, events={event_count}");
     }
     Ok(())
   }

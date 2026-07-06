@@ -162,7 +162,8 @@ fn export_table(table: &TableBlock, theme: &DocumentTheme, context: &SectionCont
     || "table has header_row set but no rows; w:tblHeader marker not emitted".to_string(),
   );
   let content_width = context.content_width_twips.max(1);
-  let mut grid = compute_grid_twips(&table.column_widths, content_width);
+  let column_widths: Vec<TableColumnWidth> = table.columns.iter().map(|column| column.width.clone()).collect();
+  let mut grid = compute_grid_twips(&column_widths, content_width);
   if grid.is_empty() {
     // No canonical column widths: derive an equal-width grid from the widest row
     // so column spans and vertical merges still resolve.

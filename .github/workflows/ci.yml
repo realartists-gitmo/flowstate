@@ -95,6 +95,9 @@ jobs:
 
       # Runs the binaries built in "Build test binaries" (nothing to recompile);
       # xvfb + software Vulkan cover any test that builds a gpui::App context.
+      # The default (fast) suite. The multi_peer_convergence fuzzers run here
+      # (they converge in ~0.5s). Only the `caret_soak` reconcile-race soak is
+      # still `#[ignore]`d for wall-clock (~66s); run it explicitly when needed.
       - name: cargo test
         run: xvfb-run -a cargo test --workspace
         env:

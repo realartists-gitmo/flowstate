@@ -123,7 +123,7 @@ impl RichTextEditor {
       return;
     }
     if event.dragging()
-      && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block
+      && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block
       && let Some((
         BlockSelection::TableCell {
           row_ix: hit_row,

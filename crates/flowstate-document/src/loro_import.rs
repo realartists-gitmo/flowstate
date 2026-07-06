@@ -14,7 +14,10 @@ use crate::{
   AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
   MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
   ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
-  loro_schema::{ASSETS_BY_ID, REVISIONS, SectionPageAttrs, write_section_page_attrs},
+  loro_schema::{
+    ASSETS_BY_ID, REVISIONS, SectionPageAttrs, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
+    TABLE_ROWS_BY_ID, cell_flow_loro_id, cell_loro_id, column_loro_id, row_loro_id, write_section_page_attrs,
+  },
 };
 
 /// Canonical result of an external import. The Loro document is authoritative;
@@ -175,7 +178,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
         let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, *anchor_pos)?;
-        import_table(&flows, &block, table, &durable_block_id)?;
+        import_table(&flows, &block, table)?;
       },
       _ => unreachable!("flow import plan must preserve document block shape"),
     }
@@ -528,13 +531,13 @@ fn push_rich_text_insert(delta: &mut Vec<TextDelta>, value: &str, attributes: Op
   });
 }
 
-fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &str) -> LoroResult<()> {
-  let table_map = block.ensure_mergeable_map("table")?;
-  let row_order = table_map.ensure_mergeable_movable_list("row_order")?;
-  let column_order = table_map.ensure_mergeable_movable_list("column_order")?;
-  let rows_by_id = table_map.ensure_mergeable_map("rows_by_id")?;
-  let columns_by_id = table_map.ensure_mergeable_map("columns_by_id")?;
-  let cells_by_id = table_map.ensure_mergeable_map("cells_by_id")?;
+fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroResult<()> {
+  let table_map = block.ensure_mergeable_map(TABLE_KEY)?;
+  let row_order = table_map.ensure_mergeable_movable_list(TABLE_ROW_ORDER)?;
+  let column_order = table_map.ensure_mergeable_movable_list(TABLE_COLUMN_ORDER)?;
+  let rows_by_id = table_map.ensure_mergeable_map(TABLE_ROWS_BY_ID)?;
+  let columns_by_id = table_map.ensure_mergeable_map(TABLE_COLUMNS_BY_ID)?;
+  let cells_by_id = table_map.ensure_mergeable_map(TABLE_CELLS_BY_ID)?;
   table_map.insert("container_id", table_map.id().to_string())?;
   table_map.insert("row_order_container_id", row_order.id().to_string())?;
   table_map.insert("column_order_container_id", column_order.id().to_string())?;
@@ -543,71 +546,53 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
   table_map.insert("cells_container_id", cells_by_id.id().to_string())?;
   table_map.insert("header_row", table.style.header_row)?;
 
-  clear_movable_list(&row_order)?;
-  clear_movable_list(&column_order)?;
-  clear_map(&rows_by_id)?;
-  clear_map(&columns_by_id)?;
-  clear_map(&cells_by_id)?;
-
-  let column_count = table.column_widths.len().max(
-    table
-      .rows
-      .iter()
-      .map(|row| {
-        row
-          .cells
-          .iter()
-          .map(|cell| usize::from(cell.col_span.max(1)))
-          .sum()
-      })
-      .max()
-      .unwrap_or(0),
-  );
-  let mut column_ids = Vec::with_capacity(column_count);
-  for column_ix in 0..column_count {
-    let column_id = format!("{prefix}.column.{column_ix}");
+  // §P2b create-only: import builds a brand-new table, but it uses the SAME
+  // durable-id `ensure` scheme as the incremental edit path (never clear/rekey),
+  // so row/column/cell identity is stable and concurrent creation of the same id
+  // merges (LWW) instead of duplicating.
+  for column in &table.columns {
+    let column_id = column_loro_id(column.id);
     column_order.push(column_id.as_str())?;
-    column_ids.push(column_id.clone());
-    let column = columns_by_id.ensure_mergeable_map(&column_id)?;
-    column.insert("id", column_id.as_str())?;
-    column.insert("container_id", column.id().to_string())?;
-    let attrs = column.ensure_mergeable_map("attrs")?;
-    column.insert("attrs_container_id", attrs.id().to_string())?;
-    match table.column_widths.get(column_ix) {
-      Some(TableColumnWidth::Auto) | None => column.insert("width_kind", "auto")?,
-      Some(TableColumnWidth::FixedPx(px)) => {
-        column.insert("width_kind", "fixed_px")?;
-        column.insert("width_px", i64::from(*px))?;
+    let column_map = columns_by_id.ensure_mergeable_map(&column_id)?;
+    column_map.insert("id", column_id.as_str())?;
+    column_map.insert("container_id", column_map.id().to_string())?;
+    let attrs = column_map.ensure_mergeable_map("attrs")?;
+    column_map.insert("attrs_container_id", attrs.id().to_string())?;
+    match column.width {
+      TableColumnWidth::Auto => column_map.insert("width_kind", "auto")?,
+      TableColumnWidth::FixedPx(px) => {
+        column_map.insert("width_kind", "fixed_px")?;
+        column_map.insert("width_px", i64::from(px))?;
       },
-      Some(TableColumnWidth::Fraction(fraction)) => {
-        column.insert("width_kind", "fraction")?;
-        column.insert("fraction", i64::from(*fraction))?;
+      TableColumnWidth::Fraction(fraction) => {
+        column_map.insert("width_kind", "fraction")?;
+        column_map.insert("fraction", i64::from(fraction))?;
       },
     };
   }
 
-  for (row_ix, row) in table.rows.iter().enumerate() {
-    let row_id = format!("{prefix}.row.{row_ix}");
+  for row in &table.rows {
+    let row_id = row_loro_id(row.id);
     row_order.push(row_id.as_str())?;
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
     row_map.insert("container_id", row_map.id().to_string())?;
     let attrs = row_map.ensure_mergeable_map("attrs")?;
     row_map.insert("attrs_container_id", attrs.id().to_string())?;
-    let mut column_ix = 0_usize;
-    for (cell_ix, cell) in row.cells.iter().enumerate() {
-      let cell_id = format!("{row_id}.cell.{cell_ix}");
-      let column_id = &column_ids[column_ix];
+    for cell in &row.cells {
+      let cell_id = cell_loro_id(cell.id);
+      let column_id = column_loro_id(cell.column_id);
+      let cell_row_id = row_loro_id(cell.row_id);
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
       cell_map.insert("id", cell_id.as_str())?;
       cell_map.insert("container_id", cell_map.id().to_string())?;
-      cell_map.insert("row_id", row_id.as_str())?;
+      cell_map.insert("row_id", cell_row_id.as_str())?;
       cell_map.insert("column_id", column_id.as_str())?;
       cell_map.insert("row_span", i64::from(cell.row_span))?;
       cell_map.insert("column_span", i64::from(cell.col_span))?;
       let attrs = cell_map.ensure_mergeable_map("attrs")?;
       cell_map.insert("attrs_container_id", attrs.id().to_string())?;
-      let flow_id = format!("{cell_id}.flow");
+      let flow_id = cell_flow_loro_id(&cell_id);
       cell_map.insert("flow_id", flow_id.as_str())?;
       let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
       let nested_tables_by_id = cell_map.ensure_mergeable_map("nested_tables_by_id")?;
@@ -654,9 +639,8 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock, prefix: &s
           nested_map.insert("anchor_cursor", cursor.encode())?;
         }
         nested_map.ensure_mergeable_map("attrs")?;
-        import_table(flows, &nested_map, nested, &format!("{cell_id}.nested.{block_ix}"))?;
+        import_table(flows, &nested_map, nested)?;
       }
-      column_ix += usize::from(cell.col_span.max(1));
     }
   }
   Ok(())
@@ -978,6 +962,45 @@ mod tests {
     assert_eq!(imported.projection.paragraphs.len(), 2_000);
     assert_eq!(imported.projection.frontier, imported.doc.state_frontiers().encode());
     assert_eq!(paragraph_text(&imported.projection, 1_999), "paragraph 1999");
+    Ok(())
+  }
+
+  #[test]
+  fn large_document_materializes_without_quadratic_boundary_scan() -> io::Result<()> {
+    // Regression for the large-document collab/editor hang. Unlike the import path
+    // above (which reuses its freshly-built projection), `document_from_loro`
+    // RE-derives the projection from the canonical doc, resolving a durable
+    // paragraph + paragraph-block id for every boundary. That resolution formerly
+    // rescanned every paragraph/block record per boundary and materialized the
+    // whole body string per record — O(paragraphs²·chars) — which pegged the CRDT
+    // actor thread at 100% CPU and never returned. With the one-pass boundary index
+    // it is ~linear; this test projecting a 2,000-paragraph doc to completion is the
+    // guard (reintroducing the quadratic would hang the suite), and matching the
+    // import projection's ids proves the index selects the same id the per-boundary
+    // scan did, at scale.
+    let paragraphs = (0..2_000)
+      .map(|ix| DocumentParagraphInput {
+        style: if ix % 11 == 0 { ParagraphStyle::Custom(1) } else { ParagraphStyle::Normal },
+        runs: vec![gpui_flowtext::DocumentRunInput {
+          text: format!("paragraph {ix}"),
+          styles: RunStyles::default(),
+        }],
+      })
+      .collect();
+    let imported = import_paragraphs_as_loro(DocumentTheme::default(), paragraphs, "Large projection")?;
+
+    let projected = crate::loro_projection::document_from_loro(&imported.doc)?;
+
+    assert_eq!(projected.paragraphs.len(), 2_000);
+    assert_eq!(paragraph_text(&projected, 1_999), "paragraph 1999");
+    // Re-derived ids match the import projection's ids (the one-pass index resolves
+    // every boundary to the identical durable id the old per-boundary scan did)...
+    assert_eq!(projected.ids.paragraph_ids, imported.projection.ids.paragraph_ids);
+    assert_eq!(projected.ids.block_ids, imported.projection.ids.block_ids);
+    // ...and every boundary resolved to a distinct durable id (no collisions, no
+    // fabricated fallbacks from a mis-keyed index).
+    let distinct_paragraph_ids = projected.ids.paragraph_ids.iter().map(|id| id.0).collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(distinct_paragraph_ids.len(), 2_000, "every boundary must resolve to a unique paragraph id");
     Ok(())
   }
 

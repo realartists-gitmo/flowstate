@@ -11,7 +11,7 @@ impl RichTextEditor {
     if self.clear_matching_armed_inline_tool(ArmedInlineTool::Strikethrough, cx) {
       return;
     }
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       let Some(selection_range) = self.table_cell_selection_range() else {
         self.armed_inline_tool = Some(ArmedInlineTool::Strikethrough);
         cx.notify();
@@ -263,7 +263,7 @@ impl RichTextEditor {
   }
 
   pub fn clear_formatting(&mut self, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
         paragraph.paragraph.style = ParagraphStyle::Normal;
         for run in &mut paragraph.paragraph.runs {
@@ -295,7 +295,7 @@ impl RichTextEditor {
   }
 
   pub fn apply_run_style_to_selection(&mut self, style: RunStyle, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       let Some(selection_range) = self.table_cell_selection_range() else {
         return;
       };
@@ -334,7 +334,7 @@ impl RichTextEditor {
   }
 
   pub fn set_paragraph_style_for_selection(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block {
       self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
         if paragraph.paragraph.style != style {
           paragraph.paragraph.style = style;

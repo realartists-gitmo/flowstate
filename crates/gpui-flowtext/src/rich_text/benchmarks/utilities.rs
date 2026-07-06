@@ -129,8 +129,8 @@ fn hash_paragraph(paragraph: &Paragraph, hasher: &mut impl Hasher) {
 fn hash_table(table: &TableBlock, hasher: &mut impl Hasher) {
   table.version.hash(hasher);
   table.style.header_row.hash(hasher);
-  table.column_widths.len().hash(hasher);
-  for width in &table.column_widths {
+  table.columns.len().hash(hasher);
+  for width in table.columns.iter().map(|column| &column.width) {
     match width {
       TableColumnWidth::Auto => 0u8.hash(hasher),
       TableColumnWidth::FixedPx(value) => {
