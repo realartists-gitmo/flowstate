@@ -966,6 +966,25 @@ mod tests {
   }
 
   #[test]
+  #[ignore = "diagnostic timing, run explicitly with --ignored --nocapture"]
+  fn diag_projection_scaling() -> io::Result<()> {
+    for count in [1_000usize, 2_000, 4_000, 8_000] {
+      let paragraphs = (0..count)
+        .map(|ix| DocumentParagraphInput {
+          style: ParagraphStyle::Normal,
+          runs: vec![gpui_flowtext::DocumentRunInput { text: format!("paragraph number {ix} with some body text"), styles: RunStyles::default() }],
+        })
+        .collect();
+      let imported = import_paragraphs_as_loro(DocumentTheme::default(), paragraphs, "scaling")?;
+      let start = std::time::Instant::now();
+      let projected = crate::loro_projection::document_from_loro(&imported.doc)?;
+      let elapsed = start.elapsed();
+      eprintln!("document_from_loro: {count:>5} paragraphs -> {:>8.1}ms  ({} blocks)", elapsed.as_secs_f64() * 1000.0, projected.paragraphs.len());
+    }
+    Ok(())
+  }
+
+  #[test]
   fn large_document_materializes_without_quadratic_boundary_scan() -> io::Result<()> {
     // Regression for the large-document collab/editor hang. Unlike the import path
     // above (which reuses its freshly-built projection), `document_from_loro`

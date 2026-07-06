@@ -840,19 +840,37 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
     return index;
   };
   let mut root_first_at_zero = false;
+  let _diag_start = std::time::Instant::now();
+  let mut _diag_cursor_nanos = 0u128;
+  let mut _diag_lookup_nanos = 0u128;
+  let mut _diag_records = 0usize;
   for key in map_keys(&paragraphs) {
-    let Some(paragraph) = child_map(&paragraphs, &key).ok().flatten() else {
+    let _l0 = std::time::Instant::now();
+    let paragraph = child_map(&paragraphs, &key).ok().flatten();
+    _diag_lookup_nanos += _l0.elapsed().as_nanos();
+    let Some(paragraph) = paragraph else {
       continue;
     };
-    let Some(pos) = live_cursor_pos(doc, text, &paragraph, "boundary_cursor")
-      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"))
-    else {
+    _diag_records += 1;
+    let _c0 = std::time::Instant::now();
+    let resolved = live_cursor_pos(doc, text, &paragraph, "boundary_cursor")
+      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"));
+    _diag_cursor_nanos += _c0.elapsed().as_nanos();
+    let Some(pos) = resolved else {
       continue;
     };
     if pos == 0 && key.as_str() == ROOT_FIRST_PARAGRAPH_ID {
       root_first_at_zero = true;
     }
     index.entry(pos).or_insert(key);
+  }
+  if _diag_records > 500 {
+    eprintln!(
+      "[diag] paragraph_ids_by_boundary: {_diag_records} records, total {:.1}ms | cursor {:.1}ms | map-lookup {:.1}ms",
+      _diag_start.elapsed().as_secs_f64() * 1000.0,
+      _diag_cursor_nanos as f64 / 1e6,
+      _diag_lookup_nanos as f64 / 1e6,
+    );
   }
   if root_first_at_zero {
     index.insert(0, ROOT_FIRST_PARAGRAPH_ID.to_string());
