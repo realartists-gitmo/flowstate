@@ -30,7 +30,7 @@ use crate::cleaner::CleanedDocx;
 use flowstate_document::{
   AssetId, AssetRecord, CellId, ColumnId, DocumentParagraphInput, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing,
   InputParagraph, InputRun, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow,
-  InputTableStyle, ParagraphStyle, RowId, RunStyles,
+  InputTableStyle, ParagraphStyle, RowId, RunStyles, SOFT_LINE_BREAK,
 };
 
 use super::omml;
@@ -374,7 +374,14 @@ fn collect_run_text(node: &XmlNode, out: &mut String) {
     match child_node.local.as_str() {
       "t" => out.push_str(&child_node.text),
       "tab" => out.push('\t'),
-      "br" | "cr" => out.push('\n'),
+      // A docx <w:br>/<w:cr> is an INTRA-paragraph line break (Word Shift+Enter),
+      // not a paragraph boundary. Emit the model's soft-break char (U+2028), never
+      // '\n' — '\n' is the paragraph-separator in the body flow, so pushing it here
+      // fabricates a bare boundary with no paragraph metadata/block/style record,
+      // which the full reprojection then reports as missing_paragraph_* defects and
+      // segments differently from the incremental projection (divergence). The
+      // exporter already round-trips SOFT_LINE_BREAK back to a TextWrapping <w:br>.
+      "br" | "cr" => out.push(SOFT_LINE_BREAK),
       _ => collect_run_text(child_node, out),
     }
   }
