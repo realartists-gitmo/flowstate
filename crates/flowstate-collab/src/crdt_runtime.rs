@@ -385,14 +385,14 @@ impl ProjectionRuntimeIndex {
     }
   }
 
-  fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize) -> Vec<usize> {
+  fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize, live_starts: &[usize]) -> Vec<usize> {
     let mut touched = std::collections::BTreeSet::new();
     for range in ranges
       .iter()
       .filter(|range| range.flow_id == ROOT_BODY_FLOW_ID)
     {
-      let start = self.paragraph_at_body_unicode(range.unicode_start, paragraph_count);
-      let end = self.paragraph_at_body_unicode(range.unicode_start.saturating_add(range.unicode_len), paragraph_count);
+      let start = self.paragraph_at_body_unicode_with(live_starts, range.unicode_start, paragraph_count);
+      let end = self.paragraph_at_body_unicode_with(live_starts, range.unicode_start.saturating_add(range.unicode_len), paragraph_count);
       if let Some(start) = start {
         touched.insert(start);
       }
@@ -404,6 +404,28 @@ impl ProjectionRuntimeIndex {
       }
     }
     touched.into_iter().collect()
+  }
+
+  fn paragraph_at_body_unicode_with(&self, live_starts: &[usize], unicode: usize, paragraph_count: usize) -> Option<usize> {
+    // The changed-range unicode positions are in POST-import (new-body) coordinates,
+    // so map them against paragraph starts derived from the CURRENT Loro body, not the
+    // stale pre-import `paragraph_body_unicode_starts`. On the incremental path any
+    // boundary (`\n`) insert/delete forces a full rebuild, so the paragraph count is
+    // stable and `live_starts[i]` aligns with projection paragraph `i`. Falls back to
+    // the prebuilt index only when live starts are unavailable/mismatched.
+    let starts = if live_starts.len() == paragraph_count && !live_starts.is_empty() {
+      live_starts
+    } else {
+      self.paragraph_body_unicode_starts.as_slice()
+    };
+    if paragraph_count == 0 || starts.is_empty() {
+      return None;
+    }
+    match starts.binary_search(&unicode) {
+      Ok(ix) => Some(ix.min(paragraph_count - 1)),
+      Err(0) => Some(0),
+      Err(ix) => Some((ix - 1).min(paragraph_count - 1)),
+    }
   }
 
   fn paragraph_at_body_unicode(&self, unicode: usize, paragraph_count: usize) -> Option<usize> {
@@ -1740,9 +1762,25 @@ impl CrdtRuntime {
         ..ProjectionInvalidation::default()
       };
       self.merge_subscription_invalidation(&mut invalidation);
-      let touched_paragraphs = self
-        .projection_index
-        .paragraphs_for_changed_ranges(&invalidation.changed_text_ranges, self.projection.paragraphs.len());
+      let live_starts = paragraph_unicode_starts_from_body(&body_text(&self.doc).to_string());
+      // Structural-change backstop: `live_starts.len()` is the POST-import paragraph
+      // count (one per body `\n`). If it differs from the pre-import projection count, a
+      // paragraph boundary was inserted or DELETED by the merge. The `inserted_structure`
+      // flag catches inserted boundaries directly, but a deleted boundary is only inferred
+      // from `deleted_range_contains_structure`, which maps the delete position against the
+      // STALE pre-import boundary index and can miss it after concurrent inserts shift
+      // coordinates — leaving the incremental path to keep a paragraph the authoritative
+      // rebuild dropped. A count mismatch is an unambiguous, coordinate-free signal to take
+      // the object-aware full rebuild instead.
+      if live_starts.len() != self.projection.paragraphs.len() {
+        invalidation.rebuild_required = true;
+        invalidation.fallback_reason = Some("body_paragraph_count_changed");
+      }
+      let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
+        &invalidation.changed_text_ranges,
+        self.projection.paragraphs.len(),
+        &live_starts,
+      );
       if let Some(patches) = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs) {
         self.apply_projection_patch_set(&patches);
         self.projection.frontier = self.doc.state_frontiers().encode();
@@ -2597,6 +2635,20 @@ impl CrdtRuntime {
     self.last_persisted_vv = self.doc.state_vv();
     Ok(())
   }
+}
+
+/// Body-unicode start position of each paragraph, derived from the LIVE Loro body.
+/// The body is `sentinel\n` then `paragraph\n` per boundary; every `\n` at unicode
+/// position `i` starts the following paragraph at `i + 1` (the sentinel starts
+/// paragraph 0). This is the POST-import coordinate space that subscription diff
+/// ranges use, so mapping changed ranges against it (rather than the stale pre-import
+/// projection index) picks the right paragraphs after concurrent inserts shift them.
+fn paragraph_unicode_starts_from_body(body: &str) -> Vec<usize> {
+  body
+    .chars()
+    .enumerate()
+    .filter_map(|(unicode_pos, ch)| (ch == '\n').then_some(unicode_pos + 1))
+    .collect()
 }
 
 fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSummary {

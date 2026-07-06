@@ -363,7 +363,7 @@ fn generate_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: us
   let paragraph_ix = ((next_seed(seed) >> 32) as usize) % paragraph_count;
   let text = flowstate_document::paragraph_text(projection, paragraph_ix);
 
-  match (next_seed(seed) >> 32) % 8 {
+  match (next_seed(seed) >> 32) % 10 {
     // Insert text; ~1/8 of inserts are an intra-paragraph soft line break (U+2028),
     // which must stay inside the paragraph and never become a body boundary.
     0..=2 => {
@@ -407,6 +407,33 @@ fn generate_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: us
       first: projection.ids.paragraph_ids[paragraph_ix - 1],
       second: projection.ids.paragraph_ids[paragraph_ix],
     }),
+    // Restyle a random sub-range of runs. Combined with soft-break inserts this drives
+    // the concurrent-import coordinate paths that surfaced the touched-paragraph and
+    // deleted-boundary divergences (fixed by the live-body-starts mapping + the
+    // paragraph-count rebuild backstop in crdt_runtime.rs).
+    6..=7 if !text.is_empty() => {
+      let a = random_char_boundary(&text, seed);
+      let b = random_char_boundary(&text, seed);
+      let (start, end) = if a <= b { (a, b) } else { (b, a) };
+      if start == end {
+        return None;
+      }
+      let styles = RunStyles {
+        semantic: if (next_seed(seed) >> 32).is_multiple_of(2) {
+          flowstate_document::RunSemanticStyle::Plain
+        } else {
+          flowstate_document::RunSemanticStyle::Custom(((next_seed(seed) >> 32) % 3) as u8)
+        },
+        direct_underline: (next_seed(seed) >> 32).is_multiple_of(3),
+        strikethrough: (next_seed(seed) >> 32).is_multiple_of(5),
+        highlight: None,
+      };
+      Some(EditorSemanticCommand::SetRunStyles {
+        paragraph: projection.ids.paragraph_ids[paragraph_ix],
+        range: start..end,
+        styles,
+      })
+    },
     // Toggle paragraph style.
     _ => Some(EditorSemanticCommand::SetParagraphStyle {
       paragraph: projection.ids.paragraph_ids[paragraph_ix],
@@ -506,6 +533,205 @@ fn npeer_fuzz_structural_fixture_paragraph_ops() -> Result<()> {
     for seed in [0xA1u64, 0xC3] {
       let base = structural_fixture()?;
       run_convergence_fuzz(peer_count, &base, 120, seed)?;
+    }
+  }
+  Ok(())
+}
+
+/// High-density coordinate-stress command generator: a heavier mix of intra-paragraph
+/// soft-break (U+2028) inserts and `SetRunStyles` sub-range restyles than the general
+/// fuzz generator, deliberately tuned to hammer the concurrent-remote-import coordinate
+/// paths — the touched-paragraph mapping (`paragraph_at_body_unicode_with`) and the
+/// deleted-boundary structural detection. Regressions here manifest as an incremental
+/// projection that drops a soft break (missed touched paragraph) or keeps a paragraph the
+/// authoritative rebuild dropped (missed deleted boundary). Used by
+/// `npeer_incremental_import_equivalence_under_coordinate_stress`.
+fn coordinate_stress_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+  let paragraph_count = projection.paragraphs.len();
+  if paragraph_count == 0 {
+    return None;
+  }
+  let paragraph_ix = ((next_seed(seed) >> 32) as usize) % paragraph_count;
+  let text = flowstate_document::paragraph_text(projection, paragraph_ix);
+  match (next_seed(seed) >> 32) % 10 {
+    0..=2 => {
+      let byte = random_char_boundary(&text, seed);
+      let insert = if (next_seed(seed) >> 32).is_multiple_of(4) {
+        "\u{2028}".to_string()
+      } else {
+        char::from(b'a' + ((next_seed(seed) >> 32) % 26) as u8).to_string()
+      };
+      Some(EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: paragraph_ix, byte },
+        text: insert,
+        styles: RunStyles::default(),
+      })
+    },
+    3 if !text.is_empty() => {
+      let chars: Vec<(usize, char)> = text.char_indices().collect();
+      let pick = ((next_seed(seed) >> 32) as usize) % chars.len();
+      let start = chars[pick].0;
+      let end = start + chars[pick].1.len_utf8();
+      Some(EditorSemanticCommand::DeleteRange {
+        range: DocumentOffset { paragraph: paragraph_ix, byte: start }..DocumentOffset { paragraph: paragraph_ix, byte: end },
+      })
+    },
+    4 => {
+      let byte = random_char_boundary(&text, seed);
+      let block_ix = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
+      Some(EditorSemanticCommand::SplitParagraph {
+        at: DocumentOffset { paragraph: paragraph_ix, byte },
+        source_paragraph: projection.ids.paragraph_ids[paragraph_ix],
+        source_block: projection.ids.block_ids[block_ix],
+        new_paragraph: ParagraphId(fresh_id(peer_ix, op_seq, 1)),
+        new_block: BlockId(fresh_id(peer_ix, op_seq, 2)),
+        inherited_style: projection.paragraphs[paragraph_ix].style,
+      })
+    },
+    5 if paragraph_ix > 0 => Some(EditorSemanticCommand::JoinParagraphs {
+      first: projection.ids.paragraph_ids[paragraph_ix - 1],
+      second: projection.ids.paragraph_ids[paragraph_ix],
+    }),
+    // SetRunStyles over a random sub-range.
+    6..=7 if !text.is_empty() => {
+      let a = random_char_boundary(&text, seed);
+      let b = random_char_boundary(&text, seed);
+      let (start, end) = if a <= b { (a, b) } else { (b, a) };
+      if start == end {
+        return None;
+      }
+      let styles = RunStyles {
+        semantic: if (next_seed(seed) >> 32).is_multiple_of(2) {
+          flowstate_document::RunSemanticStyle::Plain
+        } else {
+          flowstate_document::RunSemanticStyle::Custom(((next_seed(seed) >> 32) % 3) as u8)
+        },
+        direct_underline: (next_seed(seed) >> 32).is_multiple_of(3),
+        strikethrough: (next_seed(seed) >> 32).is_multiple_of(5),
+        highlight: None,
+      };
+      Some(EditorSemanticCommand::SetRunStyles {
+        paragraph: projection.ids.paragraph_ids[paragraph_ix],
+        range: start..end,
+        styles,
+      })
+    },
+    _ => Some(EditorSemanticCommand::SetParagraphStyle {
+      paragraph: projection.ids.paragraph_ids[paragraph_ix],
+      style: if (next_seed(seed) >> 32).is_multiple_of(2) {
+        ParagraphStyle::Normal
+      } else {
+        ParagraphStyle::Custom(((next_seed(seed) >> 32) % 4) as u8)
+      },
+    }),
+  }
+}
+
+/// Assert peer `peer_ix`'s incrementally-maintained projection equals a fresh full
+/// `document_from_loro` rebuild of its own doc (the materializer-equivalence invariant),
+/// dumping the accumulated event history on the first divergence for pinpoint debugging.
+fn assert_incremental_matches_fresh(peers: &[CrdtRuntime], peer_ix: usize, context: &str, history: &[String]) -> Result<bool> {
+  let incremental = peers[peer_ix].projection_snapshot()?;
+  let fresh = document_from_loro(peers[peer_ix].doc())?;
+  let inc_texts = paragraph_texts(&incremental);
+  let fresh_texts = paragraph_texts(&fresh);
+  if inc_texts != fresh_texts || incremental.ids.paragraph_ids != fresh.ids.paragraph_ids {
+    eprintln!("DIVERGENCE at peer {peer_ix} ({context})");
+    eprintln!("incremental paras ({}): {inc_texts:?}", inc_texts.len());
+    eprintln!("fresh       paras ({}): {fresh_texts:?}", fresh_texts.len());
+    eprintln!("incremental ids: {:?}", incremental.ids.paragraph_ids);
+    eprintln!("fresh       ids: {:?}", fresh.ids.paragraph_ids);
+    eprintln!("--- event history ({}) ---", history.len());
+    for (i, line) in history.iter().enumerate() {
+      eprintln!("  [{i}] {line}");
+    }
+    return Ok(false);
+  }
+  Ok(true)
+}
+
+/// Regression for the concurrent-import coordinate bugs (crdt_runtime.rs): under a heavy
+/// mix of soft-break inserts and run-style edits across peers with out-of-order delivery,
+/// each peer's incremental projection must equal a fresh rebuild after EVERY local apply
+/// AND EVERY remote import (not just at the converged end state — the divergences were
+/// transient-then-persistent). Before the fix, the incremental path dropped a soft break
+/// (touched-paragraph mapping used the stale pre-import unicode index) and kept a
+/// paragraph the authority dropped (deleted-boundary detection missed the structural
+/// change). Fixes: `paragraph_at_body_unicode_with` maps against live-body starts, plus a
+/// paragraph-count rebuild backstop.
+#[test]
+fn npeer_incremental_import_equivalence_under_coordinate_stress() -> Result<()> {
+  for peer_count in [2usize, 3] {
+    for seed_init in [0x1111u64, 0x2222, 0x3333, 0xB2, 0xC3, 0xDEAD] {
+      let base = new_loro_document("coordinate stress")?;
+      let mut peers = seeded_peers_from_loro(peer_count, &base)?;
+      synchronize_until_converged(&mut peers)?;
+      let mut queues: Vec<PeerQueues> = vec![vec![Vec::new(); peer_count]; peer_count];
+      let mut seed = seed_init.max(1);
+      let mut op_seq = 0u64;
+      let mut history: Vec<String> = Vec::new();
+      for step in 0..150u64 {
+        #[allow(clippy::needless_range_loop)]
+        for peer_ix in 0..peer_count {
+          let projection = peers[peer_ix].projection_snapshot()?;
+          let Some(command) = coordinate_stress_command(&mut seed, &projection, peer_ix, op_seq) else {
+            continue;
+          };
+          op_seq += 1;
+          let transaction_id = ((peer_ix as u128) << 96) | ((step as u128) << 40) | u128::from(op_seq);
+          match peers[peer_ix].apply_editor_commands(transaction_id, &projection.frontier, &[command.clone()], None) {
+            Ok(commit) => {
+              history.push(format!("peer {peer_ix} APPLY {command:?}"));
+              enqueue_local_updates(&mut queues, peer_ix, &commit.events);
+              if !assert_incremental_matches_fresh(&peers, peer_ix, &format!("after local apply step {step}"), &history)? {
+                panic!("divergence after local apply: N={peer_count} seed={seed_init:#x} step={step}");
+              }
+            },
+            Err(_) => {},
+          }
+        }
+        let deliveries = (next_seed(&mut seed) >> 32) % 4;
+        for _ in 0..deliveries {
+          let pending = pending_queue_pairs(&queues);
+          if pending.is_empty() {
+            break;
+          }
+          let (recipient_ix, sender_ix) = pending[((next_seed(&mut seed) >> 32) as usize) % pending.len()];
+          let queue = &mut queues[recipient_ix][sender_ix];
+          let position = ((next_seed(&mut seed) >> 32) as usize) % queue.len();
+          let update = queue.remove(position);
+          let events = peers[recipient_ix].import_remote_update(&update)?;
+          history.push(format!("peer {recipient_ix} IMPORT from {sender_ix}"));
+          enqueue_local_updates(&mut queues, recipient_ix, &events);
+          if !assert_incremental_matches_fresh(&peers, recipient_ix, &format!("after import step {step}"), &history)? {
+            panic!("divergence after import: N={peer_count} seed={seed_init:#x} step={step}");
+          }
+        }
+      }
+      // Checked drain: deliver each remaining update and verify equivalence right after.
+      for drain_step in 0..20_000u64 {
+        let pending = pending_queue_pairs(&queues);
+        if pending.is_empty() {
+          break;
+        }
+        let (recipient_ix, sender_ix) = pending[((next_seed(&mut seed) >> 32) as usize) % pending.len()];
+        let queue = &mut queues[recipient_ix][sender_ix];
+        let position = ((next_seed(&mut seed) >> 32) as usize) % queue.len();
+        let update = queue.remove(position);
+        let events = peers[recipient_ix].import_remote_update(&update)?;
+        history.push(format!("peer {recipient_ix} DRAIN-IMPORT from {sender_ix} (drain {drain_step})"));
+        enqueue_local_updates(&mut queues, recipient_ix, &events);
+        if !assert_incremental_matches_fresh(&peers, recipient_ix, &format!("after drain-import {drain_step}"), &history)? {
+          panic!("divergence during drain: N={peer_count} seed={seed_init:#x} drain_step={drain_step}");
+        }
+      }
+      synchronize_until_converged(&mut peers)?;
+      for peer_ix in 0..peer_count {
+        if !assert_incremental_matches_fresh(&peers, peer_ix, "after full drain", &history)? {
+          panic!("divergence after drain: N={peer_count} seed={seed_init:#x}");
+        }
+      }
+      eprintln!("coord-stress ok N={peer_count} seed={seed_init:#x} ops={op_seq}");
     }
   }
   Ok(())
