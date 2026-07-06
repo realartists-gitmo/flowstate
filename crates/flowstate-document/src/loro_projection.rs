@@ -279,10 +279,19 @@ impl<'a> Projector<'a> {
               current.style = style;
               current_boundary = Some(unicode_pos);
             } else if current.runs.is_empty()
+              && current_boundary.is_none()
               && output
                 .last()
                 .is_some_and(|block| !matches!(block, InputBlock::Paragraph(_)))
             {
+              // Fork B (docs/collab-coalescing-parity.md): coalesce ONLY the phantom
+              // empty paragraph that an object's own block implies — the first `\n`
+              // after an object, when `current_boundary` is still None because the
+              // object reset it. A SUBSEQUENT empty `\n` (current_boundary already Some)
+              // is a REAL, user/edit-created empty paragraph with a durable record;
+              // KEEP it so an empty line next to an image survives instead of being
+              // silently dropped. (The incremental replay's matching half is still in
+              // progress — see the doc; the structural fuzz stays #[ignore]d until then.)
               current.style = style;
               pending_style = style;
               current_boundary = Some(unicode_pos);

@@ -1,8 +1,17 @@
 # Decision: object-adjacent empty-paragraph coalescing parity
 
-**Status:** open — needs your call on the product question + fork.
+**Status:** DECIDED — **Fork B** (preserve real empties). Half implemented; incremental half remains.
 **Found by:** the new N-peer convergence fuzz harness (`multi_peer_convergence_tests.rs`, commit d4b11ae).
 **Reproduces:** `cargo test -p flowstate-collab npeer_fuzz_structural_fixture_paragraph_ops -- --ignored` (fails). Minimal: single peer, `structural_fixture`, seed `0xB2`, 15 ops.
+
+## Progress (Fork B)
+
+- **DONE — full-rebuild half:** `push_flow_blocks` (`loro_projection.rs:279`) now coalesces ONLY the phantom (the first `\n` after an object, `current_boundary == None`) and KEEPS real, durably-recorded empty paragraphs. An empty line next to an image now survives in the authoritative `document_from_loro` projection. **Zero regressions** across all 240+ collab/document/gpui-flowtext tests.
+- **REMAINING — incremental half (in your active rework):** the incremental replay in `gpui-flowtext` (`replay_semantic_command_on_projection` / `projection_apply.rs`) must produce the same segmentation. The structural fuzz now surfaces a *second, deeper* bug there: a **merge op where the Loro mutation merged two paragraphs but the incremental replay did not** (seed 0xA1: canonical shows `"…aboveme.cClosing…"` as one paragraph, incremental keeps them split). That's a JoinParagraphs/cross-paragraph-DeleteRange replay-vs-Loro mismatch, likely the same coordinate/atomicity family as the fixes in d4b11ae but on the incremental side. Fix that + mirror the phantom-coalescing, then un-ignore the structural fuzz.
+
+The sections below are the original analysis that led to choosing Fork B.
+
+---
 
 This is the last convergence bug the harness surfaces after the fixes already landed this session. I'm isolating it here rather than guessing because the correct fix depends on a **product question** and touches the incremental-materializer rework you're actively editing.
 
