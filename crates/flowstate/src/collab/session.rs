@@ -584,7 +584,8 @@ impl CollabSession {
     let pending_updates = std::mem::take(&mut self.pending_remote_updates);
     self.pending_remote_update_bytes = 0;
     for update in pending_updates {
-      self.import_update_bytes(&update, cx)?;
+      // §perf: each queued update is owned; move it in to avoid re-copying.
+      self.import_update_bytes_owned(update, cx)?;
     }
     if std::mem::take(&mut self.pending_remote_updates_overflowed)
       && let Some(from) = self.pull_candidates(None).first().copied()
@@ -1323,8 +1324,9 @@ impl CollabSession {
     self.known_peers.insert(from);
     self.note_inbound_traffic(cx);
     let result = match msg {
+      // §perf: the gossip payload is owned; move it in to avoid a full-update memcpy.
       GossipMsg::Update(bytes) => self
-        .import_update_bytes(&bytes, cx)
+        .import_update_bytes_owned(bytes, cx)
         .map(|()| asset_transfer::schedule_missing_assets(self, Some(from), cx)),
       GossipMsg::UpdateAvailable { blob, len } => {
         tracing::debug!(session = %self.session, from = %from, ?blob, bytes = len, "collaboration update available via direct blob pull");

@@ -55,10 +55,14 @@ impl Default for SessionId {
 
 impl fmt::Display for SessionId {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    for byte in self.0 {
-      write!(f, "{byte:02x}")?;
+    // §perf: manual nibble→hex lookup avoids invoking the fmt machinery per byte.
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = String::with_capacity(self.0.len() * 2);
+    for &byte in &self.0 {
+      buf.push(HEX[(byte >> 4) as usize] as char);
+      buf.push(HEX[(byte & 0x0f) as usize] as char);
     }
-    Ok(())
+    f.write_str(&buf)
   }
 }
 

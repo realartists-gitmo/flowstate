@@ -58,8 +58,8 @@ impl Workspace {
 
     let mut this = Self {
       document_panels: Vec::new(),
-      document_runtimes: HashMap::new(),
-      document_runtime_flush_pending: HashSet::new(),
+      document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       flow_panels: Vec::new(),
       active_document_id: None,
       active_editor: None,
@@ -77,8 +77,8 @@ impl Workspace {
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
-      speech_word_count_cache: HashMap::new(),
-      speech_word_count_pending: HashSet::new(),
+      speech_word_count_cache: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      speech_word_count_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
       ribbon_resizable_state: cx.new(|_| ResizableState::default()),
@@ -97,11 +97,11 @@ impl Workspace {
       document_style_section: DocumentStyleSection::Text,
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),
-      autosave_document_generations: HashMap::new(),
-      autosave_flow_in_flight: HashSet::new(),
+      autosave_document_generations: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      autosave_flow_in_flight: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
-      collab_notice_subscriptions: HashMap::new(),
+      collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
       tub_root: None,

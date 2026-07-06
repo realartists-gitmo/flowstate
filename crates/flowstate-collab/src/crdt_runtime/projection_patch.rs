@@ -254,15 +254,19 @@ fn single_block_move(before: &[flowstate_document::BlockId], after: &[flowstate_
 
 fn retained_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjection) -> bool {
   let mut before_blocks = FxHashMap::default();
+  // §perf: rows are visited in ascending order, so carry a running paragraph counter
+  // instead of recomputing the paragraph index per row (see `input_block_at_seq`).
+  let mut before_paragraph_ix = 0;
   for row in 0..before.ids.block_ids.len() {
     let Some(id) = before.ids.block_ids.get(row).copied() else {
       return false;
     };
-    let Some(block) = input_block_at(before, row) else {
+    let Some(block) = input_block_at_seq(before, row, &mut before_paragraph_ix) else {
       return false;
     };
     before_blocks.insert(id, block);
   }
+  let mut after_paragraph_ix = 0;
   for row in 0..after.ids.block_ids.len() {
     let Some(id) = after.ids.block_ids.get(row).copied() else {
       return false;
@@ -270,7 +274,7 @@ fn retained_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjec
     let Some(before_block) = before_blocks.get(&id) else {
       return false;
     };
-    let Some(after_block) = input_block_at(after, row) else {
+    let Some(after_block) = input_block_at_seq(after, row, &mut after_paragraph_ix) else {
       return false;
     };
     if before_block != &after_block {
@@ -283,35 +287,58 @@ fn retained_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjec
 fn retained_edge_blocks_unchanged(before: &DocumentProjection, after: &DocumentProjection, prefix: usize, suffix: usize) -> bool {
   let before_len = before.ids.block_ids.len();
   let after_len = after.ids.block_ids.len();
+  // §perf: the prefix rows are contiguous from 0, so run two ascending paragraph
+  // counters (one per document) instead of an O(row) recount per row.
+  let mut before_paragraph_ix = 0;
+  let mut after_paragraph_ix = 0;
   for row in 0..prefix {
-    if input_block_at(before, row) != input_block_at(after, row) {
+    if input_block_at_seq(before, row, &mut before_paragraph_ix) != input_block_at_seq(after, row, &mut after_paragraph_ix) {
       return false;
     }
   }
+  // The suffix rows are a contiguous tail range in each document; seed each counter
+  // once (a single scan up to the suffix start) then advance it sequentially.
+  let before_suffix_start = before_len.saturating_sub(suffix);
+  let after_suffix_start = after_len.saturating_sub(suffix);
+  let mut before_paragraph_ix = count_paragraph_blocks_before(before, before_suffix_start);
+  let mut after_paragraph_ix = count_paragraph_blocks_before(after, after_suffix_start);
   for offset in 0..suffix {
-    let before_row = before_len.saturating_sub(suffix) + offset;
-    let after_row = after_len.saturating_sub(suffix) + offset;
-    if input_block_at(before, before_row) != input_block_at(after, after_row) {
+    let before_row = before_suffix_start + offset;
+    let after_row = after_suffix_start + offset;
+    if input_block_at_seq(before, before_row, &mut before_paragraph_ix) != input_block_at_seq(after, after_row, &mut after_paragraph_ix) {
       return false;
     }
   }
   true
 }
 
-fn input_block_at(document: &DocumentProjection, row: usize) -> Option<InputBlock> {
+// §perf: sequential variant of the former `input_block_at`. `paragraph_ix` must hold
+// the number of Paragraph blocks in `document.blocks[0..row]`; callers visit rows in
+// ascending order and advance it here, so building a block no longer recomputes that
+// count with an O(row) scan. This turns the patch-diff verification
+// (retained_blocks_unchanged / retained_edge_blocks_unchanged), which runs on every
+// structural edit, from O(blocks²) into O(blocks).
+fn input_block_at_seq(document: &DocumentProjection, row: usize, paragraph_ix: &mut usize) -> Option<InputBlock> {
   let block = document.blocks.get(row)?;
   match block {
     Block::Paragraph(paragraph) => {
-      let paragraph_ix = document
-        .blocks
-        .iter()
-        .take(row)
-        .filter(|block| matches!(block, Block::Paragraph(_)))
-        .count();
-      Some(InputBlock::Paragraph(input_paragraph(document, paragraph_ix, paragraph)))
+      let ix = *paragraph_ix;
+      *paragraph_ix += 1;
+      Some(InputBlock::Paragraph(input_paragraph(document, ix, paragraph)))
     },
     _ => Some(input_block_from_block(block)),
   }
+}
+
+// Count of Paragraph blocks strictly before `row`; used once per document to seed the
+// sequential counter for the suffix range.
+fn count_paragraph_blocks_before(document: &DocumentProjection, row: usize) -> usize {
+  document
+    .blocks
+    .iter()
+    .take(row)
+    .filter(|block| matches!(block, Block::Paragraph(_)))
+    .count()
 }
 
 fn common_id_prefix(left: &[flowstate_document::BlockId], right: &[flowstate_document::BlockId]) -> usize {

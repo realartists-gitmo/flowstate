@@ -103,10 +103,16 @@ pub(super) fn rewrite_document_xml(bytes: Vec<u8>, side: &SideChannel) -> Vec<u8
     xml = ensure_math_namespace(xml);
   }
   xml = rewrite_doc_prs(&xml, &side.image_doc_prs);
-  for equation in &side.equations {
-    xml = inject_equation(xml, &equation.sentinel, &equation.omml);
+  // §perf: splice every equation's run in one forward pass over the xml instead
+  // of rebuilding the whole String once per equation (O(N) vs O(N·equations)).
+  if !side.equations.is_empty() {
+    xml = inject_equations(&xml, &side.equations);
   }
-  xml = inject_table_headers(&xml);
+  // §perf: the two whole-document `.replace()` scans below only ever match the
+  // `<w:cantSplit` marker; skip both when it is absent (header rows are rare).
+  if xml.contains("<w:cantSplit") {
+    xml = inject_table_headers(&xml);
+  }
   xml.into_bytes()
 }
 
@@ -151,26 +157,45 @@ fn rewrite_doc_prs(xml: &str, entries: &[ImageDocPr]) -> String {
   out
 }
 
-/// Replace the placeholder run containing `sentinel` with `omml`. The sentinel
-/// occupies a run of its own, so the enclosing `<w:r>…</w:r>` maps 1:1 to the
-/// equation.
-fn inject_equation(xml: String, sentinel: &str, omml: &str) -> String {
-  let Some(pos) = xml.find(sentinel) else {
-    return xml;
-  };
-  // docx-rs emits run opens as the exact literal `<w:r>` (no attributes) and
-  // runs never nest, so the nearest enclosing tags bound the placeholder run.
-  let Some(run_start) = xml[..pos].rfind("<w:r>") else {
-    return xml;
-  };
-  let Some(relative_end) = xml[pos..].find("</w:r>") else {
-    return xml;
-  };
-  let run_end = pos + relative_end + "</w:r>".len();
-  let mut out = String::with_capacity(xml.len() + omml.len());
-  out.push_str(&xml[..run_start]);
-  out.push_str(omml);
-  out.push_str(&xml[run_end..]);
+/// Replace every placeholder run containing an equation sentinel with its OMML
+/// in a single forward pass. Each sentinel occupies a run of its own, so the
+/// enclosing `<w:r>…</w:r>` maps 1:1 to the equation.
+///
+/// §perf: the previous implementation rebuilt the whole document `String` once
+/// per equation (O(N·equations)). Each equation lives in a disjoint run, so the
+/// run bounds are computed against the original `xml` once, ordered by position,
+/// then spliced into a single output buffer — byte-identical to the sequential
+/// per-equation rewrite but linear in the document length.
+fn inject_equations(xml: &str, equations: &[EquationInjection]) -> String {
+  // Resolve each equation to its enclosing run span in the original xml.
+  let mut spans: Vec<(usize, usize, &str)> = Vec::with_capacity(equations.len());
+  for equation in equations {
+    let Some(pos) = xml.find(&equation.sentinel) else {
+      continue;
+    };
+    // docx-rs emits run opens as the exact literal `<w:r>` (no attributes) and
+    // runs never nest, so the nearest enclosing tags bound the placeholder run.
+    let Some(run_start) = xml[..pos].rfind("<w:r>") else {
+      continue;
+    };
+    let Some(relative_end) = xml[pos..].find("</w:r>") else {
+      continue;
+    };
+    let run_end = pos + relative_end + "</w:r>".len();
+    spans.push((run_start, run_end, equation.omml.as_str()));
+  }
+  // Sentinels are unique but may be registered in any order; splicing requires
+  // ascending, non-overlapping spans (runs are disjoint by construction).
+  spans.sort_by_key(|(run_start, _, _)| *run_start);
+  let omml_len: usize = spans.iter().map(|(_, _, omml)| omml.len()).sum();
+  let mut out = String::with_capacity(xml.len() + omml_len);
+  let mut cursor = 0usize;
+  for (run_start, run_end, omml) in spans {
+    out.push_str(&xml[cursor..run_start]);
+    out.push_str(omml);
+    cursor = run_end;
+  }
+  out.push_str(&xml[cursor..]);
   out
 }
 
@@ -221,7 +246,13 @@ mod tests {
   fn equation_injection_replaces_enclosing_run() {
     let sentinel = "@@FLOWSTATE_OMML_0@@";
     let xml = format!("<w:p><w:r><w:rPr/><w:t xml:space=\"preserve\">{sentinel}</w:t></w:r></w:p>");
-    let out = inject_equation(xml, sentinel, "<m:oMath/>");
+    let out = inject_equations(
+      &xml,
+      &[EquationInjection {
+        sentinel: sentinel.to_string(),
+        omml: "<m:oMath/>".to_string(),
+      }],
+    );
     assert_eq!(out, "<w:p><m:oMath/></w:p>");
   }
 

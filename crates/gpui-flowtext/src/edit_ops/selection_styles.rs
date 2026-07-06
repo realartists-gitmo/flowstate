@@ -43,10 +43,43 @@ pub fn selection_prefers_direct_underline(document: &DocumentProjection, range: 
     .any(|paragraph_ix| matches!(document.paragraphs[paragraph_ix].style, ParagraphStyle::Custom(3) | ParagraphStyle::Custom(4)))
 }
 
+// §perf: scan the intersecting runs directly with an early exit instead of
+// allocating a Vec<RunStyles> via selection_run_styles just to fold it away.
+// This feeds toolbar/formatting state that is recomputed on every selection change.
 #[hotpath::measure]
 pub fn selection_all_run_styles(document: &DocumentProjection, range: Range<DocumentOffset>, predicate: impl Fn(RunStyles) -> bool) -> bool {
-  let styles = selection_run_styles(document, range);
-  !styles.is_empty() && styles.into_iter().all(predicate)
+  if document.paragraphs.is_empty() || range.start.paragraph >= document.paragraphs.len() {
+    return false;
+  }
+  let last_paragraph = range.end.paragraph.min(document.paragraphs.len() - 1);
+  let mut saw_any = false;
+  for paragraph_ix in range.start.paragraph..=last_paragraph {
+    let paragraph = &document.paragraphs[paragraph_ix];
+    let paragraph_len = paragraph_text_len(paragraph);
+    let start = if paragraph_ix == range.start.paragraph {
+      range.start.byte.min(paragraph_len)
+    } else {
+      0
+    };
+    let end = if paragraph_ix == range.end.paragraph {
+      range.end.byte.min(paragraph_len)
+    } else {
+      paragraph_len
+    };
+    let mut offset = 0;
+    for run in &paragraph.runs {
+      let run_start = offset;
+      let run_end = offset + run.len;
+      offset = run_end;
+      if run_start < end && run_end > start {
+        saw_any = true;
+        if !predicate(run.styles) {
+          return false;
+        }
+      }
+    }
+  }
+  saw_any
 }
 
 #[hotpath::measure]

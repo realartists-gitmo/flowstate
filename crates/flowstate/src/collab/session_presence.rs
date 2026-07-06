@@ -162,7 +162,8 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because editor is missing");
       return;
     };
-    let self_key = presence.self_key().to_string();
+    // §perf: self_key is only used for equality; borrow it instead of allocating a String.
+    let self_key = presence.self_key();
     let requests: Vec<RuntimePresenceCaretRequest> = presence
       .roster()
       .into_iter()
@@ -319,8 +320,14 @@ fn roster_key_set(presence: &PresenceStore) -> std::collections::HashSet<String>
 }
 
 fn default_presence_name() -> String {
-  std::env::var("FLOWSTATE_COLLAB_NAME")
-    .or_else(|_| std::env::var("USER"))
-    .or_else(|_| std::env::var("USERNAME"))
-    .unwrap_or_else(|_| "Flowstate user".to_string())
+  // §perf: the name is process-stable; resolve the env lookups + alloc once and clone thereafter.
+  static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+  CACHED
+    .get_or_init(|| {
+      std::env::var("FLOWSTATE_COLLAB_NAME")
+        .or_else(|_| std::env::var("USER"))
+        .or_else(|_| std::env::var("USERNAME"))
+        .unwrap_or_else(|_| "Flowstate user".to_string())
+    })
+    .clone()
 }

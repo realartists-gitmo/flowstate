@@ -429,7 +429,11 @@ pub fn rebuild_document_sections_now(document: &mut DocumentProjection) {
 #[must_use]
 pub fn document_outline(document: &DocumentProjection) -> Vec<DocumentOutlineNode> {
   let mut outline: Vec<DocumentOutlineNode> = Vec::new();
-  let mut stack: Vec<(usize, SectionId)> = Vec::new();
+  // §perf: the stack holds each open node's index into `outline` rather than its
+  // SectionId. `outline` is append-only (nodes are never removed), so the index
+  // stays valid, and closing a section becomes an O(1) index instead of the former
+  // O(outline) linear `find` per pop — turning this from O(headings²) to O(headings).
+  let mut stack: Vec<(usize, usize)> = Vec::new();
 
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let Some((level, kind)) = section_level_and_kind(document, paragraph.style) else {
@@ -439,15 +443,14 @@ pub fn document_outline(document: &DocumentProjection) -> Vec<DocumentOutlineNod
       .last()
       .is_some_and(|(ancestor_level, _)| *ancestor_level >= level)
     {
-      if let Some((_, node_id)) = stack.pop()
-        && let Some(node) = outline.iter_mut().find(|node| node.id == node_id)
-      {
-        node.end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
+      if let Some((_, node_index)) = stack.pop() {
+        outline[node_index].end_paragraph_exclusive = paragraph_id_at(document, paragraph_ix);
       }
     }
     let paragraph_id = paragraph_id_at(document, paragraph_ix).unwrap_or_else(new_paragraph_id);
-    let parent_id = stack.last().map(|(_, id)| *id);
+    let parent_id = stack.last().map(|(_, node_index)| outline[*node_index].id);
     let id = section_id_for_heading(paragraph_id, kind);
+    let node_index = outline.len();
     outline.push(DocumentOutlineNode {
       id,
       parent_id,
@@ -456,7 +459,7 @@ pub fn document_outline(document: &DocumentProjection) -> Vec<DocumentOutlineNod
       start_paragraph: paragraph_id,
       end_paragraph_exclusive: None,
     });
-    stack.push((level, id));
+    stack.push((level, node_index));
   }
 
   outline

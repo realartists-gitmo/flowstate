@@ -309,7 +309,20 @@ impl Workspace {
   }
 
   fn sync_collab_notice_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let mut active_sessions = HashSet::new();
+    // §perf: with no existing subscriptions and no panel in a collab session, the
+    // full scan/retain is a no-op — skip building the set entirely (the common case).
+    if self.collab_notice_subscriptions.is_empty()
+      && !self
+        .document_panels
+        .iter()
+        .any(|panel| crate::collab::session_for_panel(panel.read(cx).id(), cx).is_some())
+    {
+      return;
+    }
+
+    // §perf: FxHashSet (SessionId keys are trusted/local) with capacity for the panels.
+    let mut active_sessions: FxHashSet<flowstate_collab::SessionId> =
+      FxHashSet::with_capacity_and_hasher(self.document_panels.len(), rustc_hash::FxBuildHasher);
     let window_handle = window.window_handle();
 
     for panel in &self.document_panels {

@@ -101,21 +101,38 @@ pub fn update_paragraph_offsets_after_len_change(document: &mut DocumentProjecti
     }
   }
 
-  let mut edited = Some(document.paragraphs[paragraph_ix].clone());
+  // §perf: mirror the edit into the block copy with clone_from (reuses the block
+  // paragraph's existing runs allocation instead of cloning a fresh Paragraph each
+  // keystroke). In the common object-free case (blocks and paragraphs are 1:1) index
+  // the matching block directly and shift only the tail, avoiding the O(paragraph_ix)
+  // rescan of the block vector from 0 that dominated edits low in a large document.
+  let source = &document.paragraphs[paragraph_ix];
+  let aligned = document.blocks.len() == document.paragraphs.len();
   let blocks = Arc::make_mut(&mut document.blocks);
-  let mut paragraph_ord = 0usize;
-  for block in blocks.iter_mut() {
-    let Block::Paragraph(paragraph) = block else {
-      continue;
-    };
-    if paragraph_ord == paragraph_ix {
-      if let Some(updated) = edited.take() {
-        *paragraph = updated;
-      }
-    } else if paragraph_ord > paragraph_ix && delta != 0 {
-      paragraph.byte_range = shift_byte_range(&paragraph.byte_range, delta);
+  if aligned {
+    if let Some(Block::Paragraph(paragraph)) = blocks.get_mut(paragraph_ix) {
+      paragraph.clone_from(source);
     }
-    paragraph_ord += 1;
+    if delta != 0 {
+      for block in blocks.iter_mut().skip(paragraph_ix + 1) {
+        if let Block::Paragraph(paragraph) = block {
+          paragraph.byte_range = shift_byte_range(&paragraph.byte_range, delta);
+        }
+      }
+    }
+  } else {
+    let mut paragraph_ord = 0usize;
+    for block in blocks.iter_mut() {
+      let Block::Paragraph(paragraph) = block else {
+        continue;
+      };
+      if paragraph_ord == paragraph_ix {
+        paragraph.clone_from(source);
+      } else if paragraph_ord > paragraph_ix && delta != 0 {
+        paragraph.byte_range = shift_byte_range(&paragraph.byte_range, delta);
+      }
+      paragraph_ord += 1;
+    }
   }
 }
 

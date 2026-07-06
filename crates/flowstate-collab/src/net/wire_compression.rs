@@ -17,7 +17,6 @@
 //! The prepared encoder/decoder dictionaries are digested ONCE (lazy statics) and
 //! reused for every payload — never re-digested per call.
 
-use std::borrow::Cow;
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
 
 use anyhow::{Context, Result, ensure};
@@ -129,23 +128,44 @@ fn cache_put(key: u128, codec: WireCodec, bytes: Arc<[u8]>) {
   drop(cache); // release the lock promptly to minimize serve contention
 }
 
+/// §perf: an owned handle to the bytes to stream on the wire, without copying the
+/// compressed payload. Either a slice borrowed from the caller's `payload` (verbatim
+/// path) or a shared reference to the cached compressed buffer (same `Arc` the cache
+/// holds). Replaces the old `Cow<[u8]>` return, which forced a full `.to_vec()` copy
+/// on both the cache-hit and fresh-compress paths.
+pub enum WireBytes<'a> {
+  Borrowed(&'a [u8]),
+  Shared(Arc<[u8]>),
+}
+
+impl WireBytes<'_> {
+  #[must_use]
+  pub fn as_slice(&self) -> &[u8] {
+    match self {
+      WireBytes::Borrowed(slice) => slice,
+      WireBytes::Shared(shared) => shared,
+    }
+  }
+}
+
 /// Compress `payload` for the wire, choosing the codec by size. Returns the codec
 /// and the bytes to stream: [`WireCodec::None`] borrowing `payload` verbatim when
 /// compression is skipped (fast link, tiny payload) or fails to shrink; otherwise
-/// the owned compressed bytes. Results are cached by content hash and the dictionary
+/// the shared compressed bytes. Results are cached by content hash and the dictionary
 /// is never re-digested.
 #[must_use]
-pub fn compress_for_wire(payload: &[u8], link_is_fast: bool) -> (WireCodec, Cow<'_, [u8]>) {
+pub fn compress_for_wire(payload: &[u8], link_is_fast: bool) -> (WireCodec, WireBytes<'_>) {
   // On a very fast (LAN/localhost) link the decode (~700–900 MB/s) becomes the
   // ceiling, so compression buys nothing; and tiny payloads aren't worth framing.
   if link_is_fast || payload.len() < MIN_COMPRESS_LEN {
-    return (WireCodec::None, Cow::Borrowed(payload));
+    return (WireCodec::None, WireBytes::Borrowed(payload));
   }
   // Hashing (xxh3, ~10 GB/s) is a rounding error next to compression, and a cache hit
   // skips the whole compress — the win that lets us keep level 19 without per-join cost.
   let key = XxHash3_128::oneshot(payload);
   if let Some((codec, bytes)) = cache_get(key) {
-    return (codec, Cow::Owned(bytes.to_vec()));
+    // §perf: hand back the cached Arc directly instead of copying it out.
+    return (codec, WireBytes::Shared(bytes));
   }
   let compressed = if payload.len() < SMALL_PAYLOAD_MAX && *DICT_ID_OK {
     compress_with_dict(payload).map(|bytes| (WireCodec::ZstdDict, bytes))
@@ -155,14 +175,15 @@ pub fn compress_for_wire(payload: &[u8], link_is_fast: bool) -> (WireCodec, Cow<
   match compressed {
     // Only adopt compression when it actually shrank the payload.
     Ok((codec, bytes)) if bytes.len() < payload.len() => {
+      // §perf: one Arc, shared by both the cache and the caller — no `.to_vec()` copy.
       let shared: Arc<[u8]> = Arc::from(bytes);
       cache_put(key, codec, Arc::clone(&shared));
-      (codec, Cow::Owned(shared.to_vec()))
+      (codec, WireBytes::Shared(shared))
     },
-    Ok(_) => (WireCodec::None, Cow::Borrowed(payload)),
+    Ok(_) => (WireCodec::None, WireBytes::Borrowed(payload)),
     Err(error) => {
       tracing::warn!(error = %format_args!("{error:#}"), payload_bytes = payload.len(), "wire compression failed; sending payload uncompressed");
-      (WireCodec::None, Cow::Borrowed(payload))
+      (WireCodec::None, WireBytes::Borrowed(payload))
     },
   }
 }
@@ -214,7 +235,7 @@ mod tests {
 
   fn round_trip(payload: &[u8]) -> Vec<u8> {
     let (codec, wire) = compress_for_wire(payload, false);
-    decompress_from_wire(codec, wire.into_owned(), payload.len()).expect("decompress")
+    decompress_from_wire(codec, wire.as_slice().to_vec(), payload.len()).expect("decompress")
   }
 
   #[test]
@@ -244,7 +265,7 @@ mod tests {
     assert!(payload.len() >= SMALL_PAYLOAD_MAX);
     let (codec, wire) = compress_for_wire(&payload, false);
     assert_eq!(codec, WireCodec::ZstdLong);
-    assert!(wire.len() < payload.len());
+    assert!(wire.as_slice().len() < payload.len());
     assert_eq!(round_trip(&payload), payload);
   }
 
@@ -265,7 +286,7 @@ mod tests {
     let (codec2, wire2) = compress_for_wire(&payload, false);
     assert_eq!(codec1, WireCodec::ZstdDict);
     assert_eq!(codec2, codec1);
-    assert_eq!(wire1.as_ref(), wire2.as_ref(), "cached bytes must match freshly compressed bytes");
+    assert_eq!(wire1.as_slice(), wire2.as_slice(), "cached bytes must match freshly compressed bytes");
     assert_eq!(round_trip(&payload), payload);
   }
 
@@ -295,6 +316,6 @@ mod tests {
       .collect();
     let (codec, wire) = compress_for_wire(&payload, false);
     assert_eq!(codec, WireCodec::None);
-    assert_eq!(wire.as_ref(), payload.as_slice());
+    assert_eq!(wire.as_slice(), payload.as_slice());
   }
 }

@@ -22,7 +22,14 @@ pub(super) const MAX_PENDING_REMOTE_UPDATES: usize = 512;
 pub(super) const MAX_PENDING_REMOTE_UPDATE_BYTES: usize = 64 * 1024 * 1024;
 
 impl CollabSession {
+  // §perf: borrowed entry point for the genuinely-borrowed callers; copies once into an
+  // owned buffer and forwards to import_update_bytes_owned. Owned-Vec callers should call
+  // import_update_bytes_owned directly to skip this full-update memcpy on the main thread.
   pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
+    self.import_update_bytes_owned(bytes.to_vec(), cx)
+  }
+
+  pub fn import_update_bytes_owned(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) -> Result<()> {
     if bytes.is_empty() {
       tracing::trace!(session = %self.session, "skipping empty collaboration update import");
       return Ok(());
@@ -54,7 +61,7 @@ impl CollabSession {
         "queueing remote collaboration update until session is attached",
       );
       self.pending_remote_update_bytes = self.pending_remote_update_bytes.saturating_add(bytes.len());
-      self.pending_remote_updates.push(bytes.to_vec());
+      self.pending_remote_updates.push(bytes); // §perf: move the owned buffer into the queue instead of copying
       return Ok(());
     }
 
@@ -63,7 +70,7 @@ impl CollabSession {
       .runtime
       .clone()
       .context("collaboration session has no CRDT runtime")?;
-    let bytes = bytes.to_vec();
+    // §perf: bytes is already owned; hand it straight to the runtime with no extra copy.
     let bytes_len = bytes.len();
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
@@ -214,7 +221,8 @@ impl CollabSession {
       let _ = session.update(cx, |session, cx| match result {
         Ok(Ok(bytes)) => {
           tracing::debug!(session = %session_id, ?blob, bytes = bytes.len(), "collaboration blob pull succeeded");
-          if let Err(error) = session.import_update_bytes(&bytes, cx) {
+          // §perf: bytes is owned here; move it in to avoid a full-update memcpy.
+          if let Err(error) = session.import_update_bytes_owned(bytes, cx) {
             tracing::error!(session = %session_id, ?blob, error = %format_args!("{error:#}"), "importing pulled collaboration blob failed");
             session.detach(DetachReason::Fatal(format!("pulling collaboration blob failed: {error:#}")), cx);
           }
@@ -461,7 +469,8 @@ impl CollabSession {
               tracing::trace!(session = %session_id, from = %from, "collaboration update pull returned no missing updates");
               return;
             }
-            if let Err(error) = session.import_update_bytes(&bytes, cx) {
+            // §perf: bytes is owned here; move it in to avoid a full-update memcpy.
+            if let Err(error) = session.import_update_bytes_owned(bytes, cx) {
               tracing::error!(session = %session_id, from = %from, error = %format_args!("{error:#}"), "importing pulled collaboration updates failed");
               session.detach(DetachReason::Fatal(format!("pulling collaboration updates failed: {error:#}")), cx);
             }

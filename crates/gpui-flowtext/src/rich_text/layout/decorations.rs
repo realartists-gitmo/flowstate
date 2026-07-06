@@ -149,7 +149,9 @@ pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, t
 
 #[hotpath::measure]
 pub(super) fn underlines_for_line(document: &DocumentProjection, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
-  let mut underlines = Vec::with_capacity(line.segments.len().saturating_mul(2));
+  // §perf: the common prose line has no underlines, so start empty (no allocation
+  // until the first push) rather than eagerly allocating a buffer that stays empty.
+  let mut underlines = Vec::new();
   let baseline = line.baseline_y();
   for segment in &line.segments {
     match segment.format.underline {
@@ -190,7 +192,8 @@ pub(super) fn underlines_for_line(document: &DocumentProjection, line: &LaidOutL
 #[hotpath::measure]
 pub(super) fn strikethroughs_for_line(document: &DocumentProjection, line: &LaidOutLine) -> Vec<Decoration> {
   let baseline = line.baseline_y();
-  let mut decorations = Vec::with_capacity(line.segments.len());
+  // §perf: most lines have no strikethrough; defer allocation until the first push.
+  let mut decorations = Vec::new();
   for segment in &line.segments {
     if segment.format.strikethrough {
       let thickness = document.theme.underline_rule_thickness.max(px(1.0));

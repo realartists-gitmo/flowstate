@@ -5,6 +5,7 @@ use async_channel::{Receiver, Sender};
 use flowstate_document::{AssetRecord, DocumentProjection};
 use gpui_flowtext::{EditorSelection, SemanticEditCommand as EditorSemanticCommand};
 use loro::{ExportMode, LoroDoc, VersionVector};
+use rustc_hash::FxHashMap;
 
 use crate::crdt_runtime::{
   CrdtRuntime, EditorCommitResult, ProjectionFallbackStats, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
@@ -279,7 +280,9 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
     std::sync::Arc::new(std::sync::Mutex::new(None));
   spawn_hang_watchdog(std::sync::Arc::downgrade(&in_flight));
 
-  let mut request_counts: std::collections::HashMap<&'static str, u64> = std::collections::HashMap::new();
+  // §perf: telemetry keyed by trusted &'static handler-name strings — Fx hashing
+  // is faster and no DoS resistance is needed (keys are not remote-controlled).
+  let mut request_counts: FxHashMap<&'static str, u64> = FxHashMap::default();
   let mut total_requests: u64 = 0;
   let mut last_progress = std::time::Instant::now();
   while let Ok(request) = receiver.recv_blocking() {

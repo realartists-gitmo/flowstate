@@ -228,25 +228,28 @@ pub fn find_text_ranges_with_options(document: &DocumentProjection, query: &str,
     return Vec::new();
   }
   let text = full_document_text(document);
-  let matches = if case_sensitive {
+  // §perf: filter+map the match_indices iterator straight into the result instead of
+  // collecting a throwaway intermediate Vec<Range> and re-iterating it. ASCII-lowercase
+  // preserves byte offsets, so whole-word checks still use the original `text`.
+  let to_offsets =
+    |range: Range<usize>| global_to_document_offset(document, range.start)..global_to_document_offset(document, range.end);
+  if case_sensitive {
     text
       .match_indices(query)
       .map(|(start, matched)| start..start + matched.len())
-      .collect::<Vec<_>>()
+      .filter(|range| !whole_words || is_whole_word_match(&text, range.clone()))
+      .map(to_offsets)
+      .collect()
   } else {
     let lower_text = text.to_ascii_lowercase();
     let lower_query = query.to_ascii_lowercase();
     lower_text
       .match_indices(lower_query.as_str())
       .map(|(start, matched)| start..start + matched.len())
-      .collect::<Vec<_>>()
-  };
-
-  matches
-    .into_iter()
-    .filter(|range| !whole_words || is_whole_word_match(&text, range.clone()))
-    .map(|range| global_to_document_offset(document, range.start)..global_to_document_offset(document, range.end))
-    .collect()
+      .filter(|range| !whole_words || is_whole_word_match(&text, range.clone()))
+      .map(to_offsets)
+      .collect()
+  }
 }
 
 #[hotpath::measure]

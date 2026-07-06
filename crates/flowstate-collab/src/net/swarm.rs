@@ -173,7 +173,7 @@ async fn handle_publish<S: FrameSink>(sink: &S, direct_state: &DirectServeState,
     PublishPayload::CapabilityEpoch { epoch, signature } => (GossipMsg::CapabilityEpoch { epoch, signature }, false),
   };
 
-  let frame = match if neighbors_only {
+  let mut frame = match if neighbors_only {
     proto_gossip::encode(&message)
   } else {
     proto_gossip::encode_inline(&message)
@@ -198,7 +198,10 @@ async fn handle_publish<S: FrameSink>(sink: &S, direct_state: &DirectServeState,
 
   let attempts = if retriable { PRESENCE_PUBLISH_ATTEMPTS } else { 1 };
   for attempt in 1..=attempts {
-    match sink.send_frame(frame.clone(), neighbors_only).await {
+    // §perf: clone only when a retry may still follow; the final/only attempt
+    // (the common updates/digests case, attempts == 1) moves the frame out.
+    let to_send = if attempt < attempts { frame.clone() } else { std::mem::take(&mut frame) };
+    match sink.send_frame(to_send, neighbors_only).await {
       Ok(()) => {
         tracing::trace!(%session, payload_kind, frame_bytes, neighbors_only, attempt, "collaboration gossip frame broadcast complete");
         return;
@@ -216,12 +219,17 @@ async fn handle_publish<S: FrameSink>(sink: &S, direct_state: &DirectServeState,
 
 async fn update_message(direct_state: &DirectServeState, session: SessionId, bytes: Vec<u8>) -> Result<GossipMsg> {
   let update_bytes = bytes.len();
-  let inline = GossipMsg::Update(bytes.clone());
+  // §perf: move the payload into the message instead of cloning it; on the too-big
+  // path we destructure the bytes back out for the blob insert rather than pre-cloning.
+  let inline = GossipMsg::Update(bytes);
   if proto_gossip::encoded_len(&inline)? <= GOSSIP_INLINE_LIMIT {
     tracing::trace!(%session, update_bytes, "collaboration update will be sent inline over gossip");
     return Ok(inline);
   }
 
+  let GossipMsg::Update(bytes) = inline else {
+    unreachable!("inline was just constructed as GossipMsg::Update");
+  };
   let blob = direct_state.insert_blob(session, bytes).await?;
   tracing::debug!(%session, ?blob, update_bytes, "collaboration update exceeded gossip limit; publishing blob announcement");
   Ok(GossipMsg::UpdateAvailable {

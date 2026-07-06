@@ -363,8 +363,9 @@ impl CollabSession {
         match result {
           Ok(Ok(bytes)) => {
             session.last_probe_failed = false;
+            // §perf: bytes is owned here; move it in to avoid a full-update memcpy.
             if !bytes.is_empty()
-              && let Err(error) = session.import_update_bytes(&bytes, cx)
+              && let Err(error) = session.import_update_bytes_owned(bytes, cx)
             {
               session.detach(
                 DetachReason::Fatal(format!("probing collaboration peer failed to apply updates: {error:#}")),

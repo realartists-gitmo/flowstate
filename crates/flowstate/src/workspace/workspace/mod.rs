@@ -33,6 +33,7 @@ use gpui_component::{
   ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
   VirtualListScrollHandle, WindowExt as _, h_flex, v_flex,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::app_settings::{
@@ -65,8 +66,9 @@ mod toolkit_panel;
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
-  document_runtimes: HashMap<Uuid, flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle>,
-  document_runtime_flush_pending: HashSet<Uuid>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  document_runtimes: FxHashMap<Uuid, flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle>,
+  document_runtime_flush_pending: FxHashSet<Uuid>,
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,
@@ -84,8 +86,9 @@ pub struct Workspace {
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
-  speech_word_count_cache: HashMap<Uuid, (u64, usize)>,
-  speech_word_count_pending: HashSet<Uuid>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  speech_word_count_cache: FxHashMap<Uuid, (u64, usize)>,
+  speech_word_count_pending: FxHashSet<Uuid>,
   body_resizable_state: Entity<ResizableState>,
   content_resizable_state: Entity<ResizableState>,
   ribbon_resizable_state: Entity<ResizableState>,
@@ -104,11 +107,13 @@ pub struct Workspace {
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,
-  autosave_document_generations: HashMap<Uuid, u64>,
-  autosave_flow_in_flight: HashSet<Uuid>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  autosave_document_generations: FxHashMap<Uuid, u64>,
+  autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
-  collab_notice_subscriptions: HashMap<flowstate_collab::SessionId, Subscription>,
+  // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   tub_root: Option<PathBuf>,

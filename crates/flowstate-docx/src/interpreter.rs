@@ -119,21 +119,52 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
 /// the flat paragraph projection is used, preserving the prior behavior exactly.
 #[hotpath::measure]
 fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
-  let structured = structured::interpret_structured(cleaned, &interpreted.paragraphs)?;
-  let mut report = interpreted.report;
-  report.tables_imported = structured.tables_imported;
-  report.images_imported = structured.images_imported;
-  report.equations_imported = structured.equations_imported;
+  // §perf: the structured walk (full DOM parse, OPC package open, per-run text
+  // clones) is discarded whenever the body has no tables/images/equations, yet it
+  // ran unconditionally. When the captured main-document XML provably contains
+  // none of those object markers, skip the entire build and take the object-free
+  // path directly — byte-identical to the discard branch below.
+  //
+  // Correctness: the walk recognizes elements by prefix-stripped local name and
+  // detects equations via the `oMath` substring, so scanning the same bytes for
+  // the bare substrings `tbl`/`drawing`/`oMath` can never produce a false
+  // negative (a real object's start tag always contains its local name regardless
+  // of namespace prefix). False positives (the substring appearing in text) only
+  // forgo the optimization and fall through to the identical full build. When no
+  // captured XML is available (`None`), `interpret_structured` would read from the
+  // package, so we conservatively run the full build (`is_some_and` → `false`).
+  let object_free = cleaned.main_document_xml.as_deref().is_some_and(|xml| {
+    memchr::memmem::find(xml, b"tbl").is_none()
+      && memchr::memmem::find(xml, b"drawing").is_none()
+      && memchr::memmem::find(xml, b"oMath").is_none()
+  });
 
-  let has_objects = structured.tables_imported + structured.images_imported + structured.equations_imported > 0;
-  let document = if has_objects {
-    let mut document = document_from_input_blocks(flowstate_document_theme(), structured.blocks);
-    for (asset_id, record) in structured.assets {
-      document.assets.assets.insert(asset_id, record);
-    }
-    document
+  let (document, report) = if object_free {
+    let mut report = interpreted.report;
+    // Matches the counts a fully-walked object-free body would yield.
+    report.tables_imported = 0;
+    report.images_imported = 0;
+    report.equations_imported = 0;
+    let document = document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs);
+    (document, report)
   } else {
-    document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs)
+    let structured = structured::interpret_structured(cleaned, &interpreted.paragraphs)?;
+    let mut report = interpreted.report;
+    report.tables_imported = structured.tables_imported;
+    report.images_imported = structured.images_imported;
+    report.equations_imported = structured.equations_imported;
+
+    let has_objects = structured.tables_imported + structured.images_imported + structured.equations_imported > 0;
+    let document = if has_objects {
+      let mut document = document_from_input_blocks(flowstate_document_theme(), structured.blocks);
+      for (asset_id, record) in structured.assets {
+        document.assets.assets.insert(asset_id, record);
+      }
+      document
+    } else {
+      document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs)
+    };
+    (document, report)
   };
   // Import/export fidelity: record the shape of the projection produced from the
   // cleaned DOCX. Shared funnel for both the db8 and Loro import entries.

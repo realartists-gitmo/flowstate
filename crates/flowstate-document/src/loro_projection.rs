@@ -176,11 +176,13 @@ impl<'a> Projector<'a> {
     let Some(sections_by_id) = child_map(&root, SECTIONS_BY_ID)? else {
       return Ok(Vec::new());
     };
+    // §perf: this index is only ever point-queried (section ordering comes from the
+    // explicit sort_by_key below), so an FxHashMap avoids the red-black-tree build.
     let paragraph_order = paragraph_ids
       .iter()
       .enumerate()
       .map(|(ix, id)| (id.0, ix))
-      .collect::<BTreeMap<_, _>>();
+      .collect::<FxHashMap<_, _>>();
     let mut sections = Vec::new();
     for key in map_keys(&sections_by_id) {
       let Some(section) = child_map(&sections_by_id, &key)? else {
@@ -371,7 +373,10 @@ impl<'a> Projector<'a> {
     flow_id: &str,
     defects: &mut Vec<ProjectionDefect>,
   ) -> io::Result<(BTreeMap<usize, LoroMap>, Vec<(String, LoroMap)>)> {
-    let snapshot = text.to_string();
+    // §perf: index the flow snapshot by char position once (O(N)) so the
+    // per-object-block anchor check below is O(1); previously each block did
+    // `snapshot.chars().nth(pos)` which is O(pos), i.e. O(blocks·len) overall.
+    let snapshot_chars: Vec<char> = text.to_string().chars().collect();
     let mut by_pos = BTreeMap::new();
     let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
     let mut quarantined = Vec::new();
@@ -392,7 +397,7 @@ impl<'a> Projector<'a> {
         .filter(|cursor| cursor.container == text.id())
         .and_then(|cursor| self.doc.get_cursor_pos(&cursor).ok())
         .map(|pos| pos.current.pos)
-        .filter(|pos| snapshot.chars().nth(*pos) == Some(OBJECT_REPLACEMENT));
+        .filter(|pos| snapshot_chars.get(*pos).copied() == Some(OBJECT_REPLACEMENT));
       let Some(pos) = resolved else {
         // FS-002: never silently drop a block whose anchor is unresolvable.
         defects.push(ProjectionDefect::UnresolvedObjectAnchor {
@@ -640,8 +645,13 @@ impl<'a> Projector<'a> {
   }
 
   fn plain_flow_text(&self, flow_id: &str) -> io::Result<String> {
-    let text = self.flow_text(flow_id)?.to_string();
-    Ok(text.strip_prefix('\n').unwrap_or(text.as_str()).to_string())
+    // §perf: drop a single leading '\n' in place rather than allocating a second
+    // String via strip_prefix(..).to_string().
+    let mut text = self.flow_text(flow_id)?.to_string();
+    if text.starts_with('\n') {
+      text.remove(0);
+    }
+    Ok(text)
   }
 
   fn caption_paragraph(&self, flow_id: &str) -> io::Result<InputParagraph> {
@@ -925,7 +935,10 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
 fn boundary_cursor_positions(doc: &LoroDoc, text: &LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
   let container = text.id();
   let mut ids: Vec<ID> = Vec::new();
-  for key in map_keys(records) {
+  // §perf: the result is an ID-keyed map that never depends on iteration order, so
+  // walk the block keys directly (InternalString derefs to &str) rather than
+  // collecting a sorted Vec<String> of every key just to discard the ordering.
+  for key in records.keys() {
     let Some(record) = child_map(records, &key).ok().flatten() else {
       continue;
     };

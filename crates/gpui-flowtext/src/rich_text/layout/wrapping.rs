@@ -588,8 +588,12 @@ pub(super) fn is_wrap_break(ch: char) -> bool {
 
 #[hotpath::measure]
 pub(super) fn skip_leading_whitespace(text: &str, mut byte: usize) -> usize {
-  while byte < text.len() && text[byte..].chars().next().is_some_and(char::is_whitespace) {
-    byte += text[byte..].chars().next().unwrap().len_utf8();
+  // §perf: decode each char once per iteration instead of twice (peek + re-decode).
+  while let Some(ch) = text[byte..].chars().next() {
+    if !ch.is_whitespace() {
+      break;
+    }
+    byte += ch.len_utf8();
   }
   byte
 }

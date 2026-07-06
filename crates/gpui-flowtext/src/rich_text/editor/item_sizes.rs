@@ -143,7 +143,7 @@ impl RichTextEditor {
     }
 
     let (replacement_items, replacement_block_ranges, replacement_block_heights, replacement_sizes) =
-      self.virtual_item_sizes_for_block_range(block_range.clone(), width, window, cx)?;
+      self.virtual_item_sizes_for_block_range(block_range.clone(), range.start, width, window, cx)?;
     let old_len = replace_end - replace_start;
     let new_len = replacement_items.len();
     let item_delta = new_len as isize - old_len as isize;
@@ -211,19 +211,15 @@ impl RichTextEditor {
     Some(start_block..end_block.max(start_block))
   }
 
-  fn paragraph_ix_before_block(&self, block_ix: usize) -> usize {
-    self
-      .document
-      .blocks
-      .iter()
-      .take(block_ix)
-      .filter(|block| matches!(block, Block::Paragraph(_)))
-      .count()
-  }
-
+  // §perf: the sole caller already knows the paragraph index of `block_range.start`
+  // (it derives the block range from a paragraph range whose `start` is exactly that
+  // index), so it threads it in as `first_paragraph_ix`. This removes a former
+  // O(block_range.start) scan of the whole block vector that ran on every keystroke
+  // editing low in a large document.
   fn virtual_item_sizes_for_block_range(
     &mut self,
     block_range: Range<usize>,
+    first_paragraph_ix: usize,
     width: Pixels,
     window: &mut Window,
     cx: &mut Context<Self>,
@@ -232,7 +228,7 @@ impl RichTextEditor {
     let mut sizes = Vec::with_capacity(block_range.len());
     let mut block_item_ranges = Vec::with_capacity(block_range.len());
     let mut block_heights = Vec::with_capacity(block_range.len());
-    let mut paragraph_ix = self.paragraph_ix_before_block(block_range.start);
+    let mut paragraph_ix = first_paragraph_ix;
 
     for block_ix in block_range {
       let block_start = items.len();

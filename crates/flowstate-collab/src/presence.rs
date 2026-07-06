@@ -251,10 +251,13 @@ pub fn decode_state(bytes: &[u8]) -> Result<PresenceState> {
 
 #[must_use]
 pub fn peer_key(peer: &PeerId) -> String {
-  let mut key = String::with_capacity(peer.as_bytes().len() * 2);
-  for byte in peer.as_bytes() {
-    use std::fmt::Write as _;
-    let _ = write!(&mut key, "{byte:02x}");
+  // §perf: manual nibble→hex lookup avoids invoking the fmt machinery twice per byte.
+  const HEX: &[u8; 16] = b"0123456789abcdef";
+  let bytes = peer.as_bytes();
+  let mut key = String::with_capacity(bytes.len() * 2);
+  for &byte in bytes {
+    key.push(HEX[(byte >> 4) as usize] as char);
+    key.push(HEX[(byte & 0x0f) as usize] as char);
   }
   key
 }

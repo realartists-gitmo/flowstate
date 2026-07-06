@@ -421,10 +421,10 @@ fn map_symbol(ch: char) -> Option<&'static str> {
 }
 
 fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
-  !needle.is_empty()
-    && haystack
-      .windows(needle.len())
-      .any(|window| window == needle)
+  // §perf: memchr's SIMD substring search is O(n) vs the O(n·m) `windows` scan.
+  // The empty-needle guard preserves the prior `false` result (memmem::find
+  // returns Some(0) for an empty needle).
+  !needle.is_empty() && memchr::memmem::find(haystack, needle).is_some()
 }
 
 #[cfg(test)]

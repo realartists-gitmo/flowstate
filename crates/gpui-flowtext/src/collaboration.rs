@@ -231,6 +231,17 @@ impl StableSelectionEndpoint {
 
   #[must_use]
   pub fn resolve(&self, document: &DocumentProjection) -> DocumentOffset {
+    // §perf: after a reconcile the captured paragraph almost always still sits at
+    // its hint index, so probe the hint (O(1)) before falling back to the O(P) id
+    // scan. Paragraph ids are unique in the projection, so a hint match is exactly
+    // the position the scan would have found.
+    if document.ids.paragraph_ids.get(self.paragraph_hint) == Some(&self.paragraph_id) {
+      let paragraph = self.paragraph_hint;
+      return DocumentOffset {
+        paragraph,
+        byte: clamp_paragraph_byte_to_char_boundary(document, paragraph, self.byte),
+      };
+    }
     if let Some(paragraph) = document
       .ids
       .paragraph_ids

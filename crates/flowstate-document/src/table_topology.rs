@@ -14,9 +14,13 @@
 //! so two peers holding the same canonical state produce byte-identical grids
 //! and defect lists.
 
-use std::collections::{HashMap, HashSet, hash_map::Entry};
+use std::collections::hash_map::Entry;
 
 use gpui_flowtext::{CellId, ColumnId, RowId};
+// §perf: Fx hashing for these u128 durable-id keyed maps/sets. The keys are trusted
+// canonical ids (not attacker-controlled) and the map is documented as never iterated,
+// so switching from SipHash is faster and does not affect determinism.
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// A single cell record as read from canonical `cells_by_id` (§P2b).
 ///
@@ -122,8 +126,8 @@ pub struct NormalizedTable {
 /// `DuplicateCoordinate` then `InvalidSpan`.
 #[must_use]
 pub fn normalize(row_ids: &[RowId], column_ids: &[ColumnId], raw: &[RawCellRecord]) -> NormalizedTable {
-  let row_set: HashSet<u128> = row_ids.iter().map(|row| row.0).collect();
-  let column_set: HashSet<u128> = column_ids.iter().map(|column| column.0).collect();
+  let row_set: FxHashSet<u128> = row_ids.iter().map(|row| row.0).collect();
+  let column_set: FxHashSet<u128> = column_ids.iter().map(|column| column.0).collect();
 
   let mut defects: Vec<TableTopologyDefect> = Vec::new();
 
@@ -132,8 +136,8 @@ pub fn normalize(row_ids: &[RowId], column_ids: &[ColumnId], raw: &[RawCellRecor
   // only ever queried by coordinate below, never iterated, so output order is
   // driven purely by the ordered id lists and stays deterministic regardless of
   // `HashMap` iteration order.
-  let mut chosen: HashMap<(u128, u128), RawCellRecord> = HashMap::new();
-  let mut duplicate_coords: HashSet<(u128, u128)> = HashSet::new();
+  let mut chosen: FxHashMap<(u128, u128), RawCellRecord> = FxHashMap::default();
+  let mut duplicate_coords: FxHashSet<(u128, u128)> = FxHashSet::default();
   for record in raw {
     if !row_set.contains(&record.row_id.0) || !column_set.contains(&record.column_id.0) {
       defects.push(TableTopologyDefect::OrphanCell {

@@ -1,3 +1,5 @@
+use std::borrow::Cow;
+
 use docx_rs::{
   AlignmentType, BreakType, Docx, Paragraph as DocxParagraph, Pic, Run, SectionProperty, Shading, Table as DocxTable,
   TableCell as DocxTableCell, TableLayoutType, TableRow as DocxTableRow, VMergeType, WidthType,
@@ -95,8 +97,15 @@ fn add_text_run(
     }
     first = false;
     if !segment.is_empty() {
-      let segment = segment.replace('\u{f8ff}', "¶");
-      paragraph = paragraph.add_run(apply_run_style(Run::new().add_text(segment), styles, paragraph_style, theme, force_bold));
+      // §perf: `replace` always allocates a new String even when U+F8FF is
+      // absent (the common case). Only allocate the substituted copy when the
+      // sentinel is actually present; otherwise borrow the original slice.
+      let segment = if segment.contains('\u{f8ff}') {
+        Cow::Owned(segment.replace('\u{f8ff}', "¶"))
+      } else {
+        Cow::Borrowed(segment)
+      };
+      paragraph = paragraph.add_run(apply_run_style(Run::new().add_text(segment.as_ref()), styles, paragraph_style, theme, force_bold));
     }
   }
   paragraph

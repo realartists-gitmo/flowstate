@@ -12,7 +12,11 @@ impl RichTextEditor {
     if self.invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
       return false;
     }
-    if caret.byte > paragraph_text_len(paragraph) {
+    // §perf: paragraph_text_len sums `len` over every style run; compute it once
+    // and reuse for the bounds check and the run_containing clamp below instead of
+    // walking the runs twice on this per-keystroke fast path.
+    let text_len = paragraph_text_len(paragraph);
+    if caret.byte > text_len {
       return false;
     }
     let before_selection = self.selection.clone();
@@ -22,7 +26,7 @@ impl RichTextEditor {
     let styles = if let Some(styles) = self.pending_styles {
       styles
     } else {
-      let (run_ix, _) = run_containing(paragraph, caret.byte.min(paragraph_text_len(paragraph)));
+      let (run_ix, _) = run_containing(paragraph, caret.byte.min(text_len));
       paragraph
         .runs
         .get(run_ix)
@@ -92,18 +96,25 @@ impl RichTextEditor {
       }
       self.redo_stack.clear();
     }
-    self.capture_semantic_edit(SemanticCommandBatch {
-      transaction_id: 0,
-      selection_movement_epoch: 0,
-      base_frontier: self.document.frontier.clone(),
-      semantic_commands: vec![SemanticEditCommand::InsertText {
-        at: caret,
-        text: text.to_string(),
-        styles,
-      }],
-      selection_after: Some(self.selection.clone()),
-      stable_selection_after: None,
-    });
+    // §perf: capture_semantic_edit discards this batch unless capture is enabled
+    // and unsuppressed (same predicate as its internal guard; suppress_command_capture
+    // is still 0 here — it is bumped below). Building it only when it will be used
+    // avoids a frontier Vec clone + Vec + String + selection clone on every keystroke
+    // of local (non-collaboration) editing.
+    if self.command_capture_enabled() && self.suppress_command_capture == 0 {
+      self.capture_semantic_edit(SemanticCommandBatch {
+        transaction_id: 0,
+        selection_movement_epoch: 0,
+        base_frontier: self.document.frontier.clone(),
+        semantic_commands: vec![SemanticEditCommand::InsertText {
+          at: caret,
+          text: text.to_string(),
+          styles,
+        }],
+        selection_after: Some(self.selection.clone()),
+        stable_selection_after: None,
+      });
+    }
     self.layout_invalidation_hint = Some(caret.paragraph..caret.paragraph + 1);
     self.suppress_mutation_notify += 1;
     self.after_text_mutation(cx);

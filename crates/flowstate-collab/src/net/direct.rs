@@ -1,5 +1,4 @@
 use std::{
-  borrow::Cow,
   collections::{HashMap, HashSet},
   sync::{Arc, OnceLock, RwLock as StdRwLock},
   time::Duration,
@@ -348,7 +347,9 @@ pub async fn pull_with_endpoint_progress(
   let mut errors = Vec::new();
   for peer in candidates {
     tracing::trace!(%session, request_kind, peer = %peer, "attempting collaboration direct pull peer");
-    match timeout(per_peer_timeout, pull_once(endpoint, peer, req.clone(), progress.as_ref())).await {
+    // §perf: pull_once uses req only by reference; avoid cloning DirectRequest
+    // (whose `have_vv` grows with document size) per candidate peer.
+    match timeout(per_peer_timeout, pull_once(endpoint, peer, &req, progress.as_ref())).await {
       Ok(Ok(bytes)) => {
         tracing::debug!(%session, request_kind, peer = %peer, bytes = bytes.len(), "collaboration direct pull peer succeeded");
         return Ok(bytes);
@@ -368,9 +369,9 @@ pub async fn pull_with_endpoint_progress(
   Err(anyhow!("direct pull failed for all candidates: {}", errors.join("; ")))
 }
 
-async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
+async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: &DirectRequest, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
   let session = req.session();
-  let request_kind = direct_request_kind(&req);
+  let request_kind = direct_request_kind(req);
   tracing::trace!(%session, request_kind, peer = %peer, "dialing collaboration direct peer");
   let connection = endpoint
     .connect(peer, DIRECT_ALPN)
@@ -383,7 +384,7 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, pr
       .await
       .context("collaboration capability handshake failed")?;
   }
-  request_on_connection(&connection, &req, progress).await
+  request_on_connection(&connection, req, progress).await
 }
 
 async fn authenticate_connection(connection: &Connection, session: SessionId, capability: SessionCapability) -> Result<()> {
@@ -568,19 +569,21 @@ async fn write_response(send: &mut SendStream, outcome: ServeOutcome, compressib
     ServeOutcome::Payload(payload) => {
       // Snapshots/updates are compressed by size (dictionary for small, long mode
       // for big); non-CRDT payloads (assets) and fast links stream verbatim.
-      let (codec, wire): (WireCodec, Cow<'_, [u8]>) = if compressible {
+      // §perf: WireBytes hands the caller the SAME Arc as the cache (or a borrow of
+      // `payload`), avoiding the 1-2 full compressed-payload memcpys the old Cow path took.
+      let (codec, wire): (WireCodec, super::wire_compression::WireBytes<'_>) = if compressible {
         super::wire_compression::compress_for_wire(&payload, link_is_fast)
       } else {
-        (WireCodec::None, Cow::Borrowed(payload.as_slice()))
+        (WireCodec::None, super::wire_compression::WireBytes::Borrowed(payload.as_slice()))
       };
       let header = DirectResponseHeader::Ok {
         codec,
-        wire_len: wire.len() as u64,
+        wire_len: wire.as_slice().len() as u64,
         uncompressed_len: payload.len() as u64,
       };
-      tracing::trace!(codec = ?codec, wire_bytes = wire.len(), payload_bytes = payload.len(), "wrote collaboration direct payload for the wire");
+      tracing::trace!(codec = ?codec, wire_bytes = wire.as_slice().len(), payload_bytes = payload.len(), "wrote collaboration direct payload for the wire");
       write_frame(send, &encode_frame(&header)?).await?;
-      write_payload(send, &wire).await?;
+      write_payload(send, wire.as_slice()).await?;
     },
   }
   send.finish()?;

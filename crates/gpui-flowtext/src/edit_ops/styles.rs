@@ -52,22 +52,30 @@ pub fn apply_style_to_paragraph_range(document: &mut DocumentProjection, paragra
   }
 }
 
+// §perf: compact the runs in place (write index never exceeds the read index)
+// so the caller's existing allocation is reused instead of allocating a second
+// Vec and freeing the input. This runs on nearly every text edit
+// (insert/delete/style/split), so it saves one alloc+free per edit op.
 #[hotpath::measure]
 #[must_use]
-pub fn merge_adjacent_runs(runs: Vec<TextRun>) -> Vec<TextRun> {
-  let mut merged: Vec<TextRun> = Vec::with_capacity(runs.len());
-  for run in runs {
-    if run.len == 0 {
+pub fn merge_adjacent_runs(mut runs: Vec<TextRun>) -> Vec<TextRun> {
+  let mut write = 0usize;
+  let mut read = 0usize;
+  while read < runs.len() {
+    let len = runs[read].len;
+    let styles = runs[read].styles;
+    read += 1;
+    if len == 0 {
       continue;
     }
-    if let Some(last) = merged.last_mut()
-      && last.styles == run.styles
-    {
-      last.len += run.len;
+    if write > 0 && runs[write - 1].styles == styles {
+      runs[write - 1].len += len;
       continue;
     }
-    merged.push(run);
+    runs[write] = TextRun { len, styles };
+    write += 1;
   }
-  merged
+  runs.truncate(write);
+  runs
 }
 

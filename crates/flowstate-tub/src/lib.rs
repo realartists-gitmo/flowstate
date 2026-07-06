@@ -1103,7 +1103,17 @@ fn first_non_empty_line(text: &str) -> Option<String> {
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
-  let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+  // §perf: build the whitespace-normalized string in a single pass, avoiding the
+  // intermediate `Vec<&str>` allocation from `.collect().join(" ")`. Output is
+  // identical: `split_whitespace` drops all whitespace runs and we insert a
+  // single space between words with no leading/trailing space.
+  let mut normalized = String::with_capacity(text.len());
+  for word in text.split_whitespace() {
+    if !normalized.is_empty() {
+      normalized.push(' ');
+    }
+    normalized.push_str(word);
+  }
   if normalized.chars().count() <= max_chars {
     return normalized;
   }

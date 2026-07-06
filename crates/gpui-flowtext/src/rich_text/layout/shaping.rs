@@ -91,8 +91,6 @@ pub(super) fn shape_line(
   );
   let mut x = px(0.0);
   let mut segments = Vec::with_capacity(fragments.len().max(1));
-  let mut ascent = px(0.0);
-  let mut descent = px(0.0);
 
   for (fragment_ix, fragment) in fragments.iter().enumerate() {
     let text = &line_text[fragment.fragment.line_range.clone()];
@@ -105,8 +103,6 @@ pub(super) fn shape_line(
     let (box_pad_left, box_pad_right) = boxed_fragment_padding(&fragments, fragment_ix, document.theme.box_padding_left, document.theme.box_padding_right);
     let segment_ascent = shaped.ascent;
     let segment_descent = shaped.descent;
-    ascent = ascent.max(segment_ascent);
-    descent = descent.max(segment_descent);
     x += box_pad_left;
     segments.push(LaidOutSegment {
       shaped,
@@ -147,11 +143,13 @@ pub(super) fn shape_line(
     });
   }
 
-  ascent = segments
+  // §perf: ascent/descent derive solely from the final segment set, so compute them
+  // once here instead of also max-accumulating them per segment inside the loop above.
+  let ascent = segments
     .iter()
     .map(|segment| segment.ascent)
     .fold(px(0.0), Pixels::max);
-  descent = segments
+  let descent = segments
     .iter()
     .map(|segment| segment.descent)
     .fold(px(0.0), Pixels::max);

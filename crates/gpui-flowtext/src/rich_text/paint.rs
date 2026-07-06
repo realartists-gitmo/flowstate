@@ -731,14 +731,17 @@ pub(super) fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, content
   }
   for segment in &line.segments {
     let segment_origin = origin + point(segment.x, baseline);
+    // §perf: run_bounds is a function of the segment only (not the run), so compute
+    // it and the mask test once per segment rather than once per shaped run; an
+    // off-mask segment now skips all its runs in a single test.
+    let run_bounds = Bounds::new(
+      point(segment_origin.x, origin.y + baseline - segment.ascent),
+      size(segment.width.max(px(1.0)), segment.ascent + segment.descent),
+    );
+    if !run_bounds.intersects(&content_mask) {
+      continue;
+    }
     for run in &segment.shaped.runs {
-      let run_bounds = Bounds::new(
-        point(segment_origin.x, origin.y + baseline - segment.ascent),
-        size(segment.width.max(px(1.0)), segment.ascent + segment.descent),
-      );
-      if !run_bounds.intersects(&content_mask) {
-        continue;
-      }
       for glyph in &run.glyphs {
         let glyph_origin = segment_origin + point(glyph.position.x, px(0.0));
         let result = if glyph.is_emoji {
