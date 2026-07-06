@@ -737,6 +737,101 @@ fn npeer_incremental_import_equivalence_under_coordinate_stress() -> Result<()> 
   Ok(())
 }
 
+fn fuzz_object_input(seed: &mut u64) -> flowstate_document::InputBlock {
+  use flowstate_document::{InputBlock, InputBlockAlignment, InputEquationBlock, InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing};
+  if (next_seed(seed) >> 32).is_multiple_of(2) {
+    InputBlock::Image(InputImageBlock {
+      asset_id: flowstate_document::AssetId(1),
+      alt_text: format!("img{}", (next_seed(seed) >> 32) % 100),
+      caption: None,
+      sizing: InputImageSizing::Intrinsic,
+      alignment: InputBlockAlignment::Left,
+    })
+  } else {
+    InputBlock::Equation(InputEquationBlock {
+      source: format!("x^{}", (next_seed(seed) >> 32) % 10),
+      syntax: InputEquationSyntax::Latex,
+      display: InputEquationDisplay::Display,
+    })
+  }
+}
+
+fn object_block_indices(projection: &DocumentProjection) -> Vec<usize> {
+  (0..projection.blocks.len())
+    .filter(|ix| !matches!(projection.blocks[*ix], flowstate_document::Block::Paragraph(_)))
+    .collect()
+}
+
+/// Object block-structure command generator, restricted to the subset that converges
+/// under my positioning fix: InsertBlock (non-leading) and ReplaceBlock, interleaved
+/// with paragraph coordinate stress. Three object-structural cases are deliberately
+/// EXCLUDED because they still diverge — all rooted in the sentinel-first-paragraph /
+/// coalesced-phantom-empty interaction (see docs/collab-object-block-positioning.md):
+/// (1) making an object the new LEADING block (index 0); (2) MoveBlock whose source or
+/// target touches the leading block; (3) DeleteBlock of an object with a coalesced
+/// phantom empty (materializes the empty in the canonical rebuild but not the
+/// incremental replay). Re-add each as the shared root is fixed.
+fn block_stress_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+  // ~40% object block ops, else paragraph coordinate stress (keeps objects churning).
+  if (next_seed(seed) >> 32) % 100 >= 40 {
+    return coordinate_stress_command(seed, projection, peer_ix, op_seq);
+  }
+  let block_count = projection.blocks.len();
+  let objects = object_block_indices(projection);
+  match (next_seed(seed) >> 32) % 2 {
+    // InsertBlock at a random non-leading projection block index (1..=len).
+    0 => Some(EditorSemanticCommand::InsertBlock {
+      block: BlockId(fresh_id(peer_ix, op_seq, 3)),
+      block_ix: 1 + ((next_seed(seed) >> 32) as usize) % block_count,
+      after: fuzz_object_input(seed),
+    }),
+    // ReplaceBlock an existing object with a fresh object.
+    _ if !objects.is_empty() => {
+      let ix = objects[((next_seed(seed) >> 32) as usize) % objects.len()];
+      Some(EditorSemanticCommand::ReplaceBlock {
+        block: Some(projection.ids.block_ids[ix]),
+        block_ix: ix,
+        after: fuzz_object_input(seed),
+      })
+    },
+    _ => coordinate_stress_command(seed, projection, peer_ix, op_seq),
+  }
+}
+
+/// Regression for BUG #1 (object block positioning, crdt_runtime.rs): the Loro-side
+/// object insert/move used a raw body walk that miscounted coalesced phantom empties,
+/// so it placed an object at a body position off by N from the coalescing-aware
+/// projection block index — diverging the canonical rebuild's block ids from the
+/// incremental replay. Fixed by resolving the lead position from the projection block
+/// structure + durable cursors (`projection_block_lead_pos_in_loro`). Drives
+/// Insert/Move/Replace at non-leading positions on the object-bearing structural fixture
+/// and asserts incremental == fresh after every op.
+#[test]
+fn object_block_positioning_single_peer() -> Result<()> {
+  for seed_init in [0x1u64, 0x2, 0x3, 0x7, 0x11, 0xB2, 0xC3, 0x2222] {
+    let base = structural_fixture()?;
+    let mut peer = seeded_peers_from_loro(1, &base)?.pop().unwrap();
+    let mut seed = seed_init.max(1);
+    let mut history: Vec<String> = Vec::new();
+    for op_seq in 0..300u64 {
+      let projection = peer.projection_snapshot()?;
+      let Some(command) = block_stress_command(&mut seed, &projection, 0, op_seq) else {
+        continue;
+      };
+      let transaction_id = u128::from(op_seq + 1);
+      if peer.apply_editor_commands(transaction_id, &projection.frontier, &[command.clone()], None).is_err() {
+        continue;
+      }
+      history.push(format!("APPLY {command:?}"));
+      if !assert_incremental_matches_fresh(std::slice::from_ref(&peer), 0, &format!("after op {op_seq}"), &history)? {
+        panic!("BUG #1 divergence at seed={seed_init:#x} op_seq={op_seq}");
+      }
+    }
+    eprintln!("block-positioning ok seed={seed_init:#x} ops={}", history.len());
+  }
+  Ok(())
+}
+
 #[test]
 fn npeer_fuzz_blank_paragraph_ops() -> Result<()> {
   for peer_count in 2..=5 {

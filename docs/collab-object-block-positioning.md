@@ -1,71 +1,74 @@
-# Next target: object block-structure op positioning (Insert/Delete/Move/Replace)
+# Object block-structure op positioning (Insert/Delete/Move/Replace)
 
-**Status:** open. Found by extending the N-peer fuzz generator to block ops.
-**Reproduces:** enable the `TEMP-DISABLED` arms in `generate_command`
-(`multi_peer_convergence_tests.rs`) and run `npeer_fuzz_structural_fixture_paragraph_ops`.
-First failure: `MoveBlock` — canonical vs incremental disagree on the moved block's
-final index by one.
+**Status:** PARTIALLY FIXED. InsertBlock and MoveBlock positioning now resolve from the
+coalescing-aware projection structure; ReplaceBlock was already correct. A shared root
+(the sentinel-first-paragraph / coalesced-phantom-empty interaction) still breaks three
+cases; they are scoped below and excluded from the fuzz until the root is fixed.
 
-## What's covered now (green)
+## What was fixed
 
-The fuzz generator now drives, and the harness proves convergent for:
-paragraph/text (InsertText incl. soft breaks, DeleteRange, SplitParagraph,
-JoinParagraphs, SetParagraphStyle), **SetRunStyles**, and **object-property ops**
-(ReplaceImageAltText, SetImageLayout, ReplaceImageCaption) — at N=2–5 with
-out-of-order delivery. Fork B (object-adjacent empty parity) is done.
+The Loro-side object insert/move used a raw body walk
+(`object_insert_unicode_pos_for_projection_block`) that counted one block per `\n` and per
+`OBJECT_REPLACEMENT`, which does NOT match the **coalescing-aware** projection block index
+(the projection drops record-less phantom empties after an object). So a projection
+`block_ix` mapped to the wrong body position — an off-by-N around objects/coalesced
+empties that diverged the canonical Loro rebuild's block ids from the incremental replay.
 
-## The bug
+Replaced with `projection_block_lead_pos_in_loro` (crdt_runtime.rs): it resolves the body
+insertion position from the projection's own (already-coalesced) block list plus each
+block's durable cursor — an object's `anchor_cursor`, or a paragraph's boundary `\n`
+(sentinel-clamped). Insert-before-a-paragraph lands on its boundary `\n`, which attaches
+the object to the previous block's tail exactly as `push_flow_blocks` re-segments it.
+`insert_projection_object_block` and `move_projection_object_block` now take the
+(incremental-replay-evolved) working projection and use it; the old body-walk positioner
+was deleted. MoveBlock maps its post-removal `new_block_ix` back to the pre-removal block
+it lands before, resolving that lead position on the post-delete body via durable cursors.
 
-The block-structure ops place/find objects in the Loro body via body-walk helpers
-`object_insert_unicode_pos_for_projection_block` / `object_unicode_pos_for_projection_block`
-(`crdt_runtime.rs`). These walk the raw body counting a block per `\n` and per
-`OBJECT_REPLACEMENT`, which does **not** match the **coalescing-aware** projection
-block index (the projection drops the record-less phantom empty after an object).
-So a projection `block_ix` (e.g. `MoveBlock { new_block_ix }`, `InsertBlock { block_ix }`)
-maps to the wrong body position, and the incremental replay (which moves by projection
-index) and the Loro mutation (which moves by body-walk index) disagree — an off-by-N
-around objects/coalesced empties.
+**Validated:** `object_block_positioning_single_peer` (multi_peer_convergence_tests.rs)
+drives InsertBlock (non-leading) + ReplaceBlock on the object-bearing structural fixture,
+asserting incremental == fresh after every op across 8 seeds. Isolated runs also proved
+MoveBlock (non-leading source AND target) convergent.
 
-`MoveBlock` additionally deletes the object then computes the insert position on the
-post-delete body while `new_block_ix` is a pre-delete index — a second off-by-one on
-forward moves.
+## What still diverges — one shared root
 
-## Fix direction
+All three remaining failures come from the **sentinel-anchored first paragraph** and the
+**coalesced phantom empty** an object implies. The reserved first paragraph is anchored to
+the body sentinel `\n` (pos 0), and the first `\n` after an object is coalesced out of the
+projection (Fork B). Any structural op that changes what sits at the front, or that
+adds/removes an object whose phantom empty then materializes, desyncs the incremental
+replay (which just reorders/removes projection blocks) from the canonical rebuild (which
+re-segments and re-resolves ids).
 
-Mirror the paragraph coordinate fix (5d50099 / d4b11ae): resolve object block
-positions from the **projection block structure + durable anchor cursors**, not a raw
-body walk. To place an object at projection block index `N`:
-- resolve the live body position of the block currently at `N` (its durable
-  `anchor_cursor` for an object, or `paragraph_body_start_in_loro`-style boundary for
-  a paragraph), and insert there;
-- for `MoveBlock`, compute the target position **before** deleting the source, or
-  adjust the index for the post-delete shift.
+1. **Leading insert (block_ix 0).** Inserting an object before the sentinel-anchored first
+   paragraph steals that paragraph's boundary: `\n OBJECT P0text` leaves P0 with no
+   boundary `\n`, so the canonical rebuild fabricates a new id for it (seen as
+   `ParagraphId(1)`-ish) while the incremental replay keeps P0's id. Correct form is
+   `\n OBJECT \n P0text` with P0 RE-ANCHORED to the new boundary — mirror SplitParagraph's
+   `\n`-insert + style mark + `repair_paragraph_metadata_after_stable_split`, but for the
+   reserved first paragraph (`ROOT_FIRST_PARAGRAPH_ID`).
+2. **Move touching the leading block.** Moving the leading object away (or to index 1)
+   changes front-of-doc coalescing; the incremental prediction gains an extra leading
+   paragraph the canonical rebuild doesn't have. Same re-anchor need as (1).
+3. **DeleteBlock of an object with a coalesced phantom empty.** Removing the object
+   un-coalesces its trailing phantom `\n`, which materializes as a REAL empty paragraph in
+   the canonical rebuild; the incremental replay only drops the object block, so a later
+   SplitParagraph diverges block ids. Minimal repro: structural_fixture, seed 0x7,
+   `DeleteBlock` then `SplitParagraph` (6 ops).
 
-Touches: `object_insert_unicode_pos_for_projection_block`,
-`object_unicode_pos_for_projection_block`, `move_projection_object_block`,
-`insert_projection_object_block`, `delete_projection_object_block`
-(`crdt_runtime.rs`), and the matching incremental replay (`lifecycle.rs`).
+### Fix direction (shared)
 
-Then re-enable the `TEMP-DISABLED` generator arms and grind to green, then add the
-9 table ops (cookbook ready).
+Teach the incremental replay (`gpui-flowtext` block ops in projection_apply.rs /
+lifecycle.rs) and the Loro-side ops to agree on ONE phantom/sentinel rule:
+materialize/coalesce the object-adjacent empty and re-anchor the reserved first paragraph
+identically on both sides. This is the same class as the Fork B coalescing-parity work,
+extended to the object structural ops. Once done, re-enable the excluded arms in
+`block_stress_command` (leading insert, MoveBlock, DeleteBlock) and grind to green, then
+fold the object ops into the N-peer fuzz and add the 9 table ops.
 
-## Coverage-extension results (what the expansion found)
+## Coverage status
 
-I extended `generate_command` to the full op surface and ran the fuzz. Results, so
-the next session starts from known ground:
-
-- **SAFE (validated convergent on the structural fixture, N=2–5):** `SetRunStyles`,
-  `ReplaceImageAltText`, `SetImageLayout`, `ReplaceImageCaption`. These can be added
-  back with confidence.
-- **BUG #1 — object block-structure positioning** (above): `InsertBlock`,
-  `DeleteBlock`, `MoveBlock`, `ReplaceBlock`. First failure `MoveBlock` off-by-one.
-- **BUG #2 — soft-break under broader op sequences:** with the wider op mix, the
-  *blank*-doc fuzz hit a paragraph-identity divergence on an `InsertText` of U+2028
-  (`SplitParagraph`/`SetRunStyles` reach a state the old paragraph-only sequence
-  didn't). The structural fuzz did not hit it (different sequence). This is a real
-  materializer bug around soft breaks + paragraph structure — reproduce by re-adding
-  `SetRunStyles` and running `npeer_fuzz_blank_paragraph_ops`. Investigate whether a
-  run-style mark spanning a boundary/soft-break, or a soft-break split, is the trigger.
-
-The generator extension was reverted to keep the fuzz a green gate; re-apply it
-incrementally (SAFE ops first, then grind BUG #1 and BUG #2) next session.
+- InsertBlock (non-leading), ReplaceBlock: convergent (fuzzed).
+- MoveBlock (non-leading source+target): convergent in isolation; excluded from the mixed
+  fuzz because a leading-block source/target hits root case (2). Positioning fix retained.
+- DeleteBlock, leading insert, leading move: excluded pending the shared-root fix.
+- Table ops (9 variants): not yet generated.

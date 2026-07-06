@@ -3069,13 +3069,13 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
     EditorSemanticCommand::ReplaceParagraphSpan { start, before, after } => {
       replace_body_paragraph_span(doc, projection, *start, before, after).context("replacing paragraph span from editor semantic command")
     },
-    EditorSemanticCommand::InsertBlock { block, block_ix, after } => insert_projection_object_block(doc, *block, *block_ix, after)
+    EditorSemanticCommand::InsertBlock { block, block_ix, after } => insert_projection_object_block(doc, projection, *block, *block_ix, after)
       .with_context(|| format!("inserting object block from editor semantic command at projection block {block_ix} ({block:?})")),
     EditorSemanticCommand::DeleteBlock { block } => {
       delete_projection_object_block(doc, *block).context("deleting object block from editor semantic command")
     },
     EditorSemanticCommand::MoveBlock { block, new_block_ix } => {
-      move_projection_object_block(doc, *block, *new_block_ix).context("moving object block from editor semantic command")
+      move_projection_object_block(doc, projection, *block, *new_block_ix).context("moving object block from editor semantic command")
     },
     EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => replace_projection_object_block(doc, projection, *block, *block_ix, after)
       .with_context(|| format!("replacing object block from editor semantic command at projection block {block_ix} ({block:?})")),
@@ -3677,7 +3677,13 @@ fn editor_command_invalidation(
   }
 }
 
-fn insert_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId, block_ix: usize, input: &InputBlock) -> Result<bool> {
+fn insert_projection_object_block(
+  doc: &LoroDoc,
+  projection: &DocumentProjection,
+  block_id: flowstate_document::BlockId,
+  block_ix: usize,
+  input: &InputBlock,
+) -> Result<bool> {
   if matches!(input, InputBlock::Paragraph(_)) {
     tracing::warn!(
       block_ix,
@@ -3692,14 +3698,7 @@ fn insert_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
     tracing::warn!(block_ix, ?block_id, "skipping InsertBlock because the Loro object block already exists");
     return Ok(false);
   }
-  let Some(unicode_index) = object_insert_unicode_pos_for_projection_block(&body, block_ix) else {
-    tracing::warn!(
-      block_ix,
-      ?block_id,
-      "skipping InsertBlock because no Loro insertion point maps to the projection block index"
-    );
-    return Ok(false);
-  };
+  let unicode_index = projection_block_lead_pos_in_loro(doc, projection, &body, block_ix);
   insert_input_object_block(doc, unicode_index, block_id, input)?;
   Ok(true)
 }
@@ -3987,7 +3986,12 @@ fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
   Ok(true)
 }
 
-fn move_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId, new_block_ix: usize) -> Result<bool> {
+fn move_projection_object_block(
+  doc: &LoroDoc,
+  projection: &DocumentProjection,
+  block_id: flowstate_document::BlockId,
+  new_block_ix: usize,
+) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, anchor_pos)) = object_loro_block_by_projected_id(doc, &body, block_id) else {
     tracing::warn!(
@@ -4005,10 +4009,25 @@ fn move_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::Blo
     );
     return Ok(false);
   }
+  // `new_block_ix` is the target index in the POST-removal projection block list (the
+  // incremental replay removes the source, then inserts at `new_block_ix`). Map it back
+  // to the pre-removal block whose lead position it lands before, skipping the source's
+  // own slot, then resolve that lead position on the post-delete body via durable cursors
+  // (which survive the char deletion). A target at/after the tail appends.
+  let source_ix = projection.ids.block_ids.iter().position(|id| *id == block_id);
   body
     .delete(anchor_pos, 1)
     .context("deleting object placeholder before move")?;
-  let insert_pos = object_insert_unicode_pos_for_projection_block(&body, new_block_ix).unwrap_or_else(|| body.len_unicode());
+  let remaining = projection.blocks.len().saturating_sub(1);
+  let insert_pos = if new_block_ix >= remaining {
+    body.len_unicode()
+  } else {
+    let original_ix = match source_ix {
+      Some(source_ix) if new_block_ix >= source_ix => new_block_ix + 1,
+      _ => new_block_ix,
+    };
+    projection_block_lead_pos_in_loro(doc, projection, &body, original_ix)
+  };
   body
     .insert(insert_pos, &OBJECT_REPLACEMENT.to_string())
     .context("reinserting object placeholder after move")?;
@@ -4016,6 +4035,40 @@ fn move_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::Blo
     block.insert("anchor_cursor", cursor.encode())?;
   }
   Ok(true)
+}
+
+/// Body-unicode position at which projection block `block_ix` begins — inserting an
+/// `OBJECT_REPLACEMENT` char here makes it the new block `block_ix` (append when
+/// `block_ix >= blocks.len()`). Coalescing-aware BY CONSTRUCTION: it resolves the lead
+/// position from the projection's own (already-coalesced) block list plus each block's
+/// durable cursor — an object's `anchor_cursor`, or a paragraph's boundary `\n` — so it
+/// never miscounts the record-less phantom empties a raw body walk stumbled over (the
+/// off-by-N that diverged the incremental replay from the canonical Loro rebuild). Insert
+/// before a paragraph lands on its boundary `\n` (clamped past the sentinel), which
+/// attaches the object to the previous block's tail exactly as `push_flow_blocks`
+/// re-segments it.
+fn projection_block_lead_pos_in_loro(doc: &LoroDoc, projection: &DocumentProjection, body: &LoroText, block_ix: usize) -> usize {
+  let Some(block) = projection.blocks.get(block_ix) else {
+    return body.len_unicode();
+  };
+  match block {
+    flowstate_document::Block::Paragraph(_) => {
+      let paragraph_ix = projection
+        .blocks
+        .iter()
+        .take(block_ix)
+        .filter(|block| matches!(block, flowstate_document::Block::Paragraph(_)))
+        .count();
+      // The paragraph's leading `\n` (sentinel-clamped: never insert before body pos 1).
+      paragraph_boundary_loro_unicode_index(doc, projection, paragraph_ix).max(1)
+    },
+    _ => projection
+      .ids
+      .block_ids
+      .get(block_ix)
+      .and_then(|block_id| object_loro_block_by_projected_id(doc, body, *block_id))
+      .map_or_else(|| body.len_unicode(), |(_, _, anchor_pos)| anchor_pos),
+  }
 }
 
 fn object_unicode_pos_for_projection_block(body: &LoroText, target_block_ix: usize) -> Option<usize> {
@@ -4055,51 +4108,6 @@ fn object_unicode_pos_for_projection_block(body: &LoroText, target_block_ix: usi
   None
 }
 
-fn object_insert_unicode_pos_for_projection_block(body: &LoroText, target_block_ix: usize) -> Option<usize> {
-  let mut block_ix = 0_usize;
-  let mut current_paragraph_has_text = false;
-  let mut seen_sentinel = false;
-  let mut last_pos = 0_usize;
-
-  for (unicode_pos, ch) in body.to_string().chars().enumerate() {
-    last_pos = unicode_pos + 1;
-    match ch {
-      '\n' => {
-        if seen_sentinel {
-          if block_ix >= target_block_ix {
-            return Some(unicode_pos);
-          }
-          block_ix += 1;
-        } else {
-          seen_sentinel = true;
-        }
-        current_paragraph_has_text = false;
-      },
-      OBJECT_REPLACEMENT => {
-        if current_paragraph_has_text {
-          if block_ix >= target_block_ix {
-            return Some(unicode_pos);
-          }
-          block_ix += 1;
-          current_paragraph_has_text = false;
-        }
-        if block_ix >= target_block_ix {
-          return Some(unicode_pos);
-        }
-        block_ix += 1;
-      },
-      _ => current_paragraph_has_text = true,
-    }
-  }
-
-  if current_paragraph_has_text {
-    if block_ix >= target_block_ix {
-      return Some(last_pos);
-    }
-    block_ix += 1;
-  }
-  (block_ix <= target_block_ix).then_some(last_pos)
-}
 
 /// Live start (unicode) of the paragraph identified by `paragraph_id` in the actual
 /// Loro body flow, resolved from its durable boundary cursor — the paragraph's text
