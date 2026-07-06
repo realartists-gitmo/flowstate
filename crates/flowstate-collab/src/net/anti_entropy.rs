@@ -144,7 +144,13 @@ impl AntiEntropyState {
     tracing::debug!(session = %self.session, from = %from, was_in_flight, in_flight = self.pulls_in_flight.len(), "collaboration anti-entropy pull finished");
   }
 
-  fn begin_pull(&mut self, from: EndpointId, our_vv: Vec<u8>, now: Instant) -> GapAction {
+  /// Start a deduplicated pull to `from`: returns [`GapAction::Pull`] and registers
+  /// an in-flight slot (with a [`PULL_IN_FLIGHT_DEADLINE`] expiry), or
+  /// [`GapAction::None`] if a pull to that peer is already outstanding. Every pull —
+  /// digest-driven or triggered by a pending-dependency import — MUST go through
+  /// here so a single peer gets at most one in-flight pull, and so the matching
+  /// [`Self::finish_pull`] clears a slot this actually set.
+  pub fn begin_pull(&mut self, from: EndpointId, our_vv: Vec<u8>, now: Instant) -> GapAction {
     self.expire_stale_pulls(now);
     if self.pulls_in_flight.contains_key(&from) {
       tracing::debug!(session = %self.session, from = %from, "collaboration anti-entropy skipped pull because one is already in flight for this peer");

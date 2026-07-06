@@ -188,7 +188,7 @@ async fn install_snapshot_handler(peer: &Peer, session: SessionId, snapshot: Vec
   let (request_tx, request_rx) = async_channel::unbounded();
   peer
     .direct_state
-    .register_handler(session, DirectSessionHandler::new(request_tx))
+    .register_handler(session, DirectSessionHandler::new(request_tx, None))
     .await;
   tokio::spawn(async move {
     while let Ok(request) = request_rx.recv().await {

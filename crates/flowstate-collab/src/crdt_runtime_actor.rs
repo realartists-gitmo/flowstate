@@ -4,7 +4,7 @@ use anyhow::{Context as _, Result, anyhow};
 use async_channel::{Receiver, Sender};
 use flowstate_document::{AssetRecord, DocumentProjection};
 use gpui_flowtext::{EditorSelection, SemanticEditCommand as EditorSemanticCommand};
-use loro::{ExportMode, VersionVector};
+use loro::{ExportMode, LoroDoc, VersionVector};
 
 use crate::crdt_runtime::{
   CrdtRuntime, EditorCommitResult, ProjectionFallbackStats, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest,
@@ -17,17 +17,33 @@ const RUNTIME_REQUEST_CHANNEL_CAPACITY: usize = 256;
 #[derive(Clone)]
 pub struct CrdtRuntimeHandle {
   commands: Sender<RuntimeRequest>,
+  /// A shared read handle to the runtime's canonical Loro document. `LoroDoc::clone`
+  /// is a reference-counted handle (not a deep fork), and the runtime only ever
+  /// MUTATES its doc (never reassigns `self.doc`), so this stays live for the
+  /// runtime's whole life and observes every edit. It lets read-only pulls
+  /// (snapshot / updates export) be served WITHOUT queueing behind the mutation
+  /// actor's FIFO — Loro's own internal locks make concurrent read-vs-edit safe.
+  read_doc: LoroDoc,
 }
 
 impl CrdtRuntimeHandle {
   pub fn spawn(runtime: CrdtRuntime) -> io::Result<Self> {
+    // Capture the shared read handle before the runtime moves onto its thread.
+    let read_doc = runtime.doc().clone();
     // Bounded so a stalled runtime thread backpressures callers via
     // `send().await` instead of growing an unbounded request queue.
     let (commands, receiver) = async_channel::bounded(RUNTIME_REQUEST_CHANNEL_CAPACITY);
     thread::Builder::new()
       .name("flowstate-crdt-runtime".to_string())
       .spawn(move || runtime_loop(runtime, receiver))?;
-    Ok(Self { commands })
+    Ok(Self { commands, read_doc })
+  }
+
+  /// A shared read handle to the canonical Loro document, for serving read-only
+  /// pulls off the mutation actor's queue. See [`Self::read_doc`] (the field).
+  #[must_use]
+  pub fn read_doc(&self) -> LoroDoc {
+    self.read_doc.clone()
   }
 }
 

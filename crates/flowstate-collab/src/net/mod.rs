@@ -4,6 +4,7 @@ pub mod blobs;
 pub mod direct;
 pub mod runtime;
 pub mod swarm;
+pub(crate) mod wire_compression;
 
 use anyhow::Result;
 use async_channel::Sender;

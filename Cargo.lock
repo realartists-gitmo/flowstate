@@ -3043,6 +3043,7 @@ dependencies = [
  "tracing",
  "twox-hash",
  "uuid",
+ "zstd",
 ]
 
 [[package]]
@@ -6050,8 +6051,6 @@ dependencies = [
 [[package]]
 name = "loro-internal"
 version = "1.13.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252a84196402ac55a7dd064af87a747a430fc176ec744d5bb99f4ed92e639fa8"
 dependencies = [
  "append-only-bytes",
  "arref",

@@ -1840,13 +1840,12 @@ impl CrdtRuntime {
           "incremental-vs-full-divergence",
           || {
             format!(
-              "{context}: incremental projection diverged from full rebuild (incremental_paragraphs={}, full_paragraphs={}, incremental_blocks={}, full_blocks={}, incremental_frontier={:?}, full_frontier={:?})",
+              "{context}: incremental projection diverged from full rebuild [first_divergence: {}] (incremental_paragraphs={}, full_paragraphs={}, incremental_blocks={}, full_blocks={})",
+              first_projection_divergence(&self.projection, &fresh),
               self.projection.paragraphs.len(),
               fresh.paragraphs.len(),
               self.projection.blocks.len(),
               fresh.blocks.len(),
-              self.projection.frontier,
-              fresh.frontier,
             )
           },
         );
@@ -2627,6 +2626,21 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
 }
 
 fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: &str, keys: &[String]) {
+  // §divergence: a change to a paragraph/block metadata record's durable identity
+  // or anchor alters which id a boundary resolves to. The incremental remote patch
+  // path applies content only and NEVER re-derives the paragraph_ids/block_ids
+  // arrays, so on such a change the incremental projection would freeze stale ids
+  // that diverge from the authoritative full rebuild (and clobber peers). Force a
+  // full rebuild — which re-resolves the ids — for any id-affecting record change.
+  // (Text-structural changes already force a rebuild above; this covers the
+  // non-structural record writes, e.g. a peer's repaired metadata record syncing.)
+  if keys
+    .iter()
+    .any(|key| matches!(key.as_str(), "id" | "boundary_cursor" | "start_cursor" | "anchor_cursor"))
+  {
+    invalidation.rebuild_required = true;
+    invalidation.fallback_reason = Some("metadata_record_id_change");
+  }
   if keys.iter().any(|key| {
     matches!(
       key.as_str(),
@@ -2781,6 +2795,44 @@ fn projections_semantically_equal(left: &DocumentProjection, right: &DocumentPro
       (Block::Paragraph(_), Block::Paragraph(_)) => true,
       _ => left_block == right_block,
     })
+}
+
+/// §divergence-diagnostic: name the FIRST concrete field where `left` (the
+/// incremental projection) differs from `right` (the authoritative full rebuild),
+/// so the `incremental-vs-full-divergence` event pinpoints the exact id/text
+/// instead of only counts. Called only once a divergence is already known.
+fn first_projection_divergence(left: &DocumentProjection, right: &DocumentProjection) -> String {
+  if left.ids.document_id != right.ids.document_id {
+    return format!("document_id {} != {}", left.ids.document_id, right.ids.document_id);
+  }
+  if left.ids.paragraph_ids.len() != right.ids.paragraph_ids.len() {
+    return format!("paragraph_ids len {} != {}", left.ids.paragraph_ids.len(), right.ids.paragraph_ids.len());
+  }
+  for (ix, (l, r)) in left.ids.paragraph_ids.iter().zip(&right.ids.paragraph_ids).enumerate() {
+    if l != r {
+      return format!("paragraph_ids[{ix}] incremental={} full={} text={:?}", l.0, r.0, flowstate_document::paragraph_text(right, ix));
+    }
+  }
+  if left.ids.block_ids.len() != right.ids.block_ids.len() {
+    return format!("block_ids len {} != {}", left.ids.block_ids.len(), right.ids.block_ids.len());
+  }
+  for (ix, (l, r)) in left.ids.block_ids.iter().zip(&right.ids.block_ids).enumerate() {
+    if l != r {
+      return format!("block_ids[{ix}] incremental={} full={}", l.0, r.0);
+    }
+  }
+  if left.sections != right.sections {
+    return "sections differ".to_string();
+  }
+  for ix in 0..left.paragraphs.len().min(right.paragraphs.len()) {
+    if flowstate_document::paragraph_text(left, ix) != flowstate_document::paragraph_text(right, ix) {
+      return format!("paragraph[{ix}] text incremental={:?} full={:?}", flowstate_document::paragraph_text(left, ix), flowstate_document::paragraph_text(right, ix));
+    }
+    if left.paragraphs[ix].style != right.paragraphs[ix].style || left.paragraphs[ix].runs != right.paragraphs[ix].runs {
+      return format!("paragraph[{ix}] style/runs differ");
+    }
+  }
+  "blocks or other non-id content differ".to_string()
 }
 
 /// §fidelity: classify a projection defect into a fidelity event class. Paragraph

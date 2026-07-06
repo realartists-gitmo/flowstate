@@ -1,4 +1,5 @@
 use std::{
+  borrow::Cow,
   collections::{HashMap, HashSet},
   sync::{Arc, OnceLock, RwLock as StdRwLock},
   time::Duration,
@@ -8,9 +9,10 @@ use anyhow::{Context as _, Result, anyhow, bail, ensure};
 use async_channel::Sender;
 use iroh::{
   Endpoint, EndpointId,
-  endpoint::{Connection, RecvStream, SendStream},
+  endpoint::{Connection, PathId, RecvStream, SendStream},
   protocol::{AcceptError, ProtocolHandler},
 };
+use loro::{ExportMode, LoroDoc, VersionVector};
 use tokio::{
   sync::{OwnedSemaphorePermit, RwLock, Semaphore},
   time::timeout,
@@ -20,7 +22,7 @@ use crate::{
   capability::{SessionCapability, unix_now},
   ids::{BlobId, SessionId},
   proto_direct::{
-    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, MAX_PAYLOAD_LEN, decode_frame,
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, MAX_PAYLOAD_LEN, WireCodec, decode_frame,
     encode_frame,
   },
 };
@@ -28,18 +30,29 @@ use crate::{
 use super::{PullProgress, auth::SessionAuthRegistry, blobs::BlobOutbox};
 
 const DIRECT_SERVE_CONCURRENCY: usize = 4;
+/// RTT below which the path is treated as "fast" (LAN/localhost) and wire
+/// compression is skipped, because zstd decode (~700–900 MB/s) would become the
+/// bottleneck rather than the link. See [`link_is_fast`].
+const FAST_LINK_RTT: Duration = Duration::from_millis(1);
 const DIRECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 static CLIENT_ENDPOINT: OnceLock<StdRwLock<Option<Endpoint>>> = OnceLock::new();
 
 #[derive(Clone, Debug)]
 pub struct DirectSessionHandler {
   requests: Sender<DirectServeRequest>,
+  /// Shared read handle to the session's canonical Loro document. When present,
+  /// snapshot / update pulls are served DIRECTLY off it (see
+  /// [`serve_snapshot_off_actor`]) instead of queueing a `DirectServeRequest`
+  /// behind the mutation actor's FIFO — so a peer's recovery pull cannot be
+  /// starved behind the local user's edit backlog (which is what left large-doc
+  /// sessions unable to converge). `None` falls back to the actor-served path.
+  read_doc: Option<LoroDoc>,
 }
 
 impl DirectSessionHandler {
   #[must_use]
-  pub fn new(requests: Sender<DirectServeRequest>) -> Self {
-    Self { requests }
+  pub fn new(requests: Sender<DirectServeRequest>, read_doc: Option<LoroDoc>) -> Self {
+    Self { requests, read_doc }
   }
 }
 
@@ -178,15 +191,19 @@ impl DirectServeState {
 
     match request {
       DirectRequest::Snapshot { .. } => {
-        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await
+        if let Some(read_doc) = handler.read_doc.clone() {
+          serve_snapshot_off_actor(session, read_doc).await
+        } else {
+          request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await
+        }
       },
       DirectRequest::Updates { have_vv, .. } => {
-        tracing::trace!(%session, have_vv_bytes = have_vv.len(), "forwarding collaboration direct updates request to session");
-        request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates {
-          have_vv,
-          reply,
-        })
-        .await
+        tracing::trace!(%session, have_vv_bytes = have_vv.len(), "serving collaboration direct updates request");
+        if let Some(read_doc) = handler.read_doc.clone() {
+          serve_updates_off_actor(session, read_doc, have_vv).await
+        } else {
+          request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates { have_vv, reply }).await
+        }
       },
       DirectRequest::Asset { asset, .. } => request_asset(handler.requests, session, asset).await,
       DirectRequest::Blob { .. } | DirectRequest::Authenticate { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
@@ -231,14 +248,17 @@ impl DirectProto {
     }
   }
 
-  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, remote: EndpointId, _permit: OwnedSemaphorePermit) -> Result<()> {
+  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, remote: EndpointId, link_is_fast: bool, _permit: OwnedSemaphorePermit) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
     let session = request.session();
     let request_kind = direct_request_kind(&request);
+    // Only the CRDT payloads (snapshots, update batches) benefit from zstd; assets
+    // are already compressed and blobs are opaque, so those stream verbatim.
+    let compressible = matches!(request, DirectRequest::Snapshot { .. } | DirectRequest::Updates { .. });
     tracing::debug!(%session, remote = %remote, request_kind, "received collaboration direct stream request");
     let outcome = self.state.serve(request, remote).await;
     tracing::debug!(%session, request_kind, outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "collaboration direct request served");
-    write_response(&mut send, outcome).await?;
+    write_response(&mut send, outcome, compressible, link_is_fast).await?;
     Ok(())
   }
 }
@@ -248,18 +268,21 @@ impl ProtocolHandler for DirectProto {
     // The remote endpoint id comes from the connection's TLS handshake, so it
     // is an authenticated sender identity, not self-reported data.
     let remote = connection.remote_id();
-    tracing::trace!(remote = %remote, "accepted collaboration direct connection");
+    // Decide once per connection whether the path is fast enough that zstd decode
+    // would be the bottleneck rather than the link (then skip compression).
+    let link_is_fast = link_is_fast(&connection);
+    tracing::trace!(remote = %remote, link_is_fast, "accepted collaboration direct connection");
     while let Ok((send, recv)) = connection.accept_bi().await {
       let Ok(permit) = self.permits.clone().try_acquire_owned() else {
         let mut send = send;
-        if let Err(error) = write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy)).await {
+        if let Err(error) = write_response(&mut send, ServeOutcome::Header(DirectResponseHeader::Busy), false, link_is_fast).await {
           tracing::warn!("flowstate collab direct busy response failed: {error:#}");
         }
         continue;
       };
       let proto = self.clone();
       tokio::spawn(async move {
-        if let Err(error) = proto.handle_stream(send, recv, remote, permit).await {
+        if let Err(error) = proto.handle_stream(send, recv, remote, link_is_fast, permit).await {
           tracing::error!(error = %format_args!("{error:#}"), "collaboration direct stream failed");
         }
       });
@@ -385,9 +408,11 @@ async fn request_on_connection(connection: &Connection, req: &DirectRequest, pro
   let header = read_frame::<DirectResponseHeader>(&mut recv).await?;
   tracing::trace!(%session, request_kind, response = direct_response_header_kind(&header), "received collaboration direct response header");
   match header {
-    DirectResponseHeader::Ok { total_len } => {
-      let payload = read_payload(&mut recv, total_len, progress).await?;
-      tracing::trace!(%session, request_kind, bytes = payload.len(), "read collaboration direct response payload");
+    DirectResponseHeader::Ok { codec, wire_len, uncompressed_len } => {
+      let wire = read_payload(&mut recv, wire_len, progress).await?;
+      let uncompressed_len = usize::try_from(uncompressed_len).context("direct payload is too large for this platform")?;
+      let payload = super::wire_compression::decompress_from_wire(codec, wire, uncompressed_len).context("decoding direct response payload")?;
+      tracing::trace!(%session, request_kind, wire_bytes = wire_len, bytes = payload.len(), codec = ?codec, "read collaboration direct response payload");
       Ok(payload)
     },
     DirectResponseHeader::NotAttached => Err(anyhow!("peer is not attached to this session")),
@@ -426,6 +451,53 @@ where
     },
     Err(_) => {
       tracing::warn!(%session, request_kind, ?DIRECT_RESPONSE_TIMEOUT, "collaboration direct session payload timed out");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+  }
+}
+
+/// Serve a snapshot pull directly from the shared Loro read handle, bypassing the
+/// mutation actor's FIFO so it can't be starved behind the local user's edits. The
+/// export is a blocking CPU/lock operation, so it runs on a blocking thread rather
+/// than stalling an async worker; Loro's internal locks keep it safe against
+/// concurrent edits on the actor thread (the runtime only mutates its doc).
+async fn serve_snapshot_off_actor(session: SessionId, read_doc: LoroDoc) -> ServeOutcome {
+  let export = tokio::task::spawn_blocking(move || read_doc.export(ExportMode::Snapshot).context("exporting Loro snapshot")).await;
+  match export {
+    Ok(Ok(bytes)) => {
+      tracing::trace!(%session, bytes = bytes.len(), "served collaboration snapshot off the mutation actor");
+      ServeOutcome::Payload(bytes)
+    },
+    Ok(Err(error)) => {
+      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration snapshot failed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(error) => {
+      tracing::warn!(%session, error = %error, "collaboration snapshot export task failed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+  }
+}
+
+/// Serve an incremental-updates pull directly from the shared Loro read handle,
+/// off the mutation actor's queue (see [`serve_snapshot_off_actor`]).
+async fn serve_updates_off_actor(session: SessionId, read_doc: LoroDoc, have_vv: Vec<u8>) -> ServeOutcome {
+  let export = tokio::task::spawn_blocking(move || {
+    let remote_vv = VersionVector::decode(&have_vv).context("decoding remote Loro version vector")?;
+    read_doc.export(ExportMode::updates(&remote_vv)).context("exporting Loro updates for anti-entropy")
+  })
+  .await;
+  match export {
+    Ok(Ok(bytes)) => {
+      tracing::trace!(%session, bytes = bytes.len(), "served collaboration updates off the mutation actor");
+      ServeOutcome::Payload(bytes)
+    },
+    Ok(Err(error)) => {
+      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration updates failed");
+      ServeOutcome::Header(DirectResponseHeader::NotFound)
+    },
+    Err(error) => {
+      tracing::warn!(%session, error = %error, "collaboration updates export task failed");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
   }
@@ -475,7 +547,17 @@ where
   decode_frame(&frame)
 }
 
-async fn write_response(send: &mut SendStream, outcome: ServeOutcome) -> Result<()> {
+/// Whether the connection's path is fast enough that zstd decode would be the
+/// bottleneck rather than the link, in which case compression is skipped. A very
+/// low RTT means LAN/localhost; higher-RTT WAN/relay paths gain ~2.5–3× effective
+/// goodput from compression, so they keep it.
+fn link_is_fast(connection: &Connection) -> bool {
+  // `PathId::ZERO` is the primary path (iroh's own net-report reads rtt the same
+  // way). An unknown rtt is treated as NOT fast, so we compress when in doubt.
+  connection.rtt(PathId::ZERO).is_some_and(|rtt| rtt < FAST_LINK_RTT)
+}
+
+async fn write_response(send: &mut SendStream, outcome: ServeOutcome, compressible: bool, link_is_fast: bool) -> Result<()> {
   tracing::trace!(
     outcome = outcome.kind(),
     payload_bytes = outcome.payload_len(),
@@ -484,11 +566,21 @@ async fn write_response(send: &mut SendStream, outcome: ServeOutcome) -> Result<
   match outcome {
     ServeOutcome::Header(header) => write_frame(send, &encode_frame(&header)?).await?,
     ServeOutcome::Payload(payload) => {
-      let header = DirectResponseHeader::Ok {
-        total_len: payload.len() as u64,
+      // Snapshots/updates are compressed by size (dictionary for small, long mode
+      // for big); non-CRDT payloads (assets) and fast links stream verbatim.
+      let (codec, wire): (WireCodec, Cow<'_, [u8]>) = if compressible {
+        super::wire_compression::compress_for_wire(&payload, link_is_fast)
+      } else {
+        (WireCodec::None, Cow::Borrowed(payload.as_slice()))
       };
+      let header = DirectResponseHeader::Ok {
+        codec,
+        wire_len: wire.len() as u64,
+        uncompressed_len: payload.len() as u64,
+      };
+      tracing::trace!(codec = ?codec, wire_bytes = wire.len(), payload_bytes = payload.len(), "wrote collaboration direct payload for the wire");
       write_frame(send, &encode_frame(&header)?).await?;
-      write_payload(send, &payload).await?;
+      write_payload(send, &wire).await?;
     },
   }
   send.finish()?;

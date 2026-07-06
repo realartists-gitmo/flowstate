@@ -33,10 +33,9 @@ use flowstate_fidelity as fidelity;
 use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroText, cursor::Cursor};
 
 use super::{
-  BLOCKS_BY_ID, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_PARAGRAPH_STYLE, OBJECT_REPLACEMENT, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID,
-  ROOT_FIRST_PARAGRAPH_ID, body_text, child_map, child_movable_list, empty_input_table_cell, ensure_paragraph_metadata_at_boundary_with_keys,
-  flow_text, map_binary_opt, map_i64_opt, map_keys, map_string_opt, movable_list_strings, paragraph_style_value,
-  write_table_cell_map_from_input,
+  BLOCKS_BY_ID, FLOWS_BY_ID, MARK_PARAGRAPH_STYLE, OBJECT_REPLACEMENT, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID, body_text, child_map,
+  child_movable_list, empty_input_table_cell, ensure_paragraph_metadata_at_boundary_with_keys, flow_text, map_binary_opt, map_i64_opt,
+  map_keys, map_string_opt, movable_list_strings, paragraph_style_value, write_table_cell_map_from_input,
 };
 
 /// Apply the single canonical repair for one projection defect.
@@ -100,17 +99,16 @@ fn repair_missing_paragraph_metadata(doc: &LoroDoc, flow_id: &str, boundary_unic
   match boundary_unicode {
     Some(boundary) => {
       let body = body_text(doc);
-      // Deterministic, convergent map keys: two peers repairing the same boundary
-      // write the SAME paragraph/block keys, so Loro map LWW converges them (the
-      // default random-uuid id would diverge). Boundary 0 uses the canonical seed
-      // identities; other boundaries derive a stable key from flow + boundary.
-      let (paragraph_key, block_key) = if boundary == 0 {
-        (ROOT_FIRST_PARAGRAPH_ID.to_string(), MAIN_BODY_BLOCK_ID.to_string())
-      } else {
-        (
-          format!("paragraph.repair.{flow_id}.{boundary}"),
-          format!("paragraph_block.repair.{flow_id}.{boundary}"),
-        )
+      // Derive the SAME position-independent keys the projection fabricates for a
+      // missing boundary (`stable_boundary_metadata_keys`, keyed off the boundary
+      // newline's stable OpID). Using the identical derivation means a repaired
+      // record's id equals the fabricated id on every peer, so they converge via
+      // Loro map LWW instead of the old position-based keys (block_ix vs unicode
+      // offset), which diverged between the incremental projection, the full
+      // rebuild, and across peers.
+      let Some((paragraph_key, block_key)) = flowstate_document::loro_projection::stable_boundary_metadata_keys(&body, boundary) else {
+        // No live anchor for this boundary yet; leave it for a later pass.
+        return Ok(false);
       };
       ensure_paragraph_metadata_at_boundary_with_keys(doc, &body, boundary, Some(paragraph_key), Some(block_key))
         .context("writing durable paragraph metadata for MissingParagraph* defect")?;

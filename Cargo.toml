@@ -77,6 +77,13 @@ zstd = "0.13.3"
 
 [patch.crates-io]
 gpui-component = { path = "vendor/gpui-component" }
+# §perf: vendored to add `LoroDoc::query_text_id_positions`, a single-pass batch
+# resolver for many text cursor ids. Upstream Loro 1.13 only offers per-id cursor
+# resolution (`get_cursor_pos`), which is O(elements) each; resolving every
+# paragraph/block boundary per projection was therefore O(paragraphs²) and hung
+# the CRDT actor on large documents. The patch is one added method (see
+# `richtext_state.rs` get_text_indices_of_ids); re-apply it on Loro upgrades.
+loro-internal = { path = "vendor/loro-internal" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }

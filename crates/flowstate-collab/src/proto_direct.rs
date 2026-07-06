@@ -31,9 +31,26 @@ pub enum DirectRequest {
   Asset { session: SessionId, asset: u128 },
 }
 
+/// How a streamed direct payload is encoded on the wire. Rides on the response
+/// header so the receiver knows how to decode and how much to preallocate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum WireCodec {
+  /// Streamed verbatim; `wire_len == uncompressed_len`, no decode step.
+  None,
+  /// zstd framed with the shipped 256 KiB dictionary — the small-payload profile
+  /// (updates / small docs), where the dictionary's shared structure wins most.
+  ZstdDict,
+  /// zstd with long-distance matching and NO dictionary — the big-payload profile
+  /// (full large-document snapshots), where the dictionary actively hurts.
+  ZstdLong,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DirectResponseHeader {
-  Ok { total_len: u64 },
+  /// A payload follows. `codec` is how the streamed `wire_len` bytes are encoded;
+  /// `uncompressed_len` is the decoded size the receiver preallocates (equal to
+  /// `wire_len` when `codec` is `None`).
+  Ok { codec: WireCodec, wire_len: u64, uncompressed_len: u64 },
   NotAttached,
   NotFound,
   Busy,

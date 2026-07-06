@@ -12,7 +12,7 @@ use flowstate_collab::{
   ids::PeerId,
   net::{
     NetCommand, PeerAddr, PublishPayload,
-    anti_entropy::AntiEntropyState,
+    anti_entropy::{AntiEntropyState, GapAction},
     direct::{DirectServeRequest, DirectSessionHandler},
     runtime::CommandSender,
   },
@@ -380,7 +380,11 @@ impl CollabSession {
   }
 
   pub fn direct_handler(&self) -> DirectSessionHandler {
-    DirectSessionHandler::new(self.direct_tx.clone())
+    // Hand the direct-serve path a shared read handle to the runtime's Loro doc so
+    // snapshot/update pulls are answered off the mutation actor's queue (they can't
+    // be starved behind local edits). Absent a runtime yet, it falls back to the
+    // actor-served path.
+    DirectSessionHandler::new(self.direct_tx.clone(), self.runtime.as_ref().map(CrdtRuntimeHandle::read_doc))
   }
 
   pub(super) fn pull_candidates(&self, preferred: Option<flowstate_collab::ids::PeerId>) -> Vec<flowstate_collab::ids::PeerId> {
@@ -586,8 +590,11 @@ impl CollabSession {
       && let Some(from) = self.pull_candidates(None).first().copied()
     {
       tracing::info!(session = %self.session, from = %from, "starting collaboration resync pull after pre-attach queue overflow");
-      let our_vv = self.runtime_vv.clone();
-      self.start_update_pull(from, our_vv, cx);
+      // Also go through the dedup so this recovery pull registers the slot its
+      // `finish_pull` will later clear (never clearing a digest pull's slot).
+      if let GapAction::Pull { from, our_vv } = self.anti_entropy.begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now()) {
+        self.start_update_pull(from, our_vv, cx);
+      }
     }
     self.flush_pending_asset_records(cx);
     asset_transfer::schedule_missing_assets(self, None, cx);
@@ -1134,8 +1141,16 @@ impl CollabSession {
               "remote collaboration update has pending Loro dependencies; requesting anti-entropy pull immediately",
             );
             if let Some(from) = self.pull_candidates(None).first().copied() {
-              let our_vv = self.runtime_vv.clone();
-              self.start_update_pull(from, our_vv, cx);
+              // Route through `begin_pull` (the same dedup the digest path uses)
+              // rather than calling `start_update_pull` directly: a burst of pending
+              // imports (each carrying the SAME frozen `runtime_vv` while the import
+              // stays buffered) must not fire a storm of identical pulls at one peer.
+              // begin_pull admits at most one in-flight pull per peer (with a
+              // deadline), and registers the slot the later `finish_pull` clears.
+              match self.anti_entropy.begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now()) {
+                GapAction::Pull { from, our_vv } => self.start_update_pull(from, our_vv, cx),
+                _ => tracing::debug!(session = %self.session, from = %from, "pending-dependency pull skipped; one is already in flight for this peer"),
+              }
             } else {
               tracing::warn!(session = %self.session, "cannot pull pending Loro dependencies because no collaboration peers are available");
             }

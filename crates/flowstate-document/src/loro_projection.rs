@@ -7,7 +7,7 @@ use gpui_flowtext::{
   InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle,
   RunStyles, SectionId, SectionKind, document_from_input_blocks,
 };
-use loro::{Container, ContainerID, ContainerTrait, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::Cursor};
+use loro::{Container, ContainerID, ContainerTrait, ID, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::{Cursor, Side}};
 use rustc_hash::FxHashMap;
 
 use crate::{
@@ -286,6 +286,7 @@ impl<'a> Projector<'a> {
               current_boundary = Some(unicode_pos);
             } else {
               push_paragraph_projection_metadata(
+                text,
                 paragraph_index.as_ref(),
                 paragraph_block_index.as_ref(),
                 flow_id,
@@ -305,6 +306,7 @@ impl<'a> Projector<'a> {
             if let Some(block) = object_blocks.get(&unicode_pos) {
               if !current.runs.is_empty() {
                 push_paragraph_projection_metadata(
+                  text,
                   paragraph_index.as_ref(),
                   paragraph_block_index.as_ref(),
                   flow_id,
@@ -343,6 +345,7 @@ impl<'a> Projector<'a> {
 
     if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
       push_paragraph_projection_metadata(
+        text,
         paragraph_index.as_ref(),
         paragraph_block_index.as_ref(),
         flow_id,
@@ -777,8 +780,9 @@ fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   });
 }
 
-#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs the prebuilt boundary indexes, flow/boundary context, id pools and defect sink")]
+#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs the flow text, prebuilt boundary indexes, flow/boundary context, id pools and defect sink")]
 fn push_paragraph_projection_metadata(
+  text: &LoroText,
   paragraph_index: Option<&FxHashMap<usize, String>>,
   paragraph_block_index: Option<&FxHashMap<usize, String>>,
   flow_id: &str,
@@ -788,13 +792,26 @@ fn push_paragraph_projection_metadata(
   block_ids: Option<&mut Vec<BlockId>>,
   defects: &mut Vec<ProjectionDefect>,
 ) {
+  let paragraph_resolved = boundary.and_then(|boundary| paragraph_index.and_then(|index| index.get(&boundary)).cloned());
+  let block_resolved = boundary.and_then(|boundary| paragraph_block_index.and_then(|index| index.get(&boundary)).cloned());
+  // §5: fabricate stable, position-independent ids (from the boundary's OpID —
+  // the SAME keys the repair writer mints) for any boundary without a durable
+  // record. Resolve the anchor once, and only when we actually must fabricate,
+  // since `get_cursor` is not free.
+  let needs_fabrication = (paragraph_ids.is_some() && paragraph_resolved.is_none()) || (block_ids.is_some() && block_resolved.is_none());
+  let fabricated_keys = needs_fabrication.then(|| boundary.and_then(|boundary| stable_boundary_metadata_keys(text, boundary))).flatten();
+
   if let Some(paragraph_ids) = paragraph_ids {
     // §5/FS-004: a boundary with no durable paragraph metadata gets a fabricated,
-    // projection-only id and is reported so the runtime writes a real record.
-    let id = match boundary.and_then(|boundary| paragraph_index.and_then(|index| index.get(&boundary)).cloned()) {
+    // projection-only id (reported so the runtime writes the real record). Deriving
+    // it from the boundary OpID makes it identical to the repaired record's id and
+    // stable across peers, so incremental/full and both peers converge.
+    let id = match paragraph_resolved {
       Some(id) => id,
       None => {
-        let fabricated_id = format!("paragraph.projection.{block_ix}");
+        let fabricated_id = fabricated_keys
+          .as_ref()
+          .map_or_else(|| format!("paragraph.projection.{block_ix}"), |(paragraph_key, _)| paragraph_key.clone());
         defects.push(ProjectionDefect::MissingParagraphMetadata {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -807,10 +824,12 @@ fn push_paragraph_projection_metadata(
   }
   if let Some(block_ids) = block_ids {
     // §5/FS-005: mirror the paragraph-metadata report for the paragraph block registry.
-    let id = match boundary.and_then(|boundary| paragraph_block_index.and_then(|index| index.get(&boundary)).cloned()) {
+    let id = match block_resolved {
       Some(id) => id,
       None => {
-        let fabricated_id = format!("paragraph_block.projection.{block_ix}");
+        let fabricated_id = fabricated_keys
+          .as_ref()
+          .map_or_else(|| format!("paragraph_block.projection.{block_ix}"), |(_, block_key)| block_key.clone());
         defects.push(ProjectionDefect::MissingParagraphBlock {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -839,38 +858,21 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   let Some(paragraphs) = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten() else {
     return index;
   };
+  let pos_by_id = boundary_cursor_positions(doc, text, &paragraphs, &["boundary_cursor", "start_cursor"]);
   let mut root_first_at_zero = false;
-  let _diag_start = std::time::Instant::now();
-  let mut _diag_cursor_nanos = 0u128;
-  let mut _diag_lookup_nanos = 0u128;
-  let mut _diag_records = 0usize;
   for key in map_keys(&paragraphs) {
-    let _l0 = std::time::Instant::now();
-    let paragraph = child_map(&paragraphs, &key).ok().flatten();
-    _diag_lookup_nanos += _l0.elapsed().as_nanos();
-    let Some(paragraph) = paragraph else {
+    let Some(paragraph) = child_map(&paragraphs, &key).ok().flatten() else {
       continue;
     };
-    _diag_records += 1;
-    let _c0 = std::time::Instant::now();
-    let resolved = live_cursor_pos(doc, text, &paragraph, "boundary_cursor")
-      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor"));
-    _diag_cursor_nanos += _c0.elapsed().as_nanos();
-    let Some(pos) = resolved else {
+    let Some(pos) = live_cursor_pos(doc, text, &paragraph, "boundary_cursor", &pos_by_id)
+      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor", &pos_by_id))
+    else {
       continue;
     };
     if pos == 0 && key.as_str() == ROOT_FIRST_PARAGRAPH_ID {
       root_first_at_zero = true;
     }
     index.entry(pos).or_insert(key);
-  }
-  if _diag_records > 500 {
-    eprintln!(
-      "[diag] paragraph_ids_by_boundary: {_diag_records} records, total {:.1}ms | cursor {:.1}ms | map-lookup {:.1}ms",
-      _diag_start.elapsed().as_secs_f64() * 1000.0,
-      _diag_cursor_nanos as f64 / 1e6,
-      _diag_lookup_nanos as f64 / 1e6,
-    );
   }
   if root_first_at_zero {
     index.insert(0, ROOT_FIRST_PARAGRAPH_ID.to_string());
@@ -888,6 +890,7 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
   let Some(blocks) = child_map(&root, BLOCKS_BY_ID).ok().flatten() else {
     return index;
   };
+  let pos_by_id = boundary_cursor_positions(doc, text, &blocks, &["anchor_cursor"]);
   let mut main_body_at_zero = false;
   for key in map_keys(&blocks) {
     let Some(block) = child_map(&blocks, &key).ok().flatten() else {
@@ -896,7 +899,7 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
     if map_string_opt(&block, "kind").ok().flatten().as_deref() != Some("paragraph") {
       continue;
     }
-    let Some(pos) = live_cursor_pos(doc, text, &block, "anchor_cursor") else {
+    let Some(pos) = live_cursor_pos(doc, text, &block, "anchor_cursor", &pos_by_id) else {
       continue;
     };
     if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
@@ -910,20 +913,60 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
   index
 }
 
-fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str) -> Option<usize> {
+/// Resolve, in a SINGLE pass over `text`, the current position of every live
+/// boundary cursor stored under `cursor_fields` across `records`, returning an
+/// `id → position` map. Each record contributes O(1) cursor decodes here, and the
+/// whole set of positions is resolved by one `query_text_id_positions` chunk scan
+/// (vendored Loro batch resolver) instead of an O(elements) `get_cursor_pos` per
+/// record. That is what takes `document_from_loro` from O(records²) — which pegged
+/// the CRDT actor at 100% CPU on a large document — down to ~O(elements). Ids not
+/// present (deleted) are simply absent; [`live_cursor_pos`] falls back to the
+/// per-id `get_cursor_pos` (history-traced) for those.
+fn boundary_cursor_positions(doc: &LoroDoc, text: &LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
+  let container = text.id();
+  let mut ids: Vec<ID> = Vec::new();
+  for key in map_keys(records) {
+    let Some(record) = child_map(records, &key).ok().flatten() else {
+      continue;
+    };
+    for field in cursor_fields {
+      if let Some(bytes) = map_binary_opt(&record, field).ok().flatten()
+        && let Ok(cursor) = Cursor::decode(&bytes)
+        && cursor.container == container
+        && let Some(id) = cursor.id
+      {
+        ids.push(id);
+      }
+    }
+  }
+  let mut positions = FxHashMap::default();
+  if ids.is_empty() {
+    return positions;
+  }
+  for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+    if let Some(pos) = pos {
+      positions.insert(id, pos);
+    }
+  }
+  positions
+}
+
+fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
   let cursor_bytes = map_binary_opt(map, key).ok().flatten()?;
   let cursor = Cursor::decode(&cursor_bytes).ok()?;
   if cursor.container != text.id() {
     return None;
   }
-  let pos = doc.get_cursor_pos(&cursor).ok()?.current.pos;
-  // §perf: `pos` is a live Unicode-code-point index into `text`; validate it is in
-  // range with an O(1) length check. This previously materialized the ENTIRE flow
-  // string (`text.to_string()`) on every call — and this function runs once per
-  // paragraph/block record per boundary, so on a large document it became an
-  // O(records²·chars) allocation storm that pegged the CRDT actor thread at 100%
-  // CPU and never returned (the large-document collab/editor hang). See
-  // `paragraph_ids_by_boundary` for the companion per-boundary-scan removal.
+  // Fast path: the boundary index built above resolved every live cursor in one
+  // pass, so this is an O(1) lookup. Fall back to the per-id `get_cursor_pos` only
+  // for a cursor whose id isn't live (deleted) and thus wasn't in the batch — it
+  // does the history-traced resolution, preserving exact parity with the old path.
+  let pos = match cursor.id.and_then(|id| pos_by_id.get(&id).copied()) {
+    Some(pos) => pos,
+    None => doc.get_cursor_pos(&cursor).ok()?.current.pos,
+  };
+  // `pos` is a live Unicode-code-point index into `text`; validate it is in range
+  // with an O(1) length check (never materialize the flow string).
   (pos < text.len_unicode()).then_some(pos)
 }
 
@@ -945,6 +988,32 @@ fn loro_id_u128(id: &str) -> u128 {
   let mut bytes = [0_u8; 16];
   bytes.copy_from_slice(&hash.as_bytes()[..16]);
   u128::from_le_bytes(bytes)
+}
+
+/// Deterministic `(paragraph_key, block_key)` for the durable metadata records that
+/// anchor `boundary` in `text` — the SINGLE source of these ids, shared by the
+/// projection (which fabricates them when a boundary has no durable record) and the
+/// runtime's repair writer (which materializes the records). Because both derive
+/// the same key, a fabricated id and a later-repaired record's id are the SAME
+/// value on every peer, so they converge instead of clobbering each other.
+///
+/// The keys are POSITION-INDEPENDENT: boundary 0 is the canonical first paragraph;
+/// every other boundary derives from the boundary newline's stable Loro `OpID`
+/// (globally unique and insertion-stable), so unlike a `block_ix` or unicode-offset
+/// key it does not change when text shifts and is identical across peers. The
+/// non-numeric `op-…` suffix routes both keys through `loro_id_u128`'s hash (rather
+/// than its trailing-number rule), keeping the paragraph and block ids distinct.
+/// Returns `None` only when `boundary` has no live anchor (e.g. an empty container).
+#[must_use]
+pub fn stable_boundary_metadata_keys(text: &LoroText, boundary: usize) -> Option<(String, String)> {
+  if boundary == 0 {
+    return Some((ROOT_FIRST_PARAGRAPH_ID.to_string(), MAIN_BODY_BLOCK_ID.to_string()));
+  }
+  let anchor = text.get_cursor(boundary, Side::Left)?.id?;
+  Some((
+    format!("paragraph.anchor.op-{}-{}", anchor.peer, anchor.counter),
+    format!("paragraph_block.anchor.op-{}-{}", anchor.peer, anchor.counter),
+  ))
 }
 
 fn child_map(parent: &LoroMap, key: &str) -> io::Result<Option<LoroMap>> {
@@ -1252,6 +1321,158 @@ mod tests {
   use gpui_flowtext::{
     InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun, RunStyles, document_from_input_blocks,
   };
+
+  /// The vendored Loro batch resolver (`query_text_id_positions`, driving
+  /// `boundary_cursor_positions`) must produce EXACTLY the positions the per-id
+  /// `get_cursor_pos` produces — that equivalence is the entire correctness basis
+  /// for replacing the O(records²) per-cursor scan. Resolves every boundary cursor
+  /// in one batch call (exercising the by-peer grouping + binary search) and checks
+  /// each against `get_cursor_pos`; multibyte content is included so any
+  /// unicode/event index mismatch would surface.
+  #[test]
+  fn batch_cursor_resolver_matches_per_cursor_get_cursor_pos() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      (0..40)
+        .map(|ix| {
+          InputBlock::Paragraph(InputParagraph {
+            style: gpui_flowtext::ParagraphStyle::Normal,
+            runs: vec![InputRun { text: format!("paragraph {ix} — naïve café ☃ tail"), styles: RunStyles::default() }],
+          })
+        })
+        .collect(),
+    );
+    let doc = document_to_loro(&source, "Batch cursor equivalence")?;
+    let root = doc.get_map(ROOT);
+    let body = body_text(&doc);
+    let paragraphs = child_map(&root, PARAGRAPHS_BY_ID)?.expect("paragraphs map");
+
+    let mut cursors: Vec<(ID, Cursor)> = Vec::new();
+    for key in map_keys(&paragraphs) {
+      let Some(record) = child_map(&paragraphs, &key)? else {
+        continue;
+      };
+      for field in ["boundary_cursor", "start_cursor"] {
+        let Some(bytes) = map_binary_opt(&record, field)? else {
+          continue;
+        };
+        let Ok(cursor) = Cursor::decode(&bytes) else {
+          continue;
+        };
+        if cursor.container == body.id()
+          && let Some(id) = cursor.id
+        {
+          cursors.push((id, cursor));
+        }
+      }
+    }
+    let ids: Vec<ID> = cursors.iter().map(|(id, _)| *id).collect();
+    let batch = doc.inner().query_text_id_positions(&body.id(), &ids);
+    assert_eq!(batch.len(), ids.len(), "one result per queried id");
+
+    let mut checked = 0usize;
+    for ((_, cursor), batch_pos) in cursors.iter().zip(&batch) {
+      let per_cursor = doc.get_cursor_pos(cursor).ok().map(|result| result.current.pos);
+      if let Some(pos) = batch_pos {
+        assert_eq!(Some(*pos), per_cursor, "batch resolver disagreed with get_cursor_pos");
+        checked += 1;
+      }
+    }
+    assert!(checked >= 40, "expected >=40 live boundary cursors resolved by the batch path, got {checked}");
+    Ok(())
+  }
+
+  /// Stronger equivalence: the batch resolver must still equal `get_cursor_pos`
+  /// after fragmenting edits (insert/delete/re-insert) AND a concurrent multi-peer
+  /// merge — the live collab state the fresh-doc test above doesn't reach. If the
+  /// vendored resolver were wrong here, the full projection rebuild would assign
+  /// different ids than the per-cursor path and show up as projection divergence.
+  #[test]
+  fn batch_resolver_matches_per_cursor_after_edits_and_merge() {
+    use loro::{ExportMode, cursor::Side};
+    let a = LoroDoc::new();
+    a.set_peer_id(1).unwrap();
+    let ta = a.get_text("t");
+    ta.insert(0, "the quick brown fox jumps over").unwrap();
+    a.commit();
+    ta.delete(4, 6).unwrap(); // remove "quick "
+    ta.insert(4, "SLOW ").unwrap();
+    a.commit();
+    ta.insert(0, "well, ").unwrap();
+    a.commit();
+    // Peer 2: snapshot from A, edit concurrently, merge back so `a` holds chunks
+    // authored by two different peers.
+    let b = LoroDoc::new();
+    b.set_peer_id(2).unwrap();
+    b.import(&a.export(ExportMode::Snapshot).unwrap()).unwrap();
+    let tb = b.get_text("t");
+    tb.insert(0, "PREFIX ").unwrap();
+    let tb_end = tb.len_unicode();
+    tb.insert(tb_end, " suffix").unwrap();
+    b.commit();
+    a.import(&b.export(ExportMode::updates(&a.oplog_vv())).unwrap()).unwrap();
+    a.commit();
+
+    let text = a.get_text("t");
+    let container = text.id();
+    let len = text.len_unicode();
+    let mut ids: Vec<ID> = Vec::new();
+    let mut cursors = Vec::new();
+    for pos in 0..=len {
+      for side in [Side::Left, Side::Right] {
+        if let Some(cursor) = text.get_cursor(pos, side)
+          && let Some(id) = cursor.id
+        {
+          ids.push(id);
+          cursors.push(cursor);
+        }
+      }
+    }
+    assert!(!ids.is_empty(), "should have collected some cursors");
+
+    let batch = a.inner().query_text_id_positions(&container, &ids);
+    assert_eq!(batch.len(), ids.len());
+    let mut compared = 0usize;
+    for (cursor, batch_pos) in cursors.iter().zip(&batch) {
+      let per_cursor = a.get_cursor_pos(cursor).ok().map(|result| result.current.pos);
+      if let Some(pos) = batch_pos {
+        assert_eq!(Some(*pos), per_cursor, "batch resolver diverged from get_cursor_pos on multi-peer/edited text");
+        compared += 1;
+      }
+    }
+    assert!(compared > 0, "should have compared at least some live cursors");
+  }
+
+  /// The fabricated/repair id derivation must be POSITION-INDEPENDENT: the same
+  /// boundary newline keeps the same key after text is inserted ahead of it (it
+  /// shifts position but its `OpID` is unchanged). This is what lets a fabricated id
+  /// and a later-repaired record's id converge instead of diverging as the old
+  /// `block_ix` / unicode-offset keys did.
+  #[test]
+  fn stable_boundary_keys_are_position_independent() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![
+        InputBlock::Paragraph(InputParagraph { style: gpui_flowtext::ParagraphStyle::Normal, runs: vec![InputRun { text: "alpha".into(), styles: RunStyles::default() }] }),
+        InputBlock::Paragraph(InputParagraph { style: gpui_flowtext::ParagraphStyle::Normal, runs: vec![InputRun { text: "bravo".into(), styles: RunStyles::default() }] }),
+      ],
+    );
+    let doc = document_to_loro(&source, "Stable boundary keys")?;
+    let body = body_text(&doc);
+
+    // A non-zero boundary (so it exercises the OpID path, not the boundary-0 seed).
+    let boundary = body.to_string().chars().enumerate().filter_map(|(i, c)| (c == '\n').then_some(i)).find(|&i| i > 0).expect("a non-zero boundary");
+    let before = stable_boundary_metadata_keys(&body, boundary).expect("keys for a live boundary");
+    assert!(before.0.contains("op-") && before.1.contains("op-"), "non-zero boundary keys derive from the OpID: {before:?}");
+    assert_ne!(before.0, before.1, "paragraph and block keys must be distinct");
+
+    // Insert ahead of the boundary so it shifts by 4 unicode positions.
+    body.insert(1, "XXXX").expect("insert");
+    doc.commit();
+    let after = stable_boundary_metadata_keys(&body, boundary + 4).expect("keys after shift");
+    assert_eq!(before, after, "the same newline keeps the same key after shifting");
+    Ok(())
+  }
 
   #[test]
   fn projection_preserves_loro_paragraph_and_block_ids() -> io::Result<()> {
