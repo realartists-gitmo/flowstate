@@ -155,15 +155,23 @@ fn grouped_enter_text_batch_is_one_loro_change_and_preserves_client_ids() -> Res
 }
 
 // KNOWN-FAILING repro (ignored) for the `incremental-vs-full-divergence` seen on the
-// impact-defense doc. A doc with an object flanked by an EMPTY paragraph edits fine at
-// rest, but after an InsertText the runtime's own preflight assert (crdt_runtime.rs
-// ~1249) fires: the AUTHORITATIVE projection (document_from_loro) KEEPS the empty
-// paragraph (3 paragraph ids) while the INCREMENTAL replay DROPS it (2). Direction is
-// the OPPOSITE of the first hypothesis: the fix is to stop the incremental replay
-// (replay_semantic_command_on_projection / apply_projection_patches_to_document in
-// gpui-flowtext) from dropping an object-adjacent empty paragraph, so it matches the
-// canonical full rebuild. Un-ignore once that path is fixed; this asserts convergence.
-#[ignore = "reproduces incremental-vs-full divergence: incremental replay drops an object-adjacent empty paragraph the full rebuild keeps"]
+// impact-defense doc. ROOT CAUSE (traced): a projection<->Loro coordinate mismatch from
+// coalescing. `push_flow_blocks` coalesces an empty paragraph whose previous block is an
+// object, so the projection is [before, image, after] (2 paras) even though the empty
+// paragraph's boundary '\n' is still PHYSICALLY in the Loro body. `ProjectionRuntimeIndex`
+// (crdt_runtime.rs ~182-189) computes `paragraph_body_unicode_starts` from the coalesced
+// projection, so it runs SHORT of the real Loro body by one unicode per coalesced empty.
+// Result: InsertText at the following paragraph's byte 0 resolves to a body-unicode that
+// is one short, landing the char in the phantom empty slot -> document_from_loro then
+// un-coalesces it (3 paras) while the incremental projection stays 2 -> preflight assert
+// at crdt_runtime.rs ~1249 fires. FIX is a design choice (all convergence-critical):
+//   (a) resolve projection->Loro offsets via each paragraph's durable Loro boundary
+//       cursor instead of the projection-derived body-unicode index; OR
+//   (b) coalesce PHANTOM empties only (a '\n' with no durable paragraph record), so a
+//       real empty paragraph survives and the projection mirrors Loro; OR
+//   (c) prune a coalesced empty paragraph's '\n'/records from Loro so it matches.
+// Un-ignore once chosen+implemented; this then asserts the convergence invariant.
+#[ignore = "reproduces incremental-vs-full divergence: projection<->Loro body-unicode coordinate mismatch from coalescing an object-adjacent empty paragraph"]
 #[test]
 fn object_adjacent_empty_paragraph_incremental_matches_full_rebuild() -> Result<()> {
   fn para(text: &str) -> flowstate_document::InputBlock {
