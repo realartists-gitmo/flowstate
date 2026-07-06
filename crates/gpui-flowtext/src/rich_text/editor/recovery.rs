@@ -227,7 +227,7 @@ impl RichTextEditor {
           });
         },
         Err(error) => {
-          eprintln!("failed to write recovery file: {error}");
+          tracing::warn!(%error, "failed to write recovery file");
         },
       }
       let _ = editor.update(cx, |editor, cx| {

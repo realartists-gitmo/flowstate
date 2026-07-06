@@ -1,4 +1,7 @@
-use std::time::{Duration, Instant};
+use std::{
+  collections::HashMap,
+  time::{Duration, Instant},
+};
 
 use iroh::EndpointId;
 
@@ -6,6 +9,11 @@ use crate::ids::SessionId;
 
 pub const DIGEST_INTERVAL: Duration = Duration::from_secs(10);
 pub const DIGEST_JITTER_PERCENT: u32 = 20;
+/// FS-077: safety net for a wedged direct pull. A per-peer in-flight pull that
+/// is never finished (e.g. the runtime reply is dropped) is force-expired after
+/// this deadline, so one stuck peer can never block anti-entropy pulls to every
+/// other peer.
+pub const PULL_IN_FLIGHT_DEADLINE: Duration = Duration::from_secs(60);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum VersionVectorRelation {
@@ -26,7 +34,11 @@ pub enum GapAction {
 pub struct AntiEntropyState {
   session: SessionId,
   next_digest: Instant,
-  pull_in_flight: bool,
+  // FS-077: per-peer in-flight pulls keyed by peer, valued by an expiry
+  // deadline. Replaces a single global `pull_in_flight` flag so one wedged peer
+  // cannot starve pulls to the rest of the swarm, while still deduplicating a
+  // second pull for the same peer while one is outstanding.
+  pulls_in_flight: HashMap<EndpointId, Instant>,
 }
 
 impl AntiEntropyState {
@@ -35,7 +47,7 @@ impl AntiEntropyState {
     Self {
       session,
       next_digest: next_jittered_deadline(now),
-      pull_in_flight: false,
+      pulls_in_flight: HashMap::new(),
     }
   }
 
@@ -75,18 +87,25 @@ impl AntiEntropyState {
   }
 
   #[must_use]
-  pub fn on_lagged(&mut self, fallback_peer: Option<EndpointId>, our_vv: Vec<u8>) -> GapAction {
+  pub fn on_lagged(&mut self, fallback_peer: Option<EndpointId>, our_vv: Vec<u8>, now: Instant) -> GapAction {
     tracing::warn!(session = %self.session, fallback_peer = ?fallback_peer, our_vv_bytes = our_vv.len(), "collaboration anti-entropy gossip lagged");
     self.schedule_immediate_digest();
     let Some(from) = fallback_peer else {
       tracing::warn!(session = %self.session, "collaboration anti-entropy lagged without fallback peer");
       return GapAction::None;
     };
-    self.begin_pull(from, our_vv)
+    self.begin_pull(from, our_vv, now)
   }
 
   #[must_use]
-  pub fn consider_digest(&mut self, from: EndpointId, digest_session: SessionId, relation: VersionVectorRelation, our_vv: Vec<u8>) -> GapAction {
+  pub fn consider_digest(
+    &mut self,
+    from: EndpointId,
+    digest_session: SessionId,
+    relation: VersionVectorRelation,
+    our_vv: Vec<u8>,
+    now: Instant,
+  ) -> GapAction {
     tracing::trace!(
       session = %self.session,
       from = %from,
@@ -110,7 +129,7 @@ impl AntiEntropyState {
     }
 
     match relation {
-      VersionVectorRelation::SenderHasMissingOps | VersionVectorRelation::Concurrent => self.begin_pull(from, our_vv),
+      VersionVectorRelation::SenderHasMissingOps | VersionVectorRelation::Concurrent => self.begin_pull(from, our_vv, now),
       VersionVectorRelation::Equal | VersionVectorRelation::WeHaveMissingOps => {
         tracing::trace!(session = %self.session, from = %from, ?relation, "collaboration anti-entropy digest needs no pull");
         GapAction::None
@@ -118,19 +137,34 @@ impl AntiEntropyState {
     }
   }
 
-  pub fn finish_pull(&mut self) {
-    tracing::debug!(session = %self.session, was_in_flight = self.pull_in_flight, "collaboration anti-entropy pull finished");
-    self.pull_in_flight = false;
+  /// Mark the outstanding pull to `from` as finished, clearing its dedup slot so
+  /// a fresh gap for that peer can start a new pull.
+  pub fn finish_pull(&mut self, from: EndpointId) {
+    let was_in_flight = self.pulls_in_flight.remove(&from).is_some();
+    tracing::debug!(session = %self.session, from = %from, was_in_flight, in_flight = self.pulls_in_flight.len(), "collaboration anti-entropy pull finished");
   }
 
-  fn begin_pull(&mut self, from: EndpointId, our_vv: Vec<u8>) -> GapAction {
-    if self.pull_in_flight {
-      tracing::debug!(session = %self.session, from = %from, "collaboration anti-entropy skipped pull because one is already in flight");
+  fn begin_pull(&mut self, from: EndpointId, our_vv: Vec<u8>, now: Instant) -> GapAction {
+    self.expire_stale_pulls(now);
+    if self.pulls_in_flight.contains_key(&from) {
+      tracing::debug!(session = %self.session, from = %from, "collaboration anti-entropy skipped pull because one is already in flight for this peer");
       return GapAction::None;
     }
-    self.pull_in_flight = true;
-    tracing::debug!(session = %self.session, from = %from, our_vv_bytes = our_vv.len(), "collaboration anti-entropy pull started");
+    self.pulls_in_flight.insert(from, now + PULL_IN_FLIGHT_DEADLINE);
+    tracing::debug!(session = %self.session, from = %from, our_vv_bytes = our_vv.len(), in_flight = self.pulls_in_flight.len(), "collaboration anti-entropy pull started");
     GapAction::Pull { from, our_vv }
+  }
+
+  /// Drop in-flight pulls whose deadline has passed. A pull whose reply is never
+  /// delivered would otherwise pin its peer's dedup slot forever; expiring it
+  /// lets anti-entropy retry that peer without waiting on the wedged request.
+  fn expire_stale_pulls(&mut self, now: Instant) {
+    let before = self.pulls_in_flight.len();
+    self.pulls_in_flight.retain(|_, deadline| *deadline > now);
+    let expired = before - self.pulls_in_flight.len();
+    if expired > 0 {
+      tracing::warn!(session = %self.session, expired, in_flight = self.pulls_in_flight.len(), "collaboration anti-entropy expired wedged in-flight pulls past their deadline");
+    }
   }
 }
 

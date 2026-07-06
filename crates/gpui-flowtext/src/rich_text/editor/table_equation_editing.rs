@@ -99,9 +99,7 @@ impl RichTextEditor {
       .get(row_ix)
       .and_then(|row| row.cells.get(cell_ix))
     else {
-      eprintln!(
-        "skipping table-cell semantic command because block {block_ix} cell {row_ix}:{cell_ix} is out of range"
-      );
+      tracing::warn!(block_ix, row_ix, cell_ix, "dropping table-cell semantic command: cell is out of range; local and canonical state will diverge until repair");
       return Vec::new();
     };
     vec![SemanticEditCommand::ReplaceTableCell {
@@ -291,7 +289,7 @@ impl RichTextEditor {
         text: text.to_string(),
       }]
     } else {
-      eprintln!("skipping equation source semantic command because projection block {block_ix} has no durable id");
+      tracing::warn!(block_ix, "dropping equation source semantic command: projection block has no durable id; local and canonical state will diverge until repair");
       Vec::new()
     };
     self.record_local_history(EditRecord {

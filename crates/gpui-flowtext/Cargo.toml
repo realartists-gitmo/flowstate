@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 blake3 = "1.8.5"
 crop = { workspace = true }
+flowstate-fidelity.workspace = true
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 hotpath = { workspace = true }
@@ -22,6 +23,7 @@ rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+tracing.workspace = true
 typst = { workspace = true }
 typst-assets = { workspace = true, features = ["fonts"] }
 typst-library = { workspace = true }

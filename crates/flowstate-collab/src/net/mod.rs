@@ -1,4 +1,5 @@
 pub mod anti_entropy;
+pub mod auth;
 pub mod blobs;
 pub mod direct;
 pub mod runtime;
@@ -6,9 +7,10 @@ pub mod swarm;
 
 use anyhow::Result;
 use async_channel::Sender;
-use iroh::{EndpointAddr, EndpointId};
+use iroh::{EndpointAddr, EndpointId, Signature};
 
 use crate::{
+  capability::{CapabilityRole, SessionCapability},
   ids::{BlobId, SessionId},
   proto_direct::AssetBytes,
   proto_gossip::GossipMsg,
@@ -24,6 +26,8 @@ pub enum PublishPayload {
   Update(Vec<u8>),
   Presence(Vec<u8>),
   Digest { vv: Vec<u8> },
+  /// Owner-signed capability revocation control frame (FS-080).
+  CapabilityEpoch { epoch: u64, signature: Signature },
 }
 
 impl PublishPayload {
@@ -33,6 +37,7 @@ impl PublishPayload {
       Self::Update(_) => "update",
       Self::Presence(_) => "presence",
       Self::Digest { .. } => "digest",
+      Self::CapabilityEpoch { .. } => "capability_epoch",
     }
   }
 
@@ -41,6 +46,7 @@ impl PublishPayload {
     match self {
       Self::Update(bytes) | Self::Presence(bytes) => bytes.len(),
       Self::Digest { vv } => vv.len(),
+      Self::CapabilityEpoch { .. } => 8 + Signature::LENGTH,
     }
   }
 }
@@ -59,9 +65,27 @@ pub enum NetCommand {
   JoinSession {
     session: SessionId,
     bootstrap: Vec<EndpointAddr>,
+    /// The owner-signed grant from the invite ticket. Configures owner-key
+    /// and epoch verification for the session and is presented to peers
+    /// during the direct handshake.
+    capability: SessionCapability,
   },
   LeaveSession {
     session: SessionId,
+  },
+  /// Mint a signed invite ticket seed: reachable inviter address plus an
+  /// owner-signed capability at the session's current revocation epoch.
+  MintTicket {
+    session: SessionId,
+    role: CapabilityRole,
+    ttl_secs: u64,
+    reply: Reply<Result<MintedTicket>>,
+  },
+  /// Bump the session capability epoch, revoking all previously minted
+  /// tickets, and gossip the signed bump to peers. Replies with the new epoch.
+  RevokeCapabilities {
+    session: SessionId,
+    reply: Reply<Result<u64>>,
   },
   Publish {
     session: SessionId,
@@ -106,6 +130,8 @@ impl NetCommand {
       Self::CreateSession { .. } => "create_session",
       Self::JoinSession { .. } => "join_session",
       Self::LeaveSession { .. } => "leave_session",
+      Self::MintTicket { .. } => "mint_ticket",
+      Self::RevokeCapabilities { .. } => "revoke_capabilities",
       Self::Publish { .. } => "publish",
       Self::PullUpdates { .. } => "pull_updates",
       Self::PullSnapshot { .. } => "pull_snapshot",
@@ -126,6 +152,13 @@ pub struct PullProgress {
 #[derive(Clone, Debug)]
 pub struct TicketSeed {
   pub inviter: EndpointAddr,
+}
+
+/// Reply payload of [`NetCommand::MintTicket`].
+#[derive(Clone, Debug)]
+pub struct MintedTicket {
+  pub inviter: EndpointAddr,
+  pub capability: SessionCapability,
 }
 
 #[derive(Clone, Debug)]

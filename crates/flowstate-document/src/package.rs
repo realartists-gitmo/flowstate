@@ -5,6 +5,7 @@ use std::{
   path::Path,
 };
 
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use loro::{Container, ExportMode, Frontiers, LoroDoc, LoroValue, ValueOrContainer, VersionVector};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -286,12 +287,84 @@ impl DocumentPackage {
     .with_manifest_indexes()?;
     package.rebuild_projection_cache_from_loro(doc)?;
     package.rebuild_search_units_from_loro(doc)?;
+    fidelity::event(FidelityClass::Persistence, "save-snapshot", || {
+      format!(
+        "snapshots={} segments={} revisions={} assets={} frontier={}",
+        package.loro_snapshots.len(),
+        package.loro_update_segments.len(),
+        package.revisions.len(),
+        package.assets.len(),
+        frontier_tag(&package.manifest.latest_frontier)
+      )
+    });
+    package.fidelity_check_roundtrip(doc);
     Ok(package)
   }
 
   pub fn load_loro_doc(&self) -> io::Result<LoroDoc> {
     self.validate()?;
-    self.load_loro_doc_unvalidated()
+    let doc = self.load_loro_doc_unvalidated()?;
+    fidelity::event(FidelityClass::Persistence, "load", || {
+      format!(
+        "snapshots={} segments={} revisions={} frontier={}",
+        self.loro_snapshots.len(),
+        self.loro_update_segments.len(),
+        self.revisions.len(),
+        frontier_tag(&self.manifest.latest_frontier)
+      )
+    });
+    Ok(doc)
+  }
+
+  /// §fidelity persistence round-trip invariant. Read-only and gated on
+  /// [`fidelity::enabled`]: it reloads this package's canonical Loro state into a
+  /// fresh document and asserts the projection built from the reloaded state
+  /// matches the projection of the `source` document that was persisted
+  /// (paragraph count + texts, paragraph/block ids, and section count). Never
+  /// mutates `self` or `source`; failures fire the `package-roundtrip-mismatch`
+  /// violation.
+  fn fidelity_check_roundtrip(&self, source: &LoroDoc) {
+    if !fidelity::enabled() {
+      return;
+    }
+    let expected = match crate::loro_projection::document_from_loro(source) {
+      Ok(document) => document,
+      Err(error) => {
+        fidelity::violation(FidelityClass::Persistence, "package-roundtrip-mismatch", || {
+          format!("could not project the source document for the round-trip check: {error}")
+        });
+        return;
+      },
+    };
+    let loaded = match self
+      .load_loro_doc_unvalidated()
+      .and_then(|doc| crate::loro_projection::document_from_loro(&doc))
+    {
+      Ok(document) => document,
+      Err(error) => {
+        fidelity::violation(FidelityClass::Persistence, "package-roundtrip-mismatch", || {
+          format!("could not reload and project the persisted package: {error}")
+        });
+        return;
+      },
+    };
+    let same_shape = expected.paragraphs.len() == loaded.paragraphs.len()
+      && expected.ids.paragraph_ids == loaded.ids.paragraph_ids
+      && expected.ids.block_ids == loaded.ids.block_ids
+      && expected.sections.len() == loaded.sections.len();
+    let same_text =
+      same_shape && (0..expected.paragraphs.len()).all(|ix| crate::paragraph_text(&expected, ix) == crate::paragraph_text(&loaded, ix));
+    fidelity::check(same_shape && same_text, FidelityClass::Persistence, "package-roundtrip-mismatch", || {
+      format!(
+        "reloaded projection differs from persisted source: paragraphs {}->{}, sections {}->{}, ids_match={}, text_match={}",
+        expected.paragraphs.len(),
+        loaded.paragraphs.len(),
+        expected.sections.len(),
+        loaded.sections.len(),
+        expected.ids.paragraph_ids == loaded.ids.paragraph_ids && expected.ids.block_ids == loaded.ids.block_ids,
+        same_text
+      )
+    });
   }
 
   fn load_loro_doc_unvalidated(&self) -> io::Result<LoroDoc> {
@@ -407,6 +480,13 @@ impl DocumentPackage {
     next.refresh_manifest_indexes();
     next.validate()?;
     *self = next;
+    fidelity::event(FidelityClass::Persistence, "append-segment", || {
+      format!(
+        "segment={segment_id:032x} segments={} frontier={}",
+        self.loro_update_segments.len(),
+        frontier_tag(&self.manifest.latest_frontier)
+      )
+    });
     Ok(segment_id)
   }
 
@@ -500,6 +580,14 @@ impl DocumentPackage {
     // §19: a revision may add a snapshot chunk; keep the integrity index complete.
     self.integrity_index = self.build_integrity_index();
     self.validate()?;
+    fidelity::event(FidelityClass::Persistence, "checkpoint", || {
+      format!(
+        "revision={revision_id:032x} revisions={} snapshots={} frontier={}",
+        self.revisions.len(),
+        self.loro_snapshots.len(),
+        frontier_tag(&frontier)
+      )
+    });
     Ok(revision_id)
   }
 
@@ -509,6 +597,9 @@ impl DocumentPackage {
       .iter()
       .find(|revision| revision.revision_id == revision_id)
       .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Flowstate package revision is missing"))?;
+    fidelity::event(FidelityClass::Persistence, "load-revision", || {
+      format!("revision={:032x} frontier={}", revision.revision_id, frontier_tag(&revision.frontier))
+    });
     if let Some(snapshot) = self.snapshot_for_frontier(&revision.frontier) {
       let doc = LoroDoc::new();
       crate::loro_schema::configure_text_styles(&doc);
@@ -641,6 +732,28 @@ impl DocumentPackage {
     next.rebuild_projection_cache_from_loro(doc)?;
     next.rebuild_search_units_from_loro(doc)?;
     *self = next;
+    // §fidelity persistence: record the compaction and assert that compaction did
+    // not drop the ability to reload any named revision, and that the compacted
+    // package still round-trips to the source projection. The revision reload
+    // loop is eager, so gate the whole block on `enabled()`.
+    if fidelity::enabled() {
+      fidelity::event(FidelityClass::Persistence, "compact", || {
+        format!(
+          "snapshot={snapshot_id:032x} snapshots={} segments={} revisions={} frontier={}",
+          self.loro_snapshots.len(),
+          self.loro_update_segments.len(),
+          self.revisions.len(),
+          frontier_tag(&self.manifest.latest_frontier)
+        )
+      });
+      for revision in &self.revisions {
+        let loadable = self.load_revision_loro_doc(revision.revision_id).is_ok();
+        fidelity::check(loadable, FidelityClass::Persistence, "revision-unloadable-after-compact", || {
+          format!("named revision {:032x} is not loadable after compaction", revision.revision_id)
+        });
+      }
+      self.fidelity_check_roundtrip(doc);
+    }
     Ok(snapshot_id)
   }
 
@@ -678,6 +791,16 @@ impl DocumentPackage {
 
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    fidelity::event(FidelityClass::Persistence, "write", || {
+      format!(
+        "snapshots={} segments={} revisions={} assets={} frontier={}",
+        self.loro_snapshots.len(),
+        self.loro_update_segments.len(),
+        self.revisions.len(),
+        self.assets.len(),
+        frontier_tag(&self.manifest.latest_frontier)
+      )
+    });
     let payload = self.to_bytes()?;
     if file_has_journal_header(path)? {
       let bytes = fs::read(path)?;
@@ -1411,6 +1534,21 @@ fn validate_version_vector(bytes: &[u8], label: &'static str) -> io::Result<()> 
 
 fn blake3_hash(bytes: &[u8]) -> [u8; 32] {
   *blake3::hash(bytes).as_bytes()
+}
+
+/// Compact `<len>B:<hex-prefix>` tag for an encoded frontier / version vector.
+/// Used only inside lazy fidelity detail closures, so it never runs unless
+/// tracing is enabled; it truncates to keep firehose lines short.
+fn frontier_tag(bytes: &[u8]) -> String {
+  use std::fmt::Write as _;
+  let mut hex = String::new();
+  for byte in bytes.iter().take(12) {
+    let _ = write!(hex, "{byte:02x}");
+  }
+  if bytes.len() > 12 {
+    hex.push('~');
+  }
+  format!("{}B:{hex}", bytes.len())
 }
 
 fn loro_io_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {

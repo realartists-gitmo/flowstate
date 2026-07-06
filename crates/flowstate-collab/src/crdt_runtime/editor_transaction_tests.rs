@@ -18,7 +18,7 @@ fn projection_event_count(events: &[RuntimeEvent]) -> usize {
     .count()
 }
 
-fn assert_semantic_projection_eq(left: &flowstate_document::DocumentProjection, right: &flowstate_document::DocumentProjection, context: &str) {
+pub(super) fn assert_semantic_projection_eq(left: &flowstate_document::DocumentProjection, right: &flowstate_document::DocumentProjection, context: &str) {
   assert_eq!(left.ids, right.ids, "identity mismatch: {context}");
   assert_eq!(left.sections, right.sections, "section mismatch: {context}");
   assert_eq!(left.frontier, right.frontier, "frontier mismatch: {context}");

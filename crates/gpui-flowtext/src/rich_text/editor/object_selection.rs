@@ -46,7 +46,9 @@ impl RichTextEditor {
   pub(super) fn set_text_selection_for_test(&mut self, anchor: DocumentOffset, head: DocumentOffset, cx: &mut Context<Self>) {
     self.selected_block = None;
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = EditorSelection::range(anchor, head);
+    self.fidelity_caret_set("set_text_selection_for_test", &fid_before);
     cx.notify();
   }
 
@@ -273,9 +275,9 @@ impl RichTextEditor {
         })
         .collect::<Vec<_>>()
     } else {
-      eprintln!(
-        "skipping table column resize semantic command because projection block {} has no durable id",
-        drag.block_ix
+      tracing::warn!(
+        block_ix = drag.block_ix,
+        "dropping table column resize semantic command: projection block has no durable id; local and canonical state will diverge until repair",
       );
       Vec::new()
     };
@@ -475,7 +477,7 @@ impl RichTextEditor {
       if let Some(block) = self.semantic_block_id(block_ix) {
         object_delete_commands.push(SemanticEditCommand::DeleteBlock { block });
       } else {
-        eprintln!("skipping selected-object deletion semantic command because projection block {block_ix} has no durable id");
+        tracing::warn!(block_ix, "dropping selected-object deletion semantic command: projection block has no durable id; local and canonical state will diverge until repair");
       }
     }
     let before_paragraph_count = self.document.paragraphs.len();
@@ -569,7 +571,7 @@ impl RichTextEditor {
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     let semantic_commands = block_id.map_or_else(
       || {
-        eprintln!("skipping selected-block deletion semantic command because projection block {block_ix} has no durable id");
+        tracing::warn!(block_ix, "dropping selected-block deletion semantic command: projection block has no durable id; local and canonical state will diverge until repair");
         Vec::new()
       },
       |block| vec![SemanticEditCommand::DeleteBlock { block }],

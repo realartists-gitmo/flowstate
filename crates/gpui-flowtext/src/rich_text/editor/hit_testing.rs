@@ -117,7 +117,9 @@ impl RichTextEditor {
       return;
     }
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_to_line_edge", &fid_before);
     self.goal_x = None;
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
@@ -167,7 +169,9 @@ impl RichTextEditor {
       paragraph: caret.paragraph,
       byte: caret.byte + text.len(),
     };
+    let fid_before = self.fidelity_caret_before();
     self.selection = EditorSelection::collapsed(new);
+    self.fidelity_caret_set("insert_text", &fid_before);
     self.after_text_mutation(cx);
   }
 
@@ -186,7 +190,9 @@ impl RichTextEditor {
       // paragraphs are dropped wholesale.
       delete_cross_paragraph_range(&mut self.document, range.clone());
     }
+    let fid_before = self.fidelity_caret_before();
     self.selection = EditorSelection::collapsed(range.start);
+    self.fidelity_caret_set("delete_selection_internal", &fid_before);
     true
   }
 
@@ -229,7 +235,9 @@ impl RichTextEditor {
         paragraph: prev_ix,
         byte: prev_len,
       };
+      let fid_before = self.fidelity_caret_before();
       self.selection = EditorSelection::collapsed(new);
+      self.fidelity_caret_set("backspace/join-previous", &fid_before);
     } else {
       let prev = prev_grapheme_boundary_in_paragraph(&self.document, caret.paragraph, caret.byte);
       delete_range_in_paragraph(&mut self.document, caret.paragraph, prev..caret.byte);
@@ -237,7 +245,9 @@ impl RichTextEditor {
         paragraph: caret.paragraph,
         byte: prev,
       };
+      let fid_before = self.fidelity_caret_before();
       self.selection = EditorSelection::collapsed(new);
+      self.fidelity_caret_set("backspace/within-paragraph", &fid_before);
     }
     self.after_text_mutation(cx);
   }
@@ -296,7 +306,9 @@ impl RichTextEditor {
       clear_whole_paragraph_formatting(&mut self.document, new.paragraph);
       rebuild_document_sections(&mut self.document);
     }
+    let fid_before = self.fidelity_caret_before();
     self.selection = EditorSelection::collapsed(new);
+    self.fidelity_caret_set("insert_paragraph_break", &fid_before);
     self.after_text_mutation(cx);
   }
 }

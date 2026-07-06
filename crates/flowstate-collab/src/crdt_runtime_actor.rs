@@ -12,6 +12,8 @@ use crate::crdt_runtime::{
 };
 use crate::presence::PresenceSelection;
 
+const RUNTIME_REQUEST_CHANNEL_CAPACITY: usize = 256;
+
 #[derive(Clone)]
 pub struct CrdtRuntimeHandle {
   commands: Sender<RuntimeRequest>,
@@ -19,7 +21,9 @@ pub struct CrdtRuntimeHandle {
 
 impl CrdtRuntimeHandle {
   pub fn spawn(runtime: CrdtRuntime) -> io::Result<Self> {
-    let (commands, receiver) = async_channel::unbounded();
+    // Bounded so a stalled runtime thread backpressures callers via
+    // `send().await` instead of growing an unbounded request queue.
+    let (commands, receiver) = async_channel::bounded(RUNTIME_REQUEST_CHANNEL_CAPACITY);
     thread::Builder::new()
       .name("flowstate-crdt-runtime".to_string())
       .spawn(move || runtime_loop(runtime, receiver))?;

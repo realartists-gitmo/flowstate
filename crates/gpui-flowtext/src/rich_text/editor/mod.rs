@@ -1021,7 +1021,7 @@ pub struct RichTextEditor {
   redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
   pending_semantic_edits: Vec<SemanticCommandBatch>,
-  runtime_edits_in_flight: usize,
+  reconciliation_recoveries: u64,
   command_capture_route: CommandCaptureRoute,
   native_save_hook: Option<NativeSaveHook>,
   native_export_hook: Option<NativeExportHook>,

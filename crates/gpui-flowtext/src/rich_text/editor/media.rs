@@ -159,16 +159,17 @@ impl RichTextEditor {
         alignment: image.alignment,
       }],
       (None, _) => {
-        eprintln!(
-          "skipping image resize semantic command because projection block {} has no durable id",
-          drag.block_ix
+        tracing::warn!(
+          block_ix = drag.block_ix,
+          "dropping image resize semantic command: projection block has no durable id; local and canonical state will diverge until repair",
         );
         Vec::new()
       },
       (Some(image_id), _) => {
-        eprintln!(
-          "skipping image resize semantic command because projection block {} ({image_id:?}) is no longer an image",
-          drag.block_ix
+        tracing::warn!(
+          block_ix = drag.block_ix,
+          ?image_id,
+          "dropping image resize semantic command: projection block is no longer an image",
         );
         Vec::new()
       },
@@ -222,7 +223,7 @@ impl RichTextEditor {
           text: semantic_alt_text,
         }]
       } else {
-        eprintln!("skipping image alt-text semantic command because projection block {block_ix} has no durable id");
+        tracing::warn!(block_ix, "dropping image alt-text semantic command: projection block has no durable id; local and canonical state will diverge until repair");
         Vec::new()
       }
     });
@@ -231,11 +232,11 @@ impl RichTextEditor {
   fn edit_selected_image(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut ImageBlock)) {
     self.edit_selected_image_with_semantic(block_ix, cx, update, |editor, block_ix, after| {
       let Some(image_id) = editor.semantic_block_id(block_ix) else {
-        eprintln!("skipping image layout semantic command because projection block {block_ix} has no durable id");
+        tracing::warn!(block_ix, "dropping image layout semantic command: projection block has no durable id; local and canonical state will diverge until repair");
         return Vec::new();
       };
       let InputBlock::Image(image) = input_block_from_block(after) else {
-        eprintln!("skipping image layout semantic command because projection block {block_ix} ({image_id:?}) is no longer an image");
+        tracing::warn!(block_ix, ?image_id, "dropping image layout semantic command: projection block is no longer an image");
         return Vec::new();
       };
       vec![SemanticEditCommand::SetImageLayout {

@@ -1,11 +1,12 @@
 use std::{io, path::Path};
 
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui_flowtext::{
   Block, BlockAlignment, DocumentParagraphInput, DocumentProjection, DocumentTheme, EquationDisplay, EquationSyntax, HighlightStyle, ImageBlock,
   ImageSizing, Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles, TableBlock, TableCellBlock, TableColumnWidth, document_from_paragraphs,
   paragraph_text,
 };
-use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, TextDelta, cursor::Side};
+use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, TextDelta, ValueOrContainer, cursor::Side};
 use rustc_hash::FxHashMap;
 use uuid::Uuid;
 
@@ -33,7 +34,66 @@ pub fn import_document_projection(mut document: DocumentProjection, title: &str)
   import_assets(&doc, &document).map_err(loro_io_error)?;
   doc.commit();
   document.frontier = doc.state_frontiers().encode();
+  fidelity_report_import(&doc, &document);
   Ok(ImportedLoroDocument { doc, projection: document })
+}
+
+/// §fidelity import completion event + seed invariant. The caller path always
+/// reaches here after `replace_body_from_document`, so the checks read the freshly
+/// imported canonical state. Gated on [`fidelity::enabled`]; strictly read-only
+/// (no `ensure_*`, so a failing invariant never fabricates the structure it is
+/// asserting). Emits the imported block-shape counts and asserts the document
+/// seeds a leading sentinel newline plus at least one durable first-paragraph
+/// metadata record.
+fn fidelity_report_import(doc: &LoroDoc, document: &DocumentProjection) {
+  if !fidelity::enabled() {
+    return;
+  }
+  let paragraphs = document.paragraphs.len();
+  let (mut blocks, mut tables, mut images, mut equations) = (0_usize, 0_usize, 0_usize, 0_usize);
+  for block in document.blocks.iter() {
+    blocks += 1;
+    match block {
+      Block::Table(_) => tables += 1,
+      Block::Image(_) => images += 1,
+      Block::Equation(_) => equations += 1,
+      Block::Paragraph(_) => {},
+    }
+  }
+  fidelity::event(FidelityClass::ImportExport, "import-complete", || {
+    format!("paragraphs={paragraphs} blocks={blocks} tables={tables} images={images} equations={equations}")
+  });
+  let sentinel_ok = read_body_text(doc).is_some_and(|text| text.to_string().starts_with(crate::SENTINEL_NEWLINE));
+  fidelity::check(sentinel_ok, FidelityClass::ImportExport, "missing-sentinel", || {
+    "imported document body does not start with the sentinel newline".to_string()
+  });
+  let first_paragraph_ok = read_root_child_map(doc, PARAGRAPHS_BY_ID).is_some_and(|map| map.keys().next().is_some());
+  fidelity::check(first_paragraph_ok, FidelityClass::ImportExport, "missing-first-paragraph", || {
+    "imported document has no durable first-paragraph metadata record".to_string()
+  });
+}
+
+/// Read-only resolution of a top-level `flowstate.root` child map. Unlike
+/// `ensure_mergeable_map`, this never creates the container, so a fidelity
+/// invariant cannot fabricate the very structure it is meant to verify.
+fn read_root_child_map(doc: &LoroDoc, key: &str) -> Option<LoroMap> {
+  match doc.get_map(ROOT).get(key)? {
+    ValueOrContainer::Container(container) => container.into_map().ok(),
+    ValueOrContainer::Value(_) => None,
+  }
+}
+
+/// Read-only resolution of the body flow's text container (no `ensure_*`).
+fn read_body_text(doc: &LoroDoc) -> Option<LoroText> {
+  let flows = read_root_child_map(doc, FLOWS_BY_ID)?;
+  let ValueOrContainer::Container(body) = flows.get(ROOT_BODY_FLOW_ID)? else {
+    return None;
+  };
+  let body = body.into_map().ok()?;
+  let ValueOrContainer::Container(text) = body.get(FLOW_TEXT_KEY)? else {
+    return None;
+  };
+  text.into_text().ok()
 }
 
 pub fn import_paragraphs_as_loro(
@@ -122,6 +182,14 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
   }
 
   import_sections(document, &sections, &flows, &body_text, &plan.paragraphs)?;
+  // §P2a: an import that carried no blocks still needs the canonical first
+  // paragraph seed so the projector never has to fabricate an identity for the
+  // lone sentinel boundary. A non-empty import already wrote its own
+  // paragraph/block records, so only the empty case routes through the shared
+  // seed (which is idempotent and converges with the runtime repair path).
+  if document.blocks.is_empty() {
+    crate::loro_schema::seed_document_body(doc)?;
+  }
   Ok(())
 }
 

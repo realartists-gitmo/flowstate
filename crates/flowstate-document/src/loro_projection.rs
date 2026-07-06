@@ -1,5 +1,6 @@
 use std::{collections::BTreeMap, io, sync::Arc};
 
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui_flowtext::{
   AssetId, BlockId, DocumentProjection, DocumentSection, DocumentTheme, HighlightStyle, InputBlock, InputBlockAlignment, InputEquationBlock,
   InputEquationDisplay, InputEquationSyntax, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock, InputTableCell,
@@ -12,14 +13,25 @@ use rustc_hash::FxHashMap;
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
   MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
-  SECTIONS_BY_ID, flowstate_document_theme,
+  SECTIONS_BY_ID, flowstate_document_theme, projection_defects::ProjectionDefect,
 };
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
-  let projection = projection_from_loro(doc)?;
+  // Callers that cannot repair still get the deterministic projection; the
+  // defects are simply discarded here (the runtime uses the sibling below).
+  Ok(document_from_loro_with_defects(doc)?.0)
+}
+
+/// §5: project the document and report every malformed-canonical-state defect
+/// encountered on the way. The projection is deterministic even when defective:
+/// unresolvable blocks are quarantined (appended in stable order) instead of
+/// dropped, and fabricated identities are deterministic per projection.
+pub fn document_from_loro_with_defects(doc: &LoroDoc) -> io::Result<(DocumentProjection, Vec<ProjectionDefect>)> {
+  let mut defects = Vec::new();
+  let projection = projection_from_loro_with_defects(doc, &mut defects)?;
   let mut document = document_from_projection_blocks(projection);
   document.frontier = doc.state_frontiers().encode();
-  Ok(document)
+  Ok((document, defects))
 }
 
 pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
@@ -29,6 +41,7 @@ pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock
 pub fn object_input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<(BlockId, InputBlock)>> {
   let projector = Projector::new(doc)?;
   let mut blocks = Vec::new();
+  let mut defect_sink = Vec::new();
   for key in projector.blocks.keys().map(|key| key.to_string()) {
     let Some(block) = child_map(&projector.blocks, &key)? else {
       continue;
@@ -37,7 +50,7 @@ pub fn object_input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<(BlockId, 
       continue;
     }
     let id = map_string_opt(&block, "id")?.unwrap_or(key);
-    blocks.push((BlockId(loro_id_u128(&id)), projector.object_block(&block)?));
+    blocks.push((BlockId(loro_id_u128(&id)), projector.object_block(&block, &mut defect_sink)?));
   }
   blocks.sort_by_key(|(id, _)| id.0);
   Ok(blocks)
@@ -55,8 +68,13 @@ pub(crate) struct ProjectionBlocks {
 }
 
 fn projection_from_loro(doc: &LoroDoc) -> io::Result<ProjectionBlocks> {
+  let mut defects = Vec::new();
+  projection_from_loro_with_defects(doc, &mut defects)
+}
+
+fn projection_from_loro_with_defects(doc: &LoroDoc, defects: &mut Vec<ProjectionDefect>) -> io::Result<ProjectionBlocks> {
   let projector = Projector::new(doc)?;
-  projector.body_projection()
+  projector.body_projection(defects)
 }
 
 pub(crate) fn projection_blocks_from_loro(doc: &LoroDoc) -> io::Result<ProjectionBlocks> {
@@ -94,20 +112,46 @@ impl<'a> Projector<'a> {
     Ok(Self { doc, flows, blocks })
   }
 
-  fn body_projection(&self) -> io::Result<ProjectionBlocks> {
+  fn body_projection(&self, defects: &mut Vec<ProjectionDefect>) -> io::Result<ProjectionBlocks> {
     let body = self.flow_text(ROOT_BODY_FLOW_ID)?;
-    let body_blocks = self.object_blocks_for_flow(ROOT_BODY_FLOW_ID)?;
+    let (body_blocks, quarantined) = self.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, defects)?;
     let mut blocks = Vec::new();
     let mut paragraph_ids = Vec::new();
     let mut block_ids = Vec::new();
-    self.push_flow_blocks(&body, &body_blocks, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks)?;
+    self.push_flow_blocks(&body, &body_blocks, ROOT_BODY_FLOW_ID, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks, defects)?;
+    // §5 quarantine: blocks whose anchors no longer resolve are appended at the
+    // end in stable (sorted block key) order instead of vanishing. Their defects
+    // were already recorded by `object_blocks_for_flow`.
+    for (key, block) in quarantined {
+      if let Ok(projected) = self.object_block(&block, defects) {
+        let id = map_string_opt(&block, "id")?.unwrap_or(key);
+        blocks.push(projected);
+        block_ids.push(BlockId(loro_id_u128(&id)));
+      }
+    }
     if blocks.is_empty() {
       blocks.push(InputBlock::Paragraph(InputParagraph {
         style: gpui_flowtext::ParagraphStyle::Normal,
         runs: Vec::new(),
       }));
+      // §5/FS-004: even the deterministic empty-projection placeholder is a
+      // fabricated identity; report it so the runtime seeds durable state.
+      defects.push(ProjectionDefect::MissingParagraphMetadata {
+        flow_id: ROOT_BODY_FLOW_ID.to_string(),
+        boundary_unicode: None,
+        fabricated_id: loro_id_u128("paragraph.projection.empty"),
+      });
       paragraph_ids.push(ParagraphId(loro_id_u128("paragraph.projection.empty")));
       block_ids.push(BlockId(loro_id_u128("block.projection.empty")));
+    }
+    // §5 fidelity: surface every collected projection defect (Structure firehose)
+    // and assert the canonical body-projection invariants. Fully read-only and
+    // gated, so it costs a single atomic load when tracing is disabled.
+    if fidelity::enabled() {
+      for defect in defects.iter() {
+        fidelity::event(FidelityClass::Structure, "defect", || format!("{} @ {}", defect.class(), defect.stable_key()));
+      }
+      check_body_projection_integrity(&body, &body_blocks, defects.as_slice());
     }
     let sections = self.sections_for_projection(&paragraph_ids)?;
     Ok(ProjectionBlocks {
@@ -175,13 +219,16 @@ impl<'a> Projector<'a> {
     Ok(sections)
   }
 
+  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
   fn push_flow_blocks(
     &self,
     text: &LoroText,
     object_blocks: &BTreeMap<usize, LoroMap>,
+    flow_id: &str,
     mut paragraph_ids: Option<&mut Vec<ParagraphId>>,
     mut block_ids: Option<&mut Vec<BlockId>>,
     output: &mut Vec<InputBlock>,
+    defects: &mut Vec<ProjectionDefect>,
   ) -> io::Result<()> {
     let mut current = InputParagraph {
       style: gpui_flowtext::ParagraphStyle::Normal,
@@ -200,7 +247,20 @@ impl<'a> Projector<'a> {
       for ch in insert.chars() {
         match ch {
           '\n' => {
-            let style = paragraph_style_from_attrs(attributes.as_ref()).unwrap_or(pending_style);
+            // §5 (adjustmentplan:224): a paragraph boundary without a
+            // paragraph-style mark projects as Normal and is reported so the
+            // runtime repairs the canonical mark, instead of silently
+            // inheriting the previous paragraph's style.
+            let style = match paragraph_style_from_attrs(attributes.as_ref()) {
+              Some(style) => style,
+              None => {
+                defects.push(ProjectionDefect::MissingParagraphStyleMark {
+                  flow_id: flow_id.to_string(),
+                  boundary_unicode: unicode_pos,
+                });
+                gpui_flowtext::ParagraphStyle::Normal
+              },
+            };
             if !seen_sentinel {
               seen_sentinel = true;
               pending_style = style;
@@ -218,10 +278,12 @@ impl<'a> Projector<'a> {
               push_paragraph_projection_metadata(
                 self.doc,
                 text,
+                flow_id,
                 current_boundary,
                 output.len(),
                 paragraph_ids.as_deref_mut(),
                 block_ids.as_deref_mut(),
+                defects,
               );
               output.push(InputBlock::Paragraph(current));
               current = InputParagraph { style, runs: Vec::new() };
@@ -235,10 +297,12 @@ impl<'a> Projector<'a> {
                 push_paragraph_projection_metadata(
                   self.doc,
                   text,
+                  flow_id,
                   current_boundary,
                   output.len(),
                   paragraph_ids.as_deref_mut(),
                   block_ids.as_deref_mut(),
+                  defects,
                 );
                 output.push(InputBlock::Paragraph(current));
                 current = InputParagraph {
@@ -246,11 +310,19 @@ impl<'a> Projector<'a> {
                   runs: Vec::new(),
                 };
               }
-              output.push(self.object_block(block)?);
+              output.push(self.object_block(block, defects)?);
               if let Some(block_ids) = block_ids.as_deref_mut() {
                 block_ids.push(BlockId(loro_id_u128(&map_string(block, "id")?)));
               }
               current_boundary = None;
+            } else if flow_id == ROOT_BODY_FLOW_ID {
+              // §5/FS-036 backstop: a placeholder no block claims would
+              // silently vanish; report it so the runtime removes the orphan
+              // character canonically.
+              defects.push(ProjectionDefect::OrphanObjectPlaceholder {
+                flow_id: flow_id.to_string(),
+                unicode_pos,
+              });
             }
           },
           _ => push_char(&mut current, ch, run_styles),
@@ -260,16 +332,28 @@ impl<'a> Projector<'a> {
     }
 
     if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
-      push_paragraph_projection_metadata(self.doc, text, current_boundary, output.len(), paragraph_ids, block_ids);
+      push_paragraph_projection_metadata(self.doc, text, flow_id, current_boundary, output.len(), paragraph_ids, block_ids, defects);
       output.push(InputBlock::Paragraph(current));
     }
     Ok(())
   }
 
-  fn object_blocks_for_flow(&self, flow_id: &str) -> io::Result<BTreeMap<usize, LoroMap>> {
+  /// Resolve every object block anchored into `flow_id`. The first return value
+  /// maps live placeholder positions to their blocks; the second collects the
+  /// quarantined blocks (unresolved or displaced-by-collision anchors) in stable
+  /// sorted-key order, with one defect recorded per quarantined block.
+  #[allow(clippy::type_complexity, reason = "returns resolved-by-position blocks plus stable-key-ordered quarantined blocks in one pass")]
+  fn object_blocks_for_flow(
+    &self,
+    text: &LoroText,
+    flow_id: &str,
+    defects: &mut Vec<ProjectionDefect>,
+  ) -> io::Result<(BTreeMap<usize, LoroMap>, Vec<(String, LoroMap)>)> {
+    let snapshot = text.to_string();
     let mut by_pos = BTreeMap::new();
-    for key in self.blocks.keys() {
-      let key = key.to_string();
+    let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
+    let mut quarantined = Vec::new();
+    for key in map_keys(&self.blocks) {
       let Some(block) = child_map(&self.blocks, &key)? else {
         continue;
       };
@@ -279,32 +363,64 @@ impl<'a> Projector<'a> {
       if map_string_opt(&block, "kind")?.as_deref() == Some("paragraph") {
         continue;
       }
-      let Some(cursor_bytes) = map_binary_opt(&block, "anchor_cursor")? else {
+      let cursor_bytes = map_binary_opt(&block, "anchor_cursor")?;
+      let resolved = cursor_bytes
+        .as_deref()
+        .and_then(|bytes| Cursor::decode(bytes).ok())
+        .filter(|cursor| cursor.container == text.id())
+        .and_then(|cursor| self.doc.get_cursor_pos(&cursor).ok())
+        .map(|pos| pos.current.pos)
+        .filter(|pos| snapshot.chars().nth(*pos) == Some(OBJECT_REPLACEMENT));
+      let Some(pos) = resolved else {
+        // FS-002: never silently drop a block whose anchor is unresolvable.
+        defects.push(ProjectionDefect::UnresolvedObjectAnchor {
+          block_key: key.clone(),
+          flow_id: flow_id.to_string(),
+          anchor_cursor: cursor_bytes,
+        });
+        quarantined.push((key, block));
         continue;
       };
-      let Ok(cursor) = Cursor::decode(&cursor_bytes) else {
+      if let Some(kept_key) = keys_by_pos.get(&pos) {
+        // FS-003: colliding cursors previously overwrote each other in the map.
+        defects.push(ProjectionDefect::CollidingObjectAnchors {
+          flow_id: flow_id.to_string(),
+          anchor_unicode: pos,
+          kept_block_key: kept_key.clone(),
+          displaced_block_key: key.clone(),
+        });
+        quarantined.push((key, block));
         continue;
-      };
-      if let Ok(pos) = self.doc.get_cursor_pos(&cursor) {
-        by_pos.insert(pos.current.pos, block);
       }
+      keys_by_pos.insert(pos, key);
+      by_pos.insert(pos, block);
     }
-    Ok(by_pos)
+    Ok((by_pos, quarantined))
   }
 
-  fn object_block(&self, block: &LoroMap) -> io::Result<InputBlock> {
+  fn object_block(&self, block: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputBlock> {
     match map_string(block, "kind")?.as_str() {
-      "image" => self.image_block(block).map(InputBlock::Image),
+      "image" => self.image_block(block, defects).map(InputBlock::Image),
       "equation" => self.equation_block(block).map(InputBlock::Equation),
-      "table" => self.table_block(block).map(InputBlock::Table),
+      "table" => self.table_block(block, defects).map(InputBlock::Table),
       kind => Err(invalid(format!("unsupported Loro block kind `{kind}`"))),
     }
   }
 
-  fn image_block(&self, block: &LoroMap) -> io::Result<InputImageBlock> {
+  fn image_block(&self, block: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputImageBlock> {
     let attrs = child_map(block, "attrs")?;
+    // FS-011: an invalid asset id projects as a deterministic placeholder id
+    // (never a silent coercion) and is reported for canonical recovery.
+    let raw_asset_id = map_string_opt(block, "asset_id")?;
+    let asset_id = raw_asset_id.as_deref().and_then(parse_u128);
+    if asset_id.is_none() {
+      defects.push(ProjectionDefect::InvalidAssetId {
+        block_key: map_string_opt(block, "id")?.unwrap_or_default(),
+        raw_asset_id,
+      });
+    }
     Ok(InputImageBlock {
-      asset_id: AssetId(parse_u128(&map_string(block, "asset_id")?).ok_or_else(|| invalid("image block has invalid asset_id"))?),
+      asset_id: AssetId(asset_id.unwrap_or(0)),
       alt_text: map_string_opt(block, "alt_text_flow_id")?
         .map(|flow_id| self.plain_flow_text(&flow_id))
         .transpose()?
@@ -329,12 +445,12 @@ impl<'a> Projector<'a> {
     })
   }
 
-  fn table_block(&self, owner: &LoroMap) -> io::Result<InputTableBlock> {
+  fn table_block(&self, owner: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableBlock> {
     let table = child_map(owner, "table")?.ok_or_else(|| invalid("table block has no table map"))?;
-    self.table_from_map(&table)
+    self.table_from_map(&table, defects)
   }
 
-  fn table_from_map(&self, table: &LoroMap) -> io::Result<InputTableBlock> {
+  fn table_from_map(&self, table: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableBlock> {
     // §28: resolve the table's child containers through their stored raw
     // container ids, falling back to key traversal when unavailable.
     let columns = self
@@ -378,7 +494,7 @@ impl<'a> Projector<'a> {
         }
       }
       for (_, cell) in cells_by_column {
-        row_cells.push(self.table_cell(&cell)?);
+        row_cells.push(self.table_cell(&cell, defects)?);
       }
       rows.push(InputTableRow { cells: row_cells });
     }
@@ -392,12 +508,12 @@ impl<'a> Projector<'a> {
     })
   }
 
-  fn table_cell(&self, cell: &LoroMap) -> io::Result<InputTableCell> {
+  fn table_cell(&self, cell: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputTableCell> {
     let flow_id = map_string(cell, "flow_id")?;
     let flow = self.flow_text(&flow_id)?;
     let object_blocks = self.cell_nested_tables(cell, &flow)?;
     let mut projected = Vec::new();
-    self.push_flow_blocks(&flow, &object_blocks, None, None, &mut projected)?;
+    self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, &mut projected, defects)?;
     let mut blocks = projected
       .into_iter()
       .filter_map(|block| match block {
@@ -485,6 +601,75 @@ impl<'a> Projector<'a> {
   }
 }
 
+/// §5 fidelity integrity invariant for the body projection. The caller gates this
+/// on [`fidelity::enabled`]; it never mutates the document and only reads the
+/// already-resolved body text and object-block map. It asserts the canonical
+/// invariants that the projector's defect reporting is designed to guarantee:
+/// * `missing-sentinel` (Structure): the body flow starts with the sentinel newline.
+/// * `boundary-without-mark` (Structure): every boundary newline carries a
+///   paragraph-style mark.
+/// * `orphan-object` (Structure): every U+FFFC placeholder resolves to a live
+///   block record (a key of `object_blocks`).
+/// * `orphan-metadata` (Identity): no non-paragraph block record dangles without a
+///   live U+FFFC placeholder (surfaced as an unresolved-anchor defect).
+///
+/// (d) A fabricated-id paragraph is only ever emitted alongside a recorded
+/// `MissingParagraph*` defect (see [`push_paragraph_projection_metadata`] and the
+/// empty-projection placeholder), each of which is surfaced by the per-defect
+/// `Structure`/`defect` events, so fabricated identities need no separate scan.
+fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usize, LoroMap>, defects: &[ProjectionDefect]) {
+  let snapshot = body.to_string();
+  fidelity::check(
+    snapshot.starts_with(crate::SENTINEL_NEWLINE),
+    FidelityClass::Structure,
+    "missing-sentinel",
+    || format!("body flow does not start with the sentinel newline (first char {:?})", snapshot.chars().next()),
+  );
+  // (b) Every boundary newline must carry a paragraph-style mark. Walk the rich
+  // delta so we see each insert's attributes, mirroring the projector's own scan.
+  let mut unicode_pos = 0_usize;
+  for item in body.to_delta() {
+    let loro::TextDelta::Insert { insert, attributes } = item else {
+      continue;
+    };
+    for ch in insert.chars() {
+      if ch == '\n' {
+        fidelity::check(
+          paragraph_style_from_attrs(attributes.as_ref()).is_some(),
+          FidelityClass::Structure,
+          "boundary-without-mark",
+          || format!("paragraph boundary newline at body unicode pos {unicode_pos} carries no paragraph-style mark"),
+        );
+      }
+      unicode_pos += 1;
+    }
+  }
+  // (c) Every live U+FFFC placeholder must be claimed by a resolved block record.
+  for (pos, ch) in snapshot.chars().enumerate() {
+    if ch == OBJECT_REPLACEMENT {
+      fidelity::check(
+        object_blocks.contains_key(&pos),
+        FidelityClass::Structure,
+        "orphan-object",
+        || format!("U+FFFC object placeholder at body unicode pos {pos} has no live block record"),
+      );
+    }
+  }
+  // (c, vice-versa) A block record whose anchor no longer resolves to a live
+  // placeholder is dangling metadata; the projector reports it as an
+  // unresolved-anchor defect, which this invariant escalates loudly.
+  for defect in defects {
+    if let ProjectionDefect::UnresolvedObjectAnchor { block_key, flow_id, .. } = defect {
+      fidelity::check(
+        false,
+        FidelityClass::Identity,
+        "orphan-metadata",
+        || format!("block `{block_key}` in flow `{flow_id}` has no live U+FFFC placeholder"),
+      );
+    }
+  }
+}
+
 fn paragraphs_from_text(text: &LoroText) -> Vec<InputParagraph> {
   let mut blocks = Vec::new();
   let projector = ParagraphOnlyProjector;
@@ -543,24 +728,48 @@ fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   });
 }
 
+#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs doc, text, flow/boundary context, id pools and defect sink")]
 fn push_paragraph_projection_metadata(
   doc: &LoroDoc,
   text: &LoroText,
+  flow_id: &str,
   boundary: Option<usize>,
   block_ix: usize,
   paragraph_ids: Option<&mut Vec<ParagraphId>>,
   block_ids: Option<&mut Vec<BlockId>>,
+  defects: &mut Vec<ProjectionDefect>,
 ) {
   if let Some(paragraph_ids) = paragraph_ids {
-    let id = boundary
-      .and_then(|boundary| paragraph_loro_id_at_boundary(doc, text, boundary))
-      .unwrap_or_else(|| format!("paragraph.projection.{block_ix}"));
+    // §5/FS-004: a boundary with no durable paragraph metadata gets a fabricated,
+    // projection-only id and is reported so the runtime writes a real record.
+    let id = match boundary.and_then(|boundary| paragraph_loro_id_at_boundary(doc, text, boundary)) {
+      Some(id) => id,
+      None => {
+        let fabricated_id = format!("paragraph.projection.{block_ix}");
+        defects.push(ProjectionDefect::MissingParagraphMetadata {
+          flow_id: flow_id.to_string(),
+          boundary_unicode: boundary,
+          fabricated_id: loro_id_u128(&fabricated_id),
+        });
+        fabricated_id
+      },
+    };
     paragraph_ids.push(ParagraphId(loro_id_u128(&id)));
   }
   if let Some(block_ids) = block_ids {
-    let id = boundary
-      .and_then(|boundary| paragraph_block_loro_id_at_boundary(doc, text, boundary))
-      .unwrap_or_else(|| format!("paragraph_block.projection.{block_ix}"));
+    // §5/FS-005: mirror the paragraph-metadata report for the paragraph block registry.
+    let id = match boundary.and_then(|boundary| paragraph_block_loro_id_at_boundary(doc, text, boundary)) {
+      Some(id) => id,
+      None => {
+        let fabricated_id = format!("paragraph_block.projection.{block_ix}");
+        defects.push(ProjectionDefect::MissingParagraphBlock {
+          flow_id: flow_id.to_string(),
+          boundary_unicode: boundary,
+          fabricated_id: loro_id_u128(&fabricated_id),
+        });
+        fabricated_id
+      },
+    };
     block_ids.push(BlockId(loro_id_u128(&id)));
   }
 }
@@ -1021,5 +1230,116 @@ mod tests {
 
     assert_eq!(section_page_attrs(&doc, "section.alpha"), Some(expected));
     assert_eq!(section_page_attrs(&doc, "section.missing"), None);
+  }
+
+  #[test]
+  fn missing_paragraph_metadata_is_deterministic_and_quarantines_content() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![InputBlock::Paragraph(InputParagraph {
+        style: gpui_flowtext::ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "before".to_string(),
+          styles: RunStyles::default(),
+        }],
+      })],
+    );
+    let doc = document_to_loro(&source, "Missing metadata")?;
+    let body = body_text(&doc);
+    // Append a second paragraph boundary that carries a style mark but has no
+    // durable paragraph metadata record.
+    let end = body.len_unicode();
+    body.insert(end, "\nextra").unwrap();
+    body.mark(end..end + 1, MARK_PARAGRAPH_STYLE, 0_i64).unwrap();
+    doc.commit();
+
+    let (projection, defects) = document_from_loro_with_defects(&doc)?;
+    let (_, defects_again) = document_from_loro_with_defects(&doc)?;
+    assert_eq!(defects, defects_again, "projection defects must be deterministic across passes");
+    assert!(defects.iter().any(|defect| matches!(
+      defect,
+      ProjectionDefect::MissingParagraphMetadata {
+        boundary_unicode: Some(_),
+        ..
+      }
+    )));
+    // The paragraph is quarantined with a fabricated id — its content survives.
+    assert_eq!(projection.paragraphs.len(), 2);
+    assert_eq!(gpui_flowtext::paragraph_text(&projection, 1), "extra");
+    Ok(())
+  }
+
+  #[test]
+  fn unresolved_object_anchor_is_quarantined_not_dropped() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![InputBlock::Image(InputImageBlock {
+        asset_id: AssetId(7),
+        alt_text: "alt".into(),
+        caption: None,
+        sizing: InputImageSizing::FitWidth,
+        alignment: InputBlockAlignment::Left,
+      })],
+    );
+    let doc = document_to_loro(&source, "Unresolved anchor")?;
+    let body = body_text(&doc);
+    // Delete the object placeholder, leaving the block's anchor dangling.
+    let placeholder = body
+      .to_string()
+      .chars()
+      .position(|ch| ch == OBJECT_REPLACEMENT)
+      .expect("object placeholder");
+    body.delete(placeholder, 1).unwrap();
+    doc.commit();
+
+    let (projection, defects) = document_from_loro_with_defects(&doc)?;
+    let (_, defects_again) = document_from_loro_with_defects(&doc)?;
+    assert_eq!(defects, defects_again, "quarantine reporting must be deterministic");
+    assert!(defects.iter().any(|defect| matches!(defect, ProjectionDefect::UnresolvedObjectAnchor { .. })));
+    // The block is quarantined (appended), not silently dropped.
+    assert!(projection.blocks.iter().any(|block| matches!(block, gpui_flowtext::Block::Image(_))));
+    Ok(())
+  }
+
+  #[test]
+  fn invalid_asset_id_is_reported_and_placeholdered() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      vec![InputBlock::Image(InputImageBlock {
+        asset_id: AssetId(42),
+        alt_text: "alt".into(),
+        caption: None,
+        sizing: InputImageSizing::FitWidth,
+        alignment: InputBlockAlignment::Left,
+      })],
+    );
+    let doc = document_to_loro(&source, "Invalid asset")?;
+    let root = doc.get_map(ROOT);
+    let blocks = child_map(&root, BLOCKS_BY_ID)?.expect("blocks map");
+    let image_key = map_keys(&blocks)
+      .into_iter()
+      .find(|key| {
+        child_map(&blocks, key)
+          .ok()
+          .flatten()
+          .and_then(|block| map_string_opt(&block, "kind").ok().flatten())
+          .as_deref()
+          == Some("image")
+      })
+      .expect("image block");
+    let image = child_map(&blocks, &image_key)?.expect("image block map");
+    image.insert("asset_id", "not-a-number").unwrap();
+    doc.commit();
+
+    let (projection, defects) = document_from_loro_with_defects(&doc)?;
+    assert!(defects.iter().any(|defect| matches!(defect, ProjectionDefect::InvalidAssetId { .. })));
+    // Never silently coerced away: projected as the deterministic AssetId(0) placeholder.
+    assert!(
+      projection
+        .blocks
+        .iter()
+        .any(|block| matches!(block, gpui_flowtext::Block::Image(image) if image.asset_id == AssetId(0)))
+    );
+    Ok(())
   }
 }

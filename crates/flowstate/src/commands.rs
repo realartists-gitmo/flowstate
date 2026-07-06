@@ -4,7 +4,7 @@ use gpui::actions;
 
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
-actions!(flowstate_workspace, [FindInDocumentAction]);
+actions!(flowstate_workspace, [FindInDocumentAction, FidelityMarkAction]);
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 

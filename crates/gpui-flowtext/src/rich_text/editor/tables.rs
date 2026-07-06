@@ -273,7 +273,7 @@ impl RichTextEditor {
   }
 
   fn missing_table_identity_semantic_commands(&self, block_ix: usize, operation: &'static str) -> Vec<SemanticEditCommand> {
-    eprintln!("skipping table {operation} semantic command because projection block {block_ix} has no durable id");
+    tracing::warn!(block_ix, operation, "dropping table semantic command: projection block has no durable id; local and canonical state will diverge until repair");
     Vec::new()
   }
 

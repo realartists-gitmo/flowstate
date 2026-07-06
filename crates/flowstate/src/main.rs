@@ -102,6 +102,10 @@ fn main() {
     },
   };
 
+  // Enable CRDT/document fidelity diagnostics when FLOWSTATE_TRACE_FIDELITY is
+  // set. Must run after logging init so violation dumps reach the subscriber.
+  flowstate_fidelity::init_from_env();
+
   let cli = Cli::parse();
 
   if cli.write_demo_db8 {

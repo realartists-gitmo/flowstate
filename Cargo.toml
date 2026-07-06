@@ -25,6 +25,7 @@ docxide-pdf = { version = "0.15.1", default-features = false, git = "https://git
 fff-search = "0.8.2-nightly.ffb39a8"
 flowstate-document = { version = "0.1.0", path = "crates/flowstate-document" }
 flowstate-docx = { version = "0.1.0", path = "crates/flowstate-docx" }
+flowstate-fidelity = { version = "0.1.0", path = "crates/flowstate-fidelity" }
 flowstate-collab = { version = "0.1.0", path = "crates/flowstate-collab" }
 flowstate-flow = { version = "0.1.0", path = "crates/flowstate-flow" }
 flowstate-tub = { version = "0.1.0", path = "crates/flowstate-tub" }

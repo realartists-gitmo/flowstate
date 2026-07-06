@@ -19,6 +19,7 @@ use flowstate_document::{
   DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
   document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
 };
+use flowstate_fidelity::FidelityClass;
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
   RecognitionRule::ParagraphStyle {
@@ -134,6 +135,19 @@ fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx
   } else {
     document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs)
   };
+  // Import/export fidelity: record the shape of the projection produced from the
+  // cleaned DOCX. Shared funnel for both the db8 and Loro import entries.
+  flowstate_fidelity::event(FidelityClass::ImportExport, "import-docx", || {
+    format!(
+      "paragraphs={} runs={} tables={} images={} equations={} sections={}",
+      report.paragraphs_imported,
+      report.runs_imported,
+      report.tables_imported,
+      report.images_imported,
+      report.equations_imported,
+      document.sections.len()
+    )
+  });
   Ok((document, report))
 }
 

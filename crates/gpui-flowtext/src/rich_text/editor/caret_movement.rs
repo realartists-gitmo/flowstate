@@ -115,7 +115,9 @@ impl RichTextEditor {
       return;
     }
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_horizontal", &fid_before);
     self.goal_x = None;
     let width = self.current_layout_width();
     let _ = self.ensure_paragraph_chunk_containing_byte(new_head.paragraph, new_head.byte, width, window, cx);
@@ -203,7 +205,9 @@ impl RichTextEditor {
       return;
     }
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_vertical", &fid_before);
     // Preserve the goal x across the move so repeated Up/Down stays on a
     // straight column.
     self.goal_x = Some(used_goal_x);
@@ -263,7 +267,9 @@ impl RichTextEditor {
       byte: target_byte,
     };
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
+    self.fidelity_caret_set("move_to_adjacent_unmounted_paragraph", &fid_before);
     self.goal_x = Some(goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);

@@ -1,13 +1,18 @@
 use std::{
   fs::File,
-  io::{self, Cursor},
+  io::{self, Cursor, Read},
   path::Path,
 };
 
 use zip::{CompressionMethod, ZipArchive, ZipWriter, write::FileOptions};
 
+use super::xml_postprocess::{SideChannel, rewrite_document_xml};
+
+/// The main document part rewritten by the post-process seam.
+const DOCUMENT_PART: &str = "word/document.xml";
+
 #[hotpath::measure]
-pub(super) fn write_recompressed_docx(path: &Path, package: Vec<u8>) -> io::Result<()> {
+pub(super) fn write_recompressed_docx(path: &Path, package: Vec<u8>, side: &SideChannel) -> io::Result<()> {
   let mut archive =
     ZipArchive::new(Cursor::new(package)).map_err(|error| io::Error::other(format!("failed to read generated docx package: {error}")))?;
   let file = File::create(path)?;
@@ -27,6 +32,16 @@ pub(super) fn write_recompressed_docx(path: &Path, package: Vec<u8>) -> io::Resu
       writer
         .add_directory(name, options)
         .map_err(|error| io::Error::other(format!("failed to write docx directory: {error}")))?;
+    } else if name == DOCUMENT_PART {
+      // FS-124/125/127: route the main document part through the OOXML rewrite
+      // seam before recompressing it back into the package.
+      let mut bytes = Vec::with_capacity(entry.size() as usize);
+      entry.read_to_end(&mut bytes)?;
+      let rewritten = rewrite_document_xml(bytes, side);
+      writer
+        .start_file(name, options)
+        .map_err(|error| io::Error::other(format!("failed to write docx entry: {error}")))?;
+      io::Write::write_all(&mut writer, &rewritten)?;
     } else {
       writer
         .start_file(name, options)

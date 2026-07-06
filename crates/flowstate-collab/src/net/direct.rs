@@ -17,13 +17,14 @@ use tokio::{
 };
 
 use crate::{
+  capability::{SessionCapability, unix_now},
   ids::{BlobId, SessionId},
   proto_direct::{
     AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, decode_frame, encode_frame,
   },
 };
 
-use super::{PullProgress, blobs::BlobOutbox};
+use super::{PullProgress, auth::SessionAuthRegistry, blobs::BlobOutbox};
 
 const DIRECT_SERVE_CONCURRENCY: usize = 4;
 const DIRECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
@@ -51,6 +52,7 @@ pub enum DirectServeRequest {
 #[derive(Clone, Debug, Default)]
 pub struct DirectServeState {
   inner: Arc<RwLock<DirectServeInner>>,
+  auth: SessionAuthRegistry,
 }
 
 #[derive(Debug, Default)]
@@ -61,6 +63,12 @@ struct DirectServeInner {
 }
 
 impl DirectServeState {
+  /// Capability authentication state shared with the gossip layer.
+  #[must_use]
+  pub fn auth(&self) -> &SessionAuthRegistry {
+    &self.auth
+  }
+
   pub async fn attach_session(&self, session: SessionId) {
     let mut inner = self.inner.write().await;
     let inserted = inner.attached.insert(session);
@@ -112,11 +120,31 @@ impl DirectServeState {
     Ok(blob)
   }
 
-  async fn serve(&self, request: DirectRequest) -> ServeOutcome {
+  async fn serve(&self, request: DirectRequest, remote: EndpointId) -> ServeOutcome {
     let session = request.session();
     let request_kind = direct_request_kind(&request);
     let request_detail_bytes = direct_request_detail_bytes(&request);
-    tracing::trace!(%session, request_kind, request_detail_bytes, "serving collaboration direct request");
+    tracing::trace!(%session, remote = %remote, request_kind, request_detail_bytes, "serving collaboration direct request");
+
+    // FS-080: the capability handshake and the authorization gate live here,
+    // on the serving side, so enforcement never depends on the client.
+    if let DirectRequest::Authenticate { session, capability } = &request {
+      return match self.auth.authenticate_peer(*session, remote, capability, unix_now()) {
+        Ok(role) => {
+          tracing::debug!(%session, remote = %remote, role = role.label(), "collaboration direct capability handshake accepted");
+          ServeOutcome::Payload(Vec::new())
+        },
+        Err(error) => {
+          tracing::warn!(%session, remote = %remote, error = %format_args!("{error:#}"), "collaboration direct capability handshake rejected");
+          ServeOutcome::Header(DirectResponseHeader::Unauthorized)
+        },
+      };
+    }
+    if !self.auth.authorize_direct(session, remote, unix_now()) {
+      tracing::warn!(%session, remote = %remote, request_kind, "collaboration direct request rejected without a valid capability");
+      return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
+    }
+
     let handler = {
       let inner = self.inner.read().await;
       if !inner.attached.contains(&session) {
@@ -160,7 +188,7 @@ impl DirectServeState {
         .await
       },
       DirectRequest::Asset { asset, .. } => request_asset(handler.requests, session, asset).await,
-      DirectRequest::Blob { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
+      DirectRequest::Blob { .. } | DirectRequest::Authenticate { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
     }
   }
 }
@@ -202,12 +230,12 @@ impl DirectProto {
     }
   }
 
-  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, _permit: OwnedSemaphorePermit) -> Result<()> {
+  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, remote: EndpointId, _permit: OwnedSemaphorePermit) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
     let session = request.session();
     let request_kind = direct_request_kind(&request);
-    tracing::debug!(%session, request_kind, "received collaboration direct stream request");
-    let outcome = self.state.serve(request).await;
+    tracing::debug!(%session, remote = %remote, request_kind, "received collaboration direct stream request");
+    let outcome = self.state.serve(request, remote).await;
     tracing::debug!(%session, request_kind, outcome = outcome.kind(), payload_bytes = outcome.payload_len(), "collaboration direct request served");
     write_response(&mut send, outcome).await?;
     Ok(())
@@ -216,7 +244,10 @@ impl DirectProto {
 
 impl ProtocolHandler for DirectProto {
   async fn accept(&self, connection: Connection) -> Result<(), AcceptError> {
-    tracing::trace!("accepted collaboration direct connection");
+    // The remote endpoint id comes from the connection's TLS handshake, so it
+    // is an authenticated sender identity, not self-reported data.
+    let remote = connection.remote_id();
+    tracing::trace!(remote = %remote, "accepted collaboration direct connection");
     while let Ok((send, recv)) = connection.accept_bi().await {
       let Ok(permit) = self.permits.clone().try_acquire_owned() else {
         let mut send = send;
@@ -227,7 +258,7 @@ impl ProtocolHandler for DirectProto {
       };
       let proto = self.clone();
       tokio::spawn(async move {
-        if let Err(error) = proto.handle_stream(send, recv, permit).await {
+        if let Err(error) = proto.handle_stream(send, recv, remote, permit).await {
           tracing::error!(error = %format_args!("{error:#}"), "collaboration direct stream failed");
         }
       });
@@ -321,27 +352,47 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: DirectRequest, pr
     .connect(peer, DIRECT_ALPN)
     .await
     .context("direct dial failed")?;
-  tracing::trace!(%session, request_kind, peer = %peer, "opening collaboration direct stream");
+  // FS-080: present our invite capability before requesting data, so the
+  // serving peer can record our role and authorize this endpoint.
+  if let Some(capability) = super::auth::local_capability(session) {
+    authenticate_connection(&connection, session, capability)
+      .await
+      .context("collaboration capability handshake failed")?;
+  }
+  request_on_connection(&connection, &req, progress).await
+}
+
+async fn authenticate_connection(connection: &Connection, session: SessionId, capability: SessionCapability) -> Result<()> {
+  tracing::trace!(%session, "sending collaboration direct capability handshake");
+  let _ = request_on_connection(connection, &DirectRequest::Authenticate { session, capability }, None).await?;
+  Ok(())
+}
+
+async fn request_on_connection(connection: &Connection, req: &DirectRequest, progress: Option<&Sender<PullProgress>>) -> Result<Vec<u8>> {
+  let session = req.session();
+  let request_kind = direct_request_kind(req);
+  tracing::trace!(%session, request_kind, "opening collaboration direct stream");
   let (mut send, mut recv) = connection
     .open_bi()
     .await
     .context("opening direct request stream failed")?;
-  let frame = encode_frame(&req)?;
-  tracing::trace!(%session, request_kind, peer = %peer, frame_bytes = frame.len(), "sending collaboration direct request frame");
+  let frame = encode_frame(req)?;
+  tracing::trace!(%session, request_kind, frame_bytes = frame.len(), "sending collaboration direct request frame");
   write_frame(&mut send, &frame).await?;
   send.finish()?;
 
   let header = read_frame::<DirectResponseHeader>(&mut recv).await?;
-  tracing::trace!(%session, request_kind, peer = %peer, response = direct_response_header_kind(&header), "received collaboration direct response header");
+  tracing::trace!(%session, request_kind, response = direct_response_header_kind(&header), "received collaboration direct response header");
   match header {
     DirectResponseHeader::Ok { total_len } => {
       let payload = read_payload(&mut recv, total_len, progress).await?;
-      tracing::trace!(%session, request_kind, peer = %peer, bytes = payload.len(), "read collaboration direct response payload");
+      tracing::trace!(%session, request_kind, bytes = payload.len(), "read collaboration direct response payload");
       Ok(payload)
     },
     DirectResponseHeader::NotAttached => Err(anyhow!("peer is not attached to this session")),
     DirectResponseHeader::NotFound => Err(anyhow!("peer does not have the requested collaboration data")),
     DirectResponseHeader::Busy => Err(anyhow!("peer is busy serving collaboration data")),
+    DirectResponseHeader::Unauthorized => Err(anyhow!("peer rejected our collaboration capability")),
   }
 }
 
@@ -490,6 +541,7 @@ async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&S
 
 fn direct_request_kind(request: &DirectRequest) -> &'static str {
   match request {
+    DirectRequest::Authenticate { .. } => "authenticate",
     DirectRequest::Snapshot { .. } => "snapshot",
     DirectRequest::Updates { .. } => "updates",
     DirectRequest::Blob { .. } => "blob",
@@ -500,7 +552,7 @@ fn direct_request_kind(request: &DirectRequest) -> &'static str {
 fn direct_request_detail_bytes(request: &DirectRequest) -> usize {
   match request {
     DirectRequest::Updates { have_vv, .. } => have_vv.len(),
-    DirectRequest::Snapshot { .. } | DirectRequest::Blob { .. } | DirectRequest::Asset { .. } => 0,
+    DirectRequest::Authenticate { .. } | DirectRequest::Snapshot { .. } | DirectRequest::Blob { .. } | DirectRequest::Asset { .. } => 0,
   }
 }
 
@@ -510,13 +562,18 @@ fn direct_response_header_kind(header: &DirectResponseHeader) -> &'static str {
     DirectResponseHeader::NotAttached => "not_attached",
     DirectResponseHeader::NotFound => "not_found",
     DirectResponseHeader::Busy => "busy",
+    DirectResponseHeader::Unauthorized => "unauthorized",
   }
 }
 
 impl DirectRequest {
   fn session(&self) -> SessionId {
     match self {
-      Self::Snapshot { session } | Self::Updates { session, .. } | Self::Blob { session, .. } | Self::Asset { session, .. } => *session,
+      Self::Authenticate { session, .. }
+      | Self::Snapshot { session }
+      | Self::Updates { session, .. }
+      | Self::Blob { session, .. }
+      | Self::Asset { session, .. } => *session,
     }
   }
 }

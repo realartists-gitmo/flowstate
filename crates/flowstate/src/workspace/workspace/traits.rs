@@ -27,6 +27,7 @@ impl Render for Workspace {
         v_flex()
           .on_action(cx.listener(Self::on_save))
           .on_action(cx.listener(Self::on_find_in_document))
+          .on_action(cx.listener(Self::on_fidelity_mark))
           .on_action(cx.listener(Self::on_zoom_in))
           .on_action(cx.listener(Self::on_zoom_out))
           .size_full()

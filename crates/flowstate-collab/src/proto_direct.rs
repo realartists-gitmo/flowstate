@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 
+use crate::capability::SessionCapability;
 use crate::ids::{BlobId, SessionId};
 use crate::proto_gossip::PROTOCOL_VERSION;
 
@@ -10,6 +11,11 @@ pub const MAX_PAYLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DirectRequest {
+  /// Capability handshake (FS-080): presents the owner-signed grant from the
+  /// invite ticket. Peers verify signature, expiry, and revocation epoch and
+  /// record the sender endpoint with the granted role; data requests from
+  /// endpoints that never authenticated are refused with `Unauthorized`.
+  Authenticate { session: SessionId, capability: SessionCapability },
   Snapshot { session: SessionId },
   Updates { session: SessionId, have_vv: Vec<u8> },
   Blob { session: SessionId, blob: BlobId },
@@ -22,6 +28,9 @@ pub enum DirectResponseHeader {
   NotAttached,
   NotFound,
   Busy,
+  /// The request was refused because the sender presented no valid capability
+  /// (missing handshake, bad signature, expired, or revoked epoch).
+  Unauthorized,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

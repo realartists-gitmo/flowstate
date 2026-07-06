@@ -4,9 +4,11 @@ use std::{
   time::{Duration, SystemTime},
 };
 
+use std::sync::Mutex;
+
 use anyhow::{Context as _, Result};
 use tracing_appender::non_blocking::WorkerGuard;
-use tracing_subscriber::{EnvFilter, fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
+use tracing_subscriber::{EnvFilter, Layer as _, fmt, layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::app_settings::flowstate_data_dir;
 
@@ -46,6 +48,23 @@ pub fn init() -> Result<LoggingGuard> {
       .with_target(true)
   });
 
+  // When fidelity tracing is on, additionally stream ONLY the fidelity events
+  // (and violations/markers, matched by the `fidelity` target prefix) as
+  // machine-parseable JSON lines to a dedicated file, so an automated agent gets
+  // exactly one JSON object per event without scraping the human log format.
+  let fidelity_json_layer = trace_fidelity_enabled()
+    .then(|| directory.join("flowstate-fidelity.jsonl"))
+    .and_then(|path| fs::File::create(&path).ok())
+    .map(|file| {
+      fmt::layer()
+        .json()
+        .flatten_event(true)
+        .with_current_span(false)
+        .with_span_list(false)
+        .with_writer(Mutex::new(file))
+        .with_filter(EnvFilter::new("fidelity=debug"))
+    });
+
   tracing_subscriber::registry()
     .with(env_filter())
     .with(
@@ -59,6 +78,7 @@ pub fn init() -> Result<LoggingGuard> {
         .with_thread_names(true),
     )
     .with(stdout_layer)
+    .with(fidelity_json_layer)
     .try_init()
     .context("initializing flowstate logging failed")?;
 
@@ -73,12 +93,38 @@ pub fn init() -> Result<LoggingGuard> {
 ///    applied to Flowstate's own crates, leaving dependencies at `error`.
 /// 4. Default — `error` only.
 fn env_filter() -> EnvFilter {
+  let mut filter = base_env_filter();
+  if trace_fidelity_enabled() {
+    // A single `fidelity=debug` directive surfaces the whole diagnostics
+    // stream: EnvFilter matches targets by prefix, so this also covers the
+    // `fidelity.violation` target (emitted at error), regardless of the
+    // ambient log level. One env var thus yields both firehose and violations.
+    filter = filter.add_directive(
+      "fidelity=debug"
+        .parse()
+        .expect("static `fidelity=debug` directive is always valid"),
+    );
+  }
+  filter
+}
+
+fn base_env_filter() -> EnvFilter {
   let Some(directive) = directive_from_env() else {
     return EnvFilter::new(DEFAULT_LOG_FILTER);
   };
   EnvFilter::try_new(&directive).unwrap_or_else(|error| {
     eprintln!("invalid log filter {directive:?}: {error}; falling back to {DEFAULT_LOG_FILTER:?}");
     EnvFilter::new(DEFAULT_LOG_FILTER)
+  })
+}
+
+/// Mirrors `flowstate_fidelity`'s env parsing: any non-empty, non-`0` value of
+/// `FLOWSTATE_TRACE_FIDELITY` turns diagnostics on. Kept local so logging setup
+/// has no cross-crate ordering dependency.
+fn trace_fidelity_enabled() -> bool {
+  env::var("FLOWSTATE_TRACE_FIDELITY").is_ok_and(|value| {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed != "0"
   })
 }
 

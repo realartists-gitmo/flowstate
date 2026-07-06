@@ -12,11 +12,12 @@ use tokio::time::timeout;
 
 use crate::{
   SessionId,
+  capability::{SessionCapability, sign_epoch_bump, unix_now},
   proto_direct::{AssetBytes, DirectRequest},
 };
 
 use super::{
-  NetCommand, NetEvent, TicketSeed,
+  MintedTicket, NetCommand, NetEvent, PublishPayload, TicketSeed, auth,
   direct::{self, DirectProto, DirectServeState},
   swarm::SwarmHandle,
 };
@@ -26,6 +27,12 @@ pub type EventReceiver = async_channel::Receiver<NetEvent>;
 
 const DIRECT_PULL_TIMEOUT: Duration = Duration::from_secs(10);
 const ENDPOINT_ADDR_READY_TIMEOUT: Duration = Duration::from_secs(2);
+/// FS-074: the command and event channels are bounded so a stalled network
+/// thread or UI event pump applies backpressure instead of growing without
+/// limit. Command producers use `try_send` and tolerate a full channel; event
+/// producers coalesce or backpressure per `swarm::forward_event`.
+const RUNTIME_COMMAND_CAPACITY: usize = 1024;
+const RUNTIME_EVENT_CAPACITY: usize = 1024;
 static RUNTIME: OnceLock<Mutex<Option<RuntimeBridge>>> = OnceLock::new();
 
 #[derive(Clone)]
@@ -61,8 +68,8 @@ pub fn start() -> Result<(CommandSender, EventReceiver)> {
 }
 
 fn spawn_runtime() -> Result<RuntimeBridge> {
-  let (cmd_tx, cmd_rx) = async_channel::unbounded();
-  let (evt_tx, evt_rx) = async_channel::unbounded();
+  let (cmd_tx, cmd_rx) = async_channel::bounded(RUNTIME_COMMAND_CAPACITY);
+  let (evt_tx, evt_rx) = async_channel::bounded(RUNTIME_EVENT_CAPACITY);
   let thread_evt_tx = evt_tx.clone();
 
   thread::Builder::new()
@@ -135,8 +142,12 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         }
         let _ = reply.send(result).await;
       },
-      NetCommand::JoinSession { session, bootstrap } => {
-        if let Err(error) = join_session(&mut swarms, &endpoint, &gossip, &direct_state, &evt_tx, session, bootstrap).await {
+      NetCommand::JoinSession {
+        session,
+        bootstrap,
+        capability,
+      } => {
+        if let Err(error) = join_session(&mut swarms, &endpoint, &gossip, &direct_state, &evt_tx, session, bootstrap, capability).await {
           tracing::warn!(%session, error = %format_args!("{error:#}"), "collaboration join session failed");
           let _ = evt_tx
             .send(NetEvent::SubscribeFailed {
@@ -154,6 +165,10 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
           tracing::debug!(%session, "leave requested for missing collaboration swarm");
         }
         direct_state.detach_session(session).await;
+        // FS-080: tear down capability enforcement and forget the capability we
+        // presented so a later rejoin re-installs a fresh one.
+        direct_state.auth().remove_session(session);
+        auth::clear_local_capability(session);
       },
       NetCommand::Publish { session, payload } => {
         let payload_kind = payload.kind();
@@ -221,6 +236,54 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
         }
         let _ = reply.send(result).await;
       },
+      NetCommand::MintTicket {
+        session,
+        role,
+        ttl_secs,
+        reply,
+      } => {
+        // FS-080: issue an owner-signed capability at the session's current
+        // revocation epoch. Signing binds role/expiry/epoch to the session id,
+        // so a tampered ticket fails verification on the joiner and at the
+        // owner-side handshake.
+        let expires_at = unix_now().saturating_add(ttl_secs);
+        let epoch = direct_state.auth().current_epoch(session).unwrap_or(0);
+        let capability = SessionCapability::issue(endpoint.secret_key(), session, role, expires_at, epoch);
+        let inviter = reachable_endpoint_addr(&endpoint).await;
+        tracing::info!(%session, role = role.label(), expires_at, epoch, peer = %inviter.id, "minted collaboration invite capability");
+        let _ = reply.send(Ok(MintedTicket { inviter, capability })).await;
+      },
+      NetCommand::RevokeCapabilities { session, reply } => {
+        // FS-080: raise the session revocation epoch and gossip the owner-signed
+        // bump so every peer rejects capabilities minted before it.
+        let registry = direct_state.auth();
+        let new_epoch = registry.current_epoch(session).unwrap_or(0).saturating_add(1);
+        let result = match registry.bump_epoch(session, new_epoch) {
+          Ok(effective) => {
+            let signature = sign_epoch_bump(endpoint.secret_key(), session, effective);
+            if let Some(handle) = swarms.get(&session) {
+              if let Err(error) = handle
+                .publish(PublishPayload::CapabilityEpoch {
+                  epoch: effective,
+                  signature,
+                })
+                .await
+              {
+                tracing::warn!(%session, epoch = effective, error = %format_args!("{error:#}"), "publishing collaboration capability revocation failed");
+              }
+            } else {
+              tracing::warn!(%session, epoch = effective, "cannot gossip collaboration capability revocation for missing swarm");
+            }
+            tracing::info!(%session, epoch = effective, "revoked collaboration capabilities");
+            Ok(effective)
+          },
+          Err(error) => {
+            tracing::warn!(%session, error = %format_args!("{error:#}"), "collaboration capability revocation failed");
+            Err(error)
+          },
+        };
+        let _ = reply.send(result).await;
+      },
       NetCommand::MintTicketAddr { reply } => {
         let addr = reachable_endpoint_addr(&endpoint).await;
         tracing::debug!(peer = %addr.id, "minting collaboration ticket address");
@@ -252,6 +315,10 @@ async fn create_session(
 ) -> Result<TicketSeed> {
   tracing::info!(%session, "creating collaboration network session");
   direct_state.attach_session(session).await;
+  // FS-080: the local endpoint is the session owner. Configure owner-side
+  // capability enforcement at epoch 0 so direct requests from unauthenticated
+  // peers are rejected and minted tickets sign against this owner key.
+  direct_state.auth().configure_session(session, endpoint.id(), 0);
   replace_swarm(
     swarms,
     SwarmHandle::spawn(
@@ -277,10 +344,19 @@ async fn join_session(
   evt_tx: &async_channel::Sender<NetEvent>,
   session: SessionId,
   bootstrap: Vec<EndpointAddr>,
+  capability: SessionCapability,
 ) -> Result<()> {
   let bootstrap_count = bootstrap.len();
-  tracing::info!(%session, bootstrap_count, "joining collaboration network session");
+  tracing::info!(%session, bootstrap_count, role = capability.role.label(), "joining collaboration network session");
   direct_state.attach_session(session).await;
+  // FS-080: install the owner key + epoch from the invite ticket and store the
+  // capability we present at the direct handshake, BEFORE the swarm starts.
+  // Without `install_local_capability` the joiner never sends the Authenticate
+  // handshake and owner-side enforcement is silently bypassed.
+  direct_state
+    .auth()
+    .configure_session(session, capability.owner, capability.capability_epoch);
+  auth::install_local_capability(session, capability);
   replace_swarm(
     swarms,
     SwarmHandle::spawn(endpoint.clone(), gossip.clone(), direct_state.clone(), session, bootstrap, evt_tx.clone())?,

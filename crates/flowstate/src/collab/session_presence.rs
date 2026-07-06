@@ -2,8 +2,10 @@ use std::{collections::HashMap, time::Duration};
 
 use flowstate_collab::{
   crdt_runtime::RuntimePresenceCaretRequest,
+  ids::PeerId,
   presence::{PresenceState, PresenceStore},
 };
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui::{Context, Timer};
 
 use super::{CollabSession, SessionNotice};
@@ -12,13 +14,43 @@ const PRESENCE_REFRESH_DEBOUNCE: Duration = Duration::from_millis(50);
 const EXTERNAL_CARET_REFRESH_DEBOUNCE: Duration = Duration::from_millis(16);
 
 impl CollabSession {
-  pub(super) fn apply_presence(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+  pub(super) fn apply_presence(&mut self, from: PeerId, bytes: &[u8], cx: &mut Context<Self>) {
     if let Some(presence) = &self.presence {
-      tracing::trace!(session = %self.session, bytes = bytes.len(), "applying remote collaboration presence update");
+      tracing::trace!(session = %self.session, from = %from, bytes = bytes.len(), "applying remote collaboration presence update");
       let before = remote_roster(presence);
-      if let Err(error) = presence.apply(bytes) {
+      let before_keys = if fidelity::enabled() {
+        roster_key_set(presence)
+      } else {
+        std::collections::HashSet::new()
+      };
+      if let Err(error) = presence.apply_from(&from, bytes) {
+        fidelity::event(FidelityClass::Presence, "presence-reject", || {
+          format!("session={} from={from} bytes={} error={error:#}", self.session, bytes.len())
+        });
         tracing::warn!(session = %self.session, bytes = bytes.len(), error = %format_args!("{error:#}"), "collaboration presence update failed");
         return;
+      }
+      if fidelity::enabled() {
+        // Presence is a per-peer, self-authored signal: `apply_from` only accepts
+        // a frame that touches the delivering peer's own key. Any other key that
+        // changed across the apply means a frame bound to the wrong peer slipped
+        // through — an impersonation/misroute the trust gate should have dropped.
+        let expected_key = flowstate_collab::presence::peer_key(&from);
+        let after_keys = roster_key_set(presence);
+        let offending: Vec<String> = after_keys
+          .symmetric_difference(&before_keys)
+          .filter(|key| **key != expected_key)
+          .cloned()
+          .collect();
+        fidelity::check(
+          offending.is_empty(),
+          FidelityClass::Presence,
+          "presence-key-unbound",
+          || format!("session={} from={from} expected_key={expected_key} offending_keys={offending:?}", self.session),
+        );
+        fidelity::event(FidelityClass::Presence, "presence-apply", || {
+          format!("session={} from={from} bytes={} roster_keys={}", self.session, bytes.len(), after_keys.len())
+        });
       }
       let roster_changed = self.emit_presence_roster_diff(before, cx);
       let peer_count_changed = self.refresh_peer_count();
@@ -166,6 +198,28 @@ impl CollabSession {
             .as_ref()
             .is_some_and(|current| current == &editor)
           {
+            if fidelity::enabled() {
+              // A resolved external caret must land inside the editor's current
+              // projection; a paragraph index past the end means the resolution
+              // targeted a document the local editor no longer reflects.
+              let paragraph_count = editor.read(cx).document().paragraphs.len();
+              for caret in &resolved.carets {
+                fidelity::check(
+                  caret.offset.paragraph < paragraph_count,
+                  FidelityClass::Presence,
+                  "external-caret-invalid-offset",
+                  || {
+                    format!(
+                      "session={session_id} paragraph={} byte={} paragraphs={paragraph_count}",
+                      caret.offset.paragraph, caret.offset.byte,
+                    )
+                  },
+                );
+              }
+              fidelity::event(FidelityClass::Presence, "external-carets-resolved", || {
+                format!("session={session_id} carets={} paragraphs={paragraph_count}", resolved.carets.len())
+              });
+            }
             editor.update(cx, |editor, cx| editor.set_external_carets(resolved.carets, cx));
           }
         },
@@ -255,6 +309,13 @@ fn remote_roster(presence: &PresenceStore) -> HashMap<String, String> {
     .filter(|entry| entry.key != self_key)
     .map(|entry| (entry.key, entry.name))
     .collect()
+}
+
+/// Full set of roster keys (including this endpoint's own). Used only by the
+/// fidelity presence-binding invariant to detect a frame that mutated a key
+/// other than the delivering peer's own.
+fn roster_key_set(presence: &PresenceStore) -> std::collections::HashSet<String> {
+  presence.roster().into_iter().map(|entry| entry.key).collect()
 }
 
 fn default_presence_name() -> String {

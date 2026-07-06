@@ -5,3 +5,4 @@ include!("positions_formatting.rs");
 include!("history_fragments.rs");
 include!("decorations_drag_search.rs");
 include!("collab_capture.rs");
+include!("latency_bench.rs");

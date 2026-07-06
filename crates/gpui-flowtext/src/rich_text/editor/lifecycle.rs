@@ -49,7 +49,7 @@ impl RichTextEditor {
       redo_stack: Vec::new(),
       identity_map,
       pending_semantic_edits: Vec::new(),
-      runtime_edits_in_flight: 0,
+      reconciliation_recoveries: 0,
       command_capture_route: CommandCaptureRoute::Disabled,
       native_save_hook: None,
       native_export_hook: None,
@@ -156,7 +156,9 @@ impl RichTextEditor {
     self.document = blank_document();
     self.committed_document = self.document.clone();
     self.identity_map = DocumentIdentityMap::new(&self.document);
+    let fid_sel_before = self.fidelity_caret_before();
     self.selection = EditorSelection::caret();
+    self.fidelity_caret_set("dispose_for_close", &fid_sel_before);
     self.selection_movement_epoch = 0;
     self.runtime_edit_selection_epoch = None;
     self.next_local_transaction_id = 1;
@@ -178,7 +180,6 @@ impl RichTextEditor {
     self.undo_stack = Vec::new();
     self.redo_stack = Vec::new();
     self.pending_semantic_edits.clear();
-    self.runtime_edits_in_flight = 0;
     self.runtime_edit_selection_epoch = None;
     self.runtime_transaction_in_flight = None;
     self.command_capture_route = CommandCaptureRoute::Disabled;
@@ -289,16 +290,28 @@ impl RichTextEditor {
     selection: Option<EditorSelection>,
     cx: &mut Context<Self>,
   ) {
+    // The local caret is authoritative live state. Capture it against the
+    // pre-rebuild document so it can be re-anchored onto the rebuilt one; we
+    // never re-derive the caret from a replayed batch's recorded position, which
+    // is what let typed text outrun the cursor on empty-paragraph boundaries.
     let stable_live_selection = StableEditorSelection::capture(&self.document, &self.selection);
-    let preserve_explicit_live_selection = self
-      .runtime_edit_selection_epoch
-      .is_some_and(|epoch| epoch != self.selection_movement_epoch);
+    let live_selection = self.selection.clone();
+    // Fidelity: snapshot the pre-rebuild caret, document size, and identity map so
+    // the reconciliation can be checked for a backward caret jump and dropped ids.
+    let fid_sel_before = self.fidelity_caret_before();
+    let fid_size_before = flowstate_fidelity::enabled().then(|| self.fidelity_document_size());
+    let fid_ids_before = self.fidelity_ids_before();
+    // Fingerprint the paragraph structure the user is currently looking at. A
+    // rebuild that reproduces it exactly (same paragraph count and text lengths)
+    // is a local acknowledgement — the text is unchanged and at most some
+    // paragraph ids were canonically reassigned by a repair — so the raw live
+    // caret is exactly correct and must be kept verbatim.
+    let live_paragraph_lengths: Vec<usize> = self.document.paragraphs.iter().map(paragraph_text_len).collect();
     let frontier = self.committed_document.frontier.clone();
     let mut edits = retry_edits;
     edits.extend(std::mem::take(&mut self.pending_semantic_edits));
     let mut document = self.committed_document.clone();
     let mut replayed = Vec::with_capacity(edits.len());
-    let mut replayed_selection = None;
     let mut rejected = 0usize;
 
     for mut edit in edits {
@@ -312,9 +325,6 @@ impl RichTextEditor {
         .all(|command| replay_semantic_command_on_projection(&mut candidate, command))
       {
         edit.base_frontier.clone_from(&frontier);
-        if let Some(selection) = &edit.stable_selection_after {
-          replayed_selection = Some((edit.selection_movement_epoch, selection.clone()));
-        }
         document = candidate;
         replayed.push(edit);
       } else {
@@ -323,7 +333,11 @@ impl RichTextEditor {
     }
 
     if rejected > 0 {
-      eprintln!("dropped {rejected} unrebasable optimistic editor batch(es) after canonical replay");
+      self.note_reconciliation_recovery(
+        rejected,
+        "optimistic editor batches could not be replayed onto the canonical projection",
+        cx,
+      );
     }
 
     document.frontier.clone_from(&frontier);
@@ -332,65 +346,68 @@ impl RichTextEditor {
     self.identity_map.reconcile(&self.document);
     self.pending_semantic_edits = replayed;
 
-    let next_selection = match (preserve_explicit_live_selection, replayed_selection, selection) {
-      (true, Some((epoch, selection)), _) if epoch == self.selection_movement_epoch => Some(selection.resolve(&self.document)),
-      (true, _, _) => stable_live_selection.map(|selection| selection.resolve(&self.document)),
-      (false, Some((_, selection)), _) => Some(selection.resolve(&self.document)),
-      (false, None, Some(selection)) => Some(selection),
-      (false, None, None) => stable_live_selection.map(|selection| selection.resolve(&self.document)),
+    // When the rebuild is structurally identical to what the user is looking at
+    // (every local acknowledgement, even one whose canonical projection
+    // reassigned paragraph ids during a repair), the raw live caret is exactly
+    // correct, so keep it verbatim — this is what makes "typed text outruns the
+    // cursor" structurally impossible on any document. Only a genuine external
+    // delta (a remote op or a structural canonical change) re-anchors the caret
+    // along its stable paragraph anchor.
+    let structurally_identical = self
+      .document
+      .paragraphs
+      .iter()
+      .map(paragraph_text_len)
+      .eq(live_paragraph_lengths.iter().copied());
+    self.selection = if structurally_identical {
+      live_selection
+    } else {
+      stable_live_selection
+        .map(|selection| selection.resolve(&self.document))
+        .or(selection)
+        .unwrap_or(live_selection)
     };
-    if let Some(selection) = next_selection {
-      self.selection = selection;
-      clamp_selection_to_document(&self.document, &mut self.selection);
-      self.emit_selection_changed(cx);
+    clamp_selection_to_document(&self.document, &mut self.selection);
+    if flowstate_fidelity::enabled() {
+      let (pre_paras, pre_len) = fid_size_before.unwrap_or((0, 0));
+      let (post_paras, post_len) = self.fidelity_document_size();
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Reconcile, "rebuild", || {
+        format!(
+          "branch={} pre_paras={pre_paras} post_paras={post_paras} pre_len={pre_len} post_len={post_len} pending={} rejected={rejected}",
+          if structurally_identical { "identical" } else { "transform" },
+          self.pending_semantic_edits.len(),
+        )
+      });
+      self.fidelity_note_dropped_ids("rebuild_visible_from_committed", &fid_ids_before);
+      self.fidelity_check_visible_matches_committed("rebuild_visible_from_committed");
+      let shrank = post_paras < pre_paras || post_len < pre_len;
+      self.fidelity_check_caret_not_regressed("rebuild_visible_from_committed", &fid_sel_before, shrank);
+      self.fidelity_caret_set("rebuild_visible_from_committed", &fid_sel_before);
     }
+    self.emit_selection_changed(cx);
     self.after_text_mutation(cx);
   }
 
-  pub fn complete_runtime_edit(&mut self, selection: Option<EditorSelection>, cx: &mut Context<Self>) {
-    let selection = if self
-      .runtime_edit_selection_epoch
-      .is_some_and(|epoch| epoch != self.selection_movement_epoch)
-    {
-      None
-    } else {
-      selection
-    };
-    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_sub(1);
-    if self.runtime_edits_in_flight == 0 && self.pending_semantic_edits.is_empty() {
-      if let Some(selection) = selection {
-        self.selection = selection;
-        clamp_selection_to_document(&self.document, &mut self.selection);
-        self.emit_selection_changed(cx);
-      }
-      self.scroll_head_into_view();
-      self.reset_caret_blink(cx);
-    }
-    if self.runtime_edits_in_flight == 0 {
-      self.runtime_edit_selection_epoch = None;
-      self.runtime_transaction_in_flight = None;
-    }
-    // A completion with newer optimistic edits still queued must wake the host
-    // so it can schedule the next serialized runtime flush.
-    cx.notify();
-  }
-
-  pub fn begin_runtime_edit(&mut self, transaction_id: u128) {
-    if self.runtime_edits_in_flight == 0 {
-      self.runtime_edit_selection_epoch = Some(self.selection_movement_epoch);
-      self.runtime_transaction_in_flight = Some(transaction_id);
-    }
-    self.runtime_edits_in_flight = self.runtime_edits_in_flight.saturating_add(1);
+  /// Open the exactly-one-outstanding runtime transaction gate. Hosts must
+  /// check `runtime_transaction_in_flight()` before flushing a new batch.
+  pub fn begin_runtime_transaction(&mut self, transaction_id: u128) {
+    debug_assert!(
+      self.runtime_transaction_in_flight.is_none(),
+      "a runtime transaction is already in flight; the flush protocol allows exactly one",
+    );
+    self.runtime_edit_selection_epoch = Some(self.selection_movement_epoch);
+    self.runtime_transaction_in_flight = Some(transaction_id);
   }
 
   #[must_use]
-  pub fn runtime_edit_in_flight(&self) -> bool {
-    self.runtime_edits_in_flight > 0
+  pub fn runtime_transaction_in_flight(&self) -> bool {
+    self.runtime_transaction_in_flight.is_some()
   }
 
   /// Complete a local runtime transaction only after its authoritative projection
-  /// has already been materialized into `committed_document`.
-  pub fn complete_runtime_edit_after_materialization(
+  /// has already been materialized into `committed_document`. This is the only
+  /// success path for closing the transaction gate.
+  pub fn complete_runtime_transaction(
     &mut self,
     transaction_id: u128,
     expected_frontier: Vec<u8>,
@@ -409,13 +426,75 @@ impl RichTextEditor {
         actual: self.committed_document.frontier.clone(),
       });
     }
-    let selection = if self.pending_semantic_edits.is_empty() {
-      selection.map(|selection| selection.resolve(&self.document))
-    } else {
-      None
-    };
-    self.complete_runtime_edit(selection, cx);
+    self.finish_runtime_transaction(selection, cx);
     Ok(())
+  }
+
+  /// Close the transaction gate after a failed or repaired commit. The caller
+  /// must already have restored a canonical projection (via
+  /// `replace_document_projection_replaying_pending`) or be detaching.
+  pub fn abort_runtime_transaction(&mut self, cx: &mut Context<Self>) {
+    self.runtime_edit_selection_epoch = None;
+    self.runtime_transaction_in_flight = None;
+    // Newer optimistic edits may be queued behind the failed transaction; wake
+    // the host so it can schedule the next serialized runtime flush.
+    cx.notify();
+  }
+
+  fn finish_runtime_transaction(&mut self, acknowledged_selection: Option<StableEditorSelection>, cx: &mut Context<Self>) {
+    let fid_sel_before = self.fidelity_caret_before();
+    if self.pending_semantic_edits.is_empty() {
+      // The projection rebuild that preceded completion already reconciled the
+      // authoritative live caret; we never override it here (overriding it with
+      // the flushed batch's position is what let typed text outrun the cursor).
+      // We only recover to the acknowledged position if the live caret no longer
+      // resolves into the document — a defensive net that should never fire on
+      // the normal path.
+      if !self.selection_within_document()
+        && let Some(acknowledged_selection) = acknowledged_selection
+      {
+        self.selection = acknowledged_selection.resolve(&self.document);
+        clamp_selection_to_document(&self.document, &mut self.selection);
+        self.fidelity_caret_set("finish_runtime_transaction/acknowledged", &fid_sel_before);
+        self.emit_selection_changed(cx);
+      }
+      self.scroll_head_into_view();
+      self.reset_caret_blink(cx);
+    }
+    // The document is unchanged here, so any backward caret move is a regression
+    // (not a deletion): pass `shrank = false`.
+    self.fidelity_check_caret_not_regressed("finish_runtime_transaction", &fid_sel_before, false);
+    self.runtime_edit_selection_epoch = None;
+    self.runtime_transaction_in_flight = None;
+    // A completion with newer optimistic edits still queued must wake the host
+    // so it can schedule the next serialized runtime flush.
+    cx.notify();
+  }
+
+  fn selection_within_document(&self) -> bool {
+    [self.selection.anchor, self.selection.head].iter().all(|offset| {
+      self
+        .document
+        .paragraphs
+        .get(offset.paragraph)
+        .is_some_and(|paragraph| offset.byte <= paragraph_text_len(paragraph))
+    })
+  }
+
+  /// Count of reconciliation recoveries since this editor was created. A
+  /// nonzero value means optimistic state diverged from the canonical
+  /// projection and had to be repaired — always a bug worth investigating.
+  pub fn reconciliation_recoveries(&self) -> u64 {
+    self.reconciliation_recoveries
+  }
+
+  pub(super) fn note_reconciliation_recovery(&mut self, dropped_batches: usize, reason: &'static str, cx: &mut Context<Self>) {
+    self.reconciliation_recoveries = self.reconciliation_recoveries.wrapping_add(1);
+    cx.emit(EditorEvent::ReconciliationRecovery {
+      dropped_batches,
+      reason: reason.into(),
+      total_recoveries: self.reconciliation_recoveries,
+    });
   }
 
   pub fn replace_document_projection_replaying_pending(
@@ -431,8 +510,10 @@ impl RichTextEditor {
   }
 
   pub fn restore_runtime_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {
+    let fid_sel_before = self.fidelity_caret_before();
     self.selection = selection;
     clamp_selection_to_document(&self.document, &mut self.selection);
+    self.fidelity_caret_set("restore_runtime_selection", &fid_sel_before);
     self.emit_selection_changed(cx);
     self.scroll_head_into_view();
     cx.notify();
@@ -464,7 +545,8 @@ impl RichTextEditor {
       self.command_capture_route
     });
     if !on {
-      self.runtime_edits_in_flight = 0;
+      self.runtime_edit_selection_epoch = None;
+      self.runtime_transaction_in_flight = None;
     }
   }
 
@@ -661,6 +743,131 @@ impl RichTextEditor {
       .filter(|caret| caret.offset.paragraph == paragraph_ix)
       .cloned()
       .collect()
+  }
+}
+
+// -- Fidelity instrumentation helpers -------------------------------------
+//
+// Strictly additive diagnostics for caret/reconciliation/text fidelity. Kept in
+// a separate impl block WITHOUT `#[hotpath::measure_all]` so the caret hot path
+// is not wrapped in profiling timers, and so every entry point stays gated by a
+// single relaxed atomic load (`flowstate_fidelity::enabled`) when tracing is
+// off. None of these read/write anything that alters editor behavior.
+impl RichTextEditor {
+  /// Snapshot the live selection immediately before a `self.selection =` write,
+  /// but only when fidelity tracing is on. Returns `None` (and clones nothing)
+  /// when off, so the common caret hot path pays one atomic load.
+  #[inline]
+  pub(super) fn fidelity_caret_before(&self) -> Option<EditorSelection> {
+    flowstate_fidelity::enabled().then(|| self.selection.clone())
+  }
+
+  /// Emit the `Caret`/`set` firehose event for a completed selection write whose
+  /// pre-value was captured via [`Self::fidelity_caret_before`]. No-op when the
+  /// snapshot is `None` (tracing off).
+  #[inline]
+  pub(super) fn fidelity_caret_set(&self, site: &'static str, before: &Option<EditorSelection>) {
+    if let Some(old) = before {
+      self.fidelity_caret_set_from(site, old);
+    }
+  }
+
+  /// Emit the `Caret`/`set` firehose event for a completed selection write whose
+  /// pre-value is already held in an existing local (no extra clone). The detail
+  /// closure is lazy, so this costs one atomic load when tracing is off.
+  #[inline]
+  pub(super) fn fidelity_caret_set_from(&self, site: &'static str, old: &EditorSelection) {
+    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Caret, "set", || {
+      format!(
+        "site={site} old={old:?} new={:?} frontier_len={} gen={} pending={}",
+        self.selection,
+        self.committed_document.frontier.len(),
+        self.edit_generation,
+        self.pending_semantic_edits.len(),
+      )
+    });
+  }
+
+  /// Cheap document size fingerprint (paragraph count, total text length) used to
+  /// decide whether a reconciliation shrank the document — a legitimate reason
+  /// for the caret to move backward (a remote/committed deletion).
+  #[inline]
+  pub(super) fn fidelity_document_size(&self) -> (usize, usize) {
+    (
+      self.document.paragraphs.len(),
+      self.document.paragraphs.iter().map(paragraph_text_len).sum::<usize>(),
+    )
+  }
+
+  /// Assert a reconciliation write did not move the caret head BACKWARD for a
+  /// non-user, non-deletion reason. `shrank` suppresses the check when the
+  /// document lost paragraphs or text (a deletion legitimately pulls the caret
+  /// back). No-op when `before` is `None` (tracing off).
+  #[inline]
+  pub(super) fn fidelity_check_caret_not_regressed(&self, site: &'static str, before: &Option<EditorSelection>, shrank: bool) {
+    let Some(before) = before else { return };
+    let before = before.head;
+    let after = self.selection.head;
+    let regressed = after.paragraph < before.paragraph || (after.paragraph == before.paragraph && after.byte < before.byte);
+    flowstate_fidelity::check(!regressed || shrank, flowstate_fidelity::FidelityClass::Caret, "reconcile-regressed", || {
+      format!("site={site} before={before:?} after={after:?} shrank={shrank}")
+    });
+  }
+
+  /// Snapshot the paragraph/block id vectors before a reconcile, gated on tracing.
+  #[inline]
+  pub(super) fn fidelity_ids_before(&self) -> Option<(Vec<ParagraphId>, Vec<BlockId>)> {
+    flowstate_fidelity::enabled().then(|| (self.document.ids.paragraph_ids.clone(), self.document.ids.block_ids.clone()))
+  }
+
+  /// Emit an `Identity` firehose event listing paragraph/block ids that were
+  /// present before a reconcile but are absent afterward (a prime suspect for
+  /// caret jumps and lossy stable-selection fallbacks). No-op when the snapshot
+  /// is `None` (tracing off).
+  pub(super) fn fidelity_note_dropped_ids(&self, site: &'static str, before: &Option<(Vec<ParagraphId>, Vec<BlockId>)>) {
+    let Some((pre_paras, pre_blocks)) = before else { return };
+    let dropped_paras: Vec<ParagraphId> = pre_paras
+      .iter()
+      .copied()
+      .filter(|id| !self.document.ids.paragraph_ids.contains(id))
+      .collect();
+    let dropped_blocks: Vec<BlockId> = pre_blocks
+      .iter()
+      .copied()
+      .filter(|id| !self.document.ids.block_ids.contains(id))
+      .collect();
+    if !dropped_paras.is_empty() || !dropped_blocks.is_empty() {
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Identity, "id-dropped", || {
+        format!("site={site} dropped_paragraphs={dropped_paras:?} dropped_blocks={dropped_blocks:?}")
+      });
+    }
+  }
+
+  /// Independently verify the visible document equals `committed_document` with
+  /// the stored pending edits replayed onto it (paragraph texts compared). All
+  /// work is gated behind `enabled()` so it is free when tracing is off.
+  pub(super) fn fidelity_check_visible_matches_committed(&self, site: &'static str) {
+    if !flowstate_fidelity::enabled() {
+      return;
+    }
+    let mut expected = self.committed_document.clone();
+    let mut replay_ok = true;
+    for edit in &self.pending_semantic_edits {
+      for command in &edit.semantic_commands {
+        replay_ok &= replay_semantic_command_on_projection(&mut expected, command);
+      }
+    }
+    let matches = replay_ok
+      && expected.paragraphs.len() == self.document.paragraphs.len()
+      && (0..expected.paragraphs.len()).all(|ix| paragraph_text(&expected, ix) == paragraph_text(&self.document, ix));
+    flowstate_fidelity::check(matches, flowstate_fidelity::FidelityClass::Reconcile, "visible-vs-committed-mismatch", || {
+      format!(
+        "site={site} replay_ok={replay_ok} expected_paras={} visible_paras={} pending={}",
+        expected.paragraphs.len(),
+        self.document.paragraphs.len(),
+        self.pending_semantic_edits.len(),
+      )
+    });
   }
 }
 

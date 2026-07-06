@@ -9,6 +9,7 @@ use flowstate_collab::{
   },
   proto_direct::AssetBytes,
 };
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui::Context;
 use loro::VersionVector;
 use uuid::Uuid;
@@ -17,6 +18,9 @@ use crate::rich_text_element::{AssetId, AssetRecord, UndoRedirect};
 
 use super::{CollabSession, DetachReason};
 
+pub(super) const MAX_PENDING_REMOTE_UPDATES: usize = 512;
+pub(super) const MAX_PENDING_REMOTE_UPDATE_BYTES: usize = 64 * 1024 * 1024;
+
 impl CollabSession {
   pub fn import_update_bytes(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> Result<()> {
     if bytes.is_empty() {
@@ -24,6 +28,23 @@ impl CollabSession {
       return Ok(());
     }
     if self.runtime.is_none() || self.editor.is_none() {
+      if self.pending_remote_updates.len() >= MAX_PENDING_REMOTE_UPDATES
+        || self.pending_remote_update_bytes.saturating_add(bytes.len()) > MAX_PENDING_REMOTE_UPDATE_BYTES
+      {
+        // Drop the whole pre-attach queue: partial update history is useless
+        // to Loro anyway, and the overflow flag forces one anti-entropy pull
+        // right after attach, which resynchronizes everything we dropped.
+        tracing::warn!(
+          session = %self.session,
+          dropped_updates = self.pending_remote_updates.len() + 1,
+          dropped_bytes = self.pending_remote_update_bytes + bytes.len(),
+          "pre-attach collaboration update queue overflowed; will resync via anti-entropy pull after attach",
+        );
+        self.pending_remote_updates.clear();
+        self.pending_remote_update_bytes = 0;
+        self.pending_remote_updates_overflowed = true;
+        return Ok(());
+      }
       tracing::debug!(
         session = %self.session,
         bytes = bytes.len(),
@@ -32,6 +53,7 @@ impl CollabSession {
         has_editor = self.editor.is_some(),
         "queueing remote collaboration update until session is attached",
       );
+      self.pending_remote_update_bytes = self.pending_remote_update_bytes.saturating_add(bytes.len());
       self.pending_remote_updates.push(bytes.to_vec());
       return Ok(());
     }
@@ -58,6 +80,12 @@ impl CollabSession {
             },
           };
           if let Some(detail) = projection_error {
+            // Materializing a remote update against the optimistic projection
+            // failed and must be repaired from the canonical snapshot: a
+            // reconciliation recovery on the remote-apply path is a fidelity failure.
+            fidelity::violation(FidelityClass::Reconcile, "remote-projection-repair", || {
+              format!("session={session_id} bytes={bytes_len} error={detail}")
+            });
             tracing::warn!(session = %session_id, bytes = bytes_len, error = %detail, "remote projection materialization failed; repairing from canonical runtime snapshot");
             match runtime.projection_snapshot().await {
               Ok(document) => {
@@ -84,10 +112,10 @@ impl CollabSession {
           }
         },
         Err(error) => {
-          tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "remote collaboration update import failed");
-          let _ = session.update(cx, |session, cx| {
-            session.detach(DetachReason::Fatal(format!("importing collaboration update failed: {error:#}")), cx);
-          });
+          // A malformed or unimportable update is dropped, not session-fatal:
+          // real content re-arrives via digest-driven anti-entropy pulls, and a
+          // dead runtime actor surfaces through the local flush path instead.
+          tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "dropped unimportable remote collaboration update");
         },
       }
     })
@@ -134,8 +162,10 @@ impl CollabSession {
     let sender_vv = match VersionVector::decode(vv).context("decoding collaboration digest failed") {
       Ok(sender_vv) => sender_vv,
       Err(error) => {
-        tracing::warn!(session = %self.session, from = %from, digest_session = %digest_session, vv_bytes = vv.len(), error = %format_args!("{error:#}"), "decoding collaboration digest failed");
-        return Err(error);
+        // A malformed digest is the sender's defect, never grounds to detach
+        // this healthy session; drop the frame and keep serving other peers.
+        tracing::warn!(session = %self.session, from = %from, digest_session = %digest_session, vv_bytes = vv.len(), error = %format_args!("{error:#}"), "ignored undecodable collaboration digest from peer");
+        return Ok(());
       },
     };
     if self.runtime_vv.is_empty() {
@@ -151,7 +181,7 @@ impl CollabSession {
     };
     let action = self
       .anti_entropy
-      .consider_digest(from, digest_session, relation, self.runtime_vv.clone());
+      .consider_digest(from, digest_session, relation, self.runtime_vv.clone(), std::time::Instant::now());
     tracing::trace!(
       session = %self.session,
       from = %from,
@@ -235,7 +265,6 @@ impl CollabSession {
     let asset_records = std::mem::take(&mut self.pending_asset_records);
     tracing::debug!(session = %self.session, asset_records = asset_records.len(), "flushing collaboration asset records to editor");
     editor.update(cx, |editor, cx| {
-      editor.clear_undo_redo_stacks();
       editor.apply_synced_asset_records(&asset_records, cx);
     });
     self.last_document_activity = std::time::Instant::now();
@@ -245,6 +274,12 @@ impl CollabSession {
   }
 
   pub(super) fn apply_loro_undo_redirect(&mut self, redirect: UndoRedirect, cx: &mut Context<Self>) -> Result<()> {
+    if !self.collaboration_role.can_write() {
+      // FS-080: undo/redo mutate the shared document, so a viewer's undo is a
+      // no-op. The editor already gates the command; this is defense in depth.
+      tracing::debug!(session = %self.session, ?redirect, "ignoring collaboration undo redirect for a view-only session");
+      return Ok(());
+    }
     if self.runtime.is_none() || self.editor.is_none() {
       tracing::warn!(
         session = %self.session,
@@ -411,14 +446,14 @@ impl CollabSession {
     });
     if let Err(error) = send_result {
       tracing::warn!(session = %self.session, from = %from, error = %error, "queueing collaboration update pull failed");
-      self.anti_entropy.finish_pull();
+      self.anti_entropy.finish_pull(from);
       return;
     }
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
       let result = reply_rx.recv().await;
       let _ = session.update(cx, |session, cx| {
-        session.anti_entropy.finish_pull();
+        session.anti_entropy.finish_pull(from);
         match result {
           Ok(Ok(bytes)) => {
             tracing::debug!(session = %session_id, from = %from, bytes = bytes.len(), "collaboration update pull succeeded");

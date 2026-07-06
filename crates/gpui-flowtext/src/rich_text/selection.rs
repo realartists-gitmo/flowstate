@@ -1,3 +1,5 @@
+use flowstate_fidelity::{self as fidelity, FidelityClass};
+
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -14,6 +16,22 @@ pub(super) fn expand_mouse_selection(
   granularity: SelectionGranularity,
   options: MouseSelectionOptions,
 ) -> EditorSelection {
+  // Fidelity: anchor/head arrive here from hit-testing a screen point. Record
+  // the resolution and assert both endpoints land inside the document's
+  // paragraph range — an out-of-range paragraph means the point resolved
+  // against a stale/mismatched projection.
+  if fidelity::enabled() {
+    let paragraphs = document.paragraphs.len();
+    fidelity::event(FidelityClass::Caret, "mouse-select", || {
+      format!("anchor={anchor:?} head={head:?} granularity={granularity:?} options={options:?} paragraphs={paragraphs}")
+    });
+    fidelity::check(
+      paragraphs == 0 || (anchor.paragraph < paragraphs && head.paragraph < paragraphs),
+      FidelityClass::Structure,
+      "hit-test-offset-range",
+      || format!("anchor={anchor:?} head={head:?} paragraphs={paragraphs}"),
+    );
+  }
   if granularity != SelectionGranularity::Character {
     return expand_drag_selection(document, anchor, head, granularity);
   }

@@ -64,7 +64,7 @@ impl Workspace {
 
     tracing::info!(%panel_id, title = %title, "workspace starting collaboration on document");
     self.flush_document_runtime_edits(panel_id, editor.clone(), cx);
-    if editor.read(cx).runtime_edit_in_flight() {
+    if editor.read(cx).runtime_transaction_in_flight() {
       tracing::warn!(%panel_id, "collaboration start deferred because local edits are still being committed to Loro");
       return None;
     }

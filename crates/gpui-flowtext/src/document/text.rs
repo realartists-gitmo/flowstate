@@ -214,6 +214,16 @@ pub struct DocumentParagraphInput {
 pub struct DocumentSpan {
   pub start_paragraph: usize,
   pub paragraphs: Vec<Paragraph>,
+  /// Durable paragraph ids parallel to `paragraphs` (one id per paragraph).
+  ///
+  /// Carried so the optimistic replay, the runtime prediction, and the canonical
+  /// Loro apply of a `ReplaceParagraphSpan` all keep the SAME identities instead
+  /// of each side re-deriving ids (positionally on the client, by Loro metadata
+  /// survival canonically) and diverging on which id lives at a merged boundary.
+  pub paragraph_ids: Vec<ParagraphId>,
+  /// Durable block ids for the paragraph-blocks, parallel to `paragraphs`. Each
+  /// [`Paragraph`] is exactly one block, so there is one block id per paragraph.
+  pub block_ids: Vec<BlockId>,
   pub text: String,
 }
 

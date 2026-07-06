@@ -4,6 +4,7 @@ use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::Receiver;
 use flowstate_collab::{
   SessionId,
+  capability::{CapabilityRole, DEFAULT_TICKET_TTL_SECS, unix_now},
   crdt_runtime_actor::CrdtRuntimeHandle,
   ids::PeerId,
   net::{
@@ -138,6 +139,12 @@ impl CollabManager {
       tracing::warn!(session = %ticket.session, "unsupported collaboration protocol version in ticket");
     }
     ensure!(ticket.is_supported_version(), "unsupported collaboration protocol version");
+    // FS-080: reject a tampered, foreign-signed, or expired invite before we
+    // dial anyone. The owner re-verifies the epoch at the handshake, which a
+    // dishonest joiner cannot skip.
+    ticket
+      .verify_for_join(unix_now())
+      .context("collaboration invite is invalid or expired")?;
     let commands = self.ensure_runtime(cx)?;
     commands
       .try_send(NetCommand::EnsureUp)
@@ -157,7 +164,8 @@ impl CollabManager {
 
     let session = ticket.session;
     let inviter = ticket.inviter.id;
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), vec![ticket.inviter.clone()]);
+    let capability = ticket.capability.clone();
+    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), vec![ticket.inviter.clone()], capability.clone());
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
     let neighbor_rx = entity.update(cx, |session, cx| session.prepare_join_neighbor_wait(cx));
@@ -165,6 +173,7 @@ impl CollabManager {
     if let Err(error) = commands.try_send(NetCommand::JoinSession {
       session,
       bootstrap: vec![ticket.inviter],
+      capability,
     }) {
       tracing::error!(%session, error = %error, "queueing collaboration join-session command failed");
       entity.update(cx, |session, cx| {
@@ -265,22 +274,33 @@ impl CollabManager {
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    if let Err(error) = commands.try_send(NetCommand::MintTicketAddr { reply: reply_tx }) {
-      tracing::error!(%panel_id, %session_id, error = %error, "queueing collaboration ticket address command failed");
+    // Default to an Editor invite. Seam: surface a Viewer/Editor choice from the
+    // Share UI and thread the chosen `CapabilityRole` in here.
+    if let Err(error) = commands.try_send(NetCommand::MintTicket {
+      session: session_id,
+      role: CapabilityRole::Editor,
+      ttl_secs: DEFAULT_TICKET_TTL_SECS,
+      reply: reply_tx,
+    }) {
+      tracing::error!(%panel_id, %session_id, error = %error, "queueing collaboration mint-ticket command failed");
       return None;
     }
-    tracing::debug!(%panel_id, %session_id, "requested collaboration ticket address");
+    tracing::debug!(%panel_id, %session_id, "requested collaboration invite capability");
 
     cx.spawn(async move |_, cx| {
       let ticket = match reply_rx.recv().await {
-        Ok(addr) => {
-          tracing::info!(%session_id, inviter = %addr.id, "created collaboration share ticket");
-          let own_endpoint_id = addr.id;
+        Ok(Ok(minted)) => {
+          tracing::info!(%session_id, inviter = %minted.inviter.id, role = %minted.capability.role.label(), "created collaboration share ticket");
+          let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          Ok(SessionTicket::new(session_id, addr, title))
+          Ok(SessionTicket::new(session_id, minted.inviter, title, minted.capability))
+        },
+        Ok(Err(error)) => {
+          tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite capability failed");
+          Err(anyhow!("minting collaboration invite failed: {error:#}"))
         },
         Err(error) => {
-          tracing::error!(%session_id, error = %error, "collaboration endpoint address unavailable for ticket");
+          tracing::error!(%session_id, error = %error, "collaboration invite reply channel closed");
           Err(anyhow!("collaboration endpoint address unavailable: {error}"))
         },
       };

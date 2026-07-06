@@ -8,6 +8,7 @@ publish.workspace = true
 anyhow = { workspace = true }
 async-channel = { workspace = true }
 flowstate-document.workspace = true
+flowstate-fidelity.workspace = true
 gpui-flowtext = { workspace = true }
 iroh = { workspace = true }
 iroh-gossip = { workspace = true }
@@ -24,6 +25,7 @@ twox-hash = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
 proptest = { workspace = true }
 tempfile.workspace = true
 

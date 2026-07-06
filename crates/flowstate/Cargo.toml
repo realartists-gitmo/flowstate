@@ -34,9 +34,10 @@ toml = { workspace = true }
 uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
-tracing-subscriber = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
 atomicwrites = "0.4.4"
 blake3 = "1.8.5"
+flowstate-fidelity.workspace = true
 
 [features]
 hotpath = [

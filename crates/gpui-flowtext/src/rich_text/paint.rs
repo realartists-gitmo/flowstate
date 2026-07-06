@@ -2,6 +2,8 @@ use std::ops::Range;
 
 use gpui::{App, Background, Bounds, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, rgb, size};
 
+use flowstate_fidelity::{self as fidelity, FidelityClass};
+
 use super::*;
 
 #[hotpath::measure]
@@ -23,6 +25,23 @@ pub(super) fn paint_layout(
   let content_mask = window.content_mask().bounds;
   let visible_range = visible_paragraph_range(layout, bounds.origin, content_mask);
   let visible_count = visible_range.end.saturating_sub(visible_range.start);
+  // Fidelity: record the rendered paragraph set for this paint so a layout that
+  // trails the document (missing paragraphs, wrong index range) is visible in
+  // the firehose. The document/layout generation counters are not threaded into
+  // paint, so the caret-vs-laid-out check below is the staleness assertion.
+  if fidelity::enabled() {
+    let first_index = layout.paragraphs.first().map(|paragraph| paragraph.index);
+    let last_index = layout.paragraphs.last().map(|paragraph| paragraph.index);
+    fidelity::event(FidelityClass::Structure, "layout-paragraph-set", || {
+      format!(
+        "laid_out={} index_range={first_index:?}..={last_index:?} visible={}..{} blocks={}",
+        layout.paragraphs.len(),
+        visible_range.start,
+        visible_range.end,
+        layout.block_count(),
+      )
+    });
+  }
   for paragraph in &layout.paragraphs[visible_range.clone()] {
     if !paragraph_intersects_mask(paragraph, bounds.origin, content_mask) {
       continue;
@@ -97,6 +116,55 @@ pub(super) fn paint_layout(
       }
     }
   }
+  // Fidelity: before painting the local caret, verify it resolves against a
+  // layout that still matches the model caret. `show_caret` is only set for the
+  // chunk that owns the caret (see element.rs `caret_offset_belongs_to_chunk`),
+  // so the located paragraph's document index MUST equal the model caret's
+  // paragraph; a mismatch (or the model caret pointing past the last laid-out
+  // paragraph) means the painted caret is being resolved against a stale layout
+  // — render lag where the model caret is correct but the paint trails.
+  if fidelity::enabled()
+    && let Some(selection) = selection
+    && selection.is_caret()
+    && show_caret
+  {
+    let painted_rect = caret_bounds(layout, selection.head, selection.head_gravity, bounds.origin);
+    let painted_paragraph = locate_line(layout, selection.head, selection.head_gravity).map(|(p_ix, _)| layout.paragraphs[p_ix].index);
+    let max_paragraph = layout.paragraphs.last().map(|paragraph| paragraph.index);
+    fidelity::event(FidelityClass::Caret, "paint", || {
+      format!(
+        "model_caret={:?} gravity={:?} painted_rect={painted_rect:?} painted_paragraph={painted_paragraph:?} laid_out={} max_paragraph={max_paragraph:?}",
+        selection.head,
+        selection.head_gravity,
+        layout.paragraphs.len(),
+      )
+    });
+    fidelity::check(
+      painted_paragraph.is_none_or(|index| index == selection.head.paragraph),
+      FidelityClass::Caret,
+      "caret-render-stale",
+      || {
+        format!(
+          "model_paragraph={} painted_paragraph={painted_paragraph:?} model_byte={} laid_out={}",
+          selection.head.paragraph,
+          selection.head.byte,
+          layout.paragraphs.len(),
+        )
+      },
+    );
+    fidelity::check(
+      max_paragraph.is_none_or(|max| selection.head.paragraph <= max),
+      FidelityClass::Structure,
+      "layout-generation-lag",
+      || {
+        format!(
+          "model_paragraph={} max_laid_out_paragraph={max_paragraph:?} laid_out={}",
+          selection.head.paragraph,
+          layout.paragraphs.len(),
+        )
+      },
+    );
+  }
   if let Some(selection) = selection
     && selection.is_caret()
     && show_caret
@@ -108,6 +176,24 @@ pub(super) fn paint_layout(
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
+    // Fidelity: remote carets are pre-filtered to this chunk (element.rs), so a
+    // located paragraph that differs from the remote offset's paragraph means
+    // the remote caret is painted against a stale layout.
+    if fidelity::enabled() {
+      let painted_paragraph = locate_line(layout, external_caret.offset, external_caret.visual_gravity).map(|(p_ix, _)| layout.paragraphs[p_ix].index);
+      fidelity::event(FidelityClass::Caret, "paint-external", || {
+        format!(
+          "offset={:?} gravity={:?} painted_paragraph={painted_paragraph:?} color=#{:06x}",
+          external_caret.offset, external_caret.visual_gravity, external_caret.color_rgb,
+        )
+      });
+      fidelity::check(
+        painted_paragraph.is_none_or(|index| index == external_caret.offset.paragraph),
+        FidelityClass::Caret,
+        "caret-render-stale",
+        || format!("external offset={:?} painted_paragraph={painted_paragraph:?}", external_caret.offset),
+      );
+    }
     if let Some(mut caret) = caret_bounds(layout, external_caret.offset, external_caret.visual_gravity, bounds.origin)
       && caret.intersects(&content_mask)
     {
@@ -224,6 +310,35 @@ fn paint_table_block(
               paint_table_text_selection(paragraph, caret.anchor, caret.byte, origin, content_mask, window);
             }
             paint_table_paragraph(paragraph, origin, content_mask, window, cx);
+            // Fidelity: a table-cell caret whose byte exceeds the laid-out
+            // paragraph length is being resolved against a stale cell layout.
+            if fidelity::enabled()
+              && let Some(caret) = table_cell_caret
+              && caret.block_ix == table.block_ix
+              && caret.row_ix == row_ix
+              && caret.cell_ix == cell_ix
+              && caret.paragraph_block_ix == paragraph.index
+              && caret.caret_visible
+            {
+              let resolved = caret_bounds_in_paragraph(paragraph, caret.byte, origin);
+              fidelity::event(FidelityClass::Caret, "paint-table-cell", || {
+                format!(
+                  "block={} row={} cell={} paragraph={} byte={} paragraph_len={} rect={resolved:?}",
+                  caret.block_ix, caret.row_ix, caret.cell_ix, paragraph.index, caret.byte, paragraph.len,
+                )
+              });
+              fidelity::check(
+                caret.byte <= paragraph.len,
+                FidelityClass::Caret,
+                "caret-render-stale",
+                || {
+                  format!(
+                    "table caret byte={} exceeds paragraph_len={} (block={} paragraph={})",
+                    caret.byte, paragraph.len, caret.block_ix, paragraph.index,
+                  )
+                },
+              );
+            }
             if let Some(caret) = table_cell_caret
               && caret.block_ix == table.block_ix
               && caret.row_ix == row_ix
@@ -632,7 +747,7 @@ pub(super) fn paint_line_text(line: &LaidOutLine, origin: Point<Pixels>, content
           window.paint_glyph(glyph_origin, run.font_id, glyph.id, segment.font_size, segment.format.color)
         };
         if let Err(error) = result {
-          eprintln!("failed to paint glyph: {error}");
+          tracing::warn!(%error, "failed to paint glyph");
         }
       }
     }

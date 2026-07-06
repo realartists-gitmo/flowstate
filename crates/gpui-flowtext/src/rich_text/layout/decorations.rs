@@ -232,6 +232,22 @@ pub(super) fn merge_inline_decorations(decorations: Vec<Decoration>) -> Vec<Deco
   for decoration in decorations {
     push_merged_decoration(&mut merged, decoration);
   }
+  // Fidelity: underline/strikethrough rules are painted (paint.rs) at these
+  // exact bounds, so a non-finite coordinate here paints a corrupt or invisible
+  // rule that trails the model text. Gated; runs only when tracing is enabled.
+  if flowstate_fidelity::enabled() {
+    let class = flowstate_fidelity::FidelityClass::Structure;
+    flowstate_fidelity::event(class, "decorations", || format!("count={}", merged.len()));
+    let finite = merged.iter().all(|decoration| {
+      f32::from(decoration.bounds.origin.x).is_finite()
+        && f32::from(decoration.bounds.origin.y).is_finite()
+        && f32::from(decoration.bounds.size.width).is_finite()
+        && f32::from(decoration.bounds.size.height).is_finite()
+    });
+    flowstate_fidelity::check(finite, class, "decoration-geometry", || {
+      format!("non-finite decoration bounds among {} decorations", merged.len())
+    });
+  }
   merged
 }
 

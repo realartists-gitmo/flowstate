@@ -134,19 +134,27 @@ fn applying_collab_patches_does_not_arm_local_caret_scroll(cx: &mut gpui::TestAp
       let before_generation = editor.edit_generation();
       let block_id = editor.document().ids.block_ids[0];
       let paragraph_id = editor.document().ids.paragraph_ids[0];
-      editor.apply_projection_patches(
-        &[ProjectionPatch::ParagraphText {
-          block_id,
-          paragraph_id,
-          row_hint: 0,
-          new: InputParagraph {
-            style: ParagraphStyle::Normal,
-            runs: vec![plain("remote")],
+      let base_frontier = editor.document().frontier.clone();
+      editor
+        .apply_projection_patch_batch(
+          &ProjectionPatchBatch {
+            transaction_id: 0,
+            base_frontier,
+            new_frontier: vec![1],
+            patches: vec![ProjectionPatch::ParagraphText {
+              block_id,
+              paragraph_id,
+              row_hint: 0,
+              new: InputParagraph {
+                style: ParagraphStyle::Normal,
+                runs: vec![plain("remote")],
+              },
+              delta_utf8: vec![ProjectionTextDelta::Insert("remote".len())],
+            }],
           },
-          delta_utf8: vec![ProjectionTextDelta::Insert("remote".len())],
-        }],
-        cx,
-      );
+          cx,
+        )
+        .expect("collab patch batch should apply cleanly");
       assert!(!editor.pending_scroll_head_after_layout_for_test());
       assert!(editor.edit_generation() > before_generation);
     });
@@ -394,7 +402,13 @@ fn applying_collab_asset_records_updates_asset_cache(cx: &mut gpui::TestAppConte
       editor.apply_synced_asset_records(&[(asset_id, record.clone())], cx);
 
       assert_eq!(editor.document().assets.assets.get(&asset_id), Some(&record));
-      assert!(editor.edit_generation() > before_generation);
+      // Asset bytes arrive out-of-band; caching them must NOT dirty the document
+      // or advance the edit generation (FS-054).
+      assert_eq!(
+        editor.edit_generation(),
+        before_generation,
+        "asset availability must not mark the document changed",
+      );
       assert!(!editor.pending_scroll_head_after_layout_for_test());
     });
   });
@@ -907,7 +921,7 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
       let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
       let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
-      editor.begin_runtime_edit(transaction_id);
+      editor.begin_runtime_transaction(transaction_id);
 
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       assert_eq!(paragraph_text(editor.document(), 0), "ab");
@@ -923,12 +937,12 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
       canonical.frontier = vec![4, 5, 6];
       editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
       editor
-        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .complete_runtime_transaction(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
         .expect("canonical runtime projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "ab");
       assert_eq!(editor.selection.head.byte, 2);
-      assert!(!editor.runtime_edit_in_flight());
+      assert!(!editor.runtime_transaction_in_flight());
       let queued = editor.take_pending_runtime_edits();
       assert_eq!(queued.len(), 1);
       assert_eq!(queued[0].base_frontier, vec![4, 5, 6]);
@@ -937,6 +951,59 @@ fn runtime_acknowledgement_preserves_newer_optimistic_input_and_rebases_it(cx: &
       };
       assert_eq!(*at, DocumentOffset { paragraph: 0, byte: 1 });
       assert_eq!(text, "b");
+    });
+  });
+}
+
+#[gpui::test]
+fn local_reconciliation_keeps_the_caret_when_canonical_reassigns_a_paragraph_id(cx: &mut gpui::TestAppContext) {
+  // Regression guard for "typed text outruns the cursor": type into a line, press
+  // Enter to land the caret at the start of a fresh empty paragraph, then
+  // acknowledge a canonical projection that reassigned that empty paragraph's
+  // durable id (exactly what the repair pipeline does for freshly created
+  // boundaries). The caret must stay on the empty paragraph, never snapping back
+  // to the end of the previous line.
+  let mut document = blank_document();
+  document.frontier = vec![1];
+  let editor = cx.update(|cx| cx.new(|cx| RichTextEditor::new_with_path(document, None, cx)));
+
+  cx.update(|cx| {
+    editor.update(cx, |editor, cx| {
+      editor.set_runtime_capture(true);
+      assert!(editor.insert_single_grapheme_fast_path("a", cx));
+      editor.insert_paragraph_break_command(cx);
+      assert_eq!(editor.document().paragraphs.len(), 2);
+      assert_eq!(paragraph_text(editor.document(), 1), "");
+      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 1, byte: 0 });
+
+      let flushed = editor.take_pending_runtime_edits();
+      assert!(!flushed.is_empty());
+      let transaction_id = flushed
+        .iter()
+        .find(|edit| edit.transaction_id != 0)
+        .map(|edit| edit.transaction_id)
+        .unwrap_or(1);
+      editor.begin_runtime_transaction(transaction_id);
+
+      // Canonical projection for the acknowledged batch: identical text and
+      // structure, but the empty paragraph's durable id was reassigned by a
+      // repair while the first paragraph keeps its id.
+      let mut canonical = editor.document().clone();
+      canonical.frontier = vec![2];
+      canonical.ids.paragraph_ids[1] = ParagraphId(canonical.ids.paragraph_ids[1].0 ^ 0x5EED_5EED);
+
+      editor.replace_document_projection_replaying_pending(canonical, Vec::new(), None, cx);
+      editor
+        .complete_runtime_transaction(transaction_id, vec![2], None, cx)
+        .expect("acknowledged canonical projection must complete");
+
+      assert!(!editor.runtime_transaction_in_flight());
+      assert_eq!(paragraph_text(editor.document(), 1), "");
+      assert_eq!(
+        editor.selection().head,
+        DocumentOffset { paragraph: 1, byte: 0 },
+        "caret must stay on the fresh empty paragraph, not snap back behind the boundary",
+      );
     });
   });
 }
@@ -966,7 +1033,7 @@ fn explicit_selection_movement_during_runtime_commit_is_preserved(cx: &mut gpui:
       let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
       let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
-      editor.begin_runtime_edit(transaction_id);
+      editor.begin_runtime_transaction(transaction_id);
 
       editor.set_text_selection_for_test(
         DocumentOffset { paragraph: 0, byte: 0 },
@@ -984,12 +1051,12 @@ fn explicit_selection_movement_during_runtime_commit_is_preserved(cx: &mut gpui:
       canonical.frontier = vec![4, 5, 6];
       editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
       editor
-        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .complete_runtime_transaction(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
         .expect("canonical runtime projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "ab");
       assert_eq!(editor.selection.head, DocumentOffset { paragraph: 0, byte: 0 });
-      assert!(!editor.runtime_edit_in_flight());
+      assert!(!editor.runtime_transaction_in_flight());
     });
   });
 }
@@ -1024,7 +1091,7 @@ fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases
       let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
       let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
-      editor.begin_runtime_edit(transaction_id);
+      editor.begin_runtime_transaction(transaction_id);
 
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       assert!(editor.insert_single_grapheme_fast_path("c", cx));
@@ -1049,13 +1116,13 @@ fn structural_runtime_acknowledgement_replays_newer_optimistic_input_and_rebases
       canonical.frontier = vec![4, 5, 6];
       editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
       editor
-        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .complete_runtime_transaction(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
         .expect("canonical structural projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "a");
       assert_eq!(paragraph_text(editor.document(), 1), "bcd");
       assert_eq!(editor.selection.head, DocumentOffset { paragraph: 1, byte: 3 });
-      assert!(!editor.runtime_edit_in_flight());
+      assert!(!editor.runtime_transaction_in_flight());
       let queued = editor.take_pending_runtime_edits();
       assert_eq!(queued.len(), 3);
       for edit in &queued {
@@ -1107,7 +1174,7 @@ fn structural_acknowledgement_replays_newer_enter_and_text_at_the_latest_endpoin
       let transaction_id = flushed[0].transaction_id;
       let acknowledged_selection = flushed[0].selection_after.clone();
       let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
-      editor.begin_runtime_edit(transaction_id);
+      editor.begin_runtime_transaction(transaction_id);
 
       assert!(editor.insert_single_grapheme_fast_path("b", cx));
       editor.insert_paragraph_break_command(cx);
@@ -1135,14 +1202,14 @@ fn structural_acknowledgement_replays_newer_enter_and_text_at_the_latest_endpoin
       canonical.frontier = vec![4, 5, 6];
       editor.replace_document_projection_replaying_pending(canonical, Vec::new(), acknowledged_selection.clone(), cx);
       editor
-        .complete_runtime_edit_after_materialization(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .complete_runtime_transaction(transaction_id, vec![4, 5, 6], stable_acknowledged_selection, cx)
         .expect("canonical structural projection must be materialized before completion");
 
       assert_eq!(paragraph_text(editor.document(), 0), "a");
       assert_eq!(paragraph_text(editor.document(), 1), "b");
       assert_eq!(paragraph_text(editor.document(), 2), "d");
       assert_eq!(editor.selection.head, DocumentOffset { paragraph: 2, byte: 1 });
-      assert!(!editor.runtime_edit_in_flight());
+      assert!(!editor.runtime_transaction_in_flight());
 
       let queued = editor.take_pending_runtime_edits();
       assert_eq!(queued.len(), 3);
@@ -1167,7 +1234,7 @@ fn runtime_acknowledgement_rejects_unexpected_transaction(cx: &mut gpui::TestApp
       let flushed = editor.take_pending_runtime_edits();
       let transaction_id = flushed[0].transaction_id;
       let stable_acknowledged_selection = flushed[0].stable_selection_after.clone();
-      editor.begin_runtime_edit(transaction_id);
+      editor.begin_runtime_transaction(transaction_id);
 
       let mut canonical = document_from_input(
         DocumentTheme::default(),
@@ -1180,10 +1247,10 @@ fn runtime_acknowledgement_rejects_unexpected_transaction(cx: &mut gpui::TestApp
       editor.replace_document_projection_replaying_pending(canonical, Vec::new(), None, cx);
 
       let error = editor
-        .complete_runtime_edit_after_materialization(transaction_id + 1, vec![4, 5, 6], stable_acknowledged_selection, cx)
+        .complete_runtime_transaction(transaction_id + 1, vec![4, 5, 6], stable_acknowledged_selection, cx)
         .expect_err("acknowledgement for a different transaction must be rejected");
       assert!(matches!(error, ProjectionApplyError::UnexpectedTransaction { expected, actual } if expected == Some(transaction_id) && actual == transaction_id + 1));
-      assert!(editor.runtime_edit_in_flight());
+      assert!(editor.runtime_transaction_in_flight());
     });
   });
 }

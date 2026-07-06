@@ -398,7 +398,7 @@ impl RichTextEditor {
         continue;
       }
       let block = self.document.ids.block_ids.get(block_ix).copied().or_else(|| {
-        eprintln!("skipping inserted object semantic command because projection block {block_ix} has no durable id");
+        tracing::warn!(block_ix, "dropping inserted object semantic command: projection block has no durable id; local and canonical state will diverge until repair");
         None
       })?;
       let after = self

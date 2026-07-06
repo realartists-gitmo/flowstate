@@ -165,6 +165,7 @@ impl RichTextEditor {
         paragraph: paragraph_ix,
         byte: 0,
       });
+      self.fidelity_caret_set_from("scroll_to_paragraph", &before_selection);
       self.goal_x = None;
       self.reset_caret_blink(cx);
       if self.selection != before_selection {
@@ -202,7 +203,9 @@ impl RichTextEditor {
           Ok(Some(result)) => {
             editor.document = result.document;
             editor.identity_map.reconcile(&editor.document);
+            let fid_before = editor.fidelity_caret_before();
             editor.selection = result.selection.unwrap_or(fallback_selection);
+            editor.fidelity_caret_set("runtime_undo_redo_hook", &fid_before);
             editor.emit_selection_changed(cx);
             editor.edit_generation = generation;
             editor.undo_stack.clear();
@@ -212,7 +215,7 @@ impl RichTextEditor {
           Ok(None) => {},
           Err(error) => {
             editor.prepend_pending_semantic_edits(pending_edits_for_retry);
-            eprintln!("runtime undo failed: {error}");
+            tracing::warn!(%error, "runtime undo failed; pending edits were requeued");
             cx.notify();
           },
         });
@@ -231,7 +234,9 @@ impl RichTextEditor {
     for operation in record.operations.iter().rev() {
       operation.undo(&mut self.document);
     }
+    let fid_before = self.fidelity_caret_before();
     self.selection = record.before_selection.clone();
+    self.fidelity_caret_set("undo/local-history", &fid_before);
     self.emit_selection_changed(cx);
     self.edit_generation = restored_generation;
     self.redo_stack.push(record);
@@ -253,7 +258,9 @@ impl RichTextEditor {
           Ok(Some(result)) => {
             editor.document = result.document;
             editor.identity_map.reconcile(&editor.document);
+            let fid_before = editor.fidelity_caret_before();
             editor.selection = result.selection.unwrap_or(fallback_selection);
+            editor.fidelity_caret_set("runtime_undo_redo_hook", &fid_before);
             editor.emit_selection_changed(cx);
             editor.edit_generation = generation;
             editor.undo_stack.clear();
@@ -263,7 +270,7 @@ impl RichTextEditor {
           Ok(None) => {},
           Err(error) => {
             editor.prepend_pending_semantic_edits(pending_edits_for_retry);
-            eprintln!("runtime redo failed: {error}");
+            tracing::warn!(%error, "runtime redo failed; pending edits were requeued");
             cx.notify();
           },
         });
@@ -282,7 +289,9 @@ impl RichTextEditor {
     for operation in &record.operations {
       operation.redo(&mut self.document);
     }
+    let fid_before = self.fidelity_caret_before();
     self.selection = record.after_selection.clone();
+    self.fidelity_caret_set("redo/local-history", &fid_before);
     self.emit_selection_changed(cx);
     self.edit_generation = restored_generation;
     self.undo_stack.push(record);
@@ -373,7 +382,9 @@ impl RichTextEditor {
       return;
     }
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("select_all", &fid_before);
     self.goal_x = None;
     self.reset_caret_blink(cx);
     self.emit_selection_changed(cx);
@@ -487,7 +498,9 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let head = editor.selection.head;
         let anchor = editor.word_left(head);
+        let fid_before = editor.fidelity_caret_before();
         editor.selection = EditorSelection::range(anchor, head);
+        editor.fidelity_caret_set("delete_word_backward_command", &fid_before);
       }
       editor.delete_selection_internal();
       editor.after_text_mutation(cx);
@@ -499,7 +512,9 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let anchor = editor.selection.head;
         let head = editor.word_right(anchor);
+        let fid_before = editor.fidelity_caret_before();
         editor.selection = EditorSelection::range(anchor, head);
+        editor.fidelity_caret_set("delete_word_forward_command", &fid_before);
       }
       editor.delete_selection_internal();
       editor.after_text_mutation(cx);

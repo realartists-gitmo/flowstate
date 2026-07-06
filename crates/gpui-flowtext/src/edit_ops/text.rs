@@ -65,15 +65,38 @@ pub fn capture_document_span(document: &DocumentProjection, range: Range<usize>)
   } else {
     String::new()
   };
+  // Capture the durable ids the span currently owns (one paragraph id and one
+  // paragraph-block id per paragraph) so a later replacement can force the
+  // optimistic, predicted, and canonical apply to preserve the same identities.
+  let paragraph_ids = (start..end)
+    .filter_map(|paragraph_ix| document.ids.paragraph_ids.get(paragraph_ix).copied())
+    .collect::<Vec<_>>();
+  let block_ids = (start..end)
+    .filter_map(|paragraph_ix| {
+      block_ix_for_paragraph(document, paragraph_ix).and_then(|block_ix| document.ids.block_ids.get(block_ix).copied())
+    })
+    .collect::<Vec<_>>();
   DocumentSpan {
     start_paragraph: start,
     paragraphs: document.paragraphs[start..end].to_vec(),
+    paragraph_ids,
+    block_ids,
     text,
   }
 }
 
 #[hotpath::measure]
 pub fn apply_document_span_replacement(document: &mut DocumentProjection, current: &DocumentSpan, replacement: &DocumentSpan) {
+  debug_assert_eq!(
+    replacement.paragraph_ids.len(),
+    replacement.paragraphs.len(),
+    "DocumentSpan replacement must carry exactly one paragraph id per paragraph",
+  );
+  debug_assert_eq!(
+    replacement.block_ids.len(),
+    replacement.paragraphs.len(),
+    "DocumentSpan replacement must carry exactly one block id per paragraph",
+  );
   let byte_range = paragraph_span_byte_range(document, current.start_paragraph, current.paragraphs.len());
   document.text.delete(byte_range.clone());
   document.text.insert(byte_range.start, &replacement.text);
@@ -81,17 +104,32 @@ pub fn apply_document_span_replacement(document: &mut DocumentProjection, curren
     .start_paragraph
     .saturating_add(current.paragraphs.len())
     .min(document.paragraphs.len());
-  remove_paragraph_ids(document, current.start_paragraph..paragraph_end);
+  let before_count = paragraph_end.saturating_sub(current.start_paragraph);
+  // Splice the editor-captured durable ids verbatim rather than re-deriving them
+  // positionally (keep-first/mint-rest). Using the exact ids the command carried
+  // is what keeps this optimistic replay, the runtime prediction, and the
+  // canonical Loro apply from disagreeing on which paragraph/block id survives a
+  // merge (e.g. a join dropping a middle boundary) — a disagreement that would
+  // strand later pending edits referencing the dropped id and lose text.
+  let paragraph_id_end = paragraph_end.min(document.ids.paragraph_ids.len());
+  document
+    .ids
+    .paragraph_ids
+    .splice(current.start_paragraph.min(paragraph_id_end)..paragraph_id_end, replacement.paragraph_ids.iter().copied());
   paragraphs_mut(document).splice(current.start_paragraph..paragraph_end, replacement.paragraphs.clone());
-  for relative_ix in 0..replacement.paragraphs.len() {
-    insert_paragraph_id(document, current.start_paragraph + relative_ix);
+  replace_paragraph_blocks(document, current.start_paragraph, before_count, &replacement.paragraphs);
+  // `replace_paragraph_blocks` derives the span's block ids positionally; overwrite
+  // them with the editor-captured block ids so block identities match canonical
+  // too. The replacement paragraph-blocks are contiguous from `block_start`.
+  if let Some(block_start) = block_ix_for_paragraph(document, current.start_paragraph) {
+    let block_end = block_start
+      .saturating_add(replacement.block_ids.len())
+      .min(document.ids.block_ids.len());
+    document
+      .ids
+      .block_ids
+      .splice(block_start.min(block_end)..block_end, replacement.block_ids.iter().copied());
   }
-  replace_paragraph_blocks(
-    document,
-    current.start_paragraph,
-    paragraph_end.saturating_sub(current.start_paragraph),
-    &replacement.paragraphs,
-  );
   // `replace_paragraph_blocks` already rebuilt the section outline; only the
   // byte-offset index still needs refreshing after the splice.
   rebuild_document_offset_index(document);

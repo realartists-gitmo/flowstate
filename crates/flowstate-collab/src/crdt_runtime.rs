@@ -14,9 +14,10 @@ use flowstate_document::{
   FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock, InputBlockAlignment,
   InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock, InputTableColumnWidth,
   InputTableRow, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
-  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionPatch, ProjectionStructuralBlock,
-  ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId, TableBlock, document_from_loro,
-  import_document_projection, loro_import::assets_from_document, loro_schema::body_text, new_loro_document,
+  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionDefect, ProjectionPatch,
+  ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId,
+  TableBlock, document_from_loro, document_from_loro_with_defects, import_document_projection, loro_import::assets_from_document,
+  loro_schema::body_text, new_loro_document,
 };
 use gpui_flowtext::SemanticEditCommand as EditorSemanticCommand;
 use loro::{
@@ -25,11 +26,23 @@ use loro::{
   cursor::{Cursor, Side},
   event::{Diff, DiffEvent},
 };
-use rustc_hash::FxHashMap;
+use flowstate_fidelity::{self as fidelity, FidelityClass};
+use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
+
+/// §P2a: commit origin stamped on canonical projection-repair batches. Excluded
+/// from the local undo stack and used by peers/telemetry to identify repairs.
+const REPAIR_ORIGIN: &str = "repair";
+
+/// §P2a: maximum canonical-repair attempts per defect `stable_key`. A defect that
+/// survives this many repair passes is quarantined (left as the deterministic
+/// projection) instead of looping forever.
+const PROJECTION_REPAIR_ATTEMPT_CAP: u64 = 3;
 
 #[path = "crdt_runtime/projection_patch.rs"]
 mod projection_patch;
+#[path = "crdt_runtime/projection_repair.rs"]
+mod projection_repair;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
@@ -71,6 +84,14 @@ pub struct CrdtRuntime {
   runtime_epoch: Arc<AtomicU64>,
   local_subscription_updates: Arc<Mutex<Vec<Vec<u8>>>>,
   projection_fallback_counts: Mutex<BTreeMap<String, u64>>,
+  // §P2a: per-`stable_key` projection-defect repair attempt counter (mirrors
+  // `projection_fallback_counts`). A defect that survives `PROJECTION_REPAIR_ATTEMPT_CAP`
+  // repair passes is quarantined instead of spinning.
+  projection_repair_counts: Mutex<BTreeMap<String, u64>>,
+  // §P2a re-entrancy guard: `schedule_projection_repairs` re-projects via
+  // `refresh_projection`, which itself collects defects — the guard stops that
+  // inner refresh from scheduling another repair pass (no infinite recursion).
+  repairing_projection_defects: bool,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
 }
@@ -242,6 +263,12 @@ impl ProjectionRuntimeIndex {
         .or_insert(section.start_paragraph);
     }
 
+    // FS-170: surface any object placeholder whose two caret sides collapse to the
+    // same document offset. Gated so a disabled build pays only one atomic load.
+    if fidelity::enabled() {
+      index.fidelity_check_object_sides(projection);
+    }
+
     index
   }
 
@@ -254,7 +281,9 @@ impl ProjectionRuntimeIndex {
     if !paragraph_text.is_char_boundary(byte) {
       return None;
     }
-    Some(*self.paragraph_body_unicode_starts.get(offset.paragraph)? + paragraph_text[..byte].chars().count())
+    let unicode = *self.paragraph_body_unicode_starts.get(offset.paragraph)? + paragraph_text[..byte].chars().count();
+    fidelity::event(FidelityClass::Caret, "offset->unicode", || format!("offset={offset:?} byte={byte} -> body_unicode={unicode}"));
+    Some(unicode)
   }
 
   fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
@@ -270,10 +299,37 @@ impl ProjectionRuntimeIndex {
       .char_indices()
       .nth(local_unicode)
       .map_or(paragraph_text.len(), |(byte, _)| byte);
-    Some(DocumentOffset {
+    let offset = DocumentOffset {
       paragraph: paragraph_ix,
       byte,
-    })
+    };
+    fidelity::event(FidelityClass::Caret, "unicode->offset", || format!("body_unicode={unicode} -> offset={offset:?}"));
+    Some(offset)
+  }
+
+  /// FS-170 diagnostic: a U+FFFC object placeholder occupies a single body-unicode
+  /// slot, but a caret can rest on either side of it. The slot before the object
+  /// (its own position) and the slot after it (`position + 1`) must resolve to
+  /// distinct document offsets; a collapse means carets on the two sides of the
+  /// object are indistinguishable. Emits the resolved offsets and, when both
+  /// resolve, checks they differ (kind `object-side-collapse`). Runs only when
+  /// fidelity tracing is enabled; read-only.
+  fn fidelity_check_object_sides(&self, projection: &DocumentProjection) {
+    for &position in &self.object_placeholder_positions {
+      let left = self.offset_for_body_unicode(projection, position);
+      let right = self.offset_for_body_unicode(projection, position.saturating_add(1));
+      fidelity::event(FidelityClass::Caret, "object-side-offsets", || {
+        format!("placeholder_body_unicode={position} left_offset={left:?} right_offset={right:?}")
+      });
+      if let (Some(left), Some(right)) = (left, right) {
+        fidelity::check(
+          left != right,
+          FidelityClass::Caret,
+          "object-side-collapse",
+          || format!("U+FFFC object at body-unicode {position} collapses caret sides: both map to {left:?}"),
+        );
+      }
+    }
   }
 
   fn paragraphs_for_changed_ranges(&self, ranges: &[ProjectionTextRange], paragraph_count: usize) -> Vec<usize> {
@@ -600,14 +656,25 @@ impl CrdtRuntime {
       false
     };
     let current_frontier = doc.state_frontiers().encode();
+    // §P2a: projecting from canonical Loro reports defects; the two trusted-input
+    // arms below skip projection, so they contribute none.
+    let mut startup_defects: Vec<ProjectionDefect> = Vec::new();
     let mut projection = match projection {
       Some(projection) if projection.frontier == current_frontier => projection,
       Some(mut projection) if !projection_content_repaired && projection.frontier == frontier_before_startup_metadata => {
         projection.frontier.clone_from(&current_frontier);
         projection
       },
-      None => document_from_loro(&doc).context("building initial projection from canonical Loro state")?,
-      Some(_) => document_from_loro(&doc).context("rebuilding stale initial projection")?,
+      None => {
+        let (projection, defects) = document_from_loro_with_defects(&doc).context("building initial projection from canonical Loro state")?;
+        startup_defects = defects;
+        projection
+      },
+      Some(_) => {
+        let (projection, defects) = document_from_loro_with_defects(&doc).context("rebuilding stale initial projection")?;
+        startup_defects = defects;
+        projection
+      },
     };
     if let Some(package) = &package {
       attach_package_assets(&mut projection, package);
@@ -656,10 +723,13 @@ impl CrdtRuntime {
     undo.set_merge_interval(600);
     undo.set_max_undo_steps(300);
     undo.add_exclude_origin_prefix("remote");
+    // §P2a: canonical repair commits carry the `repair` origin and must never
+    // enter the local undo stack (they are convergent housekeeping, not edits).
+    undo.add_exclude_origin_prefix("repair");
     let undo_selection = Arc::new(Mutex::new(UndoSelectionState::default()));
     install_undo_selection_callbacks(&mut undo, &undo_selection);
     let projection_index = ProjectionRuntimeIndex::from_projection(&projection);
-    Ok(Self {
+    let mut runtime = Self {
       doc,
       projection,
       projection_index,
@@ -677,9 +747,21 @@ impl CrdtRuntime {
       runtime_epoch,
       local_subscription_updates,
       projection_fallback_counts: Mutex::new(BTreeMap::new()),
+      projection_repair_counts: Mutex::new(BTreeMap::new()),
+      repairing_projection_defects: false,
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
-    })
+    };
+    // §P2a: repair any malformed canonical state the initial projection reported.
+    // At construction there is no peer channel to emit onto, but the repair is
+    // committed + persisted, so peers receive it via the update segment / next
+    // anti-entropy pull. Errors are logged, never fatal to opening the document.
+    if !startup_defects.is_empty()
+      && let Err(error) = runtime.schedule_projection_repairs(startup_defects)
+    {
+      tracing::error!(%error, "scheduling projection repairs during runtime construction failed");
+    }
+    Ok(runtime)
   }
 
   pub(crate) fn doc(&self) -> &LoroDoc {
@@ -1095,6 +1177,7 @@ impl CrdtRuntime {
     let undo_selection = selection_after.and_then(|selection| self.undo_selection_for_projection(&working_projection, selection));
     self.set_pending_undo_selection(undo_selection)?;
     self.doc.commit();
+    self.fidelity_frontier_transition("editor-transaction", &batch_frontier_before, &batch_vv_before);
 
     let mut invalidation = ProjectionInvalidation::full_rebuild(
       batch_projection_before.frontier.clone(),
@@ -1104,8 +1187,14 @@ impl CrdtRuntime {
     invalidation.changed_assets = asset_merge.changed_asset_ids;
     self.merge_subscription_invalidation(&mut invalidation);
 
-    let mut authoritative_projection = match document_from_loro(&self.doc) {
-      Ok(projection) => projection,
+    // §P2a: collect projection defects so the transaction's repair pass can fold
+    // its canonical fix into the same LocalUpdate stream the peers already receive.
+    let mut transaction_defects: Vec<ProjectionDefect> = Vec::new();
+    let mut authoritative_projection = match document_from_loro_with_defects(&self.doc) {
+      Ok((projection, defects)) => {
+        transaction_defects = defects;
+        projection
+      },
       Err(error) => {
         tracing::error!(%error, "canonical projection materialization failed after committed editor transaction; using the prevalidated projection");
         let mut projection = predicted_projection.clone();
@@ -1155,14 +1244,34 @@ impl CrdtRuntime {
     invalidation
       .frontier_after
       .clone_from(&self.projection.frontier);
-    if let Some(patches) = projection_patches_between(&batch_projection_before, &self.projection) {
-      events.push(RuntimeEvent::ProjectionPatched {
-        batch: ProjectionPatchBatch {
-          transaction_id,
-          base_frontier: batch_projection_before.frontier.clone(),
-          new_frontier: self.projection.frontier.clone(),
-          patches,
+    // An incremental patch is only ever an optimization over shipping the full
+    // projection, so it MUST reproduce the authoritative projection exactly. A
+    // lossy/incomplete diff (e.g. a split-then-insert batch whose diff drops the
+    // inserted text) would silently lose content on the editor side. Verify the
+    // patch reproduces `self.projection` before trusting it; otherwise fall back
+    // to a full snapshot. This makes patch-path data loss structurally impossible
+    // regardless of any gap in `projection_patches_between`.
+    let verified_patch = projection_patches_between(&batch_projection_before, &self.projection).and_then(|patches| {
+      let batch = ProjectionPatchBatch {
+        transaction_id,
+        base_frontier: batch_projection_before.frontier.clone(),
+        new_frontier: self.projection.frontier.clone(),
+        patches,
+      };
+      let mut reproduced = batch_projection_before.clone();
+      match apply_projection_patch_batch(&mut reproduced, &batch) {
+        Ok(()) if projections_semantically_equal(&reproduced, &self.projection) => Some(batch),
+        outcome => {
+          fidelity::event(FidelityClass::Projection, "patch-verify-fallback", || {
+            format!("editor-transaction {transaction_id}: incremental patch did not reproduce the authoritative projection ({outcome:?}); emitting full projection")
+          });
+          None
         },
+      }
+    });
+    if let Some(batch) = verified_patch {
+      events.push(RuntimeEvent::ProjectionPatched {
+        batch,
         invalidation,
         version_vector: self.doc.state_vv().encode(),
       });
@@ -1173,6 +1282,17 @@ impl CrdtRuntime {
         frontier: self.projection.frontier.clone(),
         version_vector: self.doc.state_vv().encode(),
       });
+    }
+
+    // §P2a: repair any malformed canonical state this transaction surfaced. The
+    // repair commits under the `repair` origin and, unlike the refresh path, its
+    // `LocalUpdate` + `ProjectionUpdated` events are surfaced to the caller so
+    // peers receive the repair immediately (in addition to persistence).
+    if !transaction_defects.is_empty() {
+      match self.schedule_projection_repairs(transaction_defects) {
+        Ok(repair_events) => events.extend(repair_events),
+        Err(error) => tracing::error!(%error, "scheduling projection repairs after committed editor transaction failed"),
+      }
     }
 
     Ok(EditorCommitResult {
@@ -1198,6 +1318,7 @@ impl CrdtRuntime {
     if mutates_document {
       flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for semantic command")?;
     }
+    #[allow(clippy::needless_late_init, reason = "assigned across match arms that interleave with diverging early-return arms")]
     let projection_invalidation;
     match command {
       SemanticCommand::InsertText { unicode_index, text, styles } => {
@@ -1220,19 +1341,23 @@ impl CrdtRuntime {
           ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, inserted_len);
       },
       SemanticCommand::DeleteRange { unicode_index, unicode_len } => {
-        if unicode_len > 0 {
-          let body = body_text(&self.doc);
-          body
-            .delete(unicode_index, unicode_len)
-            .context("deleting text from Loro body flow")?;
-          repair_paragraph_metadata_after_text_flow_edit(&self.doc, &body, &[], "semantic_delete_range")?;
-          self.doc.commit();
-          self.record_undo_checkpoint()?;
-          projection_invalidation =
-            ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, unicode_len);
-        } else {
+        // §5 sentinel protection (preflight): clamp/reject any range that would
+        // delete the boundary-0 sentinel newline before mutating the body.
+        let Some((unicode_index, unicode_len)) = sentinel_protected_delete_range(unicode_index, unicode_len) else {
           return Ok(Vec::new());
-        }
+        };
+        let body = body_text(&self.doc);
+        body
+          .delete(unicode_index, unicode_len)
+          .context("deleting text from Loro body flow")?;
+        // §5: drop object blocks whose U+FFFC placeholder this delete removed, in
+        // the same transaction, so they never linger as unresolved-anchor records.
+        prune_orphaned_body_object_blocks(&self.doc, &body)?;
+        repair_paragraph_metadata_after_text_flow_edit(&self.doc, &body, &[], "semantic_delete_range")?;
+        self.doc.commit();
+        self.record_undo_checkpoint()?;
+        projection_invalidation =
+          ProjectionInvalidation::body_text(from_frontier.encode(), self.doc.state_frontiers().encode(), unicode_index, unicode_len);
       },
       SemanticCommand::SplitParagraph {
         unicode_index,
@@ -1340,7 +1465,18 @@ impl CrdtRuntime {
         }]);
       },
       SemanticCommand::Undo => {
-        if !self.undo.undo().context("applying Loro undo")? {
+        let applied = self.undo.undo().context("applying Loro undo")?;
+        // §fidelity: record the undo's frontier transition and assert it only
+        // introduced local-peer ops (remote-origin ops are excluded from undo).
+        if fidelity::enabled() {
+          fidelity::event(FidelityClass::Undo, "undo", || {
+            format!("applied={applied} frontier {:?} -> {:?}", from_frontier.encode(), self.doc.state_frontiers().encode())
+          });
+          if applied {
+            self.fidelity_check_undo_local_only("undo", &from_vv);
+          }
+        }
+        if !applied {
           return Ok(Vec::new());
         }
         projection_invalidation = ProjectionInvalidation {
@@ -1351,7 +1487,18 @@ impl CrdtRuntime {
         };
       },
       SemanticCommand::Redo => {
-        if !self.undo.redo().context("applying Loro redo")? {
+        let applied = self.undo.redo().context("applying Loro redo")?;
+        // §fidelity: record the redo's frontier transition and assert it only
+        // introduced local-peer ops (remote-origin ops are excluded from redo).
+        if fidelity::enabled() {
+          fidelity::event(FidelityClass::Undo, "redo", || {
+            format!("applied={applied} frontier {:?} -> {:?}", from_frontier.encode(), self.doc.state_frontiers().encode())
+          });
+          if applied {
+            self.fidelity_check_undo_local_only("redo", &from_vv);
+          }
+        }
+        if !applied {
           return Ok(Vec::new());
         }
         projection_invalidation = ProjectionInvalidation {
@@ -1466,11 +1613,18 @@ impl CrdtRuntime {
 
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
     let from_frontier = self.doc.state_frontiers();
+    // §fidelity: capture the pre-import version only when tracing so a disabled
+    // build pays nothing; used to assert the import advanced (never regressed) the
+    // canonical frontier below.
+    let fidelity_before_vv = fidelity::enabled().then(|| self.doc.state_vv());
     let status = self
       .doc
       .import_with(bytes, "remote")
       .context("importing remote Loro update")?;
     let after_remote_vv = self.doc.state_vv();
+    if let Some(before_vv) = &fidelity_before_vv {
+      self.fidelity_frontier_transition("import", &from_frontier, before_vv);
+    }
     let repair_update = if status.pending.is_none() && repair_missing_paragraph_style_marks(&self.doc)? {
       self.local_update_bytes(&after_remote_vv)?
     } else {
@@ -1589,6 +1743,10 @@ impl CrdtRuntime {
   }
 
   fn projection_patched_event(&self, patches: Vec<flowstate_document::ProjectionPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
+    // §fidelity: the single choke point for every incrementally-patched projection
+    // emission (local semantic commands + remote non-structural imports). Verify
+    // the maintained projection still matches a fresh full rebuild.
+    self.fidelity_verify_incremental_projection("projection-patched");
     RuntimeEvent::ProjectionPatched {
       batch: ProjectionPatchBatch {
         transaction_id: uuid::Uuid::new_v4().as_u128(),
@@ -1611,7 +1769,92 @@ impl CrdtRuntime {
     if let Ok(mut counts) = self.projection_fallback_counts.lock() {
       *counts.entry(reason.to_string()).or_default() += 1;
     }
+    fidelity::event(FidelityClass::Projection, "full-rebuild-fallback", || format!("reason={reason}"));
     tracing::warn!(reason, "Flowstate projection used a full rebuild fallback");
+  }
+
+  /// §fidelity: when tracing is enabled, verify the incrementally-maintained
+  /// `self.projection` still equals a fresh full projection built from canonical
+  /// Loro state via [`document_from_loro`]. A mismatch means an incremental patch
+  /// diverged from the authoritative materializer (kind
+  /// `incremental-vs-full-divergence`). Read-only; a single atomic load when off.
+  fn fidelity_verify_incremental_projection(&self, context: &str) {
+    if !fidelity::enabled() {
+      return;
+    }
+    match document_from_loro(&self.doc) {
+      Ok(fresh) => {
+        fidelity::check(
+          projections_semantically_equal(&self.projection, &fresh),
+          FidelityClass::Projection,
+          "incremental-vs-full-divergence",
+          || {
+            format!(
+              "{context}: incremental projection diverged from full rebuild (incremental_paragraphs={}, full_paragraphs={}, incremental_blocks={}, full_blocks={}, incremental_frontier={:?}, full_frontier={:?})",
+              self.projection.paragraphs.len(),
+              fresh.paragraphs.len(),
+              self.projection.blocks.len(),
+              fresh.blocks.len(),
+              self.projection.frontier,
+              fresh.frontier,
+            )
+          },
+        );
+      },
+      Err(error) => fidelity::event(FidelityClass::Projection, "full-rebuild-verify-error", || format!("{context}: {error}")),
+    }
+  }
+
+  /// §fidelity: log a canonical frontier transition and assert the version only
+  /// advances (never regresses). Local edits and remote imports are monotone
+  /// merges, so `before_vv <= after_vv`; a regression (kind `frontier-regressed`)
+  /// signals canonical-state corruption. No-op (one atomic load) when off.
+  fn fidelity_frontier_transition(&self, context: &'static str, before_frontier: &Frontiers, before_vv: &VersionVector) {
+    if !fidelity::enabled() {
+      return;
+    }
+    let after_frontier = self.doc.state_frontiers();
+    let after_vv = self.doc.state_vv();
+    fidelity::event(FidelityClass::Frontier, context, || {
+      format!("frontier {:?} -> {:?}", before_frontier.encode(), after_frontier.encode())
+    });
+    fidelity::check(
+      matches!(before_vv.partial_cmp(&after_vv), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+      FidelityClass::Frontier,
+      "frontier-regressed",
+      || {
+        format!(
+          "{context}: canonical version regressed (before_vv={:?}, after_vv={:?})",
+          before_vv.encode(),
+          after_vv.encode()
+        )
+      },
+    );
+  }
+
+  /// §fidelity: assert an undo/redo introduced only local-peer operations. Remote-
+  /// origin changes are excluded from the undo stack
+  /// (`add_exclude_origin_prefix("remote")`), so an undo/redo must never advance a
+  /// foreign peer's version. Violation kind `remote-origin-op-in-undo`. No-op off.
+  fn fidelity_check_undo_local_only(&self, op: &str, before_vv: &VersionVector) {
+    if !fidelity::enabled() {
+      return;
+    }
+    let after_vv = self.doc.state_vv();
+    let local_peer = self.doc.peer_id();
+    let foreign: Vec<(u64, i32)> = after_vv
+      .iter()
+      .filter_map(|(peer, counter)| {
+        let before = before_vv.get(peer).copied().unwrap_or(0);
+        (*peer != local_peer && *counter > before).then_some((*peer, *counter - before))
+      })
+      .collect();
+    fidelity::check(
+      foreign.is_empty(),
+      FidelityClass::Undo,
+      "remote-origin-op-in-undo",
+      || format!("{op} advanced non-local peers {foreign:?} (local_peer={local_peer}); remote-origin ops must be excluded from undo"),
+    );
   }
 
   pub fn projection_fallback_stats(&self) -> ProjectionFallbackStats {
@@ -1626,9 +1869,161 @@ impl CrdtRuntime {
     }
   }
 
+  /// §P2a: telemetry snapshot of projection-defect repair attempts, keyed by
+  /// defect `stable_key`. Mirrors [`Self::projection_fallback_stats`].
+  pub fn projection_repair_stats(&self) -> ProjectionFallbackStats {
+    let by_reason = self
+      .projection_repair_counts
+      .lock()
+      .map(|counts| counts.clone())
+      .unwrap_or_default();
+    ProjectionFallbackStats {
+      total: by_reason.values().copied().sum(),
+      by_reason,
+    }
+  }
+
+  /// §P2a: record and return the repair-attempt count for `stable_key`.
+  fn record_projection_repair_attempt(&self, stable_key: &str) -> u64 {
+    if let Ok(mut counts) = self.projection_repair_counts.lock() {
+      let entry = counts.entry(stable_key.to_string()).or_default();
+      *entry += 1;
+      *entry
+    } else {
+      // A poisoned lock cannot account attempts; treat as over-cap so we quarantine
+      // rather than risk an unbounded repair loop.
+      PROJECTION_REPAIR_ATTEMPT_CAP + 1
+    }
+  }
+
+  /// §P2a: apply the idempotent canonical repair for each reported projection
+  /// defect, then commit the batch under the `repair` origin, re-project, persist
+  /// the update segment, and return the `LocalUpdate` (+ `ProjectionUpdated`)
+  /// events so peers receive the repair.
+  ///
+  /// Defects are deduplicated by `stable_key` and capped at
+  /// [`PROJECTION_REPAIR_ATTEMPT_CAP`] attempts per key: a defect that persists
+  /// across repair passes is logged and quarantined (left as the deterministic
+  /// projection) rather than retried forever. Convergence under concurrent
+  /// multi-peer repair is guaranteed by the check-before-write, stable-key-keyed
+  /// mutations in [`projection_repair`] plus Loro map/mark LWW semantics.
+  ///
+  /// Re-entrant calls (the inner refresh re-projecting after a repair) are
+  /// no-ops via the `repairing_projection_defects` guard.
+  pub fn schedule_projection_repairs(&mut self, defects: Vec<ProjectionDefect>) -> Result<Vec<RuntimeEvent>> {
+    if self.repairing_projection_defects || defects.is_empty() {
+      return Ok(Vec::new());
+    }
+    let mut seen = FxHashSet::default();
+    let mut actionable = Vec::new();
+    for defect in defects {
+      let stable_key = defect.stable_key();
+      if !seen.insert(stable_key.clone()) {
+        continue;
+      }
+      let attempts = self.record_projection_repair_attempt(&stable_key);
+      if attempts > PROJECTION_REPAIR_ATTEMPT_CAP {
+        tracing::error!(
+          stable_key = %stable_key,
+          class = defect.class(),
+          attempts,
+          cap = PROJECTION_REPAIR_ATTEMPT_CAP,
+          "projection defect exceeded repair attempt cap; quarantining (leaving deterministic projection)"
+        );
+        continue;
+      }
+      // §fidelity: record each defect queued for canonical repair, with its class,
+      // stable key, and this-pass attempt count (bounded by the attempt cap).
+      fidelity::event(fidelity_class_for_defect(&defect), "repair-scheduled", || {
+        format!("class={} key={stable_key} attempt={attempts}", defect.class())
+      });
+      actionable.push(defect);
+    }
+    if actionable.is_empty() {
+      return Ok(Vec::new());
+    }
+
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    self.repairing_projection_defects = true;
+    let mut applied = 0_usize;
+    for defect in &actionable {
+      match projection_repair::apply_projection_repair(&self.doc, defect) {
+        Ok(true) => applied += 1,
+        Ok(false) => {},
+        Err(error) => tracing::error!(%error, stable_key = %defect.stable_key(), class = defect.class(), "applying projection defect repair failed"),
+      }
+    }
+    if applied == 0 {
+      self.repairing_projection_defects = false;
+      return Ok(Vec::new());
+    }
+
+    // Commit the whole repair batch atomically under the dedicated origin so it is
+    // excluded from undo and identifiable by peers.
+    self.doc.set_next_commit_origin(REPAIR_ORIGIN);
+    self.doc.commit();
+    // Re-project onto the repaired canonical state. The guard keeps this refresh
+    // from scheduling another (recursive) repair pass; the next external refresh
+    // re-checks and, per the attempt cap, either converges to zero defects or
+    // quarantines the residual.
+    let refresh_result = self.refresh_projection();
+    self.repairing_projection_defects = false;
+    refresh_result?;
+
+    // §fidelity: a repair pass must make progress — re-projecting the repaired
+    // canonical state must not surface MORE defects than it started with. A
+    // genuinely repairable defect count drops; an unrepairable one is bounded by
+    // the per-key attempt cap (`PROJECTION_REPAIR_ATTEMPT_CAP`) rather than
+    // growing (kind `repair-not-converging`). Gated so it costs nothing when off.
+    if fidelity::enabled() {
+      let scheduled = actionable.len();
+      let remaining = document_from_loro_with_defects(&self.doc)
+        .map(|(_, defects)| defects.len())
+        .unwrap_or(0);
+      fidelity::check(
+        remaining <= scheduled,
+        FidelityClass::Structure,
+        "repair-not-converging",
+        || format!("repair pass scheduled {scheduled} defect(s) but {remaining} remain after re-projection (cap={PROJECTION_REPAIR_ATTEMPT_CAP})"),
+      );
+    }
+
+    // Encode the pre-repair frontier before `from_frontier` is consumed by
+    // `persist_update_segment` below.
+    let repair_frontier_before = from_frontier.encode();
+    let mut events = Vec::new();
+    match self.local_update_bytes(&from_vv) {
+      Ok(update) if !update.is_empty() => {
+        if let Err(error) = self.persist_update_segment(from_frontier, from_vv, update.clone()) {
+          tracing::error!(%error, "persisting projection repair update segment failed");
+        }
+        events.push(RuntimeEvent::LocalUpdate {
+          bytes: update,
+          frontier: self.doc.state_frontiers().encode(),
+          version_vector: self.doc.state_vv().encode(),
+        });
+      },
+      Ok(_) => {},
+      Err(error) => tracing::error!(%error, "exporting projection repair update failed; later synchronization must recover it"),
+    }
+    let invalidation =
+      ProjectionInvalidation::full_rebuild(repair_frontier_before, self.doc.state_frontiers().encode(), "projection_defect_repair");
+    events.push(RuntimeEvent::ProjectionUpdated {
+      document: Box::new(self.projection.clone()),
+      invalidation,
+      frontier: self.projection.frontier.clone(),
+      version_vector: self.doc.state_vv().encode(),
+    });
+    Ok(events)
+  }
+
   fn refresh_projection(&mut self) -> Result<()> {
     let current_assets = self.projection.assets.clone();
-    let mut projection = document_from_loro(&self.doc).context("refreshing projection from canonical Loro state")?;
+    // §P2a: a full rebuild is where malformed canonical state surfaces; collect
+    // the projection defects so we can schedule their canonical repair.
+    let (mut projection, defects) =
+      document_from_loro_with_defects(&self.doc).context("refreshing projection from canonical Loro state")?;
     if let Some(package) = &self.package {
       attach_package_assets(&mut projection, package);
     }
@@ -1643,6 +2038,18 @@ impl CrdtRuntime {
     // non-structural fallback, and the pending/again-changed remote import that
     // forces a rebuild) routes through here, so bumping once here covers them all.
     self.bump_runtime_epoch();
+    // §P2a: schedule canonical repair for any defects. The re-entrancy guard
+    // (`repairing_projection_defects`) stops the inner re-projection that
+    // `schedule_projection_repairs` performs from recursing back into a repair
+    // pass. Repairs committed here are persisted (durable + anti-entropy), so
+    // peers converge even though this low-level helper cannot surface the
+    // repair's `LocalUpdate` event to the caller.
+    if !self.repairing_projection_defects
+      && !defects.is_empty()
+      && let Err(error) = self.schedule_projection_repairs(defects)
+    {
+      tracing::error!(%error, "scheduling projection repairs after projection refresh failed");
+    }
     Ok(())
   }
 
@@ -2213,6 +2620,114 @@ fn editor_semantic_command_requires_staging_validation(command: &EditorSemanticC
   )
 }
 
+/// §5 sentinel protection: the boundary-0 [`SENTINEL_NEWLINE`] anchors the first
+/// paragraph and must never be deleted. Given a requested body delete of `len`
+/// unicode chars starting at `start`, return the largest sub-range that leaves
+/// position 0 intact, or `None` when nothing outside the sentinel remains to
+/// delete. Clamping here in *preflight* keeps a malformed delete from
+/// half-applying. A well-formed editor command never targets position 0 (the
+/// first paragraph's text starts at unicode index 1), so the clamp only fires on
+/// corruption or an explicit whole-document delete — which correctly keeps the
+/// lone sentinel and drops everything after it.
+fn sentinel_protected_delete_range(start: usize, len: usize) -> Option<(usize, usize)> {
+  if len == 0 {
+    return None;
+  }
+  let end = start.saturating_add(len);
+  let protected_start = start.max(1);
+  (end > protected_start).then_some((protected_start, end - protected_start))
+}
+
+/// §5 sentinel/object coupling: after a body text delete, an object block whose
+/// U+FFFC placeholder was removed must not linger as a dangling record — it would
+/// otherwise project as an `UnresolvedObjectAnchor` quarantine on every future
+/// projection. Remove such body object blocks in the **same transaction** as the
+/// delete so canonical state stays coherent (the paired paragraph metadata is
+/// handled separately by [`repair_paragraph_metadata_after_text_flow_edit`]).
+///
+/// Convergent: deletion is keyed on the block's stable map key, so two peers that
+/// concurrently delete the same placeholder converge on the same removed record.
+/// Returns the number of blocks pruned.
+fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::LoroText) -> loro::LoroResult<usize> {
+  let body_snapshot = body.to_string();
+  let root = doc.get_map(ROOT);
+  let Some(blocks) = child_map(&root, BLOCKS_BY_ID) else {
+    return Ok(0);
+  };
+  let mut pruned = 0_usize;
+  for key in map_keys(&blocks) {
+    let Some(block) = child_map(&blocks, &key) else {
+      continue;
+    };
+    if map_string_opt(&block, "flow_id").as_deref() != Some(ROOT_BODY_FLOW_ID) {
+      continue;
+    }
+    // Only object blocks (image/equation/table) anchor to a U+FFFC placeholder;
+    // paragraph blocks are pruned by the paragraph-metadata repair path.
+    match map_string_opt(&block, "kind").as_deref() {
+      Some("paragraph") | None => continue,
+      Some(_) => {},
+    }
+    if live_object_cursor_pos(doc, &body_snapshot, &block, "anchor_cursor").is_none() {
+      blocks.delete(&key)?;
+      pruned += 1;
+    }
+  }
+  Ok(pruned)
+}
+
+/// §fidelity: boolean mirror of the test helper `assert_semantic_projection_eq`
+/// (`crdt_runtime/editor_transaction_tests.rs`) — whether two projections are
+/// semantically equal across identity, sections, frontier, per-paragraph
+/// style/runs/text, and object (non-paragraph) blocks. Paragraph `Block`s are
+/// covered by the per-paragraph comparison, so only object blocks are compared
+/// structurally. Used to detect incremental-vs-full projection divergence without
+/// panicking; assets and theme are intentionally excluded (mirrors the helper).
+fn projections_semantically_equal(left: &DocumentProjection, right: &DocumentProjection) -> bool {
+  if left.ids != right.ids || left.sections != right.sections || left.frontier != right.frontier {
+    return false;
+  }
+  if left.paragraphs.len() != right.paragraphs.len() {
+    return false;
+  }
+  for paragraph_ix in 0..left.paragraphs.len() {
+    let left_paragraph = &left.paragraphs[paragraph_ix];
+    let right_paragraph = &right.paragraphs[paragraph_ix];
+    if left_paragraph.style != right_paragraph.style
+      || left_paragraph.runs != right_paragraph.runs
+      || flowstate_document::paragraph_text(left, paragraph_ix) != flowstate_document::paragraph_text(right, paragraph_ix)
+    {
+      return false;
+    }
+  }
+  if left.blocks.len() != right.blocks.len() {
+    return false;
+  }
+  left
+    .blocks
+    .iter()
+    .zip(right.blocks.iter())
+    .all(|(left_block, right_block)| match (left_block, right_block) {
+      (Block::Paragraph(_), Block::Paragraph(_)) => true,
+      _ => left_block == right_block,
+    })
+}
+
+/// §fidelity: classify a projection defect into a fidelity event class. Paragraph
+/// / block / asset identity defects carry durable ids (Identity); object-anchor
+/// and paragraph-style-mark defects are structural (Structure).
+fn fidelity_class_for_defect(defect: &ProjectionDefect) -> FidelityClass {
+  match defect {
+    ProjectionDefect::MissingParagraphMetadata { .. }
+    | ProjectionDefect::MissingParagraphBlock { .. }
+    | ProjectionDefect::InvalidAssetId { .. } => FidelityClass::Identity,
+    ProjectionDefect::MissingParagraphStyleMark { .. }
+    | ProjectionDefect::UnresolvedObjectAnchor { .. }
+    | ProjectionDefect::CollidingObjectAnchors { .. }
+    | ProjectionDefect::OrphanObjectPlaceholder { .. } => FidelityClass::Structure,
+  }
+}
+
 pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProjection, command: &EditorSemanticCommand) -> Result<bool> {
   match command {
     EditorSemanticCommand::InsertText { at, text, styles } => {
@@ -2232,11 +2747,14 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
     EditorSemanticCommand::DeleteRange { range } => {
       let start = projection_offset_to_body_unicode_index(projection, range.start);
       let end = projection_offset_to_body_unicode_index(projection, range.end);
-      if end > start {
+      // §5 sentinel protection (preflight): clamp/reject a range that would delete
+      // the boundary-0 sentinel newline before mutating the body.
+      if let Some((start, len)) = sentinel_protected_delete_range(start, end.saturating_sub(start)) {
         let body = body_text(doc);
         body
-          .delete(start, end - start)
+          .delete(start, len)
           .context("deleting projection-scoped text range from Loro body flow")?;
+        prune_orphaned_body_object_blocks(doc, &body)?;
         repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range")?;
         return Ok(true);
       }
@@ -2272,6 +2790,15 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         )
         .context("marking split paragraph style")?;
       repair_paragraph_metadata_after_stable_split(doc, &body, unicode_index, *new_paragraph, *new_block, "editor_split_paragraph")?;
+      // §fidelity: make the client-supplied vs canonical id flow for a split
+      // visible. The new paragraph/block ids the editor chose are written straight
+      // into canonical state here, so any later id divergence is traceable.
+      fidelity::event(FidelityClass::Identity, "client-id", || {
+        format!(
+          "SplitParagraph@para{}.byte{}: source_paragraph={source_paragraph:?} source_block={source_block:?} client_new_paragraph={new_paragraph:?} client_new_block={new_block:?} written_at_body_unicode={unicode_index}",
+          at.paragraph, at.byte
+        )
+      });
       Ok(true)
     },
     EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
@@ -2455,10 +2982,13 @@ fn apply_editor_semantic_command_body_fast_path(
       let Some(end) = projection_index.body_unicode_for_offset(projection, range.end) else {
         return Ok(false);
       };
-      if end > start {
+      // §5 sentinel protection (preflight): clamp/reject a range that would delete
+      // the boundary-0 sentinel newline before mutating the body.
+      if let Some((start, len)) = sentinel_protected_delete_range(start, end.saturating_sub(start)) {
         body
-          .delete(start, end - start)
+          .delete(start, len)
           .context("deleting text from Loro body flow without projection snapshot")?;
+        prune_orphaned_body_object_blocks(doc, &body)?;
         repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range_fast_path")?;
         return Ok(true);
       }
@@ -4301,6 +4831,15 @@ fn replace_body_paragraph_span(
   let replacement_changed = replacement_chars[common_prefix..replacement_changed_end]
     .iter()
     .collect::<String>();
+  // Drop the metadata for paragraphs this replacement REMOVES (ids in `before`
+  // but not `after`) before touching the body text. Otherwise a removed
+  // paragraph's record survives the edit, re-anchors its cursor to the following
+  // paragraph's boundary, and — via the metadata prune's lexicographic tie-break
+  // — can displace that paragraph's real id, diverging canonical block/paragraph
+  // ids from the optimistic replay. This covers boundary-0 joins too, where
+  // `overwrite_span_paragraph_metadata_ids` deliberately leaves the reserved root
+  // record alone and so cannot clean an orphaned sibling.
+  delete_removed_span_metadata(doc, before, after)?;
   let body = body_text(doc);
   let start = start.min(body.len_unicode());
   let change_start = start.saturating_add(common_prefix).min(body.len_unicode());
@@ -4317,7 +4856,148 @@ fn replace_body_paragraph_span(
   mark_replacement_span(&body, first_boundary, start, after, &paragraph_texts)?;
   let boundaries = replacement_span_boundaries(first_boundary, start, &paragraph_texts);
   repair_paragraph_metadata_after_text_flow_edit(doc, &body, &boundaries, "editor_replace_paragraph_span")?;
+  // Crux of the identity-divergence fix: the text-flow repair above lets Loro
+  // metadata survival decide which durable id lives at each resulting boundary,
+  // which can disagree with the editor's optimistic replay. Overwrite each
+  // boundary's paragraph/block record with the editor-supplied ids so canonical
+  // == predicted == optimistic by construction.
+  overwrite_span_paragraph_metadata_ids(doc, &body, &boundaries, &after.paragraph_ids, &after.block_ids)?;
   Ok(true)
+}
+
+/// Deletes the Loro paragraph and paragraph-block metadata records for paragraphs
+/// a span replacement REMOVES — durable ids present in `before` but absent from
+/// `after`, compared by id rather than position.
+///
+/// A removed paragraph's record would otherwise survive the body edit, re-anchor
+/// its cursor onto the following (surviving) paragraph's boundary, and get kept by
+/// [`prune_stale_paragraph_metadata`]'s lexicographic tie-break in place of that
+/// paragraph's real record — so the canonical projection reads the removed id at
+/// the shifted index while the optimistic replay reads the correct one. Deleting
+/// the record up front makes the survivor unambiguous. Records are matched on the
+/// stored `id` field (falling back to the map key) in `PARAGRAPHS_BY_ID` /
+/// `BLOCKS_BY_ID`, exactly like [`delete_projection_paragraph_metadata`]. The
+/// reserved boundary-0 anchors ([`ROOT_FIRST_PARAGRAPH_ID`]/[`MAIN_BODY_BLOCK_ID`])
+/// are never deleted; other machinery keys off those names and boundary 0's id
+/// convergence is handled separately.
+fn delete_removed_span_metadata(
+  doc: &LoroDoc,
+  before: &flowstate_document::DocumentSpan,
+  after: &flowstate_document::DocumentSpan,
+) -> loro::LoroResult<()> {
+  let removed_paragraph_ids = before
+    .paragraph_ids
+    .iter()
+    .copied()
+    .filter(|id| !after.paragraph_ids.contains(id))
+    .map(|id| id.0)
+    .collect::<Vec<u128>>();
+  let removed_block_ids = before
+    .block_ids
+    .iter()
+    .copied()
+    .filter(|id| !after.block_ids.contains(id))
+    .map(|id| id.0)
+    .collect::<Vec<u128>>();
+  if removed_paragraph_ids.is_empty() && removed_block_ids.is_empty() {
+    return Ok(());
+  }
+
+  let root = doc.get_map(ROOT);
+  if !removed_paragraph_ids.is_empty() {
+    let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+    for key in map_keys(&paragraphs) {
+      if key == ROOT_FIRST_PARAGRAPH_ID {
+        continue;
+      }
+      let id = child_map(&paragraphs, &key)
+        .and_then(|paragraph| map_string_opt(&paragraph, "id"))
+        .unwrap_or_else(|| key.clone());
+      if removed_paragraph_ids.contains(&loro_id_u128(&id)) {
+        paragraphs.delete(&key)?;
+      }
+    }
+  }
+  if !removed_block_ids.is_empty() {
+    let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+    for key in map_keys(&blocks) {
+      if key == MAIN_BODY_BLOCK_ID {
+        continue;
+      }
+      let id = child_map(&blocks, &key)
+        .and_then(|block| map_string_opt(&block, "id"))
+        .unwrap_or_else(|| key.clone());
+      if removed_block_ids.contains(&loro_id_u128(&id)) {
+        blocks.delete(&key)?;
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Forces the canonical paragraph/block metadata at each resulting span boundary
+/// to the editor-supplied durable ids (`ReplaceParagraphSpan`'s `after` span).
+///
+/// [`repair_paragraph_metadata_after_text_flow_edit`] normalizes the replaced run
+/// to exactly one paragraph and one block record per boundary, but the id that
+/// survives is chosen by Loro cursor survival + lexicographic tie-break. That can
+/// keep a different id than the optimistic positional replay assigned (e.g. a
+/// join that drops a middle boundary), diverging the two projections and later
+/// dropping pending edits that reference the id the other side kept.
+///
+/// Mirrors [`repair_paragraph_metadata_after_stable_split`]'s forced-id write via
+/// [`ensure_paragraph_metadata_at_boundary_with_ids`], extended to every boundary
+/// of the run: it writes the forced record and drops the pre-existing survivor so
+/// the projection reads back exactly `after.paragraph_ids[i]`/`after.block_ids[i]`.
+/// Reserved boundary-0 root records already converge numerically with the client's
+/// first-paragraph id and are keyed on by other machinery, so they are left as-is.
+fn overwrite_span_paragraph_metadata_ids(
+  doc: &LoroDoc,
+  body: &loro::LoroText,
+  boundaries: &[usize],
+  paragraph_ids: &[flowstate_document::ParagraphId],
+  block_ids: &[flowstate_document::BlockId],
+) -> loro::LoroResult<()> {
+  let body_snapshot = body.to_string();
+  for (ix, &boundary) in boundaries.iter().enumerate() {
+    let (Some(&paragraph_id), Some(&block_id)) = (paragraph_ids.get(ix), block_ids.get(ix)) else {
+      continue;
+    };
+    if !boundary_is_live(&body_snapshot, boundary) {
+      continue;
+    }
+    let root = doc.get_map(ROOT);
+    let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+    let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+    // The prior repair pass left exactly one paragraph/block record live at this
+    // boundary; find it (mirroring the projection's own selection) before writing
+    // the forced record so the loser can be dropped afterwards.
+    let existing_paragraph_key = paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary);
+    let existing_block_key = paragraph_block_key_at_boundary(doc, &body_snapshot, &blocks, boundary);
+    // Boundary 0's reserved root records already converge numerically with the
+    // client's first-paragraph id, and other machinery keys off those reserved
+    // names, so never rewrite or delete them.
+    if existing_paragraph_key.as_deref() == Some(ROOT_FIRST_PARAGRAPH_ID) || existing_block_key.as_deref() == Some(MAIN_BODY_BLOCK_ID) {
+      continue;
+    }
+    let paragraph_matches = existing_paragraph_key.as_deref().map(loro_id_u128) == Some(paragraph_id.0);
+    let block_matches = existing_block_key.as_deref().map(loro_id_u128) == Some(block_id.0);
+    if paragraph_matches && block_matches {
+      continue;
+    }
+    ensure_paragraph_metadata_at_boundary_with_ids(doc, body, boundary, paragraph_id, block_id)?;
+    if let Some(old) = existing_paragraph_key
+      && loro_id_u128(&old) != paragraph_id.0
+    {
+      paragraphs.delete(&old)?;
+    }
+    if let Some(old) = existing_block_key
+      && loro_id_u128(&old) != block_id.0
+    {
+      blocks.delete(&old)?;
+    }
+  }
+  Ok(())
 }
 
 fn span_paragraph_texts(span: &flowstate_document::DocumentSpan) -> Vec<String> {
@@ -5579,7 +6259,12 @@ mod tests {
 
     assert_eq!(body_text(&loaded).to_string(), "\nbad\nnext");
     assert!(body_paragraph_boundaries_missing_style_mark(&body_text(&loaded)).is_empty());
-    assert_eq!(package.loro_update_segments.len(), 1);
+    // §P2a: opening also runs the projection-repair pipeline, which writes the
+    // durable paragraph metadata this malformed doc was missing at boundary 4.
+    // That repair persists an additional update segment beyond the style-mark
+    // repair, so the count is no longer exactly one.
+    assert!(!package.loro_update_segments.is_empty());
+    assert_eq!(live_paragraph_metadata_boundaries(&loaded), vec![0, 4]);
     Ok(())
   }
 
@@ -5845,6 +6530,95 @@ mod tests {
     assert_eq!(projection.paragraphs[0].runs[0].styles, replacement_styles);
     assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0, 6]);
     assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0, 6]);
+    Ok(())
+  }
+
+  #[test]
+  fn editor_replace_paragraph_span_forces_editor_supplied_ids() -> Result<()> {
+    // Regression for the optimistic-vs-canonical identity divergence: a span
+    // replacement (here a 3->2 paragraph join) must adopt the editor-supplied
+    // durable ids canonically instead of letting Loro metadata survival keep a
+    // different id, which would strand later pending edits that reference the id
+    // the optimistic replay dropped. Boundary 0 keeps its reserved root id, so
+    // this asserts the trailing (non-reserved) boundary the join keeps.
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![
+        flowstate_document::InputBlock::Paragraph(input_paragraph("a")),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("b")),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("c")),
+      ],
+    );
+    let replacement = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![
+        flowstate_document::InputBlock::Paragraph(input_paragraph("ab")),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("c")),
+      ],
+    );
+    let before = flowstate_document::capture_document_span(&source, 0..3);
+    let after = flowstate_document::capture_document_span(&replacement, 0..2);
+    // The editor-captured ids for the surviving trailing paragraph; canonical
+    // survival would otherwise keep `source`'s third-paragraph id here.
+    let expected_paragraph_id = after.paragraph_ids[1];
+    let expected_block_id = after.block_ids[1];
+
+    let doc = flowstate_document::document_to_loro(&source, "Span Ids")?;
+    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
+    runtime.apply_editor_semantic_command(
+      &source,
+      &EditorSemanticCommand::ReplaceParagraphSpan { start: None, before, after },
+    )?;
+
+    let projection = runtime.projection_snapshot()?;
+    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "ab");
+    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "c");
+    assert_eq!(projection.ids.paragraph_ids[1], expected_paragraph_id);
+    assert_eq!(projection.ids.block_ids[1], expected_block_id);
+    Ok(())
+  }
+
+  #[test]
+  fn editor_replace_paragraph_span_join_at_start_drops_removed_sibling_block() -> Result<()> {
+    // Regression for the block-id divergence: a boundary-0 join that removes an
+    // empty middle paragraph must not let the removed paragraph's block metadata
+    // survive and re-anchor onto the following paragraph's boundary, displacing
+    // that paragraph's real block id. `before`/`after` are captured from the
+    // runtime's own (canonical) projection so their ids match the Loro records,
+    // exactly as in the live editor flow.
+    let source = flowstate_document::document_from_input_blocks(
+      flowstate_document::flowstate_document_theme(),
+      vec![
+        flowstate_document::InputBlock::Paragraph(input_paragraph("y")),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("")),
+        flowstate_document::InputBlock::Paragraph(input_paragraph("z")),
+      ],
+    );
+    let doc = flowstate_document::document_to_loro(&source, "Join Start")?;
+    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
+    let projection = runtime.projection_snapshot()?;
+    // The trailing "z" paragraph is OUTSIDE the replaced span; its ids must be
+    // exactly what survives at the shifted index after the join.
+    let surviving_paragraph_id = projection.ids.paragraph_ids[2];
+    let surviving_block_id = projection.ids.block_ids[2];
+
+    // Join "y"+"" -> "y": the span covers paragraphs 0..2, the result keeps "y".
+    let before = flowstate_document::capture_document_span(&projection, 0..2);
+    let after = flowstate_document::capture_document_span(&projection, 0..1);
+    runtime.apply_editor_semantic_command(
+      &projection,
+      &EditorSemanticCommand::ReplaceParagraphSpan {
+        start: Some(flowstate_document::DocumentOffset { paragraph: 0, byte: 0 }),
+        before,
+        after,
+      },
+    )?;
+
+    let projection = runtime.projection_snapshot()?;
+    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "y");
+    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "z");
+    assert_eq!(projection.ids.paragraph_ids[1], surviving_paragraph_id);
+    assert_eq!(projection.ids.block_ids[1], surviving_block_id);
     Ok(())
   }
 
@@ -7288,3 +8062,9 @@ mod tests {
 #[cfg(test)]
 #[path = "crdt_runtime/editor_transaction_tests.rs"]
 mod editor_transaction_tests;
+#[cfg(test)]
+#[path = "crdt_runtime/multi_peer_convergence_tests.rs"]
+mod multi_peer_convergence_tests;
+#[cfg(test)]
+#[path = "crdt_runtime/projection_repair_tests.rs"]
+mod projection_repair_tests;

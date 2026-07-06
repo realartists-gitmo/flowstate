@@ -231,6 +231,24 @@ impl StableSelectionEndpoint {
       };
     }
 
+    // Fidelity: the captured paragraph id is gone from the projection, so the
+    // caret must fall back to a neighbor/hint. This lossy path is a prime
+    // suspect for caret drift after a reconcile; the event is strictly additive
+    // and does not change the resolution below.
+    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Identity, "stable-selection-fallback", || {
+      format!(
+        "paragraph_id={:?} hint={} byte={} affinity={:?} gravity={:?} prev={:?} next={:?} doc_paras={}",
+        self.paragraph_id,
+        self.paragraph_hint,
+        self.byte,
+        self.affinity,
+        self.gravity,
+        self.previous_paragraph.map(|(id, _)| id),
+        self.next_paragraph,
+        document.paragraphs.len(),
+      )
+    });
+
     let prefer_next = matches!(self.affinity, SelectionAffinity::After) || matches!(self.gravity, VisualGravity::Downstream);
     let previous = self.previous_paragraph.and_then(|(id, old_len)| {
       let paragraph = document.ids.paragraph_ids.iter().position(|candidate| *candidate == id)?;

@@ -12,33 +12,34 @@ impl RichTextEditor {
       self.committed_document.assets.assets.insert(*id, record.clone());
     }
     self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
-    let generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.mark_document_changed_with_ops(generation, false, None, cx);
+    // Asset availability is out-of-band cache state: repaint, but never dirty
+    // the document or advance the edit generation.
     self.after_formatting_mutation(cx);
-  }
-
-  // Retained for local derived UI-diff helpers; network collaboration applies
-  // Loro projection snapshots instead.
-  pub fn apply_projection_patches(&mut self, patches: &[ProjectionPatch], cx: &mut Context<Self>) {
-    let batch = ProjectionPatchBatch {
-      transaction_id: 0,
-      base_frontier: self.document.frontier.clone(),
-      new_frontier: self.document.frontier.clone(),
-      patches: patches.to_vec(),
-    };
-    if let Err(error) = self.apply_projection_patch_batch(&batch, cx) {
-      eprintln!("failed to apply derived projection patch batch: {error}");
-    }
   }
 
   pub fn apply_projection_patch_batch(&mut self, batch: &ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<(), ProjectionApplyError> {
     if self.committed_document.frontier != batch.base_frontier {
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Frontier, "apply-stale-frontier", || {
+        format!(
+          "txn={} expected_len={} actual_len={}",
+          batch.transaction_id,
+          batch.base_frontier.len(),
+          self.committed_document.frontier.len(),
+        )
+      });
       return Err(ProjectionApplyError::StaleFrontier {
         expected: batch.base_frontier.clone(),
         actual: self.committed_document.frontier.clone(),
       });
     }
+    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Frontier, "apply-frontier-ok", || {
+      format!("txn={} frontier_len={} patches={}", batch.transaction_id, batch.base_frontier.len(), batch.patches.len())
+    });
+    // Fidelity: snapshot the pre-apply caret and document size so the whole
+    // apply (rebuild + stable-selection re-resolve) can be checked for a
+    // backward caret jump.
+    let fid_sel_before = self.fidelity_caret_before();
+    let fid_size_before = flowstate_fidelity::enabled().then(|| self.fidelity_document_size());
     let stable_selection = StableEditorSelection::capture(&self.document, &self.selection);
     let mut document = self.committed_document.clone();
     let mut invalidation: Option<Range<usize>> = None;
@@ -53,7 +54,9 @@ impl RichTextEditor {
       && self.pending_semantic_edits.is_empty()
       && let Some(selection) = stable_selection
     {
+      let fid_before = self.fidelity_caret_before();
       self.selection = selection.resolve(&self.document);
+      self.fidelity_caret_set("apply_projection_patch_batch/stable-resolve", &fid_before);
       self.emit_selection_changed(cx);
     }
     self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
@@ -67,6 +70,11 @@ impl RichTextEditor {
     self.after_formatting_mutation(cx);
     self.pending_scroll_head_after_layout = false;
     self.layout_invalidation_hint = None;
+    if let Some((pre_paras, pre_len)) = fid_size_before {
+      let (post_paras, post_len) = self.fidelity_document_size();
+      let shrank = post_paras < pre_paras || post_len < pre_len;
+      self.fidelity_check_caret_not_regressed("apply_projection_patch_batch", &fid_sel_before, shrank);
+    }
     Ok(())
   }
 
@@ -90,13 +98,6 @@ pub fn apply_projection_patch_batch(document: &mut DocumentProjection, batch: &P
   let mut candidate = document.clone();
   apply_projection_patches_to_document(&mut candidate, &batch.patches, None)?;
   candidate.frontier.clone_from(&batch.new_frontier);
-  *document = candidate;
-  Ok(())
-}
-
-pub fn apply_projection_patches(document: &mut DocumentProjection, patches: &[ProjectionPatch]) -> Result<(), ProjectionApplyError> {
-  let mut candidate = document.clone();
-  apply_projection_patches_to_document(&mut candidate, patches, None)?;
   *document = candidate;
   Ok(())
 }

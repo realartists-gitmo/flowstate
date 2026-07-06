@@ -7,7 +7,9 @@ impl RichTextEditor {
       return;
     }
     self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_to_offset", &fid_before);
     self.emit_selection_changed(cx);
     self.goal_x = None;
     self.scroll_head_into_view();

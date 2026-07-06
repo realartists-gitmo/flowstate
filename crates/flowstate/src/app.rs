@@ -72,6 +72,9 @@ impl Render for RichTextEditorView {
 #[hotpath::measure]
 pub fn register_rich_text_editor_keybindings(cx: &mut App) {
   register_keymap(cx, &load_keymap());
+  // Global fidelity marker: stamps "the bug is happening now" + the recent event
+  // ring into the diagnostics stream. No-op unless FLOWSTATE_TRACE_FIDELITY is on.
+  cx.bind_keys([KeyBinding::new("ctrl-alt-m", crate::commands::FidelityMarkAction, None)]);
 }
 
 #[hotpath::measure]

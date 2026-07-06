@@ -244,13 +244,18 @@ impl CollabSession {
         if let Err(error) = self.net_tx.try_send(NetCommand::EnsureUp) {
           tracing::warn!(session = %self.session, error = %error, "queueing collaboration ensure-up recovery failed");
         }
-      } else {
+      } else if let Some(capability) = self.capability.clone() {
+        // FS-080: rejoining re-dials peers, so re-present the stored capability
+        // or the owner-side handshake rejects this endpoint.
         if let Err(error) = self.net_tx.try_send(NetCommand::JoinSession {
           session: self.session,
           bootstrap: self.bootstrap_addrs.clone(),
+          capability,
         }) {
           tracing::warn!(session = %self.session, error = %error, "queueing collaboration join-session recovery failed");
         }
+      } else {
+        tracing::warn!(session = %self.session, "cannot rejoin collaboration session without a stored capability");
       }
       self.publish_digest();
       cx.notify();

@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use loro::{
   ContainerTrait as _, ExpandType, LoroDoc, LoroMap, LoroResult, LoroText, LoroValue, StyleConfig, StyleConfigMap, ValueOrContainer,
   cursor::Side,
@@ -260,13 +261,51 @@ fn init_loro_document_structure(doc: &LoroDoc, title: &str, include_initial_para
   meta.insert("revisions_container_id", revisions.id().to_string())?;
   meta.insert("users_container_id", users.id().to_string())?;
   meta.insert("replicas_container_id", replicas.id().to_string())?;
+  // `ensure_flow` establishes the body flow's text + attrs containers for both
+  // the seeded and the import (`include_initial_paragraph == false`) paths.
+  ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
+  if include_initial_paragraph {
+    // §P2a: route fresh-document creation through the unified seed so new
+    // documents and the runtime empty-body repair path converge on identical
+    // canonical state.
+    seed_document_body(doc)?;
+  }
+  Ok(())
+}
+
+/// §P2a unified canonical document seed. Establishes exactly the canonical body
+/// state that both fresh-document creation and the runtime empty-body /
+/// `MissingParagraph*` repair path must converge on:
+/// * the boundary-0 [`SENTINEL_NEWLINE`] carrying a `Normal` paragraph-style mark,
+/// * the first paragraph record ([`ROOT_FIRST_PARAGRAPH_ID`]) and its paired
+///   paragraph block record ([`MAIN_BODY_BLOCK_ID`]).
+///
+/// Section page defaults are supplied lazily by [`read_section_page_attrs`]
+/// (which substitutes documented US-Letter defaults for any missing section
+/// `attrs`), so the seed does not need to materialize a section container to make
+/// a new/repaired document render with correct page structure.
+///
+/// Idempotent: every step is an `ensure_*` / starts-with check, so seeding an
+/// already-seeded document — or two peers seeding the same body concurrently —
+/// converges via Loro map LWW semantics without duplicating structure. This
+/// function does **not** commit; the caller controls the commit (and, for the
+/// runtime repair path, its origin).
+pub fn seed_document_body(doc: &LoroDoc) -> LoroResult<()> {
+  let root = doc.get_map(ROOT);
+  let flows = root.ensure_mergeable_map(FLOWS_BY_ID)?;
+  let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+  let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let body_flow = ensure_flow(&flows, ROOT_BODY_FLOW_ID, "body")?;
   let body_text = body_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
   body_flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
-  if include_initial_paragraph {
-    ensure_sentinel(&body_text)?;
-    ensure_initial_paragraph(&paragraphs, &blocks, &body_text)?;
-  }
+  ensure_sentinel(&body_text)?;
+  ensure_initial_paragraph(&paragraphs, &blocks, &body_text)?;
+  // §P2a fidelity: the canonical seed establishes exactly the sentinel +
+  // first-paragraph state that the projection integrity and import invariants
+  // assert. Trace each seeding so a convergence/repair trail is visible.
+  fidelity::event(FidelityClass::Structure, "seed-body", || {
+    format!("seeded canonical body sentinel + first paragraph (body_unicode_len={})", body_text.len_unicode())
+  });
   Ok(())
 }
 

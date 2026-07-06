@@ -44,6 +44,7 @@ impl RichTextEditor {
       SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
       SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
+    self.fidelity_caret_set_from("on_mouse_down", &before_selection);
     self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
     if self.selection != before_selection {
@@ -154,6 +155,7 @@ impl RichTextEditor {
       });
       let before_selection = self.selection.clone();
       self.selection = pending_drag.source_selection;
+      self.fidelity_caret_set_from("on_mouse_move/begin-text-drag", &before_selection);
       if self.selection != before_selection {
         self.emit_selection_changed(cx);
       }
@@ -167,7 +169,9 @@ impl RichTextEditor {
       let selection = EditorSelection::collapsed(drop);
       if self.selection != selection {
         self.note_explicit_selection_movement();
+        let fid_before = self.fidelity_caret_before();
         self.selection = selection;
+        self.fidelity_caret_set("on_mouse_move/text-drag-caret", &fid_before);
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
         self.emit_selection_changed(cx);
@@ -202,7 +206,9 @@ impl RichTextEditor {
     );
     if self.selection != selection {
       self.note_explicit_selection_movement();
+      let fid_before = self.fidelity_caret_before();
       self.selection = selection;
+      self.fidelity_caret_set("on_mouse_move/drag-select", &fid_before);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       self.emit_selection_changed(cx);
@@ -242,6 +248,7 @@ impl RichTextEditor {
       let caret = self.hit_test_document_position(event.position, window, cx);
       let before_selection = self.selection.clone();
       self.selection = EditorSelection::collapsed(caret);
+      self.fidelity_caret_set_from("on_mouse_up/cancel-text-drag", &before_selection);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       if self.selection != before_selection {
@@ -267,6 +274,7 @@ impl RichTextEditor {
       self.clear_drop_preview();
       let before_selection = self.selection.clone();
       self.selection = EditorSelection::range(drag.source_range.start, drag.source_range.end);
+      self.fidelity_caret_set_from("move_rich_text_fragment/drop-on-source", &before_selection);
       if self.selection != before_selection {
         self.emit_selection_changed(cx);
       }
@@ -283,11 +291,15 @@ impl RichTextEditor {
     let capture_start = source_range.start.paragraph.min(drop.paragraph);
     let capture_end = source_range.end.paragraph.max(drop.paragraph).saturating_add(1);
     let before_span = capture_document_span(&before_document, capture_start..capture_end);
+    let fid_before_delete = self.fidelity_caret_before();
     self.selection = before_selection.clone();
+    self.fidelity_caret_set("move_rich_text_fragment/select-source", &fid_before_delete);
     self.delete_selection_internal();
     let inserted_start = adjusted_drop;
     let inserted_end = insert_rich_fragment_at(&mut self.document, inserted_start, &drag.fragment);
+    let fid_before_insert = self.fidelity_caret_before();
     self.selection = EditorSelection::collapsed(inserted_end);
+    self.fidelity_caret_set("move_rich_text_fragment/after-insert", &fid_before_insert);
     self.emit_selection_changed(cx);
     let paragraph_delta = self.document.paragraphs.len() as isize - before_document.paragraphs.len() as isize;
     let after_count = before_span
@@ -456,7 +468,9 @@ impl RichTextEditor {
             if let Some(head) = editor.hit_test_cached_position(position)
               && editor.selection.head != head
             {
+              let fid_before = editor.fidelity_caret_before();
               editor.selection.head = head;
+              editor.fidelity_caret_set("autoscroll_drag/extend-head", &fid_before);
               editor.emit_selection_changed(cx);
             }
             cx.notify();

@@ -54,7 +54,35 @@ pub(super) fn caret_bounds(layout: &LayoutState, offset: DocumentOffset, gravity
   let (p_ix, l_ix) = locate_line(layout, offset, gravity)?;
   let line = layout.paragraphs[p_ix].lines.get(l_ix)?;
   let x = x_for_byte(line, offset.byte);
-  Some(Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height)))
+  let bounds = Bounds::new(origin + line.origin + point(x, px(0.0)), size(px(1.0), line.line_height));
+  // Fidelity: round-trip the caret through offset -> x -> hit-test. `x` is
+  // line-local (same basis as `hit_test_x`), so for an interior caret offset the
+  // recovered byte must equal the requested byte; a mismatch means the byte->x
+  // and x->byte maps disagree (the painted caret and mouse hit-testing would
+  // land on different positions). Seam/line-edge offsets legitimately snap, so
+  // the assertion is limited to strictly interior offsets to avoid noise.
+  if flowstate_fidelity::enabled() {
+    let recovered = line.hit_test_x(x);
+    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Caret, "resolve", || {
+      format!(
+        "offset={offset:?} gravity={gravity:?} paragraph_index={} line={l_ix} line_bytes={}..{} x={x:?} recovered_byte={recovered} rect={bounds:?}",
+        layout.paragraphs[p_ix].index, line.start_byte, line.end_byte,
+      )
+    });
+    let interior = offset.byte > line.start_byte && offset.byte < line.end_byte;
+    flowstate_fidelity::check(
+      recovered == offset.byte || !interior,
+      flowstate_fidelity::FidelityClass::Caret,
+      "hit-test-roundtrip",
+      || {
+        format!(
+          "offset_byte={} x={x:?} recovered_byte={recovered} line_bytes={}..{} paragraph_index={}",
+          offset.byte, line.start_byte, line.end_byte, layout.paragraphs[p_ix].index,
+        )
+      },
+    );
+  }
+  Some(bounds)
 }
 
 #[hotpath::measure]

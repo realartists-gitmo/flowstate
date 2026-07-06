@@ -7,7 +7,7 @@ mod pdf_recovery;
 use std::{io, path::Path};
 
 pub use cleaner::{CleanAction, CleanedDocx, DocxCleanReport, DocxCleanStats, clean_docx_bytes};
-pub use exporter::{convert_db8_to_docx, write_docx};
+pub use exporter::{ExportWarning, convert_db8_to_docx, write_docx, write_docx_with_report};
 pub use interpreter::{
   DocxConversionReport, RecognitionRule, convert_cleaned_docx_to_document, convert_docx_bytes_to_document, convert_docx_to_document,
   import_cleaned_docx_to_loro, import_docx_bytes_to_loro, import_docx_to_loro,

@@ -36,6 +36,7 @@ impl RichTextEditor {
     };
     insert_text_at(&mut self.document, caret.paragraph, caret.byte, text, styles);
     self.selection = EditorSelection::collapsed(after);
+    self.fidelity_caret_set_from("insert_single_grapheme_fast_path", &before_selection);
     self.emit_selection_changed(cx);
 
     if self.local_history_enabled() {

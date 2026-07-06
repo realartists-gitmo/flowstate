@@ -5,7 +5,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlobId, SessionId};
 
-pub const PROTOCOL_VERSION: u16 = 1;
+/// Version 2 (FS-080): invite tickets carry owner-signed capabilities, the
+/// direct protocol gained the `Authenticate` handshake and `Unauthorized`
+/// response, and gossip gained the signed `CapabilityEpoch` control frame.
+/// No back-compat with version 1 (pre-release).
+pub const PROTOCOL_VERSION: u16 = 2;
 pub const GOSSIP_INLINE_LIMIT: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -32,6 +36,11 @@ pub enum GossipMsg {
   UpdateAvailable { blob: BlobId, len: u64 },
   Presence(Vec<u8>),
   Digest { session: SessionId, vv: Vec<u8> },
+  /// Owner-signed capability revocation control frame (FS-080). The signature
+  /// covers `(session id, epoch)` with the owner secret key; peers verify it
+  /// against the owner public key learned from their invite ticket and raise
+  /// their local revocation epoch.
+  CapabilityEpoch { epoch: u64, signature: iroh::Signature },
 }
 
 impl GossipMsg {
@@ -42,6 +51,7 @@ impl GossipMsg {
       Self::UpdateAvailable { .. } => "update_available",
       Self::Presence(_) => "presence",
       Self::Digest { .. } => "digest",
+      Self::CapabilityEpoch { .. } => "capability_epoch",
     }
   }
 
@@ -51,6 +61,7 @@ impl GossipMsg {
       Self::Update(bytes) | Self::Presence(bytes) => bytes.len() as u64,
       Self::UpdateAvailable { len, .. } => *len,
       Self::Digest { vv, .. } => vv.len() as u64,
+      Self::CapabilityEpoch { .. } => (8 + iroh::Signature::LENGTH) as u64,
     }
   }
 }

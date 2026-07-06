@@ -1,3 +1,5 @@
+use flowstate_fidelity::{self as fidelity, FidelityClass};
+
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
@@ -581,7 +583,7 @@ impl Workspace {
     // Keep exactly one optimistic command batch in flight. Later keystrokes
     // remain rendered locally and are rebased onto the acknowledged frontier
     // when this batch completes.
-    if editor.read(cx).runtime_edit_in_flight() {
+    if editor.read(cx).runtime_transaction_in_flight() {
       return;
     }
     let edits = editor.update(cx, |editor, _| editor.take_pending_runtime_edits());
@@ -594,7 +596,23 @@ impl Workspace {
     };
     let retry_edits = edits.clone();
     let (transaction_id, base_frontier, commands, selection_after, stable_selection_after) = flatten_runtime_edit_commands(edits);
-    editor.update(cx, |editor, _| editor.begin_runtime_edit(transaction_id));
+    if fidelity::enabled() {
+      let in_flight = editor.read(cx).runtime_transaction_in_flight();
+      fidelity::check(
+        !in_flight,
+        FidelityClass::Reconcile,
+        "concurrent-transaction",
+        || format!("panel={panel_id} txn={transaction_id:x} began a document-runtime flush while a runtime transaction was already in flight"),
+      );
+    }
+    fidelity::event(FidelityClass::Reconcile, "document-flush-begin", || {
+      format!(
+        "panel={panel_id} txn={transaction_id:x} base_frontier_bytes={} commands={}",
+        base_frontier.len(),
+        commands.len(),
+      )
+    });
+    editor.update(cx, |editor, _| editor.begin_runtime_transaction(transaction_id));
     let assets = editor
       .read(cx)
       .document()
@@ -622,16 +640,22 @@ impl Workspace {
             match runtime.projection_snapshot().await {
               Ok(document) => {
                 let _ = workspace.update(cx, |_, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=materialization-repair")
+                  });
                   editor.update(cx, |editor, cx| {
                     editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
-                    editor.complete_runtime_edit(None, cx);
+                    editor.abort_runtime_transaction(cx);
                   });
                 });
               },
               Err(error) => {
                 tracing::error!(%panel_id, %error, "failed to obtain canonical projection after local materialization failure");
                 let _ = workspace.update(cx, |_, cx| {
-                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=materialization-repair-failed")
+                  });
+                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                 });
               },
             }
@@ -643,16 +667,22 @@ impl Workspace {
               Ok(document) => {
                 tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
                 let _ = workspace.update(cx, |_, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=stale-rebase")
+                  });
                   editor.update(cx, |editor, cx| {
                     editor.replace_document_projection_replaying_pending(document, retry_edits, None, cx);
-                    editor.complete_runtime_edit(None, cx);
+                    editor.abort_runtime_transaction(cx);
                   });
                 });
               },
               Err(snapshot_error) => {
                 tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after stale editor transaction");
                 let _ = workspace.update(cx, |_, cx| {
-                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=stale-repair-failed")
+                  });
+                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                 });
               },
             }
@@ -661,16 +691,22 @@ impl Workspace {
             match runtime.projection_snapshot().await {
               Ok(document) => {
                 let _ = workspace.update(cx, |_, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=rejected")
+                  });
                   editor.update(cx, |editor, cx| {
                     editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
-                    editor.complete_runtime_edit(None, cx);
+                    editor.abort_runtime_transaction(cx);
                   });
                 });
               },
               Err(snapshot_error) => {
                 tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after rejected editor transaction");
                 let _ = workspace.update(cx, |_, cx| {
-                  editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
+                    format!("panel={panel_id} txn={transaction_id:x} reason=rejected-repair-failed")
+                  });
+                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                 });
               },
             }
@@ -1803,12 +1839,37 @@ fn flatten_runtime_edit_commands(
   )
 }
 
+/// Stable short tag for a runtime event variant, used only by fidelity firehose
+/// lines so a document-runtime commit stream reads which transition was applied.
+fn runtime_event_kind(event: &flowstate_collab::crdt_runtime::RuntimeEvent) -> &'static str {
+  use flowstate_collab::crdt_runtime::RuntimeEvent;
+  match event {
+    RuntimeEvent::LocalUpdate { .. } => "local-update",
+    RuntimeEvent::RemoteUpdateApplied { .. } => "remote-update-applied",
+    RuntimeEvent::RevisionOpened { .. } => "revision-opened",
+    RuntimeEvent::RevisionForked { .. } => "revision-forked",
+    RuntimeEvent::SelectionRestored { .. } => "selection-restored",
+    RuntimeEvent::ProjectionUpdated { .. } => "projection-updated",
+    RuntimeEvent::ProjectionPatched { .. } => "projection-patched",
+  }
+}
+
 fn apply_local_runtime_commit(
   editor: &Entity<RichTextEditor>,
   commit: flowstate_collab::crdt_runtime::EditorCommitResult,
   selection_after: Option<crate::rich_text_element::StableEditorSelection>,
   cx: &mut Context<Workspace>,
 ) -> Result<(), String> {
+  let transaction_id = commit.transaction_id;
+  fidelity::event(FidelityClass::Reconcile, "document-commit-complete", || {
+    format!(
+      "txn={transaction_id:x} base_frontier_bytes={} new_frontier_bytes={} events={} projection_events={}",
+      commit.base_frontier.len(),
+      commit.new_frontier.len(),
+      commit.events.len(),
+      commit.projection_event_count(),
+    )
+  });
   if commit.projection_event_count() > 1 {
     return Err(format!(
       "local editor transaction {} returned multiple projection transitions",
@@ -1816,7 +1877,36 @@ fn apply_local_runtime_commit(
     ));
   }
   let frontier = commit.new_frontier;
+  // The editor is acknowledged (`complete_runtime_transaction`) at `frontier`;
+  // the single projection transition this commit carries must land on that same
+  // frontier or the editor would close its gate against an unmaterialized state.
+  if fidelity::enabled() {
+    for event in &commit.events {
+      let event_frontier = match event {
+        flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { batch, .. } => Some(batch.new_frontier.as_slice()),
+        flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { frontier, .. } => Some(frontier.as_slice()),
+        _ => None,
+      };
+      if let Some(event_frontier) = event_frontier {
+        fidelity::check(
+          event_frontier == frontier.as_slice(),
+          FidelityClass::Frontier,
+          "ack-frontier-mismatch",
+          || {
+            format!(
+              "txn={transaction_id:x} ack_frontier_bytes={} projection_event_frontier_bytes={}",
+              frontier.len(),
+              event_frontier.len(),
+            )
+          },
+        );
+      }
+    }
+  }
   for event in commit.events {
+    fidelity::event(FidelityClass::Projection, "apply-document-commit-event", || {
+      format!("txn={transaction_id:x} kind={}", runtime_event_kind(&event))
+    });
     match event {
       flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { batch, .. } => {
         editor
@@ -1839,7 +1929,7 @@ fn apply_local_runtime_commit(
   }
   editor
     .update(cx, |editor, cx| {
-      editor.complete_runtime_edit_after_materialization(commit.transaction_id, frontier, selection_after, cx)
+      editor.complete_runtime_transaction(commit.transaction_id, frontier, selection_after, cx)
     })
     .map_err(|error| error.to_string())?;
   Ok(())

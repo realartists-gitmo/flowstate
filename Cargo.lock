@@ -2994,6 +2994,7 @@ dependencies = [
  "flowstate-collab",
  "flowstate-document",
  "flowstate-docx",
+ "flowstate-fidelity",
  "flowstate-flow",
  "flowstate-tub",
  "gpui",
@@ -3022,6 +3023,8 @@ dependencies = [
  "anyhow",
  "async-channel 2.5.0",
  "flowstate-document",
+ "flowstate-fidelity",
+ "gpui",
  "gpui-flowtext",
  "iroh",
  "iroh-gossip",
@@ -3046,6 +3049,7 @@ version = "0.1.0"
 dependencies = [
  "atomicwrites",
  "blake3",
+ "flowstate-fidelity",
  "gpui",
  "gpui-flowtext",
  "imagesize",
@@ -3065,8 +3069,10 @@ dependencies = [
  "docx-rs",
  "docxide-pdf",
  "flowstate-document",
+ "flowstate-fidelity",
  "gpui",
  "hotpath",
+ "image",
  "imagesize",
  "lopdf",
  "quick-xml 0.36.2",
@@ -3076,6 +3082,13 @@ dependencies = [
  "rustc-hash 2.1.2",
  "zip 0.6.6",
  "zstd",
+]
+
+[[package]]
+name = "flowstate-fidelity"
+version = "0.1.0"
+dependencies = [
+ "tracing",
 ]
 
 [[package]]
@@ -3826,6 +3839,7 @@ dependencies = [
  "blake3",
  "cosmic-text",
  "crop",
+ "flowstate-fidelity",
  "gpui",
  "gpui-component",
  "hotpath",
@@ -3837,6 +3851,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
  "typst",
  "typst-assets",
  "typst-library",
@@ -11090,6 +11105,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11099,12 +11124,15 @@ dependencies = [
  "nu-ansi-term",
  "once_cell",
  "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
  "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

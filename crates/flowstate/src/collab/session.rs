@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
-  SessionId,
+  SessionCapability, SessionId,
   crdt_runtime::{CrdtRuntime, EditorCommitResult, RuntimeEvent},
   crdt_runtime_actor::CrdtRuntimeHandle,
   ids::PeerId,
@@ -19,12 +19,15 @@ use flowstate_collab::{
   presence::PresenceStore,
   proto_gossip::GossipMsg,
 };
+use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
 use crate::app_settings::{load_document_theme, load_local_user_identity};
-use crate::rich_text_element::{AssetId, AssetRecord, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect};
+use crate::rich_text_element::{
+  AssetId, AssetRecord, CollaborationRole, DocumentProjection, EditorEvent, RichTextEditor, SemanticEditCommand, UndoRedirect,
+};
 
 use super::presence_view;
 
@@ -113,6 +116,8 @@ pub struct CollabSession {
   // UI-only asset cache records fetched after Loro metadata arrives.
   pending_asset_records: Vec<(AssetId, AssetRecord)>,
   pending_remote_updates: Vec<Vec<u8>>,
+  pending_remote_update_bytes: usize,
+  pending_remote_updates_overflowed: bool,
   presence: Option<PresenceStore>,
   net_tx: CommandSender,
   direct_tx: async_channel::Sender<DirectServeRequest>,
@@ -123,6 +128,13 @@ pub struct CollabSession {
   loro_subscriptions: Vec<LoroSubscription>,
   neighbors: HashSet<flowstate_collab::ids::PeerId>,
   bootstrap_addrs: Vec<PeerAddr>,
+  // FS-080: the owner-signed capability we present at the direct handshake, kept
+  // so reconnects can re-supply it. `None` for the owner (this endpoint is the
+  // session owner and needs no ticket).
+  capability: Option<SessionCapability>,
+  // The role this endpoint holds in the session; gates local writes/undo and is
+  // pushed onto the editor at attach so `can_write_collaboration()` takes effect.
+  collaboration_role: CollaborationRole,
   asset_pulls_in_flight: HashSet<AssetId>,
   anti_entropy: AntiEntropyState,
   direct_pump_started: bool,
@@ -186,6 +198,20 @@ fn merge_adjacent_insert_text(previous: &mut SemanticEditCommand, next: &Semanti
   true
 }
 
+/// Stable short tag for a runtime event variant, used only by fidelity firehose
+/// lines so an event stream reads which transition was applied.
+fn runtime_event_kind(event: &RuntimeEvent) -> &'static str {
+  match event {
+    RuntimeEvent::LocalUpdate { .. } => "local-update",
+    RuntimeEvent::RemoteUpdateApplied { .. } => "remote-update-applied",
+    RuntimeEvent::RevisionOpened { .. } => "revision-opened",
+    RuntimeEvent::RevisionForked { .. } => "revision-forked",
+    RuntimeEvent::SelectionRestored { .. } => "selection-restored",
+    RuntimeEvent::ProjectionUpdated { .. } => "projection-updated",
+    RuntimeEvent::ProjectionPatched { .. } => "projection-patched",
+  }
+}
+
 impl CollabSession {
   pub fn from_local_runtime(
     session: SessionId,
@@ -217,6 +243,8 @@ impl CollabSession {
       panel_id: Some(panel_id),
       pending_asset_records: Vec::new(),
       pending_remote_updates: Vec::new(),
+      pending_remote_update_bytes: 0,
+      pending_remote_updates_overflowed: false,
       presence: None,
       net_tx,
       direct_tx,
@@ -227,6 +255,10 @@ impl CollabSession {
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
       bootstrap_addrs: Vec::new(),
+      // The endpoint that starts a session is its owner: full write access, no
+      // bearer capability to present.
+      capability: None,
+      collaboration_role: CollaborationRole::Owner,
       asset_pulls_in_flight: HashSet::new(),
       anti_entropy: AntiEntropyState::new(session, now),
       direct_pump_started: false,
@@ -253,7 +285,14 @@ impl CollabSession {
     }
   }
 
-  pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>) -> Self {
+  pub fn joining(
+    session: SessionId,
+    title: String,
+    net_tx: CommandSender,
+    bootstrap_addrs: Vec<PeerAddr>,
+    capability: SessionCapability,
+  ) -> Self {
+    let collaboration_role = CollaborationRole::from(capability.role);
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     let (undo_tx, undo_rx) = async_channel::bounded(UNDO_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
@@ -268,6 +307,8 @@ impl CollabSession {
       panel_id: None,
       pending_asset_records: Vec::new(),
       pending_remote_updates: Vec::new(),
+      pending_remote_update_bytes: 0,
+      pending_remote_updates_overflowed: false,
       presence: None,
       net_tx,
       direct_tx,
@@ -278,6 +319,8 @@ impl CollabSession {
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
       bootstrap_addrs,
+      capability: Some(capability),
+      collaboration_role,
       asset_pulls_in_flight: HashSet::new(),
       anti_entropy: AntiEntropyState::new(session, now),
       direct_pump_started: false,
@@ -535,8 +578,16 @@ impl CollabSession {
     self.attach(cx);
 
     let pending_updates = std::mem::take(&mut self.pending_remote_updates);
+    self.pending_remote_update_bytes = 0;
     for update in pending_updates {
       self.import_update_bytes(&update, cx)?;
+    }
+    if std::mem::take(&mut self.pending_remote_updates_overflowed)
+      && let Some(from) = self.pull_candidates(None).first().copied()
+    {
+      tracing::info!(session = %self.session, from = %from, "starting collaboration resync pull after pre-attach queue overflow");
+      let our_vv = self.runtime_vv.clone();
+      self.start_update_pull(from, our_vv, cx);
     }
     self.flush_pending_asset_records(cx);
     asset_transfer::schedule_missing_assets(self, None, cx);
@@ -559,6 +610,46 @@ impl CollabSession {
     self.runtime.clone()
   }
 
+  /// Single fidelity-instrumented write point for the cached runtime version
+  /// vector. Logs every update; when `enforce_monotonic` is set (op-application
+  /// paths, where the vector can only advance) it also checks the new vector
+  /// dominates or equals the previous one. Strictly additive: the vector is
+  /// assigned unconditionally, so behavior is identical when tracing is off.
+  fn update_runtime_vv(&mut self, new_vv: Vec<u8>, source: &'static str, enforce_monotonic: bool) {
+    if fidelity::enabled() {
+      fidelity::event(FidelityClass::Frontier, "runtime-vv-update", || {
+        format!(
+          "session={} source={source} old_bytes={} new_bytes={}",
+          self.session,
+          self.runtime_vv.len(),
+          new_vv.len(),
+        )
+      });
+      if enforce_monotonic && !self.runtime_vv.is_empty() && !new_vv.is_empty() {
+        if let (Ok(old), Ok(new)) = (
+          loro::VersionVector::decode(&self.runtime_vv),
+          loro::VersionVector::decode(&new_vv),
+        ) {
+          let relation = new.partial_cmp(&old);
+          fidelity::check(
+            matches!(relation, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+            FidelityClass::Frontier,
+            "runtime-vv-regression",
+            || {
+              format!(
+                "session={} source={source} relation={relation:?} old_bytes={} new_bytes={}",
+                self.session,
+                self.runtime_vv.len(),
+                new_vv.len(),
+              )
+            },
+          );
+        }
+      }
+    }
+    self.runtime_vv = new_vv;
+  }
+
   fn refresh_runtime_version_vector(&mut self, cx: &mut Context<Self>) {
     let Some(runtime) = self.runtime.clone() else {
       return;
@@ -568,7 +659,10 @@ impl CollabSession {
       let result = runtime.oplog_version_vector().await;
       let _ = session.update(cx, |session, _| match result {
         Ok(vv) => {
-          session.runtime_vv = vv;
+          // Authoritative re-read of the oplog vector: enforcing monotonicity
+          // here would false-positive against benign async reordering with a
+          // concurrent op-applying commit, so log the update without the check.
+          session.update_runtime_vv(vv, "oplog-refresh", false);
           session.publish_digest();
         },
         Err(error) => {
@@ -708,6 +802,9 @@ impl CollabSession {
     );
 
     self.runtime = Some(runtime);
+    fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
+      format!("session={} source=join-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
+    });
     self.runtime_vv.clear();
     Ok(JoinedDocument {
       session: self.session,
@@ -763,6 +860,8 @@ impl CollabSession {
     self.runtime_vv.clear();
     self.pending_asset_records.clear();
     self.pending_remote_updates.clear();
+    self.pending_remote_update_bytes = 0;
+    self.pending_remote_updates_overflowed = false;
     self.local_edit_flush_pending = false;
     self.neighbors.clear();
     self.asset_pulls_in_flight.clear();
@@ -795,8 +894,19 @@ impl CollabSession {
       return;
     }
 
-    if editor.read(cx).runtime_edit_in_flight() {
-      tracing::trace!(session = %self.session, "deferring local collaboration edit flush until the current runtime batch is acknowledged");
+    if !self.collaboration_role.can_write() {
+      // FS-080: a viewer must never mutate the shared document. The editor
+      // already gates write commands via `can_write_collaboration()`; discard
+      // any edits that were captured defensively so they can never reach Loro.
+      let dropped = editor.update(cx, |editor, _| editor.take_pending_session_edits().len());
+      if dropped > 0 {
+        tracing::warn!(session = %self.session, dropped, "discarded local edits captured in a view-only collaboration session");
+      }
+      return;
+    }
+
+    if editor.read(cx).runtime_transaction_in_flight() {
+      tracing::trace!(session = %self.session, "deferring local collaboration edit flush until the current runtime transaction is acknowledged");
       return;
     }
 
@@ -840,7 +950,23 @@ impl CollabSession {
       editor.update(cx, |editor, _| editor.prepend_pending_semantic_edits(retry_edits));
       return;
     };
-    editor.update(cx, |editor, _| editor.begin_runtime_edit(transaction_id));
+    if fidelity::enabled() {
+      let in_flight = editor.read(cx).runtime_transaction_in_flight();
+      fidelity::check(
+        !in_flight,
+        FidelityClass::Reconcile,
+        "concurrent-transaction",
+        || format!("session={} txn={transaction_id:x} began a local flush while a runtime transaction was already in flight", self.session),
+      );
+    }
+    fidelity::event(FidelityClass::Reconcile, "local-flush-begin", || {
+      format!(
+        "session={} txn={transaction_id:x} base_frontier_bytes={} edit_count={edit_count} operation_count={operation_count}",
+        self.session,
+        base_frontier.len(),
+      )
+    });
+    editor.update(cx, |editor, _| editor.begin_runtime_transaction(transaction_id));
     let assets = editor
       .read(cx)
       .document()
@@ -876,10 +1002,13 @@ impl CollabSession {
             match runtime.projection_snapshot().await {
               Ok(document) => {
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=materialization-repair")
+                  });
                   if let Some(editor) = session.editor.clone() {
                     editor.update(cx, |editor, cx| {
                       editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
-                      editor.complete_runtime_edit(None, cx);
+                      editor.abort_runtime_transaction(cx);
                     });
                   }
                   session.last_document_activity = Instant::now();
@@ -889,8 +1018,11 @@ impl CollabSession {
               },
               Err(error) => {
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=materialization-repair-failed")
+                  });
                   if let Some(editor) = session.editor.clone() {
-                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                    editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                   }
                   session.detach(
                     DetachReason::Fatal(format!("canonical projection repair failed after local commit: {error:#}")),
@@ -910,18 +1042,24 @@ impl CollabSession {
               Ok(document) => {
                 tracing::debug!(session = %session_id, "rebasing stale optimistic collaboration transaction on canonical projection");
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=stale-rebase")
+                  });
                   if let Some(editor) = session.editor.clone() {
                     editor.update(cx, |editor, cx| {
                       editor.replace_document_projection_replaying_pending(document, retry_edits, None, cx);
-                      editor.complete_runtime_edit(None, cx);
+                      editor.abort_runtime_transaction(cx);
                     });
                   }
                 });
               },
               Err(snapshot_error) => {
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=stale-repair-failed")
+                  });
                   if let Some(editor) = session.editor.clone() {
-                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                    editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                   }
                   session.detach(
                     DetachReason::Fatal(format!("canonical projection repair failed after stale local transaction: {snapshot_error:#}")),
@@ -935,10 +1073,13 @@ impl CollabSession {
             match runtime.projection_snapshot().await {
               Ok(document) => {
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=rejected")
+                  });
                   if let Some(editor) = session.editor.clone() {
                     editor.update(cx, |editor, cx| {
                       editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
-                      editor.complete_runtime_edit(None, cx);
+                      editor.abort_runtime_transaction(cx);
                     });
                   }
                   session.last_self_check = None;
@@ -947,8 +1088,11 @@ impl CollabSession {
               },
               Err(snapshot_error) => {
                 let _ = session.update(cx, |session, cx| {
+                  fidelity::event(FidelityClass::Reconcile, "local-commit-abort", || {
+                    format!("session={session_id} txn={transaction_id:x} reason=rejected-repair-failed")
+                  });
                   if let Some(editor) = session.editor.clone() {
-                    editor.update(cx, |editor, cx| editor.complete_runtime_edit(None, cx));
+                    editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
                   }
                   session.detach(
                     DetachReason::Fatal(format!(
@@ -968,13 +1112,16 @@ impl CollabSession {
 
   pub(super) fn apply_runtime_events(&mut self, events: Vec<RuntimeEvent>, apply_projection: bool, cx: &mut Context<Self>) -> Result<()> {
     for event in events {
+      fidelity::event(FidelityClass::Projection, "apply-runtime-event", || {
+        format!("session={} kind={} apply_projection={apply_projection}", self.session, runtime_event_kind(&event))
+      });
       match event {
         RuntimeEvent::LocalUpdate { bytes, version_vector, .. } => {
-          self.runtime_vv = version_vector;
+          self.update_runtime_vv(version_vector, "local-update", true);
           self.publish_update_bytes(bytes);
         },
         RuntimeEvent::RemoteUpdateApplied { pending, version_vector, .. } => {
-          self.runtime_vv = version_vector;
+          self.update_runtime_vv(version_vector, "remote-update-applied", true);
           if let Some(pending) = pending {
             tracing::debug!(
               session = %self.session,
@@ -992,11 +1139,11 @@ impl CollabSession {
         RuntimeEvent::ProjectionUpdated {
           document, version_vector, ..
         } if apply_projection => {
-          self.runtime_vv = version_vector;
+          self.update_runtime_vv(version_vector, "projection-updated", true);
           self.apply_runtime_projection(*document, cx)?;
         },
         RuntimeEvent::ProjectionPatched { batch, version_vector, .. } if apply_projection => {
-          self.runtime_vv = version_vector;
+          self.update_runtime_vv(version_vector, "projection-patched", true);
           self.apply_runtime_patches(batch, cx)?;
         },
         RuntimeEvent::RevisionOpened { document, .. } if apply_projection => {
@@ -1023,6 +1170,17 @@ impl CollabSession {
     selection_after: Option<crate::rich_text_element::StableEditorSelection>,
     cx: &mut Context<Self>,
   ) -> Result<()> {
+    let transaction_id = commit.transaction_id;
+    fidelity::event(FidelityClass::Reconcile, "local-commit-complete", || {
+      format!(
+        "session={} txn={transaction_id:x} base_frontier_bytes={} new_frontier_bytes={} events={} projection_events={}",
+        self.session,
+        commit.base_frontier.len(),
+        commit.new_frontier.len(),
+        commit.events.len(),
+        commit.projection_event_count(),
+      )
+    });
     if commit.projection_event_count() > 1 {
       bail!(
         "local editor transaction {} returned multiple projection transitions",
@@ -1030,11 +1188,39 @@ impl CollabSession {
       );
     }
     let frontier = commit.new_frontier;
+    // The editor is acknowledged (`complete_runtime_transaction`) at `frontier`;
+    // the single projection transition carried by this commit must land on that
+    // same frontier, or the editor would close its optimistic gate against a
+    // projection it never materialized.
+    if fidelity::enabled() {
+      for event in &commit.events {
+        let event_frontier = match event {
+          RuntimeEvent::ProjectionPatched { batch, .. } => Some(batch.new_frontier.as_slice()),
+          RuntimeEvent::ProjectionUpdated { frontier, .. } => Some(frontier.as_slice()),
+          _ => None,
+        };
+        if let Some(event_frontier) = event_frontier {
+          fidelity::check(
+            event_frontier == frontier.as_slice(),
+            FidelityClass::Frontier,
+            "ack-frontier-mismatch",
+            || {
+              format!(
+                "session={} txn={transaction_id:x} ack_frontier_bytes={} projection_event_frontier_bytes={}",
+                self.session,
+                frontier.len(),
+                event_frontier.len(),
+              )
+            },
+          );
+        }
+      }
+    }
     self.apply_runtime_events(commit.events, true, cx)?;
     if let Some(editor) = self.editor.clone() {
       editor
         .update(cx, |editor, cx| {
-          editor.complete_runtime_edit_after_materialization(commit.transaction_id, frontier, selection_after, cx)
+          editor.complete_runtime_transaction(commit.transaction_id, frontier, selection_after, cx)
         })
         .map_err(anyhow::Error::new)?;
     }
@@ -1047,6 +1233,15 @@ impl CollabSession {
     let Some(editor) = self.editor.clone() else {
       return Ok(());
     };
+    fidelity::event(FidelityClass::Projection, "apply-projection-patches", || {
+      format!(
+        "session={} patches={} base_frontier_bytes={} new_frontier_bytes={}",
+        self.session,
+        batch.patches.len(),
+        batch.base_frontier.len(),
+        batch.new_frontier.len(),
+      )
+    });
     editor
       .update(cx, |editor, cx| editor.apply_projection_patch_batch(&batch, cx))
       .map_err(anyhow::Error::new)?;
@@ -1060,6 +1255,15 @@ impl CollabSession {
     let Some(editor) = self.editor.clone() else {
       return Ok(());
     };
+    fidelity::event(FidelityClass::Projection, "apply-projection", || {
+      format!(
+        "session={} paragraphs={} blocks={} frontier_bytes={}",
+        self.session,
+        document.paragraphs.len(),
+        document.blocks.len(),
+        document.frontier.len(),
+      )
+    });
     let current = editor.read(cx).document().clone();
     document.assets = current.assets;
     document.theme = current.theme;
@@ -1104,10 +1308,14 @@ impl CollabSession {
         Ok(())
       },
       GossipMsg::Presence(bytes) => {
-        self.apply_presence(&bytes, cx);
+        self.apply_presence(from, &bytes, cx);
         Ok(())
       },
       GossipMsg::Digest { session, vv } => self.handle_digest(from, session, &vv, cx),
+      // FS-080: signed revocation control frames are consumed at the transport
+      // layer (see `net::swarm::handle_event`) and never reach a session; this
+      // arm keeps the match exhaustive defensively.
+      GossipMsg::CapabilityEpoch { .. } => Ok(()),
     };
     if let Err(error) = result {
       tracing::error!(session = %self.session, from = %from, gossip_kind, error = %format_args!("{error:#}"), "collaboration gossip handling failed");
@@ -1147,7 +1355,7 @@ impl CollabSession {
     self.publish_digest();
     let peer = self.neighbors.iter().next().copied();
     let vv = self.runtime_vv.clone();
-    let action = self.anti_entropy.on_lagged(peer, vv);
+    let action = self.anti_entropy.on_lagged(peer, vv, Instant::now());
     self.handle_gap_action(action, cx);
   }
 
@@ -1189,13 +1397,18 @@ impl CollabSession {
         editor.set_recovery_path(Some(presence_view::collaboration_recovery_path(self.session, &self.title)), cx);
         tracing::debug!(session = %self.session, "set collaboration recovery path for untitled document");
       }
+      // FS-080: publish the session role so the editor's `can_write_collaboration()`
+      // gate blocks local edits/undo for a Viewer. Detach clears it.
+      editor.set_collaboration_role(Some(self.collaboration_role), cx);
       editor.clear_undo_redo_stacks();
       editor.set_runtime_capture(false);
       editor.set_session_capture(true);
       editor.set_native_undo_hook(None);
       let undo_tx = self.undo_tx.clone();
       editor.set_session_undo_redirect(Some(Rc::new(move |redirect: UndoRedirect| {
-        let _ = undo_tx.try_send(redirect);
+        if let Err(error) = undo_tx.try_send(redirect) {
+          tracing::warn!(%error, "collaboration undo redirect dropped because the undo queue is saturated");
+        }
       })));
     });
 
@@ -1209,9 +1422,33 @@ impl CollabSession {
     self
       .editor_subscriptions
       .push(cx.subscribe(&editor, |session, _, event: &EditorEvent, cx| {
-        if matches!(event, EditorEvent::SelectionChanged { .. }) {
-          tracing::trace!(session = %session.session, "collaboration local selection changed; refreshing presence");
-          session.schedule_own_presence_refresh(cx);
+        match event {
+          EditorEvent::SelectionChanged { .. } => {
+            tracing::trace!(session = %session.session, "collaboration local selection changed; refreshing presence");
+            session.schedule_own_presence_refresh(cx);
+          },
+          EditorEvent::ReconciliationRecovery {
+            dropped_batches,
+            reason,
+            total_recoveries,
+          } => {
+            // A recovery means the editor's optimistic state diverged from the
+            // canonical projection and had to be rebuilt: a fidelity failure.
+            fidelity::violation(FidelityClass::Reconcile, "reconciliation-recovery", || {
+              format!(
+                "session={} dropped_batches={dropped_batches} total_recoveries={total_recoveries} reason={reason}",
+                session.session,
+              )
+            });
+            tracing::warn!(
+              session = %session.session,
+              dropped_batches,
+              total_recoveries,
+              %reason,
+              "editor reconciliation recovery; optimistic state diverged from the canonical projection",
+            );
+          },
+          _ => {},
         }
       }));
     tracing::debug!(session = %self.session, subscriptions = self.editor_subscriptions.len(), "collaboration editor hooks attached");

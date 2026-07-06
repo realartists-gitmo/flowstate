@@ -111,6 +111,14 @@ pub enum EditorEvent {
   SelectionChanged { selection: EditorSelection },
   CommandDispatched { command: RichTextEditorCommand },
   Exported { format: DocumentExportFormat },
+  /// The editor could not reconcile optimistic local state with the canonical
+  /// projection and recovered by discarding or rebuilding. Hosts must surface
+  /// this (telemetry at minimum); it indicates replay/projection divergence.
+  ReconciliationRecovery {
+    dropped_batches: usize,
+    reason: gpui::SharedString,
+    total_recoveries: u64,
+  },
 }
 
 pub trait EditorEventSink: Send + Sync + 'static {

@@ -51,8 +51,9 @@ impl RichTextEditor {
         match result {
           Ok(document) => {
             let _ = editor.update(cx, |editor, cx| {
-              editor.replace_document_projection(document, cx);
-              editor.complete_runtime_edit(selection_after, cx);
+              // Replay any edits captured while the hook ran so they stay
+              // visible until the next runtime flush acknowledges them.
+              editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
               editor.last_send_document_generation = Some(generation);
               cx.notify();
             });
@@ -111,8 +112,9 @@ impl RichTextEditor {
         match result {
           Ok(document) => {
             let _ = editor.update(cx, |editor, cx| {
-              editor.replace_document_projection(document, cx);
-              editor.complete_runtime_edit(selection_after, cx);
+              // Replay any edits captured while the hook ran so they stay
+              // visible until the next runtime flush acknowledges them.
+              editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
               editor.last_format_export_generation = Some(generation);
               cx.notify();
             });
