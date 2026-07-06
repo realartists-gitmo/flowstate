@@ -633,21 +633,20 @@ impl CollabSession {
           loro::VersionVector::decode(&new_vv),
         )
       {
-          let relation = new.partial_cmp(&old);
-          fidelity::check(
-            matches!(relation, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
-            FidelityClass::Frontier,
-            "runtime-vv-regression",
-            || {
-              format!(
-                "session={} source={source} relation={relation:?} old_bytes={} new_bytes={}",
-                self.session,
-                self.runtime_vv.len(),
-                new_vv.len(),
-              )
-            },
-          );
-        }
+        let relation = new.partial_cmp(&old);
+        fidelity::check(
+          matches!(relation, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+          FidelityClass::Frontier,
+          "runtime-vv-regression",
+          || {
+            format!(
+              "session={} source={source} relation={relation:?} old_bytes={} new_bytes={}",
+              self.session,
+              self.runtime_vv.len(),
+              new_vv.len(),
+            )
+          },
+        );
       }
     }
     self.runtime_vv = new_vv;
