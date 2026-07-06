@@ -301,12 +301,14 @@ impl RichTextEditor {
     let fid_sel_before = self.fidelity_caret_before();
     let fid_size_before = flowstate_fidelity::enabled().then(|| self.fidelity_document_size());
     let fid_ids_before = self.fidelity_ids_before();
-    // Fingerprint the paragraph structure the user is currently looking at. A
-    // rebuild that reproduces it exactly (same paragraph count and text lengths)
-    // is a local acknowledgement — the text is unchanged and at most some
-    // paragraph ids were canonically reassigned by a repair — so the raw live
-    // caret is exactly correct and must be kept verbatim.
-    let live_paragraph_lengths: Vec<usize> = self.document.paragraphs.iter().map(paragraph_text_len).collect();
+    // Fingerprint what the user is currently looking at. A rebuild that
+    // reproduces it exactly (same paragraph count and total text length) is a
+    // local acknowledgement — the text is unchanged and at most some paragraph
+    // ids were canonically reassigned by a repair — so the raw live caret is
+    // exactly correct and must be kept verbatim. Paragraph count + total byte
+    // length is an O(1) fingerprint (vs. iterating per-paragraph lengths) that
+    // still captures every local-ack and repair-id-reassignment case.
+    let live_fingerprint = (self.document.paragraphs.len(), self.document.text.byte_len());
     let frontier = self.committed_document.frontier.clone();
     let mut edits = retry_edits;
     edits.extend(std::mem::take(&mut self.pending_semantic_edits));
@@ -353,12 +355,7 @@ impl RichTextEditor {
     // cursor" structurally impossible on any document. Only a genuine external
     // delta (a remote op or a structural canonical change) re-anchors the caret
     // along its stable paragraph anchor.
-    let structurally_identical = self
-      .document
-      .paragraphs
-      .iter()
-      .map(paragraph_text_len)
-      .eq(live_paragraph_lengths.iter().copied());
+    let structurally_identical = (self.document.paragraphs.len(), self.document.text.byte_len()) == live_fingerprint;
     self.selection = if structurally_identical {
       live_selection
     } else {
@@ -766,6 +763,7 @@ impl RichTextEditor {
   /// pre-value was captured via [`Self::fidelity_caret_before`]. No-op when the
   /// snapshot is `None` (tracing off).
   #[inline]
+  #[allow(clippy::ref_option, reason = "gated diagnostic helper borrows the caller's Option-typed caret snapshot; Option<&T> would push .as_ref() onto every call site")]
   pub(super) fn fidelity_caret_set(&self, site: &'static str, before: &Option<EditorSelection>) {
     if let Some(old) = before {
       self.fidelity_caret_set_from(site, old);
@@ -804,6 +802,7 @@ impl RichTextEditor {
   /// document lost paragraphs or text (a deletion legitimately pulls the caret
   /// back). No-op when `before` is `None` (tracing off).
   #[inline]
+  #[allow(clippy::ref_option, reason = "gated diagnostic helper borrows the caller's Option-typed caret snapshot; Option<&T> would push .as_ref() onto every call site")]
   pub(super) fn fidelity_check_caret_not_regressed(&self, site: &'static str, before: &Option<EditorSelection>, shrank: bool) {
     let Some(before) = before else { return };
     let before = before.head;
@@ -824,6 +823,7 @@ impl RichTextEditor {
   /// present before a reconcile but are absent afterward (a prime suspect for
   /// caret jumps and lossy stable-selection fallbacks). No-op when the snapshot
   /// is `None` (tracing off).
+  #[allow(clippy::ref_option, reason = "gated diagnostic helper borrows the caller's Option-typed id snapshot; Option<&T> would push .as_ref() onto every call site")]
   pub(super) fn fidelity_note_dropped_ids(&self, site: &'static str, before: &Option<(Vec<ParagraphId>, Vec<BlockId>)>) {
     let Some((pre_paras, pre_blocks)) = before else { return };
     let dropped_paras: Vec<ParagraphId> = pre_paras

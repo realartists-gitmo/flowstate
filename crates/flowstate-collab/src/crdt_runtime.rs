@@ -1150,7 +1150,7 @@ impl CrdtRuntime {
       });
     }
 
-    let batch_projection_before = self.projection.clone();
+    let mut batch_projection_before = self.projection.clone();
     let batch_frontier_before = self.doc.state_frontiers();
     let batch_vv_before = self.doc.state_vv();
     flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for grouped editor transaction")?;
@@ -1251,24 +1251,30 @@ impl CrdtRuntime {
     // patch reproduces `self.projection` before trusting it; otherwise fall back
     // to a full snapshot. This makes patch-path data loss structurally impossible
     // regardless of any gap in `projection_patches_between`.
-    let verified_patch = projection_patches_between(&batch_projection_before, &self.projection).and_then(|patches| {
-      let batch = ProjectionPatchBatch {
-        transaction_id,
-        base_frontier: batch_projection_before.frontier.clone(),
-        new_frontier: self.projection.frontier.clone(),
-        patches,
-      };
-      let mut reproduced = batch_projection_before.clone();
-      match apply_projection_patch_batch(&mut reproduced, &batch) {
-        Ok(()) if projections_semantically_equal(&reproduced, &self.projection) => Some(batch),
-        outcome => {
-          fidelity::event(FidelityClass::Projection, "patch-verify-fallback", || {
-            format!("editor-transaction {transaction_id}: incremental patch did not reproduce the authoritative projection ({outcome:?}); emitting full projection")
-          });
-          None
-        },
-      }
-    });
+    let batch_before_frontier = batch_projection_before.frontier.clone();
+    let verified_patch = match projection_patches_between(&batch_projection_before, &self.projection) {
+      Some(patches) => {
+        let batch = ProjectionPatchBatch {
+          transaction_id,
+          base_frontier: batch_before_frontier.clone(),
+          new_frontier: self.projection.frontier.clone(),
+          patches,
+        };
+        // Verify by replaying the patch onto the pre-batch projection IN PLACE.
+        // Its content is not needed afterward (only its frontier, saved above),
+        // so this avoids a second full-projection clone per transaction.
+        match apply_projection_patch_batch(&mut batch_projection_before, &batch) {
+          Ok(()) if projections_semantically_equal(&batch_projection_before, &self.projection) => Some(batch),
+          outcome => {
+            fidelity::event(FidelityClass::Projection, "patch-verify-fallback", || {
+              format!("editor-transaction {transaction_id}: incremental patch did not reproduce the authoritative projection ({outcome:?}); emitting full projection")
+            });
+            None
+          },
+        }
+      },
+      None => None,
+    };
     if let Some(batch) = verified_patch {
       events.push(RuntimeEvent::ProjectionPatched {
         batch,
@@ -1297,7 +1303,7 @@ impl CrdtRuntime {
 
     Ok(EditorCommitResult {
       transaction_id,
-      base_frontier: batch_projection_before.frontier,
+      base_frontier: batch_before_frontier,
       new_frontier: self.projection.frontier.clone(),
       events,
     })

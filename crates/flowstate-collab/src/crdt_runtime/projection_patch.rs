@@ -176,16 +176,20 @@ fn structural_blocks(document: &DocumentProjection, range: std::ops::Range<usize
 }
 
 fn structural_block(document: &DocumentProjection, row: usize, paragraph_ix: usize) -> ProjectionStructuralBlock {
-  let block = document
-    .blocks
-    .get(row)
-    .map(input_block_from_block)
-    .unwrap_or_else(|| {
-      InputBlock::Paragraph(InputParagraph {
-        style: ParagraphStyle::Normal,
-        runs: Vec::new(),
-      })
-    });
+  // A `Block::Paragraph` stores only run lengths — its text lives in the document
+  // Rope — so `input_block_from_block` (which has no document) would produce
+  // runs with EMPTY text and silently drop the paragraph's content (e.g. a
+  // split-then-insert batch inserting an empty paragraph instead of the typed
+  // text). Slice the real text via `input_paragraph`; objects carry their own
+  // payload and convert directly.
+  let block = match document.blocks.get(row) {
+    Some(Block::Paragraph(paragraph)) => InputBlock::Paragraph(input_paragraph(document, paragraph_ix, paragraph)),
+    Some(other) => input_block_from_block(other),
+    None => InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: Vec::new(),
+    }),
+  };
   ProjectionStructuralBlock {
     block_id: document
       .ids

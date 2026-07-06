@@ -376,6 +376,11 @@ mod tests {
       subject.complete(cx);
 
       let violations = fidelity::take_violations();
+      let trail = fidelity::drain_ring();
+      // The Enter+char batch must reproduce the authoritative projection via an
+      // incremental patch, NOT force a full-snapshot fallback (a perf regression
+      // guard: a lossy structural diff would trip `patch-verify-fallback`).
+      let took_full_snapshot = trail.iter().any(|line| line.contains("patch-verify-fallback"));
       let (s_anchor, s_head, s_text) = subject.snapshot(cx);
       let (r_anchor, r_head, r_text) = reference.snapshot(cx);
       // Caret must equal the synchronous shadow, must not regress against the
@@ -383,13 +388,13 @@ mod tests {
       // fired.
       let regressed = s_head.paragraph < prev_head.paragraph || (s_head.paragraph == prev_head.paragraph && s_head.byte < prev_head.byte);
       assert!(
-        violations.is_empty() && s_head == r_head && s_anchor == r_anchor && s_text == r_text && !regressed,
-        "FAST iteration {iteration}: regressed={regressed} prev_head={prev_head:?}\n  subject   caret anchor={s_anchor:?} head={s_head:?}\n  \
+        violations.is_empty() && s_head == r_head && s_anchor == r_anchor && s_text == r_text && !regressed && !took_full_snapshot,
+        "FAST iteration {iteration}: regressed={regressed} took_full_snapshot={took_full_snapshot} prev_head={prev_head:?}\n  subject   caret anchor={s_anchor:?} head={s_head:?}\n  \
            reference caret anchor={r_anchor:?} head={r_head:?}\n  subject   text={s_text:?}\n  reference text={r_text:?}\n  \
            fidelity violations ({}):\n{}\n  --- event trail ---\n{}",
         violations.len(),
         violations.join("\n"),
-        fidelity::drain_ring().join("\n"),
+        trail.join("\n"),
       );
       prev_head = s_head;
     }
