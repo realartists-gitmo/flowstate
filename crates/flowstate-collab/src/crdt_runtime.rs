@@ -902,6 +902,12 @@ impl CrdtRuntime {
     let anchor = clamp_projection_offset(projection, selection.anchor);
     let head = clamp_projection_offset(projection, selection.head);
     let projection_index = ProjectionRuntimeIndex::from_projection(projection);
+    // Intentionally projection-space (NOT the `_in_loro` variant): a selection is
+    // encoded to a Loro cursor here and decoded back via `offset_for_body_unicode`,
+    // which is also projection-space. Both directions must use the SAME space or the
+    // round-trip drifts on object-adjacent-empty docs (guarded by
+    // `caret_offset_round_trips_through_projection_space`). Only direct body mutations
+    // — which don't round-trip — use the Loro-space resolver (FS-170 fix 5d50099).
     let anchor_pos = projection_index.body_unicode_for_offset(projection, anchor)?;
     let head_pos = projection_index.body_unicode_for_offset(projection, head)?;
     let anchor_cursor = cursor_for_boundary(&body, anchor_pos, anchor_affinity)?.encode();
@@ -1093,6 +1099,10 @@ impl CrdtRuntime {
   fn presence_endpoint(&self, offset: DocumentOffset, affinity: SelectionAffinity, visual_gravity: VisualGravity) -> Option<SelectionEndpoint> {
     let text = body_text(&self.doc);
     let offset = clamp_projection_offset(&self.projection, offset);
+    // Intentionally projection-space: the endpoint encodes to a Loro cursor and is
+    // decoded back via projection-space `offset_for_body_unicode`; both sides must
+    // share a space or the presence caret drifts on object-adjacent-empty docs. Only
+    // direct (non-round-tripping) body mutations use the Loro-space resolver (5d50099).
     let pos = self
       .projection_index
       .body_unicode_for_offset(&self.projection, offset)?;

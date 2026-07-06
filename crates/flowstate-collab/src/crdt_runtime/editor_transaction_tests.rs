@@ -220,6 +220,56 @@ fn object_adjacent_empty_paragraph_incremental_matches_full_rebuild() -> Result<
   Ok(())
 }
 
+// Guards the caret coordinate-space invariant behind the FS-170 fix: a caret/selection
+// encodes a projection offset to a Loro cursor (forward, `body_unicode_for_offset`) and
+// later decodes it back (reverse, `offset_for_body_unicode`). BOTH must stay in the same
+// (projection) space, or the encode->decode round-trip drifts on object-adjacent-empty
+// docs. (Only direct, non-round-tripping body mutations use the Loro-space resolver.)
+// This asserts the projection-space round-trip is self-consistent for a paragraph that
+// follows a coalesced empty — regression guard against "fixing" only one direction.
+#[test]
+fn caret_offset_round_trips_through_projection_space() -> Result<()> {
+  let mk_para = |text: &str| {
+    flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: if text.is_empty() {
+        Vec::new()
+      } else {
+        vec![flowstate_document::InputRun { text: text.to_string(), styles: RunStyles::default() }]
+      },
+    })
+  };
+  let source = flowstate_document::document_from_input_blocks(
+    flowstate_document::flowstate_document_theme(),
+    vec![
+      mk_para("before"),
+      flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
+        asset_id: AssetId(1),
+        alt_text: "img".to_string(),
+        caption: None,
+        sizing: flowstate_document::InputImageSizing::Intrinsic,
+        alignment: flowstate_document::InputBlockAlignment::Left,
+      }),
+      mk_para(""),
+      mk_para("after"),
+    ],
+  );
+  let doc = flowstate_document::document_to_loro(&source, "Caret round-trip")?;
+  let runtime = CrdtRuntime::from_doc(doc, None, None)?;
+  // Start of the "after" paragraph (index 1 after the empty is coalesced out).
+  let target = DocumentOffset { paragraph: runtime.projection.paragraphs.len() - 1, byte: 0 };
+  let pos = runtime
+    .projection_index
+    .body_unicode_for_offset(&runtime.projection, target)
+    .expect("projection-space offset resolves");
+  let back = runtime
+    .projection_index
+    .offset_for_body_unicode(&runtime.projection, pos)
+    .expect("reverse resolves");
+  assert_eq!(back, target, "caret encode->decode must round-trip in one consistent (projection) space");
+  Ok(())
+}
+
 #[test]
 fn grouped_editor_preflight_rejects_wrong_stable_ids_without_mutation() -> Result<()> {
   let mut runtime = CrdtRuntime::new_empty("Invalid stable identity")?;
