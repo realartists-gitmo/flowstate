@@ -31,6 +31,66 @@ fn seeded_peers(peer_count: usize, title: &str) -> Result<Vec<CrdtRuntime>> {
     .collect()
 }
 
+/// Seed `peer_count` runtimes from an existing Loro `base` document (a fixture),
+/// each with a deterministic peer id — like [`seeded_peers`] but from real document
+/// structure (objects, empties, soft breaks, tables) instead of a blank doc.
+fn seeded_peers_from_loro(peer_count: usize, base: &LoroDoc) -> Result<Vec<CrdtRuntime>> {
+  let snapshot = base.export(ExportMode::Snapshot)?;
+  (0..peer_count)
+    .map(|peer_ix| {
+      let doc = LoroDoc::new();
+      doc.set_peer_id(0x1000 + peer_ix as u64)?;
+      let status = doc.import(&snapshot)?;
+      assert!(status.pending.is_none(), "seed snapshot import must not leave pending dependencies");
+      CrdtRuntime::from_doc(doc, None, None)
+    })
+    .collect()
+}
+
+/// Structurally-rich fixture reproducing the impact-defense doc's problem features
+/// in miniature — the structures blank-doc random stress never generates: images
+/// flanked by empty paragraphs (projection coalescing vs live-body coordinates) and
+/// intra-paragraph soft line breaks (U+2028). Seeding the convergence stress from
+/// THIS is what exercises the projection<->Loro coordinate paths that broke on the
+/// real doc but that the blank-doc suites structurally cannot reach.
+fn structural_fixture() -> Result<LoroDoc> {
+  use flowstate_document::{InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun};
+  let para = |t: &str| {
+    InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: if t.is_empty() {
+        Vec::new()
+      } else {
+        vec![InputRun { text: t.to_string(), styles: RunStyles::default() }]
+      },
+    })
+  };
+  let image = || {
+    InputBlock::Image(InputImageBlock {
+      asset_id: flowstate_document::AssetId(1),
+      alt_text: "img".to_string(),
+      caption: None,
+      sizing: InputImageSizing::Intrinsic,
+      alignment: InputBlockAlignment::Left,
+    })
+  };
+  let blocks = vec![
+    para("Introduction with several words to edit."),
+    image(),
+    para(""), // coalesced empty immediately after an object
+    para("Text after the first image."),
+    para("Left of soft break\u{2028}right of soft break."), // intra-paragraph soft break
+    para("alpha bravo charlie"),
+    image(),
+    para(""),
+    para(""), // two empties after an object
+    para("Two empties above me."),
+    para("Closing remarks paragraph."),
+  ];
+  let source = flowstate_document::document_from_input_blocks(flowstate_document::flowstate_document_theme(), blocks);
+  Ok(flowstate_document::document_to_loro(&source, "Structural fixture")?)
+}
+
 fn all_version_vectors_equal(peers: &[CrdtRuntime]) -> bool {
   let first = peers[0].doc().state_vv();
   peers.iter().skip(1).all(|peer| peer.doc().state_vv() == first)
@@ -261,6 +321,211 @@ fn three_peer_random_interleaving_converges_semantically() -> Result<()> {
   Ok(())
 }
 
+// ============================================================================
+// N-peer full-operation convergence fuzz harness.
+//
+// Convergence is a PROPERTY: for any peer count and any sequence of valid
+// operations, after all updates drain (a) every peer's projection is identical
+// and (b) each peer's incrementally-maintained projection equals a fresh full
+// `document_from_loro` rebuild. The blank-doc suites above never exercised
+// objects, empty paragraphs, soft breaks, or tables, so they structurally could
+// not reach the coordinate/coalescing paths that broke on the real doc. This
+// harness seeds from structural fixtures, drives every op family from each peer's
+// live projection, delivers updates out of order, and asserts the property across
+// N peers. Op families are added incrementally; each returned command must be one
+// the runtime SHOULD accept.
+// ============================================================================
+
+/// Per-peer-namespaced fresh id. Editor-minted paragraph/block/row/column ids must
+/// never collide across replicas; real ids are Uuid-derived u128 so this small
+/// structured space (per-peer high bits + monotonic sequence) effectively never
+/// collides with them or across peers.
+fn fresh_id(peer_ix: usize, op_seq: u64, salt: u64) -> u128 {
+  0x5000_0000_u128 + ((peer_ix as u128) << 44) + (u128::from(op_seq) << 8) + u128::from(salt)
+}
+
+/// A uniformly random VALID char-boundary byte offset in `0..=text.len()`.
+fn random_char_boundary(text: &str, seed: &mut u64) -> usize {
+  let char_count = text.chars().count();
+  let pick = ((next_seed(seed) >> 32) as usize) % (char_count + 1);
+  text.char_indices().nth(pick).map_or(text.len(), |(byte, _)| byte)
+}
+
+/// Generate a random valid editor command from `projection` (this peer's live
+/// state), or `None` when the chosen op doesn't fit the current document (caller
+/// retries). Paragraph/text families for now; block/table/object families are
+/// added as the generator grows toward full coverage.
+fn generate_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+  let paragraph_count = projection.paragraphs.len();
+  if paragraph_count == 0 {
+    return None;
+  }
+  let paragraph_ix = ((next_seed(seed) >> 32) as usize) % paragraph_count;
+  let text = flowstate_document::paragraph_text(projection, paragraph_ix);
+
+  match (next_seed(seed) >> 32) % 8 {
+    // Insert text; ~1/8 of inserts are an intra-paragraph soft line break (U+2028),
+    // which must stay inside the paragraph and never become a body boundary.
+    0..=2 => {
+      let byte = random_char_boundary(&text, seed);
+      let insert = if (next_seed(seed) >> 32).is_multiple_of(8) {
+        "\u{2028}".to_string()
+      } else {
+        char::from(b'a' + ((next_seed(seed) >> 32) % 26) as u8).to_string()
+      };
+      Some(EditorSemanticCommand::InsertText {
+        at: DocumentOffset { paragraph: paragraph_ix, byte },
+        text: insert,
+        styles: RunStyles::default(),
+      })
+    },
+    // Delete a single char within a paragraph.
+    3 if !text.is_empty() => {
+      let chars: Vec<(usize, char)> = text.char_indices().collect();
+      let pick = ((next_seed(seed) >> 32) as usize) % chars.len();
+      let start = chars[pick].0;
+      let end = start + chars[pick].1.len_utf8();
+      Some(EditorSemanticCommand::DeleteRange {
+        range: DocumentOffset { paragraph: paragraph_ix, byte: start }..DocumentOffset { paragraph: paragraph_ix, byte: end },
+      })
+    },
+    // Split a paragraph at a random boundary.
+    4 => {
+      let byte = random_char_boundary(&text, seed);
+      let block_ix = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
+      Some(EditorSemanticCommand::SplitParagraph {
+        at: DocumentOffset { paragraph: paragraph_ix, byte },
+        source_paragraph: projection.ids.paragraph_ids[paragraph_ix],
+        source_block: projection.ids.block_ids[block_ix],
+        new_paragraph: ParagraphId(fresh_id(peer_ix, op_seq, 1)),
+        new_block: BlockId(fresh_id(peer_ix, op_seq, 2)),
+        inherited_style: projection.paragraphs[paragraph_ix].style,
+      })
+    },
+    // Join this paragraph with the previous one.
+    5 if paragraph_ix > 0 => Some(EditorSemanticCommand::JoinParagraphs {
+      first: projection.ids.paragraph_ids[paragraph_ix - 1],
+      second: projection.ids.paragraph_ids[paragraph_ix],
+    }),
+    // Toggle paragraph style.
+    _ => Some(EditorSemanticCommand::SetParagraphStyle {
+      paragraph: projection.ids.paragraph_ids[paragraph_ix],
+      style: if (next_seed(seed) >> 32).is_multiple_of(2) {
+        ParagraphStyle::Normal
+      } else {
+        ParagraphStyle::Custom(((next_seed(seed) >> 32) % 4) as u8)
+      },
+    }),
+  }
+}
+
+/// Drive `peer_count` peers seeded from `base` through `steps` rounds of concurrent
+/// random edits with out-of-order delivery, then assert the convergence property.
+/// Apply errors on generated edge-commands are tolerated (counted, skipped); the
+/// real signal is the post-drain projection equality across all peers and the
+/// incremental-vs-full materializer equivalence per peer.
+fn run_convergence_fuzz(peer_count: usize, base: &LoroDoc, steps: u64, seed_init: u64) -> Result<()> {
+  let mut peers = seeded_peers_from_loro(peer_count, base)?;
+  synchronize_until_converged(&mut peers)?;
+  let mut queues: Vec<PeerQueues> = vec![vec![Vec::new(); peer_count]; peer_count];
+  let mut seed = seed_init.max(1);
+  let mut op_seq = 0_u64;
+  let (mut applied, mut rejected, mut skipped) = (0_u64, 0_u64, 0_u64);
+
+  for step in 0..steps {
+    // Every peer edits concurrently from its own live projection each round — the
+    // genuine simultaneous edits a single tester can't produce by hand.
+    #[allow(clippy::needless_range_loop, reason = "indexed access: each peer applies its own edit and mutates peers[peer_ix]")]
+    for peer_ix in 0..peer_count {
+      let projection = peers[peer_ix].projection_snapshot()?;
+      let mut command = None;
+      for _ in 0..8 {
+        if let Some(candidate) = generate_command(&mut seed, &projection, peer_ix, op_seq) {
+          command = Some(candidate);
+          break;
+        }
+      }
+      let Some(command) = command else {
+        skipped += 1;
+        continue;
+      };
+      op_seq += 1;
+      let transaction_id = ((peer_ix as u128) << 96) | ((step as u128) << 40) | u128::from(op_seq);
+      if std::env::var("FUZZ_LOG").is_ok() {
+        eprintln!("APPLY peer={peer_ix} step={step} {command:?}");
+      }
+      match peers[peer_ix].apply_editor_commands(transaction_id, &projection.frontier, &[command], None) {
+        Ok(commit) => {
+          applied += 1;
+          enqueue_local_updates(&mut queues, peer_ix, &commit.events);
+        },
+        Err(_error) => rejected += 1,
+      }
+    }
+    // Deliver a random out-of-order subset, leaving some updates in flight so peers
+    // stay concurrently diverged.
+    let deliveries = (next_seed(&mut seed) >> 32) % 4;
+    for _ in 0..deliveries {
+      if !deliver_random_pending_update(&mut peers, &mut queues, &mut seed, "fuzz") {
+        break;
+      }
+    }
+  }
+
+  drain_all_queues_randomized(&mut peers, &mut queues, &mut seed)?;
+  synchronize_until_converged(&mut peers)?;
+
+  let context = format!("N={peer_count} seed={seed_init} (applied={applied} rejected={rejected} skipped={skipped})");
+  for peer_ix in 1..peer_count {
+    assert_eq!(
+      peers[0].doc().state_vv(),
+      peers[peer_ix].doc().state_vv(),
+      "version vector mismatch: peer 0 vs {peer_ix} [{context}]"
+    );
+    let left = peers[0].projection_snapshot()?;
+    let right = peers[peer_ix].projection_snapshot()?;
+    assert_projections_converged(&left, &right, &format!("peer 0 vs {peer_ix} [{context}]"));
+  }
+  for (peer_ix, peer) in peers.iter().enumerate() {
+    let incremental = peer.projection_snapshot()?;
+    let fresh = document_from_loro(peer.doc())?;
+    assert_projections_converged(&incremental, &fresh, &format!("peer {peer_ix} incremental-vs-full [{context}]"));
+  }
+  eprintln!("fuzz ok: {context}");
+  Ok(())
+}
+
+// KNOWN-FAILING (ignored): surfaces the incremental-vs-full COALESCING PARITY bug.
+// `document_from_loro`/`push_flow_blocks` coalesces an object-adjacent empty paragraph,
+// but the incremental replay does not — so an edit that turns an object-adjacent
+// paragraph empty (e.g. deleting its last char) leaves the incremental projection with
+// one more paragraph than the full rebuild. Minimal single-peer repro: structural_fixture,
+// seed 0xB2, 15 ops (a "Two empties above me." split into "T"+"wo…", then delete the "T").
+// See docs/collab-coalescing-parity.md. Un-ignore once the incremental path coalesces
+// object-adjacent empties to match the full rebuild.
+#[ignore = "incremental-vs-full coalescing parity: incremental replay keeps object-adjacent empty paragraphs the full rebuild drops (see docs/collab-coalescing-parity.md)"]
+#[test]
+fn npeer_fuzz_structural_fixture_paragraph_ops() -> Result<()> {
+  for peer_count in 2..=5 {
+    for seed in [0xA1u64, 0xB2, 0xC3, 0xD4] {
+      let base = structural_fixture()?;
+      run_convergence_fuzz(peer_count, &base, 120, seed)?;
+    }
+  }
+  Ok(())
+}
+
+#[test]
+fn npeer_fuzz_blank_paragraph_ops() -> Result<()> {
+  for peer_count in 2..=5 {
+    for seed in [0x1111u64, 0x2222] {
+      let base = new_loro_document("Blank fuzz")?;
+      run_convergence_fuzz(peer_count, &base, 120, seed)?;
+    }
+  }
+  Ok(())
+}
+
 #[test]
 fn two_peer_concurrent_same_paragraph_edits_converge() -> Result<()> {
   let mut peers = seeded_peers(2, "Two peer concurrent paragraph")?;
@@ -355,3 +620,4 @@ fn two_peer_concurrent_same_paragraph_edits_converge() -> Result<()> {
   }
   Ok(())
 }
+

@@ -2973,7 +2973,7 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         .iter()
         .position(|id| id == paragraph)
       {
-        let boundary = paragraph_boundary_unicode_index(projection, paragraph_ix);
+        let boundary = paragraph_boundary_loro_unicode_index(doc, projection, paragraph_ix);
         body_text(doc)
           .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*style))
           .context("marking paragraph style from editor semantic command")?;
@@ -2988,14 +2988,16 @@ pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProject
         .iter()
         .position(|id| id == paragraph)
       {
-        let start = projection_offset_to_body_unicode_index(
+        let start = projection_offset_to_loro_body_unicode_index(
+          doc,
           projection,
           flowstate_document::DocumentOffset {
             paragraph: paragraph_ix,
             byte: range.start,
           },
         );
-        let end = projection_offset_to_body_unicode_index(
+        let end = projection_offset_to_loro_body_unicode_index(
+          doc,
           projection,
           flowstate_document::DocumentOffset {
             paragraph: paragraph_ix,
@@ -4076,6 +4078,25 @@ fn paragraph_body_start_in_loro(doc: &LoroDoc, paragraph_id: ParagraphId) -> Opt
   None
 }
 
+/// Loro-space boundary position (the paragraph's leading `\n`) for projection
+/// paragraph `paragraph_ix`, resolved from its durable cursor so coalesced empties
+/// don't shift it. Loro-space counterpart of [`paragraph_boundary_unicode_index`];
+/// use at Loro body-mutation sites (join delete, style mark). The paragraph's text
+/// begins one unicode past its boundary. Falls back to the projection-space boundary
+/// when the durable record can't be resolved (e.g. the boundary-0 sentinel).
+fn paragraph_boundary_loro_unicode_index(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ix: usize) -> usize {
+  if paragraph_ix == 0 {
+    return 0;
+  }
+  projection
+    .ids
+    .paragraph_ids
+    .get(paragraph_ix)
+    .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
+    .map(|start| start.saturating_sub(1))
+    .unwrap_or_else(|| paragraph_boundary_unicode_index(projection, paragraph_ix))
+}
+
 fn object_loro_block_by_projected_id(doc: &LoroDoc, body: &LoroText, block_id: flowstate_document::BlockId) -> Option<(String, LoroMap, usize)> {
   let root = doc.get_map(ROOT);
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID).ok()?;
@@ -4623,9 +4644,8 @@ fn join_projection_paragraphs(
   let Some(second_block) = projection.ids.block_ids.get(second_block_ix).copied() else {
     return Ok(false);
   };
-  delete_projection_paragraph_metadata(doc, second, second_block)?;
 
-  let boundary = paragraph_boundary_unicode_index(projection, second_ix);
+  let boundary = paragraph_boundary_loro_unicode_index(doc, projection, second_ix);
   let body = body_text(doc);
   if !boundary_is_live(&body.to_string(), boundary) {
     tracing::warn!(
@@ -4636,6 +4656,12 @@ fn join_projection_paragraphs(
     );
     return Ok(false);
   }
+  // Atomicity: only drop the second paragraph's durable metadata once we have
+  // committed to deleting its boundary. Deleting the record before the liveness
+  // check could orphan the boundary (record gone, '\n' still live) when the join
+  // then skips — a full reprojection fabricates a fresh id there and diverges from
+  // the incremental projection, which still holds the record's original id.
+  delete_projection_paragraph_metadata(doc, second, second_block)?;
   body
     .delete(boundary, 1)
     .context("deleting joined paragraph boundary from Loro body flow")?;
