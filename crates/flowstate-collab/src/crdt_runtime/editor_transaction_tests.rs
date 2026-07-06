@@ -154,6 +154,65 @@ fn grouped_enter_text_batch_is_one_loro_change_and_preserves_client_ids() -> Res
   Ok(())
 }
 
+// KNOWN-FAILING repro (ignored) for the `incremental-vs-full-divergence` seen on the
+// impact-defense doc. A doc with an object flanked by an EMPTY paragraph edits fine at
+// rest, but after an InsertText the runtime's own preflight assert (crdt_runtime.rs
+// ~1249) fires: the AUTHORITATIVE projection (document_from_loro) KEEPS the empty
+// paragraph (3 paragraph ids) while the INCREMENTAL replay DROPS it (2). Direction is
+// the OPPOSITE of the first hypothesis: the fix is to stop the incremental replay
+// (replay_semantic_command_on_projection / apply_projection_patches_to_document in
+// gpui-flowtext) from dropping an object-adjacent empty paragraph, so it matches the
+// canonical full rebuild. Un-ignore once that path is fixed; this asserts convergence.
+#[ignore = "reproduces incremental-vs-full divergence: incremental replay drops an object-adjacent empty paragraph the full rebuild keeps"]
+#[test]
+fn object_adjacent_empty_paragraph_incremental_matches_full_rebuild() -> Result<()> {
+  fn para(text: &str) -> flowstate_document::InputBlock {
+    flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: if text.is_empty() {
+        Vec::new()
+      } else {
+        vec![flowstate_document::InputRun { text: text.to_string(), styles: RunStyles::default() }]
+      },
+    })
+  }
+  let source = flowstate_document::document_from_input_blocks(
+    flowstate_document::flowstate_document_theme(),
+    vec![
+      para("before"),
+      flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
+        asset_id: AssetId(1),
+        alt_text: "img".to_string(),
+        caption: None,
+        sizing: flowstate_document::InputImageSizing::Intrinsic,
+        alignment: flowstate_document::InputBlockAlignment::Left,
+      }),
+      para(""), // empty paragraph immediately after the object
+      para("after"),
+    ],
+  );
+  let doc = flowstate_document::document_to_loro(&source, "Object empty paragraph")?;
+  let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
+
+  let at_rest = runtime.projection_snapshot()?;
+  let fresh_at_rest = document_from_loro(runtime.doc())?;
+  assert_semantic_projection_eq(&at_rest, &fresh_at_rest, "object+empty at rest");
+
+  let target_paragraph = at_rest.paragraphs.len() - 1; // the "after" paragraph
+  let command = EditorSemanticCommand::InsertText {
+    at: DocumentOffset { paragraph: target_paragraph, byte: 0 },
+    text: "X".to_string(),
+    styles: RunStyles::default(),
+  };
+  let selection = EditorSelection::collapsed(DocumentOffset { paragraph: target_paragraph, byte: 1 });
+  runtime.apply_editor_commands(0xabc, &at_rest.frontier, &[command], Some(&selection))?;
+
+  let after_edit = runtime.projection_snapshot()?;
+  let fresh_after_edit = document_from_loro(runtime.doc())?;
+  assert_semantic_projection_eq(&after_edit, &fresh_after_edit, "object+empty after edit");
+  Ok(())
+}
+
 #[test]
 fn grouped_editor_preflight_rejects_wrong_stable_ids_without_mutation() -> Result<()> {
   let mut runtime = CrdtRuntime::new_empty("Invalid stable identity")?;
