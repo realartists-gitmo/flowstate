@@ -322,22 +322,22 @@ impl RichTextEditor {
     let mut replayed = Vec::with_capacity(edits.len());
     let mut rejected = 0usize;
 
+    let section_rebuild_deferral = defer_document_section_rebuilds();
     for mut edit in edits {
       if edit.semantic_commands.is_empty() {
         continue;
       }
-      let mut candidate = document.clone();
-      if edit
-        .semantic_commands
-        .iter()
-        .all(|command| replay_semantic_command_on_projection(&mut candidate, command))
-      {
+      if replay_semantic_batch_on_projection(&mut document, &edit.semantic_commands) {
         edit.base_frontier.clone_from(&frontier);
-        document = candidate;
         replayed.push(edit);
       } else {
         rejected += 1;
       }
+    }
+    let section_rebuild_requested = deferred_document_section_rebuild_requested();
+    drop(section_rebuild_deferral);
+    if section_rebuild_requested {
+      rebuild_document_sections_now(&mut document);
     }
 
     if rejected > 0 {
@@ -857,10 +857,18 @@ impl RichTextEditor {
   }
 
   /// Independently verify the visible document equals `committed_document` with
-  /// the stored pending edits replayed onto it (paragraph texts compared). All
-  /// work is gated behind `enabled()` so it is free when tracing is off.
+  /// the stored pending edits replayed onto it (paragraph texts compared). This
+  /// full replay is gated behind heavy fidelity tracing so normal firehose traces
+  /// do not perturb large-document profiles.
   pub(super) fn fidelity_check_visible_matches_committed(&self, site: &'static str) {
-    if !flowstate_fidelity::enabled() {
+    if !flowstate_fidelity::expensive_checks_enabled() {
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Reconcile, "visible-vs-committed-skipped", || {
+        format!(
+          "site={site} pending={} paragraphs={} reason=heavy-fidelity-disabled",
+          self.pending_semantic_edits.len(),
+          self.document.paragraphs.len(),
+        )
+      });
       return;
     }
     let mut expected = self.committed_document.clone();
@@ -1023,49 +1031,30 @@ pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, 
       true
     },
     SemanticEditCommand::InsertBlock { block, block_ix, after } => {
-      let mut blocks = projection_structural_blocks_from_document(document);
-      let row = (*block_ix).min(blocks.len());
-      blocks.insert(row, structural_block_for_input(*block, None, after.clone()));
-      rebuild_document_from_projection_structural_blocks(document, blocks);
-      true
+      let row = (*block_ix).min(document.blocks.len());
+      insert_projection_structural_block(document, row, structural_block_for_input(*block, None, after.clone())).is_ok()
     },
     SemanticEditCommand::DeleteBlock { block } => {
       let Some(block_ix) = document.ids.block_ids.iter().position(|id| id == block) else {
         return false;
       };
-      let mut blocks = projection_structural_blocks_from_document(document);
-      if block_ix >= blocks.len() {
-        return false;
-      }
-      blocks.remove(block_ix);
-      rebuild_document_from_projection_structural_blocks(document, blocks);
-      true
+      delete_projection_block_at(document, block_ix).is_ok()
     },
     SemanticEditCommand::MoveBlock { block, new_block_ix } => {
       let Some(block_ix) = document.ids.block_ids.iter().position(|id| id == block) else {
         return false;
       };
-      let mut blocks = projection_structural_blocks_from_document(document);
-      if block_ix >= blocks.len() {
-        return false;
-      }
-      let block = blocks.remove(block_ix);
-      blocks.insert((*new_block_ix).min(blocks.len()), block);
-      rebuild_document_from_projection_structural_blocks(document, blocks);
-      true
+      move_projection_block(document, block_ix, *new_block_ix).is_ok()
     },
     SemanticEditCommand::ReplaceBlock { block, block_ix, after } => {
       let row = block
         .and_then(|block| document.ids.block_ids.iter().position(|id| *id == block))
         .unwrap_or(*block_ix);
-      let mut blocks = projection_structural_blocks_from_document(document);
-      if row >= blocks.len() {
+      if row >= document.blocks.len() {
         return false;
       }
-      let block_id = block.unwrap_or(blocks[row].block_id);
-      blocks[row] = structural_block_for_input(block_id, blocks[row].paragraph_id, after.clone());
-      rebuild_document_from_projection_structural_blocks(document, blocks);
-      true
+      let block_id = block.unwrap_or_else(|| document.ids.block_ids.get(row).copied().unwrap_or_else(new_block_id));
+      replace_projection_block(document, row, block_id, after.clone()).is_ok()
     },
     SemanticEditCommand::InsertTableRow {
       table,
@@ -1225,6 +1214,26 @@ pub fn replay_semantic_command_on_projection(document: &mut DocumentProjection, 
       image.alignment = alignment_from_input_alignment(*alignment);
       true
     }),
+  }
+}
+
+#[hotpath::measure]
+fn replay_semantic_batch_on_projection(document: &mut DocumentProjection, commands: &[SemanticEditCommand]) -> bool {
+  match commands {
+    [] => true,
+    [command] => replay_semantic_command_on_projection(document, command),
+    _ => {
+      let mut candidate = document.clone();
+      if commands
+        .iter()
+        .all(|command| replay_semantic_command_on_projection(&mut candidate, command))
+      {
+        *document = candidate;
+        true
+      } else {
+        false
+      }
+    },
   }
 }
 

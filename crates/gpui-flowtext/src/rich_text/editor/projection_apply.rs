@@ -49,6 +49,7 @@ impl RichTextEditor {
     document.frontier.clone_from(&batch.new_frontier);
     self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
     self.committed_document = document;
+    self.layout_invalidation_hint = invalidation;
     self.rebuild_visible_from_committed(Vec::new(), None, cx);
     if self.runtime_edit_selection_epoch.is_none()
       && self.pending_semantic_edits.is_empty()
@@ -61,13 +62,11 @@ impl RichTextEditor {
     }
     self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
     self.identity_map.reconcile(&self.document);
-    self.layout_invalidation_hint = invalidation;
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     self.mark_document_changed_with_ops(generation, false, None, cx);
     // Remote collaboration patches should update this editor in place, but
     // should not scroll the viewport as if the local user typed the change.
-    self.after_formatting_mutation(cx);
     self.pending_scroll_head_after_layout = false;
     self.layout_invalidation_hint = None;
     if let Some((pre_paras, pre_len)) = fid_size_before {
@@ -107,8 +106,7 @@ fn apply_projection_patches_to_document(
   patches: &[ProjectionPatch],
   invalidation: Option<&mut Option<Range<usize>>>,
 ) -> Result<(), ProjectionApplyError> {
-  let original_outline = document.outline.clone();
-  let mut structural_blocks: Option<Vec<ProjectionStructuralBlock>> = None;
+  let mut structural_blocks: Option<Vec<ProjectionPatchBlock>> = None;
   let mut structural_changed = false;
   let mut outline_dirty = false;
   let mut paragraph_invalidation: Option<Range<usize>> = None;
@@ -125,26 +123,18 @@ fn apply_projection_patches_to_document(
         let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
           let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
           let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
-          let target = blocks
-            .get_mut(row)
-            .ok_or(ProjectionApplyError::MissingBlock {
-              block_id: *block_id,
-              row_hint: *row_hint,
-            })?;
+          let target = blocks.get_mut(row).ok_or(ProjectionApplyError::MissingBlock {
+            block_id: *block_id,
+            row_hint: *row_hint,
+          })?;
           if target.paragraph_id != Some(*paragraph_id) {
             return Err(ProjectionApplyError::MissingParagraph {
               paragraph_id: *paragraph_id,
               block_id: *block_id,
             });
           }
-          let InputBlock::Paragraph(old) = &target.block else {
-            return Err(ProjectionApplyError::WrongBlockKind {
-              block_id: *block_id,
-              expected: "a paragraph",
-            });
-          };
-          outline_dirty |= old.style != new.style;
-          target.block = InputBlock::Paragraph(new.clone());
+          outline_dirty |= projection_patch_block_paragraph_style(document, target, *block_id)? != new.style;
+          target.payload = ProjectionPatchBlockPayload::Paragraph(new.clone());
           paragraph_ix
         } else {
           let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
@@ -163,24 +153,17 @@ fn apply_projection_patches_to_document(
         let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
           let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
           let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
-          let target = blocks
-            .get_mut(row)
-            .ok_or(ProjectionApplyError::MissingBlock {
-              block_id: *block_id,
-              row_hint: *row_hint,
-            })?;
+          let target = blocks.get_mut(row).ok_or(ProjectionApplyError::MissingBlock {
+            block_id: *block_id,
+            row_hint: *row_hint,
+          })?;
           if target.paragraph_id != Some(*paragraph_id) {
             return Err(ProjectionApplyError::MissingParagraph {
               paragraph_id: *paragraph_id,
               block_id: *block_id,
             });
           }
-          let InputBlock::Paragraph(paragraph) = &mut target.block else {
-            return Err(ProjectionApplyError::WrongBlockKind {
-              block_id: *block_id,
-              expected: "a paragraph",
-            });
-          };
+          let paragraph = materialize_projection_patch_paragraph(document, target, *block_id)?;
           outline_dirty |= paragraph.style != *style;
           paragraph.style = *style;
           paragraph_ix
@@ -209,24 +192,17 @@ fn apply_projection_patches_to_document(
         let paragraph_ix = if let Some(blocks) = structural_blocks.as_mut() {
           let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
           let paragraph_ix = paragraph_ix_for_structural_row(blocks, row);
-          let target = blocks
-            .get_mut(row)
-            .ok_or(ProjectionApplyError::MissingBlock {
-              block_id: *block_id,
-              row_hint: *row_hint,
-            })?;
+          let target = blocks.get_mut(row).ok_or(ProjectionApplyError::MissingBlock {
+            block_id: *block_id,
+            row_hint: *row_hint,
+          })?;
           if target.paragraph_id != Some(*paragraph_id) {
             return Err(ProjectionApplyError::MissingParagraph {
               paragraph_id: *paragraph_id,
               block_id: *block_id,
             });
           }
-          let InputBlock::Paragraph(paragraph) = &mut target.block else {
-            return Err(ProjectionApplyError::WrongBlockKind {
-              block_id: *block_id,
-              expected: "a paragraph",
-            });
-          };
+          let paragraph = materialize_projection_patch_paragraph(document, target, *block_id)?;
           let text = input_paragraph_text(paragraph);
           paragraph.runs = input_runs_from_text_runs(&text, runs)?;
           paragraph_ix
@@ -252,21 +228,26 @@ fn apply_projection_patches_to_document(
         row_hint,
         block,
       } => {
-        let blocks = structural_blocks
-          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
-        let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
-        if blocks[row].paragraph_id.is_some() || block.paragraph_id.is_some() {
-          return Err(ProjectionApplyError::WrongBlockKind {
-            block_id: *block_id,
-            expected: "an object block",
-          });
+        if let Some(blocks) = structural_blocks.as_mut() {
+          let row = structural_block_ix_for_patch(blocks, *block_id, *row_hint)?;
+          if blocks[row].paragraph_id.is_some()
+            || block.paragraph_id.is_some()
+            || matches!(&block.block, InputBlock::Paragraph(_))
+          {
+            return Err(ProjectionApplyError::WrongBlockKind {
+              block_id: *block_id,
+              expected: "an object block",
+            });
+          }
+          if block.block_id != *block_id {
+            return Err(ProjectionApplyError::InvalidStructuralPatch(
+              "object replacement must preserve the target block id",
+            ));
+          }
+          blocks[row] = ProjectionPatchBlock::from_structural_block(block)?;
+        } else {
+          replace_object_projection_patch(document, *block_id, *row_hint, block)?;
         }
-        if block.block_id != *block_id {
-          return Err(ProjectionApplyError::InvalidStructuralPatch(
-            "object replacement must preserve the target block id",
-          ));
-        }
-        blocks[row] = block.clone();
         structural_changed = true;
       },
       ProjectionPatch::InsertBlocks {
@@ -274,31 +255,60 @@ fn apply_projection_patches_to_document(
         row_hint,
         blocks: inserted,
       } => {
-        let blocks = structural_blocks
-          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
-        let row = anchor_ix_for_insert_blocks(blocks, *before, *row_hint)?;
-        blocks.splice(row..row, inserted.iter().cloned());
-        structural_changed = true;
-        outline_dirty = true;
+        if structural_blocks.is_none() && inserted.iter().all(projection_structural_block_is_object) {
+          let row = anchor_ix_for_document_insert(document, *before, *row_hint)?;
+          for (offset, block) in inserted.iter().enumerate() {
+            insert_projection_structural_block(document, row + offset, (*block).clone())?;
+          }
+          structural_changed = true;
+        } else {
+          let blocks = structural_blocks
+            .get_or_insert_with(|| projection_patch_blocks_from_document(document));
+          let row = anchor_ix_for_insert_blocks(blocks, *before, *row_hint)?;
+          let inserted = inserted
+            .iter()
+            .map(ProjectionPatchBlock::from_structural_block)
+            .collect::<Result<Vec<_>, _>>()?;
+          blocks.splice(row..row, inserted);
+          structural_changed = true;
+          outline_dirty = true;
+        }
       },
       ProjectionPatch::DeleteBlocks { block_ids, row_hint } => {
-        let blocks = structural_blocks
-          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
-        let mut rows = block_ids
-          .iter()
-          .map(|block_id| structural_block_ix_for_patch(blocks, *block_id, *row_hint))
-          .collect::<Result<Vec<_>, _>>()?;
-        rows.sort_unstable();
-        for window in rows.windows(2) {
-          if window[0] == window[1] {
-            return Err(ProjectionApplyError::DuplicateBlockId(blocks[window[0]].block_id));
+        if structural_blocks.is_none() && block_ids.iter().all(|block_id| document_block_is_object(document, *block_id, *row_hint)) {
+          let mut rows = block_ids
+            .iter()
+            .map(|block_id| block_ix_for_patch(document, *block_id, *row_hint))
+            .collect::<Result<Vec<_>, _>>()?;
+          rows.sort_unstable();
+          for window in rows.windows(2) {
+            if window[0] == window[1] {
+              return Err(ProjectionApplyError::DuplicateBlockId(document.ids.block_ids[window[0]]));
+            }
           }
+          for row in rows.into_iter().rev() {
+            delete_projection_block_at(document, row)?;
+          }
+          structural_changed = true;
+        } else {
+          let blocks = structural_blocks
+            .get_or_insert_with(|| projection_patch_blocks_from_document(document));
+          let mut rows = block_ids
+            .iter()
+            .map(|block_id| structural_block_ix_for_patch(blocks, *block_id, *row_hint))
+            .collect::<Result<Vec<_>, _>>()?;
+          rows.sort_unstable();
+          for window in rows.windows(2) {
+            if window[0] == window[1] {
+              return Err(ProjectionApplyError::DuplicateBlockId(blocks[window[0]].block_id));
+            }
+          }
+          for row in rows.into_iter().rev() {
+            blocks.remove(row);
+          }
+          structural_changed = true;
+          outline_dirty = true;
         }
-        for row in rows.into_iter().rev() {
-          blocks.remove(row);
-        }
-        structural_changed = true;
-        outline_dirty = true;
       },
       ProjectionPatch::MoveBlock {
         block_id,
@@ -306,14 +316,21 @@ fn apply_projection_patches_to_document(
         from_hint,
         to_hint,
       } => {
-        let blocks = structural_blocks
-          .get_or_insert_with(|| projection_structural_blocks_from_document(document));
-        let from = structural_block_ix_for_patch(blocks, *block_id, *from_hint)?;
-        let block = blocks.remove(from);
-        let to = anchor_ix_for_insert_blocks(blocks, *before, *to_hint)?;
-        blocks.insert(to, block);
-        structural_changed = true;
-        outline_dirty = true;
+        if structural_blocks.is_none() && document_block_is_object(document, *block_id, *from_hint) {
+          let from = block_ix_for_patch(document, *block_id, *from_hint)?;
+          let to = anchor_ix_for_document_move(document, from, *before, *to_hint)?;
+          move_projection_block(document, from, to)?;
+          structural_changed = true;
+        } else {
+          let blocks = structural_blocks
+            .get_or_insert_with(|| projection_patch_blocks_from_document(document));
+          let from = structural_block_ix_for_patch(blocks, *block_id, *from_hint)?;
+          let block = blocks.remove(from);
+          let to = anchor_ix_for_insert_blocks(blocks, *before, *to_hint)?;
+          blocks.insert(to, block);
+          structural_changed = true;
+          outline_dirty = true;
+        }
       },
       ProjectionPatch::AssetArrived { id, record } => {
         document.assets.assets.insert(*id, record.clone());
@@ -321,13 +338,14 @@ fn apply_projection_patches_to_document(
     }
   }
 
+  let rebuilt_structural = structural_blocks.is_some();
   if let Some(blocks) = structural_blocks {
-    validate_structural_blocks(&blocks)?;
-    rebuild_document_from_projection_structural_blocks(document, blocks);
-    if !outline_dirty {
-      document.outline = original_outline;
-    }
+    validate_projection_patch_blocks(&blocks)?;
+    rebuild_document_from_projection_patch_blocks(document, blocks)?;
   } else if outline_dirty {
+    rebuild_document_sections(document);
+  }
+  if rebuilt_structural && outline_dirty {
     rebuild_document_sections(document);
   }
 
@@ -341,8 +359,89 @@ fn apply_projection_patches_to_document(
   Ok(())
 }
 
+#[derive(Clone)]
+struct ProjectionPatchBlock {
+  block_id: BlockId,
+  paragraph_id: Option<ParagraphId>,
+  payload: ProjectionPatchBlockPayload,
+}
+
+#[derive(Clone)]
+enum ProjectionPatchBlockPayload {
+  ExistingParagraph { paragraph_ix: usize },
+  Paragraph(InputParagraph),
+  ExistingObject { block_ix: usize },
+  Object(InputBlock),
+}
+
+impl ProjectionPatchBlock {
+  fn from_structural_block(block: &ProjectionStructuralBlock) -> Result<Self, ProjectionApplyError> {
+    match &block.block {
+      InputBlock::Paragraph(paragraph) => {
+        let Some(paragraph_id) = block.paragraph_id else {
+          return Err(ProjectionApplyError::InvalidStructuralPatch(
+            "paragraph structural block must carry a paragraph id",
+          ));
+        };
+        Ok(Self {
+          block_id: block.block_id,
+          paragraph_id: Some(paragraph_id),
+          payload: ProjectionPatchBlockPayload::Paragraph(paragraph.clone()),
+        })
+      },
+      InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_) => {
+        if block.paragraph_id.is_some() {
+          return Err(ProjectionApplyError::InvalidStructuralPatch(
+            "object structural block must not carry a paragraph id",
+          ));
+        }
+        Ok(Self {
+          block_id: block.block_id,
+          paragraph_id: None,
+          payload: ProjectionPatchBlockPayload::Object(block.block.clone()),
+        })
+      },
+    }
+  }
+}
+
+fn projection_patch_blocks_from_document(document: &DocumentProjection) -> Vec<ProjectionPatchBlock> {
+  let mut paragraph_ix = 0;
+  document
+    .blocks
+    .iter()
+    .enumerate()
+    .map(|(block_ix, block)| {
+      let block_id = document.ids.block_ids.get(block_ix).copied().unwrap_or_else(new_block_id);
+      match block {
+        Block::Paragraph(_) => {
+          let structural = ProjectionPatchBlock {
+            block_id,
+            paragraph_id: Some(
+              document
+                .ids
+                .paragraph_ids
+                .get(paragraph_ix)
+                .copied()
+                .unwrap_or_else(new_paragraph_id),
+            ),
+            payload: ProjectionPatchBlockPayload::ExistingParagraph { paragraph_ix },
+          };
+          paragraph_ix += 1;
+          structural
+        },
+        Block::Image(_) | Block::Equation(_) | Block::Table(_) => ProjectionPatchBlock {
+          block_id,
+          paragraph_id: None,
+          payload: ProjectionPatchBlockPayload::ExistingObject { block_ix },
+        },
+      }
+    })
+    .collect()
+}
+
 fn structural_block_ix_for_patch(
-  blocks: &[ProjectionStructuralBlock],
+  blocks: &[ProjectionPatchBlock],
   block_id: BlockId,
   row_hint: usize,
 ) -> Result<usize, ProjectionApplyError> {
@@ -355,7 +454,7 @@ fn structural_block_ix_for_patch(
     .ok_or(ProjectionApplyError::MissingBlock { block_id, row_hint })
 }
 
-fn paragraph_ix_for_structural_row(blocks: &[ProjectionStructuralBlock], row: usize) -> usize {
+fn paragraph_ix_for_structural_row(blocks: &[ProjectionPatchBlock], row: usize) -> usize {
   blocks.iter().take(row).filter(|block| block.paragraph_id.is_some()).count()
 }
 
@@ -400,7 +499,7 @@ fn block_ix_for_patch(document: &DocumentProjection, block_id: BlockId, row_hint
 }
 
 fn anchor_ix_for_insert_blocks(
-  blocks: &[ProjectionStructuralBlock],
+  blocks: &[ProjectionPatchBlock],
   before: Option<BlockId>,
   row_hint: usize,
 ) -> Result<usize, ProjectionApplyError> {
@@ -414,6 +513,94 @@ fn anchor_ix_for_insert_blocks(
     .iter()
     .position(|block| block.block_id == before)
     .ok_or(ProjectionApplyError::InvalidAnchor(before))
+}
+
+fn anchor_ix_for_document_insert(
+  document: &DocumentProjection,
+  before: Option<BlockId>,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  let Some(before) = before else {
+    return Ok(document.blocks.len());
+  };
+  if document.ids.block_ids.get(row_hint).copied() == Some(before) {
+    return Ok(row_hint);
+  }
+  document
+    .ids
+    .block_ids
+    .iter()
+    .position(|block_id| *block_id == before)
+    .ok_or(ProjectionApplyError::InvalidAnchor(before))
+}
+
+fn anchor_ix_for_document_move(
+  document: &DocumentProjection,
+  from: usize,
+  before: Option<BlockId>,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  let Some(before) = before else {
+    return Ok(document.blocks.len().saturating_sub(1));
+  };
+  let adjusted_hint = if row_hint > from { row_hint.saturating_sub(1) } else { row_hint };
+  if document
+    .ids
+    .block_ids
+    .get(row_hint)
+    .copied()
+    .or_else(|| document.ids.block_ids.get(adjusted_hint).copied())
+    == Some(before)
+  {
+    return Ok(adjusted_hint);
+  }
+  document
+    .ids
+    .block_ids
+    .iter()
+    .enumerate()
+    .filter(|(ix, _)| *ix != from)
+    .map(|(_, id)| *id)
+    .position(|block_id| block_id == before)
+    .ok_or(ProjectionApplyError::InvalidAnchor(before))
+}
+
+fn projection_structural_block_is_object(block: &ProjectionStructuralBlock) -> bool {
+  block.paragraph_id.is_none() && matches!(&block.block, InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_))
+}
+
+fn document_block_is_object(document: &DocumentProjection, block_id: BlockId, row_hint: usize) -> bool {
+  block_ix_for_patch(document, block_id, row_hint)
+    .ok()
+    .and_then(|row| document.blocks.get(row))
+    .is_some_and(|block| matches!(block, Block::Image(_) | Block::Equation(_) | Block::Table(_)))
+}
+
+fn replace_object_projection_patch(
+  document: &mut DocumentProjection,
+  block_id: BlockId,
+  row_hint: usize,
+  block: &ProjectionStructuralBlock,
+) -> Result<(), ProjectionApplyError> {
+  if block.block_id != block_id {
+    return Err(ProjectionApplyError::InvalidStructuralPatch(
+      "object replacement must preserve the target block id",
+    ));
+  }
+  if !projection_structural_block_is_object(block) {
+    return Err(ProjectionApplyError::WrongBlockKind {
+      block_id,
+      expected: "an object block",
+    });
+  }
+  let row = block_ix_for_patch(document, block_id, row_hint)?;
+  if !matches!(document.blocks.get(row), Some(Block::Image(_) | Block::Equation(_) | Block::Table(_))) {
+    return Err(ProjectionApplyError::WrongBlockKind {
+      block_id,
+      expected: "an object block",
+    });
+  }
+  replace_projection_block(document, row, block_id, block.block.clone())
 }
 
 fn validate_text_runs(text: &str, runs: &[TextRun]) -> Result<(), ProjectionApplyError> {
@@ -455,7 +642,7 @@ fn input_runs_from_text_runs(text: &str, runs: &[TextRun]) -> Result<Vec<InputRu
   )
 }
 
-fn validate_structural_blocks(blocks: &[ProjectionStructuralBlock]) -> Result<(), ProjectionApplyError> {
+fn validate_projection_patch_blocks(blocks: &[ProjectionPatchBlock]) -> Result<(), ProjectionApplyError> {
   let mut block_ids = rustc_hash::FxHashSet::default();
   let mut paragraph_ids = rustc_hash::FxHashSet::default();
   for block in blocks {
@@ -488,40 +675,6 @@ fn replace_paragraph_content(document: &mut DocumentProjection, paragraph_ix: us
 }
 
 #[hotpath::measure]
-fn projection_structural_blocks_from_document(document: &DocumentProjection) -> Vec<ProjectionStructuralBlock> {
-  let mut paragraph_ix = 0;
-  document
-    .blocks
-    .iter()
-    .enumerate()
-    .map(|(block_ix, block)| match block {
-      Block::Paragraph(paragraph) => {
-        let input = input_paragraph_from_document_paragraph(document, paragraph_ix, paragraph);
-        let structural = ProjectionStructuralBlock {
-          block_id: document.ids.block_ids.get(block_ix).copied().unwrap_or_else(new_block_id),
-          paragraph_id: Some(
-            document
-              .ids
-              .paragraph_ids
-              .get(paragraph_ix)
-              .copied()
-              .unwrap_or_else(new_paragraph_id),
-          ),
-          block: InputBlock::Paragraph(input),
-        };
-        paragraph_ix += 1;
-        structural
-      },
-      Block::Image(_) | Block::Equation(_) | Block::Table(_) => ProjectionStructuralBlock {
-        block_id: document.ids.block_ids.get(block_ix).copied().unwrap_or_else(new_block_id),
-        paragraph_id: None,
-        block: input_block_from_block(block),
-      },
-    })
-    .collect()
-}
-
-#[hotpath::measure]
 fn input_paragraph_from_document_paragraph(document: &DocumentProjection, paragraph_ix: usize, paragraph: &Paragraph) -> InputParagraph {
   let text = paragraph_text(document, paragraph_ix);
   let mut byte = 0;
@@ -543,35 +696,339 @@ fn input_paragraph_from_document_paragraph(document: &DocumentProjection, paragr
   }
 }
 
+fn projection_patch_block_paragraph_style(
+  document: &DocumentProjection,
+  block: &ProjectionPatchBlock,
+  block_id: BlockId,
+) -> Result<ParagraphStyle, ProjectionApplyError> {
+  match &block.payload {
+    ProjectionPatchBlockPayload::ExistingParagraph { paragraph_ix } => document
+      .paragraphs
+      .get(*paragraph_ix)
+      .map(|paragraph| paragraph.style)
+      .ok_or(ProjectionApplyError::MissingBlock {
+        block_id,
+        row_hint: *paragraph_ix,
+      }),
+    ProjectionPatchBlockPayload::Paragraph(paragraph) => Ok(paragraph.style),
+    ProjectionPatchBlockPayload::ExistingObject { .. } | ProjectionPatchBlockPayload::Object(_) => {
+      Err(ProjectionApplyError::WrongBlockKind {
+        block_id,
+        expected: "a paragraph",
+      })
+    },
+  }
+}
+
+fn materialize_projection_patch_paragraph<'a>(
+  document: &DocumentProjection,
+  block: &'a mut ProjectionPatchBlock,
+  block_id: BlockId,
+) -> Result<&'a mut InputParagraph, ProjectionApplyError> {
+  match &block.payload {
+    ProjectionPatchBlockPayload::ExistingParagraph { paragraph_ix } => {
+      let Some(paragraph) = document.paragraphs.get(*paragraph_ix) else {
+        return Err(ProjectionApplyError::MissingBlock {
+          block_id,
+          row_hint: *paragraph_ix,
+        });
+      };
+      block.payload = ProjectionPatchBlockPayload::Paragraph(input_paragraph_from_document_paragraph(
+        document,
+        *paragraph_ix,
+        paragraph,
+      ));
+    },
+    ProjectionPatchBlockPayload::Paragraph(_) => {},
+    ProjectionPatchBlockPayload::ExistingObject { .. } | ProjectionPatchBlockPayload::Object(_) => {
+      return Err(ProjectionApplyError::WrongBlockKind {
+        block_id,
+        expected: "a paragraph",
+      });
+    },
+  }
+  match &mut block.payload {
+    ProjectionPatchBlockPayload::Paragraph(paragraph) => Ok(paragraph),
+    ProjectionPatchBlockPayload::ExistingParagraph { .. }
+    | ProjectionPatchBlockPayload::ExistingObject { .. }
+    | ProjectionPatchBlockPayload::Object(_) => unreachable!("paragraph payload was just materialized"),
+  }
+}
+
 #[hotpath::measure]
-fn rebuild_document_from_projection_structural_blocks(document: &mut DocumentProjection, blocks: Vec<ProjectionStructuralBlock>) {
-  let assets = document.assets.clone();
-  let theme = document.theme.clone();
-  let frontier = document.frontier.clone();
-  let document_id = document.ids.document_id;
-  let input_blocks = blocks
-    .iter()
-    .map(|block| block.block.clone())
-    .collect::<Vec<_>>();
-  let block_ids = blocks.iter().map(|block| block.block_id).collect::<Vec<_>>();
-  let paragraph_ids = blocks
-    .iter()
-    .filter_map(|block| match &block.block {
-      InputBlock::Paragraph(_) => Some(block.paragraph_id.unwrap_or_else(new_paragraph_id)),
-      InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_) => None,
-    })
-    .collect::<Vec<_>>();
-  let mut rebuilt = document_from_input_blocks(theme, input_blocks);
-  rebuilt.assets = assets;
-  rebuilt.frontier = frontier;
-  rebuilt.sections = document.sections.clone();
-  rebuilt.ids.document_id = document_id;
-  rebuilt.ids.block_ids = block_ids;
-  rebuilt.ids.paragraph_ids = paragraph_ids;
-  debug_assert_eq!(rebuilt.ids.block_ids.len(), rebuilt.blocks.len());
-  debug_assert_eq!(rebuilt.ids.paragraph_ids.len(), rebuilt.paragraphs.len());
-  rebuild_document_sections(&mut rebuilt);
-  *document = rebuilt;
+fn rebuild_document_from_projection_patch_blocks(
+  document: &mut DocumentProjection,
+  patch_blocks: Vec<ProjectionPatchBlock>,
+) -> Result<(), ProjectionApplyError> {
+  let mut text = String::new();
+  let mut paragraphs = Vec::new();
+  let mut blocks = Vec::with_capacity(patch_blocks.len().max(1));
+  let mut block_ids = Vec::with_capacity(patch_blocks.len().max(1));
+  let mut paragraph_ids = Vec::new();
+
+  for patch_block in patch_blocks {
+    block_ids.push(patch_block.block_id);
+    match patch_block.payload {
+      ProjectionPatchBlockPayload::ExistingParagraph { paragraph_ix } => {
+        let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
+          return Err(ProjectionApplyError::MissingBlock {
+            block_id: patch_block.block_id,
+            row_hint: paragraph_ix,
+          });
+        };
+        let Some(paragraph_id) = patch_block.paragraph_id else {
+          return Err(ProjectionApplyError::InvalidStructuralPatch(
+            "paragraph structural block must carry a paragraph id",
+          ));
+        };
+        let paragraph_text = paragraph_text(document, paragraph_ix);
+        push_rebuilt_paragraph(
+          &mut text,
+          &mut paragraphs,
+          &mut blocks,
+          &mut paragraph_ids,
+          paragraph,
+          paragraph_id,
+          &paragraph_text,
+        );
+      },
+      ProjectionPatchBlockPayload::Paragraph(input) => {
+        let Some(paragraph_id) = patch_block.paragraph_id else {
+          return Err(ProjectionApplyError::InvalidStructuralPatch(
+            "paragraph structural block must carry a paragraph id",
+          ));
+        };
+        let paragraph_text = input_paragraph_text(&input);
+        let paragraph = paragraph_from_input_paragraph(&input);
+        push_rebuilt_paragraph(
+          &mut text,
+          &mut paragraphs,
+          &mut blocks,
+          &mut paragraph_ids,
+          paragraph,
+          paragraph_id,
+          &paragraph_text,
+        );
+      },
+      ProjectionPatchBlockPayload::ExistingObject { block_ix } => {
+        let Some(block) = document.blocks.get(block_ix).cloned() else {
+          return Err(ProjectionApplyError::MissingBlock {
+            block_id: patch_block.block_id,
+            row_hint: block_ix,
+          });
+        };
+        if matches!(block, Block::Paragraph(_)) {
+          return Err(ProjectionApplyError::WrongBlockKind {
+            block_id: patch_block.block_id,
+            expected: "an object block",
+          });
+        }
+        blocks.push(block);
+      },
+      ProjectionPatchBlockPayload::Object(input) => {
+        if matches!(&input, InputBlock::Paragraph(_)) {
+          return Err(ProjectionApplyError::WrongBlockKind {
+            block_id: patch_block.block_id,
+            expected: "an object block",
+          });
+        }
+        blocks.push(block_from_input_block(&input));
+      },
+    }
+  }
+
+  if paragraphs.is_empty() {
+    let paragraph = Paragraph {
+      style: ParagraphStyle::Normal,
+      byte_range: 0..0,
+      runs: Vec::new(),
+      version: 0,
+    };
+    let paragraph_id = new_paragraph_id();
+    let block_id = new_block_id();
+    block_ids.push(block_id);
+    push_rebuilt_paragraph(
+      &mut text,
+      &mut paragraphs,
+      &mut blocks,
+      &mut paragraph_ids,
+      paragraph,
+      paragraph_id,
+      "",
+    );
+  }
+
+  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
+  document.text = Rope::from(text);
+  document.paragraphs = Arc::new(paragraphs);
+  document.blocks = Arc::new(blocks);
+  document.ids.block_ids = block_ids;
+  document.ids.paragraph_ids = paragraph_ids;
+  document.offset_index = offset_index;
+  reconcile_document_ids(document);
+  Ok(())
+}
+
+#[allow(clippy::too_many_arguments, reason = "rebuilding projection shape threads parallel output vectors")]
+fn push_rebuilt_paragraph(
+  text: &mut String,
+  paragraphs: &mut Vec<Paragraph>,
+  blocks: &mut Vec<Block>,
+  paragraph_ids: &mut Vec<ParagraphId>,
+  mut paragraph: Paragraph,
+  paragraph_id: ParagraphId,
+  paragraph_text: &str,
+) {
+  if !paragraphs.is_empty() {
+    text.push('\n');
+  }
+  let start = text.len();
+  text.push_str(paragraph_text);
+  paragraph.byte_range = start..text.len();
+  paragraph_ids.push(paragraph_id);
+  paragraphs.push(paragraph.clone());
+  blocks.push(Block::Paragraph(paragraph));
+}
+
+fn insert_projection_structural_block(
+  document: &mut DocumentProjection,
+  row: usize,
+  block: ProjectionStructuralBlock,
+) -> Result<(), ProjectionApplyError> {
+  if matches!(&block.block, InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_)) {
+    if block.paragraph_id.is_some() {
+      return Err(ProjectionApplyError::InvalidStructuralPatch(
+        "object structural block must not carry a paragraph id",
+      ));
+    }
+    if document.ids.block_ids.contains(&block.block_id) {
+      return Err(ProjectionApplyError::DuplicateBlockId(block.block_id));
+    }
+    let row = row.min(document.blocks.len());
+    Arc::make_mut(&mut document.blocks).insert(row, block_from_input_block(&block.block));
+    document
+      .ids
+      .block_ids
+      .insert(row.min(document.ids.block_ids.len()), block.block_id);
+    reconcile_document_ids(document);
+    return Ok(());
+  }
+
+  let mut blocks = projection_patch_blocks_from_document(document);
+  let row = row.min(blocks.len());
+  blocks.insert(row, ProjectionPatchBlock::from_structural_block(&block)?);
+  validate_projection_patch_blocks(&blocks)?;
+  rebuild_document_from_projection_patch_blocks(document, blocks)?;
+  rebuild_document_sections(document);
+  Ok(())
+}
+
+fn delete_projection_block_at(document: &mut DocumentProjection, row: usize) -> Result<(), ProjectionApplyError> {
+  let missing_block_id = document.ids.block_ids.get(row).copied().unwrap_or(BlockId(0));
+  let Some(block) = document.blocks.get(row) else {
+    return Err(ProjectionApplyError::MissingBlock {
+      block_id: missing_block_id,
+      row_hint: row,
+    });
+  };
+  if matches!(block, Block::Image(_) | Block::Equation(_) | Block::Table(_)) {
+    Arc::make_mut(&mut document.blocks).remove(row);
+    remove_block_ids(document, row..row + 1);
+    reconcile_document_ids(document);
+    return Ok(());
+  }
+
+  let mut blocks = projection_patch_blocks_from_document(document);
+  if row >= blocks.len() {
+    return Err(ProjectionApplyError::MissingBlock {
+      block_id: missing_block_id,
+      row_hint: row,
+    });
+  }
+  blocks.remove(row);
+  validate_projection_patch_blocks(&blocks)?;
+  rebuild_document_from_projection_patch_blocks(document, blocks)?;
+  rebuild_document_sections(document);
+  Ok(())
+}
+
+fn move_projection_block(document: &mut DocumentProjection, from: usize, to: usize) -> Result<(), ProjectionApplyError> {
+  let missing_block_id = document.ids.block_ids.get(from).copied().unwrap_or(BlockId(0));
+  let Some(block) = document.blocks.get(from) else {
+    return Err(ProjectionApplyError::MissingBlock {
+      block_id: missing_block_id,
+      row_hint: from,
+    });
+  };
+  if matches!(block, Block::Image(_) | Block::Equation(_) | Block::Table(_)) {
+    let blocks = Arc::make_mut(&mut document.blocks);
+    let block = blocks.remove(from);
+    let to = to.min(blocks.len());
+    blocks.insert(to, block);
+    if from < document.ids.block_ids.len() {
+      let block_id = document.ids.block_ids.remove(from);
+      document
+        .ids
+        .block_ids
+        .insert(to.min(document.ids.block_ids.len()), block_id);
+    }
+    reconcile_document_ids(document);
+    return Ok(());
+  }
+
+  let mut blocks = projection_patch_blocks_from_document(document);
+  if from >= blocks.len() {
+    return Err(ProjectionApplyError::MissingBlock {
+      block_id: missing_block_id,
+      row_hint: from,
+    });
+  }
+  let block = blocks.remove(from);
+  blocks.insert(to.min(blocks.len()), block);
+  validate_projection_patch_blocks(&blocks)?;
+  rebuild_document_from_projection_patch_blocks(document, blocks)?;
+  rebuild_document_sections(document);
+  Ok(())
+}
+
+fn replace_projection_block(
+  document: &mut DocumentProjection,
+  row: usize,
+  block_id: BlockId,
+  after: InputBlock,
+) -> Result<(), ProjectionApplyError> {
+  let paragraph_id = paragraph_ix_for_block_row(document, row).and_then(|paragraph_ix| document.ids.paragraph_ids.get(paragraph_ix).copied());
+  if matches!(document.blocks.get(row), Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)))
+    && matches!(&after, InputBlock::Image(_) | InputBlock::Equation(_) | InputBlock::Table(_))
+  {
+    if document
+      .ids
+      .block_ids
+      .iter()
+      .enumerate()
+      .any(|(ix, id)| ix != row && *id == block_id)
+    {
+      return Err(ProjectionApplyError::DuplicateBlockId(block_id));
+    }
+    if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(row) {
+      *block = block_from_input_block(&after);
+    }
+    if row < document.ids.block_ids.len() {
+      document.ids.block_ids[row] = block_id;
+    }
+    reconcile_document_ids(document);
+    return Ok(());
+  }
+
+  let mut blocks = projection_patch_blocks_from_document(document);
+  if row >= blocks.len() {
+    return Err(ProjectionApplyError::MissingBlock { block_id, row_hint: row });
+  }
+  blocks[row] = ProjectionPatchBlock::from_structural_block(&structural_block_for_input(block_id, paragraph_id, after))?;
+  validate_projection_patch_blocks(&blocks)?;
+  rebuild_document_from_projection_patch_blocks(document, blocks)?;
+  rebuild_document_sections(document);
+  Ok(())
 }
 
 

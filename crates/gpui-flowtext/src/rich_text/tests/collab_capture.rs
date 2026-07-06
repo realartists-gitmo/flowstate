@@ -287,6 +287,95 @@ fn projection_patch_batch_moves_blocks_by_stable_anchor() {
 }
 
 #[test]
+fn projection_patch_batch_inserts_paragraph_block_without_dropping_text() {
+  let mut document = document_from_input(
+    DocumentTheme::default(),
+    vec![
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("alpha")],
+      },
+      InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![plain("omega")],
+      },
+    ],
+  );
+  document.frontier = vec![1];
+  let inserted_block = BlockId(0xabc);
+  let inserted_paragraph = ParagraphId(0xdef);
+  let before = document.ids.block_ids[1];
+  let batch = ProjectionPatchBatch {
+    transaction_id: 11,
+    base_frontier: document.frontier.clone(),
+    new_frontier: vec![2],
+    patches: vec![ProjectionPatch::InsertBlocks {
+      before: Some(before),
+      row_hint: 1,
+      blocks: vec![ProjectionStructuralBlock {
+        block_id: inserted_block,
+        paragraph_id: Some(inserted_paragraph),
+        block: InputBlock::Paragraph(InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![plain("inserted")],
+        }),
+      }],
+    }],
+  };
+
+  apply_projection_patch_batch(&mut document, &batch).expect("paragraph block insert should apply");
+
+  assert_eq!(paragraph_text(&document, 0), "alpha");
+  assert_eq!(paragraph_text(&document, 1), "inserted");
+  assert_eq!(paragraph_text(&document, 2), "omega");
+  assert_eq!(document.ids.block_ids[1], inserted_block);
+  assert_eq!(document.ids.paragraph_ids[1], inserted_paragraph);
+  assert_eq!(document.frontier, vec![2]);
+}
+
+#[test]
+fn deferred_section_rebuilds_wait_for_explicit_finalizer() {
+  let mut theme = DocumentTheme::default();
+  theme.set_custom_paragraph_style(
+    0,
+    CustomParagraphStyle {
+      font_size: gpui::px(18.0),
+      font_family: None,
+      color: gpui::black(),
+      bold: true,
+      italic: false,
+      underline: ThemeUnderline::None,
+      align: CustomParagraphAlign::Left,
+      spacing_before: gpui::px(0.0),
+      spacing_after: gpui::px(0.0),
+      border: None,
+      section_kind: Some(0),
+      section_level: Some(1),
+    },
+  );
+  let mut document = document_from_input(
+    theme,
+    vec![InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![plain("Heading")],
+    }],
+  );
+  assert!(document.outline.is_empty());
+
+  let guard = defer_document_section_rebuilds();
+  paragraphs_mut(&mut document)[0].style = ParagraphStyle::Custom(0);
+  rebuild_document_sections(&mut document);
+  assert!(deferred_document_section_rebuild_requested());
+  assert!(document.outline.is_empty(), "deferred rebuild should not update outline eagerly");
+  drop(guard);
+
+  rebuild_document_sections_now(&mut document);
+  assert!(!deferred_document_section_rebuild_requested());
+  assert_eq!(document.outline.len(), 1);
+  assert_eq!(document.outline[0].heading_paragraph, document.ids.paragraph_ids[0]);
+}
+
+#[test]
 fn section_page_metadata_survives_outline_recompute_and_block_move() {
   let mut theme = DocumentTheme::default();
   theme.set_custom_paragraph_style(

@@ -99,6 +99,21 @@ pub fn enabled() -> bool {
   ENABLED.load(Ordering::Relaxed)
 }
 
+/// Returns whether diagnostics may run expensive whole-document verification.
+///
+/// `FLOWSTATE_TRACE_FIDELITY=1` should keep the normal firehose and cheap
+/// invariants available without perturbing large-document hot paths. Set
+/// `FLOWSTATE_TRACE_FIDELITY_HEAVY=1` when a debugging session specifically needs
+/// full reprojection or replay checks.
+#[must_use]
+pub fn expensive_checks_enabled() -> bool {
+  enabled()
+    && std::env::var("FLOWSTATE_TRACE_FIDELITY_HEAVY").is_ok_and(|value| {
+      let trimmed = value.trim();
+      !trimmed.is_empty() && trimmed != "0"
+    })
+}
+
 /// Records a gated firehose event. The `detail` closure runs only when enabled,
 /// so instrumentation is free when off. The rendered line is pushed to the
 /// thread-local ring buffer and emitted at `debug` under target `fidelity`.

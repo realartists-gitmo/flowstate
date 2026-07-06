@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::{cell::Cell, ops::Range, sync::Arc};
 
 use crop::Rope;
 use gpui::{Hsla, Pixels, SharedString, black, px, rgb};
@@ -65,6 +65,46 @@ pub fn paragraphs_mut(document: &mut DocumentProjection) -> &mut Vec<Paragraph> 
 #[hotpath::measure]
 pub fn paragraph_blocks_from_paragraphs(paragraphs: &[Paragraph]) -> Vec<Block> {
   paragraphs.iter().cloned().map(Block::Paragraph).collect()
+}
+
+thread_local! {
+  static DOCUMENT_SECTION_REBUILD_DEFERRAL_DEPTH: Cell<usize> = const { Cell::new(0) };
+  static DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY: Cell<bool> = const { Cell::new(false) };
+}
+
+#[derive(Debug)]
+pub struct DocumentSectionRebuildDeferral;
+
+impl Drop for DocumentSectionRebuildDeferral {
+  fn drop(&mut self) {
+    DOCUMENT_SECTION_REBUILD_DEFERRAL_DEPTH.with(|depth| {
+      depth.set(depth.get().saturating_sub(1));
+    });
+  }
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn defer_document_section_rebuilds() -> DocumentSectionRebuildDeferral {
+  DOCUMENT_SECTION_REBUILD_DEFERRAL_DEPTH.with(|depth| {
+    if depth.get() == 0 {
+      DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY.with(|dirty| dirty.set(false));
+    }
+    depth.set(depth.get().saturating_add(1));
+  });
+  DocumentSectionRebuildDeferral
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn document_section_rebuilds_deferred() -> bool {
+  DOCUMENT_SECTION_REBUILD_DEFERRAL_DEPTH.with(|depth| depth.get() > 0)
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn deferred_document_section_rebuild_requested() -> bool {
+  DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY.with(Cell::get)
 }
 
 #[hotpath::measure]
@@ -356,6 +396,15 @@ pub fn remove_block_ids(document: &mut DocumentProjection, range: Range<usize>) 
 
 #[hotpath::measure]
 pub fn rebuild_document_outline(document: &mut DocumentProjection) {
+  if document_section_rebuilds_deferred() {
+    DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY.with(|dirty| dirty.set(true));
+    return;
+  }
+  rebuild_document_outline_now(document);
+}
+
+#[hotpath::measure]
+pub fn rebuild_document_outline_now(document: &mut DocumentProjection) {
   reconcile_document_ids(document);
   document.outline = Arc::new(document_outline(document));
 }
@@ -366,6 +415,12 @@ pub fn rebuild_document_outline(document: &mut DocumentProjection) {
 #[hotpath::measure]
 pub fn rebuild_document_sections(document: &mut DocumentProjection) {
   rebuild_document_outline(document);
+}
+
+#[hotpath::measure]
+pub fn rebuild_document_sections_now(document: &mut DocumentProjection) {
+  DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY.with(|dirty| dirty.set(false));
+  rebuild_document_outline_now(document);
 }
 
 /// Computes the disposable heading hierarchy purely from paragraph styles,

@@ -317,14 +317,14 @@ impl DocumentPackage {
   }
 
   /// §fidelity persistence round-trip invariant. Read-only and gated on
-  /// [`fidelity::enabled`]: it reloads this package's canonical Loro state into a
+  /// [`fidelity::expensive_checks_enabled`]: it reloads this package's canonical Loro state into a
   /// fresh document and asserts the projection built from the reloaded state
   /// matches the projection of the `source` document that was persisted
   /// (paragraph count + texts, paragraph/block ids, and section count). Never
   /// mutates `self` or `source`; failures fire the `package-roundtrip-mismatch`
   /// violation.
   fn fidelity_check_roundtrip(&self, source: &LoroDoc) {
-    if !fidelity::enabled() {
+    if !fidelity::expensive_checks_enabled() {
       return;
     }
     let expected = match crate::loro_projection::document_from_loro(source) {

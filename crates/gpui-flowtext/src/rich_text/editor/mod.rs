@@ -1094,11 +1094,11 @@ pub struct RichTextEditor {
   // Convergence backstop for the scroll-materialization render loop. Records the
   // (rounded scroll-y, edit_generation) of the last render-path materialization
   // pass and how many consecutive passes ran at that unchanged signature. A large
-  // document whose item-size cache cannot be incrementally patched
-  // (`document_has_object_blocks`) re-runs a full O(doc) rebuild + `cx.notify()`
-  // every render; if materialization never "sticks" it loops forever and freezes
-  // the window. Any real scroll or edit changes the signature and resets the
-  // count, so this caps ONLY the pathological non-converging loop.
+  // document whose item-size cache cannot be incrementally patched re-runs a full
+  // O(doc) rebuild + `cx.notify()` every render; if materialization never
+  // "sticks" it loops forever and freezes the window. Any real scroll or edit
+  // changes the signature and resets the count, so this caps ONLY the
+  // pathological non-converging loop.
   scroll_materialize_signature: Option<(i32, u64)>,
   scroll_materialize_stall_frames: u32,
   item_sizes_cache: Option<ItemSizesCache>,
