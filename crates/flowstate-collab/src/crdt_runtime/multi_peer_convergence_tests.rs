@@ -503,7 +503,7 @@ fn run_convergence_fuzz(peer_count: usize, base: &LoroDoc, steps: u64, seed_init
 // seed 0xB2, 15 ops (a "Two empties above me." split into "T"+"wo…", then delete the "T").
 // See docs/collab-coalescing-parity.md. Un-ignore once the incremental path coalesces
 // object-adjacent empties to match the full rebuild.
-#[ignore = "incremental-vs-full coalescing parity: incremental replay keeps object-adjacent empty paragraphs the full rebuild drops (see docs/collab-coalescing-parity.md)"]
+#[ignore = "incremental-vs-full coalescing parity: incremental replay keeps object-adjacent empty paragraphs the full rebuild coalesces (see docs/collab-coalescing-parity.md)"]
 #[test]
 fn npeer_fuzz_structural_fixture_paragraph_ops() -> Result<()> {
   for peer_count in 2..=5 {
