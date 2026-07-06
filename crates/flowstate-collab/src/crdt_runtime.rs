@@ -22,7 +22,7 @@ use flowstate_document::{
 };
 use gpui_flowtext::SemanticEditCommand as EditorSemanticCommand;
 use loro::{
-  Container, ContainerID, ExportMode, Frontiers, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
+  Container, ContainerID, ExportMode, Frontiers, ID, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
   UndoItemMeta, UndoManager, ValueOrContainer, VersionRange, VersionVector,
   cursor::{Cursor, Side},
   event::{Diff, DiffEvent},
@@ -1823,13 +1823,14 @@ impl CrdtRuntime {
     tracing::warn!(reason, "Flowstate projection used a full rebuild fallback");
   }
 
-  /// §fidelity: when tracing is enabled, verify the incrementally-maintained
+  /// §fidelity: when heavy tracing is enabled, verify the incrementally-maintained
   /// `self.projection` still equals a fresh full projection built from canonical
   /// Loro state via [`document_from_loro`]. A mismatch means an incremental patch
   /// diverged from the authoritative materializer (kind
-  /// `incremental-vs-full-divergence`). Read-only; a single atomic load when off.
+  /// `incremental-vs-full-divergence`). Read-only; cheap firehose tracing does not
+  /// run this full reprojection because it perturbs large-document profiles.
   fn fidelity_verify_incremental_projection(&self, context: &str) {
-    if !fidelity::enabled() {
+    if !fidelity::expensive_checks_enabled() {
       return;
     }
     match document_from_loro(&self.doc) {
@@ -4780,8 +4781,8 @@ fn overwrite_span_paragraph_metadata_ids(
     // The prior repair pass left exactly one paragraph/block record live at this
     // boundary; find it (mirroring the projection's own selection) before writing
     // the forced record so the loser can be dropped afterwards.
-    let existing_paragraph_key = paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary);
-    let existing_block_key = paragraph_block_key_at_boundary(doc, &body_snapshot, &blocks, boundary);
+    let existing_paragraph_key = paragraph_metadata_key_at_boundary(doc, body, &paragraphs, boundary);
+    let existing_block_key = paragraph_block_key_at_boundary(doc, body, &blocks, boundary);
     // Boundary 0's reserved root records already converge numerically with the
     // client's first-paragraph id, and other machinery keys off those reserved
     // names, so never rewrite or delete them.
@@ -5086,7 +5087,7 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
   let paragraph_id = forced_paragraph_id
-    .or_else(|| paragraph_metadata_key_at_boundary(doc, &body_snapshot, &paragraphs, boundary))
+    .or_else(|| paragraph_metadata_key_at_boundary(doc, body, &paragraphs, boundary))
     .unwrap_or_else(|| new_paragraph_metadata_id(boundary));
   let paragraph = paragraphs.ensure_mergeable_map(&paragraph_id)?;
   paragraph.insert("id", paragraph_id.as_str())?;
@@ -5102,7 +5103,7 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   paragraph.insert("attrs_container_id", paragraph_attrs.id().to_string())?;
 
   let block_id = forced_block_id
-    .or_else(|| paragraph_block_key_at_boundary(doc, &body_snapshot, &blocks, boundary))
+    .or_else(|| paragraph_block_key_at_boundary(doc, body, &blocks, boundary))
     .unwrap_or_else(|| new_paragraph_block_id(boundary));
   let block = blocks.ensure_mergeable_map(&block_id)?;
   block.insert("id", block_id.as_str())?;
@@ -5120,8 +5121,8 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   Ok(())
 }
 
-fn paragraph_metadata_key_at_boundary(doc: &LoroDoc, body_snapshot: &str, paragraphs: &LoroMap, boundary: usize) -> Option<String> {
-  let mut keys = metadata_keys_at_boundary(doc, body_snapshot, paragraphs, "boundary_cursor", boundary);
+fn paragraph_metadata_key_at_boundary(doc: &LoroDoc, body: &loro::LoroText, paragraphs: &LoroMap, boundary: usize) -> Option<String> {
+  let mut keys = metadata_keys_at_boundary(doc, body, paragraphs, "boundary_cursor", boundary);
   if boundary == 0
     && let Some(root_ix) = keys.iter().position(|key| key == ROOT_FIRST_PARAGRAPH_ID)
   {
@@ -5130,7 +5131,11 @@ fn paragraph_metadata_key_at_boundary(doc: &LoroDoc, body_snapshot: &str, paragr
   keys.into_iter().next()
 }
 
-fn paragraph_block_key_at_boundary(doc: &LoroDoc, body_snapshot: &str, blocks: &LoroMap, boundary: usize) -> Option<String> {
+fn paragraph_block_key_at_boundary(doc: &LoroDoc, body: &loro::LoroText, blocks: &LoroMap, boundary: usize) -> Option<String> {
+  // `boundary` is already validated live by every caller, so the resolved position
+  // only has to equal it — a single-element live set gives that test in O(1).
+  let pos_by_id = boundary_cursor_positions(doc, body, blocks, &["anchor_cursor"]);
+  let live = [boundary];
   let mut keys = Vec::new();
   for key in map_keys(blocks) {
     let Some(block) = child_map(blocks, &key) else {
@@ -5139,7 +5144,7 @@ fn paragraph_block_key_at_boundary(doc: &LoroDoc, body_snapshot: &str, blocks: &
     if map_string_opt(&block, "kind").as_deref() != Some("paragraph") {
       continue;
     }
-    if live_cursor_pos(doc, body_snapshot, &block, "anchor_cursor") == Some(boundary) {
+    if live_cursor_pos(doc, &live, &pos_by_id, &block, "anchor_cursor") == Some(boundary) {
       keys.push(key);
     }
   }
@@ -5151,13 +5156,17 @@ fn paragraph_block_key_at_boundary(doc: &LoroDoc, body_snapshot: &str, blocks: &
   keys.into_iter().next()
 }
 
-fn metadata_keys_at_boundary(doc: &LoroDoc, body_snapshot: &str, maps: &LoroMap, cursor_key: &str, boundary: usize) -> Vec<String> {
+fn metadata_keys_at_boundary(doc: &LoroDoc, body: &loro::LoroText, maps: &LoroMap, cursor_key: &str, boundary: usize) -> Vec<String> {
+  // `boundary` is already validated live by callers, so a single-element live set
+  // reduces the per-record check to `resolved position == boundary` in O(1).
+  let pos_by_id = boundary_cursor_positions(doc, body, maps, &[cursor_key]);
+  let live = [boundary];
   map_keys(maps)
     .into_iter()
     .filter(|key| {
       child_map(maps, key)
         .as_ref()
-        .and_then(|map| live_cursor_pos(doc, body_snapshot, map, cursor_key))
+        .and_then(|map| live_cursor_pos(doc, &live, &pos_by_id, map, cursor_key))
         == Some(boundary)
     })
     .collect()
@@ -5184,6 +5193,15 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
   let mut pruned = ParagraphMetadataPrune::default();
 
+  // Resolve every record's boundary in one batched pass instead of an O(records)
+  // `get_cursor_pos` per record: `live_boundaries` validates liveness in O(log N),
+  // and the two `*_pos` indexes give O(1) position lookups. `block_pos` is reused by
+  // both block loops (the block registry is untouched between them); `paragraph_pos`
+  // covers both the `boundary_cursor` and `start_cursor` fields.
+  let live_boundaries = live_boundary_positions(&body_snapshot);
+  let block_pos = boundary_cursor_positions(doc, body, &blocks, &["anchor_cursor"]);
+  let paragraph_pos = boundary_cursor_positions(doc, body, &paragraphs, &["boundary_cursor", "start_cursor"]);
+
   let mut block_boundary_by_paragraph = FxHashMap::<String, usize>::default();
   for key in map_keys(&blocks) {
     let Some(block) = child_map(&blocks, &key) else {
@@ -5195,7 +5213,7 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
     let Some(paragraph_id) = map_string_opt(&block, "paragraph_id") else {
       continue;
     };
-    let Some(boundary) = live_cursor_pos(doc, &body_snapshot, &block, "anchor_cursor") else {
+    let Some(boundary) = live_cursor_pos(doc, &live_boundaries, &block_pos, &block, "anchor_cursor") else {
       continue;
     };
     block_boundary_by_paragraph
@@ -5211,8 +5229,8 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
       pruned.stale_paragraphs += 1;
       continue;
     };
-    let boundary = live_cursor_pos(doc, &body_snapshot, &paragraph, "boundary_cursor")
-      .or_else(|| live_cursor_pos(doc, &body_snapshot, &paragraph, "start_cursor"))
+    let boundary = live_cursor_pos(doc, &live_boundaries, &paragraph_pos, &paragraph, "boundary_cursor")
+      .or_else(|| live_cursor_pos(doc, &live_boundaries, &paragraph_pos, &paragraph, "start_cursor"))
       .or_else(|| {
         let boundary = block_boundary_by_paragraph.get(&key).copied()?;
         repair_paragraph_boundary_cursors(body, &paragraph, boundary).ok()?;
@@ -5248,7 +5266,7 @@ fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro:
     if map_string_opt(&block, "kind").as_deref() != Some("paragraph") {
       continue;
     }
-    let Some(boundary) = live_cursor_pos(doc, &body_snapshot, &block, "anchor_cursor") else {
+    let Some(boundary) = live_cursor_pos(doc, &live_boundaries, &block_pos, &block, "anchor_cursor") else {
       blocks_to_delete.push(key);
       pruned.stale_blocks += 1;
       continue;
@@ -5290,10 +5308,71 @@ fn prefer_paragraph_block_key(boundary: usize, existing: &str, candidate: &str) 
   boundary == 0 && candidate == MAIN_BODY_BLOCK_ID && existing != MAIN_BODY_BLOCK_ID
 }
 
-fn live_cursor_pos(doc: &LoroDoc, body_snapshot: &str, map: &LoroMap, cursor_key: &str) -> Option<usize> {
+/// Resolve every live boundary cursor stored under `cursor_fields` across `records`
+/// in a SINGLE pass, returning an `id → position` map. Mirrors the batch resolver in
+/// `flowstate_document::loro_projection` (`boundary_cursor_positions`): each record
+/// contributes an O(1) cursor decode, and the whole set of positions is resolved by
+/// one vendored-Loro `query_text_id_positions` chunk scan instead of an O(records)
+/// history-traced `get_cursor_pos` per record. That is what removes the O(records²)
+/// scan which pinned the CRDT actor at 100% CPU — and drove the unbounded allocation
+/// that OOM-killed the host — while editing a large document. Ids not present
+/// (deleted) are simply absent; [`live_cursor_pos`] falls back to per-id
+/// `get_cursor_pos` for those, preserving exact parity with the old scan.
+fn boundary_cursor_positions(doc: &LoroDoc, body: &loro::LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
+  let container = body.id();
+  let mut ids: Vec<ID> = Vec::new();
+  for key in map_keys(records) {
+    let Some(record) = child_map(records, &key) else {
+      continue;
+    };
+    for field in cursor_fields {
+      if let Some(bytes) = map_binary_opt(&record, field)
+        && let Ok(cursor) = Cursor::decode(&bytes)
+        && cursor.container == container
+        && let Some(id) = cursor.id
+      {
+        ids.push(id);
+      }
+    }
+  }
+  let mut positions = FxHashMap::default();
+  if ids.is_empty() {
+    return positions;
+  }
+  for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+    if let Some(pos) = pos {
+      positions.insert(id, pos);
+    }
+  }
+  positions
+}
+
+/// Sorted Unicode-code-point indices of every paragraph-boundary newline in
+/// `body_snapshot`, built in one O(N) pass so boundary-liveness can be tested with an
+/// O(log N) `binary_search` instead of a per-record O(N) `chars().nth(pos)` — the
+/// second quadratic factor (alongside `get_cursor_pos`) in the old per-record scan.
+fn live_boundary_positions(body_snapshot: &str) -> Vec<usize> {
+  body_snapshot
+    .chars()
+    .enumerate()
+    .filter_map(|(i, c)| (c == '\n').then_some(i))
+    .collect()
+}
+
+/// Resolve one record's boundary cursor to its live position. `pos_by_id` (built by
+/// [`boundary_cursor_positions`]) gives an O(1) hit for every live cursor; only a
+/// cursor whose id is no longer live falls back to the history-traced `get_cursor_pos`
+/// (exact parity with the old path). The resolved position must land on a member of
+/// the sorted `live_boundaries` set to count — pass the full newline set to validate
+/// against the whole document, or a single-element slice to test one already-validated
+/// live boundary.
+fn live_cursor_pos(doc: &LoroDoc, live_boundaries: &[usize], pos_by_id: &FxHashMap<ID, usize>, map: &LoroMap, cursor_key: &str) -> Option<usize> {
   let cursor = Cursor::decode(&map_binary_opt(map, cursor_key)?).ok()?;
-  let pos = doc.get_cursor_pos(&cursor).ok()?.current.pos;
-  boundary_is_live(body_snapshot, pos).then_some(pos)
+  let pos = match cursor.id.and_then(|id| pos_by_id.get(&id).copied()) {
+    Some(pos) => pos,
+    None => doc.get_cursor_pos(&cursor).ok()?.current.pos,
+  };
+  live_boundaries.binary_search(&pos).is_ok().then_some(pos)
 }
 
 fn live_object_cursor_pos(doc: &LoroDoc, body_snapshot: &str, map: &LoroMap, cursor_key: &str) -> Option<usize> {
@@ -5828,14 +5907,16 @@ mod tests {
   fn live_paragraph_metadata_boundaries(doc: &LoroDoc) -> Vec<usize> {
     let body = body_text(doc);
     let snapshot = body.to_string();
+    let live_boundaries = live_boundary_positions(&snapshot);
     let root = doc.get_map(ROOT);
     let paragraphs = root
       .ensure_mergeable_map(PARAGRAPHS_BY_ID)
       .expect("paragraph registry");
+    let pos_by_id = boundary_cursor_positions(doc, &body, &paragraphs, &["boundary_cursor"]);
     let mut boundaries = map_keys(&paragraphs)
       .into_iter()
       .filter_map(|key| child_map(&paragraphs, &key))
-      .filter_map(|paragraph| live_cursor_pos(doc, &snapshot, &paragraph, "boundary_cursor"))
+      .filter_map(|paragraph| live_cursor_pos(doc, &live_boundaries, &pos_by_id, &paragraph, "boundary_cursor"))
       .collect::<Vec<_>>();
     boundaries.sort_unstable();
     boundaries
@@ -5844,15 +5925,17 @@ mod tests {
   fn live_paragraph_block_boundaries(doc: &LoroDoc) -> Vec<usize> {
     let body = body_text(doc);
     let snapshot = body.to_string();
+    let live_boundaries = live_boundary_positions(&snapshot);
     let root = doc.get_map(ROOT);
     let blocks = root
       .ensure_mergeable_map(BLOCKS_BY_ID)
       .expect("block registry");
+    let pos_by_id = boundary_cursor_positions(doc, &body, &blocks, &["anchor_cursor"]);
     let mut boundaries = map_keys(&blocks)
       .into_iter()
       .filter_map(|key| child_map(&blocks, &key))
       .filter(|block| map_string_opt(block, "kind").as_deref() == Some("paragraph"))
-      .filter_map(|block| live_cursor_pos(doc, &snapshot, &block, "anchor_cursor"))
+      .filter_map(|block| live_cursor_pos(doc, &live_boundaries, &pos_by_id, &block, "anchor_cursor"))
       .collect::<Vec<_>>();
     boundaries.sort_unstable();
     boundaries
@@ -6172,12 +6255,14 @@ mod tests {
       let snapshot = body.to_string();
       let root = runtime.doc().get_map(ROOT);
       let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
+      let live_boundaries = live_boundary_positions(&snapshot);
+      let pos_by_id = boundary_cursor_positions(runtime.doc(), &body, &paragraphs, &["boundary_cursor"]);
       let mut rewrote = false;
       for key in map_keys(&paragraphs) {
         let Some(paragraph) = child_map(&paragraphs, &key) else {
           continue;
         };
-        if live_cursor_pos(runtime.doc(), &snapshot, &paragraph, "boundary_cursor") == Some(8)
+        if live_cursor_pos(runtime.doc(), &live_boundaries, &pos_by_id, &paragraph, "boundary_cursor") == Some(8)
           && let Some(cursor) = body.get_cursor(8, Side::Right)
         {
           paragraph.insert("boundary_cursor", cursor.encode())?;
