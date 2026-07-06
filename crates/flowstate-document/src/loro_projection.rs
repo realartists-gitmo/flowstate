@@ -315,7 +315,17 @@ impl<'a> Projector<'a> {
           },
           OBJECT_REPLACEMENT => {
             if let Some(block) = object_blocks.get(&unicode_pos) {
-              if !current.runs.is_empty() {
+              // Fork B symmetry (docs/collab-coalescing-parity.md): flush a REAL empty
+              // paragraph sitting just BEFORE an object — one with a live boundary
+              // (`current_boundary.is_some()`) that follows already-emitted content
+              // (`!output.is_empty()`), i.e. a durably-recorded empty the user created
+              // or an edit produced (e.g. splitting at the end of the paragraph that
+              // precedes an image). Excluded: the record-less phantom (current_boundary
+              // == None, right after another object) AND the leading sentinel empty
+              // before a doc-first object (output still empty — the object stays block 0).
+              // Previously an empty `current` was always dropped here, so the full rebuild
+              // lost an empty line before an image that the incremental replay kept.
+              if !current.runs.is_empty() || (current_boundary.is_some() && !output.is_empty()) {
                 push_paragraph_projection_metadata(
                   text,
                   paragraph_index.as_ref(),

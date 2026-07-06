@@ -499,6 +499,21 @@ pub(super) fn remote_nonstructural_projection_patches(
   if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
     return None;
   }
+  // The incremental text-patch path (`body_input_paragraph`) is object-UNAWARE: it
+  // walks raw `\n` boundaries, so an OBJECT_REPLACEMENT char folds into paragraph
+  // text and paragraph indices mis-align around object-adjacent (coalesced) empties.
+  // A remote update that also merged/split a paragraph would then patch the wrong
+  // rows, leaving the projection stale vs the canonical Loro state. Any object in the
+  // doc → take the object-aware full rebuild (`refresh_projection`), which is O(N)
+  // since the batched-resolver perf fix. Guarded here so non-object docs keep the
+  // fast incremental import path. (Convergence: proven by the N-peer structural fuzz.)
+  if projection
+    .blocks
+    .iter()
+    .any(|block| !matches!(block, flowstate_document::Block::Paragraph(_)))
+  {
+    return None;
+  }
 
   let mut patches = paragraph_projection_patches(projection, doc, touched_paragraphs.iter().copied())?;
   if !invalidation.changed_blocks.is_empty()

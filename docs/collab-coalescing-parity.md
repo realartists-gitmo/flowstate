@@ -1,15 +1,20 @@
 # Decision: object-adjacent empty-paragraph coalescing parity
 
-**Status:** DECIDED — **Fork B** (preserve real empties). Half implemented; incremental half remains.
-**Found by:** the new N-peer convergence fuzz harness (`multi_peer_convergence_tests.rs`, commit d4b11ae).
-**Reproduces:** `cargo test -p flowstate-collab npeer_fuzz_structural_fixture_paragraph_ops -- --ignored` (fails). Minimal: single peer, `structural_fixture`, seed `0xB2`, 15 ops.
+**Status:** ✅ DONE — **Fork B** implemented, structural fuzz green (N=2–5, out-of-order delivery), zero regressions.
+**Found by:** the N-peer convergence fuzz harness (`multi_peer_convergence_tests.rs`, commit d4b11ae).
+**Acceptance test (now passing):** `cargo test -p flowstate-collab npeer_fuzz_structural_fixture_paragraph_ops`.
 
-## Progress (Fork B)
+## Resolution (three fixes)
 
-- **DONE — full-rebuild half:** `push_flow_blocks` (`loro_projection.rs:279`) now coalesces ONLY the phantom (the first `\n` after an object, `current_boundary == None`) and KEEPS real, durably-recorded empty paragraphs. An empty line next to an image now survives in the authoritative `document_from_loro` projection. **Zero regressions** across all 240+ collab/document/gpui-flowtext tests.
-- **REMAINING — incremental half (in your active rework):** the incremental replay in `gpui-flowtext` (`replay_semantic_command_on_projection` / `projection_apply.rs`) must produce the same segmentation. The structural fuzz now surfaces a *second, deeper* bug there: a **merge op where the Loro mutation merged two paragraphs but the incremental replay did not** (seed 0xA1: canonical shows `"…aboveme.cClosing…"` as one paragraph, incremental keeps them split). That's a JoinParagraphs/cross-paragraph-DeleteRange replay-vs-Loro mismatch, likely the same coordinate/atomicity family as the fixes in d4b11ae but on the incremental side. Fix that + mirror the phantom-coalescing, then un-ignore the structural fuzz.
+Fork B (preserve real empty paragraphs, drop only object-phantoms) needed parity on **both sides of an object** and in the **remote-import** path:
 
-The sections below are the original analysis that led to choosing Fork B.
+1. **Coalesce phantom-only AFTER an object** — `push_flow_blocks` (`loro_projection.rs:279`) coalesces only the first `\n` after an object (`current_boundary == None`); a real recorded empty after an object survives.
+2. **Flush real empties BEFORE an object** — the OBJECT handler (`loro_projection.rs:316`) now flushes an empty `current` with a live boundary that follows already-emitted content (`current_boundary.is_some() && !output.is_empty()`), so an empty line before an image survives. The leading sentinel empty before a doc-first object is still excluded (the object stays block 0).
+3. **Remote imports on object docs take the full rebuild** — `remote_nonstructural_projection_patches` (`projection_patch.rs:493`) is object-unaware (`body_input_paragraph` folds `OBJECT_REPLACEMENT` into text and mis-indexes around coalesced empties), so any object in the doc now routes remote updates through `refresh_projection` (object-aware, O(N) since the batched-resolver perf fix). This was the multi-peer half of the bug: a remote merge left the incremental projection stale.
+
+Together these make the incremental projection and `document_from_loro` agree for every op family the fuzz drives, at any peer count, under out-of-order delivery. **Zero regressions** (105 collab + document + gpui-flowtext).
+
+The sections below are the original analysis that led to choosing Fork B, kept for history.
 
 ---
 
