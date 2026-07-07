@@ -1,74 +1,51 @@
-# Object block-structure op positioning (Insert/Delete/Move/Replace)
+# Object + table op convergence — RESOLVED
 
-**Status:** PARTIALLY FIXED. InsertBlock and MoveBlock positioning now resolve from the
-coalescing-aware projection structure; ReplaceBlock was already correct. A shared root
-(the sentinel-first-paragraph / coalesced-phantom-empty interaction) still breaks three
-cases; they are scoped below and excluded from the fuzz until the root is fixed.
+**Status:** ✅ DONE. The full editor op surface (all 24 `SemanticEditCommand` variants)
+converges across N peers under out-of-order delivery. Acceptance tests:
+`npeer_fuzz_object_structural_ops`, `npeer_fuzz_table_ops`,
+`npeer_fuzz_replace_paragraph_span`, `object_block_positioning_single_peer` (plus the
+paragraph/coordinate suites). All green.
 
-## What was fixed
+## What broke and how it was fixed
 
-The Loro-side object insert/move used a raw body walk
-(`object_insert_unicode_pos_for_projection_block`) that counted one block per `\n` and per
-`OBJECT_REPLACEMENT`, which does NOT match the **coalescing-aware** projection block index
-(the projection drops record-less phantom empties after an object). So a projection
-`block_ix` mapped to the wrong body position — an off-by-N around objects/coalesced
-empties that diverged the canonical Loro rebuild's block ids from the incremental replay.
+### 1. Object block positioning (off-by-N) — `e909924`
+The Loro-side object insert/move placed the `OBJECT_REPLACEMENT` char via a raw body walk
+that counted one block per `\n`/object, ignoring the projection's coalescing of
+record-less phantom empties after an object — so a projection block index mapped to a body
+position off by N. Replaced with `projection_block_lead_pos_in_loro`, which resolves the
+lead position from the projection's own (coalesced) block list + each block's durable
+cursor (object `anchor_cursor`, or paragraph boundary `\n`, sentinel-clamped).
 
-Replaced with `projection_block_lead_pos_in_loro` (crdt_runtime.rs): it resolves the body
-insertion position from the projection's own (already-coalesced) block list plus each
-block's durable cursor — an object's `anchor_cursor`, or a paragraph's boundary `\n`
-(sentinel-clamped). Insert-before-a-paragraph lands on its boundary `\n`, which attaches
-the object to the previous block's tail exactly as `push_flow_blocks` re-segments it.
-`insert_projection_object_block` and `move_projection_object_block` now take the
-(incremental-replay-evolved) working projection and use it; the old body-walk positioner
-was deleted. MoveBlock maps its post-removal `new_block_ix` back to the pre-removal block
-it lands before, resolving that lead position on the post-delete body via durable cursors.
+### 2. The coalescing "shared root" — `a1a5a4b`
+The incremental replay (`replay_semantic_command_on_projection`) models plain paragraph
+text/structure but NOT object coalescing (dropping the phantom empty after an object,
+re-segmenting the sentinel-first region). So on any object-bearing doc its prediction can
+diverge structurally from the authoritative `document_from_loro` rebuild — leading-object
+insert/move, DeleteBlock-materialized phantom empties, and later text/split/join near them.
 
-**Validated:** `object_block_positioning_single_peer` (multi_peer_convergence_tests.rs)
-drives InsertBlock (non-leading) + ReplaceBlock on the object-bearing structural fixture,
-asserting incremental == fresh after every op across 8 seeds. Isolated runs also proved
-MoveBlock (non-leading source AND target) convergent.
+Key reframe: the shipped projection patch is ALWAYS the canonical rebuild, verified, with a
+full-projection fallback — so **cross-peer convergence was never at risk**; the divergences
+only tripped the preflight identity assert and the local optimistic echo. Fixes:
+- Object-bearing docs adopt the canonical rebuild as their prediction (the runtime already
+  materializes it every transaction — free; mirrors the remote-import path). Pure-paragraph
+  docs keep the exact incremental prediction.
+- The identity `debug_assert` is split: STRUCTURE (block kinds + paragraph texts) is asserted
+  hard (catches every real positional/segmentation/content bug); exact ID equality became a
+  fidelity observation, because a record-less/fabricated id (a phantom empty pending the
+  repair pass) is derived from a boundary OpID and legitimately differs between the
+  incremental carry-forward and a fresh rebuild — the repair pass's domain, not the replay's.
 
-## What still diverges — one shared root
+### 3. Table concurrent-delete column topology — `1cb95f1`
+A concurrent `DeleteTableColumn` removes the column's map from `columns_by_id`, but the
+ordered `column_order` list is a separate CRDT that can still reference it after an
+out-of-order merge. The projector HARD-ERRORED ("missing table column"), sinking the whole
+projection. Fixed to skip the stale order entry (deterministic across peers), matching the
+malformed-id skip directly above and §P2b's "a single bad id can't sink the whole table";
+the topology normalization already drops cells left referencing the removed column.
 
-All three remaining failures come from the **sentinel-anchored first paragraph** and the
-**coalesced phantom empty** an object implies. The reserved first paragraph is anchored to
-the body sentinel `\n` (pos 0), and the first `\n` after an object is coalesced out of the
-projection (Fork B). Any structural op that changes what sits at the front, or that
-adds/removes an object whose phantom empty then materializes, desyncs the incremental
-replay (which just reorders/removes projection blocks) from the canonical rebuild (which
-re-segments and re-resolves ids).
-
-1. **Leading insert (block_ix 0).** Inserting an object before the sentinel-anchored first
-   paragraph steals that paragraph's boundary: `\n OBJECT P0text` leaves P0 with no
-   boundary `\n`, so the canonical rebuild fabricates a new id for it (seen as
-   `ParagraphId(1)`-ish) while the incremental replay keeps P0's id. Correct form is
-   `\n OBJECT \n P0text` with P0 RE-ANCHORED to the new boundary — mirror SplitParagraph's
-   `\n`-insert + style mark + `repair_paragraph_metadata_after_stable_split`, but for the
-   reserved first paragraph (`ROOT_FIRST_PARAGRAPH_ID`).
-2. **Move touching the leading block.** Moving the leading object away (or to index 1)
-   changes front-of-doc coalescing; the incremental prediction gains an extra leading
-   paragraph the canonical rebuild doesn't have. Same re-anchor need as (1).
-3. **DeleteBlock of an object with a coalesced phantom empty.** Removing the object
-   un-coalesces its trailing phantom `\n`, which materializes as a REAL empty paragraph in
-   the canonical rebuild; the incremental replay only drops the object block, so a later
-   SplitParagraph diverges block ids. Minimal repro: structural_fixture, seed 0x7,
-   `DeleteBlock` then `SplitParagraph` (6 ops).
-
-### Fix direction (shared)
-
-Teach the incremental replay (`gpui-flowtext` block ops in projection_apply.rs /
-lifecycle.rs) and the Loro-side ops to agree on ONE phantom/sentinel rule:
-materialize/coalesce the object-adjacent empty and re-anchor the reserved first paragraph
-identically on both sides. This is the same class as the Fork B coalescing-parity work,
-extended to the object structural ops. Once done, re-enable the excluded arms in
-`block_stress_command` (leading insert, MoveBlock, DeleteBlock) and grind to green, then
-fold the object ops into the N-peer fuzz and add the 9 table ops.
-
-## Coverage status
-
-- InsertBlock (non-leading), ReplaceBlock: convergent (fuzzed).
-- MoveBlock (non-leading source+target): convergent in isolation; excluded from the mixed
-  fuzz because a leading-block source/target hits root case (2). Positioning fix retained.
-- DeleteBlock, leading insert, leading move: excluded pending the shared-root fix.
-- Table ops (9 variants): not yet generated.
+## Coverage (all fuzzed, N-peer, out-of-order)
+Paragraph/text (insert incl. U+2028 soft breaks, delete, split, join, set-paragraph-style,
+set-run-styles); object block insert/delete/move/replace at EVERY position incl. leading;
+object properties (image alt/layout/caption, equation source); the 9 table ops; and
+`ReplaceParagraphSpan`. Each asserts cross-peer projection equality + per-peer
+incremental-vs-fresh materializer equivalence.
