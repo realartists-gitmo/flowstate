@@ -516,7 +516,16 @@ impl<'a> Projector<'a> {
       let Some(column_id) = parse_column_loro_id(&column_id_str) else {
         continue;
       };
-      let column = child_map(&columns_map, &column_id_str)?.ok_or_else(|| invalid(format!("missing table column `{column_id_str}`")))?;
+      // A concurrent DeleteTableColumn removes the column's map from `columns_by_id`, but
+      // the ordered `column_order` list is a separate CRDT and can still reference it after
+      // an out-of-order merge (e.g. concurrent delete + move). Skip the stale order entry
+      // rather than failing the whole projection — deterministic across peers (all read the
+      // same order + map state), matching the malformed-id skip above and §P2b's "a single
+      // bad id can't sink the whole table". Cells left referencing it are dropped by the
+      // topology normalization below.
+      let Some(column) = child_map(&columns_map, &column_id_str)? else {
+        continue;
+      };
       columns.push(InputTableColumn {
         id: column_id,
         width: table_column_width(&column)?,

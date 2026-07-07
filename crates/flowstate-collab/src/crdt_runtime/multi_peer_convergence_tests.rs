@@ -91,6 +91,67 @@ fn structural_fixture() -> Result<LoroDoc> {
   Ok(flowstate_document::document_to_loro(&source, "Structural fixture")?)
 }
 
+use flowstate_document::{CellId, ColumnId, InputTableCell, InputTableColumn, InputTableColumnWidth, InputTableRow, RowId};
+
+/// A fresh table cell (single empty paragraph) at `(row_id, column_id)`.
+fn table_cell(cell_id: u128, row_id: RowId, column_id: ColumnId, text: &str) -> InputTableCell {
+  use flowstate_document::{InputParagraph, InputRun, InputTableCellBlock};
+  InputTableCell {
+    id: CellId(cell_id),
+    row_id,
+    column_id,
+    blocks: vec![InputTableCellBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: if text.is_empty() {
+        Vec::new()
+      } else {
+        vec![InputRun { text: text.to_string(), styles: RunStyles::default() }]
+      },
+    })],
+    row_span: 1,
+    col_span: 1,
+  }
+}
+
+/// Fixture with a paragraph, a 2-row × 3-column table, and a trailing paragraph. Table
+/// row/column/cell ids are small distinct constants (§P2b durable ids); editor-minted ids
+/// use the per-peer `fresh_id` space, so they never collide.
+fn table_fixture() -> Result<LoroDoc> {
+  use flowstate_document::{InputBlock, InputParagraph, InputRun, InputTableBlock, InputTableStyle};
+  let columns: Vec<InputTableColumn> = (0..3)
+    .map(|c| InputTableColumn { id: ColumnId(100 + c), width: InputTableColumnWidth::Auto })
+    .collect();
+  let rows: Vec<InputTableRow> = (0..2)
+    .map(|r| InputTableRow {
+      id: RowId(200 + r),
+      cells: (0..3)
+        .map(|c| table_cell(300 + r * 10 + c, RowId(200 + r), ColumnId(100 + c), &format!("r{r}c{c}")))
+        .collect(),
+    })
+    .collect();
+  let para = |t: &str| {
+    InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![InputRun { text: t.to_string(), styles: RunStyles::default() }],
+    })
+  };
+  let blocks = vec![
+    para("Above the table."),
+    InputBlock::Table(InputTableBlock { rows, columns, style: InputTableStyle { header_row: true } }),
+    para("Below the table."),
+  ];
+  let source = flowstate_document::document_from_input_blocks(flowstate_document::flowstate_document_theme(), blocks);
+  Ok(flowstate_document::document_to_loro(&source, "Table fixture")?)
+}
+
+/// The first table block in `projection` with its block id, if any.
+fn first_table(projection: &DocumentProjection) -> Option<(BlockId, flowstate_document::TableBlock)> {
+  projection.blocks.iter().enumerate().find_map(|(ix, block)| match block {
+    flowstate_document::Block::Table(table) => Some((projection.ids.block_ids[ix], table.clone())),
+    _ => None,
+  })
+}
+
 fn all_version_vectors_equal(peers: &[CrdtRuntime]) -> bool {
   let first = peers[0].doc().state_vv();
   peers.iter().skip(1).all(|peer| peer.doc().state_vv() == first)
@@ -812,6 +873,114 @@ fn object_structural_command(seed: &mut u64, projection: &DocumentProjection, pe
     },
     _ => coordinate_stress_command(seed, projection, peer_ix, op_seq),
   }
+}
+
+/// Full table-op command generator over the first table in `projection`: the 9 table
+/// SemanticEditCommand variants (row/column insert-delete-move, cell replace, cell span,
+/// column width), interleaved with paragraph coordinate stress. Editor-minted row/column/
+/// cell ids use the per-peer `fresh_id` space so they never collide across replicas.
+fn table_op_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+  if (next_seed(seed) >> 32) % 100 >= 55 {
+    return coordinate_stress_command(seed, projection, peer_ix, op_seq);
+  }
+  let (table_id, table) = first_table(projection)?;
+  if table.rows.is_empty() || table.columns.is_empty() {
+    return None;
+  }
+  let pick = |seed: &mut u64, n: usize| ((next_seed(seed) >> 32) as usize) % n.max(1);
+  let row = &table.rows[pick(seed, table.rows.len())];
+  let column = &table.columns[pick(seed, table.columns.len())];
+  match (next_seed(seed) >> 32) % 9 {
+    // InsertTableRow after a random row (or head), with one cell per existing column.
+    0 => {
+      let new_row_id = RowId(fresh_id(peer_ix, op_seq, 10));
+      let cells = table
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(c, col)| table_cell(fresh_id(peer_ix, op_seq, 20 + c as u64), new_row_id, col.id, "new"))
+        .collect();
+      Some(EditorSemanticCommand::InsertTableRow {
+        table: table_id,
+        new_row_id,
+        after_row: if (next_seed(seed) >> 32).is_multiple_of(3) { None } else { Some(row.id) },
+        row: InputTableRow { id: new_row_id, cells },
+      })
+    },
+    // DeleteTableRow (only when more than one row remains meaningful).
+    1 if table.rows.len() > 1 => Some(EditorSemanticCommand::DeleteTableRow { table: table_id, row_id: row.id }),
+    // MoveTableRow to after a random row (or head).
+    2 if table.rows.len() > 1 => Some(EditorSemanticCommand::MoveTableRow {
+      table: table_id,
+      row_id: row.id,
+      after_row: if (next_seed(seed) >> 32).is_multiple_of(3) { None } else { Some(table.rows[pick(seed, table.rows.len())].id) },
+    }),
+    // InsertTableColumn after a random column (or head), with one cell per existing row.
+    3 => {
+      let new_column_id = ColumnId(fresh_id(peer_ix, op_seq, 30));
+      let cells = table
+        .rows
+        .iter()
+        .enumerate()
+        .map(|(r, tr)| table_cell(fresh_id(peer_ix, op_seq, 40 + r as u64), tr.id, new_column_id, "col"))
+        .collect();
+      Some(EditorSemanticCommand::InsertTableColumn {
+        table: table_id,
+        new_column_id,
+        after_column: if (next_seed(seed) >> 32).is_multiple_of(3) { None } else { Some(column.id) },
+        width: InputTableColumnWidth::Auto,
+        cells,
+      })
+    },
+    // DeleteTableColumn (only when more than one column remains).
+    4 if table.columns.len() > 1 => Some(EditorSemanticCommand::DeleteTableColumn { table: table_id, column_id: column.id }),
+    // MoveTableColumn to after a random column (or head).
+    5 if table.columns.len() > 1 => Some(EditorSemanticCommand::MoveTableColumn {
+      table: table_id,
+      column_id: column.id,
+      after_column: if (next_seed(seed) >> 32).is_multiple_of(3) { None } else { Some(table.columns[pick(seed, table.columns.len())].id) },
+    }),
+    // ReplaceTableCell at (row, column) with fresh content.
+    6 => Some(EditorSemanticCommand::ReplaceTableCell {
+      table: table_id,
+      row_id: row.id,
+      column_id: column.id,
+      cell: table_cell(fresh_id(peer_ix, op_seq, 50), row.id, column.id, "edited"),
+    }),
+    // SetTableCellSpan (bounded small spans).
+    7 => Some(EditorSemanticCommand::SetTableCellSpan {
+      table: table_id,
+      row_id: row.id,
+      column_id: column.id,
+      row_span: 1 + ((next_seed(seed) >> 32) % 2) as u16,
+      column_span: 1 + ((next_seed(seed) >> 32) % 2) as u16,
+    }),
+    // SetTableColumnWidth on a random column index.
+    _ => Some(EditorSemanticCommand::SetTableColumnWidth {
+      table: table_id,
+      column_ix: pick(seed, table.columns.len()),
+      width: match (next_seed(seed) >> 32) % 3 {
+        0 => InputTableColumnWidth::Auto,
+        1 => InputTableColumnWidth::FixedPx(50 + ((next_seed(seed) >> 32) % 200) as u32),
+        _ => InputTableColumnWidth::Fraction(1 + ((next_seed(seed) >> 32) % 4) as u32),
+      },
+    }),
+  }
+}
+
+/// N-peer convergence over the full table-op surface (the 9 table SemanticEditCommand
+/// variants) plus paragraph coordinate stress, seeded from the table fixture, with
+/// out-of-order delivery. Asserts every peer converges AND each peer's incremental
+/// projection equals a fresh rebuild.
+#[test]
+fn npeer_fuzz_table_ops() -> Result<()> {
+  for peer_count in 2..=4 {
+    for seed in [0x1111u64, 0x2222, 0xB2] {
+      let base = table_fixture()?;
+      run_convergence_fuzz_with(peer_count, &base, 120, seed, table_op_command)?;
+    }
+  }
+  Ok(())
 }
 
 /// Single-peer regression for the object block-structure ops. Combines the positioning fix
