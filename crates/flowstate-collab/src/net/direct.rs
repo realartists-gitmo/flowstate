@@ -685,3 +685,44 @@ impl DirectRequest {
     }
   }
 }
+
+// Class 6 — asset (and any direct) pull must FAIL CLEANLY when candidate peers are
+// unreachable: return the "failed for all candidates" error within the per-peer timeout
+// budget, never hang the caller. The field logs showed `direct pull failed for all
+// candidates request_kind="asset"`; these pin that the failure path is bounded and
+// well-formed, using a local-only (`presets::Minimal`, no relays/DNS) endpoint so the test
+// is deterministic and never touches the network.
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use iroh::{SecretKey, endpoint::presets};
+
+  fn asset_request() -> DirectRequest {
+    DirectRequest::Asset {
+      session: SessionId::new(),
+      asset: 42,
+    }
+  }
+
+  #[tokio::test]
+  async fn asset_pull_fails_cleanly_when_all_candidates_are_unreachable() -> Result<()> {
+    let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+    // A freshly-minted peer id that is not serving DIRECT_ALPN anywhere reachable.
+    let unreachable = SecretKey::generate().public();
+    let result = pull_with_endpoint(&endpoint, asset_request(), vec![unreachable], Duration::from_millis(250)).await;
+    let error = result.expect_err("asset pull from an unreachable candidate must fail, not hang");
+    assert!(
+      error.to_string().contains("direct pull failed for all candidates"),
+      "expected the all-candidates-failed error, got: {error}"
+    );
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn asset_pull_with_no_candidates_errors_without_reaching_the_network() -> Result<()> {
+    let endpoint = Endpoint::builder(presets::Minimal).bind().await?;
+    let result = pull_with_endpoint(&endpoint, asset_request(), Vec::new(), Duration::from_millis(250)).await;
+    assert!(result.is_err(), "asset pull with no candidate peers must error cleanly");
+    Ok(())
+  }
+}

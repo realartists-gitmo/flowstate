@@ -7,3 +7,4 @@ include!("decorations_drag_search.rs");
 include!("collab_capture.rs");
 include!("latency_bench.rs");
 include!("layout_scaling.rs");
+include!("reconcile_edit_loss.rs");
