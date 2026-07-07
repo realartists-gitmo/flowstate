@@ -3113,6 +3113,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "flowstate-soak"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "flowstate-collab",
+ "flowstate-document",
+ "flowstate-docx",
+ "hotpath",
+ "loro",
+]
+
+[[package]]
 name = "flowstate-tub"
 version = "0.1.0"
 dependencies = [

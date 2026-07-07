@@ -32,9 +32,9 @@ use super::intents::{
 use super::patch_synthesis::{PatchPlan, synthesize_patches};
 use super::resolve::{ResolvedTextPosition, resolve_text_anchor, resolve_text_range};
 use crate::crdt_runtime::{
-  CrdtRuntime, cursor_for_boundary, delete_projection_object_block, insert_projection_object_block, join_projection_paragraphs,
-  mark_run_styles, move_projection_object_block, paragraph_boundary_loro_unicode_index, paragraph_style_value,
-  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, repair_paragraph_metadata_after_text_flow_edit,
+  CrdtRuntime, cursor_for_boundary, delete_projection_object_block, delete_projection_paragraph_metadata, insert_projection_object_block,
+  join_projection_paragraphs, mark_run_styles, move_projection_object_block, paragraph_boundary_loro_unicode_index, paragraph_style_value,
+  prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split,
   replace_projection_equation_source_range, replace_projection_image_alt_text, replace_projection_image_caption,
   replace_projection_object_block, sentinel_protected_delete_range, set_projection_image_layout, table_ops,
 };
@@ -723,16 +723,33 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
       let Some((clamped_start, clamped_len)) = sentinel_protected_delete_range(start.body_unicode, len) else {
         anyhow::bail!("delete range collapsed by sentinel protection");
       };
-      body
-        .delete(clamped_start, clamped_len)
-        .context("deleting intent range from Loro body flow")?;
+      hotpath::measure_block!("delete_range_body_delete", {
+        body
+          .delete(clamped_start, clamped_len)
+          .context("deleting intent range from Loro body flow")?;
+      });
       summary.containers_touched = 1;
       // Cross-paragraph deletes remove newline boundaries: orphaned object
-      // blocks and stale paragraph records must be retired with the text.
+      // blocks and dead paragraph records must be retired with the text. The
+      // dead set is known exactly from the resolved plan — every paragraph
+      // after the first absorbs into it — so retirement is O(edit), not the
+      // O(records) prune sweep (§11).
       if start.paragraph_ix != end.paragraph_ix {
-        prune_orphaned_body_object_blocks(&doc, &body).context("pruning orphaned object blocks after cross-paragraph delete")?;
-        repair_paragraph_metadata_after_text_flow_edit(&doc, &body, &[], "local_delete_range")
-          .context("repairing paragraph metadata after cross-paragraph delete")?;
+        hotpath::measure_block!("delete_range_prune_objects", {
+          prune_orphaned_body_object_blocks(&doc, &body).context("pruning orphaned object blocks after cross-paragraph delete")?;
+        });
+        hotpath::measure_block!("delete_range_retire_records", {
+          for paragraph_ix in (start.paragraph_ix + 1)..=end.paragraph_ix {
+            let (Some(paragraph_id), Some(block_id)) = (
+              projection.ids.paragraph_ids.get(paragraph_ix).copied(),
+              flowstate_document::block_ix_for_paragraph(&projection, paragraph_ix).and_then(|ix| projection.ids.block_ids.get(ix).copied()),
+            ) else {
+              continue;
+            };
+            delete_projection_paragraph_metadata(&doc, paragraph_id, block_id)
+              .context("retiring merged-away paragraph records after cross-paragraph delete")?;
+          }
+        });
       }
       summary.caret_body_unicode = Some(clamped_start);
     },

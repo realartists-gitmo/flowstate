@@ -1530,6 +1530,26 @@ impl DocState {
 
     // Because we need to calculate path based on [DocState], so we cannot extract
     // the event recorder to a separate module.
+    /// Flowstate §perf: compose many sequential diffs of one container in a
+    /// balanced fold — O(total · log n) instead of the O(n²)
+    /// clone-and-compose-one-at-a-time accumulation. Diff composition is
+    /// associative, so pairing adjacent (order-preserving) diffs yields the
+    /// identical result.
+    fn balanced_compose(mut diffs: Vec<crate::event::DiffVariant>) -> crate::event::DiffVariant {
+        while diffs.len() > 1 {
+            let mut next = Vec::with_capacity(diffs.len().div_ceil(2));
+            let mut iter = diffs.into_iter();
+            while let Some(first) = iter.next() {
+                match iter.next() {
+                    Some(second) => next.push(first.compose(second).unwrap()),
+                    None => next.push(first),
+                }
+            }
+            diffs = next;
+        }
+        diffs.pop().unwrap()
+    }
+
     fn diffs_to_event(&mut self, diffs: Vec<InternalDocDiff<'_>>, from: Frontiers) -> DocDiff {
         if diffs.is_empty() {
             panic!("diffs is empty");
@@ -1543,9 +1563,9 @@ impl DocState {
         for diff in diffs {
             #[allow(clippy::unnecessary_to_owned)]
             for container_diff in diff.diff.into_owned() {
-                let Some((last_container_diff, _)) = containers.get_mut(&container_diff.idx) else {
+                let Some((pending_container_diffs, _)) = containers.get_mut(&container_diff.idx) else {
                     if let Some(path) = self.get_path(container_diff.idx) {
-                        containers.insert(container_diff.idx, (container_diff.diff, path));
+                        containers.insert(container_diff.idx, (vec![container_diff.diff], path));
                     } else {
                         // if we cannot find the path to the container, the container must be overwritten afterwards.
                         // So we can ignore the diff from it.
@@ -1564,16 +1584,19 @@ impl DocState {
 
                     continue;
                 };
-                // TODO: PERF avoid this clone
-                *last_container_diff = last_container_diff
-                    .clone()
-                    .compose(container_diff.diff)
-                    .unwrap();
+                // Flowstate §perf: buffer per-container diffs and compose them in a
+                // balanced fold below. The previous incremental
+                // `accumulated.clone().compose(next)` was O(n²) in both time and
+                // allocation once an edit produced many sibling diffs — a
+                // select-all delete over marked rich text splits into one diff per
+                // style-anchor segment (12k+ on a real document), which froze the
+                // editor for minutes inside a single commit.
+                pending_container_diffs.push(container_diff.diff);
             }
         }
         let mut diff: Vec<_> = containers
             .into_iter()
-            .map(|(container, (diff, path))| {
+            .map(|(container, (diffs, path))| {
                 let idx = container;
                 let id = self.arena.get_container_id(idx).unwrap();
                 let is_unknown = id.is_unknown();
@@ -1581,7 +1604,7 @@ impl DocState {
                 ContainerDiff {
                     id,
                     idx,
-                    diff: diff.into_external().unwrap(),
+                    diff: Self::balanced_compose(diffs).into_external().unwrap(),
                     is_unknown,
                     path,
                 }

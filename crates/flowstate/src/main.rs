@@ -90,26 +90,6 @@ enum CliCommand {
     /// Output `.db8` path.
     output: PathBuf,
   },
-  /// Headless collaboration hotpath soak: load a document, type/split/import
-  /// through the real write path, print latency distributions and (with
-  /// `--features hotpath-cpu`) the per-stage breakdown.
-  CollabHotpath {
-    /// Input `.docx` or package document.
-    input: PathBuf,
-    /// Local typing keystrokes to measure.
-    #[arg(long, default_value_t = 160)]
-    keystrokes: usize,
-    /// Local paragraph splits to measure.
-    #[arg(long, default_value_t = 8)]
-    splits: usize,
-    /// Remote import chunks to measure (every 6th is structural).
-    #[arg(long, default_value_t = 24)]
-    imports: usize,
-    /// Release audit sampling: `off`, or audit every N-th intent
-    /// (debug builds always audit every commit regardless).
-    #[arg(long)]
-    audit: Option<String>,
-  },
 }
 
 #[hotpath::main(allocator = FlowstateAllocator)]
@@ -146,28 +126,6 @@ fn main() {
       },
       CliCommand::PdfToDb8 { input, output } => {
         convert_pdf_to_db8(input, output).expect("failed to extract DB8");
-      },
-      CliCommand::CollabHotpath {
-        input,
-        keystrokes,
-        splits,
-        imports,
-        audit,
-      } => {
-        let audit = audit.map(|value| {
-          if value.eq_ignore_ascii_case("off") {
-            None
-          } else {
-            Some(value.parse().expect("--audit takes `off` or a positive integer"))
-          }
-        });
-        let options = flowstate::collab_hotpath::CollabHotpathOptions {
-          keystrokes,
-          splits,
-          imports,
-          audit,
-        };
-        flowstate::collab_hotpath::run(&input, &options).expect("collab hotpath soak failed");
       },
     }
     return;

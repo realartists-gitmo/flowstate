@@ -25,21 +25,18 @@ use super::intents::{
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent, SemanticCommand};
 
 /// Write-path configuration (spec §7 audit knob).
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct LocalWriteConfig {
   /// Release-build projection-audit sampling: `Some(1)` audits every commit,
   /// `Some(n)` one-in-n, `None` disables release auditing entirely (the
   /// ratified one-line off switch). Debug/CI builds audit unconditionally
   /// regardless of this knob.
+  ///
+  /// Default is OFF (2026-07-07): fidelity bugs have dried up in the field
+  /// while perf is under active measurement, and the audit's ~350ms sampled
+  /// hiccup on large docs pollutes that read. Re-enable for fidelity-hunting
+  /// builds.
   pub release_audit_sample: Option<NonZeroU32>,
-}
-
-impl Default for LocalWriteConfig {
-  fn default() -> Self {
-    Self {
-      release_audit_sample: NonZeroU32::new(256),
-    }
-  }
 }
 
 /// The single local write authority over one shared document core.
@@ -180,7 +177,10 @@ impl LocalDocHandle {
     {
       if let Some(sample) = self.config.release_audit_sample {
         let n = self.intents_committed.load(Ordering::Relaxed);
-        if n % u64::from(sample.get()) == 0
+        // n starts at 0: auditing on `n % sample == 0` would put the O(doc)
+        // rebuild-and-compare on the FIRST keystroke of every session (field
+        // symptom: one high-latency op per fresh peer). Sample the Nth op.
+        if n % u64::from(sample.get()) == u64::from(sample.get()) - 1
           && let Err(error) = core.audit_projection_against_full_rebuild(intent.class())
         {
           tracing::error!(%error, class = intent.class(), "sampled release audit mismatch");

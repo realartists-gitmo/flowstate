@@ -1,12 +1,15 @@
 //! Headless collaboration hotpath soak (field diagnosis, 2026-07-07).
 //!
-//! Reproduces the impact-doc slowness classes without a window or network:
+//! Reproduces the impact-doc slowness classes without a window or network — a
+//! thin bin over the collab stack, so soak cycles never pay the app binary's
+//! GPUI link:
 //!
 //! 1. **Local typing** — intents through the real `LocalDocHandle` write path
 //!    plus the editor-side ordered-stream drain and patch apply (the exact
 //!    projection work `sync_projection_from_authority` performs, minus GPU
 //!    layout).
-//! 2. **Paragraph splits** — the structural local-edit shape.
+//! 2. **Paragraph splits, joins, cross-paragraph deletes** — the structural
+//!    local-edit shapes.
 //! 3. **Remote imports** — a second peer runtime types text and splits
 //!    paragraphs; its update chunks import into the main runtime under the
 //!    gate (the `doc_io` `import-remote-update` shape from the field logs),
@@ -16,43 +19,75 @@
 //! prints on exit; the wall-clock distributions below print unconditionally.
 //!
 //! ```text
-//! cargo run --release --features hotpath-cpu -- collab-hotpath <doc.docx> [--audit off|N]
+//! cargo run -p flowstate-soak --release --features hotpath-cpu -- <doc.docx> [--audit off|N]
 //! ```
 
 use std::{
   num::NonZeroU32,
-  path::Path,
+  path::{Path, PathBuf},
   time::{Duration, Instant},
 };
 
+use clap::Parser;
 use flowstate_collab::{
   crdt_runtime::CrdtRuntime,
-  local_write::{GateHolder, InsertTextIntent, LocalDocHandle, LocalWriteAuthority, LocalWriteConfig, SplitParagraphIntent, TextAnchor},
+  local_write::{
+    DeleteRangeIntent, GateHolder, InsertTextIntent, JoinParagraphsIntent, LocalDocHandle, LocalWriteAuthority, LocalWriteConfig,
+    SplitParagraphIntent, TextAnchor,
+  },
 };
 use flowstate_document::{DocumentProjection, ParagraphId, ParagraphStyle, ProjectionStreamItem};
 
-pub struct CollabHotpathOptions {
-  pub keystrokes: usize,
-  pub splits: usize,
-  pub imports: usize,
-  /// `None` → profile default sampling; `Some(None)` → audit off;
-  /// `Some(Some(n))` → audit every n-th intent (release builds only — debug
-  /// builds always audit every commit).
-  pub audit: Option<Option<NonZeroU32>>,
+/// Headless collaboration hotpath soak over a real document.
+#[derive(Parser)]
+#[command(name = "flowstate-soak")]
+struct Cli {
+  /// Input `.docx` or package document.
+  input: PathBuf,
+  /// Local typing keystrokes to measure.
+  #[arg(long, default_value_t = 160)]
+  keystrokes: usize,
+  /// Local paragraph splits to measure (joins/cross-deletes run at half this).
+  #[arg(long, default_value_t = 8)]
+  splits: usize,
+  /// Remote import chunks to measure (every 6th is structural).
+  #[arg(long, default_value_t = 24)]
+  imports: usize,
+  /// Release audit sampling: `off`, or audit every N-th intent
+  /// (debug builds always audit every commit regardless).
+  #[arg(long)]
+  audit: Option<String>,
+  /// Run the pure-Loro select-all micro-matrix (marks × subscription × undo)
+  /// instead of the document soak.
+  #[arg(long, default_value_t = false)]
+  loro_micro: bool,
 }
 
-impl Default for CollabHotpathOptions {
-  fn default() -> Self {
-    Self {
-      keystrokes: 160,
-      splits: 8,
-      imports: 24,
-      audit: None,
-    }
+/// Release-audit sampling requested on the CLI.
+enum AuditSampling {
+  ProfileDefault,
+  Off,
+  Every(NonZeroU32),
+}
+
+#[hotpath::main]
+fn main() {
+  let cli = Cli::parse();
+  if cli.loro_micro {
+    loro_micro();
+    return;
   }
+  let audit = cli.audit.as_deref().map_or(AuditSampling::ProfileDefault, |value| {
+    if value.eq_ignore_ascii_case("off") {
+      AuditSampling::Off
+    } else {
+      AuditSampling::Every(value.parse().expect("--audit takes `off` or a positive integer"))
+    }
+  });
+  run(&cli.input, cli.keystrokes, cli.splits, cli.imports, &audit).expect("collab hotpath soak failed");
 }
 
-pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
+fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &AuditSampling) -> anyhow::Result<()> {
   let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
   println!("collab-hotpath soak — build profile: {build_profile}");
 
@@ -62,8 +97,10 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
   println!("document load: {:?}", load_started.elapsed());
 
   let mut config = LocalWriteConfig::default();
-  if let Some(audit) = options.audit {
-    config.release_audit_sample = audit;
+  match audit {
+    AuditSampling::ProfileDefault => {},
+    AuditSampling::Off => config.release_audit_sample = None,
+    AuditSampling::Every(sample) => config.release_audit_sample = Some(*sample),
   }
   println!(
     "release audit sampling: {:?} (ignored in debug builds — those audit every commit)",
@@ -85,9 +122,9 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
   let target = mid_paragraph(&editor);
 
   // ---- Phase 1: local typing --------------------------------------------------
-  let mut commit_times = Vec::with_capacity(options.keystrokes);
-  let mut editor_apply_times = Vec::with_capacity(options.keystrokes);
-  for i in 0..options.keystrokes {
+  let mut commit_times = Vec::with_capacity(keystrokes);
+  let mut editor_apply_times = Vec::with_capacity(keystrokes);
+  for i in 0..keystrokes {
     let started = Instant::now();
     handle
       .insert_text(InsertTextIntent {
@@ -105,8 +142,8 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
   summarize("local keystroke (editor drain + patch apply)", &mut editor_apply_times);
 
   // ---- Phase 2: local paragraph splits ---------------------------------------
-  let mut split_times = Vec::with_capacity(options.splits);
-  for _ in 0..options.splits {
+  let mut split_times = Vec::with_capacity(splits);
+  for _ in 0..splits {
     let started = Instant::now();
     handle
       .split_paragraph(SplitParagraphIntent {
@@ -118,6 +155,56 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
     drain_into_editor(&handle, &mut editor)?;
   }
   summarize("local split (intent commit, gate-held)", &mut split_times);
+
+  // ---- Phase 2b: joins (Backspace at paragraph start) and cross-paragraph
+  // deletes — the structural local edits from the field report.
+  let mut join_times = Vec::new();
+  for _ in 0..splits / 2 {
+    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let Some(ix) = projection.ids.paragraph_ids.iter().position(|id| *id == target) else {
+      break;
+    };
+    if ix + 1 >= projection.ids.paragraph_ids.len() {
+      break;
+    }
+    let second = projection.ids.paragraph_ids[ix + 1];
+    let started = Instant::now();
+    handle
+      .join_paragraphs(JoinParagraphsIntent { first: target, second })
+      .map_err(|error| anyhow::anyhow!("join intent rejected: {error}"))?;
+    join_times.push(started.elapsed());
+    drain_into_editor(&handle, &mut editor)?;
+  }
+  summarize("local join (intent commit, gate-held)", &mut join_times);
+
+  let mut cross_delete_times = Vec::new();
+  for _ in 0..splits / 2 {
+    // Create a fresh boundary, then delete across it.
+    handle
+      .split_paragraph(SplitParagraphIntent {
+        at: TextAnchor::new(target, usize::MAX),
+        inherited_style: ParagraphStyle::Normal,
+      })
+      .map_err(|error| anyhow::anyhow!("cross-delete setup split rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let Some(ix) = projection.ids.paragraph_ids.iter().position(|id| *id == target) else {
+      break;
+    };
+    let Some(next) = projection.ids.paragraph_ids.get(ix + 1).copied() else {
+      break;
+    };
+    let started = Instant::now();
+    handle
+      .delete_range(DeleteRangeIntent {
+        start: TextAnchor::new(target, flowstate_document::paragraph_text(&projection, ix).len().saturating_sub(2)),
+        end: TextAnchor::new(next, 0),
+      })
+      .map_err(|error| anyhow::anyhow!("cross-paragraph delete rejected: {error}"))?;
+    cross_delete_times.push(started.elapsed());
+    drain_into_editor(&handle, &mut editor)?;
+  }
+  summarize("local cross-paragraph delete (gate-held)", &mut cross_delete_times);
 
   // ---- Phase 3: remote imports -------------------------------------------------
   // A converged peer produced from the main doc's own snapshot, editing through
@@ -152,7 +239,7 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
   let mut text_import_times = Vec::new();
   let mut structural_import_times = Vec::new();
   let mut import_apply_times = Vec::new();
-  for i in 0..options.imports {
+  for i in 0..imports {
     // Realistic peer traffic: mostly short typing bursts, every 6th chunk is
     // structural (an Enter) — the field logs' import mix.
     let structural = i % 6 == 5;
@@ -184,16 +271,15 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
       update
     };
     let started = Instant::now();
-    {
-      let mut guard = gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
-      let events = guard.import_remote_update(&update)?;
-      for event in &events {
-        if let flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { invalidation, .. } = event {
-          println!(
-            "  import {i} took the REBUILD path (structural={structural}, reason={:?})",
-            invalidation.fallback_reason
-          );
-        }
+    let mut guard = gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+    let events = guard.import_remote_update(&update)?;
+    drop(guard);
+    for event in &events {
+      if let flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { invalidation, .. } = event {
+        println!(
+          "  import {i} took the REBUILD path (structural={structural}, reason={:?})",
+          invalidation.fallback_reason
+        );
       }
     }
     if structural {
@@ -209,11 +295,76 @@ pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
   summarize("remote import (structural chunk, gate-held)", &mut structural_import_times);
   summarize("remote import (editor drain + apply)", &mut import_apply_times);
 
+  // ---- Phase 4: select-all delete + retype (the ctrl-A field freeze). Runs
+  // LAST because it guts the document. ------------------------------------------
+  let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let first = projection.ids.paragraph_ids[0];
+  let last = *projection.ids.paragraph_ids.last().expect("paragraphs");
+  let started = Instant::now();
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(first, 0),
+      end: TextAnchor::new(last, usize::MAX),
+    })
+    .map_err(|error| anyhow::anyhow!("select-all delete rejected: {error}"))?;
+  println!("select-all delete (intent commit, gate-held):    {:?}", started.elapsed());
+  let apply_started = Instant::now();
+  drain_into_editor(&handle, &mut editor)?;
+  println!("select-all delete (editor drain + apply):        {:?}", apply_started.elapsed());
+  let started = Instant::now();
+  let remaining = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?.ids.paragraph_ids[0];
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(remaining, usize::MAX),
+      text: "replacement text after select-all".to_string(),
+      style_override: None,
+    })
+    .map_err(|error| anyhow::anyhow!("post-select-all retype rejected: {error}"))?;
+  drain_into_editor(&handle, &mut editor)?;
+  println!("select-all retype (commit + drain):              {:?}", started.elapsed());
+
   // ---- Convergence proof: the soak measured real work, not dropped work -------
   let canonical = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
   anyhow::ensure!(editor.frontier == canonical.frontier, "simulated editor diverged from canonical frontier");
   println!("\nconverged: editor tracked all {} paragraphs at the canonical frontier", canonical.paragraphs.len());
   Ok(())
+}
+
+/// Pure-Loro bisect for the select-all-delete commit freeze: which combination
+/// of {style marks, root subscription, `UndoManager`} makes `doc.commit()` of
+/// a whole-body delete explode on a 2.6M-char text?
+fn loro_micro() {
+  let paragraph = "x".repeat(430);
+  for marks in [false, true] {
+    for with_subscription in [false, true] {
+      for with_undo in [false, true] {
+        let doc = loro::LoroDoc::new();
+        let text = doc.get_text("t");
+        for _ in 0..6000 {
+          text.insert(text.len_unicode(), &paragraph).expect("insert");
+          text.insert(text.len_unicode(), "\n").expect("insert boundary");
+        }
+        if marks {
+          for i in 0..6000 {
+            let start = i * 431;
+            text.mark(start..start + 100, "bold", true).expect("mark");
+          }
+        }
+        doc.commit();
+        let _subscription = with_subscription.then(|| doc.subscribe_root(std::sync::Arc::new(|_event| {})));
+        let _undo = with_undo.then(|| loro::UndoManager::new(&doc));
+        let started = Instant::now();
+        text.delete(0, text.len_unicode()).expect("select-all delete");
+        let delete_elapsed = started.elapsed();
+        let started = Instant::now();
+        doc.commit();
+        println!(
+          "marks={marks:<5} subscription={with_subscription:<5} undo={with_undo:<5} delete={delete_elapsed:>12.3?} commit={:>12.3?}",
+          started.elapsed()
+        );
+      }
+    }
+  }
 }
 
 fn load_runtime(path: &Path) -> anyhow::Result<CrdtRuntime> {
@@ -223,9 +374,9 @@ fn load_runtime(path: &Path) -> anyhow::Result<CrdtRuntime> {
     .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"));
   if is_docx {
     let (imported, _) = flowstate_docx::import_docx_to_loro(path, "Hotpath Soak")?;
-    return Ok(CrdtRuntime::from_imported_document(imported)?);
+    return CrdtRuntime::from_imported_document(imported);
   }
-  Ok(CrdtRuntime::open_package(path)?)
+  CrdtRuntime::open_package(path)
 }
 
 fn mid_paragraph(projection: &DocumentProjection) -> ParagraphId {
@@ -252,7 +403,7 @@ fn drain_into_editor(handle: &LocalDocHandle, editor: &mut DocumentProjection) -
   Ok(())
 }
 
-fn summarize(label: &str, times: &mut Vec<Duration>) {
+fn summarize(label: &str, times: &mut [Duration]) {
   if times.is_empty() {
     println!("{label:<48} (no samples)");
     return;

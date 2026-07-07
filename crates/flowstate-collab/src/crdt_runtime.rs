@@ -2292,17 +2292,6 @@ impl CrdtRuntime {
       .context("exporting local Loro update fallback")
   }
 
-  /// §23: drain the permanent subscription buffer and fold the in-epoch, in-frontier
-  /// summaries into `invalidation`, filtering/processing by runtime epoch, emit-time
-  /// frontier, origin, and trigger.
-  ///
-  /// * Epoch — summaries stamped before the most recent full rebuild are discarded.
-  /// * Frontier — summaries stamped strictly ahead of `frontier_after` belong to a
-  ///   later batch and are returned to the buffer for the next drain.
-  /// * Origin — a remote-origin summary sets `has_remote_origin` (telemetry/bias)
-  ///   without forcing a rebuild, so the incremental remote fast paths still apply.
-  /// * Trigger — a checkout-triggered event forces a conservative full rebuild;
-  ///   import/local triggers are left to the existing structural detection.
   /// Non-destructive peek at the buffered (not yet drained) subscription
   /// events: did any of them insert a paragraph boundary or object
   /// placeholder? Poisoned lock answers `true` (conservative).
@@ -2321,6 +2310,17 @@ impl CrdtRuntime {
       .unwrap_or(true)
   }
 
+  /// §23: drain the permanent subscription buffer and fold the in-epoch, in-frontier
+  /// summaries into `invalidation`, filtering/processing by runtime epoch, emit-time
+  /// frontier, origin, and trigger.
+  ///
+  /// * Epoch — summaries stamped before the most recent full rebuild are discarded.
+  /// * Frontier — summaries stamped strictly ahead of `frontier_after` belong to a
+  ///   later batch and are returned to the buffer for the next drain.
+  /// * Origin — a remote-origin summary sets `has_remote_origin` (telemetry/bias)
+  ///   without forcing a rebuild, so the incremental remote fast paths still apply.
+  /// * Trigger — a checkout-triggered event forces a conservative full rebuild;
+  ///   import/local triggers are left to the existing structural detection.
   #[hotpath::measure]
   pub(crate) fn merge_subscription_invalidation(&self, invalidation: &mut ProjectionInvalidation) -> DrainedBodyDelta {
     let summaries = self
@@ -2730,9 +2730,17 @@ fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: 
   // full rebuild — which re-resolves the ids — for any id-affecting record change.
   // (Text-structural changes already force a rebuild above; this covers the
   // non-structural record writes, e.g. a peer's repaired metadata record syncing.)
-  if keys
+  // Exemption: user/replica IDENTITY records also write an `"id"` key but never
+  // feed positional id resolution — rebuilding on them put a full O(doc) rebuild
+  // on every fresh peer's first update (field: "second peer's first op stalled").
+  // Identity records are recognizable by their exclusive key set.
+  let identity_record = keys
     .iter()
-    .any(|key| matches!(key.as_str(), "id" | "boundary_cursor" | "start_cursor" | "anchor_cursor"))
+    .any(|key| matches!(key.as_str(), "user_id" | "display_name" | "last_seen_at" | "created_at"));
+  if !identity_record
+    && keys
+      .iter()
+      .any(|key| matches!(key.as_str(), "id" | "boundary_cursor" | "start_cursor" | "anchor_cursor"))
   {
     invalidation.rebuild_required = true;
     invalidation.fallback_reason = Some("metadata_record_id_change");
@@ -2795,12 +2803,24 @@ pub(crate) fn sentinel_protected_delete_range(start: usize, len: usize) -> Optio
 /// Convergent: deletion is keyed on the block's stable map key, so two peers that
 /// concurrently delete the same placeholder converge on the same removed record.
 /// Returns the number of blocks pruned.
+#[hotpath::measure]
 pub(crate) fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::LoroText) -> loro::LoroResult<usize> {
   let body_snapshot = body.to_string();
   let root = doc.get_map(ROOT);
   let Some(blocks) = child_map(&root, BLOCKS_BY_ID) else {
     return Ok(0);
   };
+  // ONE batched resolver pass for every anchor cursor. A DELETED anchor simply
+  // fails to resolve (absent from the map) — which is exactly the orphan
+  // signal. The previous per-record `doc.get_cursor_pos` walked update history
+  // for each dead anchor, turning a select-all delete into an
+  // O(objects × history) multi-minute freeze (the 2026-07-07 ctrl-A field bug).
+  let anchor_pos = boundary_cursor_positions(doc, body, &blocks, &["anchor_cursor"]);
+  let placeholder_positions: Vec<usize> = body_snapshot
+    .chars()
+    .enumerate()
+    .filter_map(|(pos, ch)| (ch == OBJECT_REPLACEMENT).then_some(pos))
+    .collect();
   let mut pruned = 0_usize;
   for key in map_keys(&blocks) {
     let Some(block) = child_map(&blocks, &key) else {
@@ -2815,7 +2835,12 @@ pub(crate) fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::Loro
       Some("paragraph") | None => continue,
       Some(_) => {},
     }
-    if live_object_cursor_pos(doc, &body_snapshot, &block, "anchor_cursor").is_none() {
+    let live = map_binary_opt(&block, "anchor_cursor")
+      .and_then(|bytes| Cursor::decode(&bytes).ok())
+      .and_then(|cursor| cursor.id)
+      .and_then(|id| anchor_pos.get(&id).copied())
+      .is_some_and(|pos| placeholder_positions.binary_search(&pos).is_ok());
+    if !live {
       blocks.delete(&key)?;
       pruned += 1;
     }
@@ -4091,29 +4116,46 @@ pub(crate) fn join_projection_paragraphs(
   body
     .delete(boundary, 1)
     .context("deleting joined paragraph boundary from Loro body flow")?;
-  repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_join_paragraphs")?;
+  // The joined-away paragraph's records were retired explicitly above; no
+  // record can go stale here, so the O(records) prune sweep is not run
+  // (§11 — it cost ~100ms per Backspace-join on a 6k-paragraph doc).
   Ok(true)
 }
 
-fn delete_projection_paragraph_metadata(doc: &LoroDoc, paragraph_id: ParagraphId, block_id: BlockId) -> loro::LoroResult<()> {
+pub(crate) fn delete_projection_paragraph_metadata(doc: &LoroDoc, paragraph_id: ParagraphId, block_id: BlockId) -> loro::LoroResult<()> {
   let root = doc.get_map(ROOT);
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
-  for key in map_keys(&paragraphs) {
-    let id = child_map(&paragraphs, &key)
-      .and_then(|paragraph| map_string_opt(&paragraph, "id"))
-      .unwrap_or_else(|| key.clone());
-    if loro_id_u128(&id) == paragraph_id.0 {
-      paragraphs.delete(&key)?;
+  // Canonical keys are directly constructible, making the common case an
+  // O(1) delete — the key scan (which also sweeps non-canonical duplicate
+  // keys) would go quadratic on multi-paragraph deletes (select-all class).
+  // A missed legacy-keyed duplicate surfaces as a projection defect on the
+  // next full rebuild and is repaired there.
+  let canonical_paragraph = format!("paragraph.{}", paragraph_id.0);
+  if child_map(&paragraphs, &canonical_paragraph).is_some() {
+    paragraphs.delete(&canonical_paragraph)?;
+  } else {
+    for key in map_keys(&paragraphs) {
+      let id = child_map(&paragraphs, &key)
+        .and_then(|paragraph| map_string_opt(&paragraph, "id"))
+        .unwrap_or_else(|| key.clone());
+      if loro_id_u128(&id) == paragraph_id.0 {
+        paragraphs.delete(&key)?;
+      }
     }
   }
 
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
-  for key in map_keys(&blocks) {
-    let id = child_map(&blocks, &key)
-      .and_then(|block| map_string_opt(&block, "id"))
-      .unwrap_or_else(|| key.clone());
-    if loro_id_u128(&id) == block_id.0 {
-      blocks.delete(&key)?;
+  let canonical_block = format!("paragraph_block.{}", block_id.0);
+  if child_map(&blocks, &canonical_block).is_some() {
+    blocks.delete(&canonical_block)?;
+  } else {
+    for key in map_keys(&blocks) {
+      let id = child_map(&blocks, &key)
+        .and_then(|block| map_string_opt(&block, "id"))
+        .unwrap_or_else(|| key.clone());
+      if loro_id_u128(&id) == block_id.0 {
+        blocks.delete(&key)?;
+      }
     }
   }
   Ok(())
@@ -4249,19 +4291,14 @@ pub(crate) fn repair_paragraph_metadata_after_stable_split(
   block_id: flowstate_document::BlockId,
   reason: &'static str,
 ) -> loro::LoroResult<()> {
-  ensure_paragraph_metadata_at_boundary_with_ids(doc, body, boundary, paragraph_id, block_id)?;
-  let pruned = prune_stale_paragraph_metadata(doc, body)?;
-  if pruned.changed() {
-    tracing::warn!(
-      reason,
-      stale_paragraphs = pruned.stale_paragraphs,
-      duplicate_paragraphs = pruned.duplicate_paragraphs,
-      stale_blocks = pruned.stale_blocks,
-      duplicate_blocks = pruned.duplicate_blocks,
-      "pruned stale Loro paragraph metadata after stable split",
-    );
-  }
-  Ok(())
+  let _ = reason;
+  // §11 complexity contract: a local split retires no records (fresh unique
+  // ids at a fresh boundary), so the O(records) stale-metadata prune does NOT
+  // run here (it cost ~100ms per Enter on a 6k-paragraph doc). Stale and
+  // duplicate records only arise from concurrent-merge imports, and every
+  // full rebuild collects them as projection defects and schedules canonical
+  // repair (`refresh_projection` §P2a).
+  ensure_paragraph_metadata_at_boundary_with_ids(doc, body, boundary, paragraph_id, block_id)
 }
 
 fn ensure_paragraph_metadata_at_boundary(doc: &LoroDoc, body: &loro::LoroText, boundary: usize) -> loro::LoroResult<()> {
@@ -4586,8 +4623,14 @@ fn live_boundary_positions(body_snapshot: &str) -> Vec<usize> {
 /// live boundary.
 fn live_cursor_pos(doc: &LoroDoc, live_boundaries: &[usize], pos_by_id: &FxHashMap<ID, usize>, map: &LoroMap, cursor_key: &str) -> Option<usize> {
   let cursor = Cursor::decode(&map_binary_opt(map, cursor_key)?).ok()?;
-  let pos = match cursor.id.and_then(|id| pos_by_id.get(&id).copied()) {
-    Some(pos) => pos,
+  let pos = match cursor.id {
+    // The batched resolver covered every id-carrying cursor: absence means the
+    // anchor is DELETED. Falling back to `get_cursor_pos` here would walk
+    // update history per dead anchor — O(records × history) after a mass
+    // delete (the ctrl-A freeze class). Dead ⇒ not live, directly.
+    Some(id) => pos_by_id.get(&id).copied()?,
+    // Id-less cursors (F7: whole-body-end resolution) are rare and can't be
+    // batch-resolved; the per-cursor resolution stays for them alone.
     None => doc.get_cursor_pos(&cursor).ok()?.current.pos,
   };
   live_boundaries.binary_search(&pos).is_ok().then_some(pos)
