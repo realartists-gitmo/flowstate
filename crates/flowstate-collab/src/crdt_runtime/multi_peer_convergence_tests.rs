@@ -842,7 +842,19 @@ fn object_structural_command(seed: &mut u64, projection: &DocumentProjection, pe
   }
   let block_count = projection.blocks.len();
   let objects = object_block_indices(projection);
-  match (next_seed(seed) >> 32) % 4 {
+  let image_ix = |seed: &mut u64| {
+    let images: Vec<usize> = (0..projection.blocks.len())
+      .filter(|ix| matches!(projection.blocks[*ix], flowstate_document::Block::Image(_)))
+      .collect();
+    (!images.is_empty()).then(|| images[((next_seed(seed) >> 32) as usize) % images.len()])
+  };
+  let equation_ix = |seed: &mut u64| {
+    let eqs: Vec<usize> = (0..projection.blocks.len())
+      .filter(|ix| matches!(projection.blocks[*ix], flowstate_document::Block::Equation(_)))
+      .collect();
+    (!eqs.is_empty()).then(|| eqs[((next_seed(seed) >> 32) as usize) % eqs.len()])
+  };
+  match (next_seed(seed) >> 32) % 7 {
     // InsertBlock at any projection block index (0..=len; 0 = new leading block).
     0 => Some(EditorSemanticCommand::InsertBlock {
       block: BlockId(fresh_id(peer_ix, op_seq, 3)),
@@ -863,7 +875,7 @@ fn object_structural_command(seed: &mut u64, projection: &DocumentProjection, pe
       })
     },
     // ReplaceBlock an existing object with a fresh object.
-    _ if !objects.is_empty() => {
+    3 if !objects.is_empty() => {
       let ix = objects[((next_seed(seed) >> 32) as usize) % objects.len()];
       Some(EditorSemanticCommand::ReplaceBlock {
         block: Some(projection.ids.block_ids[ix]),
@@ -871,7 +883,42 @@ fn object_structural_command(seed: &mut u64, projection: &DocumentProjection, pe
         after: fuzz_object_input(seed),
       })
     },
-    _ => coordinate_stress_command(seed, projection, peer_ix, op_seq),
+    // Image property ops (alt text / layout / caption) on an existing image.
+    4 => image_ix(seed).map(|ix| EditorSemanticCommand::ReplaceImageAltText {
+      image: projection.ids.block_ids[ix],
+      text: format!("alt-{}", (next_seed(seed) >> 32) % 1000),
+    }),
+    5 => image_ix(seed).map(|ix| {
+      use flowstate_document::{InputBlockAlignment, InputImageSizing, InputParagraph, InputRun};
+      match (next_seed(seed) >> 32) % 2 {
+        0 => EditorSemanticCommand::SetImageLayout {
+          image: projection.ids.block_ids[ix],
+          sizing: match (next_seed(seed) >> 32) % 3 {
+            0 => InputImageSizing::Intrinsic,
+            1 => InputImageSizing::FitWidth,
+            _ => InputImageSizing::Fixed { width_px: 100 + ((next_seed(seed) >> 32) % 200) as u32, height_px: None },
+          },
+          alignment: match (next_seed(seed) >> 32) % 3 {
+            0 => InputBlockAlignment::Left,
+            1 => InputBlockAlignment::Center,
+            _ => InputBlockAlignment::Right,
+          },
+        },
+        _ => EditorSemanticCommand::ReplaceImageCaption {
+          image: projection.ids.block_ids[ix],
+          caption: ((next_seed(seed) >> 32).is_multiple_of(2)).then(|| InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![InputRun { text: format!("cap-{}", (next_seed(seed) >> 32) % 1000), styles: RunStyles::default() }],
+          }),
+        },
+      }
+    }),
+    // Equation source edit on an existing equation.
+    _ => equation_ix(seed).map(|ix| EditorSemanticCommand::ReplaceEquationSourceRange {
+      equation: projection.ids.block_ids[ix],
+      range: 0..0,
+      text: format!("+{}", (next_seed(seed) >> 32) % 10),
+    }),
   }
 }
 
@@ -966,6 +1013,60 @@ fn table_op_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: us
       },
     }),
   }
+}
+
+/// Generate a `ReplaceParagraphSpan` replacing a random paragraph range with a single
+/// fresh paragraph (the compound paste/replace op) — captured `before` from the live
+/// projection so the staged validation accepts it, fresh per-peer-namespaced ids on
+/// `after` so identities never collide. Interleaved with paragraph coordinate stress.
+fn replace_span_command(seed: &mut u64, projection: &DocumentProjection, peer_ix: usize, op_seq: u64) -> Option<EditorSemanticCommand> {
+  use flowstate_document::{DocumentSpan, Paragraph, TextRun};
+  if (next_seed(seed) >> 32) % 100 >= 35 {
+    return coordinate_stress_command(seed, projection, peer_ix, op_seq);
+  }
+  let paragraph_count = projection.paragraphs.len();
+  if paragraph_count == 0 {
+    return None;
+  }
+  let start = ((next_seed(seed) >> 32) as usize) % paragraph_count;
+  let end = (start + 1 + ((next_seed(seed) >> 32) as usize) % 2).min(paragraph_count);
+  let before = flowstate_document::capture_document_span(projection, start..end);
+  if before.paragraph_ids.len() != before.paragraphs.len() || before.block_ids.is_empty() {
+    return None;
+  }
+  let text = format!("span{}", (next_seed(seed) >> 32) % 1000);
+  let after = DocumentSpan {
+    start_paragraph: start,
+    paragraphs: vec![Paragraph {
+      style: ParagraphStyle::Normal,
+      byte_range: 0..text.len(),
+      runs: vec![TextRun { len: text.len(), styles: RunStyles::default() }],
+      version: 0,
+    }],
+    paragraph_ids: vec![ParagraphId(fresh_id(peer_ix, op_seq, 60))],
+    block_ids: vec![BlockId(fresh_id(peer_ix, op_seq, 61))],
+    text,
+  };
+  Some(EditorSemanticCommand::ReplaceParagraphSpan {
+    start: Some(DocumentOffset { paragraph: start, byte: 0 }),
+    before,
+    after,
+  })
+}
+
+/// N-peer convergence over `ReplaceParagraphSpan` (the compound replace/paste op) plus
+/// paragraph coordinate stress, on the blank and structural fixtures.
+#[test]
+fn npeer_fuzz_replace_paragraph_span() -> Result<()> {
+  for peer_count in 2..=3 {
+    for seed in [0x1111u64, 0x2222, 0xB2] {
+      let blank = new_loro_document("Replace span blank")?;
+      run_convergence_fuzz_with(peer_count, &blank, 100, seed, replace_span_command)?;
+      let structural = structural_fixture()?;
+      run_convergence_fuzz_with(peer_count, &structural, 100, seed, replace_span_command)?;
+    }
+  }
+  Ok(())
 }
 
 /// N-peer convergence over the full table-op surface (the 9 table SemanticEditCommand
