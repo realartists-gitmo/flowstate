@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use flowstate_document::{
   AssetId, CellId, ColumnId, InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun, InputTableBlock,
   InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphStyle, RowId, RunStyles,
-  document_from_input_blocks, document_from_loro_with_defects, flowstate_document_theme,
+  SOFT_LINE_BREAK, document_from_input_blocks, document_from_loro_with_defects, flowstate_document_theme,
 };
 
 use crate::{import_docx_bytes_to_loro, write_docx};
@@ -79,12 +79,20 @@ fn rich_document(paragraphs: usize) -> flowstate_document::DocumentProjection {
       blocks.push(para("")); // empty paragraph adjacent to an object
     }
   }
+  // Body run with an intra-paragraph soft break: exports as a body-level
+  // `<w:br/>`, which the importer must map back to U+2028 — NOT '\n', which
+  // would fabricate a record-less paragraph boundary (the impact-doc defect).
+  blocks.push(para(&soft_break_probe_text()));
   document_from_input_blocks(flowstate_document_theme(), blocks)
 }
 
-fn assert_import_defect_free(bytes: &[u8], label: &str) {
+fn soft_break_probe_text() -> String {
+  format!("wrapped argument line{SOFT_LINE_BREAK}continued after a soft line break")
+}
+
+fn assert_import_defect_free(bytes: &[u8], label: &str) -> flowstate_document::DocumentProjection {
   let (imported, report) = import_docx_bytes_to_loro(bytes, "roundtrip").expect("import docx bytes");
-  let (_, defects) = document_from_loro_with_defects(&imported.doc).expect("project imported docx");
+  let (projection, defects) = document_from_loro_with_defects(&imported.doc).expect("project imported docx");
   assert!(
     defects.is_empty(),
     "{label}: importing produced {} projection defect(s) (paragraphs_imported={:?}) — the importer left canonical state a repair pass must fix; sample: {:?}",
@@ -92,6 +100,7 @@ fn assert_import_defect_free(bytes: &[u8], label: &str) {
     report.paragraphs_imported,
     defects.iter().take(5).collect::<Vec<_>>(),
   );
+  projection
 }
 
 /// Build a rich document, write a real .docx, re-import it, and assert the projection has
@@ -103,7 +112,13 @@ fn synthetic_docx_roundtrip_has_no_projection_defects() {
   write_docx(&path, &document).expect("write docx");
   let bytes = std::fs::read(&path).expect("read docx");
   let _ = std::fs::remove_file(&path);
-  assert_import_defect_free(&bytes, "synthetic roundtrip");
+  let projection = assert_import_defect_free(&bytes, "synthetic roundtrip");
+  // Defect-freeness alone would also pass if the break were silently DROPPED;
+  // pin the soft break to U+2028 in the imported text as well.
+  assert!(
+    projection.text.to_string().contains(&soft_break_probe_text()),
+    "synthetic roundtrip: body-level soft break did not survive import as U+2028",
+  );
 }
 
 /// Run the same defect-free assertion against a REAL .docx supplied via

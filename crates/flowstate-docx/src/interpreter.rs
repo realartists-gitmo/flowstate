@@ -17,7 +17,7 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
   DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
-  document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
+  SOFT_LINE_BREAK_STR, document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
 };
 use flowstate_fidelity::FidelityClass;
 
@@ -210,6 +210,20 @@ struct InterpretedDocx {
   report: DocxConversionReport,
 }
 
+/// rdocx's run/paragraph `text()` collapses every `<w:br>` (line, page, and
+/// column alike) to '\n' before the break type is visible here. A docx break is
+/// an INTRA-paragraph line break, while '\n' is the paragraph separator in the
+/// body flow — letting it through fabricates a bare paragraph boundary with no
+/// metadata/block/style record, which full reprojection reports as
+/// missing_paragraph_* defects (see `structured::collect_run_text`, the
+/// table-cell counterpart of this mapping). Remap to the model's soft break.
+/// Page/column breaks also becoming soft breaks matches the table-cell path
+/// and is provisional pending a product decision on their semantics. `<w:cr>`
+/// is dropped inside rdocx itself and never reaches this text.
+fn soften_rdocx_breaks(text: String) -> String {
+  if text.contains('\n') { text.replace('\n', SOFT_LINE_BREAK_STR) } else { text }
+}
+
 #[hotpath::measure]
 fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> {
   let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error)?;
@@ -249,7 +263,7 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
       .runs()
       .enumerate()
       .map(|(run_ix, run)| {
-        let text = run.text();
+        let text = soften_rdocx_breaks(run.text());
         let run_style_id = run.style_id().map(str::to_owned);
         let run_style_id_ref = run_style_id.as_deref();
         let effective_properties = run_property_cache
@@ -364,7 +378,7 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
     }
 
     if runs.is_empty() {
-      let text = paragraph.text();
+      let text = soften_rdocx_breaks(paragraph.text());
       if !text.is_empty() {
         runs.push(DocumentRunInput {
           text,
