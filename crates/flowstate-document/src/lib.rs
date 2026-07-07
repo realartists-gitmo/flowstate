@@ -1,3 +1,4 @@
+pub mod instrument;
 pub mod loro_import;
 pub mod loro_projection;
 pub mod loro_schema;

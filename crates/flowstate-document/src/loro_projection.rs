@@ -29,6 +29,7 @@ pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
 /// unresolvable blocks are quarantined (appended in stable order) instead of
 /// dropped, and fabricated identities are deterministic per projection.
 pub fn document_from_loro_with_defects(doc: &LoroDoc) -> io::Result<(DocumentProjection, Vec<ProjectionDefect>)> {
+  crate::instrument::record_full_projection();
   let mut defects = Vec::new();
   let projection = projection_from_loro_with_defects(doc, &mut defects)?;
   let mut document = document_from_projection_blocks(projection);
@@ -414,7 +415,10 @@ impl<'a> Projector<'a> {
         .as_deref()
         .and_then(|bytes| Cursor::decode(bytes).ok())
         .filter(|cursor| cursor.container == text.id())
-        .and_then(|cursor| self.doc.get_cursor_pos(&cursor).ok())
+        .and_then(|cursor| {
+          crate::instrument::record_cursor_pos_resolve();
+          self.doc.get_cursor_pos(&cursor).ok()
+        })
         .map(|pos| pos.current.pos)
         .filter(|pos| snapshot_chars.get(*pos).copied() == Some(OBJECT_REPLACEMENT));
       let Some(pos) = resolved else {
@@ -642,6 +646,7 @@ impl<'a> Projector<'a> {
       if cursor.container != flow.id() {
         continue;
       }
+      crate::instrument::record_cursor_pos_resolve();
       if let Ok(pos) = self.doc.get_cursor_pos(&cursor) {
         tables.insert(pos.current.pos, owner);
       }
@@ -1004,7 +1009,10 @@ fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str, pos
   // does the history-traced resolution, preserving exact parity with the old path.
   let pos = match cursor.id.and_then(|id| pos_by_id.get(&id).copied()) {
     Some(pos) => pos,
-    None => doc.get_cursor_pos(&cursor).ok()?.current.pos,
+    None => {
+      crate::instrument::record_cursor_pos_resolve();
+      doc.get_cursor_pos(&cursor).ok()?.current.pos
+    },
   };
   // `pos` is a live Unicode-code-point index into `text`; validate it is in range
   // with an O(1) length check (never materialize the flow string).

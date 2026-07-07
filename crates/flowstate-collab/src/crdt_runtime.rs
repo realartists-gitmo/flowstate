@@ -8300,6 +8300,9 @@ mod tests {
 }
 
 #[cfg(test)]
+#[path = "crdt_runtime/complexity_tests.rs"]
+mod complexity_tests;
+#[cfg(test)]
 #[path = "crdt_runtime/editor_transaction_tests.rs"]
 mod editor_transaction_tests;
 #[cfg(test)]
