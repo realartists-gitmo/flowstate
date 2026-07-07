@@ -197,7 +197,7 @@ pub fn load_first_key_for_command(command: crate::commands::CommandId) -> Option
 /// persisting a fresh one the first time it is requested.
 ///
 /// The returned `(user_id, display_name)` is bound to a live document runtime
-/// via `CrdtRuntimeHandle::set_author_identity` so revisions record their
+/// via `DocIoHandle::set_author_identity` so revisions record their
 /// author and `users_by_id` is populated. Persisting is best-effort: a write
 /// failure is logged but never fatal (the id regenerates on the next launch).
 pub fn load_local_user_identity() -> (u128, Option<String>) {

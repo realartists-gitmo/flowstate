@@ -11,7 +11,7 @@ use std::{
 use gpui::{
   AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
-  SharedString, Subscription, Timer, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div,
+  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div,
   prelude::*, px,
 };
 #[cfg(target_os = "windows")]
@@ -59,7 +59,6 @@ use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
 pub(super) const APP_CHROME_BORDER_WIDTH: Pixels = px(1.0);
 const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
-const DOCUMENT_RUNTIME_FLUSH_DEBOUNCE_MS: u64 = 24;
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
@@ -67,7 +66,7 @@ mod toolkit_panel;
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
-  document_runtimes: FxHashMap<Uuid, flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle>,
+  document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
   document_runtime_flush_pending: FxHashSet<Uuid>,
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,

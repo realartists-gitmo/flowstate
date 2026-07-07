@@ -23,7 +23,6 @@ use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use rustc_hash::{FxHashMap, FxHashSet};
-use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
@@ -276,12 +275,6 @@ pub enum CollaborationRole {
   Viewer,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UndoRedirect {
-  Undo,
-  Redo,
-}
-
 impl CollaborationRole {
   #[must_use]
   pub const fn can_write(self) -> bool {
@@ -289,138 +282,8 @@ impl CollaborationRole {
   }
 }
 
-pub(super) struct EditRecord {
-  before_selection: EditorSelection,
-  before_generation: u64,
-  after_selection: EditorSelection,
-  after_generation: u64,
-  operations: Vec<EditOperation>,
-  semantic_commands: Vec<SemanticEditCommand>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum EditOperation {
-  InsertText {
-    paragraph: usize,
-    byte: usize,
-    text: String,
-    styles: RunStyles,
-  },
-  ReplaceParagraphSpan {
-    before: DocumentSpan,
-    after: DocumentSpan,
-  },
-  InsertRichFragment {
-    offset: DocumentOffset,
-    inserted_end: DocumentOffset,
-    fragment: RichClipboardFragment,
-  },
-  DeleteBlock {
-    block_ix: usize,
-    block: Block,
-  },
-  #[allow(dead_code, reason = "IME state accessor is retained for platform input diagnostics.")]
-  InsertBlocks {
-    block_ix: usize,
-    blocks: Vec<Block>,
-  },
-  ReplaceBlock {
-    block_ix: usize,
-    before: Block,
-    after: Block,
-  },
-  RestoreProjectionSnapshot {
-    before: Box<DocumentProjection>,
-    after: Box<DocumentProjection>,
-  },
-  MoveRichText {
-    source_range: Range<DocumentOffset>,
-    adjusted_drop: DocumentOffset,
-    inserted_range: Range<DocumentOffset>,
-    fragment: RichClipboardFragment,
-  },
-}
-
-#[hotpath::measure_all]
-impl EditOperation {
-  pub(super) fn undo(&self, document: &mut DocumentProjection) {
-    match self {
-      Self::InsertText { paragraph, byte, text, .. } => {
-        delete_range_in_paragraph(document, *paragraph, *byte..*byte + text.len());
-      },
-      Self::ReplaceParagraphSpan { before, after } => apply_document_span_replacement(document, after, before),
-      Self::InsertRichFragment { offset, inserted_end, .. } => delete_cross_paragraph_range(document, *offset..*inserted_end),
-      Self::DeleteBlock { block_ix, block } => {
-        let insert_ix = (*block_ix).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).insert(insert_ix, block.clone());
-      },
-      Self::InsertBlocks { block_ix, blocks } => {
-        let end = (*block_ix + blocks.len()).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).drain(*block_ix..end);
-      },
-      Self::ReplaceBlock { block_ix, before, .. } => {
-        if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(*block_ix) {
-          *block = before.clone();
-        }
-      },
-      Self::RestoreProjectionSnapshot { before, .. } => {
-        *document = before.as_ref().clone();
-      },
-      Self::MoveRichText {
-        source_range,
-        inserted_range,
-        fragment,
-        ..
-      } => {
-        delete_cross_paragraph_range(document, inserted_range.clone());
-        insert_rich_fragment_at(document, source_range.start, fragment);
-      },
-    }
-  }
-
-  pub(super) fn redo(&self, document: &mut DocumentProjection) {
-    match self {
-      Self::InsertText {
-        paragraph,
-        byte,
-        text,
-        styles,
-      } => {
-        insert_text_at(document, *paragraph, *byte, text, *styles);
-      },
-      Self::ReplaceParagraphSpan { before, after } => apply_document_span_replacement(document, before, after),
-      Self::InsertRichFragment { offset, fragment, .. } => {
-        insert_rich_fragment_at(document, *offset, fragment);
-      },
-      Self::DeleteBlock { block_ix, .. } => {
-        if !matches!(document.blocks.get(*block_ix), Some(Block::Paragraph(_))) {
-          Arc::make_mut(&mut document.blocks).remove(*block_ix);
-        }
-      },
-      Self::InsertBlocks { block_ix, blocks } => {
-        let insert_ix = (*block_ix).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).splice(insert_ix..insert_ix, blocks.clone());
-      },
-      Self::ReplaceBlock { block_ix, after, .. } => {
-        if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(*block_ix) {
-          *block = after.clone();
-        }
-      },
-      Self::RestoreProjectionSnapshot { after, .. } => {
-        *document = after.as_ref().clone();
-      },
-      Self::MoveRichText {
-        source_range,
-        adjusted_drop,
-        fragment,
-        ..
-      } => {
-        delete_cross_paragraph_range(document, source_range.clone());
-        insert_rich_fragment_at(document, *adjusted_drop, fragment);
-      },
-    }
-  }
-}
+// Loro-first (spec §10, invariant 11): the editor holds NO content history.
+// Undo/redo executes through the write authority's Loro UndoManager.
 
 #[derive(Clone, Debug)]
 pub enum SaveStatus {
@@ -495,11 +358,6 @@ fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
 }
 
 #[hotpath::measure]
-fn is_single_grapheme_text_insert(text: &str) -> bool {
-  !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK) && text.graphemes(true).take(2).count() == 1
-}
-
-#[hotpath::measure]
 pub(super) fn adjust_drop_after_source_delete(drop: DocumentOffset, source: Range<DocumentOffset>) -> DocumentOffset {
   if drop <= source.start {
     return drop;
@@ -565,24 +423,12 @@ pub struct ExternalCaret {
   pub color_rgb: u32,
 }
 
-pub type NativeSaveHook =
-  Rc<dyn Fn(PathBuf, Vec<SemanticCommandBatch>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>>;
-pub type NativeExportHook = Rc<
-  dyn Fn(
-    PathBuf,
-    DocumentExportFormat,
-    Vec<SemanticCommandBatch>,
-    Vec<AssetRecord>,
-  ) -> Pin<Box<dyn Future<Output = io::Result<DocumentProjection>>>>,
->;
-pub type NativeUndoHook =
-  Rc<dyn Fn(UndoRedirect, Vec<SemanticCommandBatch>, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<Option<NativeUndoResult>>>>>>;
+// Loro-first: hooks carry NO pending edit batches (nothing is ever pending —
+// intents commit synchronously) and return no replacement projection (the
+// canonical doc is always current; there is nothing to replay).
+pub type NativeSaveHook = Rc<dyn Fn(PathBuf, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
-
-pub struct NativeUndoResult {
-  pub document: DocumentProjection,
-  pub selection: Option<EditorSelection>,
-}
 
 #[derive(Clone)]
 struct ParagraphChunkLayoutCacheEntry {
@@ -708,22 +554,22 @@ struct LayoutRuntimeMetrics {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ItemSizeBenchmarkResult {
-  pub(crate) elapsed: Duration,
-  pub(crate) cache_hit: bool,
-  pub(crate) item_count: usize,
-  pub(crate) exact_height_count: usize,
-  pub(crate) total_height: f32,
-  pub(crate) prep_requested: usize,
-  pub(crate) prep_completed: usize,
-  pub(crate) prep_installed: usize,
-  pub(crate) prep_stale: usize,
-  pub(crate) prep_batches: usize,
-  pub(crate) prep_text_bytes: usize,
-  pub(crate) ui_chunk_builds: usize,
-  pub(crate) ui_chunk_build_time: Duration,
-  pub(crate) prefetch_budget_overruns: usize,
-  pub(crate) scroll_budget_overruns: usize,
+pub struct ItemSizeBenchmarkResult {
+  pub elapsed: Duration,
+  pub cache_hit: bool,
+  pub item_count: usize,
+  pub exact_height_count: usize,
+  pub total_height: f32,
+  pub prep_requested: usize,
+  pub prep_completed: usize,
+  pub prep_installed: usize,
+  pub prep_stale: usize,
+  pub prep_batches: usize,
+  pub prep_text_bytes: usize,
+  pub ui_chunk_builds: usize,
+  pub ui_chunk_build_time: Duration,
+  pub prefetch_budget_overruns: usize,
+  pub scroll_budget_overruns: usize,
 }
 
 #[derive(Clone)]
@@ -984,27 +830,11 @@ impl HeightPrefixIndex {
   }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(super) enum CommandCaptureRoute {
-  #[default]
-  Disabled,
-  Runtime,
-  Collaboration,
-}
-
-impl CommandCaptureRoute {
-  fn accepts_runtime(self) -> bool {
-    matches!(self, Self::Runtime)
-  }
-
-  fn accepts_collaboration(self) -> bool {
-    matches!(self, Self::Collaboration)
-  }
-
-  fn is_enabled(self) -> bool {
-    !matches!(self, Self::Disabled)
-  }
-}
+use crate::local_intents::{
+  DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalCommit,
+  LocalIntent, LocalWriteAuthority, LocalWriteOutcome, ProjectionStreamItem, SetMarksIntent, SetParagraphStyleIntent,
+  SplitParagraphIntent, TextAnchor, UndoOutcome as LocalUndoOutcome, WriteRejected,
+};
 
 pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
@@ -1015,12 +845,11 @@ pub struct RichTextEditor {
   document_display_name: Option<SharedString>,
   recovery_path: Option<PathBuf>,
   pub(super) document: DocumentProjection,
-  pub(super) committed_document: DocumentProjection,
+  /// Loro-first: the injected write authority — the ONE local write path
+  /// (spec invariant 5). `None` = read-only display surface.
+  write_authority: Option<std::sync::Arc<dyn LocalWriteAuthority>>,
   pub(super) selection: EditorSelection,
   selection_movement_epoch: u64,
-  runtime_edit_selection_epoch: Option<u64>,
-  next_local_transaction_id: u128,
-  runtime_transaction_in_flight: Option<u128>,
   config: RichTextEditorConfig,
   edit_generation: u64,
   saved_generation: u64,
@@ -1029,18 +858,11 @@ pub struct RichTextEditor {
   last_format_export_generation: Option<u64>,
   zoom_percent: f32,
   save_status: SaveStatus,
-  undo_stack: Vec<EditRecord>,
-  redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
-  pending_semantic_edits: Vec<SemanticCommandBatch>,
   reconciliation_recoveries: u64,
-  command_capture_route: CommandCaptureRoute,
   native_save_hook: Option<NativeSaveHook>,
   native_export_hook: Option<NativeExportHook>,
-  native_undo_hook: Option<NativeUndoHook>,
   native_recovery_hook: Option<NativeRecoveryHook>,
-  suppress_command_capture: u32,
-  session_undo_redirect: Option<Rc<dyn Fn(UndoRedirect)>>,
   collaboration_role: Option<CollaborationRole>,
   own_collaboration_caret_color_rgb: Option<u32>,
   recovery_write_in_progress: bool,
@@ -1132,6 +954,7 @@ pub struct RichTextEditor {
 impl gpui::EventEmitter<EditorEvent> for RichTextEditor {}
 
 include!("lifecycle.rs");
+include!("local_write_path.rs");
 include!("projection_apply.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
@@ -1166,7 +989,6 @@ include!("traits.rs");
 include!("platform.rs");
 include!("virtual_helpers.rs");
 include!("table_helpers.rs");
-include!("block_helpers.rs");
 include!("render_blocks.rs");
 include!("equation_renderer.rs");
 include!("object_assets.rs");

@@ -8,9 +8,9 @@ use loro::{LoroDoc, LoroValue};
 use rustc_hash::FxHashMap;
 use std::collections::BTreeSet;
 
-use super::{ProjectionInvalidation, paragraph_style_from_attrs};
+use super::{ProjectionInvalidation, paragraph_body_start_in_loro, paragraph_style_from_attrs};
 
-pub(super) fn projection_patches_between(before: &DocumentProjection, after: &DocumentProjection) -> Option<Vec<ProjectionPatch>> {
+pub(crate) fn projection_patches_between(before: &DocumentProjection, after: &DocumentProjection) -> Option<Vec<ProjectionPatch>> {
   let mut patches = Vec::new();
   append_asset_patches(before, after, &mut patches);
 
@@ -370,7 +370,7 @@ fn text_delta_between(before: &str, after: &str) -> Vec<ProjectionTextDelta> {
   )
 }
 
-pub(super) fn remote_body_text_patch(
+pub(crate) fn remote_body_text_patch(
   projection: &DocumentProjection,
   before: &str,
   after: &str,
@@ -433,7 +433,7 @@ pub(super) fn remote_body_text_patch(
   ))
 }
 
-pub(super) fn remote_body_projection_patches(
+pub(crate) fn remote_body_projection_patches(
   projection: &DocumentProjection,
   before: &str,
   after: &str,
@@ -490,32 +490,24 @@ pub(super) fn remote_body_projection_patches(
   paragraph_projection_patches(projection, doc, touched)
 }
 
-pub(super) fn remote_nonstructural_projection_patches(
+#[hotpath::measure]
+pub(crate) fn remote_nonstructural_projection_patches(
   projection: &DocumentProjection,
   doc: &LoroDoc,
   invalidation: &ProjectionInvalidation,
   touched_paragraphs: &[usize],
+  live_starts: &[usize],
 ) -> Option<Vec<ProjectionPatch>> {
   if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
     return None;
   }
-  // The incremental text-patch path (`body_input_paragraph`) is object-UNAWARE: it
-  // walks raw `\n` boundaries, so an OBJECT_REPLACEMENT char folds into paragraph
-  // text and paragraph indices mis-align around object-adjacent (coalesced) empties.
-  // A remote update that also merged/split a paragraph would then patch the wrong
-  // rows, leaving the projection stale vs the canonical Loro state. Any object in the
-  // doc → take the object-aware full rebuild (`refresh_projection`), which is O(N)
-  // since the batched-resolver perf fix. Guarded here so non-object docs keep the
-  // fast incremental import path. (Convergence: proven by the N-peer structural fuzz.)
-  if projection
-    .blocks
-    .iter()
-    .any(|block| !matches!(block, flowstate_document::Block::Paragraph(_)))
-  {
-    return None;
-  }
-
-  let mut patches = paragraph_projection_patches(projection, doc, touched_paragraphs.iter().copied())?;
+  // Object docs are safe on this incremental path because the RANGED readback
+  // resolves each touched paragraph's live range from its durable record —
+  // object placeholders and coalesced empties cannot mis-align the rows the
+  // way the legacy whole-body index walk could. A range that does not parse
+  // as exactly one paragraph returns None and falls back to the rebuild.
+  // (Convergence: proven by the N-peer structural fuzz.)
+  let mut patches = paragraph_projection_patches_ranged(projection, doc, live_starts, touched_paragraphs.iter().copied())?;
   if !invalidation.changed_blocks.is_empty()
     || !invalidation.changed_tables.is_empty()
     || invalidation
@@ -535,55 +527,87 @@ fn paragraph_projection_patches(
 ) -> Option<Vec<ProjectionPatch>> {
   let mut patches = Vec::new();
   for paragraph_ix in touched_paragraphs {
-    let old = projection.paragraphs.get(paragraph_ix)?;
-    let old_input = input_paragraph(projection, paragraph_ix, old);
     let new_input = body_input_paragraph(doc, paragraph_ix)?;
-    let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-    let old_text = old_input
-      .runs
-      .iter()
-      .map(|run| run.text.as_str())
-      .collect::<String>();
-    let new_text = new_input
-      .runs
-      .iter()
-      .map(|run| run.text.as_str())
-      .collect::<String>();
-    if old_text != new_text {
-      patches.push(ProjectionPatch::ParagraphText {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
-        row_hint: row,
-        delta_utf8: text_delta_between(&old_text, &new_text),
-        new: new_input,
-      });
-      continue;
-    }
-    if old_input.style != new_input.style {
-      patches.push(ProjectionPatch::ParagraphStyle {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
-        row_hint: row,
-        style: new_input.style,
-      });
-    }
-    let new_runs = flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new_input)])
-      .paragraphs
-      .first()?
-      .runs
-      .clone();
-    if old.runs != new_runs {
-      patches.push(ProjectionPatch::ParagraphRuns {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
-        row_hint: row,
-        runs: new_runs,
-      });
-    }
+    paragraph_patches_from_readback(projection, paragraph_ix, new_input, &mut patches)?;
   }
   Some(patches)
 }
 
+/// Ranged sibling of [`paragraph_projection_patches`]: reads each touched
+/// paragraph back through [`body_input_paragraph_at`] (O(paragraph) per read
+/// instead of an O(doc) whole-body walk), with ranges resolved from durable
+/// paragraph records — exact in live space even for object docs, which the
+/// index-walk readback cannot promise.
+fn paragraph_projection_patches_ranged(
+  projection: &DocumentProjection,
+  doc: &LoroDoc,
+  live_starts: &[usize],
+  touched_paragraphs: impl IntoIterator<Item = usize>,
+) -> Option<Vec<ProjectionPatch>> {
+  let mut patches = Vec::new();
+  for paragraph_ix in touched_paragraphs {
+    let old = projection.paragraphs.get(paragraph_ix)?;
+    let (sentinel, end) = live_paragraph_range(doc, projection, live_starts, paragraph_ix)?;
+    let new_input = body_input_paragraph_at(doc, sentinel, end, input_paragraph(projection, paragraph_ix, old).style)?;
+    paragraph_patches_from_readback(projection, paragraph_ix, new_input, &mut patches)?;
+  }
+  Some(patches)
+}
+
+fn paragraph_patches_from_readback(
+  projection: &DocumentProjection,
+  paragraph_ix: usize,
+  new_input: InputParagraph,
+  patches: &mut Vec<ProjectionPatch>,
+) -> Option<()> {
+  let old = projection.paragraphs.get(paragraph_ix)?;
+  let old_input = input_paragraph(projection, paragraph_ix, old);
+  let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
+  let old_text = old_input
+    .runs
+    .iter()
+    .map(|run| run.text.as_str())
+    .collect::<String>();
+  let new_text = new_input
+    .runs
+    .iter()
+    .map(|run| run.text.as_str())
+    .collect::<String>();
+  if old_text != new_text {
+    patches.push(ProjectionPatch::ParagraphText {
+      block_id: projection.ids.block_ids[row],
+      paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+      row_hint: row,
+      delta_utf8: text_delta_between(&old_text, &new_text),
+      new: new_input,
+    });
+    return Some(());
+  }
+  if old_input.style != new_input.style {
+    patches.push(ProjectionPatch::ParagraphStyle {
+      block_id: projection.ids.block_ids[row],
+      paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+      row_hint: row,
+      style: new_input.style,
+    });
+  }
+  let new_runs = flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new_input)])
+    .paragraphs
+    .first()?
+    .runs
+    .clone();
+  if old.runs != new_runs {
+    patches.push(ProjectionPatch::ParagraphRuns {
+      block_id: projection.ids.block_ids[row],
+      paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+      row_hint: row,
+      runs: new_runs,
+    });
+  }
+  Some(())
+}
+
+#[hotpath::measure]
 fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroDoc) -> Option<Vec<ProjectionPatch>> {
   let projected = flowstate_document::object_input_blocks_from_loro(doc).ok()?;
   let mut existing = projection
@@ -721,7 +745,81 @@ fn common_suffix_byte_len(left: &str, right: &str, prefix: usize) -> usize {
   len
 }
 
-pub(super) fn body_input_paragraph(doc: &LoroDoc, target_paragraph_ix: usize) -> Option<InputParagraph> {
+/// Ranged replacement for [`body_input_paragraph`] (§11 complexity contract):
+/// reads ONE paragraph back through `slice_delta` over its live unicode range
+/// instead of materializing the whole body — O(paragraph), not O(doc).
+///
+/// `sentinel_unicode` addresses the paragraph's LEADING boundary `\n` (the
+/// paragraph-style carrier; the seed sentinel for paragraph 0). `end_unicode`
+/// is exclusive and may cover trailing object placeholders, which fold out of
+/// paragraph text exactly like the legacy whole-body walk. Returns `None`
+/// when the slice does not look like exactly one paragraph (missing leading
+/// sentinel, or an interior boundary such as a coalesced empty) so callers
+/// fall back to a full rebuild instead of patching the wrong rows.
+pub(crate) fn body_input_paragraph_at(
+  doc: &LoroDoc,
+  sentinel_unicode: usize,
+  end_unicode: usize,
+  fallback_style: ParagraphStyle,
+) -> Option<InputParagraph> {
+  let text = body_text(doc);
+  let end = end_unicode.min(text.len_unicode());
+  if sentinel_unicode >= end {
+    return None;
+  }
+  let spans = text.slice_delta(sentinel_unicode, end, loro::cursor::PosType::Unicode).ok()?;
+  let mut current = InputParagraph {
+    style: fallback_style,
+    runs: Vec::new(),
+  };
+  let mut seen_sentinel = false;
+  for item in spans {
+    let loro::TextDelta::Insert { insert, attributes } = item else {
+      continue;
+    };
+    let run_styles = run_styles_from_attrs(attributes.as_ref());
+    for ch in insert.chars() {
+      if ch == '\n' {
+        if seen_sentinel {
+          return None;
+        }
+        seen_sentinel = true;
+        current.style = paragraph_style_from_attrs(attributes.as_ref()).unwrap_or(fallback_style);
+      } else if ch != OBJECT_REPLACEMENT {
+        if !seen_sentinel {
+          return None;
+        }
+        push_input_char(&mut current, ch, run_styles);
+      }
+    }
+  }
+  seen_sentinel.then_some(current)
+}
+
+/// Live-body unicode range `(sentinel, end_exclusive)` for projection
+/// paragraph `paragraph_ix`, for [`body_input_paragraph_at`]. Starts resolve
+/// from durable paragraph records first (exact live space — object-aware and
+/// immune to coalesced-empty drift), with `live_starts` (the projection's
+/// paragraph starts shifted into post-change space) as the fallback.
+fn live_paragraph_range(doc: &LoroDoc, projection: &DocumentProjection, live_starts: &[usize], paragraph_ix: usize) -> Option<(usize, usize)> {
+  let start_of = |ix: usize| {
+    projection
+      .ids
+      .paragraph_ids
+      .get(ix)
+      .and_then(|id| paragraph_body_start_in_loro(doc, *id))
+      .or_else(|| live_starts.get(ix).copied())
+  };
+  let sentinel = start_of(paragraph_ix)?.checked_sub(1)?;
+  let end = if paragraph_ix + 1 < projection.ids.paragraph_ids.len() {
+    start_of(paragraph_ix + 1)?.checked_sub(1)?
+  } else {
+    body_text(doc).len_unicode()
+  };
+  (sentinel < end).then_some((sentinel, end))
+}
+
+pub(crate) fn body_input_paragraph(doc: &LoroDoc, target_paragraph_ix: usize) -> Option<InputParagraph> {
   let text = body_text(doc);
   let mut current = InputParagraph {
     style: ParagraphStyle::Normal,

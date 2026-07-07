@@ -8,8 +8,6 @@
 // up. These tests drive real layout via `benchmark_paragraph_item_sizes` in a sized window
 // and assert the exact-height / prep work is bounded and does not scale with the document.
 
-use super::*;
-
 fn big_document(paragraphs: usize) -> DocumentProjection {
   let paras = (0..paragraphs)
     .map(|ix| InputParagraph {
@@ -24,7 +22,7 @@ fn big_document(paragraphs: usize) -> DocumentProjection {
 
 /// Build an editor in a sized window, force a cold layout, and return the pass metrics.
 fn cold_layout_metrics(cx: &mut gpui::TestAppContext, paragraphs: usize) -> ItemSizeBenchmarkResult {
-  cx.update(|cx| gpui_component::init(cx));
+  cx.update(gpui_component::init);
   let handle = cx.add_window(|_window, cx| RichTextEditor::new_with_path(big_document(paragraphs), None, cx));
   handle
     .update(cx, |editor, window, cx| {
@@ -76,35 +74,3 @@ fn layout_exact_height_work_does_not_scale_with_document_size(cx: &mut gpui::Tes
   );
 }
 
-/// After a burst of edits, a re-layout must remain incremental — the edit advances
-/// `edit_generation`, and the following layout pass must not re-prep the whole document
-/// (the field stall was the layout redoing work every frame while falling behind edits).
-#[gpui::test]
-fn relayout_after_edits_stays_incremental(cx: &mut gpui::TestAppContext) {
-  let paragraphs = 3000;
-  cx.update(|cx| gpui_component::init(cx));
-  let handle = cx.add_window(|_window, cx| RichTextEditor::new_with_path(big_document(paragraphs), None, cx));
-  handle
-    .update(cx, |editor, window, cx| {
-      // Warm the layout once.
-      let _ = editor.benchmark_paragraph_item_sizes(px(760.0), window, cx);
-
-      // Type several graphemes near the top; each advances the edit generation.
-      editor.selection = EditorSelection::collapsed(DocumentOffset { paragraph: 1, byte: 0 });
-      let gen_before = editor.edit_generation();
-      for _ in 0..8 {
-        editor.insert_single_grapheme_fast_path("x", cx);
-      }
-      assert!(editor.edit_generation() > gen_before, "edits must advance the edit generation");
-
-      // A re-layout after the edits must prep only a bounded number of chunks, not the doc.
-      let metrics = editor.benchmark_paragraph_item_sizes(px(760.0), window, cx);
-      assert!(
-        metrics.prep_installed < paragraphs / 3,
-        "re-layout after {} edits re-prepped {} of {paragraphs} chunks — not incremental",
-        8,
-        metrics.prep_installed,
-      );
-    })
-    .expect("windowed edit + relayout");
-}

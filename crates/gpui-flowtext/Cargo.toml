@@ -35,6 +35,7 @@ uuid = { workspace = true }
 cosmic-text = { workspace = true }
 
 [dev-dependencies]
+flowstate-collab = { path = "../flowstate-collab" }
 gpui = { workspace = true, features = ["test-support"] }
 
 [features]

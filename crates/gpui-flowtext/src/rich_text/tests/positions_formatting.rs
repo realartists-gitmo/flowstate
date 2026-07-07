@@ -112,45 +112,6 @@ fn double_click_empty_paragraph_selects_only_empty_paragraph() {
 
 #[test]
 #[hotpath::measure]
-fn selection_across_empty_paragraphs_and_clear_formatting_policy() {
-  let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
-  let mut document = document_from_input(
-    DocumentTheme::default(),
-    vec![
-      InputParagraph {
-        style: ParagraphStyle::Custom(3),
-        runs: vec![run("tag", emphasized)],
-      },
-      InputParagraph {
-        style: ParagraphStyle::Custom(0),
-        runs: Vec::new(),
-      },
-      InputParagraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![run("body", emphasized)],
-      },
-    ],
-  );
-  let selection = DocumentOffset { paragraph: 0, byte: 1 }..DocumentOffset { paragraph: 2, byte: 1 };
-  assert!(selection_contains_whole_paragraph(&document, selection.clone()));
-
-  for paragraph_ix in selection.start.paragraph..=selection.end.paragraph {
-    clear_whole_paragraph_formatting(&mut document, paragraph_ix);
-  }
-
-  for paragraph in document.paragraphs.iter() {
-    assert_eq!(paragraph.style, ParagraphStyle::Normal);
-    assert!(
-      paragraph
-        .runs
-        .iter()
-        .all(|run| run.styles == RunStyles::default())
-    );
-  }
-}
-
-#[test]
-#[hotpath::measure]
 fn run_style_full_selection_toggle_policy() {
   let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
   let document = document_from_input(

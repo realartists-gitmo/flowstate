@@ -28,6 +28,7 @@ pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
 /// encountered on the way. The projection is deterministic even when defective:
 /// unresolvable blocks are quarantined (appended in stable order) instead of
 /// dropped, and fabricated identities are deterministic per projection.
+#[hotpath::measure]
 pub fn document_from_loro_with_defects(doc: &LoroDoc) -> io::Result<(DocumentProjection, Vec<ProjectionDefect>)> {
   crate::instrument::record_full_projection();
   let mut defects = Vec::new();

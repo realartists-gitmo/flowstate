@@ -377,6 +377,13 @@ impl AssetSource for AppAssets {
       "icons/send-horizontal.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-horizontal.svg")))),
       "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
       "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
+      "logo/flowstate-app-icon.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon.svg")))),
+      "logo/flowstate-app-icon-light.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
+        "../assets/logo/flowstate-app-icon-light.svg"
+      )))),
+      "logo/flowstate-mark.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark.svg")))),
+      "logo/flowstate-mark-white.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-white.svg")))),
+      "logo/flowstate-mark-black.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-black.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -467,6 +474,21 @@ impl AssetSource for AppAssets {
     }
     if "icons/docx.svg".starts_with(path) {
       assets.push("icons/docx.svg".into());
+    }
+    if "logo/flowstate-app-icon.svg".starts_with(path) {
+      assets.push("logo/flowstate-app-icon.svg".into());
+    }
+    if "logo/flowstate-app-icon-light.svg".starts_with(path) {
+      assets.push("logo/flowstate-app-icon-light.svg".into());
+    }
+    if "logo/flowstate-mark.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark.svg".into());
+    }
+    if "logo/flowstate-mark-white.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark-white.svg".into());
+    }
+    if "logo/flowstate-mark-black.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark-black.svg".into());
     }
     Ok(assets)
   }

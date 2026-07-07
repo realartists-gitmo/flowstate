@@ -167,6 +167,7 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
   cx.open_window(
     WindowOptions {
       window_bounds,
+      app_id: Some("dev.flowstate.Flowstate".to_string()),
       titlebar: Some(TitleBar::title_bar_options()),
       window_decorations: window_decorations(),
       ..Default::default()

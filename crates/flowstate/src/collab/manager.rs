@@ -5,7 +5,7 @@ use async_channel::Receiver;
 use flowstate_collab::{
   SessionId,
   capability::{CapabilityRole, DEFAULT_TICKET_TTL_SECS, unix_now},
-  crdt_runtime_actor::CrdtRuntimeHandle,
+  doc_io::DocIoHandle,
   ids::PeerId,
   net::{
     NetCommand, TicketSeed,
@@ -74,7 +74,7 @@ impl CollabManager {
     panel_id: Uuid,
     editor: Entity<RichTextEditor>,
     title: String,
-    document_runtime: CrdtRuntimeHandle,
+    document_io: DocIoHandle,
     cx: &mut Context<T>,
   ) -> Result<SessionId>
   where
@@ -93,7 +93,7 @@ impl CollabManager {
       title = %title,
       "starting local collaboration session",
     );
-    let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_runtime, commands.clone());
+    let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_io, commands.clone());
     let direct_handler = collab.direct_handler();
     let entity = cx.new(|_| collab);
     entity.update(cx, |session, cx| session.attach(cx));

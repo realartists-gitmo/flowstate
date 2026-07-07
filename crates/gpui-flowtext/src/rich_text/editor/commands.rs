@@ -188,122 +188,25 @@ impl RichTextEditor {
     }
   }
 
+  /// Loro-first (spec §10): undo executes through the write authority's
+  /// `UndoManager` — synchronously, cursor-restored, collaboration-safe. The
+  /// editor holds no content history of its own (invariant 11).
   pub fn undo(&mut self, cx: &mut Context<Self>) {
     self.note_explicit_selection_movement();
-    if let Some(hook) = self.native_undo_hook.clone() {
-      let pending_edits = self.take_pending_semantic_edits();
-      let pending_edits_for_retry = pending_edits.clone();
-      let assets = self.document.assets.assets.values().cloned().collect();
-      let fallback_selection = self.selection.clone();
-      let generation = self.next_edit_generation;
-      self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-      cx.spawn(async move |editor, cx| {
-        let result = hook(UndoRedirect::Undo, pending_edits, assets).await;
-        let _ = editor.update(cx, |editor, cx| match result {
-          Ok(Some(result)) => {
-            editor.document = result.document;
-            editor.identity_map.reconcile(&editor.document);
-            let fid_before = editor.fidelity_caret_before();
-            editor.selection = result.selection.unwrap_or(fallback_selection);
-            editor.fidelity_caret_set("runtime_undo_redo_hook", &fid_before);
-            editor.emit_selection_changed(cx);
-            editor.edit_generation = generation;
-            editor.undo_stack.clear();
-            editor.redo_stack.clear();
-            editor.after_history_restore(cx);
-          },
-          Ok(None) => {},
-          Err(error) => {
-            editor.prepend_pending_semantic_edits(pending_edits_for_retry);
-            tracing::warn!(%error, "runtime undo failed; pending edits were requeued");
-            cx.notify();
-          },
-        });
-      })
-      .detach();
-      return;
-    }
-    if let Some(hook) = self.session_undo_redirect.clone() {
-      hook(UndoRedirect::Undo);
-      return;
-    }
-    let Some(record) = self.undo_stack.pop() else {
-      return;
-    };
-    let restored_generation = record.before_generation;
-    for operation in record.operations.iter().rev() {
-      operation.undo(&mut self.document);
-    }
-    let fid_before = self.fidelity_caret_before();
-    self.selection = record.before_selection.clone();
-    self.fidelity_caret_set("undo/local-history", &fid_before);
-    self.emit_selection_changed(cx);
-    self.edit_generation = restored_generation;
-    self.redo_stack.push(record);
-    self.after_history_restore(cx);
+    self.undo_via_authority(cx);
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
     self.note_explicit_selection_movement();
-    if let Some(hook) = self.native_undo_hook.clone() {
-      let pending_edits = self.take_pending_semantic_edits();
-      let pending_edits_for_retry = pending_edits.clone();
-      let assets = self.document.assets.assets.values().cloned().collect();
-      let fallback_selection = self.selection.clone();
-      let generation = self.next_edit_generation;
-      self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-      cx.spawn(async move |editor, cx| {
-        let result = hook(UndoRedirect::Redo, pending_edits, assets).await;
-        let _ = editor.update(cx, |editor, cx| match result {
-          Ok(Some(result)) => {
-            editor.document = result.document;
-            editor.identity_map.reconcile(&editor.document);
-            let fid_before = editor.fidelity_caret_before();
-            editor.selection = result.selection.unwrap_or(fallback_selection);
-            editor.fidelity_caret_set("runtime_undo_redo_hook", &fid_before);
-            editor.emit_selection_changed(cx);
-            editor.edit_generation = generation;
-            editor.undo_stack.clear();
-            editor.redo_stack.clear();
-            editor.after_history_restore(cx);
-          },
-          Ok(None) => {},
-          Err(error) => {
-            editor.prepend_pending_semantic_edits(pending_edits_for_retry);
-            tracing::warn!(%error, "runtime redo failed; pending edits were requeued");
-            cx.notify();
-          },
-        });
-      })
-      .detach();
-      return;
-    }
-    if let Some(hook) = self.session_undo_redirect.clone() {
-      hook(UndoRedirect::Redo);
-      return;
-    }
-    let Some(record) = self.redo_stack.pop() else {
-      return;
-    };
-    let restored_generation = record.after_generation;
-    for operation in &record.operations {
-      operation.redo(&mut self.document);
-    }
-    let fid_before = self.fidelity_caret_before();
-    self.selection = record.after_selection.clone();
-    self.fidelity_caret_set("redo/local-history", &fid_before);
-    self.emit_selection_changed(cx);
-    self.edit_generation = restored_generation;
-    self.undo_stack.push(record);
-    self.after_history_restore(cx);
+    self.redo_via_authority(cx);
   }
 
   pub fn can_undo(&self) -> bool {
-    self.native_undo_hook.is_some() || self.session_undo_redirect.is_some() || !self.undo_stack.is_empty()
+    self.write_authority.is_some()
   }
 
   pub fn can_redo(&self) -> bool {
-    self.native_undo_hook.is_some() || self.session_undo_redirect.is_some() || !self.redo_stack.is_empty()
+    self.write_authority.is_some()
   }
 
   pub fn move_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -449,19 +352,12 @@ impl RichTextEditor {
     if self.selection != before {
       self.emit_selection_changed(cx);
     }
-    if self.insert_single_grapheme_fast_path(text, cx) {
-      return;
-    }
     self.apply_document_edit(cx, |editor, cx| editor.insert_text(text, cx));
   }
 
   pub fn backspace_command(&mut self, cx: &mut Context<Self>) {
     if !self.can_write_collaboration() {
       cx.notify();
-      return;
-    }
-    if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
-      let _ = self.delete_selection_with_document_snapshot(cx);
       return;
     }
     self.apply_document_edit(cx, |editor, cx| editor.backspace(cx));
@@ -472,25 +368,13 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
-      let _ = self.delete_selection_with_document_snapshot(cx);
-      return;
-    }
     self.apply_document_edit(cx, |editor, cx| editor.delete_forward(cx));
   }
 
   pub fn insert_paragraph_break_command(&mut self, cx: &mut Context<Self>) {
-    if !self.selection.is_caret() {
-      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
-      return;
-    }
-
-    let caret = self.selection.head;
-    let Some(block_ix) = block_ix_for_paragraph(&self.document, caret.paragraph) else {
-      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
-      return;
-    };
-    self.insert_paragraph_break_at_caret(caret, block_ix, cx);
+    // Loro-first: one primitive covers caret and selection cases — the split
+    // intent commits through the write authority (spec §5).
+    self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
   }
 
   pub fn delete_word_backward_command(&mut self, cx: &mut Context<Self>) {
@@ -502,7 +386,7 @@ impl RichTextEditor {
         editor.selection = EditorSelection::range(anchor, head);
         editor.fidelity_caret_set("delete_word_backward_command", &fid_before);
       }
-      editor.delete_selection_internal();
+      editor.delete_selection_internal_with_cx(cx);
       editor.after_text_mutation(cx);
     });
   }
@@ -516,7 +400,7 @@ impl RichTextEditor {
         editor.selection = EditorSelection::range(anchor, head);
         editor.fidelity_caret_set("delete_word_forward_command", &fid_before);
       }
-      editor.delete_selection_internal();
+      editor.delete_selection_internal_with_cx(cx);
       editor.after_text_mutation(cx);
     });
   }
@@ -565,13 +449,9 @@ impl RichTextEditor {
       });
       return;
     }
-    if self.delete_selection_with_document_snapshot(cx) {
-      return;
-    }
-    self.apply_document_edit(cx, |editor, cx| {
-      editor.delete_selection_internal();
-      editor.after_text_mutation(cx);
-    });
+    // Loro-first: one DeleteRange intent handles object-crossing selections
+    // canonically (the runtime retires objects + records with the text).
+    self.write_delete_selection(cx);
   }
 
   pub fn paste(&mut self, cx: &mut Context<Self>) {

@@ -77,22 +77,17 @@ impl RichTextEditor {
     let range = self.selection.normalized();
     let direct = explicit_direct.unwrap_or_else(|| selection_prefers_direct_underline(&self.document, range.clone()));
     let all_selected = selection_all_underline_kind(&self.document, range.clone(), direct);
-    self.apply_document_edit(cx, |editor, cx| {
-      mutate_runs_in_range(&mut editor.document, range, |styles| {
-        if direct {
-          styles.direct_underline = !all_selected;
-        } else {
-          let new_value = !all_selected;
-          if new_value {
-            styles.semantic = RunSemanticStyle::Custom(3);
-            styles.direct_underline = false;
-          } else {
-            styles.semantic = RunSemanticStyle::Plain;
-          }
-        }
-      });
-      editor.after_formatting_mutation(cx);
-    });
+    let mut styles = run_styles_at_offset(&self.document, range.start);
+    if direct {
+      styles.direct_underline = !all_selected;
+    } else if all_selected {
+      styles.semantic = RunSemanticStyle::Plain;
+    } else {
+      styles.semantic = RunSemanticStyle::Custom(3);
+      styles.direct_underline = false;
+    }
+    self.pending_styles = None;
+    self.write_set_marks(range, styles, cx);
   }
 
   fn toggle_semantic_style(&mut self, semantic: RunSemanticStyle, cx: &mut Context<Self>) {
@@ -140,12 +135,10 @@ impl RichTextEditor {
 
     let range = self.selection.normalized();
     let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.semantic == semantic);
-    self.apply_document_edit(cx, |editor, cx| {
-      mutate_runs_in_range(&mut editor.document, range, |styles| {
-        styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
-      });
-      editor.after_formatting_mutation(cx);
-    });
+    let mut styles = run_styles_at_offset(&self.document, range.start);
+    styles.semantic = if all_selected { RunSemanticStyle::Plain } else { semantic };
+    self.pending_styles = None;
+    self.write_set_marks(range, styles, cx);
   }
 
   fn set_highlight_internal(&mut self, highlight: Option<HighlightStyle>, cx: &mut Context<Self>) {
@@ -195,27 +188,32 @@ impl RichTextEditor {
       false
     };
     let target_highlight = if all_selected { None } else { highlight };
-    self.apply_document_edit(cx, |editor, cx| {
-      mutate_runs_in_range(&mut editor.document, range, |styles| styles.highlight = target_highlight);
-      editor.after_formatting_mutation(cx);
-    });
+    let mut styles = run_styles_at_offset(&self.document, range.start);
+    styles.highlight = target_highlight;
+    self.pending_styles = None;
+    self.write_set_marks(range, styles, cx);
   }
 
   pub(super) fn styles_at_caret(&self) -> RunStyles {
     if let Some(styles) = self.pending_styles {
       return styles;
     }
-    let caret = self.selection.head;
-    let Some(paragraph) = self.document.paragraphs.get(caret.paragraph) else {
-      return RunStyles::default();
-    };
-    let (run_ix, _) = run_containing(paragraph, caret.byte.min(paragraph_text_len(paragraph)));
-    paragraph
-      .runs
-      .get(run_ix)
-      .map(|run| run.styles)
-      .unwrap_or_default()
+    run_styles_at_offset(&self.document, self.selection.head)
   }
 
   // -------- Movement primitives ----------------------------------------
+}
+
+/// Pure projection read: the run styles governing `offset` (used as the base
+/// a `SetMarks` intent restates over a selection).
+fn run_styles_at_offset(document: &DocumentProjection, offset: DocumentOffset) -> RunStyles {
+  let Some(paragraph) = document.paragraphs.get(offset.paragraph) else {
+    return RunStyles::default();
+  };
+  let (run_ix, _) = run_containing(paragraph, offset.byte.min(paragraph_text_len(paragraph)));
+  paragraph
+    .runs
+    .get(run_ix)
+    .map(|run| run.styles)
+    .unwrap_or_default()
 }

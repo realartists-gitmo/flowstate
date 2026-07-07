@@ -41,10 +41,10 @@ impl RichTextEditor {
     }
     let range = self.selection.normalized();
     let all_selected = selection_all_run_styles(&self.document, range.clone(), |styles| styles.strikethrough);
-    self.apply_document_edit(cx, |editor, cx| {
-      mutate_runs_in_range(&mut editor.document, range, |styles| styles.strikethrough = !all_selected);
-      editor.after_formatting_mutation(cx);
-    });
+    let mut styles = run_styles_at_offset(&self.document, range.start);
+    styles.strikethrough = !all_selected;
+    self.pending_styles = None;
+    self.write_set_marks(range, styles, cx);
   }
 
   /// Toggle any semantic inline style for the current selection or caret.
@@ -124,14 +124,9 @@ impl RichTextEditor {
     let Some(range) = self.selection_or_enclosing_section_range(section_slots) else {
       return;
     };
-    let fragment = RichClipboardFragment {
-      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
-      paragraphs,
-      blocks: Vec::new(),
-      assets: Vec::new(),
-    };
     self.selection = EditorSelection::range(range.start, range.end);
-    self.apply_document_edit(cx, |editor, cx| editor.insert_rich_fragment(fragment, cx));
+    let blocks = paragraphs.into_iter().map(FragmentBlock::Paragraph).collect();
+    self.write_insert_rich_fragment_at_caret(blocks, cx);
   }
 
   fn selection_or_enclosing_section_range(&self, section_slots: &[u8]) -> Option<Range<DocumentOffset>> {
@@ -237,25 +232,19 @@ impl RichTextEditor {
     {
       return;
     }
-    self.apply_document_edit(cx, |editor, cx| {
-      for paragraph_ix in range_start.paragraph..=range_end.paragraph {
-        let paragraph_start = if paragraph_ix == range_start.paragraph { range_start.byte } else { 0 };
-        let paragraph_end = if paragraph_ix == range_end.paragraph {
-          range_end.byte
-        } else {
-          paragraph_text_len(&editor.document.paragraphs[paragraph_ix])
-        };
-        if paragraph_start < paragraph_end {
-          apply_highlight_to_existing_highlights_in_paragraph_range(
-            &mut editor.document,
-            paragraph_ix,
-            paragraph_start..paragraph_end,
-            highlight,
-          );
-        }
-      }
-      editor.after_formatting_mutation(cx);
-    });
+    // Only re-colors runs that already carry a highlight; each maximal
+    // already-highlighted span becomes one SetMarks intent, grouped as one
+    // undo unit.
+    let spans = highlighted_spans_in_range(&self.document, range_start..range_end, highlight);
+    if spans.is_empty() {
+      return;
+    }
+    self.pending_styles = None;
+    self.begin_undo_group();
+    for (range, styles) in spans {
+      self.write_set_marks(range, styles, cx);
+    }
+    self.end_undo_group();
   }
 
   pub fn clear_highlight(&mut self, cx: &mut Context<Self>) {
@@ -274,24 +263,51 @@ impl RichTextEditor {
       });
       return;
     }
-    self.apply_document_edit(cx, |editor, cx| {
-      if editor.selection.is_caret() {
-        let paragraph_ix = editor.selection.head.paragraph;
-        clear_whole_paragraph_formatting(&mut editor.document, paragraph_ix);
+    self.pending_styles = None;
+    if self.selection.is_caret() {
+      let paragraph_ix = self.selection.head.paragraph;
+      self.write_clear_whole_paragraph_formatting(paragraph_ix..paragraph_ix + 1, cx);
+    } else {
+      let range = self.selection.normalized();
+      if selection_contains_whole_paragraph(&self.document, range.clone()) {
+        self.write_clear_whole_paragraph_formatting(range.start.paragraph..range.end.paragraph + 1, cx);
       } else {
-        let range = editor.selection.normalized();
-        if selection_contains_whole_paragraph(&editor.document, range.clone()) {
-          for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-            clear_whole_paragraph_formatting(&mut editor.document, paragraph_ix);
-          }
-        } else {
-          mutate_runs_in_range(&mut editor.document, range, |styles| *styles = RunStyles::default());
-        }
+        self.write_set_marks(range, RunStyles::default(), cx);
       }
-      rebuild_document_sections(&mut editor.document);
-      editor.pending_styles = None;
-      editor.after_formatting_mutation(cx);
-    });
+    }
+  }
+
+  /// Clear-formatting over whole paragraphs: paragraph styles back to Normal
+  /// (one intent per changed paragraph) plus one run-style reset over the full
+  /// span, grouped as one undo unit.
+  fn write_clear_whole_paragraph_formatting(&mut self, paragraphs: Range<usize>, cx: &mut Context<Self>) {
+    let end = paragraphs.end.min(self.document.paragraphs.len());
+    if paragraphs.start >= end {
+      return;
+    }
+    self.begin_undo_group();
+    for paragraph_ix in paragraphs.start..end {
+      if self
+        .document
+        .paragraphs
+        .get(paragraph_ix)
+        .is_some_and(|paragraph| paragraph.style != ParagraphStyle::Normal)
+      {
+        self.write_set_paragraph_style(paragraph_ix, ParagraphStyle::Normal, cx);
+      }
+    }
+    let last_paragraph = end - 1;
+    let range = DocumentOffset {
+      paragraph: paragraphs.start,
+      byte: 0,
+    }..DocumentOffset {
+      paragraph: last_paragraph,
+      byte: self.document.paragraphs.get(last_paragraph).map(paragraph_text_len).unwrap_or(0),
+    };
+    if range.start != range.end {
+      self.write_set_marks(range, RunStyles::default(), cx);
+    }
+    self.end_undo_group();
   }
 
   pub fn apply_run_style_to_selection(&mut self, style: RunStyle, cx: &mut Context<Self>) {
@@ -318,19 +334,10 @@ impl RichTextEditor {
     if self.selection.is_caret() {
       return;
     }
-    self.apply_document_edit(cx, |editor, cx| {
-      let range = editor.selection.normalized();
-      for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-        let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
-        let end = if paragraph_ix == range.end.paragraph {
-          range.end.byte
-        } else {
-          paragraph_text_len(&editor.document.paragraphs[paragraph_ix])
-        };
-        apply_style_to_paragraph_range(&mut editor.document, paragraph_ix, start..end, style);
-      }
-      editor.after_formatting_mutation(cx);
-    });
+    let range = self.selection.normalized();
+    let styles = run_styles_at_offset(&self.document, range.start).with(style);
+    self.pending_styles = None;
+    self.write_set_marks(range, styles, cx);
   }
 
   pub fn set_paragraph_style_for_selection(&mut self, style: ParagraphStyle, cx: &mut Context<Self>) {
@@ -343,19 +350,19 @@ impl RichTextEditor {
       });
       return;
     }
-    self.apply_document_edit(cx, |editor, cx| {
-      let range = editor.selection.normalized();
-      for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-        if let Some(paragraph) = paragraphs_mut(&mut editor.document).get_mut(paragraph_ix)
-          && paragraph.style != style
-        {
-          paragraph.style = style;
-          bump_paragraph_version(paragraph);
-        }
+    let range = self.selection.normalized();
+    self.begin_undo_group();
+    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+      if self
+        .document
+        .paragraphs
+        .get(paragraph_ix)
+        .is_some_and(|paragraph| paragraph.style != style)
+      {
+        self.write_set_paragraph_style(paragraph_ix, style, cx);
       }
-      rebuild_document_sections(&mut editor.document);
-      editor.after_formatting_mutation(cx);
-    });
+    }
+    self.end_undo_group();
   }
 
   // -------- Action handlers (bound to keystrokes in main.rs) -----------
@@ -364,27 +371,55 @@ impl RichTextEditor {
   //   fn(&mut Self, &Action, &mut Window, &mut Context<Self>).
 }
 
-fn apply_highlight_to_existing_highlights_in_paragraph_range(
-  document: &mut DocumentProjection,
-  paragraph_ix: usize,
-  range: Range<usize>,
+/// Pure projection scan: the maximal spans inside `range` whose runs already
+/// carry a highlight, with each span's styles recolored to `highlight`.
+/// Adjacent run spans that converge on the same styles are merged so the
+/// resulting `SetMarks` intents stay minimal.
+fn highlighted_spans_in_range(
+  document: &DocumentProjection,
+  range: Range<DocumentOffset>,
   highlight: HighlightStyle,
-) {
-  mutate_runs_in_range(
-    document,
-    DocumentOffset {
-      paragraph: paragraph_ix,
-      byte: range.start,
-    }..DocumentOffset {
-      paragraph: paragraph_ix,
-      byte: range.end,
-    },
-    |styles| {
-      if styles.highlight.is_some() {
-        styles.highlight = Some(highlight);
+) -> Vec<(Range<DocumentOffset>, RunStyles)> {
+  let mut spans: Vec<(Range<DocumentOffset>, RunStyles)> = Vec::new();
+  for paragraph_ix in range.start.paragraph..=range.end.paragraph {
+    let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+      continue;
+    };
+    let paragraph_start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
+    let paragraph_end = if paragraph_ix == range.end.paragraph {
+      range.end.byte
+    } else {
+      paragraph_text_len(paragraph)
+    };
+    let mut offset = 0;
+    for run in &paragraph.runs {
+      let run_start = offset;
+      let run_end = offset + run.len;
+      offset = run_end;
+      if run_end <= paragraph_start || run_start >= paragraph_end || run.styles.highlight.is_none() {
+        continue;
       }
-    },
-  );
+      let mut styles = run.styles;
+      styles.highlight = Some(highlight);
+      let start = DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: run_start.max(paragraph_start),
+      };
+      let end = DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: run_end.min(paragraph_end),
+      };
+      if let Some((last_range, last_styles)) = spans.last_mut()
+        && last_range.end == start
+        && *last_styles == styles
+      {
+        last_range.end = end;
+      } else {
+        spans.push((start..end, styles));
+      }
+    }
+  }
+  spans
 }
 
 fn hierarchical_section_bounds(document: &DocumentProjection, paragraph_ix: usize, section_slots: &[u8]) -> Option<(usize, usize)> {

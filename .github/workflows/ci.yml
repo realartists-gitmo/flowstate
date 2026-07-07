@@ -25,6 +25,14 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  raw-authority-guard:
+    name: Raw-authority guard (Loro-first spec invariant 6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbidden raw-authority surfaces must not exist in production source
+        run: bash tools/check_raw_authority.sh
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest

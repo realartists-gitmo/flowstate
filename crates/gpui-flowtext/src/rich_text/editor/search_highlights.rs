@@ -59,8 +59,7 @@ impl RichTextEditor {
         .then_with(|| left.end.cmp(&right.end))
     });
     let count = ranges.len();
-    let paragraph_count = self.document.paragraphs.len();
-    self.apply_document_edit_with_capture_range(cx, Some(0..paragraph_count), |editor, cx| {
+    self.apply_document_edit(cx, |editor, cx| {
       let mut final_caret = None;
       let mut paragraph_groups = Vec::new();
       let mut cross_paragraph_ranges = Vec::new();

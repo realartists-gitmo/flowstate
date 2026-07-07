@@ -7,9 +7,11 @@ pub mod share_dialog;
 mod shutdown;
 pub mod status;
 
+use std::sync::Arc;
+
 use anyhow::Result;
 use async_channel::Receiver;
-use flowstate_collab::{SessionId, crdt_runtime_actor::CrdtRuntimeHandle, ticket::SessionTicket};
+use flowstate_collab::{SessionId, doc_io::DocIoHandle, local_write::LocalDocHandle, ticket::SessionTicket};
 use gpui::{App, BorrowAppContext, Context, Entity, ReadGlobal};
 use uuid::Uuid;
 
@@ -32,19 +34,28 @@ pub fn start_session_for_panel<T>(
   panel_id: Uuid,
   editor: Entity<RichTextEditor>,
   title: String,
-  runtime: CrdtRuntimeHandle,
+  io: DocIoHandle,
   cx: &mut Context<T>,
 ) -> Result<SessionId>
 where
   T: 'static,
 {
-  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_session_for_panel(panel_id, editor, title, runtime, cx))
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_session_for_panel(panel_id, editor, title, io, cx))
 }
 
-pub fn runtime_for_session(session_id: SessionId, cx: &App) -> Option<CrdtRuntimeHandle> {
-  CollabManager::global(cx)
-    .session_for_id(session_id)
-    .and_then(|session| session.read(cx).runtime_handle())
+/// JOIN handoff (Loro-first spec §3): take the document services the joining
+/// session constructed from the initial snapshot — the write authority for the
+/// editor and the I/O handle for saves/exports. One-shot: the write authority
+/// moves out of the session (the session is transport-only, invariant 5);
+/// subsequent calls return `None`.
+pub fn take_joined_document_services_for_session<T>(session_id: SessionId, cx: &mut Context<T>) -> Option<(Arc<LocalDocHandle>, DocIoHandle)>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| {
+    let session = manager.session_for_id(session_id)?;
+    session.update(cx, |session, _| session.take_joined_document_services())
+  })
 }
 
 pub fn join_session<T>(ticket: SessionTicket, cx: &mut Context<T>) -> Result<JoinRequest>

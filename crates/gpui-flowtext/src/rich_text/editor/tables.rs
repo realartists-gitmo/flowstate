@@ -18,7 +18,10 @@ impl RichTextEditor {
       style: TableStyle { header_row: false },
       version: 0,
     };
-    self.insert_blocks_after_caret(vec![Block::Table(table)], cx);
+    // Loro-first (spec §5): the table enters the document as one InsertObject
+    // intent; the block's durable identity is minted by the write path while
+    // the row/column ids above stay editor-minted (they ride in the payload).
+    self.write_insert_object_at_caret(input_block_from_block(&Block::Table(table)), cx);
   }
 
   pub fn insert_row_after_selected_table(&mut self, cx: &mut Context<Self>) {
@@ -26,39 +29,34 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { row_ix, .. }) => Some(row_ix),
       _ => None,
     };
-    let Some(block_ix) = self.selected_table_block_ix() else {
+    let Some((block_ix, table_id)) = self.selected_table_identity() else {
       return;
     };
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
       return;
     };
-    let mut updated = table.clone();
     let insert_ix = target_row
       .map(|row| row + 1)
-      .unwrap_or(updated.rows.len())
-      .min(updated.rows.len());
-    // Durable anchor: the row currently before the insertion point in the local
-    // model (`None` when inserting at the head), mirroring the canonical apply.
+      .unwrap_or(table.rows.len())
+      .min(table.rows.len());
+    // Durable anchor: the row currently before the insertion point in the
+    // projection (`None` when inserting at the head).
     let after_row = insert_ix
       .checked_sub(1)
       .and_then(|ix| table.rows.get(ix))
       .map(|row| row.id);
     let column_ids: Vec<ColumnId> = table.columns.iter().map(|column| column.id).collect();
-    let new_row_id = RowId(uuid::Uuid::new_v4().as_u128());
-    let row = default_table_row(new_row_id, &column_ids);
-    updated.rows.insert(insert_ix, row.clone());
-    updated.version = updated.version.wrapping_add(1);
-    let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
-      vec![SemanticEditCommand::InsertTableRow {
+    // The new row's identity is editor-minted (InputTableRow carries its id);
+    // the runtime materializes the row and returns the projection patches.
+    let row = default_table_row(RowId(uuid::Uuid::new_v4().as_u128()), &column_ids);
+    self.write_intent(
+      LocalIntent::Table(crate::local_intents::TableIntent::InsertRow {
         table: table_id,
-        new_row_id,
         after_row,
         row: input_table_row_from_table_row(&row),
-      }]
-    } else {
-      self.missing_table_identity_semantic_commands(block_ix, "row insert")
-    };
-    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
+      }),
+      cx,
+    );
   }
 
   pub fn delete_last_row_from_selected_table(&mut self, cx: &mut Context<Self>) {
@@ -66,10 +64,10 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { row_ix, .. }) => Some(row_ix),
       _ => None,
     };
-    let Some(block_ix) = self.selected_table_block_ix() else {
+    let Some((block_ix, table_id)) = self.selected_table_identity() else {
       return;
     };
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
       return;
     };
     if table.rows.len() <= 1 {
@@ -78,16 +76,8 @@ impl RichTextEditor {
     let row_ix = target_row
       .unwrap_or(table.rows.len() - 1)
       .min(table.rows.len() - 1);
-    let row_id = table.rows[row_ix].id;
-    let mut updated = table.clone();
-    updated.rows.remove(row_ix);
-    updated.version = updated.version.wrapping_add(1);
-    let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
-      vec![SemanticEditCommand::DeleteTableRow { table: table_id, row_id }]
-    } else {
-      self.missing_table_identity_semantic_commands(block_ix, "row delete")
-    };
-    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
+    let row = table.rows[row_ix].id;
+    self.write_intent(LocalIntent::Table(crate::local_intents::TableIntent::DeleteRow { table: table_id, row }), cx);
   }
 
   pub fn insert_column_after_selected_table(&mut self, cx: &mut Context<Self>) {
@@ -95,52 +85,31 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => Some(cell_ix),
       _ => None,
     };
-    let Some(block_ix) = self.selected_table_block_ix() else {
+    let Some((block_ix, table_id)) = self.selected_table_identity() else {
       return;
     };
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
       return;
     };
-    let mut updated = table.clone();
     let insert_ix = target_column
       .map(|column| column + 1)
-      .unwrap_or(updated.columns.len())
-      .min(updated.columns.len());
-    // Durable anchor: the column currently before the insertion point (`None` at
-    // the head), resolved from the local model like the canonical apply.
+      .unwrap_or(table.columns.len())
+      .min(table.columns.len());
+    // Durable anchor: the column currently before the insertion point (`None`
+    // at the head). The new column's identity AND its empty cells are minted
+    // by the runtime — the intent carries only the anchor and the width.
     let after_column = insert_ix
       .checked_sub(1)
       .and_then(|ix| table.columns.get(ix))
       .map(|column| column.id);
-    let new_column_id = ColumnId(uuid::Uuid::new_v4().as_u128());
-    let width = TableColumnWidth::Fraction(1);
-    updated.columns.insert(
-      insert_ix,
-      TableColumn {
-        id: new_column_id,
-        width: width.clone(),
-      },
-    );
-    let mut inserted_cells = Vec::with_capacity(updated.rows.len());
-    for row in &mut updated.rows {
-      let cell = default_table_cell(row.id, new_column_id);
-      inserted_cells.push(input_table_cell_from_table_cell(&cell));
-      let cell_ix = insert_ix.min(row.cells.len());
-      row.cells.insert(cell_ix, cell);
-    }
-    updated.version = updated.version.wrapping_add(1);
-    let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
-      vec![SemanticEditCommand::InsertTableColumn {
+    self.write_intent(
+      LocalIntent::Table(crate::local_intents::TableIntent::InsertColumn {
         table: table_id,
-        new_column_id,
         after_column,
-        width: input_table_column_width_from_table_column_width(&width),
-        cells: inserted_cells,
-      }]
-    } else {
-      self.missing_table_identity_semantic_commands(block_ix, "column insert")
-    };
-    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
+        width: InputTableColumnWidth::Fraction(1),
+      }),
+      cx,
+    );
   }
 
   pub fn delete_last_column_from_selected_table(&mut self, cx: &mut Context<Self>) {
@@ -148,48 +117,23 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => Some(cell_ix),
       _ => None,
     };
-    let Some(block_ix) = self.selected_table_block_ix() else {
+    let Some((block_ix, table_id)) = self.selected_table_identity() else {
       return;
     };
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
       return;
     };
-    let mut updated = table.clone();
-    let mut structured_column_id = None;
-    if updated.columns.len() > 1 {
-      let column_ix = target_column
-        .unwrap_or(updated.columns.len() - 1)
-        .min(updated.columns.len() - 1);
-      let removed_column_id = updated.columns[column_ix].id;
-      updated.columns.remove(column_ix);
-      for row in &mut updated.rows {
-        if row.cells.len() > 1
-          && let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == removed_column_id)
-        {
-          row.cells.remove(cell_ix);
-        }
-      }
-      structured_column_id = Some(removed_column_id);
-    } else {
-      for row in &mut updated.rows {
-        if row.cells.len() > 1 {
-          let cell_ix = target_column
-            .unwrap_or(row.cells.len() - 1)
-            .min(row.cells.len() - 1);
-          row.cells.remove(cell_ix);
-        }
-      }
-    }
-    if updated == table {
+    // Deleting the last remaining column is refused, symmetric with rows. (The
+    // old positional per-row cell trim for degenerate id-less tables has no
+    // intent form; topology repair is the materializer's job now.)
+    if table.columns.len() <= 1 {
       return;
     }
-    updated.version = updated.version.wrapping_add(1);
-    let semantic_commands = if let (Some(table_id), Some(column_id)) = (self.semantic_block_id(block_ix), structured_column_id) {
-      vec![SemanticEditCommand::DeleteTableColumn { table: table_id, column_id }]
-    } else {
-      self.missing_table_identity_semantic_commands(block_ix, "column delete")
-    };
-    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
+    let column_ix = target_column
+      .unwrap_or(table.columns.len() - 1)
+      .min(table.columns.len() - 1);
+    let column = table.columns[column_ix].id;
+    self.write_intent(LocalIntent::Table(crate::local_intents::TableIntent::DeleteColumn { table: table_id, column }), cx);
   }
 
   pub fn widen_selected_table_column(&mut self, cx: &mut Context<Self>) {
@@ -205,86 +149,48 @@ impl RichTextEditor {
       Some(BlockSelection::TableCell { cell_ix, .. }) => cell_ix,
       _ => return,
     };
-    let Some(block_ix) = self.selected_table_block_ix() else {
+    let Some((block_ix, table_id)) = self.selected_table_identity() else {
       return;
     };
-    let Some(Block::Table(table)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
       return;
     };
-    if target_column >= table.columns.len() {
+    // SetColumnWidth is identity-addressed: resolve the durable column id from
+    // the projected table's columns at the selected index.
+    let Some(target) = table.columns.get(target_column) else {
       return;
-    }
-    let mut updated = table.clone();
-    let current = match updated.columns[target_column].width {
+    };
+    let current = match target.width {
       TableColumnWidth::FixedPx(width) => width as i32,
       TableColumnWidth::Fraction(_) | TableColumnWidth::Auto => 120,
     };
-    updated.columns[target_column].width = TableColumnWidth::FixedPx((current + delta_px).clamp(32, 1600) as u32);
-    if updated == table {
+    let width = TableColumnWidth::FixedPx((current + delta_px).clamp(32, 1600) as u32);
+    if width == target.width {
       return;
     }
-    updated.version = updated.version.wrapping_add(1);
-    // §P2b: `SetTableColumnWidth` is the one table command that stays positional
-    // (`column_ix`); the canonical apply resolves the index against `column_order`
-    // to the durable column id at apply time.
-    let semantic_commands = if let Some(table_id) = self.semantic_block_id(block_ix) {
-      vec![SemanticEditCommand::SetTableColumnWidth {
+    let column = target.id;
+    self.write_intent(
+      LocalIntent::Table(crate::local_intents::TableIntent::SetColumnWidth {
         table: table_id,
-        column_ix: target_column,
-        width: input_table_column_width_from_table_column_width(&updated.columns[target_column].width),
-      }]
-    } else {
-      self.missing_table_identity_semantic_commands(block_ix, "column width")
-    };
-    self.finish_selected_table_edit(block_ix, table, updated, semantic_commands, cx);
-  }
-
-  fn finish_selected_table_edit(
-    &mut self,
-    block_ix: usize,
-    before_table: TableBlock,
-    updated: TableBlock,
-    semantic_commands: Vec<SemanticEditCommand>,
-    cx: &mut Context<Self>,
-  ) {
-    self.finish_table_edit(
-      block_ix,
-      Block::Table(before_table),
-      Block::Table(updated),
-      semantic_commands,
+        column,
+        width: input_table_column_width_from_table_column_width(&width),
+      }),
       cx,
     );
   }
 
-  fn finish_table_edit(
-    &mut self,
-    block_ix: usize,
-    before: Block,
-    after: Block,
-    semantic_commands: Vec<SemanticEditCommand>,
-    cx: &mut Context<Self>,
-  ) {
-    if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
-      *block = after.clone();
+  /// Resolve the selected table's `(block_ix, durable BlockId)` pair. A table
+  /// without a durable identity cannot be addressed by an intent; the edit is
+  /// refused loudly instead of diverging local state (spec I-2).
+  fn selected_table_identity(&self) -> Option<(usize, BlockId)> {
+    let block_ix = self.selected_table_block_ix()?;
+    match self.semantic_block_id(block_ix) {
+      Some(table_id) => Some((block_ix, table_id)),
+      None => {
+        tracing::warn!(block_ix, "refusing table edit: projection block has no durable id, so no intent can address it");
+        None
+      },
     }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.record_local_history(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      semantic_commands: semantic_commands.clone(),
-    });
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
-  }
-
-  fn missing_table_identity_semantic_commands(&self, block_ix: usize, operation: &'static str) -> Vec<SemanticEditCommand> {
-    tracing::warn!(block_ix, operation, "dropping table semantic command: projection block has no durable id; local and canonical state will diverge until repair");
-    Vec::new()
   }
 
   fn selected_table_block_ix(&self) -> Option<usize> {

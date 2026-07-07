@@ -215,7 +215,7 @@ struct InterpretedDocx {
 /// an INTRA-paragraph line break, while '\n' is the paragraph separator in the
 /// body flow — letting it through fabricates a bare paragraph boundary with no
 /// metadata/block/style record, which full reprojection reports as
-/// missing_paragraph_* defects (see `structured::collect_run_text`, the
+/// `missing_paragraph_*` defects (see `structured::collect_run_text`, the
 /// table-cell counterpart of this mapping). Remap to the model's soft break.
 /// Page/column breaks also becoming soft breaks matches the table-cell path
 /// and is provisional pending a product decision on their semantics. `<w:cr>`

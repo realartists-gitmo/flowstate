@@ -1,4 +1,5 @@
 mod api;
+pub mod local_intents;
 mod collaboration;
 mod demo;
 mod document;
@@ -8,6 +9,7 @@ mod rich_text;
 
 pub use api::*;
 pub use collaboration::*;
+pub use local_intents::*;
 pub use demo::*;
 pub use document::*;
 pub use edit_ops::*;

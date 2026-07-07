@@ -226,7 +226,7 @@ impl DocumentPackage {
       .as_u128();
     let revision_id = Uuid::new_v4().as_u128();
     let revision_frontiers = doc.state_frontiers();
-    let revision_doc = doc.fork_at(&revision_frontiers).map_err(loro_io_error)?;
+    let revision_version_vector = encode_version_vector(&frontiers_version_vector(doc, &revision_frontiers)?);
     crate::loro_schema::record_revision(doc, revision_id, encode_frontiers(&revision_frontiers), title, "Initial snapshot", None)
       .map_err(loro_io_error)?;
     let snapshot_id = Uuid::new_v4().as_u128();
@@ -260,9 +260,13 @@ impl DocumentPackage {
         LoroSnapshotChunk {
           snapshot_id: Uuid::new_v4().as_u128(),
           frontier: encode_frontiers(&revision_frontiers),
-          version_vector: encode_version_vector(&revision_doc.state_vv()),
-          bytes: revision_doc
-            .export(ExportMode::Snapshot)
+          version_vector: revision_version_vector.clone(),
+          // Full-history snapshot exported at the revision frontier directly
+          // from the live doc — no O(doc) `fork_at`. We deliberately keep full
+          // `SnapshotAt` bytes in the package; switching revision chunks to the
+          // lighter `StateOnly` variant is an explicitly deferred decision.
+          bytes: doc
+            .export(ExportMode::snapshot_at(&revision_frontiers))
             .map_err(loro_io_error)?,
           created_at_unix_secs: now,
         },
@@ -272,7 +276,7 @@ impl DocumentPackage {
       revisions: vec![PackageRevision {
         revision_id,
         frontier: encode_frontiers(&revision_frontiers),
-        version_vector: encode_version_vector(&revision_doc.state_vv()),
+        version_vector: revision_version_vector,
         title: title.to_string(),
         summary: "Initial snapshot".to_string(),
         author_user_id: None,
@@ -535,9 +539,8 @@ impl DocumentPackage {
     }
     let doc_frontier_before_revision_record = doc.state_frontiers();
     let doc_vv_before_revision_record = doc.state_vv();
-    let revision_doc = doc.fork_at(frontiers).map_err(loro_io_error)?;
     let frontier = encode_frontiers(frontiers);
-    let version_vector = encode_version_vector(&revision_doc.state_vv());
+    let version_vector = encode_version_vector(&frontiers_version_vector(doc, frontiers)?);
     if !loro_revision_exists(doc, revision_id) {
       crate::loro_schema::record_revision(doc, revision_id, frontier.clone(), &title, &summary, author_user_id).map_err(loro_io_error)?;
       let update = doc
@@ -568,9 +571,11 @@ impl DocumentPackage {
       self.loro_snapshots.push(LoroSnapshotChunk {
         snapshot_id: Uuid::new_v4().as_u128(),
         frontier: frontier.clone(),
-        version_vector: encode_version_vector(&revision_doc.state_vv()),
-        bytes: revision_doc
-          .export(ExportMode::Snapshot)
+        version_vector: revision.version_vector.clone(),
+        // Full `SnapshotAt` bytes from the live doc (no fork); the lighter
+        // `StateOnly` variant is an explicitly deferred format decision.
+        bytes: doc
+          .export(ExportMode::snapshot_at(frontiers))
           .map_err(loro_io_error)?,
         created_at_unix_secs: unix_time_secs(),
       });
@@ -646,15 +651,18 @@ impl DocumentPackage {
         continue;
       };
       let frontiers = decode_frontiers(&frontier)?;
-      let revision_doc = doc.fork_at(&frontiers).map_err(loro_io_error)?;
-      let version_vector = encode_version_vector(&revision_doc.state_vv());
+      let version_vector = encode_version_vector(&frontiers_version_vector(doc, &frontiers)?);
       if self.snapshot_for_frontier(&frontier).is_none() {
         self.loro_snapshots.push(LoroSnapshotChunk {
           snapshot_id: Uuid::new_v4().as_u128(),
           frontier: frontier.clone(),
           version_vector: version_vector.clone(),
-          bytes: revision_doc
-            .export(ExportMode::Snapshot)
+          // This runs on every remote import that learns a new revision, so it
+          // must stay O(revision) — export full `SnapshotAt` bytes straight
+          // from the live doc instead of paying an O(doc) `fork_at`. The
+          // lighter `StateOnly` variant is an explicitly deferred decision.
+          bytes: doc
+            .export(ExportMode::snapshot_at(&frontiers))
             .map_err(loro_io_error)?,
           created_at_unix_secs: package_map_i64(&revision, "timestamp").unwrap_or_else(unix_time_secs),
         });
@@ -1520,6 +1528,18 @@ fn encode_version_vector(version_vector: &VersionVector) -> Vec<u8> {
   version_vector.encode()
 }
 
+/// Resolve a frontier that must lie within `doc`'s history into its version
+/// vector directly on the live doc, replacing the `fork_at` (O(doc)) pattern
+/// that previously existed only to read the fork's `state_vv`.
+fn frontiers_version_vector(doc: &LoroDoc, frontiers: &Frontiers) -> io::Result<VersionVector> {
+  doc.frontiers_to_vv(frontiers).ok_or_else(|| {
+    io::Error::new(
+      io::ErrorKind::InvalidData,
+      "revision frontier is not contained in the Loro document history",
+    )
+  })
+}
+
 fn validate_frontiers(bytes: &[u8], label: &'static str) -> io::Result<()> {
   Frontiers::decode(bytes)
     .map(|_| ())
@@ -2072,6 +2092,117 @@ mod tests {
     assert_eq!(body_text(&second_doc).to_string(), "\nafter");
     let latest_doc = package.load_loro_doc()?;
     assert_eq!(body_text(&latest_doc).to_string(), "\nafter");
+    Ok(())
+  }
+
+  #[test]
+  fn revision_chunk_from_snapshot_at_matches_a_fork_at_reference() -> io::Result<()> {
+    let doc = new_loro_document("SnapshotAt").map_err(loro_test_error)?;
+    let text = body_text(&doc);
+    text.insert(1, "first").map_err(loro_test_error)?;
+    doc.commit();
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "SnapshotAt")?;
+
+    // Edit past the package's latest frontier so the revision below gets a
+    // fresh `snapshot_at` chunk instead of reusing the initial snapshot.
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    body_text(&doc)
+      .insert(body_text(&doc).len_unicode(), " second")
+      .map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+
+    let revision_frontiers = doc.state_frontiers();
+    let revision_id = package.create_named_revision(&doc, "Mid", "After second insert", None, None)?;
+
+    // Advance the live doc past the revision so the chunk genuinely captures
+    // an older frontier.
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    body_text(&doc)
+      .insert(body_text(&doc).len_unicode(), " third")
+      .map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+
+    // The `SnapshotAt` chunk must survive package serialization.
+    let package = DocumentPackage::from_bytes(&package.to_bytes()?)?;
+    let revision_frontier_bytes = encode_frontiers(&revision_frontiers);
+    assert!(package.snapshot_for_frontier(&revision_frontier_bytes).is_some());
+
+    let revision_doc = package.load_revision_loro_doc(revision_id)?;
+    let reference = doc.fork_at(&revision_frontiers).map_err(loro_test_error)?;
+    assert_eq!(body_text(&revision_doc).to_string(), body_text(&reference).to_string());
+    assert_eq!(body_text(&revision_doc).to_string(), "\nfirst second");
+    assert_eq!(revision_doc.state_frontiers(), reference.state_frontiers());
+    assert_eq!(revision_doc.state_vv(), reference.state_vv());
+    let revision = package
+      .revisions
+      .iter()
+      .find(|revision| revision.revision_id == revision_id)
+      .expect("named revision entry");
+    assert_eq!(revision.version_vector, encode_version_vector(&reference.state_vv()));
+    Ok(())
+  }
+
+  #[test]
+  fn sync_revisions_from_loro_snapshots_remote_revision_without_forking() -> io::Result<()> {
+    let doc = new_loro_document("Sync revisions").map_err(loro_test_error)?;
+    body_text(&doc)
+      .insert(1, "shared")
+      .map_err(loro_test_error)?;
+    doc.commit();
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Sync revisions")?;
+
+    // Simulate a remote peer that edits and records a revision at its own
+    // frontier, then arrives over sync as one imported update.
+    let remote = doc.fork();
+    body_text(&remote)
+      .insert(body_text(&remote).len_unicode(), " remote")
+      .map_err(loro_test_error)?;
+    remote.commit();
+    let remote_frontiers = remote.state_frontiers();
+    let remote_revision_id = 77_u128;
+    crate::loro_schema::record_revision(
+      &remote,
+      remote_revision_id,
+      encode_frontiers(&remote_frontiers),
+      "Remote",
+      "Recorded remotely",
+      None,
+    )
+    .map_err(loro_test_error)?;
+
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    let update = remote
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
+    doc.import(&update).map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+
+    assert_eq!(package.sync_revisions_from_loro(&doc)?, 1);
+    let remote_frontier_bytes = encode_frontiers(&remote_frontiers);
+    assert!(package.snapshot_for_frontier(&remote_frontier_bytes).is_some());
+
+    let revision_doc = package.load_revision_loro_doc(remote_revision_id)?;
+    let reference = doc.fork_at(&remote_frontiers).map_err(loro_test_error)?;
+    assert_eq!(body_text(&revision_doc).to_string(), body_text(&reference).to_string());
+    assert_eq!(body_text(&revision_doc).to_string(), "\nshared remote");
+    assert_eq!(revision_doc.state_vv(), reference.state_vv());
+    let revision = package
+      .revisions
+      .iter()
+      .find(|revision| revision.revision_id == remote_revision_id)
+      .expect("synced revision entry");
+    assert_eq!(revision.version_vector, encode_version_vector(&reference.state_vv()));
     Ok(())
   }
 

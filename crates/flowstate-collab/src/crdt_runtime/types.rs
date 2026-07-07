@@ -7,24 +7,6 @@ use loro::VersionRange;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Clone, Copy, Debug)]
-pub struct StaleProjectionError {
-  pub expected_frontier_len: usize,
-  pub current_frontier_len: usize,
-}
-
-impl std::fmt::Display for StaleProjectionError {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    write!(
-      f,
-      "editor command batch was constructed at a stale projection frontier (expected {} bytes, current frontier has {} bytes)",
-      self.expected_frontier_len, self.current_frontier_len,
-    )
-  }
-}
-
-impl std::error::Error for StaleProjectionError {}
-
 #[derive(Clone, Debug)]
 pub struct RuntimeAssetMetadata {
   pub asset_id: u128,
@@ -127,30 +109,6 @@ pub enum SemanticCommand {
 }
 
 #[derive(Debug)]
-pub struct EditorCommitResult {
-  pub transaction_id: u128,
-  pub base_frontier: Vec<u8>,
-  pub new_frontier: Vec<u8>,
-  pub events: Vec<RuntimeEvent>,
-}
-
-impl EditorCommitResult {
-  #[must_use]
-  pub fn projection_event_count(&self) -> usize {
-    self
-      .events
-      .iter()
-      .filter(|event| {
-        matches!(
-          event,
-          RuntimeEvent::ProjectionPatched { .. } | RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::RevisionOpened { .. }
-        )
-      })
-      .count()
-  }
-}
-
-#[derive(Debug)]
 pub enum RuntimeEvent {
   LocalUpdate {
     bytes: Vec<u8>,
@@ -246,7 +204,7 @@ pub struct ProjectionTextRange {
 }
 
 impl ProjectionInvalidation {
-  pub(super) fn body_text(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_start: usize, unicode_len: usize) -> Self {
+  pub(crate) fn body_text(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_start: usize, unicode_len: usize) -> Self {
     Self {
       frontier_before,
       frontier_after,
@@ -260,11 +218,11 @@ impl ProjectionInvalidation {
     }
   }
 
-  pub(super) fn body_style(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_start: usize, unicode_len: usize) -> Self {
+  pub(crate) fn body_style(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_start: usize, unicode_len: usize) -> Self {
     Self::body_text(frontier_before, frontier_after, unicode_start, unicode_len)
   }
 
-  pub(super) fn body_object(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_index: usize, block_kind: &'static str) -> Self {
+  pub(crate) fn body_object(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_index: usize, block_kind: &'static str) -> Self {
     Self {
       frontier_before,
       frontier_after,
@@ -283,7 +241,7 @@ impl ProjectionInvalidation {
     }
   }
 
-  pub(super) fn full_rebuild(frontier_before: Vec<u8>, frontier_after: Vec<u8>, reason: &'static str) -> Self {
+  pub(crate) fn full_rebuild(frontier_before: Vec<u8>, frontier_after: Vec<u8>, reason: &'static str) -> Self {
     Self {
       frontier_before,
       frontier_after,

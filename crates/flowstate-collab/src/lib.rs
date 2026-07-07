@@ -6,8 +6,9 @@
 
 pub mod capability;
 pub mod crdt_runtime;
-pub mod crdt_runtime_actor;
+pub mod doc_io;
 pub mod ids;
+pub mod local_write;
 pub mod net;
 pub mod presence;
 pub mod proto_direct;

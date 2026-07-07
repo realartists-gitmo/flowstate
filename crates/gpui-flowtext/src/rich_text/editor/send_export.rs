@@ -39,33 +39,18 @@ impl RichTextEditor {
     let generation = self.edit_generation;
     let document = self.document.clone();
     if let Some(export_hook) = self.native_export_hook.clone() {
-      let pending_runtime_edits = self.take_pending_semantic_edits();
-      let pending_runtime_edits_for_retry = pending_runtime_edits.clone();
-      let selection_after = pending_runtime_edits
-        .iter()
-        .rev()
-        .find_map(|edit| edit.selection_after.clone());
       let assets = document.assets.assets.values().cloned().collect();
       return cx.spawn(async move |editor, cx| {
-        let result = export_hook(output_path.clone(), format, pending_runtime_edits, assets).await;
+        let result = export_hook(output_path.clone(), format, assets).await;
         match result {
-          Ok(document) => {
+          Ok(()) => {
             let _ = editor.update(cx, |editor, cx| {
-              // Replay any edits captured while the hook ran so they stay
-              // visible until the next runtime flush acknowledges them.
-              editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
               editor.last_send_document_generation = Some(generation);
               cx.notify();
             });
             Ok(output_path)
           },
-          Err(error) => {
-            let _ = editor.update(cx, |editor, cx| {
-              editor.prepend_pending_semantic_edits(pending_runtime_edits_for_retry);
-              cx.notify();
-            });
-            Err(error)
-          },
+          Err(error) => Err(error),
         }
       });
     }
@@ -100,33 +85,18 @@ impl RichTextEditor {
     let generation = self.edit_generation;
     let document = self.document.clone();
     if let Some(export_hook) = self.native_export_hook.clone() {
-      let pending_runtime_edits = self.take_pending_semantic_edits();
-      let pending_runtime_edits_for_retry = pending_runtime_edits.clone();
-      let selection_after = pending_runtime_edits
-        .iter()
-        .rev()
-        .find_map(|edit| edit.selection_after.clone());
       let assets = document.assets.assets.values().cloned().collect();
       return cx.spawn(async move |editor, cx| {
-        let result = export_hook(output_path.clone(), format, pending_runtime_edits, assets).await;
+        let result = export_hook(output_path.clone(), format, assets).await;
         match result {
-          Ok(document) => {
+          Ok(()) => {
             let _ = editor.update(cx, |editor, cx| {
-              // Replay any edits captured while the hook ran so they stay
-              // visible until the next runtime flush acknowledges them.
-              editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
               editor.last_format_export_generation = Some(generation);
               cx.notify();
             });
             Ok(output_path)
           },
-          Err(error) => {
-            let _ = editor.update(cx, |editor, cx| {
-              editor.prepend_pending_semantic_edits(pending_runtime_edits_for_retry);
-              cx.notify();
-            });
-            Err(error)
-          },
+          Err(error) => Err(error),
         }
       });
     }

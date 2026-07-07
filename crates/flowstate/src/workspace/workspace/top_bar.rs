@@ -17,6 +17,7 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .child(
       Button::new("top-flowstate")
+        .icon(Icon::default().path("logo/flowstate-mark.svg").with_size(px(13.0)))
         .label("Flowstate")
         .xsmall()
         .ghost()

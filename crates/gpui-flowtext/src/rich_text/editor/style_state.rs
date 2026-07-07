@@ -280,26 +280,20 @@ impl RichTextEditor {
     self.save_status = SaveStatus::Saving;
     cx.notify();
     if let Some(save_hook) = self.native_save_hook.clone() {
-      let pending_runtime_edits = self.take_pending_semantic_edits();
-      let pending_runtime_edits_for_retry = pending_runtime_edits.clone();
-      let selection_after = pending_runtime_edits
-        .iter()
-        .rev()
-        .find_map(|edit| edit.selection_after.clone());
+      // Loro-first: every local edit is already committed to the doc core, so
+      // the hook persists canonical state — there is nothing to flush, replay,
+      // or re-install; the projection stays untouched.
       let assets = document.assets.assets.values().cloned().collect();
       return cx.spawn(async move |editor, cx| {
-        let write_result = save_hook(path, pending_runtime_edits, assets).await;
+        let write_result = save_hook(path, assets).await;
         if write_result.is_ok()
           && let Some(recovery_path) = recovery_path
         {
           let _ = fs::remove_file(recovery_path);
         }
         match write_result {
-          Ok(document) => {
+          Ok(()) => {
             let _ = editor.update(cx, |editor, cx| {
-              // Replay any edits captured while the hook ran so they stay
-              // visible until the next runtime flush acknowledges them.
-              editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
               editor.saved_generation = editor.saved_generation.max(generation);
               editor.refresh_save_status();
               cx.notify();
@@ -309,7 +303,6 @@ impl RichTextEditor {
           Err(error) => {
             let message = error.to_string();
             let _ = editor.update(cx, |editor, cx| {
-              editor.prepend_pending_semantic_edits(pending_runtime_edits_for_retry);
               if generation >= editor.saved_generation {
                 editor.save_status = SaveStatus::SaveFailed(message);
               }

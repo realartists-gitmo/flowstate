@@ -1,7 +1,6 @@
 use anyhow::{Context as _, Result, anyhow};
 use flowstate_collab::{
   SessionId,
-  crdt_runtime::SemanticCommand,
   net::{
     NetCommand, PublishPayload,
     anti_entropy::{GapAction, VersionVectorRelation},
@@ -12,9 +11,8 @@ use flowstate_collab::{
 use flowstate_fidelity::{self as fidelity, FidelityClass};
 use gpui::Context;
 use loro::VersionVector;
-use uuid::Uuid;
 
-use crate::rich_text_element::{AssetId, AssetRecord, UndoRedirect};
+use crate::rich_text_element::{AssetId, AssetRecord};
 
 use super::{CollabSession, DetachReason};
 
@@ -66,15 +64,15 @@ impl CollabSession {
     }
 
     tracing::debug!(session = %self.session, bytes = bytes.len(), "importing remote collaboration update");
-    let runtime = self
+    let io = self
       .runtime
       .clone()
-      .context("collaboration session has no CRDT runtime")?;
-    // §perf: bytes is already owned; hand it straight to the runtime with no extra copy.
+      .context("collaboration session has no document I/O service")?;
+    // §perf: bytes is already owned; hand it straight to the I/O service with no extra copy.
     let bytes_len = bytes.len();
     let session_id = self.session;
     cx.spawn(async move |session, cx| {
-      let result = runtime.import_remote_update(bytes).await;
+      let result = io.import_remote_update(bytes).await;
       match result {
         Ok(events) => {
           let applied = session.update(cx, |session, cx| session.apply_runtime_events(events, true, cx));
@@ -87,14 +85,14 @@ impl CollabSession {
             },
           };
           if let Some(detail) = projection_error {
-            // Materializing a remote update against the optimistic projection
-            // failed and must be repaired from the canonical snapshot: a
-            // reconciliation recovery on the remote-apply path is a fidelity failure.
+            // Applying a remote patch batch to THE projection failed; repair
+            // via the spec §6 fallback: canonical `projection_snapshot()` +
+            // full install. Still a fidelity violation worth counting.
             fidelity::violation(FidelityClass::Reconcile, "remote-projection-repair", || {
               format!("session={session_id} bytes={bytes_len} error={detail}")
             });
-            tracing::warn!(session = %session_id, bytes = bytes_len, error = %detail, "remote projection materialization failed; repairing from canonical runtime snapshot");
-            match runtime.projection_snapshot().await {
+            tracing::warn!(session = %session_id, bytes = bytes_len, error = %detail, "remote patch application failed; repairing from canonical runtime snapshot");
+            match io.projection_snapshot().await {
               Ok(document) => {
                 let _ = session.update(cx, |session, cx| {
                   if let Err(error) = session.apply_runtime_projection(document, cx) {
@@ -121,7 +119,7 @@ impl CollabSession {
         Err(error) => {
           // A malformed or unimportable update is dropped, not session-fatal:
           // real content re-arrives via digest-driven anti-entropy pulls, and a
-          // dead runtime actor surfaces through the local flush path instead.
+          // dead I/O service surfaces through the publish pump instead.
           tracing::error!(session = %session_id, bytes = bytes_len, error = %format_args!("{error:#}"), "dropped unimportable remote collaboration update");
         },
       }
@@ -281,54 +279,6 @@ impl CollabSession {
     true
   }
 
-  pub(super) fn apply_loro_undo_redirect(&mut self, redirect: UndoRedirect, cx: &mut Context<Self>) -> Result<()> {
-    if !self.collaboration_role.can_write() {
-      // FS-080: undo/redo mutate the shared document, so a viewer's undo is a
-      // no-op. The editor already gates the command; this is defense in depth.
-      tracing::debug!(session = %self.session, ?redirect, "ignoring collaboration undo redirect for a view-only session");
-      return Ok(());
-    }
-    if self.runtime.is_none() || self.editor.is_none() {
-      tracing::warn!(
-        session = %self.session,
-        ?redirect,
-        has_runtime = self.runtime.is_some(),
-        has_editor = self.editor.is_some(),
-        "cannot apply collaboration undo redirect because session state is incomplete",
-      );
-      return Ok(());
-    }
-
-    tracing::debug!(session = %self.session, ?redirect, "applying collaboration undo redirect");
-    let command = match redirect {
-      UndoRedirect::Undo => SemanticCommand::Undo,
-      UndoRedirect::Redo => SemanticCommand::Redo,
-    };
-    let runtime = self
-      .runtime
-      .clone()
-      .context("collaboration session has no CRDT runtime")?;
-    let session_id = self.session;
-    cx.spawn(async move |session, cx| {
-      let result = runtime.command(command).await;
-      let _ = session.update(cx, |session, cx| match result {
-        Ok(events) => {
-          let applied = !events.is_empty();
-          tracing::debug!(session = %session_id, ?redirect, applied, "collaboration undo redirect applied");
-          if applied {
-            if let Err(error) = session.apply_runtime_events(events, true, cx) {
-              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying collaboration undo projection failed");
-            }
-            session.publish_digest();
-          }
-        },
-        Err(error) => tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "applying collaboration undo operation failed"),
-      });
-    })
-    .detach();
-    Ok(())
-  }
-
   pub(super) fn handle_gap_action(&mut self, action: GapAction, cx: &mut Context<Self>) {
     match action {
       GapAction::None => {},
@@ -410,29 +360,17 @@ impl CollabSession {
     for (id, record) in &asset_records {
       trace_asset_record(self.session, *id, record);
     }
-    let canonical_records = asset_records
-      .iter()
-      .filter(|(_, record)| !record.is_loading_placeholder())
-      .map(|(_, record)| record.clone())
-      .collect::<Vec<_>>();
-    if !canonical_records.is_empty()
-      && let Some(runtime) = self.runtime.clone()
-    {
-      let session_id = self.session;
-      cx.spawn(async move |session, cx| {
-        let result = runtime
-          .apply_editor_commands(Uuid::new_v4().as_u128(), Vec::new(), Vec::new(), canonical_records, None)
-          .await;
-        let _ = session.update(cx, |session, cx| match result {
-          Ok(commit) => {
-            if let Err(error) = session.apply_runtime_events(commit.events, true, cx) {
-              tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "projecting fetched collaboration assets failed");
-            }
-          },
-          Err(error) => {
-            tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "recording fetched collaboration assets failed");
-          },
-        });
+    // Loro-first: fetched asset bytes flow to the editor's UI cache below AND
+    // are recorded into canonical state through the I/O service so this
+    // replica's own saves/packages include them. The session still never
+    // writes document CONTENT (invariant 5) — asset bytes are content-
+    // addressed sideband records.
+    if let Some(io) = self.runtime.clone() {
+      let records: Vec<AssetRecord> = asset_records.iter().map(|(_, record)| record.clone()).collect();
+      cx.spawn(async move |_, _| {
+        if let Err(error) = io.record_assets(records).await {
+          tracing::warn!(%error, "recording pulled asset bytes into canonical state failed; saves may miss them until re-pull");
+        }
       })
       .detach();
     }

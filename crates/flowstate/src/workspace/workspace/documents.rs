@@ -1,9 +1,27 @@
-use flowstate_fidelity::{self as fidelity, FidelityClass};
 
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
-  Handle(flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle),
+  Attachment(DocumentRuntimeAttachment),
+}
+
+/// Loro-first document wiring (spec §3): the write authority handed to the
+/// editor (the ONE local write path, identical for solo and collaborative
+/// documents) plus the I/O service handle for saves/exports/imports.
+pub(crate) struct DocumentRuntimeAttachment {
+  pub authority: std::sync::Arc<flowstate_collab::local_write::LocalDocHandle>,
+  pub io: flowstate_collab::doc_io::DocIoHandle,
+}
+
+/// Wrap a document core in the Loro-first services: the write gate, the
+/// editor's write authority, and the background I/O service thread.
+pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRuntime) -> std::io::Result<DocumentRuntimeAttachment> {
+  let (handle, gate) = flowstate_collab::local_write::LocalDocHandle::new(core, flowstate_collab::local_write::LocalWriteConfig::default());
+  let io = flowstate_collab::doc_io::DocIoHandle::spawn(gate)?;
+  Ok(DocumentRuntimeAttachment {
+    authority: std::sync::Arc::new(handle),
+    io,
+  })
 }
 
 #[hotpath::measure_all]
@@ -177,140 +195,103 @@ impl Workspace {
     // its identity at join time (see `CollabSession::finish_join_snapshot`), so
     // re-binding it here would be a redundant second call on the same runtime.
     let mut register_author_identity = true;
-    let runtime = match runtime {
+    // Loro-first (spec §3): every document — solo or collaborative — gets the
+    // SAME wiring: a gate-protected core, the editor's write authority
+    // (LocalDocHandle), and the background I/O service (DocIoHandle).
+    let attachment = match runtime {
       DocumentRuntimeSource::FromProjection => {
-        let imported = flowstate_document::import_document_projection(document, runtime_title)
+        let imported = flowstate_document::import_document_projection(document.clone(), runtime_title)
           .map_err(|error| anyhow::anyhow!("creating canonical Loro document failed: {error}"))?;
-        let runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported)
+        let core = flowstate_collab::crdt_runtime::CrdtRuntime::from_imported_document(imported)
           .map_err(|error| anyhow::anyhow!("creating canonical Loro runtime failed: {error:#}"))?;
-        document = runtime
-          .projection_snapshot()
-          .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error:#}"))?;
-        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(runtime)
-          .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
+        attach_local_write(core).map_err(|error| anyhow::anyhow!("starting Loro-first document services failed: {error:#}"))?
       },
       DocumentRuntimeSource::Runtime(runtime) => {
-        let local_theme = document.theme.clone();
-        document = runtime
-          .projection_snapshot()
-          .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error:#}"))?;
-        document.theme = local_theme;
-        flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle::spawn(*runtime)
-          .map_err(|error| anyhow::anyhow!("starting canonical Loro runtime failed: {error:#}"))?
+        attach_local_write(*runtime).map_err(|error| anyhow::anyhow!("starting Loro-first document services failed: {error:#}"))?
       },
-      DocumentRuntimeSource::Handle(runtime) => {
+      DocumentRuntimeSource::Attachment(attachment) => {
         register_author_identity = false;
-        runtime
+        attachment
       },
     };
+    let local_theme = document.theme.clone();
+    document = attachment
+      .authority
+      .projection()
+      .map_err(|error| anyhow::anyhow!("reading canonical startup projection failed: {error}"))?;
+    document.theme = local_theme;
 
     if register_author_identity {
       // Fire-and-forget: a failure to register author identity must never block
       // or break opening the document. The settings read/persist happens on a
       // background thread to keep the foreground non-blocking.
-      let identity_runtime = runtime.clone();
+      let identity_io = attachment.io.clone();
       cx.spawn(async move |_, cx| {
         let (user_id, display_name) = cx
           .background_executor()
           .spawn(async { load_local_user_identity() })
           .await;
-        if let Err(error) = identity_runtime.set_author_identity(user_id, display_name).await {
+        if let Err(error) = identity_io.set_author_identity(user_id, display_name).await {
           tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to document runtime failed");
         }
       })
       .detach();
     }
 
-    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
     let smart_word_selection = load_smart_word_selection();
-    let save_runtime = runtime.clone();
-    let export_runtime = runtime.clone();
-    let undo_runtime = runtime.clone();
-    let recovery_runtime = runtime.clone();
+    let save_io = attachment.io.clone();
+    let export_io = attachment.io.clone();
+    let recovery_io = attachment.io.clone();
+    let authority = std::sync::Arc::clone(&attachment.authority);
     editor.update(cx, |editor, cx| {
       editor.set_smart_word_selection(smart_word_selection, cx);
-      editor.set_runtime_capture(true);
-      editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
-        let runtime = save_runtime.clone();
+      // Loro-first (spec §5): the editor's write authority IS the document.
+      // Local intents commit synchronously; hooks below are pure I/O — no
+      // pending-edit drains, no projection replacement, no undo hook (undo
+      // executes through the authority).
+      editor.set_write_authority(authority, document, cx);
+      editor.set_native_save_hook(Some(Rc::new(move |path, _assets| {
+        let io = save_io.clone();
         Box::pin(async move {
-          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-          runtime
-            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-            .await
-            .map_err(runtime_io_error)?;
           let title = document_package_title_for_path(&path);
           // The checkpoint's LocalUpdate events are intentionally dropped here:
           // this UI-agnostic save hook future has no GPUI context to reach the
           // collaboration session. The workspace re-syncs collaborators after
           // the save completes via collab::refresh_after_external_checkpoint.
-          runtime
-            .checkpoint_package(title, Some(path))
-            .await
-            .map_err(runtime_io_error)?;
-          runtime.projection_snapshot().await.map_err(runtime_io_error)
+          io.checkpoint_package(title, Some(path)).await.map_err(runtime_io_error)?;
+          Ok(())
         })
       })));
-      editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
-        let runtime = export_runtime.clone();
+      editor.set_native_export_hook(Some(Rc::new(move |path, format, _assets| {
+        let io = export_io.clone();
         Box::pin(async move {
-          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-          runtime
-            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-            .await
-            .map_err(runtime_io_error)?;
           match format {
             crate::rich_text_element::DocumentExportFormat::Native
             | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
-              let bytes = runtime
+              let bytes = io
                 .package_bytes(document_package_title_for_path(&path))
                 .await
                 .map_err(runtime_io_error)?;
               write_bytes_to_path(&path, &bytes)?;
             },
             crate::rich_text_element::DocumentExportFormat::Docx => {
-              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
+              let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
               crate::docx_conversion::write_docx(&path, &document)?;
             },
             crate::rich_text_element::DocumentExportFormat::Pdf => {
-              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-              let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+              let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
+              let bytes = io.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
               crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
             },
           };
-          runtime.projection_snapshot().await.map_err(runtime_io_error)
-        })
-      })));
-      editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
-        let runtime = undo_runtime.clone();
-        Box::pin(async move {
-          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-          runtime
-            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-            .await
-            .map_err(runtime_io_error)?;
-          let command = match redirect {
-            crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
-            crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
-          };
-          let events = runtime.command(command).await.map_err(runtime_io_error)?;
-          if events.is_empty() {
-            return Ok(None);
-          }
-          let selection = events.into_iter().find_map(|event| match event {
-            flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
-            _ => None,
-          });
-          let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-          Ok(Some(crate::rich_text_element::NativeUndoResult {
-            document,
-            selection,
-          }))
+          Ok(())
         })
       })));
       editor.set_native_recovery_hook(Some(Rc::new(move |path| {
-        let runtime = recovery_runtime.clone();
+        let io = recovery_io.clone();
         Box::pin(async move {
-          let bytes = runtime
+          let bytes = io
             .package_bytes("Recovery snapshot".to_string())
             .await
             .map_err(runtime_io_error)?;
@@ -334,11 +315,13 @@ impl Workspace {
     }
     let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
-    self.document_runtimes.insert(id, runtime);
+    self.document_runtimes.insert(id, attachment.io.clone());
     self.editor_subscriptions.push((
       id,
       cx.observe(&editor, move |workspace, editor, cx| {
-        workspace.schedule_document_runtime_flush(id, editor.clone(), cx);
+        // Loro-first: no runtime flush — intents commit synchronously in the
+        // editor's write authority. The observation drives view-model updates
+        // and autosave only.
         let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
         workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
         workspace.maybe_autosave_document(id, editor.clone(), cx);
@@ -349,120 +332,6 @@ impl Workspace {
     self.active_flow = None;
     self.document_panels.push(panel.clone());
     Ok(panel)
-  }
-
-  pub(crate) fn attach_runtime_to_document_panel(
-    &mut self,
-    panel_id: Uuid,
-    runtime: flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle,
-    cx: &mut Context<Self>,
-  ) {
-    let Some(panel) = self
-      .document_panels
-      .iter()
-      .find(|panel| panel.read(cx).id() == panel_id)
-    else {
-      return;
-    };
-    let editor = panel.read(cx).editor();
-    let runtime_capture = crate::collab::session_for_panel(panel_id, cx).is_none();
-    let save_runtime = runtime.clone();
-    let export_runtime = runtime.clone();
-    let undo_runtime = runtime.clone();
-    let recovery_runtime = runtime.clone();
-    editor.update(cx, |editor, _| {
-      editor.set_runtime_capture(runtime_capture);
-      editor.set_native_save_hook(Some(Rc::new(move |path, pending_edits, assets| {
-        let runtime = save_runtime.clone();
-        Box::pin(async move {
-          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-          runtime
-            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-            .await
-            .map_err(runtime_io_error)?;
-          // LocalUpdate events from this checkpoint are intentionally dropped
-          // (this save hook future has no GPUI context); the workspace re-syncs
-          // collaborators afterwards via collab::refresh_after_external_checkpoint.
-          runtime
-            .checkpoint_package(document_package_title_for_path(&path), Some(path))
-            .await
-            .map_err(runtime_io_error)?;
-          runtime.projection_snapshot().await.map_err(runtime_io_error)
-        })
-      })));
-      editor.set_native_export_hook(Some(Rc::new(move |path, format, pending_edits, assets| {
-        let runtime = export_runtime.clone();
-        Box::pin(async move {
-          let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-          runtime
-            .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-            .await
-            .map_err(runtime_io_error)?;
-          match format {
-            crate::rich_text_element::DocumentExportFormat::Native
-            | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
-              let bytes = runtime
-                .package_bytes(document_package_title_for_path(&path))
-                .await
-                .map_err(runtime_io_error)?;
-              write_bytes_to_path(&path, &bytes)?;
-            },
-            crate::rich_text_element::DocumentExportFormat::Docx => {
-              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-              crate::docx_conversion::write_docx(&path, &document)?;
-            },
-            crate::rich_text_element::DocumentExportFormat::Pdf => {
-              let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-              let bytes = runtime.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
-              crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
-            },
-          };
-          runtime.projection_snapshot().await.map_err(runtime_io_error)
-        })
-      })));
-      if runtime_capture {
-        editor.set_native_undo_hook(Some(Rc::new(move |redirect, pending_edits, assets| {
-          let runtime = undo_runtime.clone();
-          Box::pin(async move {
-            let (transaction_id, base_frontier, commands, selection_after, _) = flatten_runtime_edit_commands(pending_edits);
-            runtime
-              .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after)
-              .await
-              .map_err(runtime_io_error)?;
-            let command = match redirect {
-              crate::rich_text_element::UndoRedirect::Undo => flowstate_collab::crdt_runtime::SemanticCommand::Undo,
-              crate::rich_text_element::UndoRedirect::Redo => flowstate_collab::crdt_runtime::SemanticCommand::Redo,
-            };
-            let events = runtime.command(command).await.map_err(runtime_io_error)?;
-            if events.is_empty() {
-              return Ok(None);
-            }
-            let selection = events.into_iter().find_map(|event| match event {
-              flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => Some(selection),
-              _ => None,
-            });
-            let document = runtime.projection_snapshot().await.map_err(runtime_io_error)?;
-            Ok(Some(crate::rich_text_element::NativeUndoResult {
-              document,
-              selection,
-            }))
-          })
-        })));
-      } else {
-        editor.set_native_undo_hook(None);
-      }
-      editor.set_native_recovery_hook(Some(Rc::new(move |path| {
-        let runtime = recovery_runtime.clone();
-        Box::pin(async move {
-          let bytes = runtime
-            .package_bytes("Recovery snapshot".to_string())
-            .await
-            .map_err(runtime_io_error)?;
-          write_bytes_to_path(&path, &bytes)
-        })
-      })));
-    });
-    self.document_runtimes.insert(panel_id, runtime);
   }
 
   pub fn request_document_revisions(
@@ -526,7 +395,7 @@ impl Workspace {
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       let result = runtime
-        .command(flowstate_collab::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
+        .fork_revision(revision_id)
         .await;
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| match result {
@@ -577,158 +446,6 @@ impl Workspace {
     })
     .detach();
     true
-  }
-
-  fn flush_document_runtime_edits(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
-    // Keep exactly one optimistic command batch in flight. Later keystrokes
-    // remain rendered locally and are rebased onto the acknowledged frontier
-    // when this batch completes.
-    if editor.read(cx).runtime_transaction_in_flight() {
-      return;
-    }
-    let edits = editor.update(cx, |editor, _| editor.take_pending_runtime_edits());
-    if edits.is_empty() {
-      return;
-    }
-    let Some(runtime) = self.document_runtimes.get(&panel_id).cloned() else {
-      editor.update(cx, |editor, _| editor.prepend_pending_semantic_edits(edits));
-      return;
-    };
-    let retry_edits = edits.clone();
-    let (transaction_id, base_frontier, commands, selection_after, stable_selection_after) = flatten_runtime_edit_commands(edits);
-    if fidelity::enabled() {
-      let in_flight = editor.read(cx).runtime_transaction_in_flight();
-      fidelity::check(
-        !in_flight,
-        FidelityClass::Reconcile,
-        "concurrent-transaction",
-        || format!("panel={panel_id} txn={transaction_id:x} began a document-runtime flush while a runtime transaction was already in flight"),
-      );
-    }
-    fidelity::event(FidelityClass::Reconcile, "document-flush-begin", || {
-      format!(
-        "panel={panel_id} txn={transaction_id:x} base_frontier_bytes={} commands={}",
-        base_frontier.len(),
-        commands.len(),
-      )
-    });
-    editor.update(cx, |editor, _| editor.begin_runtime_transaction(transaction_id));
-    let assets = editor
-      .read(cx)
-      .document()
-      .assets
-      .assets
-      .values()
-      .cloned()
-      .collect();
-    cx.spawn(async move |workspace, cx| {
-      let result = runtime
-        .apply_editor_commands(transaction_id, base_frontier, commands, assets, selection_after.clone())
-        .await;
-      match result {
-        Ok(commit) => {
-          let applied = workspace.update(cx, |_, cx| {
-            apply_local_runtime_commit(&editor, commit, stable_selection_after.clone(), cx)
-          });
-          if !matches!(applied, Ok(Ok(()))) {
-            let detail = match applied {
-              Ok(Err(error)) => error,
-              Err(error) => error.to_string(),
-              Ok(Ok(())) => unreachable!(),
-            };
-            tracing::warn!(%panel_id, error = %detail, "local committed projection could not be materialized; repairing from canonical snapshot");
-            match runtime.projection_snapshot().await {
-              Ok(document) => {
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=materialization-repair")
-                  });
-                  editor.update(cx, |editor, cx| {
-                    editor.replace_document_projection_replaying_pending(document, Vec::new(), selection_after, cx);
-                    editor.abort_runtime_transaction(cx);
-                  });
-                });
-              },
-              Err(error) => {
-                tracing::error!(%panel_id, %error, "failed to obtain canonical projection after local materialization failure");
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=materialization-repair-failed")
-                  });
-                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
-                });
-              },
-            }
-          }
-        },
-        Err(error) => {
-          if error.downcast_ref::<flowstate_collab::crdt_runtime::StaleProjectionError>().is_some() {
-            match runtime.projection_snapshot().await {
-              Ok(document) => {
-                tracing::debug!(%panel_id, "discarding stale optimistic projection and restoring the canonical Loro projection");
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=stale-rebase")
-                  });
-                  editor.update(cx, |editor, cx| {
-                    editor.replace_document_projection_replaying_pending(document, retry_edits, None, cx);
-                    editor.abort_runtime_transaction(cx);
-                  });
-                });
-              },
-              Err(snapshot_error) => {
-                tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after stale editor transaction");
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=stale-repair-failed")
-                  });
-                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
-                });
-              },
-            }
-          } else {
-            tracing::error!(%panel_id, error = %error, "editor transaction was rejected; restoring canonical Loro projection");
-            match runtime.projection_snapshot().await {
-              Ok(document) => {
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=rejected")
-                  });
-                  editor.update(cx, |editor, cx| {
-                    editor.replace_document_projection_replaying_pending(document, Vec::new(), None, cx);
-                    editor.abort_runtime_transaction(cx);
-                  });
-                });
-              },
-              Err(snapshot_error) => {
-                tracing::error!(%panel_id, error = %snapshot_error, "failed to obtain canonical projection after rejected editor transaction");
-                let _ = workspace.update(cx, |_, cx| {
-                  fidelity::event(FidelityClass::Reconcile, "document-commit-abort", || {
-                    format!("panel={panel_id} txn={transaction_id:x} reason=rejected-repair-failed")
-                  });
-                  editor.update(cx, |editor, cx| editor.abort_runtime_transaction(cx));
-                });
-              },
-            }
-          }
-        },
-      }
-    })
-    .detach();
-  }
-
-  fn schedule_document_runtime_flush(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
-    if !self.document_runtimes.contains_key(&panel_id) || !self.document_runtime_flush_pending.insert(panel_id) {
-      return;
-    }
-    cx.spawn(async move |workspace, cx| {
-      Timer::after(Duration::from_millis(DOCUMENT_RUNTIME_FLUSH_DEBOUNCE_MS)).await;
-      let _ = workspace.update(cx, |workspace, cx| {
-        workspace.document_runtime_flush_pending.remove(&panel_id);
-        workspace.flush_document_runtime_edits(panel_id, editor, cx);
-      });
-    })
-    .detach();
   }
 
   pub fn set_active_document(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) {
@@ -1797,181 +1514,8 @@ fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     .map_err(Into::into)
 }
 
-fn flatten_runtime_edit_commands(
-  edits: Vec<crate::rich_text_element::SemanticCommandBatch>,
-) -> (
-  u128,
-  Vec<u8>,
-  Vec<crate::rich_text_element::SemanticEditCommand>,
-  Option<crate::rich_text_element::EditorSelection>,
-  Option<crate::rich_text_element::StableEditorSelection>,
-) {
-  let mut transaction_id = None;
-  let mut base_frontier = None;
-  let mut commands = Vec::new();
-  let mut selection_after = None;
-  let mut stable_selection_after = None;
-  for edit in edits {
-    if transaction_id.is_none() && edit.transaction_id != 0 {
-      transaction_id = Some(edit.transaction_id);
-    }
-    if !edit.semantic_commands.is_empty() {
-      if let Some(existing) = &base_frontier {
-        debug_assert_eq!(existing, &edit.base_frontier, "queued editor commands must share one projection frontier");
-      } else {
-        base_frontier = Some(edit.base_frontier.clone());
-      }
-    }
-    commands.extend(edit.semantic_commands);
-    if edit.selection_after.is_some() {
-      selection_after = edit.selection_after;
-    }
-    if edit.stable_selection_after.is_some() {
-      stable_selection_after = edit.stable_selection_after;
-    }
-  }
-  (
-    transaction_id.unwrap_or_else(|| Uuid::new_v4().as_u128()),
-    base_frontier.unwrap_or_default(),
-    coalesce_document_runtime_commands(commands),
-    selection_after,
-    stable_selection_after,
-  )
-}
-
 /// Stable short tag for a runtime event variant, used only by fidelity firehose
 /// lines so a document-runtime commit stream reads which transition was applied.
-fn runtime_event_kind(event: &flowstate_collab::crdt_runtime::RuntimeEvent) -> &'static str {
-  use flowstate_collab::crdt_runtime::RuntimeEvent;
-  match event {
-    RuntimeEvent::LocalUpdate { .. } => "local-update",
-    RuntimeEvent::RemoteUpdateApplied { .. } => "remote-update-applied",
-    RuntimeEvent::RevisionOpened { .. } => "revision-opened",
-    RuntimeEvent::RevisionForked { .. } => "revision-forked",
-    RuntimeEvent::SelectionRestored { .. } => "selection-restored",
-    RuntimeEvent::ProjectionUpdated { .. } => "projection-updated",
-    RuntimeEvent::ProjectionPatched { .. } => "projection-patched",
-  }
-}
-
-fn apply_local_runtime_commit(
-  editor: &Entity<RichTextEditor>,
-  commit: flowstate_collab::crdt_runtime::EditorCommitResult,
-  selection_after: Option<crate::rich_text_element::StableEditorSelection>,
-  cx: &mut Context<Workspace>,
-) -> Result<(), String> {
-  let transaction_id = commit.transaction_id;
-  fidelity::event(FidelityClass::Reconcile, "document-commit-complete", || {
-    format!(
-      "txn={transaction_id:x} base_frontier_bytes={} new_frontier_bytes={} events={} projection_events={}",
-      commit.base_frontier.len(),
-      commit.new_frontier.len(),
-      commit.events.len(),
-      commit.projection_event_count(),
-    )
-  });
-  if commit.projection_event_count() > 1 {
-    return Err(format!(
-      "local editor transaction {} returned multiple projection transitions",
-      commit.transaction_id
-    ));
-  }
-  let frontier = commit.new_frontier;
-  // The editor is acknowledged (`complete_runtime_transaction`) at `frontier`;
-  // the single projection transition this commit carries must land on that same
-  // frontier or the editor would close its gate against an unmaterialized state.
-  if fidelity::enabled() {
-    for event in &commit.events {
-      let event_frontier = match event {
-        flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { batch, .. } => Some(batch.new_frontier.as_slice()),
-        flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { frontier, .. } => Some(frontier.as_slice()),
-        _ => None,
-      };
-      if let Some(event_frontier) = event_frontier {
-        fidelity::check(
-          event_frontier == frontier.as_slice(),
-          FidelityClass::Frontier,
-          "ack-frontier-mismatch",
-          || {
-            format!(
-              "txn={transaction_id:x} ack_frontier_bytes={} projection_event_frontier_bytes={}",
-              frontier.len(),
-              event_frontier.len(),
-            )
-          },
-        );
-      }
-    }
-  }
-  for event in commit.events {
-    fidelity::event(FidelityClass::Projection, "apply-document-commit-event", || {
-      format!("txn={transaction_id:x} kind={}", runtime_event_kind(&event))
-    });
-    match event {
-      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionPatched { batch, .. } => {
-        editor
-          .update(cx, |editor, cx| editor.apply_projection_patch_batch(&batch, cx))
-          .map_err(|error| error.to_string())?;
-      },
-      flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { document, .. }
-      | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionOpened { document, .. } => {
-        editor.update(cx, |editor, cx| {
-          editor.replace_document_projection_replaying_pending(*document, Vec::new(), None, cx);
-        });
-      },
-      flowstate_collab::crdt_runtime::RuntimeEvent::LocalUpdate { .. }
-      | flowstate_collab::crdt_runtime::RuntimeEvent::RemoteUpdateApplied { .. }
-      | flowstate_collab::crdt_runtime::RuntimeEvent::RevisionForked { .. } => {},
-      flowstate_collab::crdt_runtime::RuntimeEvent::SelectionRestored { selection } => {
-        editor.update(cx, |editor, cx| editor.restore_runtime_selection(selection, cx));
-      },
-    }
-  }
-  editor
-    .update(cx, |editor, cx| {
-      editor.complete_runtime_transaction(commit.transaction_id, frontier, selection_after, cx)
-    })
-    .map_err(|error| error.to_string())?;
-  Ok(())
-}
-
-fn coalesce_document_runtime_commands(
-  commands: Vec<crate::rich_text_element::SemanticEditCommand>,
-) -> Vec<crate::rich_text_element::SemanticEditCommand> {
-  let mut coalesced = Vec::new();
-  for command in commands {
-    if let Some(previous) = coalesced.last_mut()
-      && merge_adjacent_runtime_insert_text(previous, &command)
-    {
-      continue;
-    }
-    coalesced.push(command);
-  }
-  coalesced
-}
-
-fn merge_adjacent_runtime_insert_text(
-  previous: &mut crate::rich_text_element::SemanticEditCommand,
-  next: &crate::rich_text_element::SemanticEditCommand,
-) -> bool {
-  let crate::rich_text_element::SemanticEditCommand::InsertText { at, text, styles } = previous else {
-    return false;
-  };
-  let crate::rich_text_element::SemanticEditCommand::InsertText {
-    at: next_at,
-    text: next_text,
-    styles: next_styles,
-  } = next
-  else {
-    return false;
-  };
-  if *styles != *next_styles || at.paragraph != next_at.paragraph || at.byte + text.len() != next_at.byte {
-    return false;
-  }
-  text.push_str(next_text);
-  true
-}
-
 enum LoadedWorkspaceDocument {
   Document {
     document: Box<DocumentProjection>,

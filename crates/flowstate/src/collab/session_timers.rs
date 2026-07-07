@@ -1,17 +1,13 @@
 use std::time::{Duration, Instant};
 
-use anyhow::Result;
-use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS, self_check};
+use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS};
 use gpui::{Context, Timer};
 
-use crate::rich_text_element::DocumentProjection;
 
-use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionNotice, SessionPhase};
+use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionPhase};
 
 const ZERO_NEIGHBOR_OFFLINE_GRACE: Duration = Duration::from_secs(5);
 const QUIET_DIGEST_ROUNDS_OFFLINE: u8 = 2;
-const SELF_CHECK_INTERVAL: Duration = Duration::from_secs(30);
-const SELF_CHECK_IDLE: Duration = Duration::from_secs(2);
 const RECOVERY_MAX_BACKOFF: Duration = Duration::from_secs(30);
 const RECOVERY_NEIGHBOR_WAIT: Duration = Duration::from_secs(10);
 
@@ -25,7 +21,6 @@ impl CollabSession {
     tracing::debug!(session = %self.session, "starting collaboration timers");
     self.spawn_digest_timer(cx);
     self.spawn_presence_timer(cx);
-    self.spawn_self_check_timer(cx);
   }
 
   pub(super) fn note_inbound_traffic(&mut self, cx: &mut Context<Self>) {
@@ -133,22 +128,6 @@ impl CollabSession {
     .detach();
   }
 
-  fn spawn_self_check_timer(&mut self, cx: &mut Context<Self>) {
-    let session_id = self.session;
-    tracing::debug!(session = %session_id, "starting collaboration self-check timer");
-    cx.spawn(async move |session, cx| {
-      loop {
-        Timer::after(SELF_CHECK_INTERVAL).await;
-        match session.update(cx, |session, cx| session.run_self_check_tick(cx)) {
-          Ok(true) => {},
-          Ok(false) | Err(_) => break,
-        }
-      }
-      tracing::debug!(session = %session_id, "collaboration self-check timer stopped");
-    })
-    .detach();
-  }
-
   fn next_digest_delay(&self) -> Option<Duration> {
     self
       .timer_live()
@@ -186,21 +165,6 @@ impl CollabSession {
       if roster_changed || peer_count_changed {
         cx.notify();
       }
-    }
-    true
-  }
-
-  fn run_self_check_tick(&mut self, cx: &mut Context<Self>) -> bool {
-    if !self.timer_live() {
-      return false;
-    }
-    if !matches!(self.phase, SessionPhase::Attached(_)) || self.last_document_activity.elapsed() < SELF_CHECK_IDLE {
-      tracing::trace!(session = %self.session, phase = ?self.phase, idle_for = ?self.last_document_activity.elapsed(), "skipping collaboration self-check tick");
-      return true;
-    }
-    tracing::trace!(session = %self.session, idle_for = ?self.last_document_activity.elapsed(), "running collaboration self-check tick");
-    if let Err(error) = self.run_self_check(cx) {
-      tracing::error!(session = %self.session, error = %format_args!("{error:#}"), "collaboration self-check failed");
     }
     true
   }
@@ -260,73 +224,6 @@ impl CollabSession {
       self.publish_digest();
       cx.notify();
     }
-  }
-
-  fn run_self_check(&mut self, cx: &mut Context<Self>) -> Result<()> {
-    let Some(runtime) = self.runtime.clone() else {
-      return Ok(());
-    };
-    let Some(editor) = self.editor.clone() else {
-      return Ok(());
-    };
-
-    let live_document = editor.read(cx).document().clone();
-    let live_hash = self_check::projection_hash(&live_document);
-    let current_vv = self.runtime_vv.clone();
-    // Cheap path: if neither the Loro state (version vector) nor the live
-    // projection hash changed since the last verified check, there can be no new
-    // drift, so skip the full reprojection.
-    if self
-      .last_self_check
-      .as_ref()
-      .is_some_and(|(vv, hash)| *vv == current_vv && *hash == live_hash)
-    {
-      tracing::trace!(session = %self.session, "collaboration projection self-check skipped (unchanged)");
-      return Ok(());
-    }
-
-    let session_id = self.session;
-    cx.spawn(async move |session, cx| {
-      let projected = runtime.projection_snapshot().await;
-      let _ = session.update(cx, |session, cx| match projected {
-        Ok(mut projected) => {
-          projected.assets = live_document.assets.clone();
-          let projected_hash = self_check::projection_hash(&projected);
-          if live_hash == projected_hash {
-            session.last_self_check = Some((current_vv, live_hash));
-            tracing::trace!(session = %session_id, live_hash = %format_args!("{live_hash:016x}"), "collaboration projection self-check passed");
-          } else {
-            tracing::error!(
-              session = %session_id,
-              live_hash = %format_args!("{live_hash:016x}"),
-              projected_hash = %format_args!("{projected_hash:016x}"),
-              "collaboration projection drift detected",
-            );
-            if let Err(error) = session.rebuild_from_projection(projected, cx) {
-              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "rebuilding drifted collaboration projection failed");
-            }
-          }
-        },
-        Err(error) => {
-          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "collaboration projection self-check request failed");
-        },
-      });
-    })
-    .detach();
-    Ok(())
-  }
-
-  fn rebuild_from_projection(&mut self, projected: DocumentProjection, cx: &mut Context<Self>) -> Result<()> {
-    let Some(editor) = self.editor.clone() else {
-      return Ok(());
-    };
-    tracing::warn!(session = %self.session, paragraphs = projected.paragraphs.len(), blocks = projected.blocks.len(), "rebuilding editor document from collaboration projection");
-    editor.update(cx, |editor, cx| editor.replace_document_projection(projected, cx));
-    self.last_document_activity = Instant::now();
-    self.refresh_external_carets(cx);
-    tracing::info!(session = %self.session, "rebuilt editor document from collaboration projection");
-    cx.emit(SessionNotice::ViewRebuilt);
-    Ok(())
   }
 
   fn start_connectivity_probe(&mut self, cx: &mut Context<Self>) -> bool {

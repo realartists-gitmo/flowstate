@@ -63,11 +63,8 @@ impl Workspace {
     let runtime = self.document_runtimes.get(&panel_id)?.clone();
 
     tracing::info!(%panel_id, title = %title, "workspace starting collaboration on document");
-    self.flush_document_runtime_edits(panel_id, editor.clone(), cx);
-    if editor.read(cx).runtime_transaction_in_flight() {
-      tracing::warn!(%panel_id, "collaboration start deferred because local edits are still being committed to Loro");
-      return None;
-    }
+    // Loro-first: nothing is ever pending — local intents commit synchronously
+    // into the same gate-protected core the session will now publish from.
     match crate::collab::start_session_for_panel(panel_id, editor, title, runtime, cx) {
       Ok(session) => {
         tracing::info!(%panel_id, %session, "workspace started collaboration on document");
@@ -216,12 +213,10 @@ impl Workspace {
   }
 
   pub fn leave_collaboration_on_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> bool {
+    // Loro-first: leaving a session stops transport only. The document's write
+    // authority, gate, and I/O service are untouched — solo editing continues
+    // through the identical path (invariant 5). Nothing to re-attach.
     let left = crate::collab::leave_session_for_panel(panel_id, cx);
-    if left
-      && let Some(runtime) = self.document_runtimes.get(&panel_id).cloned()
-    {
-      self.attach_runtime_to_document_panel(panel_id, runtime, cx);
-    }
     tracing::info!(%panel_id, left, "workspace leave collaboration requested");
     left
   }
@@ -259,18 +254,24 @@ impl Workspace {
           match result {
             Ok(Ok(joined)) => {
               tracing::info!(session = %joined.session, title = %joined.title, "collaboration join completed; opening joined document");
-              let Some(runtime) = crate::collab::runtime_for_session(joined.session, cx) else {
-                tracing::error!(session = %joined.session, "joined collaboration runtime is unavailable");
+              // Loro-first (spec §3 join gate): the session built the document
+              // services from the initial snapshot import; the workspace now
+              // takes the write authority + I/O handle and wires the panel
+              // exactly like a solo document (invariant 5). The session keeps
+              // transport only.
+              let Some((authority, io)) = crate::collab::take_joined_document_services_for_session(joined.session, cx) else {
+                tracing::error!(session = %joined.session, "joined collaboration document services are unavailable");
                 std::mem::drop(window.prompt(
                   PromptLevel::Critical,
                   "Join failed",
-                  Some("The joined collaboration runtime is unavailable."),
+                  Some("The joined collaboration document is unavailable."),
                   &[PromptButton::ok("Ok")],
                   cx,
                 ));
                 return;
               };
-              let panel = match workspace.add_joined_collaboration_panel(joined.document, joined.title, runtime.clone(), window, cx) {
+              let attachment = DocumentRuntimeAttachment { authority, io };
+              let panel = match workspace.add_joined_collaboration_panel(joined.document, joined.title, attachment, window, cx) {
                 Ok(panel) => panel,
                 Err(error) => {
                   tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");
@@ -297,12 +298,11 @@ impl Workspace {
                   &[PromptButton::ok("Ok")],
                   cx,
                 ));
-              } else {
-                workspace.attach_runtime_to_document_panel(panel_id, runtime, cx);
-                if workspace.collaboration_dialog.is_some() {
-                  workspace.close_collaboration_dialog(cx);
-                  window.close_dialog(cx);
-                }
+              } else if workspace.collaboration_dialog.is_some() {
+                // The panel was fully wired by `create_document_panel` (write
+                // authority, I/O hooks, runtime map) — no second attach pass.
+                workspace.close_collaboration_dialog(cx);
+                window.close_dialog(cx);
               }
             },
             Ok(Err(error)) => {
@@ -340,11 +340,11 @@ impl Workspace {
     &mut self,
     document: DocumentProjection,
     title: String,
-    runtime: flowstate_collab::crdt_runtime_actor::CrdtRuntimeHandle,
+    attachment: DocumentRuntimeAttachment,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> anyhow::Result<Entity<DocumentPanel>> {
-    let panel = self.create_document_panel(document, None, Some(title), DocumentRuntimeSource::Handle(runtime), window, cx)?;
+    let panel = self.create_document_panel(document, None, Some(title), DocumentRuntimeSource::Attachment(attachment), window, cx)?;
     self.persist_temporary_workspace_session(cx);
     cx.notify();
     Ok(panel)

@@ -6,74 +6,36 @@ impl RichTextEditor {
     if asset_records.is_empty() {
       return;
     }
-    self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
     for (id, record) in asset_records {
       self.document.assets.assets.insert(*id, record.clone());
-      self.committed_document.assets.assets.insert(*id, record.clone());
     }
-    self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
     // Asset availability is out-of-band cache state: repaint, but never dirty
     // the document or advance the edit generation.
     self.after_formatting_mutation(cx);
   }
 
-  pub fn apply_projection_patch_batch(&mut self, batch: &ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<(), ProjectionApplyError> {
-    if self.committed_document.frontier != batch.base_frontier {
-      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Frontier, "apply-stale-frontier", || {
-        format!(
-          "txn={} expected_len={} actual_len={}",
-          batch.transaction_id,
-          batch.base_frontier.len(),
-          self.committed_document.frontier.len(),
-        )
-      });
-      return Err(ProjectionApplyError::StaleFrontier {
-        expected: batch.base_frontier.clone(),
-        actual: self.committed_document.frontier.clone(),
-      });
-    }
-    flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Frontier, "apply-frontier-ok", || {
-      format!("txn={} frontier_len={} patches={}", batch.transaction_id, batch.base_frontier.len(), batch.patches.len())
-    });
-    // Fidelity: snapshot the pre-apply caret and document size so the whole
-    // apply (rebuild + stable-selection re-resolve) can be checked for a
-    // backward caret jump.
-    let fid_sel_before = self.fidelity_caret_before();
-    let fid_size_before = flowstate_fidelity::enabled().then(|| self.fidelity_document_size());
-    let stable_selection = StableEditorSelection::capture(&self.document, &self.selection);
-    let mut document = self.committed_document.clone();
-    let mut invalidation: Option<Range<usize>> = None;
-    if !batch.is_empty() {
-      apply_projection_patches_to_document(&mut document, &batch.patches, Some(&mut invalidation))?;
-    }
-    document.frontier.clone_from(&batch.new_frontier);
-    self.suppress_command_capture = self.suppress_command_capture.saturating_add(1);
-    self.committed_document = document;
-    self.layout_invalidation_hint = invalidation;
-    self.rebuild_visible_from_committed(Vec::new(), None, cx);
-    if self.runtime_edit_selection_epoch.is_none()
-      && self.pending_semantic_edits.is_empty()
-      && let Some(selection) = stable_selection
-    {
-      let fid_before = self.fidelity_caret_before();
-      self.selection = selection.resolve(&self.document);
-      self.fidelity_caret_set("apply_projection_patch_batch/stable-resolve", &fid_before);
+  /// Apply a REMOTE projection patch batch to THE document (Loro-first spec
+  /// §6): single projection, no committed/visible split, no pending-edit
+  /// replay, no stable-selection resolve pass — the caret clamps and the next
+  /// local intent re-resolves by identity.
+  pub fn apply_remote_patch_batch(&mut self, batch: &ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<(), ProjectionApplyError> {
+    let mut document = self.document.clone();
+    apply_projection_patch_batch(&mut document, batch)?;
+    let theme = self.document.theme.clone();
+    self.document = projection_with_local_theme(document, &theme);
+    self.identity_map.reconcile(&self.document);
+    let head = self.clamp_offset_to_document(self.selection.head);
+    let anchor = self.clamp_offset_to_document(self.selection.anchor);
+    if head != self.selection.head || anchor != self.selection.anchor {
+      self.selection = EditorSelection::range(anchor, head);
       self.emit_selection_changed(cx);
     }
-    self.suppress_command_capture = self.suppress_command_capture.saturating_sub(1);
-    self.identity_map.reconcile(&self.document);
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.mark_document_changed_with_ops(generation, false, None, cx);
-    // Remote collaboration patches should update this editor in place, but
-    // should not scroll the viewport as if the local user typed the change.
+    self.mark_document_changed(generation, false, cx);
+    // Remote patches update the editor in place but never scroll the viewport
+    // as if the local user typed.
     self.pending_scroll_head_after_layout = false;
-    self.layout_invalidation_hint = None;
-    if let Some((pre_paras, pre_len)) = fid_size_before {
-      let (post_paras, post_len) = self.fidelity_document_size();
-      let shrank = post_paras < pre_paras || post_len < pre_len;
-      self.fidelity_check_caret_not_regressed("apply_projection_patch_batch", &fid_sel_before, shrank);
-    }
     Ok(())
   }
 
@@ -87,6 +49,7 @@ impl RichTextEditor {
 
 }
 
+#[hotpath::measure]
 pub fn apply_projection_patch_batch(document: &mut DocumentProjection, batch: &ProjectionPatchBatch) -> Result<(), ProjectionApplyError> {
   if document.frontier != batch.base_frontier {
     return Err(ProjectionApplyError::StaleFrontier {
@@ -94,7 +57,7 @@ pub fn apply_projection_patch_batch(document: &mut DocumentProjection, batch: &P
       actual: document.frontier.clone(),
     });
   }
-  let mut candidate = document.clone();
+  let mut candidate = hotpath::measure_block!("editor_patch_candidate_clone", document.clone());
   apply_projection_patches_to_document(&mut candidate, &batch.patches, None)?;
   candidate.frontier.clone_from(&batch.new_frontier);
   *document = candidate;

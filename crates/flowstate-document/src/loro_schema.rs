@@ -374,14 +374,27 @@ pub fn seed_document_body(doc: &LoroDoc) -> LoroResult<()> {
   Ok(())
 }
 
+/// Per-key mark expand table (Loro-first spec §9, D7).
+///
+/// Run-style marks expand `After`: typing at the end of a styled run inherits
+/// the style natively (Peritext semantics — what a word processor does), so a
+/// plain text insert emits ZERO style operations. `paragraph_style` stays
+/// `None`: it anchors the boundary sentinel newline and must never bleed into
+/// text. Two riders enforced by the write path:
+/// * caret style *overrides* (style toggled at the caret) explicitly
+///   mark/unmark exactly the inserted range;
+/// * `split_paragraph` unmarks all run-style keys on its inserted `\n`
+///   (sentinel hygiene) — an expand-`After` run ending at the split point
+///   would otherwise absorb the sentinel and bleed into the next paragraph.
 pub fn configure_text_styles(doc: &LoroDoc) {
   let mut styles = StyleConfigMap::new();
   let no_expand = StyleConfig::new().expand(ExpandType::None);
+  let expand_after = StyleConfig::new().expand(ExpandType::After);
   styles.insert(MARK_PARAGRAPH_STYLE.into(), no_expand);
-  styles.insert(MARK_RUN_SEMANTIC_STYLE.into(), no_expand);
-  styles.insert(MARK_HIGHLIGHT_STYLE.into(), no_expand);
-  styles.insert(MARK_DIRECT_UNDERLINE.into(), no_expand);
-  styles.insert(MARK_STRIKETHROUGH.into(), no_expand);
+  styles.insert(MARK_RUN_SEMANTIC_STYLE.into(), expand_after);
+  styles.insert(MARK_HIGHLIGHT_STYLE.into(), expand_after);
+  styles.insert(MARK_DIRECT_UNDERLINE.into(), expand_after);
+  styles.insert(MARK_STRIKETHROUGH.into(), expand_after);
   doc.config_text_style(styles);
 }
 

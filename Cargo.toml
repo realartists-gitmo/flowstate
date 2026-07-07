@@ -251,15 +251,20 @@ unreadable_literal = "allow"
 collapsible_else_if = "allow"
 
 
+[profile.dev]
+split-debuginfo = "unpacked"
+
 [profile.release]
 rustflags = ["-Z", "threads=0"]
 incremental = true
+split-debuginfo = "unpacked"
 
 [profile.profiler]
 inherits = "release"
 opt-level = 3
 overflow-checks = false
-debug = true
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 strip = false
 
 [profile.product]

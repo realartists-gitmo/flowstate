@@ -13,14 +13,13 @@ use flowstate_document::{
   AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, CellId, ColumnId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage,
   DocumentProjection, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock,
   InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumn, InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
+  InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
   MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId,
   ParagraphStyle, ProjectionDefect, ProjectionPatch, ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RowId,
   RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId, TableBlock, cell_loro_id, cell_loro_id_for, column_loro_id, document_from_loro,
   document_from_loro_with_defects, import_document_projection, loro_import::assets_from_document, loro_schema::body_text, new_loro_document,
   row_loro_id,
 };
-use gpui_flowtext::SemanticEditCommand as EditorSemanticCommand;
 use loro::{
   Container, ContainerID, ExportMode, Frontiers, ID, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
   UndoItemMeta, UndoManager, ValueOrContainer, VersionRange, VersionVector,
@@ -40,26 +39,28 @@ const REPAIR_ORIGIN: &str = "repair";
 /// projection) instead of looping forever.
 const PROJECTION_REPAIR_ATTEMPT_CAP: u64 = 3;
 
+#[path = "crdt_runtime/import_delta.rs"]
+mod import_delta;
 #[path = "crdt_runtime/projection_patch.rs"]
 mod projection_patch;
 #[path = "crdt_runtime/projection_repair.rs"]
 mod projection_repair;
 #[path = "crdt_runtime/table_ops.rs"]
-mod table_ops;
+pub(crate) mod table_ops;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
 use gpui_flowtext::{
-  DocumentOffset, EditorSelection, ExternalCaret, ProjectionPatchBatch, apply_projection_patch_batch, replay_semantic_command_on_projection,
+  DocumentOffset, EditorSelection, ExternalCaret, ProjectionPatchBatch, apply_projection_patch_batch,
 };
 use loro::{ContainerTrait as _, cursor::PosType};
-use projection_patch::{
-  body_input_paragraph, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
+pub(crate) use projection_patch::{
+  body_input_paragraph_at, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
 };
 use types::UndoSelectionState;
 pub use types::{
-  EditorCommitResult, ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent,
-  RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, StaleProjectionError, UndoSelectionAffinity,
+  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent,
+  RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity,
   UndoSelectionDirection, UndoSelectionSnapshot,
 };
 
@@ -74,6 +75,14 @@ pub struct CrdtRuntime {
   // §15: optional durable author identity. When set, revisions record this user
   // as their author; when `None`, authorship stays unset (behavior unchanged).
   author_user_id: Option<u128>,
+  // Loro-first spec §16 (lazy author identity): identity supplied by the app,
+  // registered into `users_by_id`/`replicas_by_id` only when this replica
+  // actually commits an edit — a replica that never edits leaves no history.
+  pending_author_identity: Option<(u128, Option<String>)>,
+  /// §16 always-on commit metrics (ops from Loro's own `ChangeMeta.len`).
+  ops_committed_total: Arc<AtomicU64>,
+  commits_total: Arc<AtomicU64>,
+  _pre_commit_subscription: Subscription,
   package: Option<DocumentPackage>,
   package_path: Option<PathBuf>,
   package_journal_prepared: bool,
@@ -95,6 +104,17 @@ pub struct CrdtRuntime {
   // `refresh_projection`, which itself collects defects — the guard stops that
   // inner refresh from scheduling another repair pass (no infinite recursion).
   repairing_projection_defects: bool,
+  /// Field fix 2026-07-07: the ORDERED editor-bound projection stream. Every
+  /// projection change (local intent patches, remote import patches, full
+  /// replaces) is pushed here IN COMMIT ORDER under the write gate; the editor
+  /// drains it as its sole projection input. See
+  /// `gpui_flowtext::local_intents::ProjectionStreamItem`.
+  editor_stream: Vec<gpui_flowtext::ProjectionStreamItem>,
+  /// Loro-first publish queue (spec §6): committed local-change events
+  /// (`LocalUpdate` bytes and friends) buffered under the write gate for the
+  /// I/O service to drain and broadcast. Local intents never block on the
+  /// network; the network never reaches into an intent.
+  pending_publish: Vec<RuntimeEvent>,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
 }
@@ -122,6 +142,15 @@ struct TableIndexEntry {
   cells: FxHashMap<(RowId, ColumnId), CellId>,
 }
 
+/// Loro-first spec §6.3: the composed body delta drained from one
+/// subscription-buffer sweep, with its conservatism flags.
+#[derive(Debug, Default)]
+pub(crate) struct DrainedBodyDelta {
+  pub(crate) net: import_delta::NetBodyDelta,
+  pub(crate) has_remote_origin: bool,
+  pub(crate) checkout_seen: bool,
+}
+
 /// §24 search unit span: a lightweight body-unicode range for one search unit.
 /// `paragraph` is `Some(ix)` for a paragraph unit and `None` for an object
 /// placeholder unit. Used to map changed body ranges onto affected search units.
@@ -133,9 +162,13 @@ struct SearchUnitSpan {
 }
 
 #[derive(Debug, Default)]
-struct ProjectionRuntimeIndex {
+pub(crate) struct ProjectionRuntimeIndex {
   // Original three indexes (§ earlier work): behavior and population unchanged.
   paragraph_body_unicode_starts: Vec<usize>,
+  /// One-past-the-end unicode position of the live body flow at index-build
+  /// time. Used to clamp degraded (id-less) cursor resolutions, which Loro
+  /// resolves to the WHOLE-BODY end (spec §8 / semantics-audit F7).
+  body_unicode_end: usize,
   paragraph_boundary_positions: Vec<usize>,
   object_placeholder_positions: Vec<usize>,
   // §24 additive projection indexes, all derived from the projection in
@@ -162,7 +195,40 @@ struct ProjectionRuntimeIndex {
 }
 
 impl ProjectionRuntimeIndex {
-  fn from_projection(projection: &DocumentProjection) -> Self {
+  /// Paragraph id → paragraph index in the projection this index was built
+  /// from. O(1); the identity basis of the local-write resolution law.
+  pub(crate) fn paragraph_index(&self, id: ParagraphId) -> Option<usize> {
+    self.paragraph_metadata_by_id.get(&id).copied()
+  }
+
+  /// Block id → block index in the projection this index was built from.
+  pub(crate) fn block_index(&self, id: BlockId) -> Option<usize> {
+    self.block_anchor_by_id.get(&id).copied()
+  }
+
+  /// Clamp a body-unicode position into the live body range recorded at index
+  /// build time (degraded-cursor defense, spec §8).
+  pub(crate) fn clamp_body_unicode(&self, pos: usize) -> usize {
+    pos.min(self.body_unicode_end)
+  }
+
+  /// Sorted pre-state paragraph-boundary positions (spec §6.3 exact
+  /// structural-delete detection).
+  pub(crate) fn boundary_positions(&self) -> &[usize] {
+    &self.paragraph_boundary_positions
+  }
+
+  /// Sorted pre-state object placeholder positions.
+  pub(crate) fn object_positions(&self) -> &[usize] {
+    &self.object_placeholder_positions
+  }
+
+  /// Pre-state paragraph start positions (body unicode).
+  pub(crate) fn paragraph_starts(&self) -> &[usize] {
+    &self.paragraph_body_unicode_starts
+  }
+
+  pub(crate) fn from_projection(projection: &DocumentProjection) -> Self {
     let mut index = Self::default();
     let mut body_unicode = 1usize;
     let mut paragraph_ix = 0usize;
@@ -272,6 +338,7 @@ impl ProjectionRuntimeIndex {
       index.fidelity_check_object_sides(projection);
     }
 
+    index.body_unicode_end = body_unicode;
     index
   }
 
@@ -300,7 +367,7 @@ impl ProjectionRuntimeIndex {
   /// (which would materialize the coalesced paragraph and diverge the incremental
   /// projection from the full rebuild). Falls back to the projection-space start when
   /// the durable record can't be resolved (e.g. the boundary-0 sentinel).
-  fn body_unicode_for_offset_in_loro(&self, doc: &LoroDoc, projection: &DocumentProjection, offset: DocumentOffset) -> Option<usize> {
+  pub(crate) fn body_unicode_for_offset_in_loro(&self, doc: &LoroDoc, projection: &DocumentProjection, offset: DocumentOffset) -> Option<usize> {
     let paragraph = projection.paragraphs.get(offset.paragraph)?;
     let paragraph_text = flowstate_document::paragraph_text(projection, offset.paragraph);
     let byte = offset
@@ -320,7 +387,7 @@ impl ProjectionRuntimeIndex {
     Some(unicode)
   }
 
-  fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
+  pub(crate) fn offset_for_body_unicode(&self, projection: &DocumentProjection, unicode: usize) -> Option<DocumentOffset> {
     // FS-170: the body-unicode slot immediately AFTER a block-object placeholder
     // is the interstitial paragraph boundary. A caret resting there is "after the
     // object" and belongs to the FOLLOWING paragraph's start — not the preceding
@@ -449,37 +516,6 @@ impl ProjectionRuntimeIndex {
       .iter()
       .chain(&self.object_placeholder_positions)
       .any(|position| (start..end).contains(position))
-  }
-
-  /// §24 paragraph metadata index lookup: paragraph id → paragraph index.
-  ///
-  /// O(1) through `paragraph_metadata_by_id`, falling back to the prior linear
-  /// `position` scan when the id is absent so the semantics (first match, or
-  /// `None`) are identical to the scans this replaces.
-  fn paragraph_index_for_id(&self, projection: &DocumentProjection, id: ParagraphId) -> Option<usize> {
-    if let Some(&paragraph_ix) = self.paragraph_metadata_by_id.get(&id) {
-      return Some(paragraph_ix);
-    }
-    projection
-      .ids
-      .paragraph_ids
-      .iter()
-      .position(|candidate| *candidate == id)
-  }
-
-  /// §24 block anchor index lookup: block id → block index in `projection.blocks`.
-  ///
-  /// O(1) through `block_anchor_by_id`, with the same linear fallback so callers
-  /// keep identical semantics to the `projection.ids.block_ids` scans.
-  fn block_index_for_id(&self, projection: &DocumentProjection, id: BlockId) -> Option<usize> {
-    if let Some(&block_ix) = self.block_anchor_by_id.get(&id) {
-      return Some(block_ix);
-    }
-    projection
-      .ids
-      .block_ids
-      .iter()
-      .position(|candidate| *candidate == id)
   }
 
   /// §24 style interval index lookup: run styles covering `byte` in a paragraph.
@@ -795,6 +831,18 @@ impl CrdtRuntime {
         events.push(summary);
       }
     }));
+    // Loro-first spec §16: source-of-truth ops-per-commit tap. `ChangeMeta.len`
+    // is measured by Loro itself at commit time — immune to instrumentation
+    // drift. Callback discipline per I-9b: copy the numbers out, touch nothing.
+    let ops_committed_total = Arc::new(AtomicU64::new(0));
+    let commits_total = Arc::new(AtomicU64::new(0));
+    let ops_for_callback = Arc::clone(&ops_committed_total);
+    let commits_for_callback = Arc::clone(&commits_total);
+    let pre_commit_subscription = doc.subscribe_pre_commit(Box::new(move |payload| {
+      ops_for_callback.fetch_add(payload.change_meta.len as u64, AtomicOrdering::Relaxed);
+      commits_for_callback.fetch_add(1, AtomicOrdering::Relaxed);
+      true
+    }));
     let local_subscription_updates = Arc::new(Mutex::new(Vec::new()));
     let local_updates_for_callback = Arc::clone(&local_subscription_updates);
     let local_update_subscription = doc.subscribe_local_update(Box::new(move |bytes| {
@@ -805,7 +853,9 @@ impl CrdtRuntime {
       true
     }));
     let mut undo = UndoManager::new(&doc);
-    undo.set_merge_interval(600);
+    // Loro-first spec §10 (D6): time-based merge OFF — undo units are explicit
+    // group_start/group_end boundaries driven by input semantics.
+    undo.set_merge_interval(0);
     undo.set_max_undo_steps(300);
     undo.add_exclude_origin_prefix("remote");
     // §P2a: canonical repair commits carry the `repair` origin and must never
@@ -822,6 +872,10 @@ impl CrdtRuntime {
       defer_undo_checkpoints: false,
       undo_checkpoint_pending: false,
       author_user_id: None,
+      pending_author_identity: None,
+      ops_committed_total,
+      commits_total,
+      _pre_commit_subscription: pre_commit_subscription,
       package,
       package_path,
       package_journal_prepared: false,
@@ -834,6 +888,8 @@ impl CrdtRuntime {
       projection_fallback_counts: Mutex::new(BTreeMap::new()),
       projection_repair_counts: Mutex::new(BTreeMap::new()),
       repairing_projection_defects: false,
+      editor_stream: Vec::new(),
+      pending_publish: Vec::new(),
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
     };
@@ -849,8 +905,78 @@ impl CrdtRuntime {
     Ok(runtime)
   }
 
-  pub(crate) fn doc(&self) -> &LoroDoc {
+  /// The live doc. Callers must hold the write gate for any barrier-capable
+  /// use (spec I-9a); integration tests access it through their gate guards.
+  pub fn doc(&self) -> &LoroDoc {
     &self.doc
+  }
+
+  /// §16 commit metrics: (total commits, total Loro ops) recorded at the
+  /// pre-commit tap since this core was constructed.
+  #[must_use]
+  pub fn commit_metrics(&self) -> (u64, u64) {
+    (self.commits_total.load(AtomicOrdering::Relaxed), self.ops_committed_total.load(AtomicOrdering::Relaxed))
+  }
+
+  // ---- Loro-first local-write core surface (spec §4/§6) --------------------
+
+  pub(crate) fn projection_ref(&self) -> &DocumentProjection {
+    &self.projection
+  }
+
+  pub(crate) fn projection_index_ref(&self) -> &ProjectionRuntimeIndex {
+    &self.projection_index
+  }
+
+  pub(crate) fn set_projection_frontier(&mut self, frontier: Vec<u8>) {
+    self.projection.frontier = frontier;
+  }
+
+  pub(crate) fn undo_manager_mut(&mut self) -> &mut UndoManager {
+    &mut self.undo
+  }
+
+  /// Push an editor-bound projection change onto the ordered stream (gate-held
+  /// callers only — ordering is the whole point).
+  pub(crate) fn push_editor_stream(&mut self, item: gpui_flowtext::ProjectionStreamItem) {
+    self.editor_stream.push(item);
+  }
+
+  /// Drain the ordered projection stream for the editor (single consumer).
+  pub(crate) fn take_editor_stream(&mut self) -> Vec<gpui_flowtext::ProjectionStreamItem> {
+    std::mem::take(&mut self.editor_stream)
+  }
+
+  /// Queue committed-change events for the I/O service to drain (spec §6).
+  pub(crate) fn queue_publish(&mut self, events: Vec<RuntimeEvent>) {
+    self.pending_publish.extend(events);
+  }
+
+  /// Drain queued publish events. Called by the I/O service under the gate.
+  pub(crate) fn take_pending_publish(&mut self) -> Vec<RuntimeEvent> {
+    std::mem::take(&mut self.pending_publish)
+  }
+
+  /// Spec §7 audit law: the patch-applied projection must equal an independent
+  /// full materialization (modulo the documented whitelist, which is embodied
+  /// by `projections_semantically_equal`). On mismatch: loud metric + snapshot
+  /// repair by installing the full rebuild.
+  #[hotpath::measure]
+  pub(crate) fn audit_projection_against_full_rebuild(&mut self, class: &str) -> Result<()> {
+    let full = document_from_loro(&self.doc).context("audit: full materialization failed")?;
+    if projections_semantically_equal(&self.projection, &full) {
+      return Ok(());
+    }
+    let detail = first_projection_divergence(&self.projection, &full);
+    tracing::error!(class, detail, "audit-mismatch: patch-applied projection != full rebuild; installing snapshot repair");
+    if let Ok(mut counts) = self.projection_fallback_counts.lock() {
+      *counts.entry("audit-mismatch".to_string()).or_default() += 1;
+    }
+    let frontier = self.projection.frontier.clone();
+    self.projection = full;
+    self.projection.frontier = frontier;
+    self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
+    anyhow::bail!("projection audit mismatch for intent class {class}: {detail}")
   }
 
   /// §15: bind a stable durable author identity to this live replica.
@@ -860,31 +986,39 @@ impl CrdtRuntime {
   /// their author. Until this is called, `author_user_id` stays `None` and
   /// authorship is left unset (behavior unchanged).
   pub fn set_author_identity(&mut self, user_id: u128, display_name: Option<String>) -> Result<Vec<RuntimeEvent>> {
+    // Loro-first spec §16: registration is LAZY — deferred to this replica's
+    // first actual edit so an open-and-look session commits no identity noise.
+    self.author_user_id = Some(user_id);
+    self.pending_author_identity = Some((user_id, display_name));
+    Ok(Vec::new())
+  }
+
+  /// Register the deferred author identity (spec §16). Called by the local
+  /// write path right after this replica's first committed edit; the identity
+  /// commit rides the excluded `repair` origin so it never enters undo stacks.
+  pub(crate) fn register_pending_author_identity(&mut self) {
+    let Some((user_id, display_name)) = self.pending_author_identity.take() else {
+      return;
+    };
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
-    flowstate_document::register_user(&self.doc, user_id, display_name.as_deref()).context("registering durable author identity")?;
-    self.doc.commit();
-    self.author_user_id = Some(user_id);
-
-    let update = match self.local_update_bytes(&from_vv) {
-      Ok(update) => update,
-      Err(error) => {
-        tracing::error!(%error, "exporting committed author-identity update failed; later synchronization must recover it");
-        return Ok(Vec::new());
-      },
-    };
-    if update.is_empty() {
-      return Ok(Vec::new());
+    self.doc.set_next_commit_origin(REPAIR_ORIGIN);
+    self.doc.set_next_commit_message("author-identity");
+    if let Err(error) = flowstate_document::register_user(&self.doc, user_id, display_name.as_deref()) {
+      tracing::warn!(%error, "registering deferred author identity failed");
+      return;
     }
-    if let Err(error) = self.persist_update_segment(from_frontier, from_vv, update.clone()) {
-      tracing::error!(%error, "persisting committed author-identity update failed");
+    match self.events_after_local_change(
+      from_frontier,
+      from_vv,
+      ProjectionInvalidation::default(),
+      false,
+    ) {
+      Ok(events) => self.queue_publish(events),
+      Err(error) => tracing::warn!(%error, "publishing deferred author-identity update failed; anti-entropy recovers it"),
     }
-    Ok(vec![RuntimeEvent::LocalUpdate {
-      bytes: update,
-      frontier: self.doc.state_frontiers().encode(),
-      version_vector: self.doc.state_vv().encode(),
-    }])
   }
+
 
   pub fn set_pending_undo_selection(&mut self, selection: Option<UndoSelectionSnapshot>) -> Result<()> {
     let pending_selection = selection
@@ -904,7 +1038,8 @@ impl CrdtRuntime {
       .and_then(|mut state| state.restored_selection.take())
   }
 
-  fn record_undo_checkpoint(&mut self) -> Result<()> {
+  #[hotpath::measure]
+  pub(crate) fn record_undo_checkpoint(&mut self) -> Result<()> {
     if self.defer_undo_checkpoints {
       self.undo_checkpoint_pending = true;
       return Ok(());
@@ -914,114 +1049,6 @@ impl CrdtRuntime {
       .record_new_checkpoint()
       .context("recording Loro undo checkpoint")?;
     Ok(())
-  }
-
-  fn undo_selection_for_projection(&self, projection: &DocumentProjection, selection: &EditorSelection) -> Option<UndoSelectionSnapshot> {
-    let direction = selection_direction(selection.anchor, selection.head);
-    let anchor_affinity = SelectionAffinity::from(selection.anchor_affinity);
-    let head_affinity = SelectionAffinity::from(selection.head_affinity);
-    let body = body_text(&self.doc);
-    let anchor = clamp_projection_offset(projection, selection.anchor);
-    let head = clamp_projection_offset(projection, selection.head);
-    let projection_index = ProjectionRuntimeIndex::from_projection(projection);
-    // Intentionally projection-space (NOT the `_in_loro` variant): a selection is
-    // encoded to a Loro cursor here and decoded back via `offset_for_body_unicode`,
-    // which is also projection-space. Both directions must use the SAME space or the
-    // round-trip drifts on object-adjacent-empty docs (guarded by
-    // `caret_offset_round_trips_through_projection_space`). Only direct body mutations
-    // — which don't round-trip — use the Loro-space resolver (FS-170 fix 5d50099).
-    let anchor_pos = projection_index.body_unicode_for_offset(projection, anchor)?;
-    let head_pos = projection_index.body_unicode_for_offset(projection, head)?;
-    let anchor_cursor = cursor_for_boundary(&body, anchor_pos, anchor_affinity)?.encode();
-    let head_cursor = cursor_for_boundary(&body, head_pos, head_affinity)?.encode();
-    Some(UndoSelectionSnapshot {
-      anchor_cursor,
-      head_cursor,
-      anchor_affinity: undo_affinity(anchor_affinity),
-      head_affinity: undo_affinity(head_affinity),
-      direction: match direction {
-        SelectionDirection::Forward => UndoSelectionDirection::Forward,
-        SelectionDirection::Backward => UndoSelectionDirection::Backward,
-        SelectionDirection::None => UndoSelectionDirection::None,
-      },
-    })
-  }
-
-  pub fn apply_editor_semantic_command(
-    &mut self,
-    projection: &DocumentProjection,
-    command: &EditorSemanticCommand,
-  ) -> Result<Vec<RuntimeEvent>> {
-    self.apply_editor_semantic_command_with_projection(projection, command, true)
-  }
-
-  pub fn apply_editor_semantic_command_without_projection(
-    &mut self,
-    projection: &DocumentProjection,
-    command: &EditorSemanticCommand,
-  ) -> Result<Vec<RuntimeEvent>> {
-    self.apply_editor_semantic_command_with_projection(projection, command, false)
-  }
-
-  pub fn try_apply_editor_semantic_command_without_projection(&mut self, command: &EditorSemanticCommand) -> Result<Option<Vec<RuntimeEvent>>> {
-    let from_frontier = self.doc.state_frontiers();
-    let from_vv = self.doc.state_vv();
-    if apply_editor_semantic_command_body_fast_path(&self.doc, &self.projection, &self.projection_index, command)? {
-      self.doc.commit();
-      self.record_undo_checkpoint()?;
-      let mut invalidation = ProjectionInvalidation::body_text(
-        from_frontier.encode(),
-        self.doc.state_frontiers().encode(),
-        0,
-        body_text(&self.doc).len_unicode(),
-      );
-      self.merge_subscription_invalidation(&mut invalidation);
-      let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
-      if let Some(patches) = incremental_projection_patches_for_command(&self.projection, &self.projection_index, &self.doc, command) {
-        self.apply_projection_patch_set(&patches);
-        self.projection.frontier = self.doc.state_frontiers().encode();
-        events.push(self.projection_patched_event(patches, invalidation));
-      } else {
-        let before_projection = self.projection.clone();
-        self.refresh_projection()?;
-        events.push(self.projection_change_event(&before_projection, invalidation)?);
-      }
-      return Ok(Some(events));
-    }
-    Ok(None)
-  }
-
-  fn apply_editor_semantic_command_with_projection(
-    &mut self,
-    projection: &DocumentProjection,
-    command: &EditorSemanticCommand,
-    emit_projection: bool,
-  ) -> Result<Vec<RuntimeEvent>> {
-    let from_frontier = self.doc.state_frontiers();
-    let from_vv = self.doc.state_vv();
-    if apply_editor_semantic_command(&self.doc, projection, command)? {
-      self.doc.commit();
-      self.record_undo_checkpoint()?;
-      let mut invalidation = editor_command_invalidation(projection, command, from_frontier.encode(), self.doc.state_frontiers().encode());
-      self.merge_subscription_invalidation(&mut invalidation);
-      let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
-      if emit_projection {
-        if let Some(patches) = incremental_projection_patches_for_command(&self.projection, &self.projection_index, &self.doc, command) {
-          self.apply_projection_patch_set(&patches);
-          self.projection.frontier = self.doc.state_frontiers().encode();
-          events.push(self.projection_patched_event(patches, invalidation));
-        } else {
-          let before_projection = self.projection.clone();
-          self.refresh_projection()?;
-          events.push(self.projection_change_event(&before_projection, invalidation)?);
-        }
-      } else {
-        self.refresh_projection()?;
-      }
-      Ok(events)
-    } else {
-      Ok(Vec::new())
-    }
   }
 
   pub fn projection_snapshot(&self) -> Result<DocumentProjection> {
@@ -1135,310 +1162,70 @@ impl CrdtRuntime {
     })
   }
 
+  /// Record asset bytes/metadata into canonical state (Loro-first spec §6):
+  /// additive `assets_by_id` metadata + the maintained projection's asset
+  /// store, published like any local change and patched to editors as
+  /// `AssetArrived`. Asset records are content-addressed sideband — never
+  /// document text authority.
   pub fn merge_asset_records(&mut self, records: Vec<AssetRecord>) -> Result<Vec<RuntimeEvent>> {
-    let base_frontier = self.projection.frontier.clone();
-    Ok(
-      self
-        .apply_editor_transaction(Uuid::new_v4().as_u128(), &base_frontier, &[], &records, None)?
-        .events,
-    )
-  }
-
-  pub fn apply_editor_commands(
-    &mut self,
-    transaction_id: u128,
-    base_frontier: &[u8],
-    commands: &[EditorSemanticCommand],
-    selection_after: Option<&EditorSelection>,
-  ) -> Result<EditorCommitResult> {
-    self.apply_editor_transaction(transaction_id, base_frontier, commands, &[], selection_after)
-  }
-
-  pub fn apply_editor_transaction(
-    &mut self,
-    transaction_id: u128,
-    base_frontier: &[u8],
-    commands: &[EditorSemanticCommand],
-    asset_records: &[AssetRecord],
-    selection_after: Option<&EditorSelection>,
-  ) -> Result<EditorCommitResult> {
-    let current_projection_frontier = self.projection.frontier.clone();
-    if !base_frontier.is_empty() && base_frontier != current_projection_frontier.as_slice() {
-      return Err(
-        StaleProjectionError {
-          expected_frontier_len: base_frontier.len(),
-          current_frontier_len: current_projection_frontier.len(),
-        }
-        .into(),
-      );
+    if records.is_empty() {
+      return Ok(Vec::new());
     }
-
-    let mut predicted_projection = self.projection.clone();
-    for (command_ix, command) in commands.iter().enumerate() {
-      if editor_semantic_command_is_noop(command) {
-        continue;
-      }
-      if !replay_semantic_command_on_projection(&mut predicted_projection, command) {
-        anyhow::bail!("editor command {command_ix} failed stable-identity preflight: {command:?}");
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let root = self.doc.get_map(ROOT);
+    let assets = root
+      .ensure_mergeable_map(flowstate_document::loro_schema::ASSETS_BY_ID)
+      .context("opening canonical assets map")?;
+    for record in &records {
+      let asset_id = record.id.0.to_string();
+      let asset_map = assets
+        .ensure_mergeable_map(&asset_id)
+        .context("opening canonical asset record")?;
+      let hash = blake3::hash(&record.bytes);
+      asset_map.insert("asset_id", asset_id.as_str()).context("writing asset id")?;
+      asset_map
+        .insert("container_id", asset_map.id().to_string())
+        .context("writing asset container id")?;
+      asset_map
+        .insert("content_hash", hash.to_hex().as_str())
+        .context("writing asset content hash")?;
+      asset_map
+        .insert("mime_type", record.mime_type.as_ref())
+        .context("writing asset mime type")?;
+      asset_map
+        .insert("byte_length", i64::try_from(record.bytes.len()).unwrap_or(i64::MAX))
+        .context("writing asset byte length")?;
+      if let Some(original_name) = &record.original_name {
+        asset_map
+          .insert("original_name", original_name.as_ref())
+          .context("writing asset original name")?;
       }
     }
-    let asset_merge = merge_asset_records_into_projection(&mut predicted_projection, asset_records);
-    let commands_change_document = commands
-      .iter()
-      .any(|command| !editor_semantic_command_is_noop(command));
-    if !commands_change_document && !asset_merge.any_changed {
-      return Ok(EditorCommitResult {
-        transaction_id,
-        base_frontier: current_projection_frontier.clone(),
-        new_frontier: current_projection_frontier,
-        events: Vec::new(),
-      });
-    }
-
-    if commands
-      .iter()
-      .any(editor_semantic_command_requires_staging_validation)
-      || asset_merge.metadata_changed
-    {
-      let staging_doc = self.doc.fork();
-      let mut staging_projection = self.projection.clone();
-      for (command_ix, command) in commands.iter().enumerate() {
-        if editor_semantic_command_is_noop(command) {
-          continue;
-        }
-        let applied = apply_editor_semantic_command(&staging_doc, &staging_projection, command)
-          .with_context(|| format!("validating editor command {command_ix} against staged canonical state"))?;
-        if !applied {
-          anyhow::bail!("editor command {command_ix} was rejected by staged canonical validation: {command:?}");
-        }
-        let replayed = replay_semantic_command_on_projection(&mut staging_projection, command);
-        debug_assert!(replayed, "preflighted editor command must replay on staged projection");
-      }
-      staging_projection.assets = predicted_projection.assets.clone();
-      if asset_merge.metadata_changed {
-        flowstate_document::loro_import::import_assets(&staging_doc, &staging_projection)
-          .context("validating canonical asset metadata in staged editor transaction")?;
-        refresh_image_asset_metadata(&staging_doc).context("validating image asset metadata in staged editor transaction")?;
-      }
-    }
-
-    let mut staged_package = self.package.clone();
-    if asset_merge.any_changed
-      && let Some(package) = staged_package.as_mut()
-    {
-      package.replace_assets_from_document(&predicted_projection)?;
-      if let Some(path) = &self.package_path {
-        package.append_assets_to_path(path)?;
-      }
-    }
-
-    if !commands_change_document && !asset_merge.metadata_changed {
-      self.projection.assets = predicted_projection.assets;
-      if asset_merge.any_changed {
-        self.package = staged_package;
-      }
-      return Ok(EditorCommitResult {
-        transaction_id,
-        base_frontier: current_projection_frontier.clone(),
-        new_frontier: current_projection_frontier,
-        events: Vec::new(),
-      });
-    }
-
-    let mut batch_projection_before = self.projection.clone();
-    let batch_frontier_before = self.doc.state_frontiers();
-    let batch_vv_before = self.doc.state_vv();
-    flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for grouped editor transaction")?;
-    let mut working_projection = self.projection.clone();
-
-    for (command_ix, command) in commands.iter().enumerate() {
-      if editor_semantic_command_is_noop(command) {
-        continue;
-      }
-      let applied = apply_editor_semantic_command(&self.doc, &working_projection, command)
-        .with_context(|| format!("applying editor command {command_ix} inside grouped Loro transaction"))?;
-      if !applied {
-        anyhow::bail!("editor command {command_ix} was rejected after successful preflight: {command:?}");
-      }
-      let replayed = replay_semantic_command_on_projection(&mut working_projection, command);
-      debug_assert!(replayed, "preflighted editor command must replay on the working projection");
-    }
-    working_projection.assets = predicted_projection.assets.clone();
-    if asset_merge.metadata_changed {
-      flowstate_document::loro_import::import_assets(&self.doc, &working_projection)
-        .context("recording asset metadata in grouped editor transaction")?;
-      refresh_image_asset_metadata(&self.doc).context("refreshing image asset metadata in grouped editor transaction")?;
-    }
-    let undo_selection = selection_after.and_then(|selection| self.undo_selection_for_projection(&working_projection, selection));
-    self.set_pending_undo_selection(undo_selection)?;
+    refresh_image_asset_metadata(&self.doc).context("refreshing image asset metadata")?;
+    // Asset records ride the repair origin: convergent housekeeping, never an
+    // undo unit.
+    self.doc.set_next_commit_origin(REPAIR_ORIGIN);
+    self.doc.set_next_commit_message("asset-records");
     self.doc.commit();
-    self.fidelity_frontier_transition("editor-transaction", &batch_frontier_before, &batch_vv_before);
 
-    let mut invalidation = ProjectionInvalidation::full_rebuild(
-      batch_projection_before.frontier.clone(),
-      self.doc.state_frontiers().encode(),
-      "editor_command_batch_projection",
-    );
-    invalidation.changed_assets = asset_merge.changed_asset_ids;
+    merge_asset_records_into_projection(&mut self.projection, &records);
+    self.projection.frontier = self.doc.state_frontiers().encode();
+
+    let mut invalidation = ProjectionInvalidation {
+      frontier_before: from_frontier.encode(),
+      frontier_after: self.doc.state_frontiers().encode(),
+      changed_assets: records.iter().map(|record| record.id.0.to_string()).collect(),
+      ..ProjectionInvalidation::default()
+    };
     self.merge_subscription_invalidation(&mut invalidation);
-
-    // §P2a: collect projection defects so the transaction's repair pass can fold
-    // its canonical fix into the same LocalUpdate stream the peers already receive.
-    let mut transaction_defects: Vec<ProjectionDefect> = Vec::new();
-    let mut authoritative_projection = match document_from_loro_with_defects(&self.doc) {
-      Ok((projection, defects)) => {
-        transaction_defects = defects;
-        projection
-      },
-      Err(error) => {
-        tracing::error!(%error, "canonical projection materialization failed after committed editor transaction; using the prevalidated projection");
-        let mut projection = predicted_projection.clone();
-        projection.frontier = self.doc.state_frontiers().encode();
-        projection
-      },
-    };
-    // The incremental replay (`replay_semantic_command_on_projection`) models plain
-    // paragraph text/structure but NOT the object coalescing rules (`push_flow_blocks`
-    // drops record-less phantom empties after an object and re-segments the sentinel-first
-    // region). So on any doc that CONTAINS an object — or any batch that inserts/deletes/
-    // moves one — its prediction can diverge structurally from the authoritative
-    // `document_from_loro` rebuild. The runtime already materializes that canonical rebuild
-    // every transaction, so we simply adopt it as the prediction here (the incremental
-    // replay still ran, for command preflight validation). This mirrors the remote-import
-    // path, which likewise routes object-bearing docs through the object-aware full rebuild.
-    // Pure-paragraph docs keep the exact incremental prediction. The shipped patch is
-    // canonical + verified regardless, so this is preflight/echo consistency, not convergence.
-    if projection_has_object(&self.projection)
-      || projection_has_object(&authoritative_projection)
-      || commands.iter().any(editor_command_changes_block_structure)
-    {
-      predicted_projection = authoritative_projection.clone();
-    }
-    authoritative_projection.assets = predicted_projection.assets.clone();
-    authoritative_projection.theme = self.projection.theme.clone();
-    self.projection = authoritative_projection;
-    self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
-    self.bump_runtime_epoch();
-    if asset_merge.any_changed {
-      self.package = staged_package;
-    }
-    if let Err(error) = self.record_undo_checkpoint() {
-      tracing::error!(%error, "recording undo checkpoint failed after committed editor transaction");
-    }
-
-    // The incremental prediction must reproduce the authoritative rebuild's STRUCTURE
-    // (block kinds + paragraph texts) exactly — that is the user-visible content and any
-    // real positional/segmentation bug shows up here. Exact IDENTITY equality is asserted
-    // only when the canonical rebuild is defect-free: a record-less paragraph/block (e.g. a
-    // phantom empty an object op materialized, pending the repair pass below) carries a
-    // FABRICATED id derived from a boundary OpID, which legitimately differs across
-    // frontiers and between the incremental carry-forward and a fresh rebuild. Asserting
-    // equality on those transient ids tests the repair pass's job, not the incremental
-    // replay's; the repair converges them to durable ids on this same transaction.
-    debug_assert!(
-      projection_block_kinds(&self.projection) == projection_block_kinds(&predicted_projection)
-        && projection_paragraph_texts(&self.projection) == projection_paragraph_texts(&predicted_projection),
-      "canonical projection STRUCTURE diverged from preflighted editor transaction {transaction_id}: {commands:?}",
-    );
-    // Identity divergence with MATCHING structure is a record-less/fabricated id (a
-    // phantom empty an object op materialized, or a boundary the repair pass has not yet
-    // stamped with a durable record) — the id is derived from a boundary OpID and
-    // legitimately differs between the incremental carry-forward and a fresh rebuild until
-    // the repair below converges it. Surface it for observability rather than panicking on
-    // an id the incremental replay is not responsible for; a real positional/segmentation
-    // bug would have failed the structure assert above.
-    if self.projection.ids.paragraph_ids != predicted_projection.ids.paragraph_ids
-      || self.projection.ids.block_ids != predicted_projection.ids.block_ids
-    {
-      fidelity::event(FidelityClass::Identity, "fabricated-id-carryforward", || {
-        format!("txn {transaction_id}: incremental prediction carries fabricated ids differing from the fresh rebuild (structure matches); repair pass converges them")
-      });
-    }
-
-    let mut events = Vec::new();
-    match self.local_update_bytes(&batch_vv_before) {
-      Ok(update) if !update.is_empty() => {
-        if let Err(error) = self.persist_update_segment(batch_frontier_before, batch_vv_before, update.clone()) {
-          tracing::error!(%error, "persisting committed editor transaction update segment failed");
-        }
-        events.push(RuntimeEvent::LocalUpdate {
-          bytes: update,
-          frontier: self.doc.state_frontiers().encode(),
-          version_vector: self.doc.state_vv().encode(),
-        });
-      },
-      Ok(_) => {},
-      Err(error) => {
-        tracing::error!(%error, "exporting committed editor transaction update failed; later synchronization must recover it");
-      },
-    }
-
-    invalidation
-      .frontier_after
-      .clone_from(&self.projection.frontier);
-    // An incremental patch is only ever an optimization over shipping the full
-    // projection, so it MUST reproduce the authoritative projection exactly. A
-    // lossy/incomplete diff (e.g. a split-then-insert batch whose diff drops the
-    // inserted text) would silently lose content on the editor side. Verify the
-    // patch reproduces `self.projection` before trusting it; otherwise fall back
-    // to a full snapshot. This makes patch-path data loss structurally impossible
-    // regardless of any gap in `projection_patches_between`.
-    let batch_before_frontier = batch_projection_before.frontier.clone();
-    let verified_patch = match projection_patches_between(&batch_projection_before, &self.projection) {
-      Some(patches) => {
-        let batch = ProjectionPatchBatch {
-          transaction_id,
-          base_frontier: batch_before_frontier.clone(),
-          new_frontier: self.projection.frontier.clone(),
-          patches,
-        };
-        // Verify by replaying the patch onto the pre-batch projection IN PLACE.
-        // Its content is not needed afterward (only its frontier, saved above),
-        // so this avoids a second full-projection clone per transaction.
-        match apply_projection_patch_batch(&mut batch_projection_before, &batch) {
-          Ok(()) if projections_semantically_equal(&batch_projection_before, &self.projection) => Some(batch),
-          outcome => {
-            fidelity::event(FidelityClass::Projection, "patch-verify-fallback", || {
-              format!("editor-transaction {transaction_id}: incremental patch did not reproduce the authoritative projection ({outcome:?}); emitting full projection")
-            });
-            None
-          },
-        }
-      },
-      None => None,
-    };
-    if let Some(batch) = verified_patch {
-      events.push(RuntimeEvent::ProjectionPatched {
-        batch,
-        invalidation,
-        version_vector: self.doc.state_vv().encode(),
-      });
-    } else {
-      events.push(RuntimeEvent::ProjectionUpdated {
-        document: Box::new(self.projection.clone()),
-        invalidation,
-        frontier: self.projection.frontier.clone(),
-        version_vector: self.doc.state_vv().encode(),
-      });
-    }
-
-    // §P2a: repair any malformed canonical state this transaction surfaced. The
-    // repair commits under the `repair` origin and, unlike the refresh path, its
-    // `LocalUpdate` + `ProjectionUpdated` events are surfaced to the caller so
-    // peers receive the repair immediately (in addition to persistence).
-    if !transaction_defects.is_empty() {
-      match self.schedule_projection_repairs(transaction_defects) {
-        Ok(repair_events) => events.extend(repair_events),
-        Err(error) => tracing::error!(%error, "scheduling projection repairs after committed editor transaction failed"),
-      }
-    }
-
-    Ok(EditorCommitResult {
-      transaction_id,
-      base_frontier: batch_before_frontier,
-      new_frontier: self.projection.frontier.clone(),
-      events,
-    })
+    let mut events = self.events_after_local_change(from_frontier, from_vv, invalidation.clone(), false)?;
+    let patches = records
+      .into_iter()
+      .map(|record| flowstate_document::ProjectionPatch::AssetArrived { id: record.id, record })
+      .collect();
+    events.push(self.projection_patched_event(patches, invalidation));
+    Ok(events)
   }
 
   pub fn command(&mut self, command: SemanticCommand) -> Result<Vec<RuntimeEvent>> {
@@ -1749,21 +1536,30 @@ impl CrdtRuntime {
     Ok((document, forked_package))
   }
 
+  #[hotpath::measure]
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
     let from_frontier = self.doc.state_frontiers();
     // §fidelity: capture the pre-import version only when tracing so a disabled
     // build pays nothing; used to assert the import advanced (never regressed) the
     // canonical frontier below.
     let fidelity_before_vv = fidelity::enabled().then(|| self.doc.state_vv());
-    let status = self
-      .doc
-      .import_with(bytes, "remote")
-      .context("importing remote Loro update")?;
+    let status = hotpath::measure_block!(
+      "loro_import_with",
+      self.doc.import_with(bytes, "remote").context("importing remote Loro update")?
+    );
     let after_remote_vv = self.doc.state_vv();
     if let Some(before_vv) = &fidelity_before_vv {
       self.fidelity_frontier_transition("import", &from_frontier, before_vv);
     }
-    let repair_update = if status.pending.is_none() && repair_missing_paragraph_style_marks(&self.doc)? {
+    // The style-mark repair walks every flow's full styled delta — O(doc). A
+    // text-only import cannot introduce an unmarked paragraph boundary, so run
+    // it only when this import's (already-buffered, copied-out) subscription
+    // events show a structural insert. Poisoned/ambiguous buffers stay
+    // conservative and repair anyway.
+    let repair_update = if status.pending.is_none()
+      && self.buffered_subscription_events_insert_structure()
+      && repair_missing_paragraph_style_marks(&self.doc)?
+    {
       self.local_update_bytes(&after_remote_vv)?
     } else {
       Vec::new()
@@ -1798,34 +1594,59 @@ impl CrdtRuntime {
         changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
         ..ProjectionInvalidation::default()
       };
-      self.merge_subscription_invalidation(&mut invalidation);
-      let live_starts = paragraph_unicode_starts_from_body(&body_text(&self.doc).to_string());
-      // Structural-change backstop: `live_starts.len()` is the POST-import paragraph
-      // count (one per body `\n`). If it differs from the pre-import projection count, a
-      // paragraph boundary was inserted or DELETED by the merge. The `inserted_structure`
-      // flag catches inserted boundaries directly, but a deleted boundary is only inferred
-      // from `deleted_range_contains_structure`, which maps the delete position against the
-      // STALE pre-import boundary index and can miss it after concurrent inserts shift
-      // coordinates — leaving the incremental path to keep a paragraph the authoritative
-      // rebuild dropped. A count mismatch is an unambiguous, coordinate-free signal to take
-      // the object-aware full rebuild instead.
-      if live_starts.len() != self.projection.paragraphs.len() {
+      let drained = self.merge_subscription_invalidation(&mut invalidation);
+      invalidation.has_remote_origin |= drained.has_remote_origin;
+      debug_assert!(!drained.checkout_seen || invalidation.rebuild_required, "checkout drains must force a rebuild");
+      // Loro-first spec §6.3: EXACT structural analysis from the composed net
+      // delta (pre-import → post-import), replacing the old count-mismatch
+      // backstop that stringified the whole body per import. Structure changed
+      // iff (a) an inserted run carries \n/U+FFFC, (b) a deleted pre-import
+      // range covers a paragraph boundary or object placeholder, or (c) a
+      // structural insert was churned away within the import (per-op flags
+      // can't prove neutrality). Checkout events stay conservative.
+      let net = &drained.net;
+      // Projection-neutral import (frontier-only advance): nothing to derive —
+      // the 19:28 churn class ends as a no-op here (spec §13.13).
+      let body_neutral = net.is_empty();
+      let structural = !body_neutral
+        && (net.structural_churn
+        || net.inserts_structure()
+          || net.deletes_any_position(self.projection_index.boundary_positions())
+          || net.deletes_any_position(self.projection_index.object_positions()));
+      if structural {
         invalidation.rebuild_required = true;
-        invalidation.fallback_reason = Some("body_paragraph_count_changed");
+        if invalidation.fallback_reason.is_none() {
+          invalidation.fallback_reason = Some("structural_body_text_change");
+        }
+      } else if invalidation.fallback_reason == Some("structural_body_text_change") {
+        // The union heuristics inside the drain were conservative; the exact
+        // net-delta analysis supersedes them for the import path.
+        invalidation.rebuild_required = false;
+        invalidation.fallback_reason = None;
       }
-      let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
-        &invalidation.changed_text_ranges,
-        self.projection.paragraphs.len(),
-        &live_starts,
-      );
-      if let Some(patches) = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs) {
-        self.apply_projection_patch_set(&patches);
-        self.projection.frontier = self.doc.state_frontiers().encode();
-        events.push(self.projection_patched_event(patches, invalidation));
-      } else {
+      if invalidation.rebuild_required {
         let before_projection = self.projection.clone();
         self.refresh_projection()?;
         events.push(self.projection_change_event(&before_projection, invalidation)?);
+      } else {
+        // Non-structural: post-import paragraph starts are the pre-import
+        // starts shifted through the net delta — O(P + ops) arithmetic, no
+        // body scan.
+        let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
+        let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
+          &invalidation.changed_text_ranges,
+          self.projection.paragraphs.len(),
+          &live_starts,
+        );
+        if let Some(patches) = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs, &live_starts) {
+          self.apply_projection_patch_set(&patches);
+          self.projection.frontier = self.doc.state_frontiers().encode();
+          events.push(self.projection_patched_event(patches, invalidation));
+        } else {
+          let before_projection = self.projection.clone();
+          self.refresh_projection()?;
+          events.push(self.projection_change_event(&before_projection, invalidation)?);
+        }
       }
     } else {
       let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after, "remote_update_pending_projection_fallback");
@@ -1854,10 +1675,14 @@ impl CrdtRuntime {
     Ok(events)
   }
 
-  fn projection_event(&self, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
+  fn projection_event(&mut self, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
     self.record_projection_fallback(&invalidation);
+    let document = Box::new(self.projection_snapshot()?);
+    // Ordered stream (field fix): the editor consumes this replace in commit
+    // order, never through a racing side channel.
+    self.push_editor_stream(gpui_flowtext::ProjectionStreamItem::Replace(document.clone()));
     Ok(RuntimeEvent::ProjectionUpdated {
-      document: Box::new(self.projection_snapshot()?),
+      document,
       invalidation,
       frontier: self.doc.state_frontiers().encode(),
       version_vector: self.doc.state_vv().encode(),
@@ -1887,16 +1712,18 @@ impl CrdtRuntime {
     Ok(())
   }
 
-  fn projection_change_event(&self, before: &DocumentProjection, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
+  pub(crate) fn projection_change_event(&mut self, before: &DocumentProjection, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
     if let Some(patches) = projection_patches_between(before, &self.projection) {
       self.record_projection_fallback(&invalidation);
+      let batch = ProjectionPatchBatch {
+        transaction_id: uuid::Uuid::new_v4().as_u128(),
+        base_frontier: before.frontier.clone(),
+        new_frontier: self.doc.state_frontiers().encode(),
+        patches,
+      };
+      self.push_editor_stream(gpui_flowtext::ProjectionStreamItem::Patches(batch.clone()));
       return Ok(RuntimeEvent::ProjectionPatched {
-        batch: ProjectionPatchBatch {
-          transaction_id: uuid::Uuid::new_v4().as_u128(),
-          base_frontier: before.frontier.clone(),
-          new_frontier: self.doc.state_frontiers().encode(),
-          patches,
-        },
+        batch,
         invalidation,
         version_vector: self.doc.state_vv().encode(),
       });
@@ -1908,18 +1735,22 @@ impl CrdtRuntime {
     ))
   }
 
-  fn projection_patched_event(&self, patches: Vec<flowstate_document::ProjectionPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
+  pub(crate) fn projection_patched_event(&mut self, patches: Vec<flowstate_document::ProjectionPatch>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
     // §fidelity: the single choke point for every incrementally-patched projection
     // emission (local semantic commands + remote non-structural imports). Verify
     // the maintained projection still matches a fresh full rebuild.
     self.fidelity_verify_incremental_projection("projection-patched");
+    let batch = ProjectionPatchBatch {
+      transaction_id: uuid::Uuid::new_v4().as_u128(),
+      base_frontier: invalidation.frontier_before.clone(),
+      new_frontier: self.doc.state_frontiers().encode(),
+      patches,
+    };
+    // Ordered stream (field fix): the editor consumes this batch in commit
+    // order, never through a racing side channel.
+    self.push_editor_stream(gpui_flowtext::ProjectionStreamItem::Patches(batch.clone()));
     RuntimeEvent::ProjectionPatched {
-      batch: ProjectionPatchBatch {
-        transaction_id: uuid::Uuid::new_v4().as_u128(),
-        base_frontier: invalidation.frontier_before.clone(),
-        new_frontier: self.doc.state_frontiers().encode(),
-        patches,
-      },
+      batch,
       invalidation,
       version_vector: self.doc.state_vv().encode(),
     }
@@ -2184,7 +2015,8 @@ impl CrdtRuntime {
     Ok(events)
   }
 
-  fn refresh_projection(&mut self) -> Result<()> {
+  #[hotpath::measure]
+  pub(crate) fn refresh_projection(&mut self) -> Result<()> {
     let current_assets = self.projection.assets.clone();
     // §P2a: a full rebuild is where malformed canonical state surfaces; collect
     // the projection defects so we can schedule their canonical repair.
@@ -2233,7 +2065,8 @@ impl CrdtRuntime {
     );
   }
 
-  fn apply_projection_patch_set(&mut self, patches: &[ProjectionPatch]) {
+  #[hotpath::measure]
+  pub(crate) fn apply_projection_patch_set(&mut self, patches: &[ProjectionPatch]) {
     let rebuild_index = self
       .projection_index
       .update_for_patches(&self.projection, patches);
@@ -2259,6 +2092,76 @@ impl CrdtRuntime {
     self.package_path = Some(path.as_ref().to_path_buf());
     self.package_journal_prepared = false;
     self.save_package()
+  }
+
+  /// Field fix 2026-07-07: phase 1 of a split checkpoint — everything that
+  /// must see the LIVE doc (metadata + revision commit, update export/persist)
+  /// plus a fork and the package CHECKOUT, all under one short gate hold. The
+  /// heavy assembly then runs off-gate/off-loop via [`CheckpointJob::run`],
+  /// and [`Self::finish_checkpoint`] restores the package. Returns `None` when
+  /// no package exists yet (first save) — callers fall back to the in-place
+  /// path, which is rare and user-initiated.
+  ///
+  /// While the package is checked out, import-side revision syncs and segment
+  /// persistence skip + self-heal on the next pass (their existing behavior
+  /// for package-less runtimes).
+  pub fn begin_checkpoint(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<Option<(CheckpointJob, Vec<RuntimeEvent>)>> {
+    if self.package.is_none() {
+      return Ok(None);
+    }
+    let revision_id = Uuid::new_v4().as_u128();
+    let revision_frontiers = self.doc.state_frontiers();
+    let revision_frontier = revision_frontiers.encode();
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    flowstate_document::touch_document_metadata(&self.doc).map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    flowstate_document::record_revision(&self.doc, revision_id, revision_frontier, title, "Explicit save", self.author_user_id)
+      .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut revision_invalidation = ProjectionInvalidation::default();
+    self.merge_subscription_invalidation(&mut revision_invalidation);
+    let update = self
+      .local_update_bytes(&from_vv)
+      .map_err(|error| io::Error::other(error.to_string()))?;
+    let mut events = Vec::new();
+    if !update.is_empty() {
+      let event_update = update.clone();
+      self
+        .persist_update_segment(from_frontier, from_vv, update)
+        .map_err(|error| io::Error::other(error.to_string()))?;
+      events.push(RuntimeEvent::LocalUpdate {
+        bytes: event_update,
+        frontier: self.doc.state_frontiers().encode(),
+        version_vector: self.doc.state_vv().encode(),
+      });
+    }
+    if let Some(path) = path {
+      self.package_path = Some(path);
+      self.package_journal_prepared = false;
+    }
+    let package = self.package.take().expect("checked above");
+    let job = CheckpointJob {
+      fork: self.doc.fork(),
+      projection: self.projection.clone(),
+      package,
+      title: title.to_string(),
+      revision_id,
+      revision_frontiers,
+      author_user_id: self.author_user_id,
+      peer_id: self.doc.peer_id(),
+      write_path: self.package_path.clone(),
+    };
+    Ok(Some((job, events)))
+  }
+
+  /// Phase 3 of a split checkpoint: restore the (now compacted + saved)
+  /// package under the gate.
+  pub fn finish_checkpoint(&mut self, package: DocumentPackage, wrote_to_disk: bool) {
+    self.package = Some(package);
+    if wrote_to_disk {
+      self.package_journal_prepared = true;
+      self.last_persisted_frontier = self.doc.state_frontiers();
+      self.last_persisted_vv = self.doc.state_vv();
+    }
   }
 
   pub fn checkpoint_package(&mut self, title: &str, path: Option<PathBuf>) -> io::Result<Vec<RuntimeEvent>> {
@@ -2331,24 +2234,26 @@ impl CrdtRuntime {
     Ok(events)
   }
 
-  pub fn package_bytes(&mut self, title: &str) -> io::Result<Vec<u8>> {
-    if self.package.is_none() {
-      self.package = Some(DocumentPackage::from_loro_snapshot_with_assets(
-        &self.doc,
-        title,
-        assets_from_document(&self.projection),
-      )?);
-    }
-    let Some(package) = &mut self.package else {
-      return Err(io::Error::other("runtime package was not initialized"));
-    };
-    package.replace_assets_from_document(&self.projection)?;
-    package.rebuild_projection_cache_from_loro(&self.doc)?;
-    package.rebuild_search_units_from_loro(&self.doc)?;
-    package.to_bytes()
+  /// Field fix 2026-07-07 (I-9a completion): capture everything a package
+  /// assembly needs under a SHORT gate hold — a doc fork plus a shallow
+  /// projection clone. Assembly then runs off-gate and off the I/O loop; the
+  /// 18-second `package-bytes` gate holds in the field logs (typing frozen,
+  /// imports starved, peer pulls timing out) were the whole-assembly-under-
+  /// gate shape.
+  pub fn package_export_context(&self) -> (LoroDoc, DocumentProjection) {
+    (self.doc.fork(), self.projection.clone())
   }
 
-  fn events_after_local_change(
+  /// Legacy in-place variant retained for gate-held callers that already own
+  /// the core exclusively (tests, seeding). Production package exports go
+  /// through `package_export_context` + `assemble_package_bytes`.
+  pub fn package_bytes(&mut self, title: &str) -> io::Result<Vec<u8>> {
+    let (fork, projection) = self.package_export_context();
+    assemble_package_bytes(&fork, &projection, title)
+  }
+
+  #[hotpath::measure]
+  pub(crate) fn events_after_local_change(
     &mut self,
     from_frontier: Frontiers,
     from_vv: VersionVector,
@@ -2371,7 +2276,8 @@ impl CrdtRuntime {
     Ok(events)
   }
 
-  fn local_update_bytes(&self, from_vv: &VersionVector) -> Result<Vec<u8>> {
+  #[hotpath::measure]
+  pub(crate) fn local_update_bytes(&self, from_vv: &VersionVector) -> Result<Vec<u8>> {
     let mut subscribed = self
       .local_subscription_updates
       .lock()
@@ -2397,7 +2303,26 @@ impl CrdtRuntime {
   ///   without forcing a rebuild, so the incremental remote fast paths still apply.
   /// * Trigger — a checkout-triggered event forces a conservative full rebuild;
   ///   import/local triggers are left to the existing structural detection.
-  fn merge_subscription_invalidation(&self, invalidation: &mut ProjectionInvalidation) {
+  /// Non-destructive peek at the buffered (not yet drained) subscription
+  /// events: did any of them insert a paragraph boundary or object
+  /// placeholder? Poisoned lock answers `true` (conservative).
+  fn buffered_subscription_events_insert_structure(&self) -> bool {
+    self
+      .subscription_events
+      .lock()
+      .map(|events| {
+        events.iter().any(|summary| {
+          summary
+            .changes
+            .iter()
+            .any(|change| matches!(change, SubscriptionChange::Text { inserted_structure: true, .. }))
+        })
+      })
+      .unwrap_or(true)
+  }
+
+  #[hotpath::measure]
+  pub(crate) fn merge_subscription_invalidation(&self, invalidation: &mut ProjectionInvalidation) -> DrainedBodyDelta {
     let summaries = self
       .subscription_events
       .lock()
@@ -2405,6 +2330,11 @@ impl CrdtRuntime {
       .unwrap_or_default();
     let body_target = body_text(&self.doc).id().to_string();
     let current_epoch = self.runtime_epoch.load(AtomicOrdering::SeqCst);
+    // Loro-first spec §6.3: harvest per-summary body deltas (copied-out data,
+    // I-9b) so the import path can compose them into ONE exact pre→post
+    // delta instead of relying on the lossy union heuristics below.
+    let mut body_batches: Vec<Vec<import_delta::NetOp>> = Vec::new();
+    let mut checkout_seen = false;
     // §23 FRONTIER: decode the drain target once so each summary can be compared
     // causally. Empty/undecodable targets (e.g. revision bookkeeping drains) disable
     // the frontier filter and fall back to draining everything in-epoch.
@@ -2450,9 +2380,48 @@ impl CrdtRuntime {
       // expressed as an incremental projection patch, so force a conservative rebuild.
       // Ordinary local and import triggers preserve the incremental fast paths.
       if summary.triggered_by.eq_ignore_ascii_case("checkout") {
+        checkout_seen = true;
         invalidation.rebuild_required = true;
         invalidation.fallback_reason = Some("checkout_trigger_projection_rebuild");
         tracing::debug!(origin = %summary.origin, "Flowstate forcing projection rebuild for checkout-triggered Loro event");
+      }
+      let mut batch_ops: Vec<import_delta::NetOp> = Vec::new();
+      let mut implied_cursor = 0usize;
+      for change in &summary.changes {
+        if let SubscriptionChange::Text {
+          target,
+          kind,
+          unicode_start,
+          unicode_len,
+          deleted_len,
+          inserted_structure,
+        } = change
+          && *target == body_target
+        {
+          if *unicode_start > implied_cursor {
+            batch_ops.push(import_delta::NetOp::Retain(unicode_start - implied_cursor));
+            implied_cursor = *unicode_start;
+          }
+          match kind {
+            TextChangeKind::StyledRetain => {
+              batch_ops.push(import_delta::NetOp::Retain(*unicode_len));
+              implied_cursor += unicode_len;
+            },
+            TextChangeKind::Insert => {
+              batch_ops.push(import_delta::NetOp::Insert {
+                len: *unicode_len,
+                structure: *inserted_structure,
+              });
+              implied_cursor += unicode_len;
+            },
+            TextChangeKind::Delete => {
+              batch_ops.push(import_delta::NetOp::Delete(*deleted_len));
+            },
+          }
+        }
+      }
+      if !batch_ops.is_empty() {
+        body_batches.push(batch_ops);
       }
       for change in summary.changes {
         match change {
@@ -2462,6 +2431,7 @@ impl CrdtRuntime {
             unicode_len,
             deleted_len,
             inserted_structure,
+            ..
           } if target == body_target => {
             if inserted_structure
               || self
@@ -2513,6 +2483,11 @@ impl CrdtRuntime {
     {
       let newly_buffered = std::mem::replace(&mut *events, deferred);
       events.extend(newly_buffered);
+    }
+    DrainedBodyDelta {
+      net: import_delta::compose_batches(&body_batches),
+      has_remote_origin,
+      checkout_seen,
     }
   }
 
@@ -2632,7 +2607,8 @@ impl CrdtRuntime {
     self.persist_update_segment(from_frontier, from_vv, update)
   }
 
-  fn persist_update_segment(&mut self, from_frontier: Frontiers, from_vv: VersionVector, update: Vec<u8>) -> Result<()> {
+  #[hotpath::measure]
+  pub(crate) fn persist_update_segment(&mut self, from_frontier: Frontiers, from_vv: VersionVector, update: Vec<u8>) -> Result<()> {
     if let Some(package) = &mut self.package {
       match package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update) {
         Ok(_) => {
@@ -2674,20 +2650,6 @@ impl CrdtRuntime {
   }
 }
 
-/// Body-unicode start position of each paragraph, derived from the LIVE Loro body.
-/// The body is `sentinel\n` then `paragraph\n` per boundary; every `\n` at unicode
-/// position `i` starts the following paragraph at `i + 1` (the sentinel starts
-/// paragraph 0). This is the POST-import coordinate space that subscription diff
-/// ranges use, so mapping changed ranges against it (rather than the stale pre-import
-/// projection index) picks the right paragraphs after concurrent inserts shift them.
-fn paragraph_unicode_starts_from_body(body: &str) -> Vec<usize> {
-  body
-    .chars()
-    .enumerate()
-    .filter_map(|(unicode_pos, ch)| (ch == '\n').then_some(unicode_pos + 1))
-    .collect()
-}
-
 fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSummary {
   let mut changes = Vec::new();
   for container in &event.events {
@@ -2701,6 +2663,7 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
               if attributes.is_some() {
                 changes.push(SubscriptionChange::Text {
                   target: target.clone(),
+                  kind: TextChangeKind::StyledRetain,
                   unicode_start: cursor,
                   unicode_len: *retain,
                   deleted_len: 0,
@@ -2713,6 +2676,7 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
               let len = insert.chars().count();
               changes.push(SubscriptionChange::Text {
                 target: target.clone(),
+                kind: TextChangeKind::Insert,
                 unicode_start: cursor,
                 unicode_len: len,
                 deleted_len: 0,
@@ -2725,6 +2689,7 @@ fn summarize_subscription_event(event: &DiffEvent<'_>) -> SubscriptionEventSumma
             loro::TextDelta::Delete { delete } => {
               changes.push(SubscriptionChange::Text {
                 target: target.clone(),
+                kind: TextChangeKind::Delete,
                 unicode_start: cursor,
                 unicode_len: *delete,
                 deleted_len: *delete,
@@ -2802,83 +2767,6 @@ fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: 
   }
 }
 
-fn editor_semantic_command_is_noop(command: &EditorSemanticCommand) -> bool {
-  match command {
-    EditorSemanticCommand::InsertText { text, .. } => text.is_empty(),
-    EditorSemanticCommand::DeleteRange { range } => range.start == range.end,
-    EditorSemanticCommand::SetRunStyles { range, .. } => range.start == range.end,
-    _ => false,
-  }
-}
-
-/// True for the ops that change the BODY block coalescing structure — inserting,
-/// deleting, or moving an object block. These add/remove `OBJECT_REPLACEMENT` chars, which
-/// shifts whether the record-less phantom empty an object implies is coalesced (Fork B)
-/// and, at the front, whether the reserved sentinel-first-paragraph region holds a
-/// paragraph or an object. The incremental replay (`replay_semantic_command_on_projection`)
-/// reorders/removes projection blocks directly and cannot cheaply reproduce that
-/// re-segmentation, so its prediction diverges from the authoritative `document_from_loro`
-/// rebuild around objects/coalesced empties (harmlessly for cross-peer convergence — the
-/// shipped patch is always canonical and verified — but it trips the preflight identity
-/// assert and mis-echoes locally). For these rare ops we take the canonical rebuild as the
-/// prediction instead. Object PROPERTY ops (alt text, layout, caption, equation source)
-/// and `ReplaceBlock` (object→object, structure-preserving) do NOT qualify.
-fn projection_has_object(projection: &DocumentProjection) -> bool {
-  projection.blocks.iter().any(|block| !matches!(block, flowstate_document::Block::Paragraph(_)))
-}
-
-/// Compact block-kind signature for the structure-equality assert (paragraph vs each
-/// object kind), independent of durable/fabricated identity.
-fn projection_block_kinds(projection: &DocumentProjection) -> Vec<u8> {
-  projection
-    .blocks
-    .iter()
-    .map(|block| match block {
-      flowstate_document::Block::Paragraph(_) => 0,
-      flowstate_document::Block::Image(_) => 1,
-      flowstate_document::Block::Equation(_) => 2,
-      flowstate_document::Block::Table(_) => 3,
-    })
-    .collect()
-}
-
-fn projection_paragraph_texts(projection: &DocumentProjection) -> Vec<String> {
-  (0..projection.paragraphs.len())
-    .map(|ix| flowstate_document::paragraph_text(projection, ix))
-    .collect()
-}
-
-fn editor_command_changes_block_structure(command: &EditorSemanticCommand) -> bool {
-  matches!(
-    command,
-    EditorSemanticCommand::InsertBlock { .. } | EditorSemanticCommand::DeleteBlock { .. } | EditorSemanticCommand::MoveBlock { .. }
-  )
-}
-
-fn editor_semantic_command_requires_staging_validation(command: &EditorSemanticCommand) -> bool {
-  matches!(
-    command,
-    EditorSemanticCommand::ReplaceParagraphSpan { .. }
-      | EditorSemanticCommand::InsertBlock { .. }
-      | EditorSemanticCommand::DeleteBlock { .. }
-      | EditorSemanticCommand::MoveBlock { .. }
-      | EditorSemanticCommand::ReplaceBlock { .. }
-      | EditorSemanticCommand::InsertTableRow { .. }
-      | EditorSemanticCommand::DeleteTableRow { .. }
-      | EditorSemanticCommand::MoveTableRow { .. }
-      | EditorSemanticCommand::InsertTableColumn { .. }
-      | EditorSemanticCommand::DeleteTableColumn { .. }
-      | EditorSemanticCommand::MoveTableColumn { .. }
-      | EditorSemanticCommand::ReplaceTableCell { .. }
-      | EditorSemanticCommand::SetTableCellSpan { .. }
-      | EditorSemanticCommand::ReplaceEquationSourceRange { .. }
-      | EditorSemanticCommand::ReplaceImageAltText { .. }
-      | EditorSemanticCommand::ReplaceImageCaption { .. }
-      | EditorSemanticCommand::SetImageLayout { .. }
-      | EditorSemanticCommand::SetTableColumnWidth { .. }
-  )
-}
-
 /// §5 sentinel protection: the boundary-0 [`SENTINEL_NEWLINE`] anchors the first
 /// paragraph and must never be deleted. Given a requested body delete of `len`
 /// unicode chars starting at `start`, return the largest sub-range that leaves
@@ -2888,7 +2776,7 @@ fn editor_semantic_command_requires_staging_validation(command: &EditorSemanticC
 /// first paragraph's text starts at unicode index 1), so the clamp only fires on
 /// corruption or an explicit whole-document delete — which correctly keeps the
 /// lone sentinel and drops everything after it.
-fn sentinel_protected_delete_range(start: usize, len: usize) -> Option<(usize, usize)> {
+pub(crate) fn sentinel_protected_delete_range(start: usize, len: usize) -> Option<(usize, usize)> {
   if len == 0 {
     return None;
   }
@@ -2907,7 +2795,7 @@ fn sentinel_protected_delete_range(start: usize, len: usize) -> Option<(usize, u
 /// Convergent: deletion is keyed on the block's stable map key, so two peers that
 /// concurrently delete the same placeholder converge on the same removed record.
 /// Returns the number of blocks pruned.
-fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::LoroText) -> loro::LoroResult<usize> {
+pub(crate) fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::LoroText) -> loro::LoroResult<usize> {
   let body_snapshot = body.to_string();
   let root = doc.get_map(ROOT);
   let Some(blocks) = child_map(&root, BLOCKS_BY_ID) else {
@@ -2936,7 +2824,7 @@ fn prune_orphaned_body_object_blocks(doc: &LoroDoc, body: &loro::LoroText) -> lo
 }
 
 /// §fidelity: boolean mirror of the test helper `assert_semantic_projection_eq`
-/// (`crdt_runtime/editor_transaction_tests.rs`) — whether two projections are
+/// — whether two projections are
 /// semantically equal across identity, sections, frontier, per-paragraph
 /// style/runs/text, and object (non-paragraph) blocks. Paragraph `Block`s are
 /// covered by the per-paragraph comparison, so only object blocks are compared
@@ -3026,197 +2914,6 @@ fn fidelity_class_for_defect(defect: &ProjectionDefect) -> FidelityClass {
   }
 }
 
-pub fn apply_editor_semantic_command(doc: &LoroDoc, projection: &DocumentProjection, command: &EditorSemanticCommand) -> Result<bool> {
-  match command {
-    EditorSemanticCommand::InsertText { at, text, styles } => {
-      let unicode_index = projection_offset_to_loro_body_unicode_index(doc, projection, *at);
-      let body = body_text(doc);
-      let newline_boundaries = inserted_newline_boundaries(unicode_index, text);
-      body
-        .insert(unicode_index, text)
-        .context("inserting projection-scoped text command into Loro body flow")?;
-      let inserted_len = text.chars().count();
-      if inserted_len > 0 {
-        mark_run_styles(&body, unicode_index..unicode_index + inserted_len, *styles).context("marking inserted run styles")?;
-      }
-      repair_paragraph_metadata_after_text_flow_edit(doc, &body, &newline_boundaries, "editor_insert_text")?;
-      Ok(true)
-    },
-    EditorSemanticCommand::DeleteRange { range } => {
-      let start = projection_offset_to_loro_body_unicode_index(doc, projection, range.start);
-      let end = projection_offset_to_loro_body_unicode_index(doc, projection, range.end);
-      // §5 sentinel protection (preflight): clamp/reject a range that would delete
-      // the boundary-0 sentinel newline before mutating the body.
-      if let Some((start, len)) = sentinel_protected_delete_range(start, end.saturating_sub(start)) {
-        let body = body_text(doc);
-        body
-          .delete(start, len)
-          .context("deleting projection-scoped text range from Loro body flow")?;
-        prune_orphaned_body_object_blocks(doc, &body)?;
-        repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range")?;
-        return Ok(true);
-      }
-      Ok(false)
-    },
-    EditorSemanticCommand::SplitParagraph {
-      at,
-      source_paragraph,
-      source_block,
-      new_paragraph,
-      new_block,
-      inherited_style,
-    } => {
-      if projection.ids.paragraph_ids.get(at.paragraph).copied() != Some(*source_paragraph) {
-        return Ok(false);
-      }
-      let Some(source_block_ix) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph) else {
-        return Ok(false);
-      };
-      if projection.ids.block_ids.get(source_block_ix).copied() != Some(*source_block) {
-        return Ok(false);
-      }
-      let unicode_index = projection_offset_to_loro_body_unicode_index(doc, projection, *at);
-      let body = body_text(doc);
-      body
-        .insert(unicode_index, "\n")
-        .context("splitting paragraph in Loro body flow")?;
-      body
-        .mark(
-          unicode_index..unicode_index + 1,
-          MARK_PARAGRAPH_STYLE,
-          paragraph_style_value(*inherited_style),
-        )
-        .context("marking split paragraph style")?;
-      repair_paragraph_metadata_after_stable_split(doc, &body, unicode_index, *new_paragraph, *new_block, "editor_split_paragraph")?;
-      // §fidelity: make the client-supplied vs canonical id flow for a split
-      // visible. The new paragraph/block ids the editor chose are written straight
-      // into canonical state here, so any later id divergence is traceable.
-      fidelity::event(FidelityClass::Identity, "client-id", || {
-        format!(
-          "SplitParagraph@para{}.byte{}: source_paragraph={source_paragraph:?} source_block={source_block:?} client_new_paragraph={new_paragraph:?} client_new_block={new_block:?} written_at_body_unicode={unicode_index}",
-          at.paragraph, at.byte
-        )
-      });
-      Ok(true)
-    },
-    EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
-      if let Some(paragraph_ix) = projection
-        .ids
-        .paragraph_ids
-        .iter()
-        .position(|id| id == paragraph)
-      {
-        let boundary = paragraph_boundary_loro_unicode_index(doc, projection, paragraph_ix);
-        body_text(doc)
-          .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*style))
-          .context("marking paragraph style from editor semantic command")?;
-        return Ok(true);
-      }
-      Ok(false)
-    },
-    EditorSemanticCommand::SetRunStyles { paragraph, range, styles } => {
-      if let Some(paragraph_ix) = projection
-        .ids
-        .paragraph_ids
-        .iter()
-        .position(|id| id == paragraph)
-      {
-        let start = projection_offset_to_loro_body_unicode_index(
-          doc,
-          projection,
-          flowstate_document::DocumentOffset {
-            paragraph: paragraph_ix,
-            byte: range.start,
-          },
-        );
-        let end = projection_offset_to_loro_body_unicode_index(
-          doc,
-          projection,
-          flowstate_document::DocumentOffset {
-            paragraph: paragraph_ix,
-            byte: range.end,
-          },
-        );
-        if end > start {
-          mark_run_styles(&body_text(doc), start..end, *styles).context("marking run styles from editor semantic command")?;
-          return Ok(true);
-        }
-      }
-      Ok(false)
-    },
-    EditorSemanticCommand::JoinParagraphs { first, second } => {
-      join_projection_paragraphs(doc, projection, *first, *second).context("joining paragraphs from editor semantic command")
-    },
-    EditorSemanticCommand::ReplaceParagraphSpan { start, before, after } => {
-      replace_body_paragraph_span(doc, projection, *start, before, after).context("replacing paragraph span from editor semantic command")
-    },
-    EditorSemanticCommand::InsertBlock { block, block_ix, after } => insert_projection_object_block(doc, projection, *block, *block_ix, after)
-      .with_context(|| format!("inserting object block from editor semantic command at projection block {block_ix} ({block:?})")),
-    EditorSemanticCommand::DeleteBlock { block } => {
-      delete_projection_object_block(doc, *block).context("deleting object block from editor semantic command")
-    },
-    EditorSemanticCommand::MoveBlock { block, new_block_ix } => {
-      move_projection_object_block(doc, projection, *block, *new_block_ix).context("moving object block from editor semantic command")
-    },
-    EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => replace_projection_object_block(doc, projection, *block, *block_ix, after)
-      .with_context(|| format!("replacing object block from editor semantic command at projection block {block_ix} ({block:?})")),
-    EditorSemanticCommand::InsertTableRow {
-      table,
-      new_row_id,
-      after_row,
-      row,
-    } => table_ops::insert_table_row(doc, *table, *new_row_id, *after_row, row)
-      .with_context(|| format!("inserting table row {new_row_id:?} from editor semantic command at table {table:?}")),
-    EditorSemanticCommand::DeleteTableRow { table, row_id } => table_ops::delete_table_row(doc, *table, *row_id)
-      .with_context(|| format!("deleting table row {row_id:?} from editor semantic command at table {table:?}")),
-    EditorSemanticCommand::MoveTableRow { table, row_id, after_row } => table_ops::move_table_row(doc, *table, *row_id, *after_row)
-      .with_context(|| format!("moving table row {row_id:?} after {after_row:?} at table {table:?}")),
-    EditorSemanticCommand::InsertTableColumn {
-      table,
-      new_column_id,
-      after_column,
-      width,
-      cells,
-    } => table_ops::insert_table_column(doc, *table, *new_column_id, *after_column, width, cells)
-      .with_context(|| format!("inserting table column {new_column_id:?} from editor semantic command at table {table:?}")),
-    EditorSemanticCommand::DeleteTableColumn { table, column_id } => table_ops::delete_table_column(doc, *table, *column_id)
-      .with_context(|| format!("deleting table column {column_id:?} from editor semantic command at table {table:?}")),
-    EditorSemanticCommand::MoveTableColumn {
-      table,
-      column_id,
-      after_column,
-    } => table_ops::move_table_column(doc, *table, *column_id, *after_column)
-      .with_context(|| format!("moving table column {column_id:?} after {after_column:?} at table {table:?}")),
-    EditorSemanticCommand::ReplaceTableCell {
-      table,
-      row_id,
-      column_id,
-      cell,
-    } => table_ops::replace_table_cell(doc, *table, *row_id, *column_id, cell)
-      .with_context(|| format!("replacing table cell ({row_id:?},{column_id:?}) from editor semantic command at table {table:?}")),
-    EditorSemanticCommand::SetTableCellSpan {
-      table,
-      row_id,
-      column_id,
-      row_span,
-      column_span,
-    } => table_ops::set_table_cell_span(doc, *table, *row_id, *column_id, *row_span, *column_span)
-      .with_context(|| format!("setting table cell span at table {table:?}, cell ({row_id:?},{column_id:?})")),
-    EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
-      replace_projection_equation_source_range(doc, *equation, range, text)
-        .with_context(|| format!("replacing equation source range from editor semantic command at equation {equation:?}, range {range:?}"))
-    },
-    EditorSemanticCommand::ReplaceImageAltText { image, text } => replace_projection_image_alt_text(doc, *image, text)
-      .with_context(|| format!("replacing image alt text from editor semantic command at image {image:?}")),
-    EditorSemanticCommand::ReplaceImageCaption { image, caption } => replace_projection_image_caption(doc, *image, caption.as_ref())
-      .with_context(|| format!("replacing image caption from editor semantic command at image {image:?}")),
-    EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => set_projection_image_layout(doc, *image, sizing, *alignment)
-      .with_context(|| format!("setting image layout from editor semantic command at image {image:?}")),
-    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => table_ops::set_table_column_width(doc, *table, *column_ix, width)
-      .with_context(|| format!("setting table column width from editor semantic command at table {table:?}, column {column_ix}")),
-  }
-}
-
 #[derive(Clone, Debug)]
 struct SubscriptionEventSummary {
   origin: String,
@@ -3232,10 +2929,19 @@ struct SubscriptionEventSummary {
   changes: Vec<SubscriptionChange>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextChangeKind {
+  /// Style-only retain (mark/unmark over existing text).
+  StyledRetain,
+  Insert,
+  Delete,
+}
+
 #[derive(Clone, Debug)]
 enum SubscriptionChange {
   Text {
     target: String,
+    kind: TextChangeKind,
     unicode_start: usize,
     unicode_len: usize,
     deleted_len: usize,
@@ -3253,392 +2959,14 @@ enum SubscriptionChange {
   },
 }
 
-fn apply_editor_semantic_command_body_fast_path(
-  doc: &LoroDoc,
-  projection: &DocumentProjection,
-  projection_index: &ProjectionRuntimeIndex,
-  command: &EditorSemanticCommand,
-) -> Result<bool> {
-  match command {
-    EditorSemanticCommand::InsertText { at, text, styles } => {
-      let body = body_text(doc);
-      let Some(unicode_index) = projection_index.body_unicode_for_offset_in_loro(doc, projection, *at) else {
-        return Ok(false);
-      };
-      let newline_boundaries = inserted_newline_boundaries(unicode_index, text);
-      body
-        .insert(unicode_index, text)
-        .context("inserting text into Loro body flow without projection snapshot")?;
-      let inserted_len = text.chars().count();
-      if inserted_len > 0 {
-        mark_run_styles(&body, unicode_index..unicode_index + inserted_len, *styles).context("marking inserted run styles")?;
-      }
-      repair_paragraph_metadata_after_text_flow_edit(doc, &body, &newline_boundaries, "editor_insert_text_fast_path")?;
-      Ok(true)
-    },
-    EditorSemanticCommand::DeleteRange { range } => {
-      let body = body_text(doc);
-      let Some(start) = projection_index.body_unicode_for_offset_in_loro(doc, projection, range.start) else {
-        return Ok(false);
-      };
-      let Some(end) = projection_index.body_unicode_for_offset_in_loro(doc, projection, range.end) else {
-        return Ok(false);
-      };
-      // §5 sentinel protection (preflight): clamp/reject a range that would delete
-      // the boundary-0 sentinel newline before mutating the body.
-      if let Some((start, len)) = sentinel_protected_delete_range(start, end.saturating_sub(start)) {
-        body
-          .delete(start, len)
-          .context("deleting text from Loro body flow without projection snapshot")?;
-        prune_orphaned_body_object_blocks(doc, &body)?;
-        repair_paragraph_metadata_after_text_flow_edit(doc, &body, &[], "editor_delete_range_fast_path")?;
-        return Ok(true);
-      }
-      Ok(false)
-    },
-    EditorSemanticCommand::SplitParagraph {
-      at,
-      source_paragraph,
-      source_block,
-      new_paragraph,
-      new_block,
-      inherited_style,
-    } => {
-      if projection.ids.paragraph_ids.get(at.paragraph).copied() != Some(*source_paragraph) {
-        return Ok(false);
-      }
-      let Some(source_block_ix) = flowstate_document::block_ix_for_paragraph(projection, at.paragraph) else {
-        return Ok(false);
-      };
-      if projection.ids.block_ids.get(source_block_ix).copied() != Some(*source_block) {
-        return Ok(false);
-      }
-      let body = body_text(doc);
-      let Some(unicode_index) = projection_index.body_unicode_for_offset_in_loro(doc, projection, *at) else {
-        return Ok(false);
-      };
-      body
-        .insert(unicode_index, "\n")
-        .context("splitting paragraph in Loro body flow without projection snapshot")?;
-      body
-        .mark(
-          unicode_index..unicode_index + 1,
-          MARK_PARAGRAPH_STYLE,
-          paragraph_style_value(*inherited_style),
-        )
-        .context("marking split paragraph style")?;
-      repair_paragraph_metadata_after_stable_split(doc, &body, unicode_index, *new_paragraph, *new_block, "editor_split_paragraph_fast_path")?;
-      Ok(true)
-    },
-    EditorSemanticCommand::SetParagraphStyle { .. }
-    | EditorSemanticCommand::SetRunStyles { .. }
-    | EditorSemanticCommand::JoinParagraphs { .. }
-    | EditorSemanticCommand::ReplaceParagraphSpan { .. }
-    | EditorSemanticCommand::InsertBlock { .. }
-    | EditorSemanticCommand::DeleteBlock { .. }
-    | EditorSemanticCommand::MoveBlock { .. }
-    | EditorSemanticCommand::ReplaceBlock { .. }
-    | EditorSemanticCommand::InsertTableRow { .. }
-    | EditorSemanticCommand::DeleteTableRow { .. }
-    | EditorSemanticCommand::MoveTableRow { .. }
-    | EditorSemanticCommand::InsertTableColumn { .. }
-    | EditorSemanticCommand::DeleteTableColumn { .. }
-    | EditorSemanticCommand::MoveTableColumn { .. }
-    | EditorSemanticCommand::ReplaceTableCell { .. }
-    | EditorSemanticCommand::SetTableCellSpan { .. }
-    | EditorSemanticCommand::ReplaceEquationSourceRange { .. }
-    | EditorSemanticCommand::ReplaceImageAltText { .. }
-    | EditorSemanticCommand::ReplaceImageCaption { .. }
-    | EditorSemanticCommand::SetImageLayout { .. }
-    | EditorSemanticCommand::SetTableColumnWidth { .. } => Ok(false),
-  }
-}
-
-fn incremental_projection_patches_for_command(
-  projection: &DocumentProjection,
-  index: &ProjectionRuntimeIndex,
-  doc: &LoroDoc,
-  command: &EditorSemanticCommand,
-) -> Option<Vec<flowstate_document::ProjectionPatch>> {
-  match command {
-    EditorSemanticCommand::InsertText { at, text, .. } if !text.contains('\n') && !text.contains(OBJECT_REPLACEMENT) => {
-      let row = flowstate_document::block_ix_for_paragraph(projection, at.paragraph)?;
-      let old_len = flowstate_document::paragraph_text_len(projection.paragraphs.get(at.paragraph)?);
-      let new = body_input_paragraph(doc, at.paragraph)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: projection.ids.paragraph_ids[at.paragraph],
-        row_hint: row,
-        new,
-        delta_utf8: projection_text_delta(at.byte.min(old_len), 0, text.len(), old_len.saturating_sub(at.byte.min(old_len))),
-      }])
-    },
-    EditorSemanticCommand::DeleteRange { range } if range.start.paragraph == range.end.paragraph => {
-      let paragraph_ix = range.start.paragraph;
-      let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      let old_len = flowstate_document::paragraph_text_len(projection.paragraphs.get(paragraph_ix)?);
-      let start = range.start.byte.min(old_len);
-      let end = range.end.byte.min(old_len).max(start);
-      let new = body_input_paragraph(doc, paragraph_ix)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphText {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
-        row_hint: row,
-        new,
-        delta_utf8: projection_text_delta(start, end - start, 0, old_len.saturating_sub(end)),
-      }])
-    },
-    EditorSemanticCommand::SetParagraphStyle { paragraph, style } => {
-      // §24: O(1) paragraph metadata index lookup replaces the linear
-      // `paragraph_ids` scan (with an identical linear fallback).
-      let paragraph_ix = index.paragraph_index_for_id(projection, *paragraph)?;
-      let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphStyle {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: *paragraph,
-        row_hint: row,
-        style: *style,
-      }])
-    },
-    EditorSemanticCommand::SetRunStyles { paragraph, .. } => {
-      // §24: O(1) paragraph metadata index lookup replaces the linear
-      // `paragraph_ids` scan (with an identical linear fallback).
-      let paragraph_ix = index.paragraph_index_for_id(projection, *paragraph)?;
-      let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
-      let new = body_input_paragraph(doc, paragraph_ix)?;
-      Some(vec![flowstate_document::ProjectionPatch::ParagraphRuns {
-        block_id: projection.ids.block_ids[row],
-        paragraph_id: *paragraph,
-        row_hint: row,
-        runs: flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new)])
-          .paragraphs
-          .first()?
-          .runs
-          .clone(),
-      }])
-    },
-    _ => structured_projection_patches_for_command(projection, index, command),
-  }
-}
-
-fn structured_projection_patches_for_command(
-  projection: &DocumentProjection,
-  index: &ProjectionRuntimeIndex,
-  command: &EditorSemanticCommand,
-) -> Option<Vec<ProjectionPatch>> {
-  match command {
-    EditorSemanticCommand::InsertBlock { block, block_ix, after } => Some(vec![ProjectionPatch::InsertBlocks {
-      before: projection.ids.block_ids.get(*block_ix).copied(),
-      row_hint: (*block_ix).min(projection.blocks.len()),
-      blocks: vec![ProjectionStructuralBlock {
-        block_id: *block,
-        paragraph_id: None,
-        block: after.clone(),
-      }],
-    }]),
-    // §24: O(1) block anchor index lookups replace the linear `block_ids` scans
-    // (each with an identical linear fallback for ids absent from the index).
-    EditorSemanticCommand::DeleteBlock { block } => Some(vec![ProjectionPatch::DeleteBlocks {
-      block_ids: vec![*block],
-      row_hint: index.block_index_for_id(projection, *block)?,
-    }]),
-    EditorSemanticCommand::MoveBlock { block, new_block_ix } => Some(vec![ProjectionPatch::MoveBlock {
-      block_id: *block,
-      before: projection.ids.block_ids.get(*new_block_ix).copied(),
-      from_hint: index.block_index_for_id(projection, *block)?,
-      to_hint: (*new_block_ix).min(projection.blocks.len().saturating_sub(1)),
-    }]),
-    EditorSemanticCommand::ReplaceBlock { block, block_ix, after } => object_replacement_patch(
-      projection,
-      block
-        .and_then(|id| index.block_index_for_id(projection, id))
-        .unwrap_or(*block_ix),
-      after.clone(),
-    ),
-    EditorSemanticCommand::InsertTableRow {
-      table,
-      new_row_id,
-      after_row,
-      row,
-    } => {
-      // §P2b: mutate the id-bearing InputTableBlock by the SAME id + anchor the
-      // canonical apply uses, so the optimistic prediction is byte-identical.
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if !table_input.rows.iter().any(|existing| existing.id == *new_row_id) {
-        let pos = input_table_row_insert_pos(&table_input, *after_row);
-        table_input.rows.insert(pos, row.clone());
-      }
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::DeleteTableRow { table, row_id } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let pos = table_input.rows.iter().position(|row| row.id == *row_id)?;
-      table_input.rows.remove(pos);
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::MoveTableRow { table, row_id, after_row } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let from = table_input.rows.iter().position(|row| row.id == *row_id)?;
-      let row = table_input.rows.remove(from);
-      let pos = input_table_row_insert_pos(&table_input, *after_row);
-      table_input.rows.insert(pos.min(table_input.rows.len()), row);
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::InsertTableColumn {
-      table,
-      new_column_id,
-      after_column,
-      width,
-      cells,
-    } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      if !table_input.columns.iter().any(|existing| existing.id == *new_column_id) {
-        let pos = input_table_column_insert_pos(&table_input, *after_column);
-        table_input.columns.insert(pos, InputTableColumn {
-          id: *new_column_id,
-          width: width.clone(),
-        });
-        for (row_ix, row) in table_input.rows.iter_mut().enumerate() {
-          let row_id = row.id;
-          let cell = cells
-            .get(row_ix)
-            .cloned()
-            .unwrap_or_else(|| empty_input_table_cell(row_id, *new_column_id));
-          let cell_pos = pos.min(row.cells.len());
-          row.cells.insert(cell_pos, cell);
-        }
-      }
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::DeleteTableColumn { table, column_id } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let pos = table_input.columns.iter().position(|column| column.id == *column_id)?;
-      table_input.columns.remove(pos);
-      for row in &mut table_input.rows {
-        if let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
-          row.cells.remove(cell_ix);
-        } else if pos < row.cells.len() {
-          row.cells.remove(pos);
-        }
-      }
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::MoveTableColumn {
-      table,
-      column_id,
-      after_column,
-    } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let from = table_input.columns.iter().position(|column| column.id == *column_id)?;
-      let column = table_input.columns.remove(from);
-      let pos = input_table_column_insert_pos(&table_input, *after_column);
-      table_input.columns.insert(pos.min(table_input.columns.len()), column);
-      for row in &mut table_input.rows {
-        if let Some(cell_from) = row.cells.iter().position(|cell| cell.column_id == *column_id) {
-          let cell = row.cells.remove(cell_from);
-          let cell_to = pos.min(row.cells.len());
-          row.cells.insert(cell_to, cell);
-        }
-      }
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::ReplaceTableCell {
-      table,
-      row_id,
-      column_id,
-      cell,
-    } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let row = table_input.rows.iter_mut().find(|row| row.id == *row_id)?;
-      let target = row.cells.iter_mut().find(|existing| existing.column_id == *column_id)?;
-      *target = cell.clone();
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::SetTableCellSpan {
-      table,
-      row_id,
-      column_id,
-      row_span,
-      column_span,
-    } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      let row = table_input.rows.iter_mut().find(|row| row.id == *row_id)?;
-      let cell = row.cells.iter_mut().find(|cell| cell.column_id == *column_id)?;
-      cell.row_span = (*row_span).max(1);
-      cell.col_span = (*column_span).max(1);
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::SetTableColumnWidth { table, column_ix, width } => {
-      let (block_ix, mut table_input) = projected_table_input(projection, index, *table)?;
-      table_input.columns.get_mut(*column_ix)?.width = width.clone();
-      object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
-    },
-    EditorSemanticCommand::ReplaceEquationSourceRange { equation, range, text } => {
-      // §24: O(1) block anchor index lookup (linear fallback preserved).
-      let block_ix = index.block_index_for_id(projection, *equation)?;
-      let InputBlock::Equation(mut equation_input) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
-        return None;
-      };
-      if range.start > range.end
-        || range.end > equation_input.source.len()
-        || !equation_input.source.is_char_boundary(range.start)
-        || !equation_input.source.is_char_boundary(range.end)
-      {
-        return None;
-      }
-      equation_input.source.replace_range(range.clone(), text);
-      object_replacement_patch(projection, block_ix, InputBlock::Equation(equation_input))
-    },
-    EditorSemanticCommand::ReplaceImageAltText { image, text } => {
-      // §24: O(1) block anchor index lookup (linear fallback preserved).
-      let block_ix = index.block_index_for_id(projection, *image)?;
-      let InputBlock::Image(mut image_input) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
-        return None;
-      };
-      image_input.alt_text = text.clone();
-      object_replacement_patch(projection, block_ix, InputBlock::Image(image_input))
-    },
-    EditorSemanticCommand::ReplaceImageCaption { image, caption } => {
-      // §24: O(1) block anchor index lookup (linear fallback preserved).
-      let block_ix = index.block_index_for_id(projection, *image)?;
-      let InputBlock::Image(mut image_input) = projection
-        .blocks
-        .get(block_ix)
-        .map(flowstate_document::input_block_from_block)?
-      else {
-        return None;
-      };
-      image_input.caption = caption.clone();
-      object_replacement_patch(projection, block_ix, InputBlock::Image(image_input))
-    },
-    EditorSemanticCommand::SetImageLayout { image, sizing, alignment } => {
-      // §24: O(1) block anchor index lookup (linear fallback preserved).
-      let block_ix = index.block_index_for_id(projection, *image)?;
-      let InputBlock::Image(mut image_input) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
-        return None;
-      };
-      image_input.sizing = sizing.clone();
-      image_input.alignment = *alignment;
-      object_replacement_patch(projection, block_ix, InputBlock::Image(image_input))
-    },
-    EditorSemanticCommand::InsertText { .. }
-    | EditorSemanticCommand::DeleteRange { .. }
-    | EditorSemanticCommand::SplitParagraph { .. }
-    | EditorSemanticCommand::JoinParagraphs { .. }
-    | EditorSemanticCommand::SetParagraphStyle { .. }
-    | EditorSemanticCommand::SetRunStyles { .. }
-    | EditorSemanticCommand::ReplaceParagraphSpan { .. } => None,
-  }
-}
-
-fn projected_table_input(
+pub(crate) fn projected_table_input(
   projection: &DocumentProjection,
   index: &ProjectionRuntimeIndex,
   table: flowstate_document::BlockId,
 ) -> Option<(usize, InputTableBlock)> {
   // §24: O(1) block anchor index lookup replaces the linear `block_ids` scan that
   // every table structural command funnels through (identical linear fallback).
-  let block_ix = index.block_index_for_id(projection, table)?;
+  let block_ix = index.block_index(table)?;
   let InputBlock::Table(table) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
     return None;
   };
@@ -3648,7 +2976,7 @@ fn projected_table_input(
 /// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] row list:
 /// `None` => head; a present `after_row` => immediately after it; an absent anchor
 /// (concurrently deleted) => tail. Matches the canonical apply's row resolution.
-fn input_table_row_insert_pos(table: &InputTableBlock, after_row: Option<RowId>) -> usize {
+pub(crate) fn input_table_row_insert_pos(table: &InputTableBlock, after_row: Option<RowId>) -> usize {
   match after_row {
     None => 0,
     Some(anchor) => table
@@ -3661,7 +2989,7 @@ fn input_table_row_insert_pos(table: &InputTableBlock, after_row: Option<RowId>)
 
 /// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] column list.
 /// See [`input_table_row_insert_pos`].
-fn input_table_column_insert_pos(table: &InputTableBlock, after_column: Option<ColumnId>) -> usize {
+pub(crate) fn input_table_column_insert_pos(table: &InputTableBlock, after_column: Option<ColumnId>) -> usize {
   match after_column {
     None => 0,
     Some(anchor) => table
@@ -3672,7 +3000,7 @@ fn input_table_column_insert_pos(table: &InputTableBlock, after_column: Option<C
   }
 }
 
-fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
+pub(crate) fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
   Some(vec![ProjectionPatch::ReplaceObjectBlock {
     block_id: *projection.ids.block_ids.get(block_ix)?,
     row_hint: block_ix,
@@ -3684,7 +3012,7 @@ fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, bl
   }])
 }
 
-fn projection_text_delta(
+pub(crate) fn projection_text_delta(
   prefix_retain: usize,
   delete_len: usize,
   insert_len: usize,
@@ -3706,59 +3034,7 @@ fn projection_text_delta(
   delta
 }
 
-fn editor_command_invalidation(
-  projection: &DocumentProjection,
-  command: &EditorSemanticCommand,
-  frontier_before: Vec<u8>,
-  frontier_after: Vec<u8>,
-) -> ProjectionInvalidation {
-  match command {
-    EditorSemanticCommand::InsertText { at, text, .. } => ProjectionInvalidation::body_text(
-      frontier_before,
-      frontier_after,
-      projection_offset_to_body_unicode_index(projection, *at),
-      text.chars().count(),
-    ),
-    EditorSemanticCommand::DeleteRange { range } => {
-      let start = projection_offset_to_body_unicode_index(projection, range.start);
-      let end = projection_offset_to_body_unicode_index(projection, range.end);
-      ProjectionInvalidation::body_text(frontier_before, frontier_after, start, end.saturating_sub(start))
-    },
-    EditorSemanticCommand::SetParagraphStyle { paragraph, .. } => {
-      let paragraph_ix = projection
-        .ids
-        .paragraph_ids
-        .iter()
-        .position(|id| id == paragraph)
-        .unwrap_or_default();
-      ProjectionInvalidation::body_style(
-        frontier_before,
-        frontier_after,
-        paragraph_boundary_unicode_index(projection, paragraph_ix),
-        1,
-      )
-    },
-    EditorSemanticCommand::SetRunStyles { paragraph, range, .. } => {
-      let paragraph_ix = projection
-        .ids
-        .paragraph_ids
-        .iter()
-        .position(|id| id == paragraph)
-        .unwrap_or_default();
-      let start = projection_offset_to_body_unicode_index(
-        projection,
-        DocumentOffset {
-          paragraph: paragraph_ix,
-          byte: range.start,
-        },
-      );
-      ProjectionInvalidation::body_style(frontier_before, frontier_after, start, range.end.saturating_sub(range.start))
-    },
-    _ => ProjectionInvalidation::full_rebuild(frontier_before, frontier_after, "editor_structural_projection_fallback"),
-  }
-}
-
-fn insert_projection_object_block(
+pub(crate) fn insert_projection_object_block(
   doc: &LoroDoc,
   projection: &DocumentProjection,
   block_id: flowstate_document::BlockId,
@@ -3784,7 +3060,7 @@ fn insert_projection_object_block(
   Ok(true)
 }
 
-fn insert_input_object_block(doc: &LoroDoc, unicode_index: usize, block_id: flowstate_document::BlockId, input: &InputBlock) -> Result<()> {
+pub(crate) fn insert_input_object_block(doc: &LoroDoc, unicode_index: usize, block_id: flowstate_document::BlockId, input: &InputBlock) -> Result<()> {
   match input {
     InputBlock::Image(image) => insert_image_block_with_id(doc, unicode_index, block_id, image),
     InputBlock::Equation(equation) => insert_equation_block_with_id(doc, unicode_index, block_id, equation),
@@ -3793,7 +3069,7 @@ fn insert_input_object_block(doc: &LoroDoc, unicode_index: usize, block_id: flow
   }
 }
 
-fn replace_projection_object_block(
+pub(crate) fn replace_projection_object_block(
   doc: &LoroDoc,
   projection: &DocumentProjection,
   block_id: Option<flowstate_document::BlockId>,
@@ -3846,7 +3122,7 @@ fn replace_projection_object_block(
   Ok(true)
 }
 
-fn replace_projection_equation_source_range(
+pub(crate) fn replace_projection_equation_source_range(
   doc: &LoroDoc,
   equation_block_id: flowstate_document::BlockId,
   range: &std::ops::Range<usize>,
@@ -3904,7 +3180,7 @@ fn replace_projection_equation_source_range(
   Ok(true)
 }
 
-fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: flowstate_document::BlockId, text: &str) -> Result<bool> {
+pub(crate) fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: flowstate_document::BlockId, text: &str) -> Result<bool> {
   let body = body_text(doc);
   let Some((_, block, _)) = object_loro_block_by_projected_id(doc, &body, image_block_id) else {
     tracing::warn!(
@@ -3928,7 +3204,7 @@ fn replace_projection_image_alt_text(doc: &LoroDoc, image_block_id: flowstate_do
   Ok(true)
 }
 
-fn replace_projection_image_caption(
+pub(crate) fn replace_projection_image_caption(
   doc: &LoroDoc,
   image_block_id: flowstate_document::BlockId,
   caption: Option<&InputParagraph>,
@@ -3983,7 +3259,7 @@ fn replace_projection_image_caption(
   Ok(true)
 }
 
-fn set_projection_image_layout(
+pub(crate) fn set_projection_image_layout(
   doc: &LoroDoc,
   image_block_id: flowstate_document::BlockId,
   sizing: &InputImageSizing,
@@ -4016,7 +3292,7 @@ fn byte_index_to_unicode_index(value: &str, byte: usize) -> Option<usize> {
 /// grid-gap cell addresses the identical Loro container (LWW merge, never a
 /// duplicate). Used as the fallback when a structural command's carried cell
 /// list is shorter than the grid.
-fn empty_input_table_cell(row_id: RowId, column_id: ColumnId) -> InputTableCell {
+pub(crate) fn empty_input_table_cell(row_id: RowId, column_id: ColumnId) -> InputTableCell {
   InputTableCell {
     id: CellId::from_coordinate(row_id, column_id),
     row_id,
@@ -4039,7 +3315,7 @@ fn projection_table_map_by_block_id(doc: &LoroDoc, table_block_id: flowstate_doc
   child_map(&block, "table")
 }
 
-fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId) -> Result<bool> {
+pub(crate) fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::BlockId) -> Result<bool> {
   let body = body_text(doc);
   let Some((key, _, anchor_pos)) = object_loro_block_by_projected_id(doc, &body, block_id) else {
     tracing::warn!(
@@ -4067,7 +3343,7 @@ fn delete_projection_object_block(doc: &LoroDoc, block_id: flowstate_document::B
   Ok(true)
 }
 
-fn move_projection_object_block(
+pub(crate) fn move_projection_object_block(
   doc: &LoroDoc,
   projection: &DocumentProjection,
   block_id: flowstate_document::BlockId,
@@ -4198,23 +3474,39 @@ fn object_unicode_pos_for_projection_block(body: &LoroText, target_block_ix: usi
 /// paragraph out of view (an object-adjacent empty paragraph). Returns `None` when
 /// the durable record or its cursor cannot be resolved, so callers fall back to the
 /// projection-space start.
-fn paragraph_body_start_in_loro(doc: &LoroDoc, paragraph_id: ParagraphId) -> Option<usize> {
+#[hotpath::measure]
+pub(crate) fn paragraph_body_start_in_loro(doc: &LoroDoc, paragraph_id: ParagraphId) -> Option<usize> {
   let root = doc.get_map(ROOT);
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID).ok()?;
+  // Fast path: canonical record keys are directly constructible from the id
+  // (`paragraph.{u128}`, plus the seeded first-paragraph key), so the common
+  // case is an O(1) map probe instead of an O(records) key scan.
+  let canonical_key = format!("paragraph.{}", paragraph_id.0);
+  for key in [canonical_key.as_str(), ROOT_FIRST_PARAGRAPH_ID] {
+    if loro_id_u128(key) == paragraph_id.0
+      && let Some(paragraph) = child_map(&paragraphs, key)
+    {
+      return paragraph_record_body_start(doc, &paragraph);
+    }
+  }
   for key in map_keys(&paragraphs) {
     if loro_id_u128(&key) != paragraph_id.0 {
       continue;
     }
     let paragraph = child_map(&paragraphs, &key)?;
-    for field in ["boundary_cursor", "start_cursor"] {
-      if let Some(bytes) = map_binary_opt(&paragraph, field)
-        && let Ok(cursor) = Cursor::decode(&bytes)
-        && let Ok(resolved) = doc.get_cursor_pos(&cursor)
-      {
-        return Some(resolved.current.pos.saturating_add(1));
-      }
+    return paragraph_record_body_start(doc, &paragraph);
+  }
+  None
+}
+
+fn paragraph_record_body_start(doc: &LoroDoc, paragraph: &LoroMap) -> Option<usize> {
+  for field in ["boundary_cursor", "start_cursor"] {
+    if let Some(bytes) = map_binary_opt(paragraph, field)
+      && let Ok(cursor) = Cursor::decode(&bytes)
+      && let Ok(resolved) = doc.get_cursor_pos(&cursor)
+    {
+      return Some(resolved.current.pos.saturating_add(1));
     }
-    return None;
   }
   None
 }
@@ -4225,7 +3517,7 @@ fn paragraph_body_start_in_loro(doc: &LoroDoc, paragraph_id: ParagraphId) -> Opt
 /// use at Loro body-mutation sites (join delete, style mark). The paragraph's text
 /// begins one unicode past its boundary. Falls back to the projection-space boundary
 /// when the durable record can't be resolved (e.g. the boundary-0 sentinel).
-fn paragraph_boundary_loro_unicode_index(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ix: usize) -> usize {
+pub(crate) fn paragraph_boundary_loro_unicode_index(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ix: usize) -> usize {
   if paragraph_ix == 0 {
     return 0;
   }
@@ -4441,7 +3733,11 @@ fn write_table_map_from_input(doc: &LoroDoc, table_map: &LoroMap, table: &InputT
     let attrs = row_map.ensure_mergeable_map("attrs")?;
     row_map.insert("attrs_container_id", attrs.id().to_string())?;
     for cell in &row.cells {
-      let cell_id = cell_loro_id(cell.id);
+      // §P2b law hardening: a cell's canonical identity IS its coordinate mix.
+      // Derive it here rather than trusting the payload's `cell.id` — a
+      // payload-minted random id would double-key the coordinate (writer by
+      // coordinate, reader by record) and split the cell across replicas.
+      let cell_id = cell_loro_id(CellId::from_coordinate(cell.row_id, cell.column_id));
       let cell_row_id = row_loro_id(cell.row_id);
       let cell_column_id = column_loro_id(cell.column_id);
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
@@ -4689,17 +3985,6 @@ fn projection_offset_to_body_unicode_index(projection: &DocumentProjection, offs
     .unwrap_or(1)
 }
 
-/// Loro-space counterpart of [`projection_offset_to_body_unicode_index`], for callers
-/// that feed the result into a live Loro body mutation (`insert`/`delete`/`mark`).
-/// Resolves via each paragraph's durable boundary cursor so coalesced object-adjacent
-/// empty paragraphs (dropped from the projection but still present in the body) don't
-/// shift the position; see [`ProjectionRuntimeIndex::body_unicode_for_offset_in_loro`].
-fn projection_offset_to_loro_body_unicode_index(doc: &LoroDoc, projection: &DocumentProjection, offset: flowstate_document::DocumentOffset) -> usize {
-  ProjectionRuntimeIndex::from_projection(projection)
-    .body_unicode_for_offset_in_loro(doc, projection, offset)
-    .unwrap_or(1)
-}
-
 fn clamp_projection_offset(projection: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   let paragraph = offset
     .paragraph
@@ -4726,7 +4011,7 @@ fn paragraph_boundary_unicode_index(projection: &DocumentProjection, paragraph_i
   ) - 1
 }
 
-fn join_projection_paragraphs(
+pub(crate) fn join_projection_paragraphs(
   doc: &LoroDoc,
   projection: &DocumentProjection,
   first: flowstate_document::ParagraphId,
@@ -4788,7 +4073,7 @@ fn join_projection_paragraphs(
 
   let boundary = paragraph_boundary_loro_unicode_index(doc, projection, second_ix);
   let body = body_text(doc);
-  if !boundary_is_live(&body.to_string(), boundary) {
+  if body.char_at(boundary) != Ok('\n') {
     tracing::warn!(
       ?first,
       ?second,
@@ -4844,308 +4129,7 @@ fn projection_paragraph_blocks_are_adjacent(projection: &DocumentProjection, fir
   second_block_ix == first_block_ix + 1
 }
 
-fn replace_body_paragraph_span(
-  doc: &LoroDoc,
-  projection: &DocumentProjection,
-  start: Option<flowstate_document::DocumentOffset>,
-  before: &flowstate_document::DocumentSpan,
-  after: &flowstate_document::DocumentSpan,
-) -> Result<bool> {
-  if before.paragraphs.is_empty() && after.paragraphs.is_empty() {
-    return Ok(false);
-  }
-  let start = projection_offset_to_body_unicode_index(
-    projection,
-    start.unwrap_or(flowstate_document::DocumentOffset {
-      paragraph: before.start_paragraph,
-      byte: 0,
-    }),
-  );
-  let paragraph_texts = span_paragraph_texts(after);
-  let replacement = paragraph_texts.join("\n");
-  let before_chars = before.text.chars().collect::<Vec<_>>();
-  let replacement_chars = replacement.chars().collect::<Vec<_>>();
-  let common_prefix = before_chars
-    .iter()
-    .zip(&replacement_chars)
-    .take_while(|(before, after)| before == after)
-    .count();
-  let max_suffix = before_chars
-    .len()
-    .min(replacement_chars.len())
-    .saturating_sub(common_prefix);
-  let common_suffix = before_chars
-    .iter()
-    .rev()
-    .zip(replacement_chars.iter().rev())
-    .take(max_suffix)
-    .take_while(|(before, after)| before == after)
-    .count();
-  let before_changed_len = before_chars
-    .len()
-    .saturating_sub(common_prefix + common_suffix);
-  let replacement_changed_end = replacement_chars.len().saturating_sub(common_suffix);
-  let replacement_changed = replacement_chars[common_prefix..replacement_changed_end]
-    .iter()
-    .collect::<String>();
-  // Drop the metadata for paragraphs this replacement REMOVES (ids in `before`
-  // but not `after`) before touching the body text. Otherwise a removed
-  // paragraph's record survives the edit, re-anchors its cursor to the following
-  // paragraph's boundary, and — via the metadata prune's lexicographic tie-break
-  // — can displace that paragraph's real id, diverging canonical block/paragraph
-  // ids from the optimistic replay. This covers boundary-0 joins too, where
-  // `overwrite_span_paragraph_metadata_ids` deliberately leaves the reserved root
-  // record alone and so cannot clean an orphaned sibling.
-  delete_removed_span_metadata(doc, before, after)?;
-  let body = body_text(doc);
-  let start = start.min(body.len_unicode());
-  let change_start = start.saturating_add(common_prefix).min(body.len_unicode());
-  let change_end = change_start
-    .saturating_add(before_changed_len)
-    .min(body.len_unicode());
-  if change_end > change_start {
-    body.delete(change_start, change_end - change_start)?;
-  }
-  if !replacement_changed.is_empty() {
-    body.insert(change_start, &replacement_changed)?;
-  }
-  let first_boundary = start.saturating_sub(1);
-  mark_replacement_span(&body, first_boundary, start, after, &paragraph_texts)?;
-  let boundaries = replacement_span_boundaries(first_boundary, start, &paragraph_texts);
-  repair_paragraph_metadata_after_text_flow_edit(doc, &body, &boundaries, "editor_replace_paragraph_span")?;
-  // Crux of the identity-divergence fix: the text-flow repair above lets Loro
-  // metadata survival decide which durable id lives at each resulting boundary,
-  // which can disagree with the editor's optimistic replay. Overwrite each
-  // boundary's paragraph/block record with the editor-supplied ids so canonical
-  // == predicted == optimistic by construction.
-  overwrite_span_paragraph_metadata_ids(doc, &body, &boundaries, &after.paragraph_ids, &after.block_ids)?;
-  Ok(true)
-}
-
-/// Deletes the Loro paragraph and paragraph-block metadata records for paragraphs
-/// a span replacement REMOVES — durable ids present in `before` but absent from
-/// `after`, compared by id rather than position.
-///
-/// A removed paragraph's record would otherwise survive the body edit, re-anchor
-/// its cursor onto the following (surviving) paragraph's boundary, and get kept by
-/// [`prune_stale_paragraph_metadata`]'s lexicographic tie-break in place of that
-/// paragraph's real record — so the canonical projection reads the removed id at
-/// the shifted index while the optimistic replay reads the correct one. Deleting
-/// the record up front makes the survivor unambiguous. Records are matched on the
-/// stored `id` field (falling back to the map key) in `PARAGRAPHS_BY_ID` /
-/// `BLOCKS_BY_ID`, exactly like [`delete_projection_paragraph_metadata`]. The
-/// reserved boundary-0 anchors ([`ROOT_FIRST_PARAGRAPH_ID`]/[`MAIN_BODY_BLOCK_ID`])
-/// are never deleted; other machinery keys off those names and boundary 0's id
-/// convergence is handled separately.
-fn delete_removed_span_metadata(
-  doc: &LoroDoc,
-  before: &flowstate_document::DocumentSpan,
-  after: &flowstate_document::DocumentSpan,
-) -> loro::LoroResult<()> {
-  let removed_paragraph_ids = before
-    .paragraph_ids
-    .iter()
-    .copied()
-    .filter(|id| !after.paragraph_ids.contains(id))
-    .map(|id| id.0)
-    .collect::<Vec<u128>>();
-  let removed_block_ids = before
-    .block_ids
-    .iter()
-    .copied()
-    .filter(|id| !after.block_ids.contains(id))
-    .map(|id| id.0)
-    .collect::<Vec<u128>>();
-  if removed_paragraph_ids.is_empty() && removed_block_ids.is_empty() {
-    return Ok(());
-  }
-
-  let root = doc.get_map(ROOT);
-  if !removed_paragraph_ids.is_empty() {
-    let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
-    for key in map_keys(&paragraphs) {
-      if key == ROOT_FIRST_PARAGRAPH_ID {
-        continue;
-      }
-      let id = child_map(&paragraphs, &key)
-        .and_then(|paragraph| map_string_opt(&paragraph, "id"))
-        .unwrap_or_else(|| key.clone());
-      if removed_paragraph_ids.contains(&loro_id_u128(&id)) {
-        paragraphs.delete(&key)?;
-      }
-    }
-  }
-  if !removed_block_ids.is_empty() {
-    let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
-    for key in map_keys(&blocks) {
-      if key == MAIN_BODY_BLOCK_ID {
-        continue;
-      }
-      let id = child_map(&blocks, &key)
-        .and_then(|block| map_string_opt(&block, "id"))
-        .unwrap_or_else(|| key.clone());
-      if removed_block_ids.contains(&loro_id_u128(&id)) {
-        blocks.delete(&key)?;
-      }
-    }
-  }
-  Ok(())
-}
-
-/// Forces the canonical paragraph/block metadata at each resulting span boundary
-/// to the editor-supplied durable ids (`ReplaceParagraphSpan`'s `after` span).
-///
-/// [`repair_paragraph_metadata_after_text_flow_edit`] normalizes the replaced run
-/// to exactly one paragraph and one block record per boundary, but the id that
-/// survives is chosen by Loro cursor survival + lexicographic tie-break. That can
-/// keep a different id than the optimistic positional replay assigned (e.g. a
-/// join that drops a middle boundary), diverging the two projections and later
-/// dropping pending edits that reference the id the other side kept.
-///
-/// Mirrors [`repair_paragraph_metadata_after_stable_split`]'s forced-id write via
-/// [`ensure_paragraph_metadata_at_boundary_with_ids`], extended to every boundary
-/// of the run: it writes the forced record and drops the pre-existing survivor so
-/// the projection reads back exactly `after.paragraph_ids[i]`/`after.block_ids[i]`.
-/// Reserved boundary-0 root records already converge numerically with the client's
-/// first-paragraph id and are keyed on by other machinery, so they are left as-is.
-fn overwrite_span_paragraph_metadata_ids(
-  doc: &LoroDoc,
-  body: &loro::LoroText,
-  boundaries: &[usize],
-  paragraph_ids: &[flowstate_document::ParagraphId],
-  block_ids: &[flowstate_document::BlockId],
-) -> loro::LoroResult<()> {
-  let body_snapshot = body.to_string();
-  for (ix, &boundary) in boundaries.iter().enumerate() {
-    let (Some(&paragraph_id), Some(&block_id)) = (paragraph_ids.get(ix), block_ids.get(ix)) else {
-      continue;
-    };
-    if !boundary_is_live(&body_snapshot, boundary) {
-      continue;
-    }
-    let root = doc.get_map(ROOT);
-    let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
-    let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
-    // The prior repair pass left exactly one paragraph/block record live at this
-    // boundary; find it (mirroring the projection's own selection) before writing
-    // the forced record so the loser can be dropped afterwards.
-    let existing_paragraph_key = paragraph_metadata_key_at_boundary(doc, body, &paragraphs, boundary);
-    let existing_block_key = paragraph_block_key_at_boundary(doc, body, &blocks, boundary);
-    // Boundary 0's reserved root records already converge numerically with the
-    // client's first-paragraph id, and other machinery keys off those reserved
-    // names, so never rewrite or delete them.
-    if existing_paragraph_key.as_deref() == Some(ROOT_FIRST_PARAGRAPH_ID) || existing_block_key.as_deref() == Some(MAIN_BODY_BLOCK_ID) {
-      continue;
-    }
-    let paragraph_matches = existing_paragraph_key.as_deref().map(loro_id_u128) == Some(paragraph_id.0);
-    let block_matches = existing_block_key.as_deref().map(loro_id_u128) == Some(block_id.0);
-    if paragraph_matches && block_matches {
-      continue;
-    }
-    ensure_paragraph_metadata_at_boundary_with_ids(doc, body, boundary, paragraph_id, block_id)?;
-    if let Some(old) = existing_paragraph_key
-      && loro_id_u128(&old) != paragraph_id.0
-    {
-      paragraphs.delete(&old)?;
-    }
-    if let Some(old) = existing_block_key
-      && loro_id_u128(&old) != block_id.0
-    {
-      blocks.delete(&old)?;
-    }
-  }
-  Ok(())
-}
-
-fn span_paragraph_texts(span: &flowstate_document::DocumentSpan) -> Vec<String> {
-  let mut offset = 0_usize;
-  span
-    .paragraphs
-    .iter()
-    .enumerate()
-    .map(|(paragraph_ix, paragraph)| {
-      if paragraph_ix > 0
-        && span
-          .text
-          .get(offset..)
-          .is_some_and(|text| text.starts_with('\n'))
-      {
-        offset += '\n'.len_utf8();
-      }
-      let len = flowstate_document::paragraph_text_len(paragraph);
-      let end = offset.saturating_add(len).min(span.text.len());
-      let text = span.text.get(offset..end).unwrap_or_default().to_string();
-      offset = end;
-      text
-    })
-    .collect()
-}
-
-fn mark_replacement_span(
-  body: &loro::LoroText,
-  first_boundary_unicode: usize,
-  text_start_unicode: usize,
-  span: &flowstate_document::DocumentSpan,
-  paragraph_texts: &[String],
-) -> loro::LoroResult<()> {
-  if let Some(first) = span.paragraphs.first() {
-    body.mark(
-      first_boundary_unicode..first_boundary_unicode + 1,
-      MARK_PARAGRAPH_STYLE,
-      paragraph_style_value(first.style),
-    )?;
-  }
-  mark_projected_paragraphs(body, text_start_unicode, &span.paragraphs, paragraph_texts)
-}
-
-fn mark_projected_paragraphs(
-  body: &loro::LoroText,
-  text_start_unicode: usize,
-  paragraphs: &[flowstate_document::Paragraph],
-  paragraph_texts: &[String],
-) -> loro::LoroResult<()> {
-  let mut paragraph_start = text_start_unicode;
-  for (paragraph_ix, (paragraph, paragraph_text)) in paragraphs.iter().zip(paragraph_texts).enumerate() {
-    if paragraph_ix > 0 {
-      let boundary = paragraph_start.saturating_sub(1);
-      body.mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))?;
-    }
-    mark_paragraph_runs(body, paragraph_start, paragraph_text, &paragraph.runs)?;
-    paragraph_start += paragraph_text.chars().count() + 1;
-  }
-  Ok(())
-}
-
-fn mark_paragraph_runs(
-  body: &loro::LoroText,
-  paragraph_start_unicode: usize,
-  paragraph_text: &str,
-  runs: &[flowstate_document::TextRun],
-) -> loro::LoroResult<()> {
-  let mut byte_offset = 0_usize;
-  for run in runs {
-    let end = byte_offset
-      .saturating_add(run.len)
-      .min(paragraph_text.len());
-    let Some(run_text) = paragraph_text.get(byte_offset..end) else {
-      break;
-    };
-    let run_len = run_text.chars().count();
-    if run_len > 0 {
-      let run_start = paragraph_start_unicode
-        + paragraph_text
-          .get(..byte_offset)
-          .unwrap_or_default()
-          .chars()
-          .count();
-      mark_run_styles(body, run_start..run_start + run_len, run.styles)?;
-    }
-    byte_offset = end;
-  }
-  Ok(())
-}
-
-fn inserted_newline_boundaries(start_unicode: usize, text: &str) -> Vec<usize> {
+pub(crate) fn inserted_newline_boundaries(start_unicode: usize, text: &str) -> Vec<usize> {
   text
     .chars()
     .enumerate()
@@ -5233,23 +4217,7 @@ fn body_paragraph_boundaries_missing_style_mark(body: &loro::LoroText) -> Vec<us
   missing
 }
 
-fn replacement_span_boundaries(first_boundary_unicode: usize, text_start_unicode: usize, paragraph_texts: &[String]) -> Vec<usize> {
-  if paragraph_texts.is_empty() {
-    return Vec::new();
-  }
-  let mut boundaries = Vec::with_capacity(paragraph_texts.len());
-  boundaries.push(first_boundary_unicode);
-  let mut paragraph_start = text_start_unicode;
-  for (paragraph_ix, paragraph_text) in paragraph_texts.iter().enumerate() {
-    if paragraph_ix > 0 {
-      boundaries.push(paragraph_start.saturating_sub(1));
-    }
-    paragraph_start += paragraph_text.chars().count() + 1;
-  }
-  boundaries
-}
-
-fn repair_paragraph_metadata_after_text_flow_edit(
+pub(crate) fn repair_paragraph_metadata_after_text_flow_edit(
   doc: &LoroDoc,
   body: &loro::LoroText,
   live_boundaries: &[usize],
@@ -5272,7 +4240,8 @@ fn repair_paragraph_metadata_after_text_flow_edit(
   Ok(())
 }
 
-fn repair_paragraph_metadata_after_stable_split(
+#[hotpath::measure]
+pub(crate) fn repair_paragraph_metadata_after_stable_split(
   doc: &LoroDoc,
   body: &loro::LoroText,
   boundary: usize,
@@ -5315,6 +4284,7 @@ fn ensure_paragraph_metadata_at_boundary_with_ids(
   )
 }
 
+#[hotpath::measure]
 fn ensure_paragraph_metadata_at_boundary_with_keys(
   doc: &LoroDoc,
   body: &loro::LoroText,
@@ -5322,8 +4292,7 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   forced_paragraph_id: Option<String>,
   forced_block_id: Option<String>,
 ) -> loro::LoroResult<()> {
-  let body_snapshot = body.to_string();
-  if !boundary_is_live(&body_snapshot, boundary) {
+  if body.char_at(boundary) != Ok('\n') {
     tracing::warn!(
       boundary,
       "cannot create paragraph metadata because boundary is not a live paragraph newline"
@@ -5434,6 +4403,7 @@ impl ParagraphMetadataPrune {
   }
 }
 
+#[hotpath::measure]
 fn prune_stale_paragraph_metadata(doc: &LoroDoc, body: &loro::LoroText) -> loro::LoroResult<ParagraphMetadataPrune> {
   let body_snapshot = body.to_string();
   let root = doc.get_map(ROOT);
@@ -5629,10 +4599,6 @@ fn live_object_cursor_pos(doc: &LoroDoc, body_snapshot: &str, map: &LoroMap, cur
   (body_snapshot.chars().nth(pos) == Some(OBJECT_REPLACEMENT)).then_some(pos)
 }
 
-fn boundary_is_live(body_snapshot: &str, boundary: usize) -> bool {
-  body_snapshot.chars().nth(boundary) == Some('\n')
-}
-
 fn new_paragraph_metadata_id(boundary: usize) -> String {
   if boundary == 0 {
     ROOT_FIRST_PARAGRAPH_ID.to_string()
@@ -5763,6 +4729,19 @@ fn install_undo_selection_callbacks(undo: &mut UndoManager, state: &Arc<Mutex<Un
     if let Ok(state) = push_state.lock()
       && let Some(selection) = &state.pending_selection
     {
+      // Loro-first spec §10: selection positions ride in the first-class
+      // `cursors` field, which Loro actively TRANSFORMS through remote diffs
+      // and container remaps while the item sits on the undo stack. The
+      // opaque `value` blob keeps only affinity/direction sidecar data (plus
+      // the capture-time cursor bytes as a decode fallback).
+      if let Ok(snapshot) = postcard::from_bytes::<UndoSelectionSnapshot>(selection.as_ref()) {
+        if let Ok(anchor) = Cursor::decode(&snapshot.anchor_cursor) {
+          meta.add_cursor(&anchor);
+        }
+        if let Ok(head) = Cursor::decode(&snapshot.head_cursor) {
+          meta.add_cursor(&head);
+        }
+      }
       meta.set_value(LoroValue::Binary(selection.clone().into()));
     }
     meta
@@ -5770,11 +4749,19 @@ fn install_undo_selection_callbacks(undo: &mut UndoManager, state: &Arc<Mutex<Un
 
   let pop_state = Arc::clone(state);
   undo.set_on_pop(Some(Box::new(move |_, _, meta| {
+    let transformed: Vec<Vec<u8>> = meta.cursors.iter().map(|entry| entry.cursor.encode()).collect();
     let LoroValue::Binary(bytes) = meta.value else {
       return;
     };
     match postcard::from_bytes::<UndoSelectionSnapshot>(bytes.as_ref()) {
-      Ok(selection) => {
+      Ok(mut selection) => {
+        // Prefer the stack-transformed cursors over the capture-time bytes:
+        // concurrent remote edits between capture and undo have already been
+        // applied to them by the UndoManager (spec §10, test #9).
+        if transformed.len() == 2 {
+          selection.anchor_cursor = transformed[0].clone();
+          selection.head_cursor = transformed[1].clone();
+        }
         if let Ok(mut state) = pop_state.lock() {
           state.restored_selection = Some(selection);
         }
@@ -5812,7 +4799,7 @@ fn selection_direction(anchor: DocumentOffset, head: DocumentOffset) -> Selectio
   }
 }
 
-fn cursor_for_boundary(text: &LoroText, unicode_pos: usize, affinity: SelectionAffinity) -> Option<Cursor> {
+pub(crate) fn cursor_for_boundary(text: &LoroText, unicode_pos: usize, affinity: SelectionAffinity) -> Option<Cursor> {
   let len = text.len_unicode();
   let pos = unicode_pos.min(len);
   match affinity {
@@ -5842,14 +4829,6 @@ fn gpui_gravity_from_presence(gravity: VisualGravity) -> gpui_flowtext::VisualGr
   }
 }
 
-fn undo_affinity(affinity: SelectionAffinity) -> UndoSelectionAffinity {
-  match affinity {
-    SelectionAffinity::Before => UndoSelectionAffinity::Before,
-    SelectionAffinity::After => UndoSelectionAffinity::After,
-    SelectionAffinity::Neutral => UndoSelectionAffinity::Neutral,
-  }
-}
-
 /// §16: map the persisted undo-snapshot affinity back onto the editor's
 /// `gpui_flowtext::SelectionAffinity` when rebuilding a restored selection.
 fn gpui_affinity_from_undo(affinity: UndoSelectionAffinity) -> gpui_flowtext::SelectionAffinity {
@@ -5869,14 +4848,14 @@ pub(super) fn paragraph_style_from_attrs(attrs: Option<&FxHashMap<String, LoroVa
   }
 }
 
-fn paragraph_style_value(style: ParagraphStyle) -> i64 {
+pub(crate) fn paragraph_style_value(style: ParagraphStyle) -> i64 {
   match style {
     ParagraphStyle::Normal => 0,
     ParagraphStyle::Custom(slot) => i64::from(slot) + 1,
   }
 }
 
-fn mark_run_styles(text: &loro::LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> loro::LoroResult<()> {
+pub(crate) fn mark_run_styles(text: &loro::LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> loro::LoroResult<()> {
   for key in [MARK_RUN_SEMANTIC_STYLE, MARK_HIGHLIGHT_STYLE, MARK_DIRECT_UNDERLINE, MARK_STRIKETHROUGH] {
     text.unmark(range.clone(), key)?;
   }
@@ -6147,10 +5126,63 @@ fn equation_display_name(display: InputEquationDisplay) -> &'static str {
   }
 }
 
+/// The off-gate half of a split checkpoint (field fix 2026-07-07): heavy
+/// package assembly against a doc FORK plus the checked-out package. No live
+/// doc access — safe on a detached worker.
+pub struct CheckpointJob {
+  pub fork: LoroDoc,
+  pub projection: DocumentProjection,
+  pub package: DocumentPackage,
+  pub title: String,
+  pub revision_id: u128,
+  pub revision_frontiers: Frontiers,
+  pub author_user_id: Option<u128>,
+  pub peer_id: u64,
+  pub write_path: Option<PathBuf>,
+}
+
+impl CheckpointJob {
+  /// Run the heavy assembly + disk write. Returns the package (for restore)
+  /// and whether it reached disk.
+  pub fn run(mut self) -> (DocumentPackage, io::Result<bool>) {
+    let result = (|| -> io::Result<bool> {
+      self.package.replace_assets_from_document(&self.projection)?;
+      self.package.rebuild_projection_cache_from_loro(&self.fork)?;
+      self.package.rebuild_search_units_from_loro(&self.fork)?;
+      self.package.compact_to_snapshot(&self.fork)?;
+      self.package.create_named_revision_at_with_id(
+        &self.fork,
+        self.revision_id,
+        &self.revision_frontiers,
+        &self.title,
+        "Explicit save",
+        self.author_user_id,
+        Some(self.peer_id as u128),
+      )?;
+      if let Some(path) = &self.write_path {
+        self.package.write(path)?;
+        return Ok(true);
+      }
+      Ok(false)
+    })();
+    (self.package, result)
+  }
+}
+
+/// Assemble a full package (snapshot + assets + caches) from a FORKED doc and
+/// a projection clone — no live-doc access, safe off-gate and off-thread.
+pub fn assemble_package_bytes(fork: &LoroDoc, projection: &DocumentProjection, title: &str) -> io::Result<Vec<u8>> {
+  let mut package = DocumentPackage::from_loro_snapshot_with_assets(fork, title, assets_from_document(projection))?;
+  package.replace_assets_from_document(projection)?;
+  package.rebuild_projection_cache_from_loro(fork)?;
+  package.rebuild_search_units_from_loro(fork)?;
+  package.to_bytes()
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
-  use flowstate_document::{DocumentPackage, InputRun, ProjectionPatch, ProjectionTextDelta, loro_schema::body_text};
+  use flowstate_document::{DocumentPackage, ProjectionPatch, ProjectionTextDelta, loro_schema::body_text};
 
   fn live_paragraph_metadata_boundaries(doc: &LoroDoc) -> Vec<usize> {
     let body = body_text(doc);
@@ -6199,69 +5231,7 @@ mod tests {
     }
   }
 
-  /// §P2b test fixture id rule: mint deterministic local ids (`ColumnId(ix + 1)`,
-  /// `RowId(ix + 1)`) so the built table is stable and internally consistent, and
-  /// derive each cell's [`CellId`] from its coordinate.
-  fn fixture_row_id(row_ix: usize) -> flowstate_document::RowId {
-    flowstate_document::RowId(u128::try_from(row_ix).expect("row index fits u128") + 1)
-  }
-
-  fn fixture_column_id(column_ix: usize) -> flowstate_document::ColumnId {
-    flowstate_document::ColumnId(u128::try_from(column_ix).expect("column index fits u128") + 1)
-  }
-
-  fn input_table(rows: Vec<Vec<&str>>, column_widths: Vec<flowstate_document::InputTableColumnWidth>, header_row: bool) -> InputTableBlock {
-    InputTableBlock {
-      rows: rows
-        .into_iter()
-        .enumerate()
-        .map(|(row_ix, row)| {
-          let row_id = fixture_row_id(row_ix);
-          flowstate_document::InputTableRow {
-            id: row_id,
-            cells: row
-              .into_iter()
-              .enumerate()
-              .map(|(column_ix, text)| input_table_cell(row_id, fixture_column_id(column_ix), text))
-              .collect(),
-          }
-        })
-        .collect(),
-      columns: column_widths
-        .into_iter()
-        .enumerate()
-        .map(|(column_ix, width)| flowstate_document::InputTableColumn {
-          id: fixture_column_id(column_ix),
-          width,
-        })
-        .collect(),
-      style: flowstate_document::InputTableStyle { header_row },
-    }
-  }
-
-  fn input_table_cell(
-    row_id: flowstate_document::RowId,
-    column_id: flowstate_document::ColumnId,
-    text: &str,
-  ) -> flowstate_document::InputTableCell {
-    flowstate_document::InputTableCell {
-      id: flowstate_document::CellId::from_coordinate(row_id, column_id),
-      row_id,
-      column_id,
-      blocks: vec![InputTableCellBlock::Paragraph(input_paragraph(text))],
-      row_span: 1,
-      col_span: 1,
-    }
-  }
-
-  fn projected_table_cell_text(table: &flowstate_document::TableBlock, row_ix: usize, cell_ix: usize) -> &str {
-    let flowstate_document::TableCellBlock::Paragraph(paragraph) = &table.rows[row_ix].cells[cell_ix].blocks[0] else {
-      panic!("expected paragraph table cell");
-    };
-    &paragraph.text
-  }
-
-  fn local_update_bytes(events: &[RuntimeEvent]) -> Vec<u8> {
+  pub(crate) fn local_update_bytes(events: &[RuntimeEvent]) -> Vec<u8> {
     events
       .iter()
       .find_map(|event| match event {
@@ -6312,37 +5282,6 @@ mod tests {
     assert_eq!(flowstate_document::paragraph_text(&projection, 0), "styled");
     assert_eq!(projection.paragraphs[0].runs.len(), 1);
     assert_eq!(projection.paragraphs[0].runs[0].styles, styles);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_insert_text_preserves_paragraph_style_mark() -> Result<()> {
-    let source = flowstate_document::document_from_input(
-      flowstate_document::flowstate_document_theme(),
-      vec![InputParagraph {
-        style: ParagraphStyle::Custom(0),
-        runs: vec![InputRun {
-          text: "pocket".to_string(),
-          styles: RunStyles::default(),
-        }],
-      }],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Styled")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::InsertText {
-        at: flowstate_document::DocumentOffset { paragraph: 0, byte: 3 },
-        text: "x".to_string(),
-        styles: RunStyles::default(),
-      },
-    )?;
-
-    let updated = runtime.projection_snapshot()?;
-    assert_eq!(flowstate_document::paragraph_text(&updated, 0), "pocxket");
-    assert_eq!(updated.paragraphs[0].style, ParagraphStyle::Custom(0));
     Ok(())
   }
 
@@ -6436,117 +5375,6 @@ mod tests {
   }
 
   #[test]
-  fn join_paragraphs_deletes_boundary_and_prunes_stale_metadata() -> Result<()> {
-    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
-    runtime.command(SemanticCommand::InsertText {
-      unicode_index: 1,
-      text: "hello".to_string(),
-      styles: RunStyles::default(),
-    })?;
-    runtime.command(SemanticCommand::SplitParagraph {
-      unicode_index: 6,
-      inherited_style: flowstate_document::ParagraphStyle::Normal,
-    })?;
-    runtime.command(SemanticCommand::InsertText {
-      unicode_index: 7,
-      text: "world".to_string(),
-      styles: RunStyles::default(),
-    })?;
-    assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0, 6]);
-
-    let before_join = runtime.projection_snapshot()?;
-    let first = before_join.ids.paragraph_ids[0];
-    let second = before_join.ids.paragraph_ids[1];
-    let events = runtime.apply_editor_semantic_command(&before_join, &EditorSemanticCommand::JoinParagraphs { first, second })?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert_eq!(body_text(runtime.doc()).to_string(), "\nhelloworld");
-    assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0]);
-    assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0]);
-    Ok(())
-  }
-
-  #[test]
-  fn insert_into_empty_paragraph_before_text_preserves_following_paragraph_identity() -> Result<()> {
-    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
-    runtime.command(SemanticCommand::InsertText {
-      unicode_index: 1,
-      text: "before".to_string(),
-      styles: RunStyles::default(),
-    })?;
-    runtime.command(SemanticCommand::SplitParagraph {
-      unicode_index: 7,
-      inherited_style: flowstate_document::ParagraphStyle::Normal,
-    })?;
-    runtime.command(SemanticCommand::SplitParagraph {
-      unicode_index: 8,
-      inherited_style: flowstate_document::ParagraphStyle::Normal,
-    })?;
-    runtime.command(SemanticCommand::InsertText {
-      unicode_index: 9,
-      text: "after".to_string(),
-      styles: RunStyles::default(),
-    })?;
-
-    let before_insert = runtime.projection_snapshot()?;
-    assert_eq!(before_insert.paragraphs.len(), 3);
-    assert_eq!(flowstate_document::paragraph_text(&before_insert, 0), "before");
-    assert_eq!(flowstate_document::paragraph_text(&before_insert, 1), "");
-    assert_eq!(flowstate_document::paragraph_text(&before_insert, 2), "after");
-    let following_id = before_insert.ids.paragraph_ids[2];
-    let rewrote_following_boundary_cursor = {
-      let body = body_text(runtime.doc());
-      let snapshot = body.to_string();
-      let root = runtime.doc().get_map(ROOT);
-      let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
-      let live_boundaries = live_boundary_positions(&snapshot);
-      let pos_by_id = boundary_cursor_positions(runtime.doc(), &body, &paragraphs, &["boundary_cursor"]);
-      let mut rewrote = false;
-      for key in map_keys(&paragraphs) {
-        let Some(paragraph) = child_map(&paragraphs, &key) else {
-          continue;
-        };
-        if live_cursor_pos(runtime.doc(), &live_boundaries, &pos_by_id, &paragraph, "boundary_cursor") == Some(8)
-          && let Some(cursor) = body.get_cursor(8, Side::Right)
-        {
-          paragraph.insert("boundary_cursor", cursor.encode())?;
-          rewrote = true;
-        }
-      }
-      runtime.doc().commit();
-      rewrote
-    };
-    assert!(rewrote_following_boundary_cursor);
-
-    let events = runtime.apply_editor_semantic_command(
-      &before_insert,
-      &EditorSemanticCommand::InsertText {
-        at: DocumentOffset { paragraph: 1, byte: 0 },
-        text: "X".to_string(),
-        styles: RunStyles::default(),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert_eq!(body_text(runtime.doc()).to_string(), "\nbefore\nX\nafter");
-    assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0, 7, 9]);
-    assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0, 7, 9]);
-    let after_insert = runtime.projection_snapshot()?;
-    assert_eq!(after_insert.ids.paragraph_ids[2], following_id);
-    assert_eq!(flowstate_document::paragraph_text(&after_insert, 1), "X");
-    assert_eq!(flowstate_document::paragraph_text(&after_insert, 2), "after");
-    Ok(())
-  }
-
-  #[test]
   fn runtime_persists_local_update_segments() -> Result<()> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("runtime.db8");
@@ -6616,160 +5444,6 @@ mod tests {
     Ok(())
   }
 
-  #[test]
-  fn editor_replace_paragraph_span_preserves_boundaries_and_marks() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
-        style: flowstate_document::ParagraphStyle::Normal,
-        runs: vec![flowstate_document::InputRun {
-          text: "old".to_string(),
-          styles: flowstate_document::RunStyles::default(),
-        }],
-      })],
-    );
-    let replacement_styles = flowstate_document::RunStyles {
-      semantic: flowstate_document::RunSemanticStyle::Custom(3),
-      direct_underline: true,
-      strikethrough: false,
-      highlight: Some(flowstate_document::HighlightStyle::Custom(4)),
-    };
-    let replacement = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
-          style: flowstate_document::ParagraphStyle::Custom(2),
-          runs: vec![flowstate_document::InputRun {
-            text: "Hello".to_string(),
-            styles: replacement_styles,
-          }],
-        }),
-        flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
-          style: flowstate_document::ParagraphStyle::Normal,
-          runs: vec![flowstate_document::InputRun {
-            text: "World".to_string(),
-            styles: flowstate_document::RunStyles::default(),
-          }],
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Span")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-
-    let events = runtime.apply_editor_semantic_command(
-      &source,
-      &EditorSemanticCommand::ReplaceParagraphSpan {
-        start: None,
-        before: flowstate_document::capture_document_span(&source, 0..1),
-        after: flowstate_document::capture_document_span(&replacement, 0..2),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert_eq!(body_text(runtime.doc()).to_string(), "\nHello\nWorld");
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "Hello");
-    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "World");
-    assert_eq!(projection.paragraphs[0].style, flowstate_document::ParagraphStyle::Custom(2));
-    assert_eq!(projection.paragraphs[0].runs[0].styles, replacement_styles);
-    assert_eq!(live_paragraph_metadata_boundaries(runtime.doc()), vec![0, 6]);
-    assert_eq!(live_paragraph_block_boundaries(runtime.doc()), vec![0, 6]);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_paragraph_span_forces_editor_supplied_ids() -> Result<()> {
-    // Regression for the optimistic-vs-canonical identity divergence: a span
-    // replacement (here a 3->2 paragraph join) must adopt the editor-supplied
-    // durable ids canonically instead of letting Loro metadata survival keep a
-    // different id, which would strand later pending edits that reference the id
-    // the optimistic replay dropped. Boundary 0 keeps its reserved root id, so
-    // this asserts the trailing (non-reserved) boundary the join keeps.
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("a")),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("b")),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("c")),
-      ],
-    );
-    let replacement = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("ab")),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("c")),
-      ],
-    );
-    let before = flowstate_document::capture_document_span(&source, 0..3);
-    let after = flowstate_document::capture_document_span(&replacement, 0..2);
-    // The editor-captured ids for the surviving trailing paragraph; canonical
-    // survival would otherwise keep `source`'s third-paragraph id here.
-    let expected_paragraph_id = after.paragraph_ids[1];
-    let expected_block_id = after.block_ids[1];
-
-    let doc = flowstate_document::document_to_loro(&source, "Span Ids")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    runtime.apply_editor_semantic_command(
-      &source,
-      &EditorSemanticCommand::ReplaceParagraphSpan { start: None, before, after },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "ab");
-    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "c");
-    assert_eq!(projection.ids.paragraph_ids[1], expected_paragraph_id);
-    assert_eq!(projection.ids.block_ids[1], expected_block_id);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_paragraph_span_join_at_start_drops_removed_sibling_block() -> Result<()> {
-    // Regression for the block-id divergence: a boundary-0 join that removes an
-    // empty middle paragraph must not let the removed paragraph's block metadata
-    // survive and re-anchor onto the following paragraph's boundary, displacing
-    // that paragraph's real block id. `before`/`after` are captured from the
-    // runtime's own (canonical) projection so their ids match the Loro records,
-    // exactly as in the live editor flow.
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("y")),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("")),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("z")),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Join Start")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    // The trailing "z" paragraph is OUTSIDE the replaced span; its ids must be
-    // exactly what survives at the shifted index after the join.
-    let surviving_paragraph_id = projection.ids.paragraph_ids[2];
-    let surviving_block_id = projection.ids.block_ids[2];
-
-    // Join "y"+"" -> "y": the span covers paragraphs 0..2, the result keeps "y".
-    let before = flowstate_document::capture_document_span(&projection, 0..2);
-    let after = flowstate_document::capture_document_span(&projection, 0..1);
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceParagraphSpan {
-        start: Some(flowstate_document::DocumentOffset { paragraph: 0, byte: 0 }),
-        before,
-        after,
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "y");
-    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "z");
-    assert_eq!(projection.ids.paragraph_ids[1], surviving_paragraph_id);
-    assert_eq!(projection.ids.block_ids[1], surviving_block_id);
-    Ok(())
-  }
-
   // FS-170: a caret can rest on either side of a block object; the two sides
   // must resolve to DISTINCT document offsets (the "before" side to the previous
   // paragraph's end, the "after" side to the following paragraph's start).
@@ -6819,788 +5493,6 @@ mod tests {
       !violations.iter().any(|violation| violation.contains("object-side-collapse")),
       "no object-side-collapse violation must fire: {violations:?}"
     );
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_block_updates_image_metadata() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "old".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Replace Image")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-
-    let events = runtime.apply_editor_semantic_command(
-      &source,
-      &EditorSemanticCommand::ReplaceBlock {
-        block: Some(source.ids.block_ids[1]),
-        block_ix: 1,
-        after: flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(9),
-          alt_text: "new alt".to_string(),
-          caption: Some(input_paragraph("caption")),
-          sizing: flowstate_document::InputImageSizing::Fixed {
-            width_px: 640,
-            height_px: Some(480),
-          },
-          alignment: flowstate_document::InputBlockAlignment::Right,
-        }),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected image block after ReplaceBlock");
-    };
-    assert_eq!(image.asset_id, flowstate_document::AssetId(9));
-    assert_eq!(image.alt_text.as_ref(), "new alt");
-    assert!(image.caption.is_some());
-    assert_eq!(
-      image.sizing,
-      flowstate_document::ImageSizing::Fixed {
-        width_px: 640,
-        height_px: Some(480),
-      }
-    );
-    assert_eq!(image.alignment, flowstate_document::BlockAlignment::Right);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_block_prefers_projected_loro_id_over_stale_index() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "old".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Replace Image")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let image_block = projection.ids.block_ids[1];
-
-    let events = runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceBlock {
-        block: Some(image_block),
-        block_ix: 99,
-        after: flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(9),
-          alt_text: "new alt".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::FitWidth,
-          alignment: flowstate_document::InputBlockAlignment::Right,
-        }),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected image block after ReplaceBlock");
-    };
-    assert_eq!(image.asset_id, flowstate_document::AssetId(9));
-    assert_eq!(image.alt_text.as_ref(), "new alt");
-    assert_eq!(image.alignment, flowstate_document::BlockAlignment::Right);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_image_alt_text_updates_alt_flow() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "old".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Image Alt")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let image_block_id = projection.ids.block_ids[1];
-    let body = body_text(runtime.doc());
-    let (_, block, _) = object_loro_block_by_projected_id(runtime.doc(), &body, image_block_id).expect("image block");
-    let before_flow = map_string_opt(&block, "alt_text_flow_id").expect("alt flow id");
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceImageAltText {
-        image: image_block_id,
-        text: "new alt".to_string(),
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected image block after alt text edit");
-    };
-    assert_eq!(image.alt_text.as_ref(), "new alt");
-    let body = body_text(runtime.doc());
-    let (_, block, _) = object_loro_block_by_projected_id(runtime.doc(), &body, image_block_id).expect("image block");
-    assert_eq!(map_string_opt(&block, "alt_text_flow_id").as_deref(), Some(before_flow.as_str()));
-    Ok(())
-  }
-
-  #[test]
-  fn editor_set_image_layout_updates_image_attrs() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "alt".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Image Layout")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let image_block_id = projection.ids.block_ids[1];
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::SetImageLayout {
-        image: image_block_id,
-        sizing: flowstate_document::InputImageSizing::Fixed {
-          width_px: 444,
-          height_px: None,
-        },
-        alignment: flowstate_document::InputBlockAlignment::Center,
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected image block after layout edit");
-    };
-    assert_eq!(image.asset_id, flowstate_document::AssetId(1));
-    assert_eq!(image.alt_text.as_ref(), "alt");
-    assert_eq!(image.alignment, flowstate_document::BlockAlignment::Center);
-    assert_eq!(
-      image.sizing,
-      flowstate_document::ImageSizing::Fixed {
-        width_px: 444,
-        height_px: None,
-      }
-    );
-    Ok(())
-  }
-
-  #[test]
-  fn editor_insert_block_creates_loro_object_from_projection_payload() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![flowstate_document::InputBlock::Paragraph(input_paragraph("body"))],
-    );
-    let target = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(7),
-          alt_text: "inserted".to_string(),
-          caption: Some(input_paragraph("caption")),
-          sizing: flowstate_document::InputImageSizing::FitWidth,
-          alignment: flowstate_document::InputBlockAlignment::Center,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Insert Image")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let image_block = target.ids.block_ids[1];
-
-    let events = runtime.apply_editor_semantic_command(
-      &target,
-      &EditorSemanticCommand::InsertBlock {
-        block: image_block,
-        block_ix: 1,
-        after: flowstate_document::input_block_from_block(&target.blocks[1]),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert!(
-      body_text(runtime.doc())
-        .to_string()
-        .contains(OBJECT_REPLACEMENT)
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected inserted image block");
-    };
-    assert_eq!(image.asset_id, flowstate_document::AssetId(7));
-    assert_eq!(image.alt_text.as_ref(), "inserted");
-    assert!(image.caption.is_some());
-    assert_eq!(image.alignment, flowstate_document::BlockAlignment::Center);
-    assert_eq!(projection.ids.block_ids[1], image_block);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_delete_block_removes_loro_object_by_projected_id() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "old".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Delete Image")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let image_block = projection.ids.block_ids[1];
-
-    let events = runtime.apply_editor_semantic_command(&projection, &EditorSemanticCommand::DeleteBlock { block: image_block })?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert!(
-      !body_text(runtime.doc())
-        .to_string()
-        .contains(OBJECT_REPLACEMENT)
-    );
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(projection.blocks.len(), 1);
-    assert!(matches!(&projection.blocks[0], flowstate_document::Block::Paragraph(_)));
-    Ok(())
-  }
-
-  #[test]
-  fn editor_delete_object_and_replace_paragraph_span_apply_together() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("alpha")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "alt".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-        flowstate_document::InputBlock::Paragraph(input_paragraph("omega")),
-      ],
-    );
-    let target = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![flowstate_document::InputBlock::Paragraph(input_paragraph("alega"))],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Mixed Delete")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let image_block_id = projection.ids.block_ids[1];
-    let before = flowstate_document::capture_document_span(&source, 0..2);
-    let after = flowstate_document::capture_document_span(&target, 0..1);
-
-    runtime.apply_editor_semantic_command(&projection, &EditorSemanticCommand::DeleteBlock { block: image_block_id })?;
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceParagraphSpan {
-        start: Some(flowstate_document::DocumentOffset { paragraph: 0, byte: 0 }),
-        before,
-        after,
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(projection.blocks.len(), 1);
-    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "alega");
-    assert!(
-      !body_text(runtime.doc())
-        .to_string()
-        .contains(OBJECT_REPLACEMENT)
-    );
-    Ok(())
-  }
-
-  #[test]
-  fn editor_move_block_reorders_loro_object_placeholder_by_projected_id() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(1),
-          alt_text: "first".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-        flowstate_document::InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(2),
-          alt_text: "second".to_string(),
-          caption: None,
-          sizing: flowstate_document::InputImageSizing::Intrinsic,
-          alignment: flowstate_document::InputBlockAlignment::Left,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Move Image")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let second_image = projection.ids.block_ids[2];
-
-    let events = runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::MoveBlock {
-        block: second_image,
-        new_block_ix: 1,
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Image(image) = &projection.blocks[1] else {
-      panic!("expected moved image at block 1");
-    };
-    assert_eq!(image.alt_text.as_ref(), "second");
-    assert_eq!(projection.ids.block_ids[1], second_image);
-    let flowstate_document::Block::Image(image) = &projection.blocks[2] else {
-      panic!("expected first image at block 2");
-    };
-    assert_eq!(image.alt_text.as_ref(), "first");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_block_updates_equation_source() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Equation(flowstate_document::InputEquationBlock {
-          source: "x".to_string(),
-          syntax: flowstate_document::InputEquationSyntax::Latex,
-          display: flowstate_document::InputEquationDisplay::Display,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Replace Equation")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-
-    runtime.apply_editor_semantic_command(
-      &source,
-      &EditorSemanticCommand::ReplaceBlock {
-        block: Some(source.ids.block_ids[1]),
-        block_ix: 1,
-        after: flowstate_document::InputBlock::Equation(flowstate_document::InputEquationBlock {
-          source: "x+1".to_string(),
-          syntax: flowstate_document::InputEquationSyntax::Latex,
-          display: flowstate_document::InputEquationDisplay::InlineLikeParagraph,
-        }),
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Equation(equation) = &projection.blocks[1] else {
-      panic!("expected equation block after ReplaceBlock");
-    };
-    assert_eq!(equation.source.as_ref(), "x+1");
-    assert_eq!(equation.display, flowstate_document::EquationDisplay::InlineLikeParagraph);
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_equation_source_range_edits_source_flow() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Equation(flowstate_document::InputEquationBlock {
-          source: "x+y".to_string(),
-          syntax: flowstate_document::InputEquationSyntax::Latex,
-          display: flowstate_document::InputEquationDisplay::Display,
-        }),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Edit Equation Source")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let equation_block_id = projection.ids.block_ids[1];
-    let body = body_text(runtime.doc());
-    let (_, block, _) = object_loro_block_by_projected_id(runtime.doc(), &body, equation_block_id).expect("equation block");
-    let before_flow = map_string_opt(&block, "source_flow_id").expect("source flow id");
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceEquationSourceRange {
-        equation: equation_block_id,
-        range: 1..2,
-        text: "*".to_string(),
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Equation(equation) = &projection.blocks[1] else {
-      panic!("expected equation block after source range edit");
-    };
-    assert_eq!(equation.source.as_ref(), "x*y");
-    let body = body_text(runtime.doc());
-    let (_, block, _) = object_loro_block_by_projected_id(runtime.doc(), &body, equation_block_id).expect("equation block");
-    assert_eq!(map_string_opt(&block, "source_flow_id").as_deref(), Some(before_flow.as_str()));
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_block_rebuilds_table_structure() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Table(input_table(
-          vec![vec!["old"]],
-          vec![flowstate_document::InputTableColumnWidth::Auto],
-          false,
-        )),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Replace Table")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-
-    runtime.apply_editor_semantic_command(
-      &source,
-      &EditorSemanticCommand::ReplaceBlock {
-        block: Some(source.ids.block_ids[1]),
-        block_ix: 1,
-        after: flowstate_document::InputBlock::Table(input_table(
-          vec![vec!["a", "b"], vec!["c", "d"]],
-          vec![
-            flowstate_document::InputTableColumnWidth::FixedPx(90),
-            flowstate_document::InputTableColumnWidth::Fraction(1),
-          ],
-          true,
-        )),
-      },
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table) = &projection.blocks[1] else {
-      panic!("expected table block after ReplaceBlock");
-    };
-    assert_eq!(table.rows.len(), 2);
-    assert_eq!(table.rows[0].cells.len(), 2);
-    assert!(table.style.header_row);
-    let column_widths = table
-      .columns
-      .iter()
-      .map(|column| column.width.clone())
-      .collect::<Vec<_>>();
-    assert!(matches!(
-      column_widths.as_slice(),
-      [
-        flowstate_document::TableColumnWidth::FixedPx(90),
-        flowstate_document::TableColumnWidth::Fraction(1)
-      ]
-    ));
-    let flowstate_document::TableCellBlock::Paragraph(cell) = &table.rows[1].cells[0].blocks[0] else {
-      panic!("expected paragraph cell after ReplaceBlock");
-    };
-    assert_eq!(cell.text, "c");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_set_table_column_width_preserves_table_identity() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Table(input_table(
-          vec![vec!["a", "b"], vec!["c", "d"]],
-          vec![
-            flowstate_document::InputTableColumnWidth::Auto,
-            flowstate_document::InputTableColumnWidth::Fraction(1),
-          ],
-          false,
-        )),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Resize Table")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let table_block_id = projection.ids.block_ids[1];
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    let before_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
-    let before_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
-
-    let events = runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::SetTableColumnWidth {
-        table: table_block_id,
-        column_ix: 1,
-        width: flowstate_document::InputTableColumnWidth::FixedPx(222),
-      },
-    )?;
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "row_order").expect("row order")),
-      before_rows
-    );
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "column_order").expect("column order")),
-      before_columns
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table) = &projection.blocks[1] else {
-      panic!("expected table block after column width command");
-    };
-    let column_widths = table
-      .columns
-      .iter()
-      .map(|column| column.width.clone())
-      .collect::<Vec<_>>();
-    assert!(matches!(
-      column_widths.as_slice(),
-      [
-        flowstate_document::TableColumnWidth::Auto,
-        flowstate_document::TableColumnWidth::FixedPx(222)
-      ]
-    ));
-    Ok(())
-  }
-
-  #[test]
-  fn editor_table_structure_commands_mutate_loro_table_incrementally() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Table(input_table(
-          vec![vec!["a", "b"], vec!["c", "d"]],
-          vec![
-            flowstate_document::InputTableColumnWidth::Auto,
-            flowstate_document::InputTableColumnWidth::Fraction(1),
-          ],
-          false,
-        )),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Structure Table")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let mut projection = runtime.projection_snapshot()?;
-    let table_block_id = projection.ids.block_ids[1];
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    let initial_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
-    let initial_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
-
-    // §P2b: the source table carried deterministic fixture ids, so the imported
-    // canonical order lists are `row.1/row.2` and `column.1/column.2`.
-    let new_row_id = flowstate_document::RowId(100);
-    let inserted_row = flowstate_document::InputTableRow {
-      id: new_row_id,
-      cells: vec![
-        input_table_cell(new_row_id, fixture_column_id(0), "new-a"),
-        input_table_cell(new_row_id, fixture_column_id(1), "new-b"),
-      ],
-    };
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::InsertTableRow {
-        table: table_block_id,
-        new_row_id,
-        after_row: Some(fixture_row_id(0)),
-        row: inserted_row,
-      },
-    )?;
-    projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
-      panic!("expected table block after row insert");
-    };
-    assert_eq!(table_projection.rows.len(), 3);
-    assert_eq!(projected_table_cell_text(table_projection, 1, 0), "new-a");
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "column_order").expect("column order")),
-      initial_columns
-    );
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "row_order").expect("row order")).len(),
-      initial_rows.len() + 1
-    );
-
-    let new_column_id = flowstate_document::ColumnId(100);
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::InsertTableColumn {
-        table: table_block_id,
-        new_column_id,
-        after_column: Some(fixture_column_id(0)),
-        width: flowstate_document::InputTableColumnWidth::FixedPx(88),
-        cells: vec![
-          input_table_cell(fixture_row_id(0), new_column_id, "x"),
-          input_table_cell(new_row_id, new_column_id, "y"),
-          input_table_cell(fixture_row_id(1), new_column_id, "z"),
-        ],
-      },
-    )?;
-    projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
-      panic!("expected table block after column insert");
-    };
-    let column_widths = table_projection
-      .columns
-      .iter()
-      .map(|column| column.width.clone())
-      .collect::<Vec<_>>();
-    assert_eq!(column_widths.len(), 3);
-    assert!(matches!(
-      column_widths.as_slice(),
-      [
-        flowstate_document::TableColumnWidth::Auto,
-        flowstate_document::TableColumnWidth::FixedPx(88),
-        flowstate_document::TableColumnWidth::Fraction(1)
-      ]
-    ));
-    assert_eq!(projected_table_cell_text(table_projection, 0, 1), "x");
-    assert_eq!(projected_table_cell_text(table_projection, 1, 1), "y");
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "row_order").expect("row order")).len(),
-      initial_rows.len() + 1
-    );
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::DeleteTableRow {
-        table: table_block_id,
-        row_id: new_row_id,
-      },
-    )?;
-    projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
-      panic!("expected table block after row delete");
-    };
-    assert_eq!(table_projection.rows.len(), 2);
-    assert_eq!(projected_table_cell_text(table_projection, 1, 0), "c");
-
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::DeleteTableColumn {
-        table: table_block_id,
-        column_id: new_column_id,
-      },
-    )?;
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
-      panic!("expected table block after column delete");
-    };
-    assert_eq!(table_projection.columns.len(), 2);
-    assert_eq!(projected_table_cell_text(table_projection, 0, 1), "b");
-    assert_eq!(projected_table_cell_text(table_projection, 1, 1), "d");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_replace_table_cell_preserves_table_structure() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::flowstate_document_theme(),
-      vec![
-        flowstate_document::InputBlock::Paragraph(input_paragraph("body")),
-        flowstate_document::InputBlock::Table(input_table(
-          vec![vec!["a", "b"], vec!["c", "d"]],
-          vec![
-            flowstate_document::InputTableColumnWidth::Auto,
-            flowstate_document::InputTableColumnWidth::Fraction(1),
-          ],
-          false,
-        )),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Replace Cell")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-    let projection = runtime.projection_snapshot()?;
-    let table_block_id = projection.ids.block_ids[1];
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    let before_rows = movable_list_strings(&child_movable_list(&table, "row_order").expect("row order"));
-    let before_columns = movable_list_strings(&child_movable_list(&table, "column_order").expect("column order"));
-
-    // Row index 1 / column index 0 of the fixture map to `RowId(2)` / `ColumnId(1)`.
-    let target_row = fixture_row_id(1);
-    let target_column = fixture_column_id(0);
-    runtime.apply_editor_semantic_command(
-      &projection,
-      &EditorSemanticCommand::ReplaceTableCell {
-        table: table_block_id,
-        row_id: target_row,
-        column_id: target_column,
-        cell: input_table_cell(target_row, target_column, "changed"),
-      },
-    )?;
-
-    let table = projection_table_map_by_block_id(runtime.doc(), table_block_id).expect("table map");
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "row_order").expect("row order")),
-      before_rows
-    );
-    assert_eq!(
-      movable_list_strings(&child_movable_list(&table, "column_order").expect("column order")),
-      before_columns
-    );
-    let projection = runtime.projection_snapshot()?;
-    let flowstate_document::Block::Table(table_projection) = &projection.blocks[1] else {
-      panic!("expected table block after cell replace");
-    };
-    assert_eq!(projected_table_cell_text(table_projection, 1, 0), "changed");
-    assert_eq!(projected_table_cell_text(table_projection, 1, 1), "d");
     Ok(())
   }
 
@@ -7851,143 +5743,6 @@ mod tests {
   }
 
   #[test]
-  fn local_text_insert_can_apply_without_projection_snapshot() -> Result<()> {
-    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
-    let events = runtime
-      .try_apply_editor_semantic_command_without_projection(&EditorSemanticCommand::InsertText {
-        at: flowstate_document::DocumentOffset { paragraph: 0, byte: 0 },
-        text: "hello".to_string(),
-        styles: RunStyles::default(),
-      })?
-      .expect("text insert should use body fast path");
-
-    assert!(
-      events
-        .iter()
-        .any(|event| matches!(event, RuntimeEvent::LocalUpdate { bytes, .. } if !bytes.is_empty()))
-    );
-    assert!(
-      events
-        .iter()
-        .all(|event| !matches!(event, RuntimeEvent::ProjectionUpdated { .. }))
-    );
-    assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
-    Ok(())
-  }
-
-  #[test]
-  fn imported_runtime_startup_projection_accepts_the_first_editor_command() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::DocumentTheme::default(),
-      vec![InputBlock::Paragraph(input_paragraph("ready"))],
-    );
-    let imported = flowstate_document::import_document_projection(source, "Imported startup")?;
-    let mut runtime = CrdtRuntime::from_imported_document(imported)?;
-    let startup = runtime.projection_snapshot()?;
-
-    runtime.apply_editor_commands(
-      1,
-      &startup.frontier,
-      &[EditorSemanticCommand::InsertText {
-        at: DocumentOffset { paragraph: 0, byte: 0 },
-        text: "x".to_string(),
-        styles: RunStyles::default(),
-      }],
-      None,
-    )?;
-
-    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "xready");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_commands_accept_projection_frontier_after_metadata_only_commit() -> Result<()> {
-    let mut runtime = CrdtRuntime::new_empty("Metadata frontier")?;
-    let base_frontier = runtime.projection_snapshot()?.frontier;
-    runtime.set_author_identity(0x0123_4567_89ab_cdef_0123_4567_89ab_cdef, Some("Author".to_string()))?;
-    assert_ne!(runtime.doc.state_frontiers().encode(), base_frontier);
-    assert_eq!(runtime.projection_snapshot()?.frontier, base_frontier);
-
-    runtime.apply_editor_commands(
-      1,
-      &base_frontier,
-      &[EditorSemanticCommand::InsertText {
-        at: DocumentOffset { paragraph: 0, byte: 0 },
-        text: "x".to_string(),
-        styles: RunStyles::default(),
-      }],
-      None,
-    )?;
-
-    assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "x");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_commands_reject_a_stale_projection_frontier() -> Result<()> {
-    let mut runtime = CrdtRuntime::new_empty("Stale frontier")?;
-    let base_frontier = runtime.projection_snapshot()?.frontier;
-    runtime.command(SemanticCommand::InsertText {
-      unicode_index: 1,
-      text: "remote".to_string(),
-      styles: RunStyles::default(),
-    })?;
-
-    let error = runtime
-      .apply_editor_commands(
-        1,
-        &base_frontier,
-        &[EditorSemanticCommand::InsertText {
-          at: DocumentOffset { paragraph: 0, byte: 0 },
-          text: "local".to_string(),
-          styles: RunStyles::default(),
-        }],
-        None,
-      )
-      .expect_err("stale editor commands must be rejected");
-
-    assert!(error.downcast_ref::<StaleProjectionError>().is_some());
-    assert_eq!(body_text(runtime.doc()).to_string(), "\nremote");
-    Ok(())
-  }
-
-  #[test]
-  fn editor_insert_after_object_uses_canonical_body_index() -> Result<()> {
-    let source = flowstate_document::document_from_input_blocks(
-      flowstate_document::DocumentTheme::default(),
-      vec![
-        InputBlock::Paragraph(input_paragraph("before")),
-        InputBlock::Image(flowstate_document::InputImageBlock {
-          asset_id: flowstate_document::AssetId(9),
-          alt_text: "figure".to_string(),
-          caption: None,
-          sizing: InputImageSizing::Intrinsic,
-          alignment: InputBlockAlignment::Center,
-        }),
-        InputBlock::Paragraph(input_paragraph("after")),
-      ],
-    );
-    let doc = flowstate_document::document_to_loro(&source, "Mixed editor offsets")?;
-    let mut runtime = CrdtRuntime::from_doc(doc, None, None)?;
-
-    runtime.apply_editor_commands(
-      1,
-      &[],
-      &[EditorSemanticCommand::InsertText {
-        at: DocumentOffset { paragraph: 1, byte: 2 },
-        text: "!".to_string(),
-        styles: RunStyles::default(),
-      }],
-      None,
-    )?;
-
-    let projection = runtime.projection_snapshot()?;
-    assert_eq!(flowstate_document::paragraph_text(&projection, 0), "before");
-    assert_eq!(flowstate_document::paragraph_text(&projection, 1), "af!ter");
-    Ok(())
-  }
-
-  #[test]
   fn remote_import_reports_pending_dependencies() -> Result<()> {
     let source = flowstate_document::new_loro_document("Source")?;
     let empty_vv = VersionVector::default();
@@ -8042,7 +5797,7 @@ mod tests {
     for (expected_ix, id) in projection.ids.paragraph_ids.iter().enumerate() {
       assert_eq!(index.paragraph_metadata_by_id.get(id).copied(), Some(expected_ix));
       assert_eq!(
-        index.paragraph_index_for_id(&projection, *id),
+        index.paragraph_index(*id),
         projection
           .ids
           .paragraph_ids
@@ -8054,7 +5809,7 @@ mod tests {
     for (expected_ix, id) in projection.ids.block_ids.iter().enumerate() {
       assert_eq!(index.block_anchor_by_id.get(id).copied(), Some(expected_ix));
       assert_eq!(
-        index.block_index_for_id(&projection, *id),
+        index.block_index(*id),
         projection
           .ids
           .block_ids
@@ -8063,8 +5818,8 @@ mod tests {
       );
     }
     // Absent ids fall back to `None` through both the index and the scan.
-    assert_eq!(index.paragraph_index_for_id(&projection, flowstate_document::new_paragraph_id()), None);
-    assert_eq!(index.block_index_for_id(&projection, flowstate_document::new_block_id()), None);
+    assert_eq!(index.paragraph_index(flowstate_document::new_paragraph_id()), None);
+    assert_eq!(index.block_index(flowstate_document::new_block_id()), None);
 
     // One search-unit span per block; one style-interval list per paragraph.
     assert_eq!(index.search_unit_spans.len(), projection.blocks.len());
@@ -8300,20 +6055,5 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "crdt_runtime/complexity_tests.rs"]
-mod complexity_tests;
-#[cfg(test)]
-#[path = "crdt_runtime/editor_transaction_tests.rs"]
-mod editor_transaction_tests;
-#[cfg(test)]
-#[path = "crdt_runtime/frontier_safety_tests.rs"]
-mod frontier_safety_tests;
-#[cfg(test)]
-#[path = "crdt_runtime/multi_peer_convergence_tests.rs"]
-mod multi_peer_convergence_tests;
-#[cfg(test)]
 #[path = "crdt_runtime/projection_repair_tests.rs"]
 mod projection_repair_tests;
-#[cfg(test)]
-#[path = "crdt_runtime/table_convergence_tests.rs"]
-mod table_convergence_tests;

@@ -303,7 +303,7 @@ impl RichTextEditor {
     Some((items, block_item_ranges, block_heights, sizes))
   }
 
-  pub(crate) fn benchmark_paragraph_item_sizes(
+  pub fn benchmark_paragraph_item_sizes(
     &mut self,
     width: Pixels,
     window: &mut Window,
@@ -363,7 +363,7 @@ impl RichTextEditor {
     }
   }
 
-  pub(crate) fn benchmark_invalidate_document_layout_caches(&mut self) {
+  pub fn benchmark_invalidate_document_layout_caches(&mut self) {
     self.invalidate_document_layout_caches();
   }
 

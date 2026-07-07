@@ -45,39 +45,42 @@ impl RichTextEditor {
     global_to_document_offset(&self.document, start)..global_to_document_offset(&self.document, end)
   }
 
-  fn replace_text_for_utf16_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) {
+  /// Loro-first (spec §5): one platform text replacement = typed intents
+  /// only. The UTF-16 range collapses into the selection, then the shared
+  /// caret-insert law (`write_insert_text_at_caret`) performs the replacement
+  /// — a non-caret selection groups its delete+insert as ONE undo group — and
+  /// a bare deletion is one `DeleteRange` intent. Returns whether a document
+  /// mutation committed.
+  fn replace_text_for_utf16_range(&mut self, range: Range<usize>, text: &str, cx: &mut Context<Self>) -> bool {
     if self.insert_text_into_selected_object_text(text, cx) {
-      return;
+      return true;
     }
     let offsets = self.utf16_range_to_document_offsets(range);
     let selection = EditorSelection::range(offsets.start, offsets.end);
     let before_selection = self.selection.clone();
     self.selection = selection;
-    if text.is_empty() {
-      if self.selection.is_caret() {
-        if self.selection != before_selection {
-          self.emit_selection_changed(cx);
-          self.reset_caret_blink(cx);
-          cx.notify();
-        }
-        return;
+    if text.is_empty() && self.selection.is_caret() {
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+        self.reset_caret_blink(cx);
+        cx.notify();
       }
-      self.apply_document_edit(cx, |editor, cx| {
-        editor.delete_selection_internal();
-        editor.after_text_mutation(cx);
-      });
-    } else {
-      self.insert_text_command(text, cx);
+      return false;
     }
+    let committed = if !self.can_write_collaboration() {
+      cx.notify();
+      false
+    } else if text.is_empty() {
+      self.write_delete_selection(cx)
+    } else {
+      self.write_insert_text_at_caret(text, cx)
+    };
     if self.selection != before_selection {
       self.emit_selection_changed(cx);
     }
+    committed
   }
 
-  #[cfg(test)]
-  pub(super) fn replace_selected_text_from_platform_for_test(&mut self, text: &str, cx: &mut Context<Self>) {
-    self.replace_text_for_utf16_range(self.selection_utf16_range(), text, cx);
-  }
 }
 
 #[hotpath::measure_all]
@@ -114,11 +117,18 @@ impl EntityInputHandler for RichTextEditor {
   }
 
   fn replace_text_in_range(&mut self, range: Option<Range<usize>>, text: &str, _: &mut Window, cx: &mut Context<Self>) {
+    // Composition commit / plain replacement (spec §5): when a marked
+    // (composition) range exists it is the replacement target — the shared
+    // intent path deletes it (write_delete_offset_range under the hood) and
+    // inserts the final text (write_insert_text_at_caret) as ONE undo group.
+    // With no composition, write_insert_text_at_caret handles selection
+    // replacement itself. Never a stale visual offset: anchors resolve
+    // against the current projection inside the write helpers.
     let range = range
       .or_else(|| self.ime_marked_range.clone())
       .unwrap_or_else(|| self.selection_utf16_range());
     self.ime_marked_range = None;
-    self.replace_text_for_utf16_range(range, text, cx);
+    let _ = self.replace_text_for_utf16_range(range, text, cx);
   }
 
   fn replace_and_mark_text_in_range(
@@ -129,12 +139,22 @@ impl EntityInputHandler for RichTextEditor {
     _: &mut Window,
     cx: &mut Context<Self>,
   ) {
+    // Composition preview (spec §5, minimal conversion): every marked-text
+    // update commits through typed intents as ONE undo-grouped pair — delete
+    // the previous marked range, insert the new marked text — via the shared
+    // caret-insert law; there is no direct projection mutation. The §5 end
+    // state is a full overlay-only composition (marked text NEVER in Loro
+    // until composition commit, anchored by a composition-start Loro cursor);
+    // until then `ime_marked_range` is render/IME-query bookkeeping only and
+    // is never used as mutation authority.
     let range = range
       .or_else(|| self.ime_marked_range.clone())
       .unwrap_or_else(|| self.selection_utf16_range());
     let mark_start = range.start;
-    self.replace_text_for_utf16_range(range, new_text, cx);
-    if new_text.is_empty() {
+    let committed = self.replace_text_for_utf16_range(range, new_text, cx);
+    if new_text.is_empty() || !committed {
+      // Nothing (or nothing new) is marked in the document — drop the marked
+      // range rather than let it drift from committed state.
       self.ime_marked_range = None;
       return;
     }

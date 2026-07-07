@@ -269,6 +269,14 @@ impl RichTextEditor {
     self.clear_drop_preview();
   }
 
+  /// Drag-drop text move, Loro-first (spec §5): ONE undo group of two typed
+  /// intents — delete the source range, then insert the dragged fragment at
+  /// the drop position. The fragment content was captured at drag start (in
+  /// `ActiveTextDrag`), BEFORE the delete; after the delete commits the
+  /// projection has changed, so the drop caret is recomputed in post-delete
+  /// coordinates and resolved to a `TextAnchor` through the reconciled
+  /// identity map inside the write helpers. No direct projection mutation,
+  /// no local history record — undo is the authority's grouped undo.
   fn move_rich_text_fragment(&mut self, drag: ActiveTextDrag, drop: DocumentOffset, cx: &mut Context<Self>) {
     if offset_in_range(drop, drag.source_range.clone()) {
       self.clear_drop_preview();
@@ -281,62 +289,48 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    let before_document = self.document.clone();
-    let before_selection = EditorSelection::range(drag.source_range.start, drag.source_range.end);
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    if drag.fragment.paragraphs.is_empty() {
+      self.clear_drop_preview();
+      return;
+    }
     let source_range = drag.source_range.clone();
+    // Drop position expressed in post-delete projection coordinates.
     let adjusted_drop = adjust_drop_after_source_delete(drop, source_range.clone());
-    let capture_start = source_range.start.paragraph.min(drop.paragraph);
-    let capture_end = source_range.end.paragraph.max(drop.paragraph).saturating_add(1);
-    let before_span = capture_document_span(&before_document, capture_start..capture_end);
-    let fid_before_delete = self.fidelity_caret_before();
-    self.selection = before_selection.clone();
-    self.fidelity_caret_set("move_rich_text_fragment/select-source", &fid_before_delete);
-    self.delete_selection_internal();
-    let inserted_start = adjusted_drop;
-    let inserted_end = insert_rich_fragment_at(&mut self.document, inserted_start, &drag.fragment);
-    let fid_before_insert = self.fidelity_caret_before();
-    self.selection = EditorSelection::collapsed(inserted_end);
-    self.fidelity_caret_set("move_rich_text_fragment/after-insert", &fid_before_insert);
+    self.begin_undo_group();
+    if !self.write_delete_offset_range(source_range.clone(), cx) {
+      self.end_undo_group();
+      self.clear_drop_preview();
+      return;
+    }
+    // The delete committed; the projection (and identity map) advanced. Land
+    // the caret at the recomputed drop position so the insert helpers anchor
+    // against the post-delete projection — never the stale pre-delete offset.
+    let caret = self.clamp_offset_to_document(adjusted_drop);
+    let fid_before = self.fidelity_caret_before();
+    self.selection = EditorSelection::collapsed(caret);
+    self.fidelity_caret_set("move_rich_text_fragment/drop-caret", &fid_before);
     self.emit_selection_changed(cx);
-    let paragraph_delta = self.document.paragraphs.len() as isize - before_document.paragraphs.len() as isize;
-    let after_count = before_span
-      .paragraphs
-      .len()
-      .saturating_add_signed(paragraph_delta)
-      .min(
-        self
-          .document
+    // Plain single-paragraph unstyled content moves as a plain text insert;
+    // anything styled or multi-paragraph moves as a rich fragment intent.
+    let plain_text = (drag.fragment.paragraphs.len() == 1)
+      .then(|| &drag.fragment.paragraphs[0])
+      .filter(|paragraph| paragraph.runs.iter().all(|run| run.styles == RunStyles::default()))
+      .map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()).collect::<String>());
+    match plain_text {
+      Some(text) => {
+        self.write_insert_text_at_caret(&text, cx);
+      },
+      None => {
+        let blocks = drag
+          .fragment
           .paragraphs
-          .len()
-          .saturating_sub(before_span.start_paragraph),
-      );
-    let after_span = capture_document_span(&self.document, before_span.start_paragraph..before_span.start_paragraph + after_count);
-    let semantic_commands = vec![SemanticEditCommand::ReplaceParagraphSpan {
-      start: Some(DocumentOffset {
-        paragraph: before_span.start_paragraph,
-        byte: 0,
-      }),
-      before: before_span,
-      after: after_span,
-    }];
-    self.record_local_history(EditRecord {
-      before_selection,
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::MoveRichText {
-        source_range,
-        adjusted_drop,
-        inserted_range: inserted_start..inserted_end,
-        fragment: drag.fragment,
-      }],
-      semantic_commands: semantic_commands.clone(),
-    });
-    self.after_text_mutation(cx);
-    self.mark_document_changed_with_ops(after_generation, true, Some(&semantic_commands), cx);
+          .into_iter()
+          .map(FragmentBlock::Paragraph)
+          .collect::<Vec<_>>();
+        self.write_insert_rich_fragment_at_caret(blocks, cx);
+      },
+    }
+    self.end_undo_group();
     self.clear_drop_preview();
   }
 

@@ -52,7 +52,7 @@ fn resolve_after_position(order: &[String], after: Option<&str>) -> usize {
 /// anchor-resolved position (skipped if already present), ensure the row record,
 /// and materialize one durable-coordinate cell per existing column from
 /// `row.cells` (empty fallback for any short row).
-pub(super) fn insert_table_row(
+pub(crate) fn insert_table_row(
   doc: &LoroDoc,
   table_block_id: BlockId,
   new_row_id: RowId,
@@ -102,7 +102,7 @@ pub(super) fn insert_table_row(
 /// and delete every deterministic-coordinate cell for the row (plus, defensively,
 /// any cell whose stored `row_id` field still names it). Convergent no-op when the
 /// row was already removed.
-pub(super) fn delete_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: RowId) -> Result<bool> {
+pub(crate) fn delete_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: RowId) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
     tracing::warn!(?table_block_id, "skipping table row delete because no Loro table maps to the projected block id");
     return Ok(false);
@@ -143,7 +143,7 @@ pub(super) fn delete_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: R
 
 /// §P2b `MoveTableRow`: `row_order.mov(index_of(row_id), target)` where `target`
 /// is resolved from `after_row` exactly as an insert-after position.
-pub(super) fn move_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: RowId, after_row: Option<RowId>) -> Result<bool> {
+pub(crate) fn move_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: RowId, after_row: Option<RowId>) -> Result<bool> {
   move_table_axis(
     doc,
     table_block_id,
@@ -154,7 +154,7 @@ pub(super) fn move_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: Row
 }
 
 /// §P2b `MoveTableColumn`: `column_order.mov(index_of(column_id), target)`.
-pub(super) fn move_table_column(doc: &LoroDoc, table_block_id: BlockId, column_id: ColumnId, after_column: Option<ColumnId>) -> Result<bool> {
+pub(crate) fn move_table_column(doc: &LoroDoc, table_block_id: BlockId, column_id: ColumnId, after_column: Option<ColumnId>) -> Result<bool> {
   move_table_axis(
     doc,
     table_block_id,
@@ -203,7 +203,7 @@ fn move_table_axis(doc: &LoroDoc, table_block_id: BlockId, order_key: &str, targ
 /// `column_order` at the anchor-resolved position, ensure the column record with
 /// its width, and materialize one durable-coordinate cell per existing row from
 /// `cells` (empty fallback for any short list).
-pub(super) fn insert_table_column(
+pub(crate) fn insert_table_column(
   doc: &LoroDoc,
   table_block_id: BlockId,
   new_column_id: ColumnId,
@@ -261,7 +261,7 @@ pub(super) fn insert_table_column(
 /// §P2b `DeleteTableColumn`: remove the id from `column_order`, delete its column
 /// record, and delete every deterministic-coordinate cell for the column (plus,
 /// defensively, any cell whose stored `column_id` field still names it).
-pub(super) fn delete_table_column(doc: &LoroDoc, table_block_id: BlockId, column_id: ColumnId) -> Result<bool> {
+pub(crate) fn delete_table_column(doc: &LoroDoc, table_block_id: BlockId, column_id: ColumnId) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
     tracing::warn!(?table_block_id, "skipping table column delete because no Loro table maps to the projected block id");
     return Ok(false);
@@ -302,7 +302,7 @@ pub(super) fn delete_table_column(doc: &LoroDoc, table_block_id: BlockId, column
 
 /// §P2b `ReplaceTableCell`: `ensure` the cell at the deterministic
 /// `(row_id, column_id)` coordinate and rewrite its spans + flow text from `cell`.
-pub(super) fn replace_table_cell(
+pub(crate) fn replace_table_cell(
   doc: &LoroDoc,
   table_block_id: BlockId,
   row_id: RowId,
@@ -323,7 +323,7 @@ pub(super) fn replace_table_cell(
 /// §P2b `SetTableCellSpan`: set the two span fields on the deterministic
 /// `(row_id, column_id)` cell. No-op when the coordinate cell does not exist yet
 /// (the topology repair materializes it, then a re-applied span converges).
-pub(super) fn set_table_cell_span(
+pub(crate) fn set_table_cell_span(
   doc: &LoroDoc,
   table_block_id: BlockId,
   row_id: RowId,
@@ -349,7 +349,7 @@ pub(super) fn set_table_cell_span(
 /// §P2b `SetTableColumnWidth`: the frozen command still addresses the column by
 /// its position (`column_ix`), so resolve that index against `column_order` to the
 /// durable column id, then write the width onto the id-keyed column record.
-pub(super) fn set_table_column_width(
+pub(crate) fn set_table_column_width(
   doc: &LoroDoc,
   table_block_id: BlockId,
   column_ix: usize,

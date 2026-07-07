@@ -11,7 +11,6 @@ use iroh::{
   endpoint::{Connection, PathId, RecvStream, SendStream},
   protocol::{AcceptError, ProtocolHandler},
 };
-use loro::{ExportMode, LoroDoc, VersionVector};
 use tokio::{
   sync::{OwnedSemaphorePermit, RwLock, Semaphore},
   time::timeout,
@@ -19,6 +18,7 @@ use tokio::{
 
 use crate::{
   capability::{SessionCapability, unix_now},
+  doc_io::DocIoHandle,
   ids::{BlobId, SessionId},
   proto_direct::{
     AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, MAX_PAYLOAD_LEN, WireCodec, decode_frame,
@@ -36,22 +36,32 @@ const FAST_LINK_RTT: Duration = Duration::from_millis(1);
 const DIRECT_RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
 static CLIENT_ENDPOINT: OnceLock<StdRwLock<Option<Endpoint>>> = OnceLock::new();
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct DirectSessionHandler {
   requests: Sender<DirectServeRequest>,
-  /// Shared read handle to the session's canonical Loro document. When present,
-  /// snapshot / update pulls are served DIRECTLY off it (see
-  /// [`serve_snapshot_off_actor`]) instead of queueing a `DirectServeRequest`
-  /// behind the mutation actor's FIFO — so a peer's recovery pull cannot be
-  /// starved behind the local user's edit backlog (which is what left large-doc
-  /// sessions unable to converge). `None` falls back to the actor-served path.
-  read_doc: Option<LoroDoc>,
+  /// Handle to the session's document I/O service. When present, snapshot /
+  /// update pulls are served through it (see [`serve_snapshot_via_io`]): the
+  /// I/O thread answers them under the write gate (Loro-first spec I-9a — a
+  /// raw ungated `LoroDoc` read is a commit barrier that can force-commit
+  /// mid-intent state, so the old shared read-handle path is outlawed), and
+  /// snapshot exports fork under the gate + export off it, so a peer's
+  /// recovery pull still cannot be starved behind local edits. `None` falls
+  /// back to the session-served request channel.
+  io: Option<DocIoHandle>,
 }
 
 impl DirectSessionHandler {
   #[must_use]
-  pub fn new(requests: Sender<DirectServeRequest>, read_doc: Option<LoroDoc>) -> Self {
-    Self { requests, read_doc }
+  pub fn new(requests: Sender<DirectServeRequest>, io: Option<DocIoHandle>) -> Self {
+    Self { requests, io }
+  }
+}
+
+impl std::fmt::Debug for DirectSessionHandler {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("DirectSessionHandler")
+      .field("has_io", &self.io.is_some())
+      .finish_non_exhaustive()
   }
 }
 
@@ -190,16 +200,16 @@ impl DirectServeState {
 
     match request {
       DirectRequest::Snapshot { .. } => {
-        if let Some(read_doc) = handler.read_doc.clone() {
-          serve_snapshot_off_actor(session, read_doc).await
+        if let Some(io) = handler.io.clone() {
+          serve_snapshot_via_io(session, io).await
         } else {
           request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Snapshot { reply }).await
         }
       },
       DirectRequest::Updates { have_vv, .. } => {
         tracing::trace!(%session, have_vv_bytes = have_vv.len(), "serving collaboration direct updates request");
-        if let Some(read_doc) = handler.read_doc.clone() {
-          serve_updates_off_actor(session, read_doc, have_vv).await
+        if let Some(io) = handler.io.clone() {
+          serve_updates_via_io(session, io, have_vv).await
         } else {
           request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates { have_vv, reply }).await
         }
@@ -457,48 +467,34 @@ where
   }
 }
 
-/// Serve a snapshot pull directly from the shared Loro read handle, bypassing the
-/// mutation actor's FIFO so it can't be starved behind the local user's edits. The
-/// export is a blocking CPU/lock operation, so it runs on a blocking thread rather
-/// than stalling an async worker; Loro's internal locks keep it safe against
-/// concurrent edits on the actor thread (the runtime only mutates its doc).
-async fn serve_snapshot_off_actor(session: SessionId, read_doc: LoroDoc) -> ServeOutcome {
-  let export = tokio::task::spawn_blocking(move || read_doc.export(ExportMode::Snapshot).context("exporting Loro snapshot")).await;
-  match export {
-    Ok(Ok(bytes)) => {
-      tracing::trace!(%session, bytes = bytes.len(), "served collaboration snapshot off the mutation actor");
+/// Serve a snapshot pull through the document I/O service. The gate-held part
+/// is a brief `fork()`; the actual snapshot encode happens off-gate on the I/O
+/// thread (spec I-9a long-export rule), so a large snapshot neither stalls
+/// typing nor gets starved behind local edits.
+async fn serve_snapshot_via_io(session: SessionId, io: DocIoHandle) -> ServeOutcome {
+  match io.snapshot_bytes().await {
+    Ok(bytes) => {
+      tracing::trace!(%session, bytes = bytes.len(), "served collaboration snapshot via the document I/O service");
       ServeOutcome::Payload(bytes)
     },
-    Ok(Err(error)) => {
-      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration snapshot failed");
-      ServeOutcome::Header(DirectResponseHeader::NotFound)
-    },
     Err(error) => {
-      tracing::warn!(%session, error = %error, "collaboration snapshot export task failed");
+      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration snapshot failed");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
   }
 }
 
-/// Serve an incremental-updates pull directly from the shared Loro read handle,
-/// off the mutation actor's queue (see [`serve_snapshot_off_actor`]).
-async fn serve_updates_off_actor(session: SessionId, read_doc: LoroDoc, have_vv: Vec<u8>) -> ServeOutcome {
-  let export = tokio::task::spawn_blocking(move || {
-    let remote_vv = VersionVector::decode(&have_vv).context("decoding remote Loro version vector")?;
-    read_doc.export(ExportMode::updates(&remote_vv)).context("exporting Loro updates for anti-entropy")
-  })
-  .await;
-  match export {
-    Ok(Ok(bytes)) => {
-      tracing::trace!(%session, bytes = bytes.len(), "served collaboration updates off the mutation actor");
+/// Serve an incremental-updates pull through the document I/O service (see
+/// [`serve_snapshot_via_io`]); the version-vector decode and gate-held export
+/// happen on the I/O thread.
+async fn serve_updates_via_io(session: SessionId, io: DocIoHandle, have_vv: Vec<u8>) -> ServeOutcome {
+  match io.export_updates_for(have_vv).await {
+    Ok(bytes) => {
+      tracing::trace!(%session, bytes = bytes.len(), "served collaboration updates via the document I/O service");
       ServeOutcome::Payload(bytes)
     },
-    Ok(Err(error)) => {
-      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration updates failed");
-      ServeOutcome::Header(DirectResponseHeader::NotFound)
-    },
     Err(error) => {
-      tracing::warn!(%session, error = %error, "collaboration updates export task failed");
+      tracing::warn!(%session, error = %format_args!("{error:#}"), "exporting collaboration updates failed");
       ServeOutcome::Header(DirectResponseHeader::NotFound)
     },
   }

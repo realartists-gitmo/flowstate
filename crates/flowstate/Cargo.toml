@@ -47,6 +47,7 @@ hotpath = [
   "flowstate-document/hotpath",
   "flowstate-docx/hotpath",
   "flowstate-flow/hotpath",
+  "flowstate-collab/hotpath",
 ]
 hotpath-cpu = [
   "hotpath",
@@ -54,6 +55,7 @@ hotpath-cpu = [
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
   "flowstate-flow/hotpath-cpu",
+  "flowstate-collab/hotpath-cpu",
 ]
 hotpath-alloc = [
   "hotpath",
@@ -61,6 +63,7 @@ hotpath-alloc = [
   "flowstate-document/hotpath-alloc",
   "flowstate-docx/hotpath-alloc",
   "flowstate-flow/hotpath-alloc",
+  "flowstate-collab/hotpath-alloc",
 ]
 profiler = ["hotpath", "hotpath-alloc", "hotpath-cpu"]
 

@@ -260,8 +260,12 @@ impl RichTextEditor {
     }
   }
 
+  /// Loro-first: the edit primitives inside the closure commit through the
+  /// write authority themselves — there is nothing to capture, diff, replay,
+  /// or locally record. This wrapper survives only as a call-site-stable
+  /// pass-through.
   pub(super) fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
-    self.apply_document_edit_with_capture_range(cx, None, edit);
+    edit(self, cx);
   }
 
 }
