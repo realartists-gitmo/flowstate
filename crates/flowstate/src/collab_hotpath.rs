@@ -1,0 +1,270 @@
+//! Headless collaboration hotpath soak (field diagnosis, 2026-07-07).
+//!
+//! Reproduces the impact-doc slowness classes without a window or network:
+//!
+//! 1. **Local typing** — intents through the real `LocalDocHandle` write path
+//!    plus the editor-side ordered-stream drain and patch apply (the exact
+//!    projection work `sync_projection_from_authority` performs, minus GPU
+//!    layout).
+//! 2. **Paragraph splits** — the structural local-edit shape.
+//! 3. **Remote imports** — a second peer runtime types text and splits
+//!    paragraphs; its update chunks import into the main runtime under the
+//!    gate (the `doc_io` `import-remote-update` shape from the field logs),
+//!    then drain into the simulated editor.
+//!
+//! Run with `--features hotpath-cpu` for the per-stage breakdown table that
+//! prints on exit; the wall-clock distributions below print unconditionally.
+//!
+//! ```text
+//! cargo run --release --features hotpath-cpu -- collab-hotpath <doc.docx> [--audit off|N]
+//! ```
+
+use std::{
+  num::NonZeroU32,
+  path::Path,
+  time::{Duration, Instant},
+};
+
+use flowstate_collab::{
+  crdt_runtime::CrdtRuntime,
+  local_write::{GateHolder, InsertTextIntent, LocalDocHandle, LocalWriteAuthority, LocalWriteConfig, SplitParagraphIntent, TextAnchor},
+};
+use flowstate_document::{DocumentProjection, ParagraphId, ParagraphStyle, ProjectionStreamItem};
+
+pub struct CollabHotpathOptions {
+  pub keystrokes: usize,
+  pub splits: usize,
+  pub imports: usize,
+  /// `None` → profile default sampling; `Some(None)` → audit off;
+  /// `Some(Some(n))` → audit every n-th intent (release builds only — debug
+  /// builds always audit every commit).
+  pub audit: Option<Option<NonZeroU32>>,
+}
+
+impl Default for CollabHotpathOptions {
+  fn default() -> Self {
+    Self {
+      keystrokes: 160,
+      splits: 8,
+      imports: 24,
+      audit: None,
+    }
+  }
+}
+
+pub fn run(path: &Path, options: &CollabHotpathOptions) -> anyhow::Result<()> {
+  let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
+  println!("collab-hotpath soak — build profile: {build_profile}");
+
+  // ---- Load the document exactly the way the app open path does -------------
+  let load_started = Instant::now();
+  let runtime = load_runtime(path)?;
+  println!("document load: {:?}", load_started.elapsed());
+
+  let mut config = LocalWriteConfig::default();
+  if let Some(audit) = options.audit {
+    config.release_audit_sample = audit;
+  }
+  println!(
+    "release audit sampling: {:?} (ignored in debug builds — those audit every commit)",
+    config.release_audit_sample
+  );
+  let (handle, gate) = LocalDocHandle::new(runtime, config);
+
+  let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let paragraph_count = projection.ids.paragraph_ids.len();
+  let body_chars: usize = (0..projection.paragraphs.len())
+    .map(|ix| flowstate_document::paragraph_text(&projection, ix).chars().count())
+    .sum();
+  println!("document shape: {paragraph_count} paragraphs, {body_chars} body chars, {} blocks", projection.blocks.len());
+
+  // ---- Simulated editor: canonical attach + ordered-stream drains ------------
+  let mut editor = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
+  drain_into_editor(&handle, &mut editor)?;
+
+  let target = mid_paragraph(&editor);
+
+  // ---- Phase 1: local typing --------------------------------------------------
+  let mut commit_times = Vec::with_capacity(options.keystrokes);
+  let mut editor_apply_times = Vec::with_capacity(options.keystrokes);
+  for i in 0..options.keystrokes {
+    let started = Instant::now();
+    handle
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(target, usize::MAX),
+        text: ((b'a' + (i % 26) as u8) as char).to_string(),
+        style_override: None,
+      })
+      .map_err(|error| anyhow::anyhow!("typing intent rejected: {error}"))?;
+    commit_times.push(started.elapsed());
+    let apply_started = Instant::now();
+    drain_into_editor(&handle, &mut editor)?;
+    editor_apply_times.push(apply_started.elapsed());
+  }
+  summarize("local keystroke (intent commit, gate-held)", &mut commit_times);
+  summarize("local keystroke (editor drain + patch apply)", &mut editor_apply_times);
+
+  // ---- Phase 2: local paragraph splits ---------------------------------------
+  let mut split_times = Vec::with_capacity(options.splits);
+  for _ in 0..options.splits {
+    let started = Instant::now();
+    handle
+      .split_paragraph(SplitParagraphIntent {
+        at: TextAnchor::new(target, usize::MAX),
+        inherited_style: ParagraphStyle::Normal,
+      })
+      .map_err(|error| anyhow::anyhow!("split intent rejected: {error}"))?;
+    split_times.push(started.elapsed());
+    drain_into_editor(&handle, &mut editor)?;
+  }
+  summarize("local split (intent commit, gate-held)", &mut split_times);
+
+  // ---- Phase 3: remote imports -------------------------------------------------
+  // A converged peer produced from the main doc's own snapshot, editing through
+  // its own full write path; its update chunks import here like session_io does.
+  let snapshot = {
+    let guard = gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+    guard
+      .doc()
+      .export(loro::ExportMode::Snapshot)
+      .map_err(|error| anyhow::anyhow!("snapshot export: {error}"))?
+  };
+  let peer_doc = loro::LoroDoc::new();
+  peer_doc
+    .import_with(&snapshot, "remote")
+    .map_err(|error| anyhow::anyhow!("peer join import: {error}"))?;
+  // Baseline BEFORE runtime startup: `from_doc` records replica metadata as
+  // new commits, and the peer's typing ops causally depend on them — update
+  // exports must include them or every main-side import reports pending
+  // missing dependencies (and falls back to a full rebuild).
+  let snapshot_vv = peer_doc.state_vv();
+  let peer_runtime = CrdtRuntime::from_doc(peer_doc, None, None)?;
+  let (peer_handle, peer_gate) = LocalDocHandle::new(
+    peer_runtime,
+    LocalWriteConfig {
+      release_audit_sample: None,
+    },
+  );
+  let peer_projection = peer_handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+  let peer_target = mid_paragraph(&peer_projection);
+  let mut peer_vv = snapshot_vv;
+
+  let mut text_import_times = Vec::new();
+  let mut structural_import_times = Vec::new();
+  let mut import_apply_times = Vec::new();
+  for i in 0..options.imports {
+    // Realistic peer traffic: mostly short typing bursts, every 6th chunk is
+    // structural (an Enter) — the field logs' import mix.
+    let structural = i % 6 == 5;
+    if structural {
+      peer_handle
+        .split_paragraph(SplitParagraphIntent {
+          at: TextAnchor::new(peer_target, usize::MAX),
+          inherited_style: ParagraphStyle::Normal,
+        })
+        .map_err(|error| anyhow::anyhow!("peer split rejected: {error}"))?;
+    } else {
+      for _ in 0..5 {
+        peer_handle
+          .insert_text(InsertTextIntent {
+            at: TextAnchor::new(peer_target, usize::MAX),
+            text: "r".to_string(),
+            style_override: None,
+          })
+          .map_err(|error| anyhow::anyhow!("peer typing rejected: {error}"))?;
+      }
+    }
+    let update = {
+      let guard = peer_gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+      let update = guard
+        .doc()
+        .export(loro::ExportMode::updates(&peer_vv))
+        .map_err(|error| anyhow::anyhow!("peer update export: {error}"))?;
+      peer_vv = guard.doc().state_vv();
+      update
+    };
+    let started = Instant::now();
+    {
+      let mut guard = gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+      let events = guard.import_remote_update(&update)?;
+      for event in &events {
+        if let flowstate_collab::crdt_runtime::RuntimeEvent::ProjectionUpdated { invalidation, .. } = event {
+          println!(
+            "  import {i} took the REBUILD path (structural={structural}, reason={:?})",
+            invalidation.fallback_reason
+          );
+        }
+      }
+    }
+    if structural {
+      structural_import_times.push(started.elapsed());
+    } else {
+      text_import_times.push(started.elapsed());
+    }
+    let apply_started = Instant::now();
+    drain_into_editor(&handle, &mut editor)?;
+    import_apply_times.push(apply_started.elapsed());
+  }
+  summarize("remote import (text chunk, gate-held)", &mut text_import_times);
+  summarize("remote import (structural chunk, gate-held)", &mut structural_import_times);
+  summarize("remote import (editor drain + apply)", &mut import_apply_times);
+
+  // ---- Convergence proof: the soak measured real work, not dropped work -------
+  let canonical = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
+  anyhow::ensure!(editor.frontier == canonical.frontier, "simulated editor diverged from canonical frontier");
+  println!("\nconverged: editor tracked all {} paragraphs at the canonical frontier", canonical.paragraphs.len());
+  Ok(())
+}
+
+fn load_runtime(path: &Path) -> anyhow::Result<CrdtRuntime> {
+  let is_docx = path
+    .extension()
+    .and_then(|extension| extension.to_str())
+    .is_some_and(|extension| extension.eq_ignore_ascii_case("docx"));
+  if is_docx {
+    let (imported, _) = flowstate_docx::import_docx_to_loro(path, "Hotpath Soak")?;
+    return Ok(CrdtRuntime::from_imported_document(imported)?);
+  }
+  Ok(CrdtRuntime::open_package(path)?)
+}
+
+fn mid_paragraph(projection: &DocumentProjection) -> ParagraphId {
+  projection.ids.paragraph_ids[projection.ids.paragraph_ids.len() / 2]
+}
+
+fn drain_into_editor(handle: &LocalDocHandle, editor: &mut DocumentProjection) -> anyhow::Result<()> {
+  for item in handle.drain_projection_stream().map_err(|error| anyhow::anyhow!("{error}"))? {
+    match item {
+      ProjectionStreamItem::Patches(batch) => {
+        if batch.new_frontier == editor.frontier {
+          continue;
+        }
+        // Mirror `sync_projection_from_authority` exactly: clone, apply to the
+        // clone, install — so the measured cost is the real editor-side cost.
+        let mut document = editor.clone();
+        flowstate_document::apply_projection_patch_batch(&mut document, &batch)
+          .map_err(|error| anyhow::anyhow!("ordered batch failed: {error:?}"))?;
+        *editor = document;
+      },
+      ProjectionStreamItem::Replace(document) => *editor = *document,
+    }
+  }
+  Ok(())
+}
+
+fn summarize(label: &str, times: &mut Vec<Duration>) {
+  if times.is_empty() {
+    println!("{label:<48} (no samples)");
+    return;
+  }
+  times.sort_unstable();
+  let pick = |q: f64| times[((times.len() - 1) as f64 * q) as usize];
+  println!(
+    "{label:<48} n={:<4} p50={:>10.3?} p90={:>10.3?} p99={:>10.3?} max={:>10.3?}",
+    times.len(),
+    pick(0.50),
+    pick(0.90),
+    pick(0.99),
+    times[times.len() - 1],
+  );
+}
