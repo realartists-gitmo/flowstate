@@ -171,6 +171,13 @@ impl CrdtRuntimeHandle {
       .await
   }
 
+  /// Test-only: occupy the single actor worker for `duration`, letting a harness hold the
+  /// FIFO deterministically to observe queueing/starvation and the hang watchdog.
+  #[cfg(test)]
+  pub async fn test_block(&self, duration: std::time::Duration) -> Result<()> {
+    self.request(|reply| RuntimeRequest::TestBlock { duration, reply }).await
+  }
+
   async fn request<T: Send + 'static>(&self, make: impl FnOnce(Sender<Result<T>>) -> RuntimeRequest) -> Result<T> {
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     self
@@ -252,6 +259,14 @@ enum RuntimeRequest {
     user_id: u128,
     display_name: Option<String>,
     reply: Sender<Result<Vec<RuntimeEvent>>>,
+  },
+  /// Test-only: occupy the single actor worker for a fixed duration, so a starvation /
+  /// hang-watchdog harness can deterministically hold the FIFO without a machine-dependent
+  /// heavy payload.
+  #[cfg(test)]
+  TestBlock {
+    duration: std::time::Duration,
+    reply: Sender<Result<()>>,
   },
 }
 
@@ -357,6 +372,11 @@ fn runtime_loop(mut runtime: CrdtRuntime, receiver: Receiver<RuntimeRequest>) {
       } => {
         send_reply(reply, runtime.set_author_identity(user_id, display_name));
       },
+      #[cfg(test)]
+      RuntimeRequest::TestBlock { duration, reply } => {
+        std::thread::sleep(duration);
+        send_reply(reply, Ok(()));
+      },
     }
     if let Ok(mut slot) = in_flight.lock() {
       *slot = None;
@@ -419,6 +439,8 @@ fn runtime_request_kind(request: &RuntimeRequest) -> &'static str {
     RuntimeRequest::SnapshotBytes { .. } => "snapshot-bytes",
     RuntimeRequest::ResolvePresenceCarets { .. } => "resolve-presence-carets",
     RuntimeRequest::PresenceSelection { .. } => "presence-selection",
+    #[cfg(test)]
+    RuntimeRequest::TestBlock { .. } => "test-block",
     _ => "other",
   }
 }
@@ -515,6 +537,83 @@ mod tests {
 
     // The runtime stays usable after binding the durable author identity.
     handle.projection_snapshot().await?;
+    Ok(())
+  }
+
+  // Class 2 — the CRDT actor is a single-threaded FIFO: a slow request blocks every
+  // request queued behind it (this is what made imports "not arrive / arrive extremely
+  // late" in the field). These tests pin BOTH the hazard (FIFO reads starve behind a slow
+  // request) and the mitigation (`read_doc` bypasses the FIFO and stays responsive), using
+  // the test-only `test_block` hook so the timing is deterministic rather than payload- and
+  // machine-dependent.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+  async fn slow_request_starves_fifo_reads_but_not_read_doc() -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let handle = CrdtRuntimeHandle::spawn(CrdtRuntime::new_empty("Actor starvation")?)?;
+
+    // Baseline: a FIFO read on an idle actor is fast.
+    let idle = Instant::now();
+    handle.projection_snapshot().await?;
+    let idle_read = idle.elapsed();
+    assert!(idle_read < Duration::from_millis(200), "idle projection_snapshot should be fast, took {idle_read:?}");
+
+    // Occupy the single worker for 800ms.
+    let blocker_handle = handle.clone();
+    let blocker = tokio::spawn(async move { blocker_handle.test_block(Duration::from_millis(800)).await });
+    // Let the block be dequeued and start occupying the worker.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+
+    // read_doc() serves off the canonical doc clone, NOT the FIFO — stays responsive.
+    let bypass = Instant::now();
+    let _doc = handle.read_doc();
+    let bypass_read = bypass.elapsed();
+    assert!(
+      bypass_read < Duration::from_millis(200),
+      "read_doc must bypass the FIFO and stay responsive while the actor is blocked (took {bypass_read:?})"
+    );
+
+    // A FIFO request submitted while the actor is blocked is starved until the block clears.
+    let starved = Instant::now();
+    handle.projection_snapshot().await?;
+    let starved_read = starved.elapsed();
+    assert!(
+      starved_read >= Duration::from_millis(500),
+      "a FIFO read behind a slow request must be starved by the single actor thread (waited only {starved_read:?})"
+    );
+
+    blocker.await??;
+    Ok(())
+  }
+
+  /// FIFO ordering under concurrency: requests are served strictly in submission order, so a
+  /// batch submitted concurrently completes only after an in-flight slow request — the
+  /// property the delivery/anti-entropy layers rely on for causal update application.
+  #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+  async fn actor_serves_requests_in_fifo_order_behind_a_slow_request() -> Result<()> {
+    use std::time::{Duration, Instant};
+
+    let handle = CrdtRuntimeHandle::spawn(CrdtRuntime::new_empty("Actor FIFO")?)?;
+    let blocker_handle = handle.clone();
+    let blocker = tokio::spawn(async move { blocker_handle.test_block(Duration::from_millis(400)).await });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    // Fan out several reads behind the block; each must wait for the block to clear.
+    let start = Instant::now();
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+      let h = handle.clone();
+      tasks.push(tokio::spawn(async move { h.oplog_version_vector().await }));
+    }
+    for task in tasks {
+      task.await??;
+    }
+    let elapsed = start.elapsed();
+    assert!(
+      elapsed >= Duration::from_millis(300),
+      "8 reads behind a 400ms block must all wait for the single worker (finished in {elapsed:?})"
+    );
+    blocker.await??;
     Ok(())
   }
 }

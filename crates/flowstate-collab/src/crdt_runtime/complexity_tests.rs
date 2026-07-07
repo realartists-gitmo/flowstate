@@ -30,7 +30,7 @@ use super::CrdtRuntime;
 
 /// A canonical Loro doc of `paragraphs` paragraphs with `images` images spread through it.
 fn large_loro_doc(paragraphs: usize, images: usize) -> LoroDoc {
-  let image_every = if images == 0 { usize::MAX } else { (paragraphs / images).max(1) };
+  let image_every = paragraphs.checked_div(images).unwrap_or(usize::MAX).max(1);
   let mut blocks = Vec::with_capacity(paragraphs + images);
   for ix in 0..paragraphs {
     blocks.push(InputBlock::Paragraph(InputParagraph {

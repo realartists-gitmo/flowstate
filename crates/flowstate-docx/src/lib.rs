@@ -1,5 +1,7 @@
 mod cleaner;
 mod exporter;
+#[cfg(test)]
+mod import_roundtrip_tests;
 mod interpreter;
 mod pdf;
 mod pdf_recovery;

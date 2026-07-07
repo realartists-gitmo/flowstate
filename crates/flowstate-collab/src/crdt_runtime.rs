@@ -8306,6 +8306,9 @@ mod complexity_tests;
 #[path = "crdt_runtime/editor_transaction_tests.rs"]
 mod editor_transaction_tests;
 #[cfg(test)]
+#[path = "crdt_runtime/frontier_safety_tests.rs"]
+mod frontier_safety_tests;
+#[cfg(test)]
 #[path = "crdt_runtime/multi_peer_convergence_tests.rs"]
 mod multi_peer_convergence_tests;
 #[cfg(test)]
