@@ -117,10 +117,14 @@ mod tests {
     }
   }
 
-  /// Full-mesh sync: every peer pulls every other peer's new history. Two passes
-  /// so transitively-learned history also converges.
+  /// Full-mesh sync, iterated to quiescence (mirror of intent_fuzz):
+  /// importing an undo can COMMIT convergent repairs (records whose cursor
+  /// anchors died with the deleted content), and those repair updates need
+  /// delivery too. A bounded pass count keeps a non-converging repair loop
+  /// from masquerading as convergence.
   fn sync_all(peers: &mut [Peer]) {
-    for _ in 0..2 {
+    for _pass in 0..8 {
+      let before: Vec<_> = peers.iter().map(Peer::state_vv).collect();
       for from in 0..peers.len() {
         let from_vv_now = peers[from].state_vv();
         for to in 0..peers.len() {
@@ -131,9 +135,18 @@ mod tests {
           let bytes = peers[from].export_updates_since(&since);
           peers[to].import(&bytes);
           peers[to].synced_vv[from] = from_vv_now.clone();
+          if std::env::var("FUZZ_PER_OP_CHECK").is_ok()
+            && let Err(reason) = projections_agree(&peers[to].projection(), &peers[to].fresh_projection())
+          {
+            panic!("sync pass {_pass}: peer {to} deviates from own canonical after importing from {from}: {reason}");
+          }
         }
       }
+      if peers.iter().map(Peer::state_vv).collect::<Vec<_>>() == before {
+        return;
+      }
     }
+    panic!("sync_all did not quiesce within 8 passes (non-converging repair loop?)");
   }
 
   // ---------------------------------------------------------------------------
@@ -240,22 +253,42 @@ mod tests {
         return Err(format!("paragraph[{ix}] text {:?} != {:?}", paragraph_text(left, ix), paragraph_text(right, ix)));
       }
       if left.paragraphs[ix].style != right.paragraphs[ix].style {
-        return Err(format!("paragraph[{ix}] style differs"));
+        return Err(format!(
+          "paragraph[{ix}] style differs: left {:?} right {:?} (kinds: {:?})",
+          left.paragraphs[ix].style,
+          right.paragraphs[ix].style,
+          left.blocks.iter().map(block_kind).collect::<Vec<_>>()
+        ));
       }
       if left.paragraphs[ix].runs != right.paragraphs[ix].runs {
         return Err(format!("paragraph[{ix}] runs differ: {:?} != {:?}", left.paragraphs[ix].runs, right.paragraphs[ix].runs));
       }
     }
     if left.ids.paragraph_ids != right.ids.paragraph_ids {
-      return Err("paragraph ids differ".to_string());
+      return Err(format!(
+        "paragraph ids differ:\n  left  {:?}\n  right {:?}",
+        left.ids.paragraph_ids, right.ids.paragraph_ids
+      ));
     }
     if left.ids.block_ids != right.ids.block_ids {
-      return Err("block ids differ".to_string());
+      return Err(format!(
+        "block ids differ:\n  left  {:?}\n  right {:?}",
+        left.ids.block_ids, right.ids.block_ids
+      ));
     }
     blocks_agree(left, right)
   }
 
   fn assert_converged(peers: &[Peer], context: &str) {
+    // Self-consistency first (classifier, mirror of intent_fuzz): a peer whose
+    // maintained projection deviates from a fresh rematerialization of its OWN
+    // canonical state is a derivation bug; self-consistent peers that disagree
+    // with each other are CRDT-level divergence.
+    for (ix, peer) in peers.iter().enumerate() {
+      if let Err(reason) = projections_agree(&peer.projection(), &peer.fresh_projection()) {
+        panic!("{context}: peer {ix} projection deviates from own canonical: {reason}");
+      }
+    }
     let reference_text = peers[0].body_text();
     let reference = peers[0].projection();
     for (ix, peer) in peers.iter().enumerate().skip(1) {
@@ -460,7 +493,11 @@ mod tests {
     let paragraph = projection.ids.paragraph_ids[paragraph_ix];
     let text_len = paragraph_text_len(&projection.paragraphs[paragraph_ix]);
     let byte = rng.below(text_len + 1);
-    match rng.below(10) {
+    let text_arm = rng.below(10);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: text sub-arm {text_arm} paragraph_ix {paragraph_ix} byte {byte}");
+    }
+    match text_arm {
       0..=3 => {
         let text = if rng.below(6) == 0 { "\u{2028}".to_string() } else { format!("s{step}") };
         peer
@@ -547,7 +584,11 @@ mod tests {
     let equations: Vec<usize> = (0..projection.blocks.len())
       .filter(|ix| matches!(projection.blocks[*ix], Block::Equation(_)))
       .collect();
-    match rng.below(9) {
+    let object_arm = rng.below(9);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: object sub-arm {object_arm} paragraph_ix {paragraph_ix}");
+    }
+    match object_arm {
       // InsertObject at an identity-anchored position (byte 0 = before the
       // paragraph's block, byte > 0 = after it — both positions fuzzed).
       0..=1 => {
@@ -677,7 +718,11 @@ mod tests {
     let row = table.rows[rng.below(table.rows.len())].id;
     let column = table.columns[rng.below(table.columns.len())].id;
     let column_ids: Vec<ColumnId> = table.columns.iter().map(|c| c.id).collect();
-    let intent = match rng.below(9) {
+    let table_arm = rng.below(9);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: table sub-arm {table_arm} row {row:?} column {column:?}");
+    }
+    let intent = match table_arm {
       0 => TableIntent::InsertRow {
         table: table_id,
         after_row: if rng.below(3) == 0 { None } else { Some(row) },
@@ -736,19 +781,33 @@ mod tests {
 
   /// ~60% text coordinate stress / ~40% object block-structure ops.
   fn random_structural_intent(rng: &mut Rng, peer: &Peer, step: usize) -> Result<(), WriteRejected> {
-    if rng.below(10) < 6 {
-      random_text_intent(rng, peer, step)
-    } else {
-      random_object_intent(rng, peer, step)
+    let arm = rng.below(10);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: structural arm {arm}");
+    }
+    match arm {
+      0..=4 => random_text_intent(rng, peer, step),
+      // Undo/redo of OBJECT-structural history under concurrency (spec §10):
+      // intent_fuzz covers body-text undo; this leg covers undoing object
+      // inserts/moves/replaces and their transforms against remote edits.
+      5 => peer.handle.apply_undo().map(|_| ()),
+      6 => peer.handle.apply_redo().map(|_| ()),
+      _ => random_object_intent(rng, peer, step),
     }
   }
 
-  /// ~55% text stress / ~45% table ops (the old `table_op_command` mix).
+  /// ~50% text stress / ~35% table ops / ~15% undo-redo (durable-id table
+  /// history under undo transforms).
   fn random_table_mix_intent(rng: &mut Rng, peer: &Peer, step: usize) -> Result<(), WriteRejected> {
-    if rng.below(100) < 55 {
-      random_text_intent(rng, peer, step)
-    } else {
-      random_table_intent(rng, peer, step)
+    let arm = rng.below(100);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: table-mix arm {arm}");
+    }
+    match arm {
+      0..=49 => random_text_intent(rng, peer, step),
+      50..=57 => peer.handle.apply_undo().map(|_| ()),
+      58..=64 => peer.handle.apply_redo().map(|_| ()),
+      _ => random_table_intent(rng, peer, step),
     }
   }
 
@@ -782,11 +841,29 @@ mod tests {
     sync_all(&mut peers);
     assert_converged(&peers, &format!("seed {seed} post-fixture"));
 
+    let per_op_check = std::env::var("FUZZ_PER_OP_CHECK").is_ok();
     for round in 0..rounds {
       for op in 0..ops_per_round {
         let peer_ix = rng.below(peers_n);
         let step = round * ops_per_round + op;
         tolerate(generator(&mut rng, &peers[peer_ix], step), seed, round, op);
+        if per_op_check {
+          let maintained = peers[peer_ix].projection();
+          let fresh = peers[peer_ix].fresh_projection();
+          eprintln!(
+            "  after step {step}: maintained={:?} fresh={:?}",
+            maintained.ids.paragraph_ids.iter().map(|id| id.0 % 100000).collect::<Vec<_>>(),
+            fresh.ids.paragraph_ids.iter().map(|id| id.0 % 100000).collect::<Vec<_>>(),
+          );
+          if let Err(reason) = projections_agree(&maintained, &fresh) {
+            let fresh_again = peers[peer_ix].fresh_projection();
+            let determinism = match projections_agree(&fresh, &fresh_again) {
+              Ok(()) => "fresh is deterministic".to_string(),
+              Err(inner) => format!("fresh is NON-DETERMINISTIC: {inner}"),
+            };
+            panic!("seed {seed} round {round} op {op} (peer {peer_ix}): projection deviates from own canonical ({determinism}): {reason}");
+          }
+        }
       }
       sync_all(&mut peers);
       assert_converged(&peers, &format!("seed {seed} round {round}"));
@@ -1037,5 +1114,158 @@ mod tests {
       matches!(style, ParagraphStyle::Custom(2) | ParagraphStyle::Custom(3)),
       "converged paragraph style must be one of the concurrently applied styles, got {style:?}"
     );
+  }
+
+  /// Minimal repro scaffold for the undo+table derivation class the fuzz
+  /// caught (seed 7: SetCellSpan after undo/redo of column topology leaves
+  /// the maintained projection's spans stale vs a fresh rematerialization).
+  #[test]
+  fn table_ops_after_undo_redo_stay_canonical() {
+    let mut rng = Rng::new(1);
+    let peers: Vec<Peer> = (0..1).map(|_| Peer::new("undo-table", 1)).collect();
+    seed_table(&peers[0], &mut rng);
+    let peer = &peers[0];
+    let check = |label: &str| {
+      if let Err(reason) = projections_agree(&peer.projection(), &peer.fresh_projection()) {
+        panic!("{label}: projection deviates from own canonical: {reason}");
+      }
+    };
+    check("post-seed");
+
+    let (table_id, table) = first_table(&peer.projection()).expect("table");
+    let column0 = table.columns[0].id;
+    let row0 = table.rows[0].id;
+
+    peer
+      .handle
+      .table_op(TableIntent::InsertColumn {
+        table: table_id,
+        after_column: Some(column0),
+        width: InputTableColumnWidth::Auto,
+      })
+      .expect("insert column");
+    check("post-insert-column");
+    peer.handle.apply_undo().expect("undo insert column");
+    check("post-undo");
+    peer.handle.apply_redo().expect("redo insert column");
+    check("post-redo");
+
+    peer
+      .handle
+      .table_op(TableIntent::SetCellSpan {
+        table: table_id,
+        row: row0,
+        column: column0,
+        row_span: 2,
+        column_span: 2,
+      })
+      .expect("set cell span");
+    check("post-set-span");
+
+    peer.handle.apply_undo().expect("undo set span");
+    check("post-undo-span");
+    peer.handle.apply_redo().expect("redo set span");
+    check("post-redo-span");
+  }
+
+  /// TEMP shrink harness: single-peer sweep (no imports) to shrink the fuzz
+  /// finding to a local-only sequence.
+  #[test]
+  #[ignore]
+  fn scratch_single_peer_table_sweep() {
+    for seed in 1..200 {
+      run_fuzz(seed, 1, 3, 12, seed_table, random_table_mix_intent);
+    }
+  }
+
+  #[test]
+  #[ignore]
+  fn scratch_single_peer_object_sweep() {
+    for seed in 1..200 {
+      run_fuzz(seed, 1, 3, 12, seed_structural, random_structural_intent);
+    }
+  }
+
+  /// Minimal repro (from the single-peer fuzz shrink, seed 1): undo the
+  /// seeded fragment, rebuild some text, then insert an object at the FIRST
+  /// paragraph's byte 0. The maintained projection keeps the seeded root
+  /// paragraph id while a fresh rematerialization elects a fabricated
+  /// interstitial identity for the after-object row.
+  #[test]
+  fn object_insert_at_paragraph_start_after_undo_stays_canonical() {
+    let mut rng = Rng::new(1);
+    let peers: Vec<Peer> = (0..1).map(|_| Peer::new("obj-undo", 1)).collect();
+    let peer = &peers[0];
+    seed_structural(peer, &mut rng);
+    peer.handle.apply_undo().expect("undo the seeded fixture");
+
+    let check = |label: &str| {
+      if let Err(reason) = projections_agree(&peer.projection(), &peer.fresh_projection()) {
+        panic!("{label}: projection deviates from own canonical: {reason}");
+      }
+    };
+    check("post-undo");
+    let dump_registry = |label: &str| {
+      let guard = peer.gate.lock(GateHolder::ExportUpdates).expect("gate");
+      let doc = guard.doc();
+      let root = doc.get_map("flowstate.root");
+      let Some(loro::ValueOrContainer::Container(loro::Container::Map(paragraphs))) = root.get("paragraphs_by_id") else {
+        eprintln!("{label}: no paragraphs_by_id");
+        return;
+      };
+      for key in paragraphs.keys() {
+        let record = match paragraphs.get(&key) {
+          Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => map,
+          _ => continue,
+        };
+        let cursor_state: Vec<String> = ["boundary_cursor", "start_cursor"]
+          .iter()
+          .map(|field| {
+            match record.get(field) {
+              Some(loro::ValueOrContainer::Value(loro::LoroValue::Binary(bytes))) => {
+                match loro::cursor::Cursor::decode(&bytes) {
+                  Ok(cursor) => match doc.get_cursor_pos(&cursor) {
+                    Ok(pos) => format!("{field}=pos {}", pos.current.pos),
+                    Err(error) => format!("{field}=unresolved({error})"),
+                  },
+                  Err(_) => format!("{field}=undecodable"),
+                }
+              },
+              _ => format!("{field}=absent"),
+            }
+          })
+          .collect();
+        eprintln!("{label}: record {key} {cursor_state:?}");
+      }
+    };
+    dump_registry("post-undo");
+
+    let projection = peer.projection();
+    let paragraph = projection.ids.paragraph_ids[0];
+    peer
+      .handle
+      .insert_object(InsertObjectIntent {
+        at: TextAnchor::new(paragraph, 0),
+        block: {
+          let mut object_rng = Rng::new(42);
+          object_input(&mut object_rng)
+        },
+      })
+      .expect("insert object at paragraph start");
+    dump_registry("post-insert");
+    {
+      let guard = peer.gate.lock(GateHolder::ExportUpdates).expect("gate");
+      let (fresh_a, defects_a) = flowstate_document::document_from_loro_with_defects(guard.doc()).expect("fresh a");
+      let (fresh_b, defects_b) = flowstate_document::document_from_loro_with_defects(guard.doc()).expect("fresh b");
+      eprintln!(
+        "fresh determinism: a={:?} b={:?} body={:?}\n  defects_a={:?}\n  defects_b={:?}",
+        fresh_a.ids.paragraph_ids,
+        fresh_b.ids.paragraph_ids,
+        flowstate_document::loro_schema::body_text(guard.doc()).to_string(),
+        defects_a.iter().map(|d| d.stable_key()).collect::<Vec<_>>(),
+        defects_b.iter().map(|d| d.stable_key()).collect::<Vec<_>>(),
+      );
+    }
+    check("post-insert-object");
   }
 }

@@ -11,7 +11,10 @@ pub use gpui_flowtext::*;
 pub use loro_import::{
   ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
 };
-pub use loro_projection::{document_from_loro, document_from_loro_with_defects, object_input_blocks_from_loro, section_page_attrs};
+pub use loro_projection::{
+  RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_table_block, object_input_blocks_from_loro,
+  section_page_attrs,
+};
 pub use projection_defects::{ProjectionDefect, TableTopologyKind};
 pub use loro_schema::{
   BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE,

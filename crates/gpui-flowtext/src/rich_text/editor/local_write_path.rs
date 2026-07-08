@@ -372,6 +372,23 @@ impl RichTextEditor {
     committed
   }
 
+  /// Replace-all (find & replace): every same-paragraph match rides ONE
+  /// compound intent — one gate hold, one commit, one undo member.
+  pub(super) fn write_replace_matches(&mut self, matches: Vec<ReplaceMatch>, replacement: &str, cx: &mut Context<Self>) -> bool {
+    if matches.is_empty() {
+      return false;
+    }
+    self
+      .write_intent(
+        LocalIntent::ReplaceMatches(ReplaceMatchesIntent {
+          matches,
+          replacement: replacement.to_string(),
+        }),
+        cx,
+      )
+      .is_some()
+  }
+
   // ---- Undo grouping (spec §10) ---------------------------------------------
 
   /// Open an undo group at an input-semantic boundary. Fallible by design

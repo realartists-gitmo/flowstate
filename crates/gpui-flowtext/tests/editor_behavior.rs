@@ -411,4 +411,70 @@ mod tests {
     assert!(p50 < std::time::Duration::from_millis(16), "keystroke p50 regressed past the ratchet: {p50:?}");
     assert!(p95 < std::time::Duration::from_millis(50), "keystroke p95 regressed past the ratchet: {p95:?}");
   }
+
+  /// Replace-all must reach CANONICAL state (2026-07-07 field class: the old
+  /// implementation rewrote the editor's projection copy directly for
+  /// same-paragraph matches, so saves, peers, and undo silently lost every
+  /// replacement — the projection looked right until the next authority
+  /// emission clobbered it).
+  #[gpui::test]
+  fn replace_all_search_highlights_commits_canonically(cx: &mut gpui::TestAppContext) {
+    let editor = cx.new(|cx| {
+      RichTextEditor::new_with_path(
+        document_from_input(
+          DocumentTheme::default(),
+          vec![
+            InputParagraph {
+              style: ParagraphStyle::Normal,
+              runs: vec![plain("alpha foo beta foo")],
+            },
+            InputParagraph {
+              style: ParagraphStyle::Normal,
+              runs: vec![plain("foo gamma")],
+            },
+          ],
+        ),
+        None,
+        cx,
+      )
+    });
+    let fixture = editor.read_with(cx, |editor, _| editor.document().clone());
+    let core = CrdtRuntime::from_document_projection(&fixture, "Replace").expect("canonical core");
+    let (handle, _gate) = LocalDocHandle::new(core, LocalWriteConfig::default());
+    let handle = std::sync::Arc::new(handle);
+    let projection = handle.projection().expect("canonical projection");
+    editor.update(cx, |editor, cx| {
+      editor.set_write_authority(handle.clone(), projection, cx);
+    });
+
+    editor.update(cx, |editor, cx| {
+      let ranges = vec![
+        DocumentOffset { paragraph: 0, byte: 6 }..DocumentOffset { paragraph: 0, byte: 9 },
+        DocumentOffset { paragraph: 0, byte: 15 }..DocumentOffset { paragraph: 0, byte: 18 },
+        DocumentOffset { paragraph: 1, byte: 0 }..DocumentOffset { paragraph: 1, byte: 3 },
+      ];
+      editor.set_search_highlights(ranges, Some(0), cx);
+      assert_eq!(editor.replace_all_search_highlights("bar", cx), 3);
+    });
+
+    // THE data-loss assertion: the write authority's canonical state carries
+    // every replacement.
+    let canonical = handle.projection().expect("canonical after replace");
+    assert_eq!(paragraph_text(&canonical, 0), "alpha bar beta bar");
+    assert_eq!(paragraph_text(&canonical, 1), "bar gamma");
+    // The editor's projection agrees with canonical (no divergent local copy).
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "alpha bar beta bar");
+      assert_eq!(paragraph_text(editor.document(), 1), "bar gamma");
+    });
+
+    // One undo reverts the whole replace-all (the compound intent is one
+    // undo member), and the revert reaches canonical too.
+    editor.update(cx, |editor, cx| {
+      editor.undo(cx);
+    });
+    let canonical = handle.projection().expect("canonical after undo");
+    assert_eq!(paragraph_text(&canonical, 0), "alpha foo beta foo");
+    assert_eq!(paragraph_text(&canonical, 1), "foo gamma");
+  }
 }

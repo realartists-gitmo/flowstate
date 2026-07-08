@@ -15,8 +15,8 @@ use super::commit::{ResolvedPlan, ResolvedTableOp};
 use super::intents::LocalIntent;
 use super::resolve::ResolvedTextPosition;
 use crate::crdt_runtime::{
-  CrdtRuntime, ProjectionInvalidation, body_input_paragraph_at, input_table_column_insert_pos, input_table_row_insert_pos,
-  object_replacement_patch, paragraph_boundary_loro_unicode_index, projected_table_input, projection_text_delta,
+  CrdtRuntime, ProjectionInvalidation, body_input_paragraph_at, object_replacement_patch, paragraph_boundary_loro_unicode_index,
+  projection_text_delta, text_delta_between,
 };
 
 /// What the projection should do for a committed intent.
@@ -301,45 +301,56 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
     },
     ResolvedPlan::InsertObject {
       at, block_ix, new_block, block, ..
-    } => Some((
-      vec![ProjectionPatch::InsertBlocks {
-        before: projection.ids.block_ids.get(*block_ix).copied(),
-        row_hint: (*block_ix).min(projection.blocks.len()),
-        blocks: vec![ProjectionStructuralBlock {
-          block_id: *new_block,
-          paragraph_id: None,
-          block: block.clone(),
+    } => {
+      // Whitelist: the exact patch is only valid for the ONE shape where no
+      // identity re-derives — a placeholder landing AFTER a non-empty
+      // paragraph's text (byte == text_len > 0) whose next block is another
+      // PARAGRAPH (a real `\n` boundary right behind the insertion). Every
+      // other shape re-derives identities under the materializer law: byte-0
+      // and mid-text inserts create boundary-less interstitial rows, inserts
+      // into empty paragraphs coalesce the row into the object, end-of-doc
+      // inserts grow a trailing fabricated row, and object-cluster inserts
+      // shift interstitial anchors. Loud rebuild for all of those (rare,
+      // explicit UI ops; found by the object-fuzz undo arm).
+      let text_len = projection.paragraphs.get(at.paragraph_ix).map(paragraph_text_len).unwrap_or(0);
+      let followed_by_paragraph = flowstate_document::block_ix_for_paragraph(projection, at.paragraph_ix)
+        .and_then(|row| projection.blocks.get(row + 1))
+        .is_some_and(|next| matches!(next, flowstate_document::Block::Paragraph(_)));
+      if text_len == 0 || at.byte < text_len || !followed_by_paragraph {
+        return rebuild("insert-object-boundary-adjacent");
+      }
+      Some((
+        vec![ProjectionPatch::InsertBlocks {
+          before: projection.ids.block_ids.get(*block_ix).copied(),
+          row_hint: (*block_ix).min(projection.blocks.len()),
+          blocks: vec![ProjectionStructuralBlock {
+            block_id: *new_block,
+            paragraph_id: None,
+            block: block.clone(),
+          }],
         }],
-      }],
-      ProjectionInvalidation::body_object(frontier_before.clone(), frontier_after.clone(), at.body_unicode, block_kind(block)),
-    )),
+        ProjectionInvalidation::body_object(frontier_before.clone(), frontier_after.clone(), at.body_unicode, block_kind(block)),
+      ))
+    },
     ResolvedPlan::ReplaceObject { block_ix, after, .. } => object_replacement_patch(projection, *block_ix, after.clone())
       .map(|patches| (patches, body_invalidation(0, 0)))
       ,
-    ResolvedPlan::DeleteBlocks { blocks } => {
-      let row_hint = blocks.iter().map(|(_, ix)| *ix).min().unwrap_or(0);
-      Some((
-        vec![ProjectionPatch::DeleteBlocks {
-          block_ids: blocks.iter().map(|(id, _)| *id).collect(),
-          row_hint,
-        }],
-        body_invalidation(0, 0),
-      ))
+    ResolvedPlan::DeleteBlocks { .. } => {
+      // Removing a block row changes the boundary geometry around it: a
+      // paragraph that was interstitial (boundary-less, after an object)
+      // re-attaches, and a coalesced empty resurrects with its durable
+      // record's identity — re-derivations only the materializer law can
+      // produce. Loud rebuild (block deletes are rare, explicit UI ops;
+      // found by the object-fuzz undo arm as maintained-vs-canonical id
+      // divergence when deleting a boundary-adjacent object).
+      return rebuild("delete-blocks-boundary-sensitive");
     },
-    ResolvedPlan::MoveBlock {
-      block,
-      from_ix,
-      to_ix,
-      before,
-    } => Some((
-      vec![ProjectionPatch::MoveBlock {
-        block_id: *block,
-        before: *before,
-        from_hint: *from_ix,
-        to_hint: *to_ix,
-      }],
-      body_invalidation(0, 0),
-    )),
+    ResolvedPlan::MoveBlock { .. } => {
+      // A move is a boundary-geometry change at BOTH endpoints (see the
+      // DeleteBlocks rationale) — identities around the source and the
+      // destination re-derive under the materializer law. Loud rebuild.
+      return rebuild("move-block-boundary-sensitive");
+    },
     ResolvedPlan::InsertRichFragment { .. } => {
       // The one op class where a full rebuild is the documented contract
       // (compound multi-container splice). Loud + counted by the caller.
@@ -371,6 +382,70 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
     .map(|patches| (patches, body_invalidation(0, 0))),
     ResolvedPlan::Table { table, table_ix, op } => {
       table_patch(core, *table, *table_ix, op).map(|patches| (patches, body_invalidation(0, 0)))
+    },
+    ResolvedPlan::ReplaceMatches { matches, replacement } => {
+      // Matches are same-paragraph and sorted descending (resolution
+      // contract); group per paragraph and read each affected paragraph back
+      // ONCE through the ranged readback — O(matches + affected paragraphs),
+      // never O(doc), regardless of how many matches the storm carries.
+      // Groups are processed in ASCENDING position order with a running net
+      // shift: resolved positions are PRE-commit, but the readback runs
+      // POST-commit, where every paragraph after an edited one has moved by
+      // the net length delta of the edits before it.
+      let replacement_chars = replacement.chars().count();
+      let mut groups: Vec<&[(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)]> = Vec::new();
+      let mut ix = 0;
+      while ix < matches.len() {
+        let paragraph_ix = matches[ix].0.paragraph_ix;
+        let group_len = matches[ix..].iter().take_while(|(start, ..)| start.paragraph_ix == paragraph_ix).count();
+        groups.push(&matches[ix..ix + group_len]);
+        ix += group_len;
+      }
+
+      let mut patches = Vec::new();
+      let mut invalid_lo = usize::MAX;
+      let mut invalid_hi = 0usize;
+      let mut shift = 0isize;
+      for group in groups.into_iter().rev() {
+        let paragraph_ix = group[0].0.paragraph_ix;
+        let Some(row) = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix) else {
+          return rebuild("replace-matches-block-missing");
+        };
+        let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, &group[0].0) else {
+          return rebuild("replace-matches-position-misaligned");
+        };
+        let removed: usize = group.iter().map(|(start, end, _)| end.body_unicode - start.body_unicode).sum();
+        let added = replacement_chars * group.len();
+        let Some(new_chars) = (old_chars + added).checked_sub(removed) else {
+          return rebuild("replace-matches-length-misaligned");
+        };
+        let Some(post_start) = paragraph_start.checked_add_signed(shift) else {
+          return rebuild("replace-matches-shift-misaligned");
+        };
+        let Some(new) = body_input_paragraph_at(
+          doc,
+          post_start.saturating_sub(1),
+          post_start + new_chars,
+          paragraph_style_at(projection, paragraph_ix),
+        ) else {
+          return rebuild("replace-matches-readback-missing");
+        };
+        shift += added as isize - removed as isize;
+        let old_text = flowstate_document::paragraph_text(projection, paragraph_ix);
+        let new_text: String = new.runs.iter().map(|run| run.text.as_str()).collect();
+        let delta_utf8 = text_delta_between(&old_text, &new_text);
+        patches.push(ProjectionPatch::ParagraphText {
+          block_id: projection.ids.block_ids[row],
+          paragraph_id: projection.ids.paragraph_ids[paragraph_ix],
+          row_hint: row,
+          new,
+          delta_utf8,
+        });
+        // Descending within the group: last entry has the lowest start.
+        invalid_lo = invalid_lo.min(group[group.len() - 1].0.body_unicode);
+        invalid_hi = invalid_hi.max(group[0].1.body_unicode);
+      }
+      Some((patches, body_invalidation(invalid_lo, invalid_hi.saturating_sub(invalid_lo))))
     },
   };
 
@@ -434,92 +509,20 @@ fn image_patch(
 }
 
 fn table_patch(core: &CrdtRuntime, table: flowstate_document::BlockId, table_ix: usize, op: &ResolvedTableOp) -> Option<Vec<ProjectionPatch>> {
+  // §6-R.1: READ the committed table back from canonical state (the same
+  // one-table materialization law the full rebuild applies) instead of
+  // simulating the op on the old projected table. Simulation was a second
+  // doc→projection semantics and diverged under undo-churned histories (the
+  // table-fuzz undo arm caught stale cell spans). Any defect or a missing
+  // canonical record falls back to the loud full rebuild (`None`).
+  let _ = op;
   let projection = core.projection_ref();
-  let index = core.projection_index_ref();
-  let (block_ix, mut table_input) = projected_table_input(projection, index, table)?;
+  let block_ix = core.projection_index_ref().block_index(table)?;
   debug_assert_eq!(block_ix, table_ix);
-  match op {
-    ResolvedTableOp::InsertRow { new_row, after_row } => {
-      if !table_input.rows.iter().any(|existing| existing.id == new_row.id) {
-        let pos = input_table_row_insert_pos(&table_input, *after_row);
-        table_input.rows.insert(pos, new_row.clone());
-      }
-    },
-    ResolvedTableOp::DeleteRow { row } => {
-      let pos = table_input.rows.iter().position(|candidate| candidate.id == *row)?;
-      table_input.rows.remove(pos);
-    },
-    ResolvedTableOp::MoveRow { row, after_row } => {
-      let from = table_input.rows.iter().position(|candidate| candidate.id == *row)?;
-      let moved = table_input.rows.remove(from);
-      let pos = input_table_row_insert_pos(&table_input, *after_row);
-      table_input.rows.insert(pos.min(table_input.rows.len()), moved);
-    },
-    ResolvedTableOp::InsertColumn {
-      new_column,
-      after_column,
-      width,
-      cells,
-    } => {
-      if !table_input.columns.iter().any(|existing| existing.id == *new_column) {
-        let pos = input_table_column_insert_pos(&table_input, *after_column);
-        table_input.columns.insert(pos, flowstate_document::InputTableColumn {
-          id: *new_column,
-          width: width.clone(),
-        });
-        for (row_ix, row) in table_input.rows.iter_mut().enumerate() {
-          let cell = cells
-            .get(row_ix)
-            .cloned()
-            .unwrap_or_else(|| crate::crdt_runtime::empty_input_table_cell(row.id, *new_column));
-          let cell_pos = pos.min(row.cells.len());
-          row.cells.insert(cell_pos, cell);
-        }
-      }
-    },
-    ResolvedTableOp::DeleteColumn { column } => {
-      let pos = table_input.columns.iter().position(|candidate| candidate.id == *column)?;
-      table_input.columns.remove(pos);
-      for row in &mut table_input.rows {
-        if let Some(cell_ix) = row.cells.iter().position(|cell| cell.column_id == *column) {
-          row.cells.remove(cell_ix);
-        } else if pos < row.cells.len() {
-          row.cells.remove(pos);
-        }
-      }
-    },
-    ResolvedTableOp::MoveColumn { column, after_column } => {
-      let from = table_input.columns.iter().position(|candidate| candidate.id == *column)?;
-      let moved = table_input.columns.remove(from);
-      let pos = input_table_column_insert_pos(&table_input, *after_column);
-      table_input.columns.insert(pos.min(table_input.columns.len()), moved);
-      for row in &mut table_input.rows {
-        if let Some(cell_from) = row.cells.iter().position(|cell| cell.column_id == *column) {
-          let cell = row.cells.remove(cell_from);
-          let cell_to = pos.min(row.cells.len());
-          row.cells.insert(cell_to, cell);
-        }
-      }
-    },
-    ResolvedTableOp::ReplaceCell { row, column, cell } => {
-      let target_row = table_input.rows.iter_mut().find(|candidate| candidate.id == *row)?;
-      let target = target_row.cells.iter_mut().find(|existing| existing.column_id == *column)?;
-      *target = cell.clone();
-    },
-    ResolvedTableOp::SetCellSpan {
-      row,
-      column,
-      row_span,
-      column_span,
-    } => {
-      let target_row = table_input.rows.iter_mut().find(|candidate| candidate.id == *row)?;
-      let cell = target_row.cells.iter_mut().find(|cell| cell.column_id == *column)?;
-      cell.row_span = (*row_span).max(1);
-      cell.col_span = (*column_span).max(1);
-    },
-    ResolvedTableOp::SetColumnWidth { column_ix, width, .. } => {
-      table_input.columns.get_mut(*column_ix)?.width = width.clone();
-    },
+  let (table_input, defects) = flowstate_document::materialize_table_block(core.doc(), table.0).ok()?;
+  if !defects.is_empty() {
+    return None;
   }
   object_replacement_patch(projection, block_ix, InputBlock::Table(table_input))
 }
+

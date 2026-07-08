@@ -134,7 +134,10 @@ fn repair_missing_paragraph_style_mark(doc: &LoroDoc, flow_id: &str, boundary_un
   let Some(text) = flow_text_for_id(doc, flow_id) else {
     return Ok(false);
   };
-  if text.to_string().chars().nth(boundary_unicode) != Some('\n') {
+  // O(1) boundary liveness — the whole-flow stringify this replaced ran once
+  // PER DEFECT, which turned the mass-undo repair pass (thousands of
+  // fabricated boundaries) into minutes of allocation.
+  if text.char_at(boundary_unicode) != Ok('\n') {
     return Ok(false);
   }
   text
@@ -215,7 +218,7 @@ fn repair_orphan_object_placeholder(doc: &LoroDoc, flow_id: &str, unicode_pos: u
     return Ok(false);
   }
   let text = body_text(doc);
-  if text.to_string().chars().nth(unicode_pos) != Some(OBJECT_REPLACEMENT) {
+  if text.char_at(unicode_pos) != Ok(OBJECT_REPLACEMENT) {
     return Ok(false);
   }
   if placeholder_is_claimed(doc, &text, unicode_pos) {
@@ -382,8 +385,13 @@ fn anchor_placeholder_pos(doc: &LoroDoc, block: &LoroMap, text: &LoroText) -> Op
   if cursor.container != text.id() {
     return None;
   }
-  let pos = doc.get_cursor_pos(&cursor).ok()?.current.pos;
-  (text.to_string().chars().nth(pos) == Some(OBJECT_REPLACEMENT)).then_some(pos)
+  // A DEAD anchor is unresolvable, not history-traced (`get_cursor_pos` walks
+  // update history per dead anchor — post-mass-undo every restored object
+  // record is dead-anchored, which multiplied into minutes). The batch query
+  // is a single live-state scan; a dead id is simply absent.
+  let id = cursor.id?;
+  let pos = doc.inner().query_text_id_positions(&text.id(), &[id]).pop().flatten()?;
+  (text.char_at(pos) == Ok(OBJECT_REPLACEMENT)).then_some(pos)
 }
 
 /// Whether any non-paragraph block's anchor resolves to `pos` in `text`.

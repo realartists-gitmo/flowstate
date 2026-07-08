@@ -3,8 +3,11 @@
 //! Every peer edits exclusively through its `LocalDocHandle` (the one write
 //! path), with randomized intents — inserts, deletes, splits, joins, marks,
 //! paragraph styles, expand-mark boundary typing, split-at-styled-run-end,
-//! rich-fragment paste — and randomized update exchange. After every sync round, all peers must
+//! rich-fragment paste, undo, redo — and randomized update exchange. After every sync round, all peers must
 //! agree on BOTH canonical Loro state and the materialized projection.
+//! Undo/redo run through the production `apply_undo`/`apply_redo` path (the
+//! Loro `UndoManager` with remote-origin exclusion), so concurrent undos
+//! against interleaved remote edits are part of the convergence bar.
 //! Includes the §13.13 zero-patch-frontier-churn regression (the 19:28 field
 //! wound): a frontier-only remote advance must never disturb local typing.
 
@@ -15,7 +18,8 @@ mod tests {
   use flowstate_collab::crdt_runtime::CrdtRuntime;
   use flowstate_collab::local_write::{
     DeleteRangeIntent, FragmentBlock, GateHolder, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalDocHandle,
-    LocalWriteConfig, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor, WriteGate, WriteRejected,
+    LocalWriteConfig, ReplaceMatch, ReplaceMatchesIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor,
+    WriteGate, WriteRejected,
   };
   use flowstate_document::{Block, DocumentProjection, InputParagraph, InputRun, ParagraphStyle, RunSemanticStyle, RunStyles, paragraph_text};
 
@@ -86,6 +90,14 @@ mod tests {
       let guard = self.gate.lock(GateHolder::ExportUpdates).expect("gate");
       flowstate_document::loro_schema::body_text(guard.doc()).to_string()
     }
+
+    /// A fresh full rematerialization of THIS peer's canonical Loro state —
+    /// deliberately not `canonical_projection()` (which returns the maintained
+    /// projection and would make self-consistency checks vacuous).
+    fn fresh_canonical(&self) -> DocumentProjection {
+      let guard = self.gate.lock(GateHolder::ExportUpdates).expect("gate");
+      flowstate_document::document_from_loro(guard.doc()).expect("fresh rematerialization")
+    }
   }
 
   fn random_styles(rng: &mut Rng) -> RunStyles {
@@ -113,7 +125,11 @@ mod tests {
     let paragraph = projection.ids.paragraph_ids[paragraph_ix];
     let text_len = flowstate_document::paragraph_text_len(&projection.paragraphs[paragraph_ix]);
     let byte = rng.below(text_len + 1);
-    match rng.below(11) {
+    let arm = rng.below(15);
+    if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
+      eprintln!("step {step}: arm {arm} paragraph_ix {paragraph_ix} byte {byte}");
+    }
+    match arm {
       // Weighted toward typing: inserts dominate real sessions.
       0..=3 => {
         let text = format!("s{step}p{paragraph_ix}");
@@ -216,20 +232,78 @@ mod tests {
           })
           .map(|_| ())
       },
-      _ => peer
+      10 => peer
         .handle
         .set_paragraph_style(SetParagraphStyleIntent {
           paragraph,
           style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom((rng.below(3) + 1) as u8) },
         })
         .map(|_| ()),
+      // Undo/redo (spec §10): production `UndoManager` path. "Nothing to
+      // undo" is a legal no-op; the convergence bar below still applies to
+      // whatever ops the transform emits against interleaved remote history.
+      11 => peer.handle.apply_undo().map(|_| ()),
+      12 => peer.handle.apply_redo().map(|_| ()),
+      // Undo GROUP (spec §10): a word-burst of grouped inserts. Undoing later
+      // must revert the whole group as one member; a non-disjoint remote
+      // import may close the group early (F3) — both fates are legal, and
+      // convergence must hold either way.
+      13 => {
+        let _ = peer.handle.begin_undo_group();
+        for burst in 0..(2 + rng.below(3)) {
+          let _ = peer.handle.insert_text(InsertTextIntent {
+            at: TextAnchor::new(paragraph, usize::MAX),
+            text: format!("g{step}b{burst}"),
+            style_override: None,
+          });
+        }
+        peer.handle.finish_undo_group().map(|_| ())
+      },
+      // Replace-all (find & replace): every occurrence of a random pattern in
+      // up to three random paragraphs, one compound intent. Exercises the
+      // multi-range back-to-front application, the per-paragraph readback
+      // shift, and the concurrent skip/prune rules.
+      _ => {
+        let needle = [b'a', b'e', b's', b'0'][rng.below(4)] as char;
+        let mut matches = Vec::new();
+        for _ in 0..(1 + rng.below(3)) {
+          let target_ix = rng.below(projection.paragraphs.len());
+          let target = projection.ids.paragraph_ids[target_ix];
+          let text = flowstate_document::paragraph_text(&projection, target_ix);
+          for (byte, ch) in text.char_indices() {
+            if ch == needle {
+              matches.push(ReplaceMatch {
+                start: TextAnchor::new(target, byte),
+                end: TextAnchor::new(target, byte + ch.len_utf8()),
+                styles: (rng.below(3) == 0).then(|| random_styles(rng)),
+              });
+            }
+          }
+        }
+        let replacement = match rng.below(3) {
+          0 => String::new(),
+          1 => format!("r{step}"),
+          _ => "×".to_string(),
+        };
+        peer
+          .handle
+          .replace_matches(ReplaceMatchesIntent { matches, replacement })
+          .map(|_| ())
+      },
     }
   }
 
-  /// Full-mesh sync: every peer pulls every other peer's new history.
+  /// Full-mesh sync, iterated to quiescence: every peer pulls every other
+  /// peer's new history until no version vector moves. Iteration (rather than
+  /// a fixed two passes) matters because importing can COMMIT: an undo
+  /// restores registry records whose cursor anchors died with the deleted
+  /// text, so each importer deterministically re-derives and repairs them
+  /// (convergent fresh ops) — those repair updates need delivery too, exactly
+  /// like the field's anti-entropy. A bounded pass count keeps a repair loop
+  /// from masquerading as convergence.
   fn sync_all(peers: &mut [Peer]) {
-    for _ in 0..2 {
-      // Two passes so transitively-learned history also converges.
+    for _pass in 0..8 {
+      let before: Vec<_> = peers.iter().map(Peer::state_vv).collect();
       for from in 0..peers.len() {
         let from_vv_now = peers[from].state_vv();
         for to in 0..peers.len() {
@@ -240,9 +314,18 @@ mod tests {
           let bytes = peers[from].export_updates_since(&since);
           peers[to].import(&bytes);
           peers[to].synced_vv[from] = from_vv_now.clone();
+          if std::env::var("FUZZ_PER_OP_CHECK").is_ok()
+            && let Err(reason) = projections_agree(&peers[to].projection(), &peers[to].fresh_canonical())
+          {
+            panic!("sync pass {_pass}: peer {to} deviates from own canonical after importing from {from}: {reason}");
+          }
         }
       }
+      if peers.iter().map(Peer::state_vv).collect::<Vec<_>>() == before {
+        return;
+      }
     }
+    panic!("sync_all did not quiesce within 8 passes (non-converging repair loop?)");
   }
 
   fn projections_agree(left: &DocumentProjection, right: &DocumentProjection) -> Result<(), String> {
@@ -291,6 +374,7 @@ mod tests {
     // Initial full exchange so the mergeable seeds converge before editing.
     sync_all(&mut peers);
 
+    let per_op_check = std::env::var("FUZZ_PER_OP_CHECK").is_ok();
     for round in 0..rounds {
       for op in 0..ops_per_round {
         let peer_ix = rng.below(peers_n);
@@ -300,13 +384,30 @@ mod tests {
           Err(WriteRejected::EmptyIntent | WriteRejected::StructureViolation(_) | WriteRejected::UnresolvedParagraph(_)) => {},
           Err(other) => panic!("seed {seed} round {round} op {op}: unexpected rejection {other}"),
         }
+        if per_op_check
+          && let Err(reason) = projections_agree(&peers[peer_ix].projection(), &peers[peer_ix].fresh_canonical())
+        {
+          panic!("seed {seed} round {round} op {op} (step {step}, peer {peer_ix}): projection deviates from own canonical: {reason}");
+        }
       }
       sync_all(&mut peers);
 
+      // Self-consistency first (the one derivation law): every peer's
+      // maintained projection must equal a fresh full rematerialization of
+      // its own canonical state — classifies a failure as projection-derivation
+      // (self-inconsistent) vs CRDT-level (self-consistent but cross-diverged).
+      for (ix, peer) in peers.iter().enumerate() {
+        if let Err(reason) = projections_agree(&peer.projection(), &peer.fresh_canonical()) {
+          panic!("seed {seed} round {round}: peer {ix} projection deviates from own canonical: {reason}");
+        }
+      }
       // Convergence bar (spec §13.7): canonical Loro text AND projection agree.
       let reference_text = peers[0].body_text();
       let reference_projection = peers[0].projection();
       for (ix, peer) in peers.iter().enumerate().skip(1) {
+        // Equal op logs are a precondition for the state comparison: a version
+        // vector mismatch here is a harness delivery hole, not divergence.
+        assert_eq!(peer.state_vv(), peers[0].state_vv(), "seed {seed} round {round}: peer {ix} version vector differs after quiescent sync");
         assert_eq!(peer.body_text(), reference_text, "seed {seed} round {round}: peer {ix} body text diverged");
         if let Err(reason) = projections_agree(&peer.projection(), &reference_projection) {
           panic!("seed {seed} round {round}: peer {ix} projection diverged: {reason}");
@@ -317,14 +418,14 @@ mod tests {
 
   #[test]
   fn two_peer_intent_fuzz_converges() {
-    for seed in [1, 7, 42, 1337] {
+    for seed in [1, 7, 42, 505, 1337, 8738] {
       run_fuzz(seed, 2, 6, 12);
     }
   }
 
   #[test]
   fn three_peer_intent_fuzz_converges() {
-    for seed in [3, 99, 20260707] {
+    for seed in [3, 99, 4242, 20260707] {
       run_fuzz(seed, 3, 5, 10);
     }
   }

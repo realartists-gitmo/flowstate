@@ -90,13 +90,18 @@ pub(crate) enum ResolvedPlan {
   },
   MoveBlock {
     block: BlockId,
-    from_ix: usize,
     to_ix: usize,
-    before: Option<BlockId>,
   },
   InsertRichFragment {
     at: ResolvedTextPosition,
     blocks: Vec<FragmentBlock>,
+  },
+  ReplaceMatches {
+    /// Resolved (start, end, replacement styles) triples, sorted DESCENDING
+    /// by start and pruned of collapsed/cross-paragraph/overlapping ranges,
+    /// so back-to-front application never shifts a later range.
+    matches: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)>,
+    replacement: String,
   },
   ReplaceEquationSourceRange {
     equation: BlockId,
@@ -466,6 +471,20 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       let paragraph_ix = index
         .paragraph_index(style.paragraph)
         .ok_or(WriteRejected::UnresolvedParagraph(style.paragraph))?;
+      // An interstitial paragraph (one that directly follows an object row)
+      // has no boundary `\n` of its own — paragraph style is CARRIED by the
+      // boundary mark, so its style is canonically inherited and cannot be
+      // set: marking the nearest newline would restyle a DIFFERENT paragraph
+      // (the object-fuzz caught exactly that as a maintained-vs-canonical
+      // style divergence). Reject before mutation (I-15) until the schema
+      // grows a per-record style field for boundary-less rows.
+      let interstitial = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)
+        .is_some_and(|row| row > 0 && !matches!(projection.blocks.get(row - 1), Some(flowstate_document::Block::Paragraph(_))));
+      if interstitial {
+        return Err(WriteRejected::StructureViolation(
+          "paragraph style on an object-following paragraph is not representable (boundary-less row)",
+        ));
+      }
       Ok(ResolvedPlan::SetParagraphStyle {
         paragraph: style.paragraph,
         paragraph_ix,
@@ -508,7 +527,9 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       Ok(ResolvedPlan::DeleteBlocks { blocks })
     },
     LocalIntent::MoveBlock(move_block) => {
-      let from_ix = index
+      // Resolve-before-mutate (I-15): the moved block must exist even though
+      // only the destination feeds the plan.
+      index
         .block_index(move_block.block)
         .ok_or(WriteRejected::UnresolvedBlock(move_block.block))?;
       let to_ix = match move_block.before {
@@ -517,9 +538,7 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       };
       Ok(ResolvedPlan::MoveBlock {
         block: move_block.block,
-        from_ix,
         to_ix,
-        before: move_block.before,
       })
     },
     LocalIntent::InsertRichFragment(fragment) => {
@@ -529,6 +548,114 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       Ok(ResolvedPlan::InsertRichFragment {
         at: resolve_text_anchor(doc, projection, index, &fragment.at)?,
         blocks: fragment.blocks.clone(),
+      })
+    },
+    LocalIntent::ReplaceMatches(replace) => {
+      if replace.replacement.contains('\n') || replace.replacement.contains(OBJECT_REPLACEMENT) {
+        return Err(WriteRejected::StructureViolation(
+          "ReplaceMatches replacement must not contain paragraph breaks or object placeholders",
+        ));
+      }
+      // Batched resolution (§11): a storm carries thousands of matches over
+      // thousands of paragraphs, and per-anchor cursor resolution is a linear
+      // chunk scan per call (the batch-resolver lesson: 27k matches on the
+      // reference doc = 125s). Resolve each DISTINCT paragraph's body start
+      // once through ONE batched query and derive every match position from
+      // projection bytes; only anchors that carry explicit cursors (none from
+      // the editor's replace-all) take the per-anchor path.
+      let mut distinct: Vec<flowstate_document::ParagraphId> = Vec::new();
+      let mut distinct_slots: std::collections::HashMap<flowstate_document::ParagraphId, usize> = std::collections::HashMap::new();
+      for entry in &replace.matches {
+        if entry.start.cursor.is_none() && entry.end.cursor.is_none() && entry.start.paragraph == entry.end.paragraph {
+          distinct_slots.entry(entry.start.paragraph).or_insert_with(|| {
+            distinct.push(entry.start.paragraph);
+            distinct.len() - 1
+          });
+        }
+      }
+      let starts = crate::crdt_runtime::paragraph_body_starts_in_loro(doc, &distinct);
+      let mut matches = Vec::with_capacity(replace.matches.len());
+      for entry in &replace.matches {
+        let batched = entry.start.cursor.is_none() && entry.end.cursor.is_none() && entry.start.paragraph == entry.end.paragraph;
+        let (start, end) = if batched {
+          // Stale identity ⇒ skip this match (not reject): the surviving
+          // matches still carry the user's intent.
+          let Some(paragraph_ix) = index.paragraph_index(entry.start.paragraph) else {
+            continue;
+          };
+          if projection.ids.paragraph_ids.get(paragraph_ix).copied() != Some(entry.start.paragraph) {
+            continue;
+          }
+          // Records without live cursors (freshly seeded paragraphs awaiting
+          // repair) fall back to the index's maintained starts — in-sync with
+          // the live doc inside the gate, same basis the per-anchor path uses.
+          let paragraph_start = match starts[distinct_slots[&entry.start.paragraph]] {
+            Some(start) => start,
+            None => {
+              let Some(start) = index.body_unicode_for_offset_in_loro(
+                doc,
+                projection,
+                DocumentOffset {
+                  paragraph: paragraph_ix,
+                  byte: 0,
+                },
+              ) else {
+                continue;
+              };
+              start
+            },
+          };
+          let text = flowstate_document::paragraph_text(projection, paragraph_ix);
+          let start_byte = super::resolve::clamp_byte_to_char_boundary(projection, paragraph_ix, entry.start.byte_hint);
+          let end_byte = super::resolve::clamp_byte_to_char_boundary(projection, paragraph_ix, entry.end.byte_hint);
+          let (start_byte, end_byte) = if start_byte <= end_byte { (start_byte, end_byte) } else { (end_byte, start_byte) };
+          let start_unicode = paragraph_start + text[..start_byte].chars().count();
+          let end_unicode = start_unicode + text[start_byte..end_byte].chars().count();
+          (
+            ResolvedTextPosition {
+              paragraph_ix,
+              byte: start_byte,
+              body_unicode: start_unicode,
+            },
+            ResolvedTextPosition {
+              paragraph_ix,
+              byte: end_byte,
+              body_unicode: end_unicode,
+            },
+          )
+        } else {
+          let Ok(range) = resolve_text_range(doc, projection, index, &entry.start, &entry.end) else {
+            continue;
+          };
+          range
+        };
+        // Skip (not reject) matches that concurrent edits collapsed or moved
+        // across a paragraph boundary — the surviving matches still carry the
+        // user's intent (intent contract).
+        if start.body_unicode == end.body_unicode || start.paragraph_ix != end.paragraph_ix {
+          continue;
+        }
+        matches.push((start, end, entry.styles));
+      }
+      // Prune overlaps preferring the EARLIER match (search matches are
+      // disjoint; an overlap means concurrency moved them, and the first
+      // match is the user-visible winner), then flip to descending for
+      // back-to-front application.
+      matches.sort_by(|a, b| a.0.body_unicode.cmp(&b.0.body_unicode));
+      let mut kept: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)> =
+        Vec::with_capacity(matches.len());
+      for entry in matches {
+        if kept.last().is_none_or(|prev| entry.0.body_unicode >= prev.1.body_unicode) {
+          kept.push(entry);
+        }
+      }
+      kept.reverse();
+      if kept.is_empty() {
+        return Err(WriteRejected::EmptyIntent);
+      }
+      Ok(ResolvedPlan::ReplaceMatches {
+        matches: kept,
+        replacement: replace.replacement.clone(),
       })
     },
     LocalIntent::ReplaceEquationSourceRange(eq) => {
@@ -852,6 +979,36 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
     },
     ResolvedPlan::Table { table, op, .. } => {
       summary.containers_touched = execute_table_op(&doc, *table, op)?;
+    },
+    ResolvedPlan::ReplaceMatches { matches, replacement } => {
+      let body = body_text(&doc);
+      let replacement_chars = replacement.chars().count();
+      // Descending order (resolution contract): applying back-to-front means
+      // no earlier range's position shifts.
+      for (start, end, styles) in matches {
+        let len = end.body_unicode - start.body_unicode;
+        hotpath::measure_block!("replace_matches_body_edit", {
+          body
+            .delete(start.body_unicode, len)
+            .context("deleting matched range from Loro body flow")?;
+          if replacement_chars > 0 {
+            body
+              .insert(start.body_unicode, replacement)
+              .context("inserting replacement into Loro body flow")?;
+          }
+        });
+        if replacement_chars > 0
+          && let Some(styles) = styles
+        {
+          mark_run_styles(&body, start.body_unicode..start.body_unicode + replacement_chars, *styles)
+            .context("marking replacement run styles")?;
+          summary.marks_emitted += style_mark_count(*styles);
+        }
+      }
+      summary.containers_touched = 1;
+      // First entry = LAST match in document order; the caret lands after its
+      // replacement (find/replace UX contract).
+      summary.caret_body_unicode = matches.first().map(|(start, _, _)| start.body_unicode + replacement_chars);
     },
   }
   Ok(summary)

@@ -28,7 +28,8 @@ pub use handle::{LocalDocHandle, LocalWriteConfig};
 pub use intents::{
   CursorEndpoint, DeleteBlocksIntent, DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent,
   IntentCounters, JoinParagraphsIntent, LocalCommit, LocalIntent, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace,
-  ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceObjectIntent, SelectionSnapshot,
+  ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatch, ReplaceMatchesIntent,
+  ReplaceObjectIntent, SelectionSnapshot,
   LocalWriteAuthority, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TableIntent,
   TextAnchor, UndoOutcome, WriteRejected,
 };

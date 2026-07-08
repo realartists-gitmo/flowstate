@@ -1170,6 +1170,14 @@ impl LoroDoc {
         }
         drop(txn);
         self.start_auto_commit();
+        // Compact the restore before applying it: an undo of a large deletion
+        // arrives as one insert item per ORIGINAL op (op-id fragments), and
+        // `_apply_diff` turns every item into a separate new op — a
+        // whole-document restore became ~10^5 tiny ops, slow to apply and
+        // slow on every later replay of the resulting change. The re-applied
+        // content mints fresh contiguous op ids regardless, so merging
+        // adjacent same-attribute inserts loses nothing.
+        let diff = compact_text_diff_batch(diff);
         // Try applying the diff, but ignore the error if it happens.
         // MovableList's undo behavior is too tricky to handle in a collaborative env
         // so in edge cases this may be an Error
@@ -2929,4 +2937,50 @@ mod test {
         };
         assert!(msg.contains("poisoned LoroMutex"), "{msg}");
     }
+}
+
+/// Merge adjacent same-attribute insert runs inside every text diff of the
+/// batch (see `undo_internal`). Non-text diffs pass through untouched.
+fn compact_text_diff_batch(mut batch: crate::undo::DiffBatch) -> crate::undo::DiffBatch {
+    use crate::event::{Diff, TextDiff};
+    use generic_btree::rle::HasLength as _;
+    for diff in batch.cid_to_events.values_mut() {
+        let Diff::Text(text) = diff else { continue };
+        if text.iter().count() < 2 {
+            continue;
+        }
+        let mut compacted: TextDiff = TextDiff::new();
+        let mut pending: Option<(String, crate::event::TextMeta)> = None;
+        fn flush(compacted: &mut TextDiff, pending: &mut Option<(String, crate::event::TextMeta)>) {
+            if let Some((text, meta)) = pending.take() {
+                compacted.push_insert(crate::utils::string_slice::StringSlice::from(text), meta);
+            }
+        }
+        for item in text.iter() {
+            match item {
+                loro_delta::DeltaItem::Retain { len, attr } => {
+                    flush(&mut compacted, &mut pending);
+                    compacted.push_retain(*len, attr.clone());
+                }
+                loro_delta::DeltaItem::Replace { value, attr, delete } => {
+                    if *delete > 0 {
+                        flush(&mut compacted, &mut pending);
+                        compacted.push_delete(*delete);
+                    }
+                    if value.rle_len() > 0 {
+                        match &mut pending {
+                            Some((buffer, meta)) if meta == attr => buffer.push_str(value.as_str()),
+                            _ => {
+                                flush(&mut compacted, &mut pending);
+                                pending = Some((value.as_str().to_string(), attr.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        flush(&mut compacted, &mut pending);
+        *diff = Diff::Text(compacted);
+    }
+    batch
 }

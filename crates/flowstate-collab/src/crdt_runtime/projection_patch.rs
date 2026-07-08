@@ -5,8 +5,7 @@ use flowstate_document::{
   paragraph_text,
 };
 use loro::{LoroDoc, LoroValue};
-use rustc_hash::FxHashMap;
-use std::collections::BTreeSet;
+use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::{ProjectionInvalidation, paragraph_body_start_in_loro, paragraph_style_from_attrs};
 
@@ -359,7 +358,7 @@ fn common_id_suffix(left: &[flowstate_document::BlockId], right: &[flowstate_doc
     .count()
 }
 
-fn text_delta_between(before: &str, after: &str) -> Vec<ProjectionTextDelta> {
+pub(crate) fn text_delta_between(before: &str, after: &str) -> Vec<ProjectionTextDelta> {
   let prefix = common_prefix_byte_len(before, after);
   let suffix = common_suffix_byte_len(before, after, prefix);
   text_delta(
@@ -370,124 +369,115 @@ fn text_delta_between(before: &str, after: &str) -> Vec<ProjectionTextDelta> {
   )
 }
 
-pub(crate) fn remote_body_text_patch(
+/// Spec §6-R step 4: diff regionally rematerialized rows against the old
+/// projection rows they replace (`old_lo..old_hi`, block-row range) and emit
+/// the minimal patch set — content patches for retained rows, one
+/// `DeleteBlocks` for dead rows, `InsertBlocks` runs anchored before their
+/// following retained row. Bails (`None`) when retained rows changed relative
+/// order (concurrent moves), a retained id changed kind or paragraph identity,
+/// or the region produced duplicate ids — those take the rebuild.
+pub(crate) fn splice_region_patches(
   projection: &DocumentProjection,
-  before: &str,
-  after: &str,
-  doc: &LoroDoc,
-  frontier_before: Vec<u8>,
-  frontier_after: Vec<u8>,
-) -> Option<(Vec<ProjectionPatch>, ProjectionInvalidation)> {
-  if before == after {
-    return None;
-  }
-
-  let prefix = common_prefix_byte_len(before, after);
-  let suffix = common_suffix_byte_len(before, after, prefix);
-  let before_changed_end = before.len().checked_sub(suffix)?;
-  let after_changed_end = after.len().checked_sub(suffix)?;
-  if prefix > before_changed_end || prefix > after_changed_end {
-    return None;
-  }
-
-  let before_changed = before.get(prefix..before_changed_end)?;
-  let after_changed = after.get(prefix..after_changed_end)?;
-  if contains_structural_body_char(before_changed) || contains_structural_body_char(after_changed) {
-    return None;
-  }
-
-  let before_location = paragraph_text_location(before, prefix)?;
-  let after_location = paragraph_text_location(after, prefix)?;
-  if before_location.paragraph_ix != after_location.paragraph_ix {
-    return None;
-  }
-
-  let old_paragraph_len = before_location
-    .paragraph_end_byte
-    .checked_sub(before_location.paragraph_start_byte)?;
-  let prefix_in_paragraph = prefix.checked_sub(before_location.paragraph_start_byte)?;
-  let old_changed_len = before_changed_end.checked_sub(prefix)?;
-  let new_changed_len = after_changed_end.checked_sub(prefix)?;
-  let trailing_retain = old_paragraph_len
-    .checked_sub(prefix_in_paragraph)?
-    .checked_sub(old_changed_len)?;
-
-  let new_paragraph = body_input_paragraph(doc, before_location.paragraph_ix)?;
-  let delta_utf8 = text_delta(prefix_in_paragraph, old_changed_len, new_changed_len, trailing_retain);
-  let unicode_start = before[..prefix].chars().count();
-  let unicode_len = before_changed
-    .chars()
-    .count()
-    .max(after_changed.chars().count());
-  let invalidation = ProjectionInvalidation::body_text(frontier_before, frontier_after, unicode_start, unicode_len);
-  let row = flowstate_document::block_ix_for_paragraph(projection, before_location.paragraph_ix)?;
-  Some((
-    vec![ProjectionPatch::ParagraphText {
-      block_id: projection.ids.block_ids[row],
-      paragraph_id: projection.ids.paragraph_ids[before_location.paragraph_ix],
-      row_hint: row,
-      new: new_paragraph,
-      delta_utf8,
-    }],
-    invalidation,
-  ))
-}
-
-pub(crate) fn remote_body_projection_patches(
-  projection: &DocumentProjection,
-  before: &str,
-  after: &str,
-  doc: &LoroDoc,
-  invalidation: &ProjectionInvalidation,
+  old_lo: usize,
+  old_hi: usize,
+  region: &flowstate_document::RegionRows,
 ) -> Option<Vec<ProjectionPatch>> {
-  if invalidation.rebuild_required || !invalidation.changed_sections.is_empty() {
+  let old_ids = projection.ids.block_ids.get(old_lo..old_hi)?;
+  let new_ids = &region.block_ids;
+  if region.blocks.len() != new_ids.len() {
+    return None;
+  }
+  let new_set: FxHashSet<flowstate_document::BlockId> = new_ids.iter().copied().collect();
+  if new_set.len() != new_ids.len() {
+    return None;
+  }
+  let old_set: FxHashSet<flowstate_document::BlockId> = old_ids.iter().copied().collect();
+  let old_retained: Vec<_> = old_ids.iter().copied().filter(|id| new_set.contains(id)).collect();
+  let new_retained: Vec<_> = new_ids.iter().copied().filter(|id| old_set.contains(id)).collect();
+  if old_retained != new_retained {
     return None;
   }
 
-  if before != after {
-    let mut patches = remote_body_text_patch(
-      projection,
+  // Old-row lookup: block id → (block row, paragraph index if a paragraph).
+  let mut old_paragraph_ix = projection
+    .blocks
+    .get(..old_lo)?
+    .iter()
+    .filter(|block| matches!(block, Block::Paragraph(_)))
+    .count();
+  let mut old_rows: FxHashMap<flowstate_document::BlockId, (usize, Option<usize>)> = FxHashMap::default();
+  for (offset, block) in projection.blocks.get(old_lo..old_hi)?.iter().enumerate() {
+    let paragraph = matches!(block, Block::Paragraph(_)).then_some(old_paragraph_ix);
+    if paragraph.is_some() {
+      old_paragraph_ix += 1;
+    }
+    old_rows.insert(old_ids[offset], (old_lo + offset, paragraph));
+  }
+
+  let mut patches = Vec::new();
+  let mut inserts: Vec<ProjectionStructuralBlock> = Vec::new();
+  let mut insert_runs: Vec<(Vec<ProjectionStructuralBlock>, Option<flowstate_document::BlockId>)> = Vec::new();
+  let mut new_paragraph_pointer = 0_usize;
+  for (new_ix, id) in new_ids.iter().enumerate() {
+    let new_block = region.blocks.get(new_ix)?;
+    let new_paragraph_id = if matches!(new_block, InputBlock::Paragraph(_)) {
+      let paragraph_id = region.paragraph_ids.get(new_paragraph_pointer).copied();
+      new_paragraph_pointer += 1;
+      paragraph_id
+    } else {
+      None
+    };
+    if let Some((old_ix, old_paragraph)) = old_rows.get(id).copied() {
+      // Retained row boundary: flush any pending insert run before it.
+      if !inserts.is_empty() {
+        insert_runs.push((std::mem::take(&mut inserts), Some(*id)));
+      }
+      match (new_block, old_paragraph) {
+        (InputBlock::Paragraph(new_input), Some(paragraph_ix)) => {
+          // Identity must agree row-for-row; a swapped paragraph id under a
+          // retained block id is not expressible as a content patch.
+          if new_paragraph_id != projection.ids.paragraph_ids.get(paragraph_ix).copied() {
+            return None;
+          }
+          paragraph_patches_from_readback(projection, paragraph_ix, new_input.clone(), &mut patches)?;
+        },
+        (new_input, None) => {
+          let old_input = input_block_from_block(projection.blocks.get(old_ix)?);
+          if old_input != *new_input {
+            patches.extend(super::object_replacement_patch(projection, old_ix, new_input.clone())?);
+          }
+        },
+        // Kind changed under a retained id — rebuild territory.
+        _ => return None,
+      }
+    } else {
+      inserts.push(ProjectionStructuralBlock {
+        block_id: *id,
+        paragraph_id: new_paragraph_id,
+        block: new_block.clone(),
+      });
+    }
+  }
+  if !inserts.is_empty() {
+    // Trailing run: anchor before the first old row AFTER the region.
+    insert_runs.push((inserts, projection.ids.block_ids.get(old_hi).copied()));
+  }
+
+  let dead: Vec<_> = old_ids.iter().copied().filter(|id| !new_set.contains(id)).collect();
+  if !dead.is_empty() {
+    patches.push(ProjectionPatch::DeleteBlocks {
+      block_ids: dead,
+      row_hint: old_lo,
+    });
+  }
+  for (blocks, before) in insert_runs {
+    patches.push(ProjectionPatch::InsertBlocks {
       before,
-      after,
-      doc,
-      invalidation.frontier_before.clone(),
-      invalidation.frontier_after.clone(),
-    )?
-    .0;
-    if !invalidation.changed_blocks.is_empty()
-      || !invalidation.changed_tables.is_empty()
-      || invalidation
-        .changed_flows
-        .iter()
-        .any(|flow| flow != flowstate_document::ROOT_BODY_FLOW_ID)
-    {
-      patches.extend(remote_object_projection_patches(projection, doc)?);
-    }
-    return Some(patches);
+      row_hint: old_lo,
+      blocks,
+    });
   }
-
-  if !invalidation.changed_blocks.is_empty()
-    || !invalidation.changed_tables.is_empty()
-    || invalidation
-      .changed_flows
-      .iter()
-      .any(|flow| flow != flowstate_document::ROOT_BODY_FLOW_ID)
-  {
-    return remote_object_projection_patches(projection, doc);
-  }
-
-  let mut touched = BTreeSet::new();
-  for range in &invalidation.changed_text_ranges {
-    if range.flow_id != flowstate_document::ROOT_BODY_FLOW_ID {
-      return None;
-    }
-    touched.insert(paragraph_index_at_unicode(after, range.unicode_start));
-    touched.insert(paragraph_index_at_unicode(after, range.unicode_start.saturating_add(range.unicode_len)));
-  }
-  if touched.is_empty() {
-    return Some(Vec::new());
-  }
-  paragraph_projection_patches(projection, doc, touched)
+  Some(patches)
 }
 
 #[hotpath::measure]
@@ -520,25 +510,11 @@ pub(crate) fn remote_nonstructural_projection_patches(
   Some(patches)
 }
 
-fn paragraph_projection_patches(
-  projection: &DocumentProjection,
-  doc: &LoroDoc,
-  touched_paragraphs: impl IntoIterator<Item = usize>,
-) -> Option<Vec<ProjectionPatch>> {
-  let mut patches = Vec::new();
-  for paragraph_ix in touched_paragraphs {
-    let new_input = body_input_paragraph(doc, paragraph_ix)?;
-    paragraph_patches_from_readback(projection, paragraph_ix, new_input, &mut patches)?;
-  }
-  Some(patches)
-}
-
-/// Ranged sibling of [`paragraph_projection_patches`]: reads each touched
-/// paragraph back through [`body_input_paragraph_at`] (O(paragraph) per read
-/// instead of an O(doc) whole-body walk), with ranges resolved from durable
-/// paragraph records — exact in live space even for object docs, which the
-/// index-walk readback cannot promise.
-fn paragraph_projection_patches_ranged(
+/// Reads each touched paragraph back through [`body_input_paragraph_at`]
+/// (O(paragraph) per read instead of an O(doc) whole-body walk), with ranges
+/// resolved from durable paragraph records — exact in live space even for
+/// object docs, which the legacy index-walk readback could not promise.
+pub(crate) fn paragraph_projection_patches_ranged(
   projection: &DocumentProjection,
   doc: &LoroDoc,
   live_starts: &[usize],
@@ -608,7 +584,7 @@ fn paragraph_patches_from_readback(
 }
 
 #[hotpath::measure]
-fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroDoc) -> Option<Vec<ProjectionPatch>> {
+pub(crate) fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroDoc) -> Option<Vec<ProjectionPatch>> {
   let projected = flowstate_document::object_input_blocks_from_loro(doc).ok()?;
   let mut existing = projection
     .blocks
@@ -647,63 +623,6 @@ fn remote_object_projection_patches(projection: &DocumentProjection, doc: &LoroD
       })
       .collect(),
   )
-}
-
-fn paragraph_index_at_unicode(body: &str, unicode_index: usize) -> usize {
-  let mut paragraph_ix = 0usize;
-  let mut seen_sentinel = false;
-  for (index, ch) in body.chars().enumerate() {
-    if index >= unicode_index {
-      break;
-    }
-    if ch == '\n' {
-      if seen_sentinel {
-        paragraph_ix += 1;
-      } else {
-        seen_sentinel = true;
-      }
-    }
-  }
-  paragraph_ix
-}
-
-fn contains_structural_body_char(text: &str) -> bool {
-  text
-    .chars()
-    .any(|ch| ch == '\n' || ch == OBJECT_REPLACEMENT)
-}
-
-#[derive(Clone, Copy)]
-struct ParagraphTextLocation {
-  paragraph_ix: usize,
-  paragraph_start_byte: usize,
-  paragraph_end_byte: usize,
-}
-
-fn paragraph_text_location(body: &str, body_byte: usize) -> Option<ParagraphTextLocation> {
-  if body_byte > body.len() || !body.is_char_boundary(body_byte) {
-    return None;
-  }
-  let sentinel_end = body.find('\n')? + '\n'.len_utf8();
-  if body_byte < sentinel_end {
-    return None;
-  }
-  let paragraph_start_byte = body[..body_byte]
-    .rfind('\n')
-    .map_or(sentinel_end, |index| index + '\n'.len_utf8());
-  let paragraph_end_byte = body[body_byte..]
-    .find('\n')
-    .map_or(body.len(), |relative| body_byte + relative);
-  let paragraph_ix = body[..paragraph_start_byte]
-    .chars()
-    .filter(|ch| *ch == '\n')
-    .count()
-    .saturating_sub(1);
-  Some(ParagraphTextLocation {
-    paragraph_ix,
-    paragraph_start_byte,
-    paragraph_end_byte,
-  })
 }
 
 fn text_delta(prefix_retain: usize, delete_len: usize, insert_len: usize, trailing_retain: usize) -> Vec<ProjectionTextDelta> {
@@ -745,9 +664,9 @@ fn common_suffix_byte_len(left: &str, right: &str, prefix: usize) -> usize {
   len
 }
 
-/// Ranged replacement for [`body_input_paragraph`] (§11 complexity contract):
-/// reads ONE paragraph back through `slice_delta` over its live unicode range
-/// instead of materializing the whole body — O(paragraph), not O(doc).
+/// Ranged paragraph readback (§11 complexity contract): reads ONE paragraph
+/// back through `slice_delta` over its live unicode range instead of
+/// materializing the whole body — O(paragraph), not O(doc).
 ///
 /// `sentinel_unicode` addresses the paragraph's LEADING boundary `\n` (the
 /// paragraph-style carrier; the seed sentinel for paragraph 0). `end_unicode`
@@ -817,45 +736,6 @@ fn live_paragraph_range(doc: &LoroDoc, projection: &DocumentProjection, live_sta
     body_text(doc).len_unicode()
   };
   (sentinel < end).then_some((sentinel, end))
-}
-
-pub(crate) fn body_input_paragraph(doc: &LoroDoc, target_paragraph_ix: usize) -> Option<InputParagraph> {
-  let text = body_text(doc);
-  let mut current = InputParagraph {
-    style: ParagraphStyle::Normal,
-    runs: Vec::new(),
-  };
-  let mut pending_style = ParagraphStyle::Normal;
-  let mut seen_sentinel = false;
-  let mut paragraph_ix = 0usize;
-
-  for item in text.to_delta() {
-    let loro::TextDelta::Insert { insert, attributes } = item else {
-      continue;
-    };
-    let run_styles = run_styles_from_attrs(attributes.as_ref());
-    for ch in insert.chars() {
-      if ch == '\n' {
-        let style = paragraph_style_from_attrs(attributes.as_ref()).unwrap_or(pending_style);
-        if !seen_sentinel {
-          seen_sentinel = true;
-          pending_style = style;
-          current.style = style;
-        } else {
-          if paragraph_ix == target_paragraph_ix {
-            return Some(current);
-          }
-          paragraph_ix += 1;
-          current = InputParagraph { style, runs: Vec::new() };
-          pending_style = style;
-        }
-      } else if ch != OBJECT_REPLACEMENT {
-        push_input_char(&mut current, ch, run_styles);
-      }
-    }
-  }
-
-  (seen_sentinel && paragraph_ix == target_paragraph_ix).then_some(current)
 }
 
 fn push_input_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {

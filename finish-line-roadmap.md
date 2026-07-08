@@ -11,6 +11,11 @@ Integrate w/ collab
 Within-app splitscreening
 Finish keymap
 Style alias enum---fill it out
+Verify .docx conversion semantics---grab entire DB:
+Two paths
+.docx -> .cmir -> .db8
+.docx -> .db8 
+EVERY difference needs to be surfaced and investigated---.cmir isn't source of truth, but could tease out where we're wrong
 
 Web---compile to gpui wasm.
 Dropbox integration--this should be partially platform agnostic

@@ -38,6 +38,71 @@ pub fn document_from_loro_with_defects(doc: &LoroDoc) -> io::Result<(DocumentPro
   Ok((document, defects))
 }
 
+/// Rows produced by a REGIONAL rematerialization (spec §6-R): the same
+/// materializer law as [`document_from_loro`], applied to one body region.
+pub struct RegionRows {
+  pub blocks: Vec<InputBlock>,
+  pub paragraph_ids: Vec<ParagraphId>,
+  pub block_ids: Vec<BlockId>,
+  pub defects: Vec<ProjectionDefect>,
+}
+
+/// Spec §6-R: materialize the body rows covering `[sentinel_unicode, end_unicode)`
+/// — a region that STARTS at a row's leading boundary sentinel (`\n`, or the seed
+/// sentinel at 0) and ENDS exclusively at the next retained row's leading sentinel
+/// (or the body end). Runs the SAME flow walk as the full materialization
+/// ([`document_from_loro`]) over a `slice_delta` of the region, so coalescing,
+/// style defaults, fabrication, and defect reporting are one law, not a copy.
+///
+/// Callers supply the identity context, all keyed by ABSOLUTE flow positions:
+/// boundary→record-key maps for the candidate paragraph/paragraph-block records
+/// and the region's resolved object blocks. Quarantine append and the empty-doc
+/// placeholder are full-rebuild concerns and intentionally do not apply here.
+#[allow(clippy::implicit_hasher, reason = "the maps are shared with the internal flow walker, whose boundary indexes are FxHashMap by construction")]
+pub fn materialize_body_region(
+  doc: &LoroDoc,
+  sentinel_unicode: usize,
+  end_unicode: usize,
+  paragraph_ids_by_boundary: &FxHashMap<usize, String>,
+  paragraph_block_ids_by_boundary: &FxHashMap<usize, String>,
+  object_blocks_by_pos: &BTreeMap<usize, LoroMap>,
+) -> io::Result<RegionRows> {
+  let projector = Projector::new(doc)?;
+  let body = projector.flow_text(ROOT_BODY_FLOW_ID)?;
+  let end = end_unicode.min(body.len_unicode());
+  if sentinel_unicode >= end {
+    return Err(invalid("regional rematerialization given an empty region"));
+  }
+  let delta = body
+    .slice_delta(sentinel_unicode, end, loro::cursor::PosType::Unicode)
+    .map_err(|error| invalid(format!("regional slice_delta failed: {error}")))?;
+  let mut blocks = Vec::new();
+  let mut paragraph_ids = Vec::new();
+  let mut block_ids = Vec::new();
+  let mut defects = Vec::new();
+  Projector::walk_flow_delta(
+    &body,
+    delta,
+    sentinel_unicode,
+    object_blocks_by_pos,
+    ROOT_BODY_FLOW_ID,
+    Some(paragraph_ids_by_boundary),
+    Some(paragraph_block_ids_by_boundary),
+    Some(&mut paragraph_ids),
+    Some(&mut block_ids),
+    &mut blocks,
+    &mut defects,
+    false,
+    |block, defects| projector.object_block(block, defects),
+  )?;
+  Ok(RegionRows {
+    blocks,
+    paragraph_ids,
+    block_ids,
+    defects,
+  })
+}
+
 pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
   Ok(projection_from_loro(doc)?.blocks)
 }
@@ -122,7 +187,7 @@ impl<'a> Projector<'a> {
     let mut blocks = Vec::new();
     let mut paragraph_ids = Vec::new();
     let mut block_ids = Vec::new();
-    self.push_flow_blocks(&body, &body_blocks, ROOT_BODY_FLOW_ID, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks, defects)?;
+    self.push_flow_blocks(&body, &body_blocks, ROOT_BODY_FLOW_ID, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks, defects, true)?;
     // §5 quarantine: blocks whose anchors no longer resolve are appended at the
     // end in stable (sorted block key) order instead of vanishing. Their defects
     // were already recorded by `object_blocks_for_flow`.
@@ -133,7 +198,15 @@ impl<'a> Projector<'a> {
         block_ids.push(BlockId(loro_id_u128(&id)));
       }
     }
-    if blocks.is_empty() {
+    if paragraph_ids.is_empty() {
+      // No paragraph rows at all — either a truly empty projection, or a body
+      // ending in object rows only (e.g. an object inserted into an empty
+      // document). The editor's document assembly appends a mandatory trailing
+      // paragraph in both shapes; emitting it HERE, with a deterministic
+      // fabricated identity, keeps `document_from_loro` a pure function — the
+      // silent length-mismatch fallback in `document_from_projection_blocks`
+      // previously let the assembly mint a RANDOM id for that row, so two
+      // rebuilds of the same doc disagreed (found by the object-fuzz undo arm).
       blocks.push(InputBlock::Paragraph(InputParagraph {
         style: gpui_flowtext::ParagraphStyle::Normal,
         runs: Vec::new(),
@@ -226,25 +299,18 @@ impl<'a> Projector<'a> {
   }
 
   #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
+  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
   fn push_flow_blocks(
     &self,
     text: &LoroText,
     object_blocks: &BTreeMap<usize, LoroMap>,
     flow_id: &str,
-    mut paragraph_ids: Option<&mut Vec<ParagraphId>>,
-    mut block_ids: Option<&mut Vec<BlockId>>,
+    paragraph_ids: Option<&mut Vec<ParagraphId>>,
+    block_ids: Option<&mut Vec<BlockId>>,
     output: &mut Vec<InputBlock>,
     defects: &mut Vec<ProjectionDefect>,
+    flush_trailing_after_object: bool,
   ) -> io::Result<()> {
-    let mut current = InputParagraph {
-      style: gpui_flowtext::ParagraphStyle::Normal,
-      runs: Vec::new(),
-    };
-    let mut pending_style = gpui_flowtext::ParagraphStyle::Normal;
-    let mut seen_sentinel = false;
-    let mut unicode_pos = 0_usize;
-    let mut current_boundary = None;
-
     // §perf: resolve this flow's boundary→id maps ONCE (only for the id sinks that
     // are actually collected — cell flows pass `None` and skip the build), then do
     // O(1) lookups per boundary below. Replaces a per-boundary full rescan of every
@@ -253,7 +319,60 @@ impl<'a> Projector<'a> {
     let paragraph_index = paragraph_ids.as_ref().map(|_| paragraph_ids_by_boundary(self.doc, text));
     let paragraph_block_index = block_ids.as_ref().map(|_| paragraph_block_ids_by_boundary(self.doc, text));
 
-    for item in text.to_delta() {
+    Self::walk_flow_delta(
+      text,
+      text.to_delta(),
+      0,
+      object_blocks,
+      flow_id,
+      paragraph_index.as_ref(),
+      paragraph_block_index.as_ref(),
+      paragraph_ids,
+      block_ids,
+      output,
+      defects,
+      flush_trailing_after_object,
+      |block, defects| self.object_block(block, defects),
+    )
+  }
+
+  /// Core flow walk shared by the FULL materialization ([`Self::push_flow_blocks`])
+  /// and the REGIONAL rematerialization ([`materialize_body_region`], spec §6-R):
+  /// ONE implementation of the paragraph/object/coalescing/defect law, applied to
+  /// either the whole flow delta from position 0 or a `slice_delta` region that
+  /// starts at a row's leading boundary sentinel. `unicode_pos` runs in ABSOLUTE
+  /// flow coordinates either way, so boundary-id maps and object positions are
+  /// always absolute.
+  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
+  fn walk_flow_delta(
+    text: &LoroText,
+    delta: Vec<loro::TextDelta>,
+    start_unicode: usize,
+    object_blocks: &BTreeMap<usize, LoroMap>,
+    flow_id: &str,
+    paragraph_index: Option<&FxHashMap<usize, String>>,
+    paragraph_block_index: Option<&FxHashMap<usize, String>>,
+    mut paragraph_ids: Option<&mut Vec<ParagraphId>>,
+    mut block_ids: Option<&mut Vec<BlockId>>,
+    output: &mut Vec<InputBlock>,
+    defects: &mut Vec<ProjectionDefect>,
+    flush_trailing_after_object: bool,
+    mut project_object: impl FnMut(&LoroMap, &mut Vec<ProjectionDefect>) -> io::Result<InputBlock>,
+  ) -> io::Result<()> {
+    let mut current = InputParagraph {
+      style: gpui_flowtext::ParagraphStyle::Normal,
+      runs: Vec::new(),
+    };
+    // Durable key of the most recently emitted object row: the identity
+    // anchor for any boundary-less (interstitial/trailing) paragraph row that
+    // follows it (see `push_paragraph_projection_metadata`).
+    let mut last_object_key: Option<String> = None;
+    let mut pending_style = gpui_flowtext::ParagraphStyle::Normal;
+    let mut seen_sentinel = false;
+    let mut unicode_pos = start_unicode;
+    let mut current_boundary = None;
+
+    for item in delta {
       let loro::TextDelta::Insert { insert, attributes } = item else {
         continue;
       };
@@ -300,11 +419,12 @@ impl<'a> Projector<'a> {
             } else {
               push_paragraph_projection_metadata(
                 text,
-                paragraph_index.as_ref(),
-                paragraph_block_index.as_ref(),
+                paragraph_index,
+                paragraph_block_index,
                 flow_id,
                 current_boundary,
                 output.len(),
+                last_object_key.as_deref(),
                 paragraph_ids.as_deref_mut(),
                 block_ids.as_deref_mut(),
                 defects,
@@ -330,11 +450,12 @@ impl<'a> Projector<'a> {
               if !current.runs.is_empty() || (current_boundary.is_some() && !output.is_empty()) {
                 push_paragraph_projection_metadata(
                   text,
-                  paragraph_index.as_ref(),
-                  paragraph_block_index.as_ref(),
+                  paragraph_index,
+                  paragraph_block_index,
                   flow_id,
                   current_boundary,
                   output.len(),
+                  last_object_key.as_deref(),
                   paragraph_ids.as_deref_mut(),
                   block_ids.as_deref_mut(),
                   defects,
@@ -345,10 +466,12 @@ impl<'a> Projector<'a> {
                   runs: Vec::new(),
                 };
               }
-              output.push(self.object_block(block, defects)?);
+              output.push(project_object(block, defects)?);
+              let object_key = map_string(block, "id")?;
               if let Some(block_ids) = block_ids.as_deref_mut() {
-                block_ids.push(BlockId(loro_id_u128(&map_string(block, "id")?)));
+                block_ids.push(BlockId(loro_id_u128(&object_key)));
               }
+              last_object_key = Some(object_key);
               current_boundary = None;
             } else if flow_id == ROOT_BODY_FLOW_ID {
               // §5/FS-036 backstop: a placeholder no block claims would
@@ -366,14 +489,32 @@ impl<'a> Projector<'a> {
       }
     }
 
-    if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel {
+    // A WHOLE flow that ends in object rows still carries `current` — the
+    // style-bearing (pending-style) trailing paragraph the editor's document
+    // assembly would otherwise mint with a RANDOM id and a default style.
+    // Emitting it here keeps the materializer a pure function AND keeps the
+    // trailing row's style equal to what the last boundary's mark says (the
+    // object-fuzz undo arm caught both: nondeterministic ids, then a stale
+    // Normal style after SetParagraphStyle on the interstitial row). Regions
+    // and cell flows keep the old behavior — a region legitimately ends
+    // mid-geometry and must not gain rows.
+    let ends_with_object = flush_trailing_after_object && matches!(output.last(), Some(block) if !matches!(block, InputBlock::Paragraph(_)));
+    if ends_with_object && current.runs.is_empty() && current_boundary.is_none() {
+      // The synthesized empty trailing row is a FRESH paragraph, not an
+      // inheritor: pending style belongs to the last real boundary's
+      // paragraph, and carrying it here would make restyling that paragraph
+      // silently restyle this row too (maintained-vs-canonical style drift).
+      current.style = gpui_flowtext::ParagraphStyle::Normal;
+    }
+    if !current.runs.is_empty() || current_boundary.is_some() || output.is_empty() && seen_sentinel || ends_with_object {
       push_paragraph_projection_metadata(
         text,
-        paragraph_index.as_ref(),
-        paragraph_block_index.as_ref(),
+        paragraph_index,
+        paragraph_block_index,
         flow_id,
         current_boundary,
         output.len(),
+        last_object_key.as_deref(),
         paragraph_ids,
         block_ids,
         defects,
@@ -398,6 +539,13 @@ impl<'a> Projector<'a> {
     // per-object-block anchor check below is O(1); previously each block did
     // `snapshot.chars().nth(pos)` which is O(pos), i.e. O(blocks·len) overall.
     let snapshot_chars: Vec<char> = text.to_string().chars().collect();
+    // ONE batched resolver pass for every anchor cursor: a DEAD anchor is
+    // simply absent (→ quarantine + canonical re-anchor repair, identity
+    // preserved). The former per-record `get_cursor_pos` walked update
+    // history for each dead anchor — after an undo of a mass delete restores
+    // object records whose anchors all point at deleted placeholders, that
+    // was O(objects × history) inside every rematerialization.
+    let anchor_positions = boundary_cursor_positions(self.doc, text, &self.blocks, &["anchor_cursor"]);
     let mut by_pos = BTreeMap::new();
     let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
     let mut quarantined = Vec::new();
@@ -416,11 +564,13 @@ impl<'a> Projector<'a> {
         .as_deref()
         .and_then(|bytes| Cursor::decode(bytes).ok())
         .filter(|cursor| cursor.container == text.id())
-        .and_then(|cursor| {
-          crate::instrument::record_cursor_pos_resolve();
-          self.doc.get_cursor_pos(&cursor).ok()
+        .and_then(|cursor| match cursor.id {
+          Some(id) => anchor_positions.get(&id).copied(),
+          None => {
+            crate::instrument::record_cursor_pos_resolve();
+            self.doc.get_cursor_pos(&cursor).ok().map(|pos| pos.current.pos)
+          },
         })
-        .map(|pos| pos.current.pos)
         .filter(|pos| snapshot_chars.get(*pos).copied() == Some(OBJECT_REPLACEMENT));
       let Some(pos) = resolved else {
         // FS-002: never silently drop a block whose anchor is unresolvable.
@@ -614,7 +764,7 @@ impl<'a> Projector<'a> {
     let flow = self.flow_text(&flow_id)?;
     let object_blocks = self.cell_nested_tables(cell, &flow)?;
     let mut projected = Vec::new();
-    self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, &mut projected, defects)?;
+    self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, &mut projected, defects, false)?;
     let mut blocks = projected
       .into_iter()
       .filter_map(|block| match block {
@@ -832,6 +982,7 @@ fn push_paragraph_projection_metadata(
   flow_id: &str,
   boundary: Option<usize>,
   block_ix: usize,
+  interstitial_anchor: Option<&str>,
   paragraph_ids: Option<&mut Vec<ParagraphId>>,
   block_ids: Option<&mut Vec<BlockId>>,
   defects: &mut Vec<ProjectionDefect>,
@@ -853,9 +1004,14 @@ fn push_paragraph_projection_metadata(
     let id = match paragraph_resolved {
       Some(id) => id,
       None => {
-        let fabricated_id = fabricated_keys
-          .as_ref()
-          .map_or_else(|| format!("paragraph.projection.{block_ix}"), |(paragraph_key, _)| paragraph_key.clone());
+        // Boundary-less (interstitial/trailing) rows anchor their fabricated
+        // identity to the durable key of the OBJECT they follow — a row-index
+        // key ("paragraph.projection.{ix}") silently re-identified the row on
+        // every edit above it (the object-fuzz undo arm caught the drift as a
+        // maintained-vs-canonical id mismatch after a join).
+        let fabricated_id = fabricated_keys.as_ref().map(|(paragraph_key, _)| paragraph_key.clone()).unwrap_or_else(|| {
+          interstitial_anchor.map_or_else(|| format!("paragraph.projection.{block_ix}"), |anchor| format!("paragraph.after.{anchor}"))
+        });
         defects.push(ProjectionDefect::MissingParagraphMetadata {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -871,9 +1027,10 @@ fn push_paragraph_projection_metadata(
     let id = match block_resolved {
       Some(id) => id,
       None => {
-        let fabricated_id = fabricated_keys
-          .as_ref()
-          .map_or_else(|| format!("paragraph_block.projection.{block_ix}"), |(_, block_key)| block_key.clone());
+        let fabricated_id = fabricated_keys.as_ref().map(|(_, block_key)| block_key.clone()).unwrap_or_else(|| {
+          interstitial_anchor
+            .map_or_else(|| format!("paragraph_block.projection.{block_ix}"), |anchor| format!("paragraph_block.after.{anchor}"))
+        });
         defects.push(ProjectionDefect::MissingParagraphBlock {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -964,8 +1121,8 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
 /// (vendored Loro batch resolver) instead of an O(elements) `get_cursor_pos` per
 /// record. That is what takes `document_from_loro` from O(records²) — which pegged
 /// the CRDT actor at 100% CPU on a large document — down to ~O(elements). Ids not
-/// present (deleted) are simply absent; [`live_cursor_pos`] falls back to the
-/// per-id `get_cursor_pos` (history-traced) for those.
+/// present (deleted) are simply absent; a DEAD anchor is treated as unresolvable
+/// (fabrication/quarantine + canonical repair), never history-traced per cursor.
 fn boundary_cursor_positions(doc: &LoroDoc, text: &LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
   let container = text.id();
   let mut ids: Vec<ID> = Vec::new();
@@ -1004,12 +1161,17 @@ fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str, pos
   if cursor.container != text.id() {
     return None;
   }
-  // Fast path: the boundary index built above resolved every live cursor in one
-  // pass, so this is an O(1) lookup. Fall back to the per-id `get_cursor_pos` only
-  // for a cursor whose id isn't live (deleted) and thus wasn't in the batch — it
-  // does the history-traced resolution, preserving exact parity with the old path.
-  let pos = match cursor.id.and_then(|id| pos_by_id.get(&id).copied()) {
-    Some(pos) => pos,
+  // The boundary index resolved every id-carrying live cursor in one batch
+  // pass, so this is an O(1) lookup — and absence means the anchor is DELETED.
+  // Falling back to per-id `get_cursor_pos` for dead anchors walks update
+  // history per cursor: after an undo of a mass delete restores records whose
+  // cursors all point at the deleted characters, that was O(records × history)
+  // — a multi-minute rematerialization freeze (the ctrl-A + undo field bug).
+  // A dead anchor resolves to None; the boundary fabricates its deterministic
+  // id and canonical defect repair re-anchors the record — identical recovery
+  // law on every peer. Id-less cursors (F7) keep the per-cursor resolution.
+  let pos = match cursor.id {
+    Some(id) => pos_by_id.get(&id).copied()?,
     None => {
       crate::instrument::record_cursor_pos_resolve();
       doc.get_cursor_pos(&cursor).ok()?.current.pos
@@ -1055,6 +1217,21 @@ fn loro_id_u128(id: &str) -> u128 {
 /// than its trailing-number rule), keeping the paragraph and block ids distinct.
 /// Returns `None` only when `boundary` has no live anchor (e.g. an empty container).
 #[must_use]
+/// Materialize ONE table block from canonical state — the same law
+/// `document_from_loro` applies to it, exposed so table-op patch synthesis
+/// READS the committed table back instead of simulating the op on the old
+/// projection. Simulation is a second doc→projection semantics and diverged
+/// from canonical under undo-churned histories (found by the table-fuzz undo
+/// arm as stale cell spans). A missing canonical record or any reported
+/// defect is the caller's cue to fall back to the full rebuild.
+pub fn materialize_table_block(doc: &LoroDoc, block_id: u128) -> io::Result<(InputTableBlock, Vec<ProjectionDefect>)> {
+  let projector = Projector::new(doc)?;
+  let record = child_map(&projector.blocks, &format!("table.{block_id}"))?.ok_or_else(|| invalid("table block record missing"))?;
+  let mut defects = Vec::new();
+  let table = projector.table_block(&record, &mut defects)?;
+  Ok((table, defects))
+}
+
 pub fn stable_boundary_metadata_keys(text: &LoroText, boundary: usize) -> Option<(String, String)> {
   if boundary == 0 {
     return Some((ROOT_FIRST_PARAGRAPH_ID.to_string(), MAIN_BODY_BLOCK_ID.to_string()));

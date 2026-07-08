@@ -1530,6 +1530,207 @@ impl DocState {
 
     // Because we need to calculate path based on [DocState], so we cannot extract
     // the event recorder to a separate module.
+    /// Flowstate §perf: pair composition for the event fold. External text
+    /// diffs take the LINEAR walk below; everything else keeps the stock
+    /// `DiffVariant::compose`.
+    fn compose_pair(first: crate::event::DiffVariant, second: crate::event::DiffVariant) -> crate::event::DiffVariant {
+        use crate::event::{Diff, DiffVariant};
+        match (first, second) {
+            (DiffVariant::External(Diff::Text(a)), DiffVariant::External(Diff::Text(b))) => {
+                DiffVariant::External(Diff::Text(Self::compose_text_linear(&a, &b)))
+            }
+            (first, second) => first.compose(second).unwrap(),
+        }
+    }
+
+    /// Flowstate §perf: LINEAR two-way composition for external text diffs —
+    /// the standard O(|a| + |b|) flat-item delta composition. The stock
+    /// `DeltaRope::compose` degrades quadratically in span count: composing
+    /// the ~12k-span deltas an undo/redo of a mass styled edit records took
+    /// ~1s per pair (a multi-minute UI freeze at document scale; the ctrl-A +
+    /// undo field bug). Attr semantics mirror `TextMeta::compose` exactly
+    /// (plain insert-overwrite, later diff wins).
+    fn compose_text_linear(a: &crate::event::TextDiff, b: &crate::event::TextDiff) -> crate::event::TextDiff {
+        use crate::event::TextMeta;
+        use crate::utils::string_slice::StringSlice;
+        use generic_btree::rle::{HasLength as _, Sliceable as _};
+        use loro_delta::{DeltaItem, DeltaRopeBuilder};
+        use std::collections::VecDeque;
+
+        enum Item {
+            Ret { len: usize, meta: TextMeta },
+            // `len` caches `value.rle_len()`: the unicode length of a
+            // `StringSlice` is a full scan, and the compose loop repeatedly
+            // carves the front off multi-megabyte inserts — recomputing the
+            // remainder's length each time is quadratic in characters.
+            Ins { value: StringSlice, len: usize, meta: TextMeta },
+            Del { len: usize },
+        }
+
+        fn push(items: &mut Vec<Item>, item: Item) {
+            // Coalesce runs so the output shape matches what rope composition
+            // would produce for the same content.
+            match (items.last_mut(), &item) {
+                (Some(Item::Ret { len, meta }), Item::Ret { len: next_len, meta: next_meta }) if meta.0 == next_meta.0 => {
+                    *len += next_len;
+                }
+                (Some(Item::Del { len }), Item::Del { len: next_len }) => *len += next_len,
+                _ => items.push(item),
+            }
+        }
+
+        fn explode(diff: &crate::event::TextDiff) -> VecDeque<Item> {
+            let mut out = VecDeque::new();
+            for item in diff.iter() {
+                match item {
+                    DeltaItem::Retain { len, attr } => out.push_back(Item::Ret {
+                        len: *len,
+                        meta: attr.clone(),
+                    }),
+                    DeltaItem::Replace { value, attr, delete } => {
+                        let value_len = value.rle_len();
+                        if value_len > 0 {
+                            out.push_back(Item::Ins {
+                                value: value.clone(),
+                                len: value_len,
+                                meta: attr.clone(),
+                            });
+                        }
+                        if *delete > 0 {
+                            out.push_back(Item::Del { len: *delete });
+                        }
+                    }
+                }
+            }
+            out
+        }
+
+        fn merge_meta(base: &TextMeta, over: &TextMeta) -> TextMeta {
+            if over.0.is_empty() {
+                return base.clone();
+            }
+            let mut merged = base.clone();
+            for (key, value) in over.0.iter() {
+                merged.0.insert(key.clone(), value.clone());
+            }
+            merged
+        }
+
+        let mut a_items = explode(a);
+        let mut b_items = explode(b);
+        let mut out: Vec<Item> = Vec::new();
+
+        while let Some(b_item) = b_items.pop_front() {
+            match b_item {
+                Item::Ins { value, len, meta } => push(&mut out, Item::Ins { value, len, meta }),
+                Item::Ret { mut len, meta } => {
+                    while len > 0 {
+                        match a_items.pop_front() {
+                            None => {
+                                // Retaining original text beyond `a`'s reach.
+                                push(&mut out, Item::Ret { len, meta: meta.clone() });
+                                len = 0;
+                            }
+                            Some(Item::Del { len: deleted }) => {
+                                // `a`'s deletions are invisible to `b`; pass through.
+                                push(&mut out, Item::Del { len: deleted });
+                            }
+                            Some(Item::Ret { len: available, meta: a_meta }) => {
+                                let taken = available.min(len);
+                                if available > taken {
+                                    a_items.push_front(Item::Ret {
+                                        len: available - taken,
+                                        meta: a_meta.clone(),
+                                    });
+                                }
+                                push(&mut out, Item::Ret {
+                                    len: taken,
+                                    meta: merge_meta(&a_meta, &meta),
+                                });
+                                len -= taken;
+                            }
+                            Some(Item::Ins {
+                                mut value,
+                                len: available,
+                                meta: a_meta,
+                            }) => {
+                                let taken = available.min(len);
+                                if taken < available {
+                                    let rest = value.split(taken);
+                                    a_items.push_front(Item::Ins {
+                                        value: rest,
+                                        len: available - taken,
+                                        meta: a_meta.clone(),
+                                    });
+                                }
+                                push(&mut out, Item::Ins {
+                                    value,
+                                    len: taken,
+                                    meta: merge_meta(&a_meta, &meta),
+                                });
+                                len -= taken;
+                            }
+                        }
+                    }
+                }
+                Item::Del { mut len } => {
+                    while len > 0 {
+                        match a_items.pop_front() {
+                            None => {
+                                push(&mut out, Item::Del { len });
+                                len = 0;
+                            }
+                            Some(Item::Del { len: deleted }) => {
+                                push(&mut out, Item::Del { len: deleted });
+                            }
+                            Some(Item::Ret { len: available, meta: a_meta }) => {
+                                let taken = available.min(len);
+                                if available > taken {
+                                    a_items.push_front(Item::Ret {
+                                        len: available - taken,
+                                        meta: a_meta,
+                                    });
+                                }
+                                push(&mut out, Item::Del { len: taken });
+                                len -= taken;
+                            }
+                            Some(Item::Ins {
+                                mut value,
+                                len: available,
+                                meta: a_meta,
+                            }) => {
+                                // Inserted by `a`, deleted by `b`: vanishes.
+                                let taken = available.min(len);
+                                if taken < available {
+                                    let rest = value.split(taken);
+                                    a_items.push_front(Item::Ins {
+                                        value: rest,
+                                        len: available - taken,
+                                        meta: a_meta,
+                                    });
+                                }
+                                len -= taken;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for item in a_items {
+            push(&mut out, item);
+        }
+
+        let mut builder: DeltaRopeBuilder<StringSlice, TextMeta> = DeltaRopeBuilder::new();
+        for item in out {
+            builder = match item {
+                Item::Ret { len, meta } => builder.retain(len, meta),
+                Item::Ins { value, meta, .. } => builder.insert(value, meta),
+                Item::Del { len } => builder.delete(len),
+            };
+        }
+        builder.build()
+    }
+
     /// Flowstate §perf: compose many sequential diffs of one container in a
     /// balanced fold — O(total · log n) instead of the O(n²)
     /// clone-and-compose-one-at-a-time accumulation. Diff composition is
@@ -1541,7 +1742,7 @@ impl DocState {
             let mut iter = diffs.into_iter();
             while let Some(first) = iter.next() {
                 match iter.next() {
-                    Some(second) => next.push(first.compose(second).unwrap()),
+                    Some(second) => next.push(Self::compose_pair(first, second)),
                     None => next.push(first),
                 }
             }
@@ -1601,10 +1802,11 @@ impl DocState {
                 let id = self.arena.get_container_id(idx).unwrap();
                 let is_unknown = id.is_unknown();
 
+                let composed = Self::balanced_compose(diffs);
                 ContainerDiff {
                     id,
                     idx,
-                    diff: Self::balanced_compose(diffs).into_external().unwrap(),
+                    diff: composed.into_external().unwrap(),
                     is_unknown,
                     path,
                 }

@@ -12,7 +12,7 @@ use flowstate_document::{
 };
 use loro::ExportMode;
 
-use super::{CrdtRuntime, SemanticCommand};
+use super::{CrdtRuntime, RepairEmission, SemanticCommand};
 
 fn has_defect(defects: &[ProjectionDefect], predicate: impl Fn(&ProjectionDefect) -> bool) -> bool {
   defects.iter().any(predicate)
@@ -84,7 +84,7 @@ fn repair_is_idempotent_across_passes() -> Result<()> {
 
   // A second explicit pass over freshly collected (now empty) defects is a no-op.
   let (_, residual) = document_from_loro_with_defects(runtime.doc())?;
-  let events = runtime.schedule_projection_repairs(residual)?;
+  let events = runtime.schedule_projection_repairs(residual, RepairEmission::Streamed)?;
   assert!(events.is_empty(), "a converged document must produce no further repair events");
   assert_eq!(
     body_text(runtime.doc()).to_string(),

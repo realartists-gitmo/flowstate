@@ -446,3 +446,140 @@ fn remote_import_mid_group_closes_the_group() {
   assert!(!after_second_undo.contains("one") && !after_second_undo.contains("two"), "the pre-import group undoes as one unit: {after_second_undo:?}");
   assert!(after_second_undo.contains('R'), "remote content survives all local undo");
 }
+
+/// Replace-all (find & replace) through the ONE write path: same-paragraph
+/// matches ride one compound intent = one commit = one undo member; canonical
+/// state carries the replacements (the pre-intent editor-side mutation lost
+/// them — the 2026-07-07 replace-all data-loss class).
+#[test]
+fn replace_matches_commits_canonically_and_undoes_as_one_unit() {
+  let (handle, gate) = new_handle("replace");
+  let projection = handle.projection().expect("projection");
+  let paragraph = first_paragraph(&projection);
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph, 0),
+      text: "foo alpha foo beta foo".into(),
+      style_override: None,
+    })
+    .expect("seed insert");
+  handle
+    .split_paragraph(SplitParagraphIntent {
+      at: TextAnchor::new(paragraph, usize::MAX),
+      inherited_style: ParagraphStyle::Normal,
+    })
+    .expect("seed split");
+  let second = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("second paragraph");
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(second, 0),
+      text: "foo gamma".into(),
+      style_override: None,
+    })
+    .expect("seed second paragraph");
+
+  // Matches across two paragraphs, in ascending order (the write path sorts
+  // and applies back-to-front itself).
+  let matches = vec![
+    super::intents::ReplaceMatch {
+      start: TextAnchor::new(paragraph, 0),
+      end: TextAnchor::new(paragraph, 3),
+      styles: None,
+    },
+    super::intents::ReplaceMatch {
+      start: TextAnchor::new(paragraph, 10),
+      end: TextAnchor::new(paragraph, 13),
+      styles: None,
+    },
+    super::intents::ReplaceMatch {
+      start: TextAnchor::new(paragraph, 19),
+      end: TextAnchor::new(paragraph, 22),
+      styles: None,
+    },
+    super::intents::ReplaceMatch {
+      start: TextAnchor::new(second, 0),
+      end: TextAnchor::new(second, 3),
+      styles: None,
+    },
+  ];
+  let outcome = handle
+    .replace_matches(super::intents::ReplaceMatchesIntent {
+      matches,
+      replacement: "QUUX".into(),
+    })
+    .expect("replace commits");
+  let commit = outcome.commit();
+  assert!(!commit.counters.full_rebuild, "replace-matches must patch, not rebuild");
+  assert_eq!(body_string(&gate), "\nQUUX alpha QUUX beta QUUX\nQUUX gamma");
+
+  // ONE undo restores every match — the storm was one commit.
+  handle.apply_undo().expect("undo runs");
+  assert_eq!(body_string(&gate), "\nfoo alpha foo beta foo\nfoo gamma");
+  handle.apply_redo().expect("redo runs");
+  assert_eq!(body_string(&gate), "\nQUUX alpha QUUX beta QUUX\nQUUX gamma");
+}
+
+/// Replace with the empty string deletes matches; collapsed and overlapping
+/// ranges are pruned rather than double-edited; a structural replacement is
+/// rejected before mutation.
+#[test]
+fn replace_matches_edge_cases() {
+  let (handle, gate) = new_handle("replace-edges");
+  let projection = handle.projection().expect("projection");
+  let paragraph = first_paragraph(&projection);
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph, 0),
+      text: "xxABxxCDxx".into(),
+      style_override: None,
+    })
+    .expect("seed insert");
+
+  // Overlapping second range (2..6 vs 4..8) is pruned; collapsed (8..8) is
+  // skipped; the empty replacement deletes what survives.
+  let outcome = handle.replace_matches(super::intents::ReplaceMatchesIntent {
+    matches: vec![
+      super::intents::ReplaceMatch {
+        start: TextAnchor::new(paragraph, 2),
+        end: TextAnchor::new(paragraph, 6),
+        styles: None,
+      },
+      super::intents::ReplaceMatch {
+        start: TextAnchor::new(paragraph, 4),
+        end: TextAnchor::new(paragraph, 8),
+        styles: None,
+      },
+      super::intents::ReplaceMatch {
+        start: TextAnchor::new(paragraph, 8),
+        end: TextAnchor::new(paragraph, 8),
+        styles: None,
+      },
+    ],
+    replacement: String::new(),
+  });
+  outcome.expect("empty replacement deletes matches");
+  assert_eq!(body_string(&gate), "\nxxCDxx");
+
+  // Structural replacement text is rejected before any mutation.
+  let rejected = handle.replace_matches(super::intents::ReplaceMatchesIntent {
+    matches: vec![super::intents::ReplaceMatch {
+      start: TextAnchor::new(paragraph, 0),
+      end: TextAnchor::new(paragraph, 2),
+      styles: None,
+    }],
+    replacement: "a\nb".into(),
+  });
+  assert!(matches!(rejected, Err(WriteRejected::StructureViolation(_))));
+  assert_eq!(body_string(&gate), "\nxxCDxx", "rejected intent must not mutate");
+
+  // All matches collapsed/skipped ⇒ EmptyIntent.
+  let empty = handle.replace_matches(super::intents::ReplaceMatchesIntent {
+    matches: vec![super::intents::ReplaceMatch {
+      start: TextAnchor::new(paragraph, 3),
+      end: TextAnchor::new(paragraph, 3),
+      styles: None,
+    }],
+    replacement: "y".into(),
+  });
+  assert!(matches!(empty, Err(WriteRejected::EmptyIntent)));
+}

@@ -55,8 +55,30 @@ use gpui_flowtext::{
 };
 use loro::{ContainerTrait as _, cursor::PosType};
 pub(crate) use projection_patch::{
-  body_input_paragraph_at, projection_patches_between, remote_body_projection_patches, remote_nonstructural_projection_patches,
+  body_input_paragraph_at, paragraph_projection_patches_ranged, projection_patches_between, remote_nonstructural_projection_patches,
+  remote_object_projection_patches, splice_region_patches, text_delta_between,
 };
+
+/// A successful §6-R regional derivation: the splice patch set, the region's
+/// defects, and the OLD projection's paragraph-index range the region covered
+/// (so the caller can route out-of-region changes through the ranged readback).
+struct RegionalPatches {
+  patches: Vec<ProjectionPatch>,
+  defects: Vec<ProjectionDefect>,
+  region_paragraphs: std::ops::Range<usize>,
+}
+
+/// How a repair pass surfaces the repaired projection to the editor stream —
+/// see [`CrdtRuntime::schedule_projection_repairs`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RepairEmission {
+  /// Push the repaired projection onto the ordered editor stream (repairs
+  /// running after a patched emission left the editor pre-repair).
+  Streamed,
+  /// Do not stream: an enclosing full-rebuild emission (or the absence of any
+  /// attached editor, at construction) carries the repaired state instead.
+  Silent,
+}
 use types::UndoSelectionState;
 pub use types::{
   ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent,
@@ -115,6 +137,11 @@ pub struct CrdtRuntime {
   /// I/O service to drain and broadcast. Local intents never block on the
   /// network; the network never reaches into an intent.
   pending_publish: Vec<RuntimeEvent>,
+  /// §6-R: the paragraph/block registry container ids, resolved once so the
+  /// subscription drain can recognize registry-map events by target and
+  /// harvest imported record keys for regional rematerialization.
+  paragraph_registry_container_id: String,
+  block_registry_container_id: String,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
 }
@@ -149,6 +176,12 @@ pub(crate) struct DrainedBodyDelta {
   pub(crate) net: import_delta::NetBodyDelta,
   pub(crate) has_remote_origin: bool,
   pub(crate) checkout_seen: bool,
+  /// Spec §6-R: record keys this batch wrote into (or deleted from) the
+  /// paragraph registry — the identity candidates a regional
+  /// rematerialization needs beyond the old projection's own rows.
+  pub(crate) imported_paragraph_record_keys: Vec<String>,
+  /// Same, for the block registry (paragraph blocks and objects alike).
+  pub(crate) imported_block_record_keys: Vec<String>,
 }
 
 /// §24 search unit span: a lightweight body-unicode range for one search unit.
@@ -460,11 +493,21 @@ impl ProjectionRuntimeIndex {
     {
       let start = self.paragraph_at_body_unicode_with(live_starts, range.unicode_start, paragraph_count);
       let end = self.paragraph_at_body_unicode_with(live_starts, range.unicode_start.saturating_add(range.unicode_len), paragraph_count);
+      // Widen by one paragraph on each edge: a paragraph-STYLE mark rides the
+      // boundary `\n`, which text-start attribution assigns to the PRECEDING
+      // paragraph, and mark expand semantics can carry one position past the
+      // range end — either way the styled paragraph sits one slot outside the
+      // strict span. Over-inclusion is harmless (the ranged readback is exact
+      // and produces no patch for untouched paragraphs); under-inclusion left
+      // a stale paragraph style after an undo of a multi-paragraph restyle
+      // (object-fuzz undo arm).
       if let Some(start) = start {
+        touched.insert(start.saturating_sub(1));
         touched.insert(start);
       }
       if let Some(end) = end {
         touched.insert(end);
+        touched.insert((end + 1).min(paragraph_count.saturating_sub(1)));
       }
       if let (Some(start), Some(end)) = (start, end) {
         touched.extend(start.min(end)..=start.max(end));
@@ -827,6 +870,13 @@ impl CrdtRuntime {
         changes = summary.changes.len(),
         "Flowstate Loro root event",
       );
+      static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+        eprintln!(
+          "  subscription: origin {} trigger {} epoch {} changes {}",
+          summary.origin, summary.triggered_by, summary.epoch, summary.changes.len()
+        );
+      }
       if let Ok(mut events) = subscription_events_for_callback.lock() {
         events.push(summary);
       }
@@ -864,6 +914,15 @@ impl CrdtRuntime {
     let undo_selection = Arc::new(Mutex::new(UndoSelectionState::default()));
     install_undo_selection_callbacks(&mut undo, &undo_selection);
     let projection_index = ProjectionRuntimeIndex::from_projection(&projection);
+    // §6-R: registry container ids, read-only (no `ensure_*` — construction
+    // must not leave uncommitted marker writes in the pending txn).
+    let registry_root = doc.get_map(ROOT);
+    let paragraph_registry_container_id = child_map(&registry_root, PARAGRAPHS_BY_ID)
+      .map(|map| map.id().to_string())
+      .unwrap_or_default();
+    let block_registry_container_id = child_map(&registry_root, BLOCKS_BY_ID)
+      .map(|map| map.id().to_string())
+      .unwrap_or_default();
     let mut runtime = Self {
       doc,
       projection,
@@ -890,6 +949,8 @@ impl CrdtRuntime {
       repairing_projection_defects: false,
       editor_stream: Vec::new(),
       pending_publish: Vec::new(),
+      paragraph_registry_container_id,
+      block_registry_container_id,
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
     };
@@ -898,7 +959,7 @@ impl CrdtRuntime {
     // committed + persisted, so peers receive it via the update segment / next
     // anti-entropy pull. Errors are logged, never fatal to opening the document.
     if !startup_defects.is_empty()
-      && let Err(error) = runtime.schedule_projection_repairs(startup_defects)
+      && let Err(error) = runtime.schedule_projection_repairs(startup_defects, RepairEmission::Silent)
     {
       tracing::error!(%error, "scheduling projection repairs during runtime construction failed");
     }
@@ -1230,8 +1291,6 @@ impl CrdtRuntime {
 
   pub fn command(&mut self, command: SemanticCommand) -> Result<Vec<RuntimeEvent>> {
     let restore_undo_selection = matches!(&command, SemanticCommand::Undo | SemanticCommand::Redo);
-    let before_projection = self.projection.clone();
-    let before_body = body_text(&self.doc).to_string();
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
     let mutates_document = match &command {
@@ -1435,25 +1494,13 @@ impl CrdtRuntime {
       },
     }
     let mut projection_invalidation = projection_invalidation;
-    self.merge_subscription_invalidation(&mut projection_invalidation);
+    let drained = self.merge_subscription_invalidation(&mut projection_invalidation);
     let mut events = self.events_after_local_change(from_frontier, from_vv, projection_invalidation.clone(), false)?;
-    let after_body = body_text(&self.doc).to_string();
-    if let Some(patches) = remote_body_projection_patches(&before_projection, &before_body, &after_body, &self.doc, &projection_invalidation) {
-      self.apply_projection_patch_set(&patches);
-      self.projection.frontier = self.doc.state_frontiers().encode();
-      events.push(self.projection_patched_event(patches, projection_invalidation));
-    } else {
-      self.refresh_projection()?;
-      let reason = if restore_undo_selection {
-        "undo_redo_structural_projection_fallback"
-      } else {
-        "semantic_command_structural_projection_fallback"
-      };
-      events.push(self.projection_change_event(
-        &before_projection,
-        ProjectionInvalidation::full_rebuild(projection_invalidation.frontier_before, projection_invalidation.frontier_after, reason),
-      )?);
-    }
+    // §6-R: semantic commands (undo/redo, object inserts) derive their
+    // projection through THE ladder — the same one remote imports use. No
+    // whole-body string diff, no O(doc) before/after captures.
+    let context = if restore_undo_selection { "undo_redo" } else { "semantic_command" };
+    self.derive_body_projection_events(projection_invalidation, &drained, context, &mut events)?;
     if restore_undo_selection && let Some(snapshot) = self.take_restored_undo_selection() {
       if let Some(selection) = self.resolve_undo_selection(&snapshot) {
         events.push(RuntimeEvent::SelectionRestored { selection });
@@ -1536,6 +1583,402 @@ impl CrdtRuntime {
     Ok((document, forked_package))
   }
 
+  /// Spec §6-R: derive exact structural patches for a remote import by
+  /// rematerializing ONLY the changed region under the same materializer law
+  /// as the full rebuild. `None` = take the full-rebuild fallback (loud,
+  /// counted by the caller). Returns the patches plus the region's projection
+  /// defects for canonical repair scheduling.
+  #[hotpath::measure]
+  /// Loro-first spec §6.3 + §6-R: THE post-commit projection derivation
+  /// ladder, shared by remote imports and local semantic commands (undo/redo,
+  /// object inserts). Structural analysis is EXACT, from the composed net
+  /// delta (pre-change → post-change): structure changed iff (a) an inserted
+  /// run carries \n/U+FFFC, (b) a deleted pre-change range covers a paragraph
+  /// boundary or object placeholder, or (c) a structural insert was churned
+  /// away within the batch (per-op flags can't prove neutrality). Checkout
+  /// events stay conservative. The ladder: projection-neutral → nothing to
+  /// derive (the 19:28 churn class ends as a no-op, spec §13.13);
+  /// non-structural → ranged paragraph patches; structural → regional
+  /// rematerialization; any bail → full rebuild, loudly, with its cause.
+  fn derive_body_projection_events(
+    &mut self,
+    mut invalidation: ProjectionInvalidation,
+    drained: &DrainedBodyDelta,
+    context: &'static str,
+    events: &mut Vec<RuntimeEvent>,
+  ) -> Result<()> {
+    invalidation.has_remote_origin |= drained.has_remote_origin;
+    debug_assert!(!drained.checkout_seen || invalidation.rebuild_required, "checkout drains must force a rebuild");
+    let net = &drained.net;
+    let body_neutral = net.is_empty();
+    let structural = !body_neutral
+      && (net.structural_churn
+        || net.inserts_structure()
+        || net.deletes_any_position(self.projection_index.boundary_positions())
+        || net.deletes_any_position(self.projection_index.object_positions()));
+    // Diagnostic affordance (FLOWSTATE_DERIVE_DEBUG=1): one line per ladder
+    // decision — which branch a change batch takes and why. Costs one cached
+    // atomic load when off.
+    static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+      eprintln!(
+        "derive[{context}]: neutral={body_neutral} structural={structural} rebuild={} fallback={:?} ranges={:?} net={:?}",
+        invalidation.rebuild_required, invalidation.fallback_reason, invalidation.changed_text_ranges, net
+      );
+    }
+    if structural {
+      invalidation.rebuild_required = true;
+      if invalidation.fallback_reason.is_none() {
+        invalidation.fallback_reason = Some("structural_body_text_change");
+      }
+    } else if invalidation.fallback_reason == Some("structural_body_text_change") {
+      // The union heuristics inside the drain were conservative; the exact
+      // net-delta analysis supersedes them.
+      invalidation.rebuild_required = false;
+      invalidation.fallback_reason = None;
+    }
+    // §6-R: structural changes take the REGIONAL rematerializer — the same
+    // materializer law as the full rebuild, applied to the changed region
+    // only. Any bail falls through to the rebuild, loudly, with its cause.
+    let regional = if structural {
+      let result = self.remote_structural_projection_patches(&invalidation, drained);
+      if let Err(bail) = &result {
+        // Mirror of `full-rebuild-after-local-write`: regional bails must be
+        // visible, not ambient.
+        tracing::warn!(bail, context, "full-rebuild-after-structural-change");
+      }
+      result.ok()
+    } else {
+      None
+    };
+    // §6-R composition: the regional walk covers the structural neighborhood;
+    // a mixed batch can ALSO carry changes outside it (e.g. an undo restoring
+    // a split while a distant paragraph is restyled in the same exchange).
+    // Out-of-region touched paragraphs take the same ranged readback the
+    // non-structural path uses — same law, region scale + paragraph scale. A
+    // readback bail falls to the rebuild exactly like a regional bail.
+    let regional = regional.and_then(|regional| {
+      let RegionalPatches {
+        mut patches,
+        defects,
+        region_paragraphs,
+      } = regional;
+      let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
+      let touched = self.projection_index.paragraphs_for_changed_ranges(
+        &invalidation.changed_text_ranges,
+        self.projection.paragraphs.len(),
+        &live_starts,
+      );
+      let outside: Vec<usize> = touched.into_iter().filter(|ix| !region_paragraphs.contains(ix)).collect();
+      if !outside.is_empty() {
+        match paragraph_projection_patches_ranged(&self.projection, &self.doc, &live_starts, outside) {
+          Some(extra) => patches.extend(extra),
+          None => {
+            tracing::warn!(bail = "outside-region-readback", context, "full-rebuild-after-structural-change");
+            return None;
+          },
+        }
+      }
+      // Same composition for OBJECT state: a batch can pair a structural body
+      // change with e.g. a table column reorder on a table outside the region
+      // (the table fuzz caught the swallowed reorder). The canonical object
+      // readback covers all object rows; in-region duplicates are benign
+      // (same derived values).
+      if !invalidation.changed_blocks.is_empty()
+        || !invalidation.changed_tables.is_empty()
+        || invalidation.changed_flows.iter().any(|flow| flow != ROOT_BODY_FLOW_ID)
+      {
+        match remote_object_projection_patches(&self.projection, &self.doc) {
+          Some(extra) => patches.extend(extra),
+          None => {
+            tracing::warn!(bail = "outside-region-object-readback", context, "full-rebuild-after-structural-change");
+            return None;
+          },
+        }
+      }
+      Some((patches, defects))
+    });
+    if let Some((patches, defects)) = regional {
+      self.apply_projection_patch_set(&patches);
+      self.projection.frontier = self.doc.state_frontiers().encode();
+      let mut patched_invalidation = invalidation;
+      patched_invalidation.rebuild_required = false;
+      patched_invalidation.fallback_reason = None;
+      events.push(self.projection_patched_event(patches, patched_invalidation));
+      match self.schedule_projection_repairs(defects, RepairEmission::Streamed) {
+        Ok(repair_events) => events.extend(repair_events),
+        Err(error) => tracing::error!(%error, context, "scheduling regional projection repairs after structural change failed"),
+      }
+    } else if invalidation.rebuild_required {
+      let before_projection = self.projection.clone();
+      self.refresh_projection()?;
+      events.push(self.projection_change_event(&before_projection, invalidation)?);
+    } else {
+      // Non-structural: post-change paragraph starts are the pre-change
+      // starts shifted through the net delta — O(P + ops) arithmetic, no
+      // body scan.
+      let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
+      let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
+        &invalidation.changed_text_ranges,
+        self.projection.paragraphs.len(),
+        &live_starts,
+      );
+      let nonstructural = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs, &live_starts);
+      static DERIVE_DEBUG2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *DERIVE_DEBUG2.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+        eprintln!(
+          "  nonstructural: touched={touched_paragraphs:?} patches={:?}",
+          nonstructural.as_ref().map(|patches| patches.iter().map(|p| format!("{p:?}").chars().take(90).collect::<String>()).collect::<Vec<_>>()
+          )
+        );
+      }
+      if let Some(patches) = nonstructural {
+        self.apply_projection_patch_set(&patches);
+        self.projection.frontier = self.doc.state_frontiers().encode();
+        events.push(self.projection_patched_event(patches, invalidation));
+      } else {
+        let before_projection = self.projection.clone();
+        self.refresh_projection()?;
+        events.push(self.projection_change_event(&before_projection, invalidation)?);
+      }
+    }
+    Ok(())
+  }
+
+  fn remote_structural_projection_patches(
+    &self,
+    invalidation: &ProjectionInvalidation,
+    drained: &DrainedBodyDelta,
+  ) -> Result<RegionalPatches, &'static str> {
+    // Rebuild-only classes: time travel, unclassifiable diffs, section-map
+    // changes, and non-body flow content (table cells) mixed into the chunk.
+    // `metadata_record_id_change` is EXPECTED here (splits write records) and
+    // is exactly what the regional re-derivation handles.
+    if drained.checkout_seen
+      || !invalidation.changed_sections.is_empty()
+      || !invalidation.changed_tables.is_empty()
+      || invalidation.changed_flows.iter().any(|flow| flow != ROOT_BODY_FLOW_ID)
+      || matches!(
+        invalidation.fallback_reason,
+        Some("checkout_trigger_projection_rebuild" | "unknown_loro_subscription_diff")
+      )
+    {
+      return Err("rebuild-only-invalidation");
+    }
+    let (pre_lo, pre_hi) = drained.net.pre_change_span().ok_or("empty-net-span")?;
+
+    // ---- Old affected rows (search spans are block-aligned, PRE space). ----
+    let spans = &self.projection_index.search_unit_spans;
+    if spans.len() != self.projection.blocks.len() {
+      return Err("search-index-misaligned");
+    }
+    let mut blk_lo = None;
+    let mut blk_hi = None;
+    for (ix, span) in spans.iter().enumerate() {
+      // A row's territory includes its leading boundary sentinel.
+      let lo = span.unicode_start.saturating_sub(1);
+      let hi = span.unicode_start + span.unicode_len;
+      if hi >= pre_lo && lo <= pre_hi {
+        blk_lo.get_or_insert(ix);
+        blk_hi = Some(ix);
+      }
+    }
+    let (blk_lo, blk_hi) = (blk_lo.ok_or("no-affected-rows")?, blk_hi.ok_or("no-affected-rows")?);
+
+    // ---- Expand to whole rows + resolve POST-space region bounds. ----------
+    // The predecessor paragraph provides the walker's object-coalescing
+    // context; the successor paragraph's leading sentinel is the exclusive
+    // region end. Both are unaffected rows, so their durable records resolve
+    // on the live fast path.
+    let is_paragraph_row = |ix: usize| matches!(self.projection.blocks.get(ix), Some(flowstate_document::Block::Paragraph(_)));
+    let paragraph_ix_of_row =
+      |row: usize| self.projection.blocks[..row].iter().filter(|block| matches!(block, flowstate_document::Block::Paragraph(_))).count();
+    let body = body_text(&self.doc);
+    let (region_lo, region_sentinel) = match (0..blk_lo).rev().find(|ix| is_paragraph_row(*ix)) {
+      Some(row) => {
+        let id = self.projection.ids.paragraph_ids.get(paragraph_ix_of_row(row)).copied().ok_or("edge-paragraph-id-missing")?;
+        let start = paragraph_body_start_in_loro(&self.doc, id).ok_or("region-start-unresolved")?;
+        (row, start.checked_sub(1).ok_or("region-start-underflow")?)
+      },
+      None => (0, 0),
+    };
+    let (region_hi, region_end) = match ((blk_hi + 1)..self.projection.blocks.len()).find(|ix| is_paragraph_row(*ix)) {
+      Some(row) => {
+        let id = self.projection.ids.paragraph_ids.get(paragraph_ix_of_row(row)).copied().ok_or("edge-paragraph-id-missing")?;
+        let start = paragraph_body_start_in_loro(&self.doc, id).ok_or("region-end-unresolved")?;
+        (row, start.checked_sub(1).ok_or("region-end-underflow")?)
+      },
+      None => (self.projection.blocks.len(), body.len_unicode()),
+    };
+
+    // ---- Identity candidates (§6-R step 2): the old projection's region rows
+    // plus every registry record this import touched. Canonical keys make each
+    // probe O(1); a candidate that no longer resolves is simply dead. ---------
+    let root = self.doc.get_map(ROOT);
+    let paragraphs_registry = child_map(&root, PARAGRAPHS_BY_ID).ok_or("paragraph-registry-missing")?;
+    let blocks_registry = child_map(&root, BLOCKS_BY_ID).ok_or("block-registry-missing")?;
+    let probe = |registry: &LoroMap, canonical: String, special: &str, id: u128| -> Option<(String, LoroMap)> {
+      if let Some(record) = child_map(registry, &canonical) {
+        return Some((canonical, record));
+      }
+      if loro_id_u128(special) == id
+        && let Some(record) = child_map(registry, special)
+      {
+        return Some((special.to_string(), record));
+      }
+      None
+    };
+
+    let mut paragraph_candidates: Vec<(String, LoroMap)> = Vec::new();
+    let mut pblock_candidates: Vec<(String, LoroMap)> = Vec::new();
+    let mut object_candidates: Vec<LoroMap> = Vec::new();
+    let mut paragraph_pointer = paragraph_ix_of_row(region_lo);
+    for row in region_lo..region_hi {
+      let block_id = self.projection.ids.block_ids.get(row).copied().ok_or("row-block-id-missing")?;
+      match self.projection.blocks.get(row).ok_or("row-missing")? {
+        flowstate_document::Block::Paragraph(_) => {
+          let id = self.projection.ids.paragraph_ids.get(paragraph_pointer).copied().ok_or("row-paragraph-id-missing")?;
+          paragraph_pointer += 1;
+          // A missing record is not a bail: the boundary fabricates the same
+          // stable id the repair writer mints, and defect repair converges it
+          // (accepted-risk class, spec 6-R).
+          if let Some(candidate) = probe(&paragraphs_registry, format!("paragraph.{}", id.0), ROOT_FIRST_PARAGRAPH_ID, id.0) {
+            paragraph_candidates.push(candidate);
+          }
+          if let Some(candidate) = probe(&blocks_registry, format!("paragraph_block.{}", block_id.0), MAIN_BODY_BLOCK_ID, block_id.0) {
+            pblock_candidates.push(candidate);
+          }
+        },
+        block => {
+          let kind = match block {
+            flowstate_document::Block::Image(_) => "image",
+            flowstate_document::Block::Equation(_) => "equation",
+            flowstate_document::Block::Table(_) => "table",
+            flowstate_document::Block::Paragraph(_) => unreachable!(),
+          };
+          object_candidates.push(child_map(&blocks_registry, &format!("{kind}.{}", block_id.0)).ok_or("object-record-missing")?);
+        },
+      }
+    }
+    for key in &drained.imported_paragraph_record_keys {
+      if let Some(record) = child_map(&paragraphs_registry, key) {
+        paragraph_candidates.push((key.clone(), record));
+      }
+    }
+    for key in &drained.imported_block_record_keys {
+      let Some(record) = child_map(&blocks_registry, key) else {
+        continue;
+      };
+      match map_string_opt(&record, "kind").as_deref() {
+        Some("paragraph") => pblock_candidates.push((key.clone(), record)),
+        Some(_) => object_candidates.push(record),
+        None => {},
+      }
+    }
+
+    // ---- ONE batch resolution for every candidate anchor (dead anchors are
+    // simply absent — never per-id history walks; the ctrl-A lesson). --------
+    let container = body.id();
+    let decode_cursor_id = |record: &LoroMap, field: &str| -> Option<ID> {
+      let bytes = map_binary_opt(record, field)?;
+      let cursor = Cursor::decode(&bytes).ok()?;
+      (cursor.container == container).then_some(cursor.id).flatten()
+    };
+    let mut query_ids: Vec<ID> = Vec::new();
+    let paragraph_cursor_ids: Vec<(Option<ID>, Option<ID>)> = paragraph_candidates
+      .iter()
+      .map(|(_, record)| (decode_cursor_id(record, "boundary_cursor"), decode_cursor_id(record, "start_cursor")))
+      .collect();
+    let pblock_cursor_ids: Vec<Option<ID>> = pblock_candidates
+      .iter()
+      .map(|(_, record)| decode_cursor_id(record, "anchor_cursor"))
+      .collect();
+    let object_cursor_ids: Vec<Option<ID>> = object_candidates
+      .iter()
+      .map(|record| decode_cursor_id(record, "anchor_cursor"))
+      .collect();
+    for id in paragraph_cursor_ids
+      .iter()
+      .flat_map(|(boundary, start)| [boundary, start])
+      .chain(pblock_cursor_ids.iter())
+      .chain(object_cursor_ids.iter())
+      .flatten()
+    {
+      query_ids.push(*id);
+    }
+    let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
+    if !query_ids.is_empty() {
+      for (id, pos) in query_ids.iter().copied().zip(self.doc.inner().query_text_id_positions(&container, &query_ids)) {
+        if let Some(pos) = pos {
+          pos_by_id.insert(id, pos);
+        }
+      }
+    }
+
+    // ---- Boundary→key maps, mirroring the full materializer's prefer rule
+    // (lexicographically smallest key wins; special ids win boundary 0). -----
+    let live_newline = |pos: usize| body.char_at(pos) == Ok('\n');
+    let mut paragraph_map: FxHashMap<usize, String> = FxHashMap::default();
+    let mut paragraph_resolved: Vec<(String, usize)> = paragraph_candidates
+      .iter()
+      .zip(&paragraph_cursor_ids)
+      .filter_map(|((key, _), (boundary, start))| {
+        let pos = boundary
+          .and_then(|id| pos_by_id.get(&id).copied())
+          .or_else(|| start.and_then(|id| pos_by_id.get(&id).copied()))?;
+        live_newline(pos).then(|| (key.clone(), pos))
+      })
+      .collect();
+    paragraph_resolved.sort();
+    for (key, pos) in &paragraph_resolved {
+      if *pos == 0 && key == ROOT_FIRST_PARAGRAPH_ID {
+        paragraph_map.insert(0, key.clone());
+      } else {
+        paragraph_map.entry(*pos).or_insert_with(|| key.clone());
+      }
+    }
+    let mut pblock_map: FxHashMap<usize, String> = FxHashMap::default();
+    let mut pblock_resolved: Vec<(String, usize)> = pblock_candidates
+      .iter()
+      .zip(&pblock_cursor_ids)
+      .filter_map(|((key, _), anchor)| {
+        let pos = anchor.and_then(|id| pos_by_id.get(&id).copied())?;
+        live_newline(pos).then(|| (key.clone(), pos))
+      })
+      .collect();
+    pblock_resolved.sort();
+    for (key, pos) in &pblock_resolved {
+      if *pos == 0 && key == MAIN_BODY_BLOCK_ID {
+        pblock_map.insert(0, key.clone());
+      } else {
+        pblock_map.entry(*pos).or_insert_with(|| key.clone());
+      }
+    }
+    let mut object_map: BTreeMap<usize, LoroMap> = BTreeMap::new();
+    for (record, anchor) in object_candidates.into_iter().zip(&object_cursor_ids) {
+      let Some(pos) = anchor.and_then(|id| pos_by_id.get(&id).copied()) else {
+        continue;
+      };
+      if body.char_at(pos) == Ok(flowstate_document::OBJECT_REPLACEMENT) {
+        object_map.entry(pos).or_insert(record);
+      }
+    }
+
+    // ---- Rematerialize the region under the shared law + splice. -----------
+    let region = flowstate_document::materialize_body_region(&self.doc, region_sentinel, region_end, &paragraph_map, &pblock_map, &object_map)
+      .map_err(|_| "region-materialize-failed")?;
+    let patches = splice_region_patches(&self.projection, region_lo, region_hi, &region).ok_or("splice-bailed")?;
+    // The region's OLD-projection paragraph-index range, so the caller can
+    // derive out-of-region changes (a mixed batch's distant mark edits)
+    // through the ranged readback rather than losing them.
+    let region_paragraphs = paragraph_ix_of_row(region_lo)..paragraph_ix_of_row(region_hi.min(self.projection.blocks.len()));
+    Ok(RegionalPatches {
+      patches,
+      defects: region.defects,
+      region_paragraphs,
+    })
+  }
+
   #[hotpath::measure]
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
     let from_frontier = self.doc.state_frontiers();
@@ -1547,23 +1990,14 @@ impl CrdtRuntime {
       "loro_import_with",
       self.doc.import_with(bytes, "remote").context("importing remote Loro update")?
     );
-    let after_remote_vv = self.doc.state_vv();
     if let Some(before_vv) = &fidelity_before_vv {
       self.fidelity_frontier_transition("import", &from_frontier, before_vv);
     }
-    // The style-mark repair walks every flow's full styled delta — O(doc). A
-    // text-only import cannot introduce an unmarked paragraph boundary, so run
-    // it only when this import's (already-buffered, copied-out) subscription
-    // events show a structural insert. Poisoned/ambiguous buffers stay
-    // conservative and repair anyway.
-    let repair_update = if status.pending.is_none()
-      && self.buffered_subscription_events_insert_structure()
-      && repair_missing_paragraph_style_marks(&self.doc)?
-    {
-      self.local_update_bytes(&after_remote_vv)?
-    } else {
-      Vec::new()
-    };
+    // §6-R: unmarked paragraph boundaries introduced by a merge surface as
+    // `MissingParagraphStyleMark` defects from whichever projection derivation
+    // runs below (regional walk or full rebuild) and are repaired canonically
+    // through `schedule_projection_repairs` — the former pre-import whole-flow
+    // style scan (O(doc) `to_delta` per structural chunk) is gone.
     let frontier_after = self.doc.state_frontiers();
     let version_vector = self.doc.state_vv();
     // §22: when the import is missing dependencies, surface the pending version
@@ -1578,13 +2012,6 @@ impl CrdtRuntime {
       frontier: frontier_after.encode(),
       version_vector: version_vector.encode(),
     }];
-    if !repair_update.is_empty() {
-      events.push(RuntimeEvent::LocalUpdate {
-        bytes: repair_update,
-        frontier: frontier_after.encode(),
-        version_vector: version_vector.encode(),
-      });
-    }
     let frontier_before = from_frontier.encode();
     let frontier_after = frontier_after.encode();
     if status.pending.is_none() {
@@ -1595,59 +2022,7 @@ impl CrdtRuntime {
         ..ProjectionInvalidation::default()
       };
       let drained = self.merge_subscription_invalidation(&mut invalidation);
-      invalidation.has_remote_origin |= drained.has_remote_origin;
-      debug_assert!(!drained.checkout_seen || invalidation.rebuild_required, "checkout drains must force a rebuild");
-      // Loro-first spec §6.3: EXACT structural analysis from the composed net
-      // delta (pre-import → post-import), replacing the old count-mismatch
-      // backstop that stringified the whole body per import. Structure changed
-      // iff (a) an inserted run carries \n/U+FFFC, (b) a deleted pre-import
-      // range covers a paragraph boundary or object placeholder, or (c) a
-      // structural insert was churned away within the import (per-op flags
-      // can't prove neutrality). Checkout events stay conservative.
-      let net = &drained.net;
-      // Projection-neutral import (frontier-only advance): nothing to derive —
-      // the 19:28 churn class ends as a no-op here (spec §13.13).
-      let body_neutral = net.is_empty();
-      let structural = !body_neutral
-        && (net.structural_churn
-        || net.inserts_structure()
-          || net.deletes_any_position(self.projection_index.boundary_positions())
-          || net.deletes_any_position(self.projection_index.object_positions()));
-      if structural {
-        invalidation.rebuild_required = true;
-        if invalidation.fallback_reason.is_none() {
-          invalidation.fallback_reason = Some("structural_body_text_change");
-        }
-      } else if invalidation.fallback_reason == Some("structural_body_text_change") {
-        // The union heuristics inside the drain were conservative; the exact
-        // net-delta analysis supersedes them for the import path.
-        invalidation.rebuild_required = false;
-        invalidation.fallback_reason = None;
-      }
-      if invalidation.rebuild_required {
-        let before_projection = self.projection.clone();
-        self.refresh_projection()?;
-        events.push(self.projection_change_event(&before_projection, invalidation)?);
-      } else {
-        // Non-structural: post-import paragraph starts are the pre-import
-        // starts shifted through the net delta — O(P + ops) arithmetic, no
-        // body scan.
-        let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
-        let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
-          &invalidation.changed_text_ranges,
-          self.projection.paragraphs.len(),
-          &live_starts,
-        );
-        if let Some(patches) = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs, &live_starts) {
-          self.apply_projection_patch_set(&patches);
-          self.projection.frontier = self.doc.state_frontiers().encode();
-          events.push(self.projection_patched_event(patches, invalidation));
-        } else {
-          let before_projection = self.projection.clone();
-          self.refresh_projection()?;
-          events.push(self.projection_change_event(&before_projection, invalidation)?);
-        }
-      }
+      self.derive_body_projection_events(invalidation, &drained, "remote_import", &mut events)?;
     } else {
       let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after, "remote_update_pending_projection_fallback");
       self.merge_subscription_invalidation(&mut invalidation);
@@ -1898,6 +2273,12 @@ impl CrdtRuntime {
   /// the update segment, and return the `LocalUpdate` (+ `ProjectionUpdated`)
   /// events so peers receive the repair.
   ///
+  /// `emission` decides whether the repaired projection is ALSO pushed onto
+  /// the ordered editor stream: `Streamed` when the repair pass runs after a
+  /// patched emission (the editor is at the pre-repair frontier and must be
+  /// advanced), `Silent` when an enclosing full-rebuild emission will carry
+  /// the repaired state itself (a stream item here would be out of order).
+  ///
   /// Defects are deduplicated by `stable_key` and capped at
   /// [`PROJECTION_REPAIR_ATTEMPT_CAP`] attempts per key: a defect that persists
   /// across repair passes is logged and quarantined (left as the deterministic
@@ -1907,7 +2288,7 @@ impl CrdtRuntime {
   ///
   /// Re-entrant calls (the inner refresh re-projecting after a repair) are
   /// no-ops via the `repairing_projection_defects` guard.
-  pub fn schedule_projection_repairs(&mut self, defects: Vec<ProjectionDefect>) -> Result<Vec<RuntimeEvent>> {
+  pub fn schedule_projection_repairs(&mut self, defects: Vec<ProjectionDefect>, emission: RepairEmission) -> Result<Vec<RuntimeEvent>> {
     if self.repairing_projection_defects || defects.is_empty() {
       return Ok(Vec::new());
     }
@@ -1942,6 +2323,7 @@ impl CrdtRuntime {
 
     let from_frontier = self.doc.state_frontiers();
     let from_vv = self.doc.state_vv();
+    let streamed = matches!(emission, RepairEmission::Streamed);
     self.repairing_projection_defects = true;
     let mut applied = 0_usize;
     for defect in &actionable {
@@ -1960,13 +2342,6 @@ impl CrdtRuntime {
     // excluded from undo and identifiable by peers.
     self.doc.set_next_commit_origin(REPAIR_ORIGIN);
     self.doc.commit();
-    // Re-project onto the repaired canonical state. The guard keeps this refresh
-    // from scheduling another (recursive) repair pass; the next external refresh
-    // re-checks and, per the attempt cap, either converges to zero defects or
-    // quarantines the residual.
-    let refresh_result = self.refresh_projection();
-    self.repairing_projection_defects = false;
-    refresh_result?;
 
     // §fidelity: a repair pass must make progress — re-projecting the repaired
     // canonical state must not surface MORE defects than it started with. A
@@ -2004,14 +2379,47 @@ impl CrdtRuntime {
       Ok(_) => {},
       Err(error) => tracing::error!(%error, "exporting projection repair update failed; later synchronization must recover it"),
     }
+    let derivation = if streamed {
+      // Ordered stream: after a PATCHED emission the repair commit advanced
+      // the canonical frontier past what the editor received, so the editor
+      // MUST get the repaired projection through the stream. Derive it via
+      // THE ladder — repairs are typically a handful of mark/record writes,
+      // patched in O(touched); any ambiguity falls to the loud rebuild inside
+      // the ladder. The `repairing_projection_defects` guard keeps the
+      // ladder's own repair scheduling from recursing.
+      let mut invalidation = ProjectionInvalidation {
+        frontier_before: repair_frontier_before.clone(),
+        frontier_after: self.doc.state_frontiers().encode(),
+        changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
+        ..ProjectionInvalidation::default()
+      };
+      let drained = self.merge_subscription_invalidation(&mut invalidation);
+      self.derive_body_projection_events(invalidation, &drained, "repair", &mut events)
+    } else {
+      // Silent: the caller (a full rebuild in flight, or runtime construction
+      // before any editor attaches) emits AFTER this repair pass with the
+      // final frontier, so a stream item here would land out of causal order
+      // (StaleFrontier class). Re-project wholesale; the repair is still
+      // committed + persisted.
+      self.refresh_projection()
+    };
+    self.repairing_projection_defects = false;
+    derivation?;
     let invalidation =
       ProjectionInvalidation::full_rebuild(repair_frontier_before, self.doc.state_frontiers().encode(), "projection_defect_repair");
-    events.push(RuntimeEvent::ProjectionUpdated {
-      document: Box::new(self.projection.clone()),
-      invalidation,
-      frontier: self.projection.frontier.clone(),
-      version_vector: self.doc.state_vv().encode(),
-    });
+    match emission {
+      // Streamed: the derivation above already pushed the patched/rebuild
+      // events (and their ordered-stream items).
+      RepairEmission::Streamed => {
+        let _ = invalidation;
+      },
+      RepairEmission::Silent => events.push(RuntimeEvent::ProjectionUpdated {
+        document: Box::new(self.projection.clone()),
+        invalidation,
+        frontier: self.projection.frontier.clone(),
+        version_vector: self.doc.state_vv().encode(),
+      }),
+    }
     Ok(events)
   }
 
@@ -2044,7 +2452,7 @@ impl CrdtRuntime {
     // repair's `LocalUpdate` event to the caller.
     if !self.repairing_projection_defects
       && !defects.is_empty()
-      && let Err(error) = self.schedule_projection_repairs(defects)
+      && let Err(error) = self.schedule_projection_repairs(defects, RepairEmission::Silent)
     {
       tracing::error!(%error, "scheduling projection repairs after projection refresh failed");
     }
@@ -2292,24 +2700,6 @@ impl CrdtRuntime {
       .context("exporting local Loro update fallback")
   }
 
-  /// Non-destructive peek at the buffered (not yet drained) subscription
-  /// events: did any of them insert a paragraph boundary or object
-  /// placeholder? Poisoned lock answers `true` (conservative).
-  fn buffered_subscription_events_insert_structure(&self) -> bool {
-    self
-      .subscription_events
-      .lock()
-      .map(|events| {
-        events.iter().any(|summary| {
-          summary
-            .changes
-            .iter()
-            .any(|change| matches!(change, SubscriptionChange::Text { inserted_structure: true, .. }))
-        })
-      })
-      .unwrap_or(true)
-  }
-
   /// §23: drain the permanent subscription buffer and fold the in-epoch, in-frontier
   /// summaries into `invalidation`, filtering/processing by runtime epoch, emit-time
   /// frontier, origin, and trigger.
@@ -2345,6 +2735,8 @@ impl CrdtRuntime {
     };
     let mut deferred: Vec<SubscriptionEventSummary> = Vec::new();
     let mut has_remote_origin = false;
+    let mut imported_paragraph_record_keys: Vec<String> = Vec::new();
+    let mut imported_block_record_keys: Vec<String> = Vec::new();
     for summary in summaries {
       // §23 EPOCH: drop summaries emitted before the latest full projection
       // rebuild/reset; their incremental meaning no longer maps onto the projection.
@@ -2356,6 +2748,13 @@ impl CrdtRuntime {
           trigger = %summary.triggered_by,
           "Flowstate discarding stale pre-reset Loro subscription summary",
         );
+        static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+          eprintln!(
+            "  drain: DISCARDED stale-epoch summary (epoch {} != {current_epoch}, origin {}, trigger {}, changes {})",
+            summary.epoch, summary.origin, summary.triggered_by, summary.changes.len()
+          );
+        }
         continue;
       }
       // §23 FRONTIER: a summary stamped strictly ahead of the drain target is from a
@@ -2370,6 +2769,13 @@ impl CrdtRuntime {
           trigger = %summary.triggered_by,
           "Flowstate deferring Loro subscription summary stamped ahead of the drain frontier",
         );
+        static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+          eprintln!(
+            "  drain: DEFERRED ahead-of-frontier summary (origin {}, trigger {}, changes {})",
+            summary.origin, summary.triggered_by, summary.changes.len()
+          );
+        }
         deferred.push(summary);
         continue;
       }
@@ -2384,6 +2790,15 @@ impl CrdtRuntime {
         invalidation.rebuild_required = true;
         invalidation.fallback_reason = Some("checkout_trigger_projection_rebuild");
         tracing::debug!(origin = %summary.origin, "Flowstate forcing projection rebuild for checkout-triggered Loro event");
+      }
+      static DERIVE_DEBUG_PROCESS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *DERIVE_DEBUG_PROCESS.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+        eprintln!(
+          "  drain: PROCESSING summary (origin {}, trigger {}, changes {:?})",
+          summary.origin,
+          summary.triggered_by,
+          summary.changes.iter().map(|change| format!("{change:?}")).collect::<Vec<_>>()
+        );
       }
       let mut batch_ops: Vec<import_delta::NetOp> = Vec::new();
       let mut implied_cursor = 0usize;
@@ -2451,7 +2866,44 @@ impl CrdtRuntime {
             });
           },
           SubscriptionChange::Text { target, .. } => invalidation.changed_flows.push(target),
-          SubscriptionChange::Map { target, keys } => classify_map_invalidation(invalidation, &target, &keys),
+          SubscriptionChange::Map { target, keys } => {
+            // §6-R: harvest the registry record keys this batch touched — the
+            // regional rematerializer's identity candidates beyond the old
+            // projection's own rows.
+            if target == self.paragraph_registry_container_id || target == self.block_registry_container_id {
+              if target == self.paragraph_registry_container_id {
+                imported_paragraph_record_keys.extend(keys.iter().cloned());
+              } else {
+                imported_block_record_keys.extend(keys.iter().cloned());
+              }
+              // A key change ON the registry parent is a record ADDED or
+              // DELETED — the projection's row SET derives from these records,
+              // so this is structural even with zero body-text ops. The class
+              // that slipped through: an undo whose text component transforms
+              // away (the char was deleted and re-inserted with fresh ids in
+              // between) but whose record deletion survives — canonical drops
+              // the row (orphan placeholder) while a neutral drain left the
+              // maintained row standing (object-fuzz undo arm). Imports still
+              // take the regional path (this reason is not in its rebuild-only
+              // guard); local undo/redo takes the rebuild.
+              invalidation.rebuild_required = true;
+              if invalidation.fallback_reason.is_none() {
+                invalidation.fallback_reason = Some("registry_record_set_change");
+              }
+            }
+            classify_map_invalidation(invalidation, &target, &keys);
+            // Every Map change may sit inside an object record's subtree
+            // (attrs, caption/alt/source flow records, nested table maps) —
+            // including opaque dynamically-created container ids that no path
+            // rule can recognize. Marking the batch object-dirty makes the
+            // ladder run the canonical object readback
+            // (`remote_object_projection_patches`: O(objects), batched, pure
+            // read, empty when nothing actually changed). The class that
+            // slipped through: undo of an image alignment change was
+            // body-neutral and left the maintained object row stale
+            // (object-fuzz undo arm).
+            invalidation.changed_blocks.push(target);
+          },
           SubscriptionChange::List { target } => invalidation.changed_blocks.push(target),
           SubscriptionChange::Unknown { target } => {
             invalidation.rebuild_required = true;
@@ -2488,6 +2940,8 @@ impl CrdtRuntime {
       net: import_delta::compose_batches(&body_batches),
       has_remote_origin,
       checkout_seen,
+      imported_paragraph_record_keys,
+      imported_block_record_keys,
     }
   }
 
@@ -2984,46 +3438,8 @@ enum SubscriptionChange {
   },
 }
 
-pub(crate) fn projected_table_input(
-  projection: &DocumentProjection,
-  index: &ProjectionRuntimeIndex,
-  table: flowstate_document::BlockId,
-) -> Option<(usize, InputTableBlock)> {
-  // §24: O(1) block anchor index lookup replaces the linear `block_ids` scan that
-  // every table structural command funnels through (identical linear fallback).
-  let block_ix = index.block_index(table)?;
-  let InputBlock::Table(table) = flowstate_document::input_block_from_block(projection.blocks.get(block_ix)?) else {
-    return None;
-  };
-  Some((block_ix, table))
-}
 
-/// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] row list:
-/// `None` => head; a present `after_row` => immediately after it; an absent anchor
-/// (concurrently deleted) => tail. Matches the canonical apply's row resolution.
-pub(crate) fn input_table_row_insert_pos(table: &InputTableBlock, after_row: Option<RowId>) -> usize {
-  match after_row {
-    None => 0,
-    Some(anchor) => table
-      .rows
-      .iter()
-      .position(|row| row.id == anchor)
-      .map_or(table.rows.len(), |ix| ix + 1),
-  }
-}
 
-/// §P2b anchor→index for an id-bearing predicted [`InputTableBlock`] column list.
-/// See [`input_table_row_insert_pos`].
-pub(crate) fn input_table_column_insert_pos(table: &InputTableBlock, after_column: Option<ColumnId>) -> usize {
-  match after_column {
-    None => 0,
-    Some(anchor) => table
-      .columns
-      .iter()
-      .position(|column| column.id == anchor)
-      .map_or(table.columns.len(), |ix| ix + 1),
-  }
-}
 
 pub(crate) fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
   Some(vec![ProjectionPatch::ReplaceObjectBlock {
@@ -3536,6 +3952,55 @@ fn paragraph_record_body_start(doc: &LoroDoc, paragraph: &LoroMap) -> Option<usi
   None
 }
 
+/// Batched sibling of [`paragraph_body_start_in_loro`]: resolve MANY
+/// paragraphs' body starts through ONE `query_text_id_positions` pass.
+/// Per-paragraph `get_cursor_pos` is a linear chunk scan per call (the
+/// batch-resolver lesson), so a caller resolving thousands of paragraph
+/// starts — a replace-all storm — was quadratic in document size. A
+/// paragraph whose record or cursor cannot be batch-resolved falls back to
+/// the exact single-paragraph path (rare: degraded cursors, seeded docs).
+pub(crate) fn paragraph_body_starts_in_loro(doc: &LoroDoc, paragraph_ids: &[ParagraphId]) -> Vec<Option<usize>> {
+  let root = doc.get_map(ROOT);
+  let Ok(paragraphs) = root.ensure_mergeable_map(PARAGRAPHS_BY_ID) else {
+    return vec![None; paragraph_ids.len()];
+  };
+  let body = body_text(doc);
+  let container = body.id();
+  let mut cursor_ids: Vec<Option<ID>> = Vec::with_capacity(paragraph_ids.len());
+  for paragraph_id in paragraph_ids {
+    let canonical_key = format!("paragraph.{}", paragraph_id.0);
+    let record = [canonical_key.as_str(), ROOT_FIRST_PARAGRAPH_ID]
+      .into_iter()
+      .find(|key| loro_id_u128(key) == paragraph_id.0)
+      .and_then(|key| child_map(&paragraphs, key));
+    let id = record.and_then(|record| {
+      ["boundary_cursor", "start_cursor"].into_iter().find_map(|field| {
+        let bytes = map_binary_opt(&record, field)?;
+        let cursor = Cursor::decode(&bytes).ok()?;
+        (cursor.container == container).then_some(cursor.id).flatten()
+      })
+    });
+    cursor_ids.push(id);
+  }
+  let query: Vec<ID> = cursor_ids.iter().copied().flatten().collect();
+  let mut resolved = if query.is_empty() {
+    Vec::new()
+  } else {
+    doc.inner().query_text_id_positions(&container, &query)
+  }
+  .into_iter();
+  paragraph_ids
+    .iter()
+    .zip(cursor_ids)
+    .map(|(paragraph_id, cursor_id)| {
+      let batched = cursor_id.and_then(|_| resolved.next().flatten());
+      batched
+        .map(|pos| pos.saturating_add(1))
+        .or_else(|| paragraph_body_start_in_loro(doc, *paragraph_id))
+    })
+    .collect()
+}
+
 /// Loro-space boundary position (the paragraph's leading `\n`) for projection
 /// paragraph `paragraph_ix`, resolved from its durable cursor so coalesced empties
 /// don't shift it. Loro-space counterpart of [`paragraph_boundary_unicode_index`];
@@ -3546,13 +4011,48 @@ pub(crate) fn paragraph_boundary_loro_unicode_index(doc: &LoroDoc, projection: &
   if paragraph_ix == 0 {
     return 0;
   }
-  projection
+  let record = projection
     .ids
     .paragraph_ids
     .get(paragraph_ix)
     .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
-    .map(|start| start.saturating_sub(1))
-    .unwrap_or_else(|| paragraph_boundary_unicode_index(projection, paragraph_ix))
+    .map(|start| start.saturating_sub(1));
+  // The durable cursor survives coalesced empties (projection-row math does
+  // not), but it can ROT under undo churn: the record's anchor re-resolves
+  // onto a NEIGHBORING newline after its original op ids die, so a style
+  // mark or join lands on the wrong paragraph (object-fuzz divergence).
+  // Content check: the boundary is only trusted when the text right after it
+  // matches the paragraph's projected prefix; otherwise fall back to
+  // projection-space math (in-sync with the doc inside the gate).
+  let body = body_text(doc);
+  let matches_paragraph = |boundary: usize| {
+    if body.char_at(boundary) != Ok('\n') {
+      return false;
+    }
+    let text = flowstate_document::paragraph_text(projection, paragraph_ix);
+    if text.is_empty() {
+      // An empty paragraph's boundary is followed by a terminator (next
+      // boundary, an object placeholder, or end of body) — anything else is a
+      // different paragraph's newline. Without this, EVERY newline vacuously
+      // matched an empty paragraph and a rotten cursor sailed through.
+      return match body.char_at(boundary + 1) {
+        Ok(next) => next == '\n' || next == flowstate_document::OBJECT_REPLACEMENT,
+        Err(_) => true,
+      };
+    }
+    text
+      .chars()
+      .take(4)
+      .enumerate()
+      .all(|(offset, expected)| body.char_at(boundary + 1 + offset) == Ok(expected))
+  };
+  match record {
+    Some(boundary) if matches_paragraph(boundary) => boundary,
+    _ => {
+      let fallback = paragraph_boundary_unicode_index(projection, paragraph_ix);
+      if matches_paragraph(fallback) { fallback } else { record.unwrap_or(fallback) }
+    },
+  }
 }
 
 fn object_loro_block_by_projected_id(doc: &LoroDoc, body: &LoroText, block_id: flowstate_document::BlockId) -> Option<(String, LoroMap, usize)> {

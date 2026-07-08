@@ -289,10 +289,26 @@ impl<'a> RichOp<'a> {
         change: BlockChangeRef,
         span: CounterSpan,
     ) -> RichOpBlockIter {
+        // Ops are counter-sorted within a change: start at the first op that
+        // can intersect `span` instead of scanning (and cloning) every op
+        // from index 0. A caller resolving many small spans inside one large
+        // change — e.g. the richtext diff calculator materializing an
+        // undo-restore of a whole imported document — was quadratic in the
+        // change size otherwise.
+        let op_index = change
+            .ops
+            .binary_search_by(|op| {
+                if op.counter + op.atom_len() as Counter <= span.start {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Greater
+                }
+            })
+            .unwrap_or_else(|i| i);
         RichOpBlockIter {
             change,
             span,
-            op_index: 0,
+            op_index,
         }
     }
 
@@ -366,23 +382,32 @@ impl Iterator for RichOpBlockIter {
     type Item = RichOp<'static>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let op = self.change.ops.get(self.op_index)?.clone();
-        let op_offset_in_change = op.counter - self.change.id.counter;
-        let op_slice_start = (self.span.start - op.counter).clamp(0, op.atom_len() as i32);
-        let op_slice_end = (self.span.end - op.counter).clamp(0, op.atom_len() as i32);
-        self.op_index += 1;
-        if op_slice_start == op_slice_end {
-            return self.next();
+        loop {
+            let op = self.change.ops.get(self.op_index)?;
+            if op.counter >= self.span.end {
+                // Counter-sorted: no later op can intersect the span.
+                return None;
+            }
+            let op_slice_start = (self.span.start - op.counter).clamp(0, op.atom_len() as i32);
+            let op_slice_end = (self.span.end - op.counter).clamp(0, op.atom_len() as i32);
+            if op_slice_start == op_slice_end {
+                self.op_index += 1;
+                continue;
+            }
+            // Clone only ops that are actually yielded (the old code cloned
+            // every skipped op too, and recursed per skip).
+            let op = op.clone();
+            self.op_index += 1;
+            let op_offset_in_change = op.counter - self.change.id.counter;
+            return Some(RichOp {
+                op: Cow::Owned(op),
+                peer: self.change.id.peer,
+                lamport: self.change.lamport + op_offset_in_change as Lamport,
+                timestamp: self.change.timestamp,
+                start: op_slice_start as usize,
+                end: op_slice_end as usize,
+            });
         }
-
-        Some(RichOp {
-            op: Cow::Owned(op),
-            peer: self.change.id.peer,
-            lamport: self.change.lamport + op_offset_in_change as Lamport,
-            timestamp: self.change.timestamp,
-            start: op_slice_start as usize,
-            end: op_slice_end as usize,
-        })
     }
 }
 

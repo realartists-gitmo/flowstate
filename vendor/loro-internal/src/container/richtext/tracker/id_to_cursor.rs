@@ -92,6 +92,16 @@ impl IdToCursor {
         };
 
         let mut start_counter = id_span.counter.start;
+        // A split of a large merged rope leaf redirects a WIDE counter range
+        // to one new leaf. Rewriting every fragment's insert-set in that range
+        // (the old behavior) made replaying a large linear history quadratic:
+        // each split walked ~all of the peer's fragments. Instead, update the
+        // partially-covered head/tail fragments in place and COLLAPSE the
+        // fully-covered middle run into a single fragment pointing at the new
+        // leaf — the list shrinks after every wide update, so the total work
+        // stays linear in the number of fragments ever created.
+        let mut collapse_lo: Option<usize> = None;
+        let mut collapse_hi = index;
         while start_counter < id_span.counter.end
             && index < list.len()
             && start_counter < list[index].counter_end()
@@ -101,12 +111,28 @@ impl IdToCursor {
             let to =
                 ((id_span.counter.end - fragment.counter) as usize).min(fragment.cursor.rle_len());
 
-            fragment.cursor.update_insert(from, to, new_leaf);
+            if from == 0 && to == fragment.cursor.rle_len() && matches!(fragment.cursor, Cursor::Insert(_)) {
+                collapse_lo.get_or_insert(index);
+                collapse_hi = index + 1;
+            } else {
+                fragment.cursor.update_insert(from, to, new_leaf);
+            }
             start_counter += (to - from) as Counter;
             index += 1;
         }
 
         assert_eq!(start_counter, id_span.counter.end);
+        if let Some(lo) = collapse_lo {
+            let counter = list[lo].counter;
+            let len = (list[collapse_hi - 1].counter_end() - counter) as usize;
+            list.splice(
+                lo..collapse_hi,
+                std::iter::once(Fragment {
+                    counter,
+                    cursor: Cursor::new_insert(new_leaf, len),
+                }),
+            );
+        }
     }
 
     pub fn update_insert_batch(&mut self, updates: &mut [(IdSpan, LeafIndex)]) {

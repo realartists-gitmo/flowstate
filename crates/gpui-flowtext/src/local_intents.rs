@@ -155,6 +155,35 @@ pub struct InsertRichFragmentIntent {
   pub blocks: Vec<FragmentBlock>,
 }
 
+/// One same-paragraph find/replace match: an anchored range plus the styles
+/// the replacement should carry (the styles at the match start in the
+/// editor's projection — the mirror of `InsertTextIntent::style_override`,
+/// so a match inside a styled run keeps its styling even at paragraph start
+/// where expand-`After` inheritance has no preceding run character).
+#[derive(Clone, Debug)]
+pub struct ReplaceMatch {
+  pub start: TextAnchor,
+  pub end: TextAnchor,
+  pub styles: Option<RunStyles>,
+}
+
+/// Replace every anchored same-paragraph match with `replacement` (find &
+/// replace). Compound intent: ONE gate hold and ONE Loro commit regardless of
+/// match count — a replace-all must never become a per-match commit storm
+/// (§11 complexity law; the select-all amplification class). The write path
+/// applies ranges back-to-front so positions never shift; matches whose
+/// anchors resolve across a paragraph boundary, collapse, or overlap a
+/// lower match (concurrent edits moved them) are skipped, not rejected — the
+/// surviving matches still carry the user's intent. Cross-paragraph matches
+/// take the selection + `InsertText` path in the editor instead.
+/// `replacement` must not contain structural characters; it may be empty
+/// (replace with nothing = delete matches).
+#[derive(Clone, Debug)]
+pub struct ReplaceMatchesIntent {
+  pub matches: Vec<ReplaceMatch>,
+  pub replacement: String,
+}
+
 /// Equation source edit (identity + intra-source byte range).
 #[derive(Clone, Debug)]
 pub struct ReplaceEquationSourceRangeIntent {
@@ -253,6 +282,7 @@ pub enum LocalIntent {
   DeleteBlocks(DeleteBlocksIntent),
   MoveBlock(MoveBlockIntent),
   InsertRichFragment(InsertRichFragmentIntent),
+  ReplaceMatches(ReplaceMatchesIntent),
   ReplaceEquationSourceRange(ReplaceEquationSourceRangeIntent),
   ReplaceImageAltText(ReplaceImageAltTextIntent),
   ReplaceImageCaption(ReplaceImageCaptionIntent),
@@ -277,6 +307,7 @@ impl LocalIntent {
       Self::DeleteBlocks(_) => "delete-blocks",
       Self::MoveBlock(_) => "move-block",
       Self::InsertRichFragment(_) => "insert-rich-fragment",
+      Self::ReplaceMatches(_) => "replace-matches",
       Self::ReplaceEquationSourceRange(_) => "replace-equation-source",
       Self::ReplaceImageAltText(_) => "replace-image-alt-text",
       Self::ReplaceImageCaption(_) => "replace-image-caption",
@@ -290,7 +321,7 @@ impl LocalIntent {
   /// mid-apply after resolution succeeds.
   #[must_use]
   pub fn is_compound(&self) -> bool {
-    matches!(self, Self::InsertRichFragment(_)) || matches!(self, Self::Table(TableIntent::InsertColumn { .. }))
+    matches!(self, Self::InsertRichFragment(_) | Self::ReplaceMatches(_)) || matches!(self, Self::Table(TableIntent::InsertColumn { .. }))
   }
 }
 

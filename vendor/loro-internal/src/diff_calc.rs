@@ -25,7 +25,7 @@ use crate::{
         idx::ContainerIdx,
         list::list_op::InnerListOp,
         richtext::{
-            richtext_state::{RichtextStateChunk, TextChunk},
+            richtext_state::{unicode_to_utf8_index, RichtextStateChunk, TextChunk},
             AnchorType, CrdtRopeDelta, RichtextChunk, RichtextChunkValue, RichtextTracker, StyleOp,
         },
     },
@@ -1077,6 +1077,15 @@ impl DiffCalculatorTrait for RichtextDiffCalculator {
             RichtextCalcMode::Crdt {
                 tracker, styles, ..
             } => {
+                // Rolling unicode→byte slice cursors, keyed by raw op id. An
+                // undo-restore of a large document resolves ~10^5 tiny unknown
+                // chunks out of a handful of giant non-ASCII `InsertText` ops,
+                // in ascending order; slicing each chunk through
+                // `InnerListOp::slice` rescans the op's text from byte 0 per
+                // chunk (quadratic in the op length). The cursor resumes each
+                // scan where the previous chunk of the same op ended, making
+                // the total conversion work linear.
+                let mut op_slice_cursors: FxHashMap<ID, (usize, usize)> = FxHashMap::default();
                 let mut delta = DeltaRope::new();
                 for item in tracker.diff(info.from_vv, info.to_vv) {
                     match item {
@@ -1140,15 +1149,59 @@ impl DiffCalculatorTrait for RichtextDiffCalculator {
                                         oplog.iter_ops(IdSpan::new(id.peer, id.counter, end))
                                     {
                                         acc_len += rich_op.content_len();
-                                        let op = rich_op.op();
+                                        // Slice manually with the rolling cursor instead of
+                                        // `rich_op.op()`, whose `InnerListOp::slice` rescans the
+                                        // op's text from byte 0 on every non-ASCII slice.
+                                        let raw = rich_op.raw_op();
                                         let lamport = rich_op.lamport();
-                                        let content = op.content.as_list().unwrap();
+                                        let (op_from, op_to) = (rich_op.start(), rich_op.end());
+                                        let content = raw.content.as_list().unwrap();
                                         match content {
-                                            InnerListOp::InsertText { slice, .. } => {
+                                            InnerListOp::InsertText {
+                                                slice, unicode_len, ..
+                                            } => {
+                                                let total_unicode = *unicode_len as usize;
+                                                let (from_byte, to_byte) =
+                                                    if slice.len() == total_unicode {
+                                                        // ASCII fast path.
+                                                        (op_from, op_to)
+                                                    } else {
+                                                        // SAFETY: op text is valid utf8
+                                                        let s = unsafe {
+                                                            std::str::from_utf8_unchecked(slice)
+                                                        };
+                                                        let key = ID::new(id.peer, raw.counter);
+                                                        let (cursor_unicode, cursor_byte) =
+                                                            match op_slice_cursors.get(&key) {
+                                                                Some(&(u, b)) if u <= op_from => {
+                                                                    (u, b)
+                                                                }
+                                                                _ => (0, 0),
+                                                            };
+                                                        let from_byte = cursor_byte
+                                                            + unicode_to_utf8_index(
+                                                                &s[cursor_byte..],
+                                                                op_from - cursor_unicode,
+                                                            )
+                                                            .expect("unicode index should be valid");
+                                                        let to_byte = from_byte
+                                                            + unicode_to_utf8_index(
+                                                                &s[from_byte..],
+                                                                op_to - op_from,
+                                                            )
+                                                            .expect("unicode index should be valid");
+                                                        op_slice_cursors
+                                                            .insert(key, (op_to, to_byte));
+                                                        (from_byte, to_byte)
+                                                    };
                                                 delta.push_insert(
                                                     RichtextStateChunk::Text(TextChunk::new(
-                                                        slice.clone(),
-                                                        IdFull::new(id.peer, op.counter, lamport),
+                                                        slice.slice(from_byte, to_byte),
+                                                        IdFull::new(
+                                                            id.peer,
+                                                            raw.counter + op_from as Counter,
+                                                            lamport,
+                                                        ),
                                                     )),
                                                     (),
                                                 );

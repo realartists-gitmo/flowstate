@@ -66,6 +66,31 @@ impl NetBodyDelta {
     ranges
   }
 
+  /// Spec §6-R: the PRE-import unicode span this net delta touches — `(lo, hi)`
+  /// covering every deleted range and every insertion point. `None` when the
+  /// delta is retain-only.
+  pub(crate) fn pre_change_span(&self) -> Option<(usize, usize)> {
+    let mut old_pos = 0_usize;
+    let mut lo = None;
+    let mut hi: Option<usize> = None;
+    for op in &self.ops {
+      match op {
+        NetOp::Retain(n) => old_pos += n,
+        NetOp::Insert { .. } => {
+          lo.get_or_insert(old_pos);
+          hi = Some(hi.map_or(old_pos, |current| current.max(old_pos)));
+        },
+        NetOp::Delete(n) => {
+          lo.get_or_insert(old_pos);
+          let end = old_pos + n;
+          hi = Some(hi.map_or(end, |current| current.max(end)));
+          old_pos = end;
+        },
+      }
+    }
+    Some((lo?, hi?))
+  }
+
   /// True when any deleted pre-import range covers one of `positions`
   /// (sorted ascending). O(ranges · log positions).
   pub(crate) fn deletes_any_position(&self, positions: &[usize]) -> bool {

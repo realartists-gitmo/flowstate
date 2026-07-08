@@ -19,7 +19,7 @@ use super::gate::{GateHolder, GateMetrics, WriteGate};
 use super::intents::{
   DeleteBlocksIntent, DeleteRangeIntent, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalIntent,
   LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace, ReplaceEquationSourceRangeIntent,
-  ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent,
+  ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent,
   SetParagraphStyleIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent, SemanticCommand};
@@ -130,6 +130,10 @@ impl LocalDocHandle {
 
   pub fn insert_rich_fragment(&self, intent: InsertRichFragmentIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     self.apply_intent(LocalIntent::InsertRichFragment(intent))
+  }
+
+  pub fn replace_matches(&self, intent: ReplaceMatchesIntent) -> Result<LocalWriteOutcome, WriteRejected> {
+    self.apply_intent(LocalIntent::ReplaceMatches(intent))
   }
 
   pub fn replace_equation_source_range(&self, intent: ReplaceEquationSourceRangeIntent) -> Result<LocalWriteOutcome, WriteRejected> {

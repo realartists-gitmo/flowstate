@@ -295,6 +295,48 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   summarize("remote import (structural chunk, gate-held)", &mut structural_import_times);
   summarize("remote import (editor drain + apply)", &mut import_apply_times);
 
+  // ---- Phase 3b: replace-all storm (find & replace). Every occurrence of a
+  // common trigram across the whole doc, ONE compound intent — the §11
+  // anti-amplification law under the heaviest realistic match count. Then one
+  // undo (the storm is one undo member) to restore the text for phase 4.
+  {
+    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let mut matches = Vec::new();
+    for (paragraph_ix, paragraph_id) in projection.ids.paragraph_ids.iter().enumerate() {
+      let text = flowstate_document::paragraph_text(&projection, paragraph_ix);
+      let mut from = 0usize;
+      while let Some(found) = text[from..].find("the") {
+        let byte = from + found;
+        matches.push(flowstate_collab::local_write::ReplaceMatch {
+          start: TextAnchor::new(*paragraph_id, byte),
+          end: TextAnchor::new(*paragraph_id, byte + 3),
+          styles: None,
+        });
+        from = byte + 3;
+      }
+    }
+    let match_count = matches.len();
+    if match_count > 0 {
+      let started = Instant::now();
+      handle
+        .replace_matches(flowstate_collab::local_write::ReplaceMatchesIntent {
+          matches,
+          replacement: "thy".to_string(),
+        })
+        .map_err(|error| anyhow::anyhow!("replace-all storm rejected: {error}"))?;
+      println!("replace-all storm ({match_count} matches, commit): {:?}", started.elapsed());
+      let apply_started = Instant::now();
+      drain_into_editor(&handle, &mut editor)?;
+      println!("replace-all storm (editor drain + apply):        {:?}", apply_started.elapsed());
+      let started = Instant::now();
+      handle.apply_undo().map_err(|error| anyhow::anyhow!("undo replace-all rejected: {error}"))?;
+      drain_into_editor(&handle, &mut editor)?;
+      println!("undo replace-all storm (commit + drain):         {:?}", started.elapsed());
+    } else {
+      println!("replace-all storm: no matches found (skipped)");
+    }
+  }
+
   // ---- Phase 4: select-all delete + retype (the ctrl-A field freeze). Runs
   // LAST because it guts the document. ------------------------------------------
   let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -322,6 +364,19 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
     .map_err(|error| anyhow::anyhow!("post-select-all retype rejected: {error}"))?;
   drain_into_editor(&handle, &mut editor)?;
   println!("select-all retype (commit + drain):              {:?}", started.elapsed());
+
+  // ---- Phase 4b: undo/redo of the select-all (the ctrl-A + undo field
+  // freeze): undo retype, undo the mass delete (restores the whole doc), redo.
+  for label in ["undo retype", "undo select-all delete"] {
+    let started = Instant::now();
+    handle.apply_undo().map_err(|error| anyhow::anyhow!("{label} rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    println!("{label} (commit + drain):{:pad$}{:?}", "", started.elapsed(), pad = 31_usize.saturating_sub(label.len()));
+  }
+  let started = Instant::now();
+  handle.apply_redo().map_err(|error| anyhow::anyhow!("redo select-all delete rejected: {error}"))?;
+  drain_into_editor(&handle, &mut editor)?;
+  println!("redo select-all delete (commit + drain):         {:?}", started.elapsed());
 
   // ---- Convergence proof: the soak measured real work, not dropped work -------
   let canonical = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -358,9 +413,14 @@ fn loro_micro() {
         let delete_elapsed = started.elapsed();
         let started = Instant::now();
         doc.commit();
+        let commit_elapsed = started.elapsed();
+        let undo_elapsed = _undo.map(|mut undo| {
+          let started = Instant::now();
+          let undone = undo.undo().expect("undo select-all delete");
+          (started.elapsed(), undone)
+        });
         println!(
-          "marks={marks:<5} subscription={with_subscription:<5} undo={with_undo:<5} delete={delete_elapsed:>12.3?} commit={:>12.3?}",
-          started.elapsed()
+          "marks={marks:<5} subscription={with_subscription:<5} undo={with_undo:<5} delete={delete_elapsed:>12.3?} commit={commit_elapsed:>12.3?} undo_op={undo_elapsed:?}"
         );
       }
     }
