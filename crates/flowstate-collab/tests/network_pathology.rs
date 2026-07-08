@@ -158,8 +158,8 @@ mod tests {
       }
 
       // ---- Publish: each peer's new history becomes one packet ----------
-      for from in 0..peers_n {
-        if let Some(bytes) = peers[from].export_chunk() {
+      for (from, peer) in peers.iter_mut().enumerate() {
+        if let Some(bytes) = peer.export_chunk() {
           network.push(Packet {
             from,
             bytes,
@@ -174,18 +174,18 @@ mod tests {
         network.swap(ix, rng.below(ix + 1));
       }
       let mut undelivered = Vec::new();
-      for mut packet in network.drain(..) {
+      for mut packet in std::mem::take(&mut network) {
         if packet.delay_rounds > 0 {
           packet.delay_rounds -= 1;
           undelivered.push(packet);
           continue;
         }
-        for to in 0..peers_n {
+        for (to, peer) in peers.iter().enumerate() {
           if to != packet.from {
-            peers[to].import(&packet.bytes);
+            peer.import(&packet.bytes);
             if rng.below(5) == 0 {
               // Duplicate delivery: idempotent import is part of the contract.
-              peers[to].import(&packet.bytes);
+              peer.import(&packet.bytes);
             }
           }
         }
@@ -194,10 +194,10 @@ mod tests {
     }
 
     // ---- Drain the network, then clean anti-entropy to quiescence --------
-    for packet in network.drain(..) {
-      for to in 0..peers_n {
+    for packet in network {
+      for (to, peer) in peers.iter().enumerate() {
         if to != packet.from {
-          peers[to].import(&packet.bytes);
+          peer.import(&packet.bytes);
         }
       }
     }
@@ -208,9 +208,9 @@ mod tests {
           let guard = peers[from].gate.lock(GateHolder::ExportUpdates).expect("gate");
           guard.doc().export(loro::ExportMode::all_updates()).expect("export")
         };
-        for to in 0..peers_n {
+        for (to, peer) in peers.iter().enumerate() {
           if to != from {
-            peers[to].import(&bytes);
+            peer.import(&bytes);
           }
         }
       }

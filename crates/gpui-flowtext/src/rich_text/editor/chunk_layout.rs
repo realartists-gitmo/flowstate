@@ -163,7 +163,9 @@ impl RichTextEditor {
     }
     if bump_revision {
       self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-      self.item_sizes_cache = None;
+      // Patch, don't nuke: only THIS paragraph's items changed (see
+      // `note_item_sizes_patch_paragraph`).
+      self.note_item_sizes_patch_paragraph(paragraph_ix);
     }
     true
   }

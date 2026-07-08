@@ -261,6 +261,7 @@ impl ProjectionRuntimeIndex {
     &self.paragraph_body_unicode_starts
   }
 
+  #[hotpath::measure]
   pub(crate) fn from_projection(projection: &DocumentProjection) -> Self {
     let mut index = Self::default();
     let mut body_unicode = 1usize;
@@ -286,9 +287,11 @@ impl ProjectionRuntimeIndex {
           }
           let paragraph_start = body_unicode;
           index.paragraph_body_unicode_starts.push(paragraph_start);
-          let char_count = flowstate_document::paragraph_text(projection, paragraph_ix)
-            .chars()
-            .count();
+          // Count chars straight off the rope slice — materializing a String
+          // per paragraph (the old `paragraph_text` call) allocated the whole
+          // body once per index rebuild.
+          let byte_range = flowstate_document::paragraph_byte_range(projection, paragraph_ix);
+          let char_count = projection.text.byte_slice(byte_range).chars().count();
           body_unicode = body_unicode.saturating_add(char_count);
           // §24 paragraph metadata index: paragraph id → paragraph index.
           if let Some(paragraph_id) = projection.ids.paragraph_ids.get(paragraph_ix) {
@@ -409,12 +412,26 @@ impl ProjectionRuntimeIndex {
     if !paragraph_text.is_char_boundary(byte) {
       return None;
     }
-    let paragraph_start = projection
-      .ids
-      .paragraph_ids
+    // §perf (measured 2026-07-07): the MAINTAINED start first, content-verified
+    // against the live body (same trust law as `paragraph_boundary_from_record`),
+    // with the durable-cursor resolution as the fallback. The old order ran
+    // `paragraph_body_start_in_loro` — a linear cursor chunk scan, 2.6ms on the
+    // reference doc — on EVERY keystroke's anchor resolution; the maintained
+    // index is in-sync inside the gate and the verification catches the
+    // coalesced-row/rot cases where it is not.
+    let maintained = self
+      .paragraph_body_unicode_starts
       .get(offset.paragraph)
-      .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
-      .or_else(|| self.paragraph_body_unicode_starts.get(offset.paragraph).copied())?;
+      .copied()
+      .filter(|&start| body_start_matches_paragraph(doc, projection, offset.paragraph, start));
+    let paragraph_start = maintained.or_else(|| {
+      projection
+        .ids
+        .paragraph_ids
+        .get(offset.paragraph)
+        .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
+        .or_else(|| self.paragraph_body_unicode_starts.get(offset.paragraph).copied())
+    })?;
     let unicode = paragraph_start + paragraph_text[..byte].chars().count();
     fidelity::event(FidelityClass::Caret, "offset->unicode-loro", || format!("offset={offset:?} byte={byte} -> body_unicode={unicode}"));
     Some(unicode)
@@ -636,41 +653,94 @@ impl ProjectionRuntimeIndex {
     if rebuild {
       return true;
     }
-    for (paragraph_ix, delta) in text_deltas {
-      if delta == 0 {
-        continue;
+    // §11 anti-amplification: ONE merge-walk pass per array instead of one
+    // full O(doc) shift pass PER TEXT PATCH — a replace-all/mass-restyle batch
+    // carries thousands of ParagraphText patches, which made this
+    // O(patches × doc). Deltas come from DISJOINT paragraphs (patch synthesis
+    // groups per paragraph), so each position's final shift is the prefix sum
+    // of the deltas of paragraphs strictly before it — same result as the
+    // sequential per-patch loops this replaces.
+    let mut text_deltas: Vec<(usize, isize)> = text_deltas.into_iter().filter(|(_, delta)| *delta != 0).collect();
+    if text_deltas.is_empty() {
+      return false;
+    }
+    text_deltas.sort_unstable_by_key(|(paragraph_ix, _)| *paragraph_ix);
+    // Pre-shift start values key the value-ordered arrays (placeholders,
+    // search spans); index-ordered arrays walk by paragraph index.
+    let thresholds: Vec<(usize, isize)> = text_deltas
+      .iter()
+      .map(|&(paragraph_ix, delta)| {
+        (
+          self
+            .paragraph_body_unicode_starts
+            .get(paragraph_ix)
+            .copied()
+            .unwrap_or_default(),
+          delta,
+        )
+      })
+      .collect();
+    {
+      let mut shift = 0isize;
+      let mut next = 0usize;
+      for (ix, start) in self.paragraph_body_unicode_starts.iter_mut().enumerate() {
+        while next < text_deltas.len() && text_deltas[next].0 < ix {
+          shift += text_deltas[next].1;
+          next += 1;
+        }
+        if shift != 0 {
+          *start = start.saturating_add_signed(shift);
+        }
       }
-      for start in self
-        .paragraph_body_unicode_starts
-        .iter_mut()
-        .skip(paragraph_ix.saturating_add(1))
-      {
-        *start = start.saturating_add_signed(delta);
+    }
+    {
+      let mut shift = 0isize;
+      let mut next = 0usize;
+      for (ix, boundary) in self.paragraph_boundary_positions.iter_mut().enumerate() {
+        while next < text_deltas.len() && text_deltas[next].0 < ix {
+          shift += text_deltas[next].1;
+          next += 1;
+        }
+        if shift != 0 {
+          *boundary = boundary.saturating_add_signed(shift);
+        }
       }
-      for boundary in self
-        .paragraph_boundary_positions
-        .iter_mut()
-        .skip(paragraph_ix.saturating_add(1))
-      {
-        *boundary = boundary.saturating_add_signed(delta);
+    }
+    {
+      // `object_placeholder_positions` is ascending by construction; shift
+      // each placeholder by the deltas whose (pre-shift) threshold lies
+      // strictly before it — identical to the old per-delta `> threshold`
+      // filter.
+      let mut shift = 0isize;
+      let mut next = 0usize;
+      for position in &mut self.object_placeholder_positions {
+        while next < thresholds.len() && thresholds[next].0 < *position {
+          shift += thresholds[next].1;
+          next += 1;
+        }
+        if shift != 0 {
+          *position = position.saturating_add_signed(shift);
+        }
       }
-      let threshold = self
-        .paragraph_body_unicode_starts
-        .get(paragraph_ix)
-        .copied()
-        .unwrap_or_default();
-      for placeholder in self
-        .object_placeholder_positions
-        .iter_mut()
-        .filter(|position| **position > threshold)
-      {
-        *placeholder = placeholder.saturating_add_signed(delta);
+    }
+    {
+      let mut delta_by_paragraph: FxHashMap<usize, isize> = FxHashMap::default();
+      for &(paragraph_ix, delta) in &text_deltas {
+        *delta_by_paragraph.entry(paragraph_ix).or_default() += delta;
       }
+      // Spans are ascending by `unicode_start` (built in flow order).
+      let mut shift = 0isize;
+      let mut next = 0usize;
       for span in &mut self.search_unit_spans {
-        if span.paragraph == Some(paragraph_ix) {
-          span.unicode_len = span.unicode_len.saturating_add_signed(delta);
-        } else if span.unicode_start > threshold {
-          span.unicode_start = span.unicode_start.saturating_add_signed(delta);
+        while next < thresholds.len() && thresholds[next].0 < span.unicode_start {
+          shift += thresholds[next].1;
+          next += 1;
+        }
+        if shift != 0 {
+          span.unicode_start = span.unicode_start.saturating_add_signed(shift);
+        }
+        if let Some(own_delta) = span.paragraph.and_then(|paragraph_ix| delta_by_paragraph.get(&paragraph_ix)) {
+          span.unicode_len = span.unicode_len.saturating_add_signed(*own_delta);
         }
       }
     }
@@ -754,8 +824,10 @@ impl CrdtRuntime {
     let projection = package
       .current_projection_document()
       .context("reading frontier-matched package projection cache")?;
+    // `read` just validated the package; the plain `load_loro_doc` would run
+    // a SECOND full validate (re-hashing every segment + asset) on every open.
     let doc = package
-      .load_loro_doc()
+      .load_loro_doc_from_validated()
       .context("loading Loro document from package")?;
     let mut runtime = Self::from_doc_with_projection(doc, Some(package), Some(path.to_path_buf()), projection)?;
     runtime.package_journal_prepared = true;
@@ -1449,7 +1521,7 @@ impl CrdtRuntime {
         }]);
       },
       SemanticCommand::Undo => {
-        let applied = self.undo.undo().context("applying Loro undo")?;
+        let applied = hotpath::measure_block!("loro_undo_manager_undo", self.undo.undo().context("applying Loro undo")?);
         // §fidelity: record the undo's frontier transition and assert it only
         // introduced local-peer ops (remote-origin ops are excluded from undo).
         if fidelity::enabled() {
@@ -1471,7 +1543,7 @@ impl CrdtRuntime {
         };
       },
       SemanticCommand::Redo => {
-        let applied = self.undo.redo().context("applying Loro redo")?;
+        let applied = hotpath::measure_block!("loro_undo_manager_redo", self.undo.redo().context("applying Loro redo")?);
         // §fidelity: record the redo's frontier transition and assert it only
         // introduced local-peer ops (remote-origin ops are excluded from redo).
         if fidelity::enabled() {
@@ -1981,15 +2053,36 @@ impl CrdtRuntime {
 
   #[hotpath::measure]
   pub fn import_remote_update(&mut self, bytes: &[u8]) -> Result<Vec<RuntimeEvent>> {
+    let mut replies = self.import_remote_updates(&[bytes])?;
+    Ok(replies.pop().unwrap_or_default())
+  }
+
+  /// Batched sibling of [`Self::import_remote_update`] (§6.4): import EVERY
+  /// coalesced blob first, then derive projection events ONCE over the
+  /// composed frontier delta. The former shape ran one full derive (regional
+  /// walk / readback / editor patch batch) per blob — 41.6% of a receiving
+  /// peer's runtime in the 2026-07-07 field profile. Returns one event vec
+  /// per input blob (each carries its own `pending` status for the session's
+  /// anti-entropy trigger); the composed projection events ride on the LAST
+  /// blob's vec, preserving commit-order delivery through the ordered stream.
+  #[hotpath::measure]
+  pub fn import_remote_updates(&mut self, chunks: &[&[u8]]) -> Result<Vec<Vec<RuntimeEvent>>> {
+    if chunks.is_empty() {
+      return Ok(Vec::new());
+    }
     let from_frontier = self.doc.state_frontiers();
     // §fidelity: capture the pre-import version only when tracing so a disabled
     // build pays nothing; used to assert the import advanced (never regressed) the
     // canonical frontier below.
     let fidelity_before_vv = fidelity::enabled().then(|| self.doc.state_vv());
-    let status = hotpath::measure_block!(
-      "loro_import_with",
-      self.doc.import_with(bytes, "remote").context("importing remote Loro update")?
-    );
+    let mut statuses = Vec::with_capacity(chunks.len());
+    for bytes in chunks {
+      let status = hotpath::measure_block!(
+        "loro_import_with",
+        self.doc.import_with(bytes, "remote").context("importing remote Loro update")?
+      );
+      statuses.push(status);
+    }
     if let Some(before_vv) = &fidelity_before_vv {
       self.fidelity_frontier_transition("import", &from_frontier, before_vv);
     }
@@ -1998,45 +2091,57 @@ impl CrdtRuntime {
     // runs below (regional walk or full rebuild) and are repaired canonically
     // through `schedule_projection_repairs` — the former pre-import whole-flow
     // style scan (O(doc) `to_delta` per structural chunk) is gone.
-    let frontier_after = self.doc.state_frontiers();
-    let version_vector = self.doc.state_vv();
-    // §22: when the import is missing dependencies, surface the pending version
+    let frontier_after = self.doc.state_frontiers().encode();
+    let version_vector = self.doc.state_vv().encode();
+    // §22: when an import is missing dependencies, surface the pending version
     // range so the UI session can trigger immediate update pull/anti-entropy
     // rather than waiting for the periodic digest. The range is both logged here
-    // and carried on `RemoteUpdateApplied { pending }` below.
-    if let Some(missing) = Self::missing_dependency_request(&status) {
-      tracing::debug!(?missing, "remote Loro import is missing dependencies; requesting anti-entropy pull");
-    }
-    let mut events = vec![RuntimeEvent::RemoteUpdateApplied {
-      pending: status.pending.clone(),
-      frontier: frontier_after.encode(),
-      version_vector: version_vector.encode(),
-    }];
+    // and carried on that blob's `RemoteUpdateApplied { pending }` below.
+    let mut replies: Vec<Vec<RuntimeEvent>> = statuses
+      .iter()
+      .map(|status| {
+        if let Some(missing) = Self::missing_dependency_request(status) {
+          tracing::debug!(?missing, "remote Loro import is missing dependencies; requesting anti-entropy pull");
+        }
+        vec![RuntimeEvent::RemoteUpdateApplied {
+          pending: status.pending.clone(),
+          frontier: frontier_after.clone(),
+          version_vector: version_vector.clone(),
+        }]
+      })
+      .collect();
+    // A blob with unresolved dependencies may have been satisfied by a LATER
+    // blob in the same chunk (Loro buffers and auto-applies), but the recorded
+    // per-import status cannot see that — treat any pending status as the
+    // conservative full-rebuild fallback, exactly once for the whole chunk
+    // (the former shape paid one full rebuild PER pending blob).
+    let any_pending = statuses.iter().any(|status| status.pending.is_some());
     let frontier_before = from_frontier.encode();
-    let frontier_after = frontier_after.encode();
-    if status.pending.is_none() {
+    let last = replies.last_mut().expect("chunks is non-empty");
+    if !any_pending {
       let mut invalidation = ProjectionInvalidation {
         frontier_before,
-        frontier_after,
+        frontier_after: frontier_after.clone(),
         changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
         ..ProjectionInvalidation::default()
       };
       let drained = self.merge_subscription_invalidation(&mut invalidation);
-      self.derive_body_projection_events(invalidation, &drained, "remote_import", &mut events)?;
+      self.derive_body_projection_events(invalidation, &drained, "remote_import", last)?;
     } else {
-      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after, "remote_update_pending_projection_fallback");
+      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after.clone(), "remote_update_pending_projection_fallback");
       self.merge_subscription_invalidation(&mut invalidation);
       self.refresh_projection()?;
-      events.push(self.projection_event(invalidation)?);
+      last.push(self.projection_event(invalidation)?);
     }
-    if status.pending.is_none() {
-      // The remote update has already merged into the canonical Loro doc above;
+    if !any_pending {
+      // The remote updates have already merged into the canonical Loro doc above;
       // durability (revision sync + update-segment persistence) is a SECONDARY
       // concern and MUST NOT be able to discard a successful merge. Propagating a
       // persist error here (`?`) previously made the caller drop the whole import
       // (session_io) so the peer never projected the remote edits/presence — a
       // one-directional-sync failure. Log and keep the merge in memory instead;
       // the segment persistence self-heals (re-snapshots) in `persist_update_segment`.
+      // One revision sync + one segment persist covers the WHOLE chunk.
       if let Some(package) = &mut self.package
         && let Err(error) = package.sync_revisions_from_loro(&self.doc)
       {
@@ -2047,7 +2152,7 @@ impl CrdtRuntime {
         fidelity::event(FidelityClass::Persistence, "remote-persist-failed", || format!("{error:#}"));
       }
     }
-    Ok(events)
+    Ok(replies)
   }
 
   fn projection_event(&mut self, invalidation: ProjectionInvalidation) -> Result<RuntimeEvent> {
@@ -2288,6 +2393,7 @@ impl CrdtRuntime {
   ///
   /// Re-entrant calls (the inner refresh re-projecting after a repair) are
   /// no-ops via the `repairing_projection_defects` guard.
+  #[hotpath::measure]
   pub fn schedule_projection_repairs(&mut self, defects: Vec<ProjectionDefect>, emission: RepairEmission) -> Result<Vec<RuntimeEvent>> {
     if self.repairing_projection_defects || defects.is_empty() {
       return Ok(Vec::new());
@@ -2338,6 +2444,31 @@ impl CrdtRuntime {
       return Ok(Vec::new());
     }
 
+    // §registry hygiene (field, 2026-07-07 act two): a MASS repair pass — an
+    // undo restoring a whole-document deletion fabricates a fresh
+    // anchor-keyed record per boundary — leaves the previous generation of
+    // records with permanently dead cursors in the registry. They project as
+    // nothing but every registry scan (`boundary_cursor_positions`, the
+    // fallback key scans) pays for them FOREVER: repeated mass undos
+    // compounded the registry to hundreds of thousands of records and pushed
+    // scan P95 to seconds. Fold the existing convergent stale/duplicate prune
+    // into the same repair-origin commit whenever a pass writes many records.
+    const REPAIR_PRUNE_THRESHOLD: usize = 32;
+    if applied >= REPAIR_PRUNE_THRESHOLD {
+      let body = body_text(&self.doc);
+      match prune_stale_paragraph_metadata(&self.doc, &body) {
+        Ok(pruned) if pruned.changed() => tracing::info!(
+          stale_paragraphs = pruned.stale_paragraphs,
+          duplicate_paragraphs = pruned.duplicate_paragraphs,
+          stale_blocks = pruned.stale_blocks,
+          duplicate_blocks = pruned.duplicate_blocks,
+          "pruned stale metadata records alongside a mass repair pass"
+        ),
+        Ok(_) => {},
+        Err(error) => tracing::error!(%error, "pruning stale metadata during repair pass failed"),
+      }
+    }
+
     // Commit the whole repair batch atomically under the dedicated origin so it is
     // excluded from undo and identifiable by peers.
     self.doc.set_next_commit_origin(REPAIR_ORIGIN);
@@ -2379,41 +2510,28 @@ impl CrdtRuntime {
       Ok(_) => {},
       Err(error) => tracing::error!(%error, "exporting projection repair update failed; later synchronization must recover it"),
     }
-    let derivation = if streamed {
+    // Re-project wholesale onto the repaired canonical state. (Measured: a
+    // ladder-based derivation here LOST to the flat rebuild on large repair
+    // batches — a mass-undo repair pass went 26s → 35s — and repair passes on
+    // small batches are rare enough that the ~300ms rebuild is acceptable.)
+    let before_projection = streamed.then(|| self.projection.clone());
+    let refresh_result = self.refresh_projection();
+    self.repairing_projection_defects = false;
+    refresh_result?;
+    let invalidation =
+      ProjectionInvalidation::full_rebuild(repair_frontier_before, self.doc.state_frontiers().encode(), "projection_defect_repair");
+    match before_projection {
       // Ordered stream: after a PATCHED emission the repair commit advanced
       // the canonical frontier past what the editor received, so the editor
-      // MUST get the repaired projection through the stream. Derive it via
-      // THE ladder — repairs are typically a handful of mark/record writes,
-      // patched in O(touched); any ambiguity falls to the loud rebuild inside
-      // the ladder. The `repairing_projection_defects` guard keeps the
-      // ladder's own repair scheduling from recursing.
-      let mut invalidation = ProjectionInvalidation {
-        frontier_before: repair_frontier_before.clone(),
-        frontier_after: self.doc.state_frontiers().encode(),
-        changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
-        ..ProjectionInvalidation::default()
-      };
-      let drained = self.merge_subscription_invalidation(&mut invalidation);
-      self.derive_body_projection_events(invalidation, &drained, "repair", &mut events)
-    } else {
+      // MUST get the repaired projection through the stream — constructing
+      // the event without streaming it leaves the editor one repair-commit
+      // behind the authority (frontier mismatch class).
+      Some(before_projection) => events.push(self.projection_change_event(&before_projection, invalidation)?),
       // Silent: the caller (a full rebuild in flight, or runtime construction
       // before any editor attaches) emits AFTER this repair pass with the
       // final frontier, so a stream item here would land out of causal order
-      // (StaleFrontier class). Re-project wholesale; the repair is still
-      // committed + persisted.
-      self.refresh_projection()
-    };
-    self.repairing_projection_defects = false;
-    derivation?;
-    let invalidation =
-      ProjectionInvalidation::full_rebuild(repair_frontier_before, self.doc.state_frontiers().encode(), "projection_defect_repair");
-    match emission {
-      // Streamed: the derivation above already pushed the patched/rebuild
-      // events (and their ordered-stream items).
-      RepairEmission::Streamed => {
-        let _ = invalidation;
-      },
-      RepairEmission::Silent => events.push(RuntimeEvent::ProjectionUpdated {
+      // (StaleFrontier class). The repair is still committed + persisted.
+      None => events.push(RuntimeEvent::ProjectionUpdated {
         document: Box::new(self.projection.clone()),
         invalidation,
         frontier: self.projection.frontier.clone(),
@@ -2557,8 +2675,38 @@ impl CrdtRuntime {
       author_user_id: self.author_user_id,
       peer_id: self.doc.peer_id(),
       write_path: self.package_path.clone(),
+      record_revision: true,
     };
     Ok(Some((job, events)))
+  }
+
+  /// §P3 (act two): a revision-LESS split checkpoint for document close/idle.
+  /// Rebuilds the projection + search caches and compacts the package
+  /// off-gate so the NEXT preview/open of this file takes the cache fast path
+  /// instead of a multi-second full Loro materialization
+  /// (`append_update_segment` nulls the cache on every edit, so an edited
+  /// document otherwise never previews fast again until an explicit save).
+  /// Returns `None` when there is no package or the cache is already
+  /// frontier-current.
+  pub fn begin_cache_flush(&mut self) -> Option<CheckpointJob> {
+    let package = self.package.as_ref()?;
+    let latest = self.doc.state_frontiers().encode();
+    if package.manifest.projection_cache_frontier.as_deref() == Some(latest.as_slice()) && package.manifest.latest_frontier == latest {
+      return None;
+    }
+    let package = self.package.take().expect("checked above");
+    Some(CheckpointJob {
+      fork: self.doc.fork(),
+      projection: self.projection.clone(),
+      package,
+      title: String::new(),
+      revision_id: 0,
+      revision_frontiers: self.doc.state_frontiers(),
+      author_user_id: self.author_user_id,
+      peer_id: self.doc.peer_id(),
+      write_path: self.package_path.clone(),
+      record_revision: false,
+    })
   }
 
   /// Phase 3 of a split checkpoint: restore the (now compacted + saved)
@@ -2660,6 +2808,7 @@ impl CrdtRuntime {
     assemble_package_bytes(&fork, &projection, title)
   }
 
+  #[hotpath::measure]
   #[hotpath::measure]
   pub(crate) fn events_after_local_change(
     &mut self,
@@ -3989,15 +4138,38 @@ pub(crate) fn paragraph_body_starts_in_loro(doc: &LoroDoc, paragraph_ids: &[Para
     doc.inner().query_text_id_positions(&container, &query)
   }
   .into_iter();
-  paragraph_ids
+  let batched: Vec<Option<usize>> = paragraph_ids
     .iter()
-    .zip(cursor_ids)
-    .map(|(paragraph_id, cursor_id)| {
-      let batched = cursor_id.and_then(|_| resolved.next().flatten());
-      batched
+    .zip(&cursor_ids)
+    .map(|(_, cursor_id)| {
+      cursor_id
+        .and_then(|_| resolved.next().flatten())
         .map(|pos| pos.saturating_add(1))
-        .or_else(|| paragraph_body_start_in_loro(doc, *paragraph_id))
     })
+    .collect();
+  // §hang fix (field, 2026-07-07 peer 2): the per-id fallback runs
+  // `get_cursor_pos`, and a DEAD cursor there triggers a full history-trace
+  // (commit barrier + DiffCalculator checkout) PER ID. After an undo restores
+  // a whole-document deletion, EVERY restored record's cursor is dead — the
+  // receiving peer ran thousands of history traces and hung until ctrl-C.
+  // The fallback is for the rare degraded-cursor/seeded-doc case; a MASS-dead
+  // state must return `None`s instead, sending callers to the O(doc) full
+  // rebuild + canonical re-anchor repair (~1s) rather than a multi-minute
+  // trace storm.
+  const DEAD_CURSOR_FALLBACK_CAP: usize = 8;
+  let misses = batched.iter().filter(|start| start.is_none()).count();
+  if misses > DEAD_CURSOR_FALLBACK_CAP {
+    tracing::warn!(
+      misses,
+      total = paragraph_ids.len(),
+      "mass dead-cursor state in batched paragraph-start resolution; skipping per-id history-trace fallbacks"
+    );
+    return batched;
+  }
+  batched
+    .into_iter()
+    .zip(paragraph_ids)
+    .map(|(start, paragraph_id)| start.or_else(|| paragraph_body_start_in_loro(doc, *paragraph_id)))
     .collect()
 }
 
@@ -4017,42 +4189,96 @@ pub(crate) fn paragraph_boundary_loro_unicode_index(doc: &LoroDoc, projection: &
     .get(paragraph_ix)
     .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
     .map(|start| start.saturating_sub(1));
-  // The durable cursor survives coalesced empties (projection-row math does
-  // not), but it can ROT under undo churn: the record's anchor re-resolves
-  // onto a NEIGHBORING newline after its original op ids die, so a style
-  // mark or join lands on the wrong paragraph (object-fuzz divergence).
-  // Content check: the boundary is only trusted when the text right after it
-  // matches the paragraph's projected prefix; otherwise fall back to
-  // projection-space math (in-sync with the doc inside the gate).
-  let body = body_text(doc);
-  let matches_paragraph = |boundary: usize| {
-    if body.char_at(boundary) != Ok('\n') {
-      return false;
-    }
-    let text = flowstate_document::paragraph_text(projection, paragraph_ix);
-    if text.is_empty() {
-      // An empty paragraph's boundary is followed by a terminator (next
-      // boundary, an object placeholder, or end of body) — anything else is a
-      // different paragraph's newline. Without this, EVERY newline vacuously
-      // matched an empty paragraph and a rotten cursor sailed through.
-      return match body.char_at(boundary + 1) {
-        Ok(next) => next == '\n' || next == flowstate_document::OBJECT_REPLACEMENT,
-        Err(_) => true,
+  paragraph_boundary_from_record(doc, projection, paragraph_ix, record)
+}
+
+/// Batched sibling of [`paragraph_boundary_loro_unicode_index`]: resolves all
+/// requested paragraphs' durable starts through ONE `query_text_id_positions`
+/// pass (per-paragraph `get_cursor_pos` is a linear chunk scan — the
+/// batch-resolver lesson), then applies the same rot-check + fallback law per
+/// paragraph. Order-preserving with the input.
+pub(crate) fn paragraph_boundaries_loro_unicode_indices(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ixs: &[usize]) -> Vec<usize> {
+  let query_ids: Vec<ParagraphId> = paragraph_ixs
+    .iter()
+    .filter(|&&ix| ix != 0)
+    .filter_map(|&ix| projection.ids.paragraph_ids.get(ix).copied())
+    .collect();
+  let mut starts = paragraph_body_starts_in_loro(doc, &query_ids).into_iter();
+  paragraph_ixs
+    .iter()
+    .map(|&ix| {
+      if ix == 0 {
+        return 0;
+      }
+      let record = if projection.ids.paragraph_ids.get(ix).is_some() {
+        starts.next().flatten().map(|start| start.saturating_sub(1))
+      } else {
+        None
       };
-    }
-    text
-      .chars()
-      .take(4)
-      .enumerate()
-      .all(|(offset, expected)| body.char_at(boundary + 1 + offset) == Ok(expected))
-  };
+      paragraph_boundary_from_record(doc, projection, ix, record)
+    })
+    .collect()
+}
+
+/// The shared boundary law: trust the durable-record boundary only when the
+/// body text right after it matches the paragraph's projected prefix.
+///
+/// The durable cursor survives coalesced empties (projection-row math does
+/// not), but it can ROT under undo churn: the record's anchor re-resolves
+/// onto a NEIGHBORING newline after its original op ids die, so a style
+/// mark or join lands on the wrong paragraph (object-fuzz divergence).
+/// Content check: the boundary is only trusted when the text right after it
+/// matches the paragraph's projected prefix; otherwise fall back to
+/// projection-space math (in-sync with the doc inside the gate).
+fn paragraph_boundary_from_record(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ix: usize, record: Option<usize>) -> usize {
+  let body = body_text(doc);
   match record {
-    Some(boundary) if matches_paragraph(boundary) => boundary,
+    Some(boundary) if boundary_matches_paragraph(&body, projection, paragraph_ix, boundary) => boundary,
     _ => {
       let fallback = paragraph_boundary_unicode_index(projection, paragraph_ix);
-      if matches_paragraph(fallback) { fallback } else { record.unwrap_or(fallback) }
+      if boundary_matches_paragraph(&body, projection, paragraph_ix, fallback) {
+        fallback
+      } else {
+        record.unwrap_or(fallback)
+      }
     },
   }
+}
+
+/// The shared boundary trust check: `boundary` is this paragraph's leading
+/// newline only when the live body text right after it matches the
+/// paragraph's projected prefix.
+fn boundary_matches_paragraph(body: &loro::LoroText, projection: &DocumentProjection, paragraph_ix: usize, boundary: usize) -> bool {
+  if body.char_at(boundary) != Ok('\n') {
+    return false;
+  }
+  let text = flowstate_document::paragraph_text(projection, paragraph_ix);
+  if text.is_empty() {
+    // An empty paragraph's boundary is followed by a terminator (next
+    // boundary, an object placeholder, or end of body) — anything else is a
+    // different paragraph's newline. Without this, EVERY newline vacuously
+    // matched an empty paragraph and a rotten cursor sailed through.
+    return match body.char_at(boundary + 1) {
+      Ok(next) => next == '\n' || next == flowstate_document::OBJECT_REPLACEMENT,
+      Err(_) => true,
+    };
+  }
+  text
+    .chars()
+    .take(4)
+    .enumerate()
+    .all(|(offset, expected)| body.char_at(boundary + 1 + offset) == Ok(expected))
+}
+
+/// Whether the MAINTAINED body-unicode `start` for `paragraph_ix` matches the
+/// live body (its leading boundary newline plus the paragraph's projected
+/// prefix) — the cheap gate that lets keystroke anchor resolution skip the
+/// per-call durable-cursor chunk scan.
+fn body_start_matches_paragraph(doc: &LoroDoc, projection: &DocumentProjection, paragraph_ix: usize, start: usize) -> bool {
+  let Some(boundary) = start.checked_sub(1) else {
+    return false;
+  };
+  boundary_matches_paragraph(&body_text(doc), projection, paragraph_ix, boundary)
 }
 
 fn object_loro_block_by_projected_id(doc: &LoroDoc, body: &LoroText, block_id: flowstate_document::BlockId) -> Option<(String, LoroMap, usize)> {
@@ -4840,6 +5066,10 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   let root = doc.get_map(ROOT);
   let paragraphs = root.ensure_mergeable_map(PARAGRAPHS_BY_ID)?;
   let blocks = root.ensure_mergeable_map(BLOCKS_BY_ID)?;
+  // ONE cursor resolution for all three anchor fields — `get_cursor` walks
+  // text chunks per call, and this writer runs per split and per boundary in
+  // a mass-repair pass; the three identical calls tripled that cost.
+  let boundary_cursor = body.get_cursor(boundary, Side::Left).map(|cursor| cursor.encode());
   let paragraph_id = forced_paragraph_id
     .or_else(|| paragraph_metadata_key_at_boundary(doc, body, &paragraphs, boundary))
     .unwrap_or_else(|| new_paragraph_metadata_id(boundary));
@@ -4847,11 +5077,9 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   paragraph.insert("id", paragraph_id.as_str())?;
   paragraph.insert("container_id", paragraph.id().to_string())?;
   paragraph.insert("flow_id", ROOT_BODY_FLOW_ID)?;
-  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
-    paragraph.insert("start_cursor", cursor.encode())?;
-  }
-  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
-    paragraph.insert("boundary_cursor", cursor.encode())?;
+  if let Some(encoded) = &boundary_cursor {
+    paragraph.insert("start_cursor", encoded.clone())?;
+    paragraph.insert("boundary_cursor", encoded.clone())?;
   }
   let paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
   paragraph.insert("attrs_container_id", paragraph_attrs.id().to_string())?;
@@ -4865,8 +5093,8 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   block.insert("kind", "paragraph")?;
   block.insert("flow_id", ROOT_BODY_FLOW_ID)?;
   block.insert("paragraph_id", paragraph_id.as_str())?;
-  if let Some(cursor) = body.get_cursor(boundary, Side::Left) {
-    block.insert("anchor_cursor", cursor.encode())?;
+  if let Some(encoded) = boundary_cursor {
+    block.insert("anchor_cursor", encoded)?;
   }
   let block_attrs = block.ensure_mergeable_map("attrs")?;
   let nested_refs = block.ensure_mergeable_map("nested_refs")?;
@@ -5682,6 +5910,9 @@ pub struct CheckpointJob {
   pub author_user_id: Option<u128>,
   pub peer_id: u64,
   pub write_path: Option<PathBuf>,
+  /// `false` for the close-time cache flush: identical assembly, but no
+  /// named revision is minted (a flush is not a user save).
+  pub record_revision: bool,
 }
 
 impl CheckpointJob {
@@ -5693,15 +5924,17 @@ impl CheckpointJob {
       self.package.rebuild_projection_cache_from_loro(&self.fork)?;
       self.package.rebuild_search_units_from_loro(&self.fork)?;
       self.package.compact_to_snapshot(&self.fork)?;
-      self.package.create_named_revision_at_with_id(
-        &self.fork,
-        self.revision_id,
-        &self.revision_frontiers,
-        &self.title,
-        "Explicit save",
-        self.author_user_id,
-        Some(self.peer_id as u128),
-      )?;
+      if self.record_revision {
+        self.package.create_named_revision_at_with_id(
+          &self.fork,
+          self.revision_id,
+          &self.revision_frontiers,
+          &self.title,
+          "Explicit save",
+          self.author_user_id,
+          Some(self.peer_id as u128),
+        )?;
+      }
       if let Some(path) = &self.write_path {
         self.package.write(path)?;
         return Ok(true);
@@ -6593,6 +6826,70 @@ mod tests {
     assert_eq!(carets.carets.len(), 1);
     assert_eq!(carets.carets[0].offset, offset);
     assert_eq!(carets.carets[0].visual_gravity, gpui_flowtext::VisualGravity::Upstream);
+    Ok(())
+  }
+
+  /// §P3 (act two): the close-time cache flush restores the preview fast
+  /// path — an edit nulls the projection cache (preview falls back to a full
+  /// Loro materialization), and `begin_cache_flush` + `CheckpointJob::run`
+  /// writes a frontier-current cache back without minting a revision.
+  #[test]
+  fn cache_flush_restores_the_preview_fast_path() -> anyhow::Result<()> {
+    use crate::local_write::{GateHolder, InsertTextIntent, LocalDocHandle, LocalWriteConfig, TextAnchor};
+
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("flush.db8");
+    let document = flowstate_document::document_from_input_blocks(
+      flowstate_document::DocumentTheme::default(),
+      vec![flowstate_document::InputBlock::Paragraph(flowstate_document::InputParagraph {
+        style: flowstate_document::ParagraphStyle::Normal,
+        runs: vec![flowstate_document::InputRun {
+          text: "flush me".to_string(),
+          styles: flowstate_document::RunStyles::default(),
+        }],
+      })],
+    );
+    let imported = flowstate_document::import_document_projection(document, "Flush")?;
+    let bytes = assemble_package_bytes(&imported.doc, &imported.projection, "Flush")?;
+    std::fs::write(&path, bytes)?;
+    assert!(
+      DocumentPackage::read_cached_projection(&path)?.is_some(),
+      "a freshly assembled package must carry a frontier-current projection cache"
+    );
+
+    let runtime = CrdtRuntime::open_package(&path)?;
+    let (handle, gate) = LocalDocHandle::new(runtime, LocalWriteConfig::default());
+    let paragraph = handle.projection().expect("projection").ids.paragraph_ids[0];
+    handle
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(paragraph, usize::MAX),
+        text: " again".to_string(),
+        style_override: None,
+      })
+      .expect("insert");
+    let revisions_before = DocumentPackage::read(&path)?.revisions.len();
+    {
+      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+      assert!(
+        DocumentPackage::read_cached_projection(&path)?.is_none(),
+        "an edit must null the projection cache (preview falls back to the full read)"
+      );
+      let job = guard.begin_cache_flush().expect("edited package must need a cache flush");
+      drop(guard);
+      let (package, wrote) = job.run();
+      let wrote = wrote?;
+      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+      guard.finish_checkpoint(package, wrote);
+      assert!(wrote, "the flush must reach disk");
+    }
+    let flushed = DocumentPackage::read_cached_projection(&path)?.expect("flushed package must preview via the cache fast path");
+    assert_eq!(flowstate_document::paragraph_text(&flushed, 0), "flush me again");
+    let revisions_after = DocumentPackage::read(&path)?.revisions.len();
+    assert_eq!(revisions_before, revisions_after, "a cache flush must not mint a revision");
+    {
+      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+      assert!(guard.begin_cache_flush().is_none(), "a frontier-current package must skip the flush");
+    }
     Ok(())
   }
 }

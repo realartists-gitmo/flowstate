@@ -130,8 +130,8 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
   clear_map(&paragraphs)?;
   clear_map(&sections)?;
 
-  let plan = FlowTextImportPlan::for_document(document);
-  plan.write_to(&body_text)?;
+  let plan = hotpath::measure_block!("import_plan_build", FlowTextImportPlan::for_document(document));
+  hotpath::measure_block!("import_plan_write_body", plan.write_to(&body_text)?);
 
   let mut paragraph_ix = 0_usize;
   for (block_ix, (block, position)) in document
@@ -340,6 +340,7 @@ fn section_page_attrs_to_loro(page: &gpui_flowtext::SectionPageAttrs) -> Section
   }
 }
 
+#[hotpath::measure]
 fn import_paragraph_record(
   paragraphs: &LoroMap,
   blocks: &LoroMap,

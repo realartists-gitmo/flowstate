@@ -2165,6 +2165,9 @@ impl TextHandler {
         })?;
 
         //debug_assert_eq!(ranges.iter().map(|x| x.event_len).sum::<usize>(), len);
+        let delete_timing = std::env::var_os("LORO_DELETE_TIMING").is_some();
+        let apply_started = std::time::Instant::now();
+        let range_count = ranges.len();
         let pos = event_pos as isize;
         let len = event_len as isize;
         let mut event_end = pos + len;
@@ -2187,6 +2190,12 @@ impl TextHandler {
                 &inner.doc,
             )?;
             event_end = event_start;
+        }
+        if delete_timing {
+            eprintln!(
+                "[loro-delete-timing] ranges={range_count} event_len={event_len} apply_loop={:?}",
+                apply_started.elapsed()
+            );
         }
 
         Ok(())

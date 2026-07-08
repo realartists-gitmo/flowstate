@@ -110,6 +110,20 @@ pub struct SetParagraphStyleIntent {
   pub style: ParagraphStyle,
 }
 
+/// Set MANY paragraphs to one style in a single commit — one gate hold, one
+/// Loro commit, one undo member, one projection patch batch (§11
+/// anti-amplification). A selection-wide restyle previously amplified into one
+/// intent per paragraph: N gate holds, N commits, N stream drains (measured
+/// 64.7s for a select-all restyle on the reference doc), and an undo group
+/// whose N members fragmented Loro undo into N full-state checkouts.
+/// Stale or non-representable targets (object-following boundary-less rows)
+/// are skipped, not rejected — the surviving targets carry the user's intent.
+#[derive(Clone, Debug)]
+pub struct SetParagraphStylesIntent {
+  pub paragraphs: Vec<ParagraphId>,
+  pub style: ParagraphStyle,
+}
+
 /// Insert an object block (image/equation/table/…) at an anchored position.
 /// The block's durable identity is minted by the write path.
 #[derive(Clone, Debug)]
@@ -277,6 +291,7 @@ pub enum LocalIntent {
   JoinParagraphs(JoinParagraphsIntent),
   SetMarks(SetMarksIntent),
   SetParagraphStyle(SetParagraphStyleIntent),
+  SetParagraphStyles(SetParagraphStylesIntent),
   InsertObject(InsertObjectIntent),
   ReplaceObject(ReplaceObjectIntent),
   DeleteBlocks(DeleteBlocksIntent),
@@ -302,6 +317,7 @@ impl LocalIntent {
       Self::JoinParagraphs(_) => "join-paragraphs",
       Self::SetMarks(_) => "set-marks",
       Self::SetParagraphStyle(_) => "set-paragraph-style",
+      Self::SetParagraphStyles(_) => "set-paragraph-styles",
       Self::InsertObject(_) => "insert-object",
       Self::ReplaceObject(_) => "replace-object",
       Self::DeleteBlocks(_) => "delete-blocks",
@@ -321,7 +337,8 @@ impl LocalIntent {
   /// mid-apply after resolution succeeds.
   #[must_use]
   pub fn is_compound(&self) -> bool {
-    matches!(self, Self::InsertRichFragment(_) | Self::ReplaceMatches(_)) || matches!(self, Self::Table(TableIntent::InsertColumn { .. }))
+    matches!(self, Self::InsertRichFragment(_) | Self::ReplaceMatches(_) | Self::SetParagraphStyles(_))
+      || matches!(self, Self::Table(TableIntent::InsertColumn { .. }))
   }
 }
 
@@ -476,8 +493,11 @@ impl LocalWriteOutcome {
 /// Loro `UndoManager` (spec §10).
 #[derive(Debug)]
 pub struct UndoOutcome {
-  /// `None` when the undo stack was empty (nothing applied).
-  pub replace: Option<ProjectionReplace>,
+  /// Whether a step actually applied (`false` ⇒ empty undo/redo stack). The
+  /// projection change itself rides the ORDERED stream like every other
+  /// change; carrying a full projection here cost a wasted O(doc) clone on
+  /// every undo of a large document.
+  pub applied: bool,
   /// Cursor-restored selection recorded in the undo item's metadata.
   pub selection: Option<EditorSelection>,
 }

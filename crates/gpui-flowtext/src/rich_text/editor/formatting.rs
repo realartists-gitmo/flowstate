@@ -286,15 +286,20 @@ impl RichTextEditor {
       return;
     }
     self.begin_undo_group();
-    for paragraph_ix in paragraphs.start..end {
-      if self
-        .document
-        .paragraphs
-        .get(paragraph_ix)
-        .is_some_and(|paragraph| paragraph.style != ParagraphStyle::Normal)
-      {
-        self.write_set_paragraph_style(paragraph_ix, ParagraphStyle::Normal, cx);
-      }
+    // ONE batched intent for every changed paragraph style (§11) — the
+    // per-paragraph loop amplified clear-formatting over a big selection the
+    // same way select-all restyle did.
+    let changed: Vec<usize> = (paragraphs.start..end)
+      .filter(|&paragraph_ix| {
+        self
+          .document
+          .paragraphs
+          .get(paragraph_ix)
+          .is_some_and(|paragraph| paragraph.style != ParagraphStyle::Normal)
+      })
+      .collect();
+    if !changed.is_empty() {
+      self.write_set_paragraph_styles(changed, ParagraphStyle::Normal, cx);
     }
     let last_paragraph = end - 1;
     let range = DocumentOffset {
@@ -351,18 +356,21 @@ impl RichTextEditor {
       return;
     }
     let range = self.selection.normalized();
-    self.begin_undo_group();
-    for paragraph_ix in range.start.paragraph..=range.end.paragraph {
-      if self
-        .document
-        .paragraphs
-        .get(paragraph_ix)
-        .is_some_and(|paragraph| paragraph.style != style)
-      {
-        self.write_set_paragraph_style(paragraph_ix, style, cx);
-      }
+    // ONE batched intent for the whole selection (one commit, one undo
+    // member) — the per-paragraph loop amplified a select-all restyle into
+    // thousands of full write-path round trips.
+    let changed: Vec<usize> = (range.start.paragraph..=range.end.paragraph)
+      .filter(|&paragraph_ix| {
+        self
+          .document
+          .paragraphs
+          .get(paragraph_ix)
+          .is_some_and(|paragraph| paragraph.style != style)
+      })
+      .collect();
+    if !changed.is_empty() {
+      self.write_set_paragraph_styles(changed, style, cx);
     }
-    self.end_undo_group();
   }
 
   // -------- Action handlers (bound to keystrokes in main.rs) -----------

@@ -118,13 +118,17 @@ impl RichTextEditor {
             needs_self_heal = true;
             continue;
           }
-          let mut document = self.document.clone();
-          if apply_projection_patch_batch(&mut document, &batch).is_err() {
+          // In-place apply: `apply_projection_patch_batch` is internally
+          // transactional (content batches journal + roll back; structural
+          // batches build a candidate), so the outer whole-projection clone
+          // this used to make per batch was pure churn. Patches never touch
+          // the local theme, so the former re-theme pass is dropped too. On
+          // failure the canonical self-heal below replaces the document
+          // wholesale anyway.
+          if apply_projection_patch_batch(&mut self.document, &batch).is_err() {
             needs_self_heal = true;
             continue;
           }
-          let theme = self.document.theme.clone();
-          self.document = projection_with_local_theme(document, &theme);
         },
         ProjectionStreamItem::Replace(document) => {
           let mut document = *document;
@@ -337,6 +341,24 @@ impl RichTextEditor {
       .is_some()
   }
 
+  /// Batched selection-wide restyle: ONE intent → one gate hold, one Loro
+  /// commit, one undo member, one patch batch (§11 anti-amplification). The
+  /// per-paragraph loop this replaces cost N full write-path round trips —
+  /// 64.7s for a select-all restyle on the reference doc — and made undo
+  /// replay N members.
+  pub(super) fn write_set_paragraph_styles(&mut self, paragraph_ixs: impl IntoIterator<Item = usize>, style: ParagraphStyle, cx: &mut Context<Self>) -> bool {
+    let paragraphs: Vec<_> = paragraph_ixs
+      .into_iter()
+      .filter_map(|paragraph_ix| self.identity_map.paragraph_id(paragraph_ix))
+      .collect();
+    if paragraphs.is_empty() {
+      return false;
+    }
+    self
+      .write_intent(LocalIntent::SetParagraphStyles(SetParagraphStylesIntent { paragraphs, style }), cx)
+      .is_some()
+  }
+
   pub(super) fn write_insert_object_at_caret(&mut self, block: InputBlock, cx: &mut Context<Self>) -> bool {
     let caret = self.selection.head;
     let Some(at) = self.text_anchor_at(caret) else {
@@ -436,7 +458,7 @@ impl RichTextEditor {
   }
 
   fn apply_undo_outcome(&mut self, outcome: LocalUndoOutcome, cx: &mut Context<Self>) -> bool {
-    if outcome.replace.is_none() {
+    if !outcome.applied {
       return false; // empty undo/redo stack
     }
     // Field fix: the undo's projection change rides the ordered stream like

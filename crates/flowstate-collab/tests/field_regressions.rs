@@ -488,17 +488,16 @@ mod tests {
       .expect("insert");
 
     // Open + fork the revision mid-session.
-    {
-      let mut guard = gate.lock(GateHolder::UndoRedo).expect("gate");
-      let events = guard
-        .command(flowstate_collab::crdt_runtime::SemanticCommand::OpenRevision { revision_id })
-        .expect("open revision");
-      assert_eq!(events.len(), 1, "revision open emits exactly the read event");
-      let events = guard
-        .command(flowstate_collab::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
-        .expect("fork revision");
-      assert_eq!(events.len(), 1, "revision fork emits exactly the fork event");
-    }
+    let mut guard = gate.lock(GateHolder::UndoRedo).expect("gate");
+    let events = guard
+      .command(flowstate_collab::crdt_runtime::SemanticCommand::OpenRevision { revision_id })
+      .expect("open revision");
+    assert_eq!(events.len(), 1, "revision open emits exactly the read event");
+    let events = guard
+      .command(flowstate_collab::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
+      .expect("fork revision");
+    assert_eq!(events.len(), 1, "revision fork emits exactly the fork event");
+    drop(guard);;
 
     // The live document is untouched: same text, editing + undo keep working.
     assert!(body_string(&gate).contains("typed before open"));

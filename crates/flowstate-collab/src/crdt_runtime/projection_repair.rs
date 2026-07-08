@@ -45,6 +45,7 @@ use super::{
 /// longer applies (already repaired, healed by a concurrent edit, or a peer got
 /// there first — all convergent no-ops). Never commits; the caller owns the
 /// commit and its origin.
+#[hotpath::measure]
 pub(super) fn apply_projection_repair(doc: &LoroDoc, defect: &ProjectionDefect) -> Result<bool> {
   let result = match defect {
     ProjectionDefect::MissingParagraphMetadata {
@@ -106,6 +107,14 @@ fn repair_missing_paragraph_metadata(doc: &LoroDoc, flow_id: &str, boundary_unic
       // Loro map LWW instead of the old position-based keys (block_ix vs unicode
       // offset), which diverged between the incremental projection, the full
       // rebuild, and across peers.
+      //
+      // §perf note (2026-07-07, measured): carrying the WALK-TIME keys on the
+      // defect to skip this per-defect `get_cursor` chunk scan (~1s across a
+      // mass-undo pass) is NOT safe: earlier repairs in the same pass can
+      // mutate body text (e.g. orphan-placeholder deletion), shifting later
+      // boundaries, and the walk-time keys then disagree with this LIVE
+      // re-derivation — redo after a mass-undo produced DuplicateBlockId
+      // patches. Re-deriving per repair self-corrects; keep it.
       let Some((paragraph_key, block_key)) = flowstate_document::loro_projection::stable_boundary_metadata_keys(&body, boundary) else {
         // No live anchor for this boundary yet; leave it for a later pass.
         return Ok(false);

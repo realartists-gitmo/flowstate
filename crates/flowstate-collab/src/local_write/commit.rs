@@ -74,6 +74,14 @@ pub(crate) enum ResolvedPlan {
     paragraph_ix: usize,
     style: flowstate_document::ParagraphStyle,
   },
+  SetParagraphStyles {
+    /// `(paragraph id, projection index, boundary loro-unicode position)`,
+    /// input order; stale and non-representable targets already skipped.
+    /// Marks never shift text, so pre-resolved boundaries stay valid across
+    /// the whole batch.
+    targets: Vec<(ParagraphId, usize, usize)>,
+    style: flowstate_document::ParagraphStyle,
+  },
   InsertObject {
     at: ResolvedTextPosition,
     block_ix: usize,
@@ -491,6 +499,47 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
         style: style.style,
       })
     },
+    LocalIntent::SetParagraphStyles(styles) => {
+      if styles.paragraphs.is_empty() {
+        return Err(WriteRejected::EmptyIntent);
+      }
+      // Batched resolution (§11): stale identities and non-representable
+      // (object-following, boundary-less) rows are SKIPPED, not rejected —
+      // the surviving targets carry the user's intent, mirroring
+      // ReplaceMatches. Rows resolve in one pass; boundaries resolve through
+      // ONE batched cursor query (per-target `get_cursor_pos` is a linear
+      // chunk scan — quadratic over a select-all restyle without this).
+      let rows = flowstate_document::paragraph_block_rows(projection);
+      let mut targets: Vec<(ParagraphId, usize)> = Vec::with_capacity(styles.paragraphs.len());
+      for paragraph in &styles.paragraphs {
+        let Some(paragraph_ix) = index.paragraph_index(*paragraph) else {
+          continue;
+        };
+        if projection.ids.paragraph_ids.get(paragraph_ix).copied() != Some(*paragraph) {
+          continue;
+        }
+        let interstitial = rows
+          .get(paragraph_ix)
+          .is_some_and(|&row| row > 0 && !matches!(projection.blocks.get(row - 1), Some(flowstate_document::Block::Paragraph(_))));
+        if interstitial {
+          continue;
+        }
+        targets.push((*paragraph, paragraph_ix));
+      }
+      if targets.is_empty() {
+        return Err(WriteRejected::EmptyIntent);
+      }
+      let indices: Vec<usize> = targets.iter().map(|(_, paragraph_ix)| *paragraph_ix).collect();
+      let boundaries = crate::crdt_runtime::paragraph_boundaries_loro_unicode_indices(doc, projection, &indices);
+      Ok(ResolvedPlan::SetParagraphStyles {
+        targets: targets
+          .into_iter()
+          .zip(boundaries)
+          .map(|((paragraph, paragraph_ix), boundary)| (paragraph, paragraph_ix, boundary))
+          .collect(),
+        style: styles.style,
+      })
+    },
     LocalIntent::InsertObject(insert) => {
       let at = resolve_text_anchor(doc, projection, index, &insert.at)?;
       let block_ix = flowstate_document::block_ix_for_paragraph(projection, at.paragraph_ix)
@@ -641,7 +690,7 @@ fn resolve_intent(core: &CrdtRuntime, intent: &LocalIntent) -> Result<ResolvedPl
       // disjoint; an overlap means concurrency moved them, and the first
       // match is the user-visible winner), then flip to descending for
       // back-to-front application.
-      matches.sort_by(|a, b| a.0.body_unicode.cmp(&b.0.body_unicode));
+      matches.sort_by_key(|entry| entry.0.body_unicode);
       let mut kept: Vec<(ResolvedTextPosition, ResolvedTextPosition, Option<flowstate_document::RunStyles>)> =
         Vec::with_capacity(matches.len());
       for entry in matches {
@@ -862,9 +911,22 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
       // after the first absorbs into it — so retirement is O(edit), not the
       // O(records) prune sweep (§11).
       if start.paragraph_ix != end.paragraph_ix {
-        hotpath::measure_block!("delete_range_prune_objects", {
-          prune_orphaned_body_object_blocks(&doc, &body).context("pruning orphaned object blocks after cross-paragraph delete")?;
-        });
+        // The prune sweep stringifies the whole body (O(doc) + a multi-MB
+        // allocation); only a delete whose PRE-STATE range covered an object
+        // placeholder can orphan an object block, so consult the maintained
+        // placeholder index first — the common cross-paragraph TEXT delete
+        // skips the sweep entirely (measured 66ms per delete on the
+        // reference doc).
+        let object_in_range = {
+          let positions = core.projection_index_ref().object_positions();
+          let from = positions.partition_point(|&pos| pos < clamped_start);
+          positions.get(from).is_some_and(|&pos| pos < clamped_start + clamped_len)
+        };
+        if object_in_range {
+          hotpath::measure_block!("delete_range_prune_objects", {
+            prune_orphaned_body_object_blocks(&doc, &body).context("pruning orphaned object blocks after cross-paragraph delete")?;
+          });
+        }
         hotpath::measure_block!("delete_range_retire_records", {
           for paragraph_ix in (start.paragraph_ix + 1)..=end.paragraph_ix {
             let (Some(paragraph_id), Some(block_id)) = (
@@ -920,6 +982,17 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
         .context("marking paragraph style")?;
       summary.containers_touched = 1;
       summary.marks_emitted = 1;
+    },
+    ResolvedPlan::SetParagraphStyles { targets, style } => {
+      let body = body_text(&doc);
+      let value = paragraph_style_value(*style);
+      for (_, _, boundary) in targets {
+        body
+          .mark(*boundary..*boundary + 1, MARK_PARAGRAPH_STYLE, value)
+          .context("marking paragraph style (batched)")?;
+      }
+      summary.containers_touched = 1;
+      summary.marks_emitted = u32::try_from(targets.len()).unwrap_or(u32::MAX);
     },
     ResolvedPlan::InsertObject {
       block_ix, new_block, block, ..

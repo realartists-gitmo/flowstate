@@ -833,7 +833,7 @@ impl HeightPrefixIndex {
 use crate::local_intents::{
   DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalCommit,
   LocalIntent, LocalWriteAuthority, LocalWriteOutcome, ProjectionStreamItem, ReplaceMatch, ReplaceMatchesIntent, SetMarksIntent,
-  SetParagraphStyleIntent, SplitParagraphIntent, TextAnchor, UndoOutcome as LocalUndoOutcome, WriteRejected,
+  SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor, UndoOutcome as LocalUndoOutcome, WriteRejected,
 };
 
 pub struct RichTextEditor {

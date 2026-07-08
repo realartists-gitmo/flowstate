@@ -307,6 +307,14 @@ impl DocumentPackage {
 
   pub fn load_loro_doc(&self) -> io::Result<LoroDoc> {
     self.validate()?;
+    self.load_loro_doc_from_validated()
+  }
+
+  /// [`Self::load_loro_doc`] minus the leading `validate()` — for callers
+  /// holding a package that `read`/`from_bytes` JUST validated. The doubled
+  /// validate re-hashed every update segment and asset (a second full
+  /// integrity sweep over a multi-hundred-MB package) on every open.
+  pub fn load_loro_doc_from_validated(&self) -> io::Result<LoroDoc> {
     let doc = self.load_loro_doc_unvalidated()?;
     fidelity::event(FidelityClass::Persistence, "load", || {
       format!(
@@ -463,8 +471,15 @@ impl DocumentPackage {
     let segment_id = Uuid::new_v4().as_u128();
     let now = unix_time_secs();
     let checksum = blake3_hash(&bytes);
-    let mut next = self.clone();
-    next.loro_update_segments.push(LoroUpdateSegmentChunk {
+    // Append IN PLACE with a rollback guard instead of `self.clone()`: the
+    // clone copied every snapshot/asset chunk — ~86MB on a large document —
+    // on EVERY keystroke inside the write gate (the .db8 first-edit freeze).
+    // Only the manifest and the cleared caches need restoring on a validation
+    // failure; the pushed segment pops back off.
+    let manifest_backup = self.manifest.clone();
+    let projection_caches_backup = std::mem::take(&mut self.projection_caches);
+    let search_units_backup = std::mem::take(&mut self.search_units);
+    self.loro_update_segments.push(LoroUpdateSegmentChunk {
       segment_id,
       from_frontier: encode_frontiers(from_frontier),
       from_version_vector: encode_version_vector(from_version_vector),
@@ -474,16 +489,24 @@ impl DocumentPackage {
       checksum,
       created_at_unix_secs: now,
     });
-    next.manifest.latest_frontier = encode_frontiers(to_frontier);
-    next.manifest.latest_version_vector = encode_version_vector(to_version_vector);
-    next.manifest.projection_cache_frontier = None;
-    next.projection_caches.clear();
-    next.manifest.search_cache_frontier = None;
-    next.search_units.clear();
-    next.manifest.modified_at_unix_secs = now;
-    next.refresh_manifest_indexes();
-    next.validate()?;
-    *self = next;
+    self.manifest.latest_frontier = encode_frontiers(to_frontier);
+    self.manifest.latest_version_vector = encode_version_vector(to_version_vector);
+    self.manifest.projection_cache_frontier = None;
+    self.manifest.search_cache_frontier = None;
+    self.manifest.modified_at_unix_secs = now;
+    self.refresh_manifest_indexes();
+    // Validate ONLY the delta: full `validate()` re-hashes every stored
+    // segment and decodes every cached projection — O(package) per keystroke
+    // (the other half of the .db8 first-edit freeze). Full validation still
+    // runs at read/write time.
+    if let Err(error) = self.validate_appended_segment() {
+      self.loro_update_segments.pop();
+      self.manifest = manifest_backup;
+      self.projection_caches = projection_caches_backup;
+      self.search_units = search_units_backup;
+      self.refresh_manifest_indexes();
+      return Err(error);
+    }
     fidelity::event(FidelityClass::Persistence, "append-segment", || {
       format!(
         "segment={segment_id:032x} segments={} frontier={}",
@@ -797,6 +820,43 @@ impl DocumentPackage {
     Ok(package)
   }
 
+  /// Preview fast path (§P3): materialize a [`crate::DocumentProjection`]
+  /// from a package file using ONLY its manifest, frontier-current projection
+  /// cache, and asset chunks. Snapshot/segment chunks are neither hashed,
+  /// copied, nor decoded, and no `validate()` sweep runs — on a large
+  /// package the full read spent seconds in exactly those (the ".db8 preview
+  /// slower than the equivalent .docx" field report). Returns `Ok(None)`
+  /// when no frontier-current cache exists; callers fall back to the full
+  /// read + Loro materialization. Read-only: never truncates a journal tail.
+  pub fn read_cached_projection(path: impl AsRef<Path>) -> io::Result<Option<crate::DocumentProjection>> {
+    let bytes = fs::read(path)?;
+    let cached = if bytes.starts_with(JOURNAL_MAGIC) {
+      cached_projection_from_journal_bytes(&bytes)?
+    } else {
+      cached_projection_from_compact_bytes(&bytes)?
+    };
+    let Some((manifest, caches, assets)) = cached else {
+      return Ok(None);
+    };
+    let Some(frontier) = manifest.projection_cache_frontier.as_deref() else {
+      return Ok(None);
+    };
+    if frontier != manifest.latest_frontier.as_slice() {
+      return Ok(None);
+    }
+    let Some(cache) = caches.iter().find(|cache| cache.frontier == frontier) else {
+      return Ok(None);
+    };
+    let projection = decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
+    let mut document = crate::loro_projection::document_from_projection_blocks(projection);
+    if document.ids.document_id == 0 {
+      document.ids.document_id = manifest.document_id;
+    }
+    document.frontier = frontier.to_vec();
+    crate::attach_package_assets(&mut document, &assets);
+    Ok(Some(document))
+  }
+
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     fidelity::event(FidelityClass::Persistence, "write", || {
@@ -876,8 +936,14 @@ impl DocumentPackage {
   }
 
   fn from_journal_bytes(bytes: &[u8]) -> io::Result<Self> {
+    let payloads = committed_journal_payloads(bytes)?;
+    // Decode from the LAST full generation: everything before it is
+    // superseded, and decoding every stacked generation made opening a large
+    // journal (~5 × 86MB on the impact-doc package) tens of seconds.
+    let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
     let mut package = None;
-    for payload in committed_journal_payloads(bytes)? {
+    for payload in &payloads[latest_generation..] {
+      let payload = *payload;
       if payload.starts_with(PACKAGE_MAGIC) {
         package = Some(Self::from_compact_bytes(payload)?);
         continue;
@@ -921,7 +987,10 @@ impl DocumentPackage {
   }
 
   fn from_compact_bytes(bytes: &[u8]) -> io::Result<Self> {
-    let chunks = read_chunks(bytes)?;
+    // Decode each chunk straight from its slice into the owned structs — the
+    // former shape copied every payload into an intermediate `Vec<u8>` first,
+    // a full extra pass over a multi-hundred-MB package on every open.
+    let chunks = read_chunk_slices(bytes, |_| true)?;
     let mut manifest = None;
     let mut loro_snapshots = Vec::new();
     let mut loro_update_segments = Vec::new();
@@ -932,17 +1001,17 @@ impl DocumentPackage {
     let mut thumbnails = Vec::new();
     let mut integrity_index = Vec::new();
 
-    for chunk in chunks {
-      match chunk.kind {
-        CHUNK_MANIFEST => manifest = Some(decode_chunk(&chunk.payload, "manifest")?),
-        CHUNK_LORO_SNAPSHOT => loro_snapshots.push(decode_chunk(&chunk.payload, "Loro snapshot")?),
-        CHUNK_LORO_UPDATE_SEGMENT => loro_update_segments.push(decode_chunk(&chunk.payload, "Loro update segment")?),
-        CHUNK_ASSET => assets.push(decode_chunk(&chunk.payload, "asset")?),
-        CHUNK_REVISION_INDEX => revisions.push(decode_chunk(&chunk.payload, "revision")?),
-        CHUNK_PROJECTION_CACHE => projection_caches.push(decode_chunk(&chunk.payload, "projection cache")?),
-        CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(&chunk.payload, "search unit")?),
-        CHUNK_THUMBNAIL => thumbnails.push(decode_chunk(&chunk.payload, "thumbnail")?),
-        CHUNK_INTEGRITY_INDEX => integrity_index.push(decode_chunk(&chunk.payload, "integrity index entry")?),
+    for (kind, payload) in chunks {
+      match kind {
+        CHUNK_MANIFEST => manifest = Some(decode_chunk(payload, "manifest")?),
+        CHUNK_LORO_SNAPSHOT => loro_snapshots.push(decode_chunk(payload, "Loro snapshot")?),
+        CHUNK_LORO_UPDATE_SEGMENT => loro_update_segments.push(decode_chunk(payload, "Loro update segment")?),
+        CHUNK_ASSET => assets.push(decode_chunk(payload, "asset")?),
+        CHUNK_REVISION_INDEX => revisions.push(decode_chunk(payload, "revision")?),
+        CHUNK_PROJECTION_CACHE => projection_caches.push(decode_chunk(payload, "projection cache")?),
+        CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(payload, "search unit")?),
+        CHUNK_THUMBNAIL => thumbnails.push(decode_chunk(payload, "thumbnail")?),
+        CHUNK_INTEGRITY_INDEX => integrity_index.push(decode_chunk(payload, "integrity index entry")?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown Flowstate package chunk kind")),
       }
     }
@@ -1020,6 +1089,51 @@ impl DocumentPackage {
     write_chunks(&chunks)
   }
 
+  /// Delta-scoped validation for [`Self::append_update_segment`]: the new
+  /// segment must chain from the previous persisted tip, carry a correct
+  /// checksum, and land the manifest on its `to` frontier. Everything already
+  /// stored was validated when it entered the package.
+  fn validate_appended_segment(&self) -> io::Result<()> {
+    if self.manifest.package_format_version != LORO_PACKAGE_FORMAT_VERSION {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package format version"));
+    }
+    if self.manifest.loro_schema_version != LORO_SCHEMA_VERSION {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate Loro schema version"));
+    }
+    let segment = self
+      .loro_update_segments
+      .last()
+      .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "appended update segment is missing"))?;
+    if segment.checksum != blake3_hash(&segment.bytes) {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "Loro update segment checksum mismatch"));
+    }
+    validate_frontiers(&segment.from_frontier, "update segment from frontier")?;
+    validate_version_vector(&segment.from_version_vector, "update segment from version vector")?;
+    validate_frontiers(&segment.to_frontier, "update segment to frontier")?;
+    validate_version_vector(&segment.to_version_vector, "update segment to version vector")?;
+    if segment.to_frontier != self.manifest.latest_frontier {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "latest update segment frontier does not match manifest",
+      ));
+    }
+    let previous_tip = if self.loro_update_segments.len() >= 2 {
+      &self.loro_update_segments[self.loro_update_segments.len() - 2].to_frontier
+    } else {
+      let snapshot = self
+        .latest_snapshot()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "latest Loro snapshot is missing"))?;
+      &snapshot.frontier
+    };
+    if &segment.from_frontier != previous_tip {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "appended update segment does not chain from the persisted tip",
+      ));
+    }
+    Ok(())
+  }
+
   pub fn validate(&self) -> io::Result<()> {
     if self.manifest.package_format_version != LORO_PACKAGE_FORMAT_VERSION {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package format version"));
@@ -1075,7 +1189,11 @@ impl DocumentPackage {
     }
     for cache in &self.projection_caches {
       validate_frontiers(&cache.frontier, "projection cache frontier")?;
-      decode_chunk::<crate::loro_projection::ProjectionBlocks>(&cache.bytes, "projection cache payload")?;
+      // Structural decode of the cache payload is DEFERRED to its consumer
+      // (`current_projection_document`, which already fails soft to a full
+      // materialization on a bad payload): decoding the whole document model
+      // here made every routine validate — package open, save, append — pay
+      // seconds on a large document.
     }
     for thumbnail in &self.thumbnails {
       validate_frontiers(&thumbnail.frontier, "thumbnail frontier")?;
@@ -1129,7 +1247,12 @@ impl DocumentPackage {
     self.validate_manifest_indexes()?;
     self.validate_integrity_index()?;
     self.validate_schema_migrations()?;
-    self.load_loro_doc_unvalidated()?;
+    // NOT validated here: a full `load_loro_doc_unvalidated()` round-trip.
+    // Importing the whole Loro snapshot as a validation step made every
+    // routine validate — open, save, compaction, and (via append) every
+    // keystroke — pay a multi-second CRDT import on a large document (the
+    // .db8 first-edit freeze). Corruption in the snapshot bytes still
+    // surfaces at the one place the doc is actually loaded.
     Ok(())
   }
 
@@ -1284,7 +1407,7 @@ impl DocumentPackage {
     Ok(migration_id)
   }
 
-  fn latest_snapshot(&self) -> Option<&LoroSnapshotChunk> {
+  pub fn latest_snapshot(&self) -> Option<&LoroSnapshotChunk> {
     self
       .loro_snapshots
       .iter()
@@ -1305,6 +1428,12 @@ impl DocumentPackage {
 
   /// Rebuild the manifest's update-segment/asset indexes and the §19 integrity
   /// index from the package's current durable chunks. Infallible and idempotent.
+  /// Public wrapper for external maintenance tooling (e.g. restoring a
+  /// package to its latest snapshot after stripping segments).
+  pub fn refresh_manifest_indexes_public(&mut self) {
+    self.refresh_manifest_indexes();
+  }
+
   fn refresh_manifest_indexes(&mut self) {
     let mut update_segment_index = Vec::with_capacity(self.loro_update_segments.len());
     for segment in &self.loro_update_segments {
@@ -1385,7 +1514,13 @@ pub fn loro_db8_bytes(doc: &LoroDoc, title: &str) -> io::Result<Vec<u8>> {
   DocumentPackage::from_loro_snapshot(doc, title)?.to_bytes()
 }
 
-fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
+/// Parse the package header + chunk table and return `(kind, payload)` SLICES
+/// into `bytes` for every chunk `keep` selects, verifying the table checksum
+/// of each kept chunk. Bounds are validated for EVERY chunk (kept or not);
+/// checksums are only computed for kept ones — a preview that needs two small
+/// chunks must not BLAKE3 an entire multi-hundred-MB package. Zero payload
+/// copies happen here; callers decode straight from the returned slices.
+fn read_chunk_slices(bytes: &[u8], mut keep: impl FnMut(u32) -> bool) -> io::Result<Vec<(u32, &[u8])>> {
   let mut cursor = Cursor::new(bytes);
   let mut magic = [0_u8; 16];
   cursor.read_exact(&mut magic)?;
@@ -1424,23 +1559,29 @@ fn read_chunks(bytes: &[u8]) -> io::Result<Vec<Chunk>> {
     if end > bytes.len() {
       return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Flowstate package chunk is truncated"));
     }
-    let payload = bytes[start..end].to_vec();
-    if blake3_hash(&payload) != entry.checksum {
+    if !keep(entry.kind) {
+      continue;
+    }
+    let payload = &bytes[start..end];
+    if blake3_hash(payload) != entry.checksum {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package chunk checksum mismatch"));
     }
-    chunks.push(Chunk { kind: entry.kind, payload });
+    chunks.push((entry.kind, payload));
   }
   Ok(chunks)
 }
 
 fn cached_search_units_from_compact_bytes(bytes: &[u8]) -> io::Result<(DocumentPackageManifest, Vec<SearchUnitChunk>)> {
-  let chunks = read_chunks(bytes)?;
+  // Selective read: only the manifest + search-unit chunks are decoded (and
+  // checksum-verified); snapshots/segments/assets are neither hashed nor
+  // copied — this consumer only wants the search cache.
+  let chunks = read_chunk_slices(bytes, |kind| matches!(kind, CHUNK_MANIFEST | CHUNK_SEARCH_UNIT))?;
   let mut manifest = None;
   let mut search_units = Vec::new();
-  for chunk in chunks {
-    match chunk.kind {
-      CHUNK_MANIFEST => manifest = Some(decode_chunk(&chunk.payload, "manifest")?),
-      CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(&chunk.payload, "search unit")?),
+  for (kind, payload) in chunks {
+    match kind {
+      CHUNK_MANIFEST => manifest = Some(decode_chunk(payload, "manifest")?),
+      CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(payload, "search unit")?),
       _ => {},
     }
   }
@@ -1448,9 +1589,40 @@ fn cached_search_units_from_compact_bytes(bytes: &[u8]) -> io::Result<(DocumentP
   Ok((manifest, search_units))
 }
 
+/// The preview triple: manifest + projection caches + assets.
+type CachedProjectionParts = (DocumentPackageManifest, Vec<ProjectionCacheChunk>, Vec<AssetChunk>);
+
+/// Preview fast path (§P3): decode ONLY the manifest, the frontier-matched
+/// projection cache, and the asset chunks from raw package bytes — skipping
+/// snapshot/segment decode, their BLAKE3 sweeps, and `validate()` entirely.
+/// Returns `Ok(None)` when no frontier-current projection cache exists (the
+/// caller falls back to the full package read + Loro materialization).
+fn cached_projection_from_compact_bytes(bytes: &[u8]) -> io::Result<Option<CachedProjectionParts>> {
+  let chunks = read_chunk_slices(bytes, |kind| matches!(kind, CHUNK_MANIFEST | CHUNK_PROJECTION_CACHE | CHUNK_ASSET))?;
+  let mut manifest: Option<DocumentPackageManifest> = None;
+  let mut caches = Vec::new();
+  let mut assets = Vec::new();
+  for (kind, payload) in chunks {
+    match kind {
+      CHUNK_MANIFEST => manifest = Some(decode_chunk(payload, "manifest")?),
+      CHUNK_PROJECTION_CACHE => caches.push(decode_chunk(payload, "projection cache")?),
+      CHUNK_ASSET => assets.push(decode_chunk(payload, "asset")?),
+      _ => {},
+    }
+  }
+  let manifest = manifest.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package has no manifest"))?;
+  Ok(Some((manifest, caches, assets)))
+}
+
 fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentPackageManifest, Vec<SearchUnitChunk>)> {
+  let payloads = committed_journal_payloads(bytes)?;
+  // Decode from the LAST full generation only — everything earlier is
+  // superseded (same law as `from_journal_bytes`); decoding every stacked
+  // generation re-parsed the whole journal history.
+  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
   let mut cached = None;
-  for payload in committed_journal_payloads(bytes)? {
+  for payload in &payloads[latest_generation..] {
+    let payload = *payload;
     if payload.starts_with(PACKAGE_MAGIC) {
       cached = Some(cached_search_units_from_compact_bytes(payload)?);
       continue;
@@ -1472,6 +1644,46 @@ fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentP
     }
   }
   cached.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal has no complete full generation"))
+}
+
+/// Journal-aware sibling of [`cached_projection_from_compact_bytes`]: decode
+/// the last full generation's manifest/projection-cache/assets, then fold the
+/// trailing deltas' manifests (an Update after the cached frontier makes the
+/// cache stale, which the caller detects via the frontier mismatch).
+fn cached_projection_from_journal_bytes(bytes: &[u8]) -> io::Result<Option<CachedProjectionParts>> {
+  let payloads = committed_journal_payloads(bytes)?;
+  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+  let mut cached = None;
+  for payload in &payloads[latest_generation..] {
+    let payload = *payload;
+    if payload.starts_with(PACKAGE_MAGIC) {
+      cached = cached_projection_from_compact_bytes(payload)?;
+      continue;
+    }
+    let delta = decode_journal_delta(payload)?;
+    let Some((manifest, caches, assets)) = cached.as_mut() else {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Flowstate package journal delta precedes a full generation",
+      ));
+    };
+    match delta {
+      PackageJournalDelta::Update { manifest: next_manifest, .. } => {
+        *manifest = next_manifest;
+        if manifest.projection_cache_frontier.is_none() {
+          caches.clear();
+        }
+      },
+      PackageJournalDelta::Assets {
+        manifest: next_manifest,
+        assets: next_assets,
+      } => {
+        *manifest = next_manifest;
+        *assets = next_assets;
+      },
+    }
+  }
+  Ok(cached)
 }
 
 fn write_chunks(chunks: &[Chunk]) -> io::Result<Vec<u8>> {
@@ -2823,5 +3035,65 @@ mod tests {
 
   fn loro_test_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+  }
+
+  /// 2026-07-07 .db8 first-edit-freeze regressions: (a) appending a segment
+  /// must be O(delta) — it must not re-validate the WHOLE package (whose full
+  /// validation previously imported the entire Loro snapshot per keystroke);
+  /// (b) reading a stacked journal must decode only the LAST generation.
+  #[test]
+  fn append_update_segment_validates_only_the_delta() -> io::Result<()> {
+    let doc = new_loro_document("Delta validate").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Delta validate")?;
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    body_text(&doc).insert(1, "x").map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+
+    // Corrupt HISTORY (the stored first segment's checksum): a delta-scoped
+    // append must still succeed, while a full validation must reject it.
+    package.loro_update_segments[0].checksum = [0_u8; 32];
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    body_text(&doc).insert(1, "y").map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    package
+      .append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)
+      .expect("append validates only the delta, not all history");
+    assert!(package.validate().is_err(), "full validation still catches the historical corruption");
+    Ok(())
+  }
+
+  #[test]
+  fn journal_read_decodes_only_the_latest_generation() -> io::Result<()> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("generations.db8");
+    let doc = new_loro_document("Generations").map_err(loro_test_error)?;
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Generations")?;
+    package.write(&path)?;
+    // Stack several full generations by rewriting through the journal append
+    // path (each `write` under the compaction threshold appends a generation).
+    for round in 0..3 {
+      let from_frontier = doc.state_frontiers();
+      let from_vv = doc.state_vv();
+      body_text(&doc)
+        .insert(1, &format!("g{round}"))
+        .map_err(loro_test_error)?;
+      doc.commit();
+      let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+      package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+      package.write(&path)?;
+    }
+    let bytes = fs::read(&path)?;
+    let payloads = committed_journal_payloads(&bytes)?;
+    let generations = payloads.iter().filter(|payload| payload.starts_with(PACKAGE_MAGIC)).count();
+    assert!(generations >= 2, "test setup must stack multiple generations, got {generations}");
+    let read_back = DocumentPackage::read(&path)?;
+    assert_eq!(read_back.manifest.latest_frontier, package.manifest.latest_frontier);
+    assert_eq!(read_back.loro_update_segments.len(), package.loro_update_segments.len());
+    Ok(())
   }
 }

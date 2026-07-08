@@ -246,6 +246,7 @@ impl<'a> Projector<'a> {
   /// back via [`crate::loro_schema::read_section_page_attrs`] (which substitutes
   /// documented defaults for missing keys), then mapped field-for-field onto the
   /// gpui-flowtext projection mirror `gpui_flowtext::SectionPageAttrs`.
+  #[hotpath::measure]
   fn sections_for_projection(&self, paragraph_ids: &[ParagraphId]) -> io::Result<Vec<DocumentSection>> {
     let root = self.doc.get_map(ROOT);
     let Some(sections_by_id) = child_map(&root, SECTIONS_BY_ID)? else {
@@ -319,9 +320,10 @@ impl<'a> Projector<'a> {
     let paragraph_index = paragraph_ids.as_ref().map(|_| paragraph_ids_by_boundary(self.doc, text));
     let paragraph_block_index = block_ids.as_ref().map(|_| paragraph_block_ids_by_boundary(self.doc, text));
 
-    Self::walk_flow_delta(
+    let delta = hotpath::measure_block!("projector_body_to_delta", text.to_delta());
+    hotpath::measure_block!("projector_walk_flow_delta", Self::walk_flow_delta(
       text,
-      text.to_delta(),
+      delta,
       0,
       object_blocks,
       flow_id,
@@ -333,7 +335,7 @@ impl<'a> Projector<'a> {
       defects,
       flush_trailing_after_object,
       |block, defects| self.object_block(block, defects),
-    )
+    ))
   }
 
   /// Core flow walk shared by the FULL materialization ([`Self::push_flow_blocks`])
@@ -529,6 +531,7 @@ impl<'a> Projector<'a> {
   /// quarantined blocks (unresolved or displaced-by-collision anchors) in stable
   /// sorted-key order, with one defect recorded per quarantined block.
   #[allow(clippy::type_complexity, reason = "returns resolved-by-position blocks plus stable-key-ordered quarantined blocks in one pass")]
+  #[hotpath::measure]
   fn object_blocks_for_flow(
     &self,
     text: &LoroText,
@@ -1053,6 +1056,7 @@ fn push_paragraph_projection_metadata(
 /// Selection matches the previous scan exactly: keys are visited in sorted order
 /// (via [`map_keys`]) so the lexicographically-smallest id wins a shared boundary,
 /// except boundary 0 always prefers `ROOT_FIRST_PARAGRAPH_ID` when it anchors there.
+#[hotpath::measure]
 fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
   let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
@@ -1085,6 +1089,7 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
 /// single pass over the block registry (paragraph-kind blocks only). Companion to
 /// [`paragraph_ids_by_boundary`] with the same one-pass rationale and selection
 /// rule, except boundary 0 prefers `MAIN_BODY_BLOCK_ID`.
+#[hotpath::measure]
 fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
   let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
@@ -1123,6 +1128,7 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
 /// the CRDT actor at 100% CPU on a large document — down to ~O(elements). Ids not
 /// present (deleted) are simply absent; a DEAD anchor is treated as unresolvable
 /// (fabrication/quarantine + canonical repair), never history-traced per cursor.
+#[hotpath::measure]
 fn boundary_cursor_positions(doc: &LoroDoc, text: &LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
   let container = text.id();
   let mut ids: Vec<ID> = Vec::new();
@@ -1216,7 +1222,6 @@ fn loro_id_u128(id: &str) -> u128 {
 /// non-numeric `op-…` suffix routes both keys through `loro_id_u128`'s hash (rather
 /// than its trailing-number rule), keeping the paragraph and block ids distinct.
 /// Returns `None` only when `boundary` has no live anchor (e.g. an empty container).
-#[must_use]
 /// Materialize ONE table block from canonical state — the same law
 /// `document_from_loro` applies to it, exposed so table-op patch synthesis
 /// READS the committed table back instead of simulating the op on the old
@@ -1232,6 +1237,7 @@ pub fn materialize_table_block(doc: &LoroDoc, block_id: u128) -> io::Result<(Inp
   Ok((table, defects))
 }
 
+#[must_use]
 pub fn stable_boundary_metadata_keys(text: &LoroText, boundary: usize) -> Option<(String, String)> {
   if boundary == 0 {
     return Some((ROOT_FIRST_PARAGRAPH_ID.to_string(), MAIN_BODY_BLOCK_ID.to_string()));

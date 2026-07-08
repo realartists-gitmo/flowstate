@@ -192,6 +192,19 @@ impl RichTextEditor {
     Some(patched_sizes)
   }
 
+  /// Record that `paragraph_ix`'s item sizes went stale (a chunk materialized
+  /// and refined its height) so the next size query PATCHES the cache instead
+  /// of rebuilding it. The former shape nuked `item_sizes_cache` outright,
+  /// which made every scroll frame that materialized a chunk pay a full
+  /// O(blocks) rebuild + prefix-index rebuild (~10 ms per frame on the
+  /// reference doc — half the frame budget).
+  pub(super) fn note_item_sizes_patch_paragraph(&mut self, paragraph_ix: usize) {
+    self.pending_item_sizes_patch_range = Some(match self.pending_item_sizes_patch_range.take() {
+      Some(range) => range.start.min(paragraph_ix)..range.end.max(paragraph_ix + 1),
+      None => paragraph_ix..paragraph_ix + 1,
+    });
+  }
+
   fn block_range_for_paragraph_range(&self, range: Range<usize>) -> Option<Range<usize>> {
     if range.start == range.end {
       let block_ix = if range.start == self.document.paragraphs.len() {

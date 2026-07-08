@@ -19,10 +19,10 @@ impl RichTextEditor {
   /// replay, no stable-selection resolve pass — the caret clamps and the next
   /// local intent re-resolves by identity.
   pub fn apply_remote_patch_batch(&mut self, batch: &ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<(), ProjectionApplyError> {
-    let mut document = self.document.clone();
-    apply_projection_patch_batch(&mut document, batch)?;
-    let theme = self.document.theme.clone();
-    self.document = projection_with_local_theme(document, &theme);
+    // In-place apply (see `sync_projection_from_authority`): the batch apply
+    // is internally transactional and never touches the local theme, so the
+    // per-batch whole-projection clone + re-theme were pure churn.
+    apply_projection_patch_batch(&mut self.document, batch)?;
     self.identity_map.reconcile(&self.document);
     let head = self.clamp_offset_to_document(self.selection.head);
     let anchor = self.clamp_offset_to_document(self.selection.anchor);
@@ -57,11 +57,434 @@ pub fn apply_projection_patch_batch(document: &mut DocumentProjection, batch: &P
       actual: document.frontier.clone(),
     });
   }
+  // §perf fast path (measured 2026-07-07): SIMPLE batches — every keystroke,
+  // remote text batch, mass restyle, and the split/join/cross-delete shapes
+  // (content patches plus one trailing paragraph-row insert/delete) — apply
+  // IN PLACE with a rollback journal. The former clone-candidate transaction
+  // deep-copied the entire projection (`Arc::make_mut` over the whole
+  // `Vec<Paragraph>` + `Vec<Block>`, ~3MB on the reference doc) on EVERY
+  // batch, and structural batches additionally REBUILT the whole document
+  // model (~8ms per side per Enter on the reference doc). A mid-batch
+  // failure restores exactly the touched rows in reverse order, so the
+  // transactional contract (`Err` ⇒ document unchanged) is preserved.
+  if simple_batch_shape(document, &batch.patches) {
+    let mut journal = ContentRollbackJournal::default();
+    return match apply_content_patches_in_place(document, &batch.patches, &mut journal) {
+      Ok(outline_dirty) => {
+        if outline_dirty {
+          rebuild_document_sections(document);
+        }
+        document.frontier.clone_from(&batch.new_frontier);
+        Ok(())
+      },
+      Err(error) => {
+        journal.rollback(document);
+        Err(error)
+      },
+    };
+  }
   let mut candidate = hotpath::measure_block!("editor_patch_candidate_clone", document.clone());
   apply_projection_patches_to_document(&mut candidate, &batch.patches, None)?;
   candidate.frontier.clone_from(&batch.new_frontier);
   *document = candidate;
   Ok(())
+}
+
+/// The SIMPLE batch shape the in-place fast path accepts: any number of
+/// content patches (paragraph text/runs/style, assets), plus AT MOST ONE
+/// trailing structural patch that inserts or deletes PARAGRAPH rows — the
+/// exact shapes local split, join, and cross-paragraph delete synthesize.
+/// Everything else (object rows, moves, multi-structural fragments) takes the
+/// legacy candidate-rebuild path.
+fn simple_batch_shape(document: &DocumentProjection, patches: &[ProjectionPatch]) -> bool {
+  let is_content = |patch: &ProjectionPatch| {
+    matches!(
+      patch,
+      ProjectionPatch::ParagraphText { .. }
+        | ProjectionPatch::ParagraphRuns { .. }
+        | ProjectionPatch::ParagraphStyle { .. }
+        | ProjectionPatch::AssetArrived { .. }
+    )
+  };
+  let Some((last, head)) = patches.split_last() else {
+    return true;
+  };
+  if !head.iter().all(is_content) {
+    return false;
+  }
+  if is_content(last) {
+    return true;
+  }
+  // Per-row splices refresh the offset index each (O(doc)); a MASS structural
+  // batch (select-all delete/redo touches thousands of rows) must keep the
+  // single-pass rebuild instead — the splice path measured O(rows × doc)
+  // there (24s for a redo of a select-all delete).
+  const STRUCTURAL_SPLICE_MAX_ROWS: usize = 8;
+  // The canonical materializer's coalescing/fabrication laws are LOCAL to
+  // object adjacency (interstitial rows, empties next to placeholders,
+  // trailing fabricated rows). A plain row splice matches the law only when
+  // no object row sits in the touched window — object-adjacent shapes keep
+  // the legacy full-derivation path (the object fuzz caught a trailing-row
+  // fabrication divergence without this gate).
+  let object_free_window = |center: usize| {
+    let start = center.saturating_sub(2);
+    let end = (center + 2).min(document.blocks.len().saturating_sub(1));
+    (start..=end).all(|row| matches!(document.blocks.get(row), None | Some(Block::Paragraph(_))))
+  };
+  match last {
+    ProjectionPatch::InsertBlocks { before, row_hint, blocks } => {
+      if blocks.len() > STRUCTURAL_SPLICE_MAX_ROWS
+        || !blocks
+          .iter()
+          .all(|block| block.paragraph_id.is_some() && matches!(block.block, InputBlock::Paragraph(_)))
+      {
+        return false;
+      }
+      let Ok(row) = anchor_ix_for_document_insert(document, *before, *row_hint) else {
+        return false;
+      };
+      // The insertion row references CURRENT rows; the ±2 window (clamped to
+      // the document edges) covers every local coalescing rule, including
+      // end-of-document object adjacency.
+      object_free_window(row)
+    },
+    ProjectionPatch::DeleteBlocks { block_ids, row_hint } => {
+      if block_ids.len() > STRUCTURAL_SPLICE_MAX_ROWS {
+        return false;
+      }
+      // Every target must resolve to a paragraph row NOW with an object-free
+      // window, and at least one paragraph row must survive the delete.
+      let mut paragraph_rows = 0usize;
+      for (offset, block_id) in block_ids.iter().enumerate() {
+        let Ok(row) = block_ix_for_patch(document, *block_id, row_hint + offset) else {
+          return false;
+        };
+        if !matches!(document.blocks.get(row), Some(Block::Paragraph(_))) || !object_free_window(row) {
+          return false;
+        }
+        paragraph_rows += 1;
+      }
+      document.paragraphs.len() > paragraph_rows
+    },
+    _ => false,
+  }
+}
+
+/// Rollback journal for the in-place fast path: one entry per touched row in
+/// chronological order, restored in reverse on a mid-batch failure.
+#[derive(Default)]
+struct ContentRollbackJournal {
+  entries: Vec<JournalEntry>,
+}
+
+enum JournalEntry {
+  Paragraph {
+    paragraph_ix: usize,
+    old_paragraph: Paragraph,
+    old_text: Option<String>,
+  },
+  Asset {
+    id: AssetId,
+    old: Option<crate::AssetRecord>,
+  },
+  InsertedRow {
+    row: usize,
+    paragraph_at: usize,
+  },
+  DeletedRow {
+    row: usize,
+    paragraph_at: usize,
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    paragraph: Paragraph,
+    text: String,
+  },
+}
+
+impl ContentRollbackJournal {
+  fn record_paragraph(&mut self, document: &DocumentProjection, paragraph_ix: usize, text_changes: bool) {
+    let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+      return;
+    };
+    let old_text = text_changes.then(|| paragraph_text(document, paragraph_ix));
+    self.entries.push(JournalEntry::Paragraph {
+      paragraph_ix,
+      old_paragraph: paragraph.clone(),
+      old_text,
+    });
+  }
+
+  fn rollback(self, document: &mut DocumentProjection) {
+    for entry in self.entries.into_iter().rev() {
+      match entry {
+        JournalEntry::Asset { id, old } => {
+          match old {
+            Some(record) => document.assets.assets.insert(id, record),
+            None => document.assets.assets.remove(&id),
+          };
+        },
+        JournalEntry::Paragraph {
+          paragraph_ix,
+          old_paragraph,
+          old_text,
+        } => {
+          if paragraph_ix >= document.paragraphs.len() {
+            continue;
+          }
+          let current_range = crate::edit_ops::paragraph_byte_range(document, paragraph_ix);
+          if let Some(old_text) = old_text {
+            document.text.delete(current_range.clone());
+            document.text.insert(current_range.start, &old_text);
+          }
+          let mut restored = old_paragraph;
+          // Seed the stored range with the CURRENT (failed) length so the
+          // offset updater below computes the delta back to the restored
+          // runs' length and fixes the Fenwick index, trailing ranges, and
+          // the block mirror.
+          restored.byte_range = current_range;
+          paragraphs_mut(document)[paragraph_ix] = restored;
+          update_paragraph_offsets_after_len_change(document, paragraph_ix);
+        },
+        JournalEntry::InsertedRow { row, paragraph_at } => {
+          delete_paragraph_row_in_place(document, row, paragraph_at);
+        },
+        JournalEntry::DeletedRow {
+          row,
+          paragraph_at,
+          block_id,
+          paragraph_id,
+          paragraph,
+          text,
+        } => {
+          insert_paragraph_row_in_place(document, row, paragraph_at, block_id, paragraph_id, paragraph, &text);
+        },
+      }
+    }
+  }
+}
+
+/// Splice ONE paragraph row into the projection in place: rope text, the
+/// paragraph/block vectors, both id vectors, then a full offset-index +
+/// range refresh (O(doc) writes, microseconds — versus the ~8ms whole-model
+/// rebuild this replaces).
+fn insert_paragraph_row_in_place(
+  document: &mut DocumentProjection,
+  row: usize,
+  paragraph_at: usize,
+  block_id: BlockId,
+  paragraph_id: ParagraphId,
+  mut paragraph: Paragraph,
+  text: &str,
+) {
+  if paragraph_at < document.paragraphs.len() {
+    let start = document.offset_index.paragraph_start(paragraph_at);
+    document.text.insert(start, text);
+    document.text.insert(start + text.len(), "\n");
+    paragraph.byte_range = start..start + text.len();
+  } else {
+    let end = document.text.byte_len();
+    document.text.insert(end, "\n");
+    document.text.insert(end + 1, text);
+    paragraph.byte_range = end + 1..end + 1 + text.len();
+  }
+  paragraphs_mut(document).insert(paragraph_at, paragraph.clone());
+  document.ids.paragraph_ids.insert(paragraph_at.min(document.ids.paragraph_ids.len()), paragraph_id);
+  Arc::make_mut(&mut document.blocks).insert(row, Block::Paragraph(paragraph));
+  document.ids.block_ids.insert(row.min(document.ids.block_ids.len()), block_id);
+  refresh_offsets_after_row_splice(document);
+}
+
+/// Splice ONE paragraph row out of the projection in place (inverse of
+/// [`insert_paragraph_row_in_place`]).
+fn delete_paragraph_row_in_place(document: &mut DocumentProjection, row: usize, paragraph_at: usize) {
+  if paragraph_at >= document.paragraphs.len() {
+    return;
+  }
+  let range = crate::edit_ops::paragraph_byte_range(document, paragraph_at);
+  if paragraph_at > 0 {
+    // Remove the leading separator with the text.
+    document.text.delete(range.start.saturating_sub(1)..range.end);
+  } else {
+    // First paragraph: remove the text plus its trailing separator.
+    let end = (range.end + 1).min(document.text.byte_len());
+    document.text.delete(range.start..end);
+  }
+  paragraphs_mut(document).remove(paragraph_at);
+  if paragraph_at < document.ids.paragraph_ids.len() {
+    document.ids.paragraph_ids.remove(paragraph_at);
+  }
+  if row < document.blocks.len() {
+    Arc::make_mut(&mut document.blocks).remove(row);
+  }
+  if row < document.ids.block_ids.len() {
+    document.ids.block_ids.remove(row);
+  }
+  refresh_offsets_after_row_splice(document);
+}
+
+/// After a row splice: rebuild the Fenwick offset index + every paragraph's
+/// cached byte range, and mirror the ranges into the parallel block copies
+/// (range-only writes — never a runs deep copy).
+fn refresh_offsets_after_row_splice(document: &mut DocumentProjection) {
+  crate::edit_ops::rebuild_document_offset_index(document);
+  let ranges: Vec<std::ops::Range<usize>> = document.paragraphs.iter().map(|paragraph| paragraph.byte_range.clone()).collect();
+  let blocks = Arc::make_mut(&mut document.blocks);
+  let mut paragraph_ord = 0usize;
+  for block in blocks.iter_mut() {
+    if let Block::Paragraph(paragraph) = block {
+      if let Some(range) = ranges.get(paragraph_ord) {
+        paragraph.byte_range = range.clone();
+      }
+      paragraph_ord += 1;
+    }
+  }
+}
+
+/// The content-only arms of [`apply_projection_patches_to_document`], applied
+/// directly to the live projection with journaling. Returns whether a style
+/// change dirtied the outline.
+fn apply_content_patches_in_place(
+  document: &mut DocumentProjection,
+  patches: &[ProjectionPatch],
+  journal: &mut ContentRollbackJournal,
+) -> Result<bool, ProjectionApplyError> {
+  let mut outline_dirty = false;
+  for patch in patches {
+    match patch {
+      ProjectionPatch::ParagraphText {
+        block_id,
+        paragraph_id,
+        row_hint,
+        new,
+        ..
+      } => {
+        let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+        journal.record_paragraph(document, paragraph_ix, true);
+        outline_dirty |= document.paragraphs[paragraph_ix].style != new.style;
+        replace_paragraph_content(document, paragraph_ix, new);
+      },
+      ProjectionPatch::ParagraphRuns {
+        block_id,
+        paragraph_id,
+        row_hint,
+        runs,
+      } => {
+        let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+        let text = paragraph_text(document, paragraph_ix);
+        validate_text_runs(&text, runs)?;
+        journal.record_paragraph(document, paragraph_ix, false);
+        let paragraph = paragraphs_mut(document)
+          .get_mut(paragraph_ix)
+          .ok_or(ProjectionApplyError::MissingParagraph {
+            paragraph_id: *paragraph_id,
+            block_id: *block_id,
+          })?;
+        paragraph.runs.clone_from(runs);
+        bump_paragraph_version(paragraph);
+        update_paragraph_block(document, paragraph_ix);
+      },
+      ProjectionPatch::ParagraphStyle {
+        block_id,
+        paragraph_id,
+        row_hint,
+        style,
+      } => {
+        let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+        journal.record_paragraph(document, paragraph_ix, false);
+        let paragraph = paragraphs_mut(document)
+          .get_mut(paragraph_ix)
+          .ok_or(ProjectionApplyError::MissingParagraph {
+            paragraph_id: *paragraph_id,
+            block_id: *block_id,
+          })?;
+        outline_dirty |= paragraph.style != *style;
+        paragraph.style = *style;
+        bump_paragraph_version(paragraph);
+        update_paragraph_block(document, paragraph_ix);
+      },
+      ProjectionPatch::AssetArrived { id, record } => {
+        journal.entries.push(JournalEntry::Asset {
+          id: *id,
+          old: document.assets.assets.get(id).cloned(),
+        });
+        document.assets.assets.insert(*id, record.clone());
+      },
+      ProjectionPatch::InsertBlocks {
+        before,
+        row_hint,
+        blocks: inserted,
+      } => {
+        // Gate-verified: every inserted block is a paragraph row with a
+        // durable paragraph id (the local split shape).
+        let row = anchor_ix_for_document_insert(document, *before, *row_hint)?;
+        for (offset, structural) in inserted.iter().enumerate() {
+          let (InputBlock::Paragraph(input), Some(paragraph_id)) = (&structural.block, structural.paragraph_id) else {
+            return Err(ProjectionApplyError::InvalidStructuralPatch(
+              "non-paragraph insert reached the in-place fast path",
+            ));
+          };
+          let row = row + offset;
+          let paragraph_at = paragraph_rows_before(document, row);
+          let text = input_paragraph_text(input);
+          let paragraph = paragraph_from_input_paragraph(input);
+          insert_paragraph_row_in_place(document, row, paragraph_at, structural.block_id, paragraph_id, paragraph, &text);
+          journal.entries.push(JournalEntry::InsertedRow { row, paragraph_at });
+        }
+        outline_dirty = true;
+      },
+      ProjectionPatch::DeleteBlocks { block_ids, row_hint } => {
+        // Gate-verified: every target row is a paragraph block and at least
+        // one paragraph survives (the join / cross-paragraph-delete shape).
+        // Delete in DESCENDING row order so earlier removals never shift the
+        // later targets.
+        let mut rows = Vec::with_capacity(block_ids.len());
+        for (offset, block_id) in block_ids.iter().enumerate() {
+          rows.push(block_ix_for_patch(document, *block_id, row_hint + offset)?);
+        }
+        rows.sort_unstable();
+        for &row in rows.iter().rev() {
+          let paragraph_at = paragraph_rows_before(document, row);
+          let (Some(Block::Paragraph(_)), Some(paragraph)) = (document.blocks.get(row), document.paragraphs.get(paragraph_at)) else {
+            return Err(ProjectionApplyError::WrongBlockKind {
+              block_id: document.ids.block_ids.get(row).copied().unwrap_or(BlockId(0)),
+              expected: "a paragraph",
+            });
+          };
+          let entry = JournalEntry::DeletedRow {
+            row,
+            paragraph_at,
+            block_id: document.ids.block_ids.get(row).copied().unwrap_or(BlockId(0)),
+            paragraph_id: document.ids.paragraph_ids.get(paragraph_at).copied().unwrap_or(ParagraphId(0)),
+            paragraph: paragraph.clone(),
+            text: paragraph_text(document, paragraph_at),
+          };
+          delete_paragraph_row_in_place(document, row, paragraph_at);
+          journal.entries.push(entry);
+        }
+        outline_dirty = true;
+      },
+      _ => {
+        return Err(ProjectionApplyError::InvalidStructuralPatch(
+          "structural patch reached the content-only fast path",
+        ));
+      },
+    }
+  }
+  Ok(outline_dirty)
+}
+
+/// Count of paragraph rows strictly before `row` — the paragraph index a row
+/// splice at `row` maps to.
+fn paragraph_rows_before(document: &DocumentProjection, row: usize) -> usize {
+  if document.blocks.len() == document.paragraphs.len() {
+    return row.min(document.paragraphs.len());
+  }
+  document
+    .blocks
+    .iter()
+    .take(row)
+    .filter(|block| matches!(block, Block::Paragraph(_)))
+    .count()
 }
 
 fn apply_projection_patches_to_document(

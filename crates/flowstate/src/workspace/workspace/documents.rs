@@ -475,6 +475,21 @@ impl Workspace {
 
   pub fn remove_document_panel(&mut self, panel_id: Uuid, _: &mut Window, cx: &mut Context<Self>) {
     crate::collab::leave_session_for_panel(panel_id, cx);
+    // §P3 (act two): flush the projection/search caches into the package on
+    // close (revision-less, off-thread) so the NEXT preview/open of this file
+    // hits the cache fast path — every edit nulls the cache, so a closed
+    // edited document otherwise previews via a multi-second full Loro
+    // materialization until an explicit save.
+    if let Some(io) = self.document_runtimes.get(&panel_id) {
+      let io = io.clone();
+      cx.background_executor()
+        .spawn(async move {
+          if let Err(error) = io.flush_package_caches().await {
+            tracing::debug!(%error, "close-time package cache flush failed");
+          }
+        })
+        .detach();
+    }
     self.document_runtimes.remove(&panel_id);
     self.document_runtime_flush_pending.remove(&panel_id);
     let closing_active_document = self.active_document_id == Some(panel_id);

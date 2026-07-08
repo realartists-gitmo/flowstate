@@ -581,12 +581,16 @@ pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
   breaks
 }
 
-#[hotpath::measure]
+// §perf: NOT hotpath-measured — a two-instruction predicate called tens of
+// millions of times per layout pass; the measurement hooks cost orders of
+// magnitude more than the function and dominated profiler-build profiles
+// (11.3% of total CPU attributed to a char compare).
+#[inline]
 pub(super) fn is_wrap_break(ch: char) -> bool {
   ch.is_whitespace() || matches!(ch, '-' | '/' | ',' | ';' | ':')
 }
 
-#[hotpath::measure]
+#[inline]
 pub(super) fn skip_leading_whitespace(text: &str, mut byte: usize) -> usize {
   // §perf: decode each char once per iteration instead of twice (peek + re-decode).
   while let Some(ch) = text[byte..].chars().next() {

@@ -125,7 +125,7 @@ mod tests {
     let paragraph = projection.ids.paragraph_ids[paragraph_ix];
     let text_len = flowstate_document::paragraph_text_len(&projection.paragraphs[paragraph_ix]);
     let byte = rng.below(text_len + 1);
-    let arm = rng.below(15);
+    let arm = rng.below(16);
     if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
       eprintln!("step {step}: arm {arm} paragraph_ix {paragraph_ix} byte {byte}");
     }
@@ -259,12 +259,30 @@ mod tests {
         }
         peer.handle.finish_undo_group().map(|_| ())
       },
+      // Batched selection-wide restyle (§11): one SetParagraphStyles intent
+      // over a random contiguous span — the editor's select-all restyle
+      // shape. Exercises the batched boundary resolution, the skip-not-reject
+      // law for stale/interstitial rows, and single-member undo of a mass
+      // restyle (arms 11/12 undo it against interleaved remote history).
+      14 => {
+        let span = 1 + rng.below(4.min(projection.paragraphs.len() - paragraph_ix).max(1));
+        let paragraphs = (paragraph_ix..(paragraph_ix + span).min(projection.paragraphs.len()))
+          .map(|ix| projection.ids.paragraph_ids[ix])
+          .collect();
+        peer
+          .handle
+          .set_paragraph_styles(flowstate_collab::local_write::SetParagraphStylesIntent {
+            paragraphs,
+            style: if rng.below(2) == 0 { ParagraphStyle::Normal } else { ParagraphStyle::Custom((rng.below(3) + 1) as u8) },
+          })
+          .map(|_| ())
+      },
       // Replace-all (find & replace): every occurrence of a random pattern in
       // up to three random paragraphs, one compound intent. Exercises the
       // multi-range back-to-front application, the per-paragraph readback
       // shift, and the concurrent skip/prune rules.
       _ => {
-        let needle = [b'a', b'e', b's', b'0'][rng.below(4)] as char;
+        let needle = b"aes0"[rng.below(4)] as char;
         let mut matches = Vec::new();
         for _ in 0..(1 + rng.below(3)) {
           let target_ix = rng.below(projection.paragraphs.len());

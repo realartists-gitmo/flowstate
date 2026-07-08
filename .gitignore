@@ -11,3 +11,16 @@ flamegraph
 
 # Local dev logs (flowstate::logging default dir; per-run timestamped files)
 flowstate-logs/
+
+# Compiled Python / caches
+__pycache__/
+*.pyc
+
+# Local scratch documents (real .db8 fixtures live under helpers/)
+/*.db8
+
+# Rustc crash dumps
+rustc-ice-*.txt
+
+# Large, regenerable ML datasets produced by tools/citation_finetune
+/datasets/

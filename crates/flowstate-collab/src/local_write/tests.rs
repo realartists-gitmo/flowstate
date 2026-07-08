@@ -350,11 +350,11 @@ fn undo_redo_round_trip_through_loro() {
   assert_eq!(body_string(&gate), "\nabc");
 
   let outcome = handle.apply_undo().expect("undo runs");
-  assert!(outcome.replace.is_some(), "undo must replace the projection");
+  assert!(outcome.applied, "undo must apply a projection change");
   assert_eq!(body_string(&gate), "\n", "undo must restore pre-insert content");
 
   let outcome = handle.apply_redo().expect("redo runs");
-  assert!(outcome.replace.is_some());
+  assert!(outcome.applied);
   assert_eq!(body_string(&gate), "\nabc", "redo must restore the insert");
 }
 

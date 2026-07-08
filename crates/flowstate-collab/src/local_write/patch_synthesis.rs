@@ -299,6 +299,25 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         body_invalidation(0, 0),
       ))
     },
+    ResolvedPlan::SetParagraphStyles { targets, style } => {
+      // One exact ParagraphStyle patch per target; style marks never change
+      // text, so no shift bookkeeping. Rows come from one O(doc) pass, not an
+      // O(doc) scan per target.
+      let rows = flowstate_document::paragraph_block_rows(projection);
+      let mut patches = Vec::with_capacity(targets.len());
+      for (paragraph, paragraph_ix, _) in targets {
+        let Some(&row) = rows.get(*paragraph_ix) else {
+          return rebuild("set-paragraph-styles-block-missing");
+        };
+        patches.push(ProjectionPatch::ParagraphStyle {
+          block_id: projection.ids.block_ids[row],
+          paragraph_id: *paragraph,
+          row_hint: row,
+          style: *style,
+        });
+      }
+      Some((patches, body_invalidation(0, 0)))
+    },
     ResolvedPlan::InsertObject {
       at, block_ix, new_block, block, ..
     } => {

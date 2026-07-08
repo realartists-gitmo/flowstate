@@ -7,7 +7,7 @@ use flowstate_document::{
 use loro::{LoroDoc, LoroValue};
 use rustc_hash::{FxHashMap, FxHashSet};
 
-use super::{ProjectionInvalidation, paragraph_body_start_in_loro, paragraph_style_from_attrs};
+use super::{ProjectionInvalidation, paragraph_style_from_attrs};
 
 pub(crate) fn projection_patches_between(before: &DocumentProjection, after: &DocumentProjection) -> Option<Vec<ProjectionPatch>> {
   let mut patches = Vec::new();
@@ -520,10 +520,58 @@ pub(crate) fn paragraph_projection_patches_ranged(
   live_starts: &[usize],
   touched_paragraphs: impl IntoIterator<Item = usize>,
 ) -> Option<Vec<ProjectionPatch>> {
+  let touched: Vec<usize> = touched_paragraphs.into_iter().collect();
+  if touched.is_empty() {
+    return Some(Vec::new());
+  }
+  // Batch-resolve every needed paragraph start (touched ∪ their successors) in
+  // ONE `query_text_id_positions` pass. Per-paragraph `get_cursor_pos` is a
+  // linear chunk scan, so resolving each touched paragraph individually (2
+  // resolutions per paragraph via the old `live_paragraph_range`) made a large
+  // readback — an undone replace-all storm, a mass restyle — QUADRATIC in
+  // document size (measured 36s for one undo on the reference doc; 69% of
+  // soak CPU inside `paragraph_body_start_in_loro`).
+  let paragraph_count = projection.ids.paragraph_ids.len();
+  let mut needed: Vec<usize> = Vec::with_capacity(touched.len() * 2);
+  for &ix in &touched {
+    needed.push(ix);
+    if ix + 1 < paragraph_count {
+      needed.push(ix + 1);
+    }
+  }
+  needed.sort_unstable();
+  needed.dedup();
+  let ids: Vec<_> = needed
+    .iter()
+    .filter_map(|&ix| projection.ids.paragraph_ids.get(ix).copied())
+    .collect();
+  if ids.len() != needed.len() {
+    return None;
+  }
+  let starts = super::paragraph_body_starts_in_loro(doc, &ids);
+  let start_by_ix: FxHashMap<usize, usize> = needed
+    .iter()
+    .zip(starts)
+    .filter_map(|(&ix, start)| {
+      // Durable-record resolution first (object-aware, coalesce-immune), the
+      // projection's shifted live start as the fallback — same law as the old
+      // per-paragraph `live_paragraph_range`.
+      start.or_else(|| live_starts.get(ix).copied()).map(|start| (ix, start))
+    })
+    .collect();
+  let body_len = body_text(doc).len_unicode();
   let mut patches = Vec::new();
-  for paragraph_ix in touched_paragraphs {
+  for paragraph_ix in touched {
     let old = projection.paragraphs.get(paragraph_ix)?;
-    let (sentinel, end) = live_paragraph_range(doc, projection, live_starts, paragraph_ix)?;
+    let sentinel = start_by_ix.get(&paragraph_ix)?.checked_sub(1)?;
+    let end = if paragraph_ix + 1 < paragraph_count {
+      start_by_ix.get(&(paragraph_ix + 1))?.checked_sub(1)?
+    } else {
+      body_len
+    };
+    if sentinel >= end {
+      return None;
+    }
     let new_input = body_input_paragraph_at(doc, sentinel, end, input_paragraph(projection, paragraph_ix, old).style)?;
     paragraph_patches_from_readback(projection, paragraph_ix, new_input, &mut patches)?;
   }
@@ -713,29 +761,6 @@ pub(crate) fn body_input_paragraph_at(
     }
   }
   seen_sentinel.then_some(current)
-}
-
-/// Live-body unicode range `(sentinel, end_exclusive)` for projection
-/// paragraph `paragraph_ix`, for [`body_input_paragraph_at`]. Starts resolve
-/// from durable paragraph records first (exact live space — object-aware and
-/// immune to coalesced-empty drift), with `live_starts` (the projection's
-/// paragraph starts shifted into post-change space) as the fallback.
-fn live_paragraph_range(doc: &LoroDoc, projection: &DocumentProjection, live_starts: &[usize], paragraph_ix: usize) -> Option<(usize, usize)> {
-  let start_of = |ix: usize| {
-    projection
-      .ids
-      .paragraph_ids
-      .get(ix)
-      .and_then(|id| paragraph_body_start_in_loro(doc, *id))
-      .or_else(|| live_starts.get(ix).copied())
-  };
-  let sentinel = start_of(paragraph_ix)?.checked_sub(1)?;
-  let end = if paragraph_ix + 1 < projection.ids.paragraph_ids.len() {
-    start_of(paragraph_ix + 1)?.checked_sub(1)?
-  } else {
-    body_text(doc).len_unicode()
-  };
-  (sentinel < end).then_some((sentinel, end))
 }
 
 fn push_input_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {

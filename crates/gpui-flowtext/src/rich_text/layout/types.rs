@@ -227,7 +227,7 @@ impl LaidOutLine {
 
 #[derive(Clone)]
 pub(super) struct LaidOutSegment {
-  pub(super) shaped: ShapedLine,
+  pub(super) shaped: std::sync::Arc<ShapedLine>,
   pub(super) format: EffectiveRunFormat,
   pub(super) x: Pixels,
   pub(super) width: Pixels,

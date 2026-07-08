@@ -123,6 +123,9 @@ impl RichTextEditor {
           .unwrap_or(before);
         let progressed = after != before;
         changed |= progressed;
+        if progressed {
+          self.note_item_sizes_patch_paragraph(paragraph_ix);
+        }
         if self.paragraph_needs_chunk_prefetch(paragraph_ix, width) {
           if progressed {
             self.chunk_prefetch_queue.push_back(paragraph_ix);
@@ -150,8 +153,13 @@ impl RichTextEditor {
     }
     if changed {
       self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-      self.item_sizes_cache = None;
-      let _ = self.rebuild_item_sizes_cache_with_prefetch(width, scroll_anchor, false, window, cx);
+      // Patch, don't nuke: the loop above recorded every refined paragraph in
+      // `pending_item_sizes_patch_range` (see `note_item_sizes_patch_paragraph`);
+      // a full O(blocks) rebuild only runs when the patch is inapplicable.
+      if self.try_patch_item_sizes_cache(width, scroll_anchor.clone(), window, cx).is_none() {
+        self.item_sizes_cache = None;
+        let _ = self.rebuild_item_sizes_cache_with_prefetch(width, scroll_anchor, false, window, cx);
+      }
       cx.notify();
     }
     if !self.chunk_prefetch_queue.is_empty() && !self.pending_chunk_prefetch {

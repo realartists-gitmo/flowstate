@@ -1,6 +1,6 @@
 use std::{
   collections::HashMap,
-  sync::{Mutex, OnceLock},
+  sync::{Arc, Mutex, OnceLock},
 };
 
 use notify::{Config as NotifyConfig, RecommendedWatcher, RecursiveMode, Watcher};
@@ -15,10 +15,14 @@ struct CachedAppSettings {
   keys_by_command: CommandKeyCache,
 }
 
-static APP_SETTINGS_CACHE: OnceLock<Mutex<Option<CachedAppSettings>>> = OnceLock::new();
+// Arc'd cache entries: every settings/keybinding accessor previously DEEP
+// CLONED the whole cached struct (keymap, per-command key vectors, recents,
+// theme — ~13KB) per lookup; ribbon tooltips alone made 21k such lookups per
+// session (274MB). An Arc bump replaces all of that.
+static APP_SETTINGS_CACHE: OnceLock<Mutex<Option<Arc<CachedAppSettings>>>> = OnceLock::new();
 static APP_SETTINGS_WATCHER: OnceLock<Mutex<Option<RecommendedWatcher>>> = OnceLock::new();
 
-fn app_settings_cache() -> &'static Mutex<Option<CachedAppSettings>> {
+fn app_settings_cache() -> &'static Mutex<Option<Arc<CachedAppSettings>>> {
   APP_SETTINGS_CACHE.get_or_init(|| Mutex::new(None))
 }
 
@@ -97,23 +101,23 @@ fn cached_settings_from(settings: AppSettings, path: PathBuf) -> CachedAppSettin
 
 #[hotpath::measure]
 pub fn load_app_settings() -> AppSettings {
-  load_cached_app_settings().settings
+  load_cached_app_settings().settings.clone()
 }
 
-fn load_cached_app_settings() -> CachedAppSettings {
+fn load_cached_app_settings() -> Arc<CachedAppSettings> {
   let path = settings_path();
   start_app_settings_watcher(&path);
 
   if let Ok(cache) = app_settings_cache().lock()
     && let Some(cached) = cache.as_ref().filter(|cached| cached.path == path)
   {
-    return cached.clone();
+    return Arc::clone(cached);
   }
 
   let settings = load_app_settings_from_path(path.clone()).unwrap_or_default();
-  let cached = cached_settings_from(settings, path);
+  let cached = Arc::new(cached_settings_from(settings, path));
   if let Ok(mut cache) = app_settings_cache().lock() {
-    *cache = Some(cached.clone());
+    *cache = Some(Arc::clone(&cached));
   }
   cached
 }
@@ -173,7 +177,7 @@ pub fn load_keymap_entries() -> Vec<crate::commands::KeymapEntry> {
 }
 
 pub fn load_keymap() -> crate::commands::Keymap {
-  load_cached_app_settings().effective_keymap
+  load_cached_app_settings().effective_keymap.clone()
 }
 
 #[hotpath::measure]
@@ -298,7 +302,7 @@ pub fn save_app_settings(settings: AppSettings) -> io::Result<()> {
   let path = settings_path();
   start_app_settings_watcher(&path);
   save_app_settings_to_path(&settings, path.clone())?;
-  let cached = cached_settings_from(settings, path);
+  let cached = Arc::new(cached_settings_from(settings, path));
   if let Ok(mut cache) = app_settings_cache().lock() {
     *cache = Some(cached);
   }

@@ -18,9 +18,9 @@ use super::commit::apply_local_intent;
 use super::gate::{GateHolder, GateMetrics, WriteGate};
 use super::intents::{
   DeleteBlocksIntent, DeleteRangeIntent, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalIntent,
-  LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace, ReplaceEquationSourceRangeIntent,
+  LocalWriteAuthority, LocalWriteOutcome, MoveBlockIntent, ReplaceEquationSourceRangeIntent,
   ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatchesIntent, ReplaceObjectIntent, SetImageLayoutIntent, SetMarksIntent,
-  SetParagraphStyleIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
+  SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TableIntent, UndoOutcome, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent, SemanticCommand};
 
@@ -112,6 +112,10 @@ impl LocalDocHandle {
     self.apply_intent(LocalIntent::SetParagraphStyle(intent))
   }
 
+  pub fn set_paragraph_styles(&self, intent: SetParagraphStylesIntent) -> Result<LocalWriteOutcome, WriteRejected> {
+    self.apply_intent(LocalIntent::SetParagraphStyles(intent))
+  }
+
   pub fn insert_object(&self, intent: InsertObjectIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     self.apply_intent(LocalIntent::InsertObject(intent))
   }
@@ -184,7 +188,7 @@ impl LocalDocHandle {
         // n starts at 0: auditing on `n % sample == 0` would put the O(doc)
         // rebuild-and-compare on the FIRST keystroke of every session (field
         // symptom: one high-latency op per fresh peer). Sample the Nth op.
-        if n % u64::from(sample.get()) == u64::from(sample.get()) - 1
+        if n % std::num::NonZeroU64::from(sample) == u64::from(sample.get()) - 1
           && let Err(error) = core.audit_projection_against_full_rebuild(intent.class())
         {
           tracing::error!(%error, class = intent.class(), "sampled release audit mismatch");
@@ -216,33 +220,17 @@ impl LocalDocHandle {
       class: "undo-redo",
       diagnostic: format!("{error:#}"),
     })?;
-    let mut replace = None;
+    let mut applied = false;
     let mut selection = None;
     let mut publish = Vec::new();
     for event in events {
       match event {
-        RuntimeEvent::ProjectionUpdated {
-          document,
-          frontier,
-          version_vector,
-          ..
-        } => {
-          replace = Some(ProjectionReplace {
-            document: *document,
-            frontier,
-            version_vector,
-          });
-        },
-        // The runtime may express an undo/redo incrementally; the core's
-        // maintained projection is already advanced either way, so hand the
-        // editor the canonical result wholesale (undo touches arbitrary spans).
-        RuntimeEvent::ProjectionPatched { .. } => {
-          replace = Some(ProjectionReplace {
-            document: guard.projection_ref().clone(),
-            frontier: guard.doc().state_frontiers().encode(),
-            version_vector: guard.doc().state_vv().encode(),
-          });
-        },
+        // Whether expressed as a replace or incrementally: the projection
+        // change reaches the editor through the ORDERED stream (already
+        // queued by the runtime); the outcome only carries the applied
+        // signal. The former shape cloned the ENTIRE projection here per
+        // undo — pure waste, the editor never read it.
+        RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::ProjectionPatched { .. } => applied = true,
         RuntimeEvent::SelectionRestored { selection: restored } => selection = Some(restored),
         RuntimeEvent::RevisionOpened { .. } | RuntimeEvent::RevisionForked { .. } => {},
         publishable @ (RuntimeEvent::LocalUpdate { .. } | RuntimeEvent::RemoteUpdateApplied { .. }) => publish.push(publishable),
@@ -250,7 +238,7 @@ impl LocalDocHandle {
     }
     guard.queue_publish(publish);
     drop(guard);
-    Ok(UndoOutcome { replace, selection })
+    Ok(UndoOutcome { applied, selection })
   }
 
   /// Begin an undo group (word/burst boundary — spec §10). Fallible by design:

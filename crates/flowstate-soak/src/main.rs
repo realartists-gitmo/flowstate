@@ -61,6 +61,9 @@ struct Cli {
   /// instead of the document soak.
   #[arg(long, default_value_t = false)]
   loro_micro: bool,
+  /// Cap the select-all-restyle phase at N paragraphs (default: all).
+  #[arg(long)]
+  restyle_cap: Option<usize>,
 }
 
 /// Release-audit sampling requested on the CLI.
@@ -70,7 +73,7 @@ enum AuditSampling {
   Every(NonZeroU32),
 }
 
-#[hotpath::main]
+#[hotpath::main(functions_limit = 60)]
 fn main() {
   let cli = Cli::parse();
   if cli.loro_micro {
@@ -84,10 +87,10 @@ fn main() {
       AuditSampling::Every(value.parse().expect("--audit takes `off` or a positive integer"))
     }
   });
-  run(&cli.input, cli.keystrokes, cli.splits, cli.imports, &audit).expect("collab hotpath soak failed");
+  run(&cli.input, cli.keystrokes, cli.splits, cli.imports, &audit, cli.restyle_cap).expect("collab hotpath soak failed");
 }
 
-fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &AuditSampling) -> anyhow::Result<()> {
+fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &AuditSampling, restyle_cap: Option<usize>) -> anyhow::Result<()> {
   let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
   println!("collab-hotpath soak — build profile: {build_profile}");
 
@@ -337,6 +340,45 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
     }
   }
 
+  // ---- Phase 3c: select-all restyle (the 64.7s hotpath1 freeze). The editor
+  // now sends ONE batched SetParagraphStyles intent for a selection-wide
+  // restyle (§11 anti-amplification; the per-paragraph loop it replaced cost
+  // one full write-path round trip per paragraph). Undo afterwards restores
+  // styles and measures single-member undo of the mass restyle.
+  {
+    let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
+    let restyle_count = projection.ids.paragraph_ids.len().min(restyle_cap.unwrap_or(usize::MAX));
+    if restyle_count == 0 {
+      println!("select-all restyle: skipped (--restyle-cap 0)");
+      // fall through to phase 4 with styles untouched
+    } else {
+    let paragraphs: Vec<_> = projection.ids.paragraph_ids.iter().copied().take(restyle_count).collect();
+    let started = Instant::now();
+    handle
+      .set_paragraph_styles(flowstate_collab::local_write::SetParagraphStylesIntent {
+        paragraphs,
+        style: ParagraphStyle::Custom(1),
+      })
+      .map_err(|error| anyhow::anyhow!("batched restyle rejected: {error}"))?;
+    println!("select-all restyle ({restyle_count} paragraphs, ONE batched commit): {:?}", started.elapsed());
+    let apply_started = Instant::now();
+    drain_into_editor(&handle, &mut editor)?;
+    println!("select-all restyle (editor drain + apply):       {:?}", apply_started.elapsed());
+    let started = Instant::now();
+    handle.apply_undo().map_err(|error| anyhow::anyhow!("undo restyle rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    println!("undo select-all restyle (commit + drain):        {:?}", started.elapsed());
+    let started = Instant::now();
+    handle.apply_redo().map_err(|error| anyhow::anyhow!("redo restyle rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    println!("redo select-all restyle (commit + drain):        {:?}", started.elapsed());
+    let started = Instant::now();
+    handle.apply_undo().map_err(|error| anyhow::anyhow!("re-undo restyle rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    println!("re-undo select-all restyle (commit + drain):     {:?}", started.elapsed());
+    }
+  }
+
   // ---- Phase 4: select-all delete + retype (the ctrl-A field freeze). Runs
   // LAST because it guts the document. ------------------------------------------
   let projection = handle.projection().map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -377,6 +419,43 @@ fn run(path: &Path, keystrokes: usize, splits: usize, imports: usize, audit: &Au
   handle.apply_redo().map_err(|error| anyhow::anyhow!("redo select-all delete rejected: {error}"))?;
   drain_into_editor(&handle, &mut editor)?;
   println!("redo select-all delete (commit + drain):         {:?}", started.elapsed());
+
+  // ---- Phase 4c: repeated mass undo/redo cycles. Registry hygiene proof:
+  // every whole-doc restore fabricates a fresh record generation, and the
+  // dead generations previously compounded the registry (field: scan P95
+  // grew to seconds across a stress session). Non-increasing cycle times ⇒
+  // the repair-pass prune is holding.
+  for cycle in 0..2 {
+    let started = Instant::now();
+    handle.apply_undo().map_err(|error| anyhow::anyhow!("cycle undo rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    handle.apply_redo().map_err(|error| anyhow::anyhow!("cycle redo rejected: {error}"))?;
+    drain_into_editor(&handle, &mut editor)?;
+    println!("mass undo+redo cycle {cycle} (commit + drain):        {:?}", started.elapsed());
+  }
+
+  // ---- Phase 4d: PEER receipt of the whole-doc delete + restore history —
+  // the 2026-07-07 field hang (peer froze importing the undo of a select-all
+  // delete: thousands of dead-cursor history traces). Must complete in
+  // seconds via the rebuild path, never trace per record.
+  let peer_guard = peer_gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
+  let peer_known_vv = peer_guard.doc().state_vv();
+  drop(peer_guard);
+  let main_guard = gate.lock(GateHolder::ExportUpdates).map_err(|_| anyhow::anyhow!("gate poisoned"))?;
+  let mass_history_update = main_guard
+    .doc()
+    .export(loro::ExportMode::updates(&peer_known_vv))
+    .map_err(|error| anyhow::anyhow!("mass-history export: {error}"))?;
+  drop(main_guard);
+  let mass_receipt_started = Instant::now();
+  let mut peer_import_guard = peer_gate.lock(GateHolder::ImportChunk).map_err(|_| anyhow::anyhow!("peer gate poisoned"))?;
+  peer_import_guard.import_remote_update(&mass_history_update)?;
+  drop(peer_import_guard);
+  println!(
+    "peer receipt of mass delete/restore history ({} KB): {:?}",
+    mass_history_update.len() / 1024,
+    mass_receipt_started.elapsed()
+  );
 
   // ---- Convergence proof: the soak measured real work, not dropped work -------
   let canonical = LocalWriteAuthority::canonical_projection(&handle).map_err(|error| anyhow::anyhow!("{error}"))?;
@@ -428,6 +507,7 @@ fn loro_micro() {
 }
 
 fn load_runtime(path: &Path) -> anyhow::Result<CrdtRuntime> {
+  let path = &scratch_input_copy(path)?;
   let is_docx = path
     .extension()
     .and_then(|extension| extension.to_str())
@@ -439,6 +519,20 @@ fn load_runtime(path: &Path) -> anyhow::Result<CrdtRuntime> {
   CrdtRuntime::open_package(path)
 }
 
+/// The runtime PERSISTS update segments to the package path it was opened
+/// from — running the soak directly against a user's .db8 appends every
+/// synthetic edit into their document (learned the hard way on a field file).
+/// Work on a scratch copy, always.
+fn scratch_input_copy(path: &Path) -> anyhow::Result<std::path::PathBuf> {
+  let scratch = std::env::temp_dir().join(format!(
+    "flowstate-soak-{}-{}",
+    std::process::id(),
+    path.file_name().and_then(|name| name.to_str()).unwrap_or("input")
+  ));
+  std::fs::copy(path, &scratch)?;
+  Ok(scratch)
+}
+
 fn mid_paragraph(projection: &DocumentProjection) -> ParagraphId {
   projection.ids.paragraph_ids[projection.ids.paragraph_ids.len() / 2]
 }
@@ -447,15 +541,17 @@ fn drain_into_editor(handle: &LocalDocHandle, editor: &mut DocumentProjection) -
   for item in handle.drain_projection_stream().map_err(|error| anyhow::anyhow!("{error}"))? {
     match item {
       ProjectionStreamItem::Patches(batch) => {
+        if std::env::var_os("SOAK_PATCH_DEBUG").is_some() {
+          eprintln!("[batch] {} patches: {:?}", batch.patches.len(), batch.patches.iter().map(std::mem::discriminant).collect::<Vec<_>>());
+        }
         if batch.new_frontier == editor.frontier {
           continue;
         }
-        // Mirror `sync_projection_from_authority` exactly: clone, apply to the
-        // clone, install — so the measured cost is the real editor-side cost.
-        let mut document = editor.clone();
-        flowstate_document::apply_projection_patch_batch(&mut document, &batch)
+        // Mirror `sync_projection_from_authority` exactly: in-place apply
+        // (the batch apply is internally transactional) — so the measured
+        // cost is the real editor-side cost.
+        flowstate_document::apply_projection_patch_batch(editor, &batch)
           .map_err(|error| anyhow::anyhow!("ordered batch failed: {error:?}"))?;
-        *editor = document;
       },
       ProjectionStreamItem::Replace(document) => *editor = *document,
     }

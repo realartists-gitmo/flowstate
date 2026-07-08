@@ -12,6 +12,7 @@ flowstate-document.workspace = true
 flowstate-docx.workspace = true
 hotpath.workspace = true
 loro.workspace = true
+postcard.workspace = true
 
 [features]
 hotpath = ["hotpath/hotpath", "flowstate-collab/hotpath", "flowstate-docx/hotpath", "flowstate-document/hotpath"]

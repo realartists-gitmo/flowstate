@@ -57,7 +57,9 @@ pub struct DocumentProjection {
   pub theme: DocumentTheme,
 }
 
-#[hotpath::measure]
+// §perf: not hotpath-measured — usually an Arc uniqueness check; the rare
+// shared-Arc deep clone shows up in its callers' numbers instead.
+#[inline]
 pub fn paragraphs_mut(document: &mut DocumentProjection) -> &mut Vec<Paragraph> {
   Arc::make_mut(&mut document.paragraphs)
 }
@@ -129,6 +131,23 @@ pub fn block_ix_for_paragraph(document: &DocumentProjection, target_paragraph_ix
     }
   }
   None
+}
+
+/// Block row for EVERY paragraph in one pass — the batched sibling of
+/// [`block_ix_for_paragraph`]. Callers that need rows for many paragraphs on
+/// an object-bearing doc (where the aligned fast path misses) would otherwise
+/// pay an O(blocks) scan per paragraph.
+#[must_use]
+pub fn paragraph_block_rows(document: &DocumentProjection) -> Vec<usize> {
+  if document.blocks.len() == document.paragraphs.len() {
+    return (0..document.blocks.len()).collect();
+  }
+  document
+    .blocks
+    .iter()
+    .enumerate()
+    .filter_map(|(row, block)| matches!(block, Block::Paragraph(_)).then_some(row))
+    .collect()
 }
 
 #[hotpath::measure]
@@ -344,13 +363,15 @@ pub fn paragraph_index_for_id(document: &DocumentProjection, id: ParagraphId) ->
     .position(|candidate| *candidate == id)
 }
 
-#[hotpath::measure]
+// §perf: not hotpath-measured — O(1) id lookups whose measurement hooks cost
+// far more than the lookup and polluted profiles at millions of calls.
+#[inline]
 #[must_use]
 pub fn paragraph_id_at(document: &DocumentProjection, paragraph_ix: usize) -> Option<ParagraphId> {
   document.ids.paragraph_ids.get(paragraph_ix).copied()
 }
 
-#[hotpath::measure]
+#[inline]
 #[must_use]
 pub fn block_id_at(document: &DocumentProjection, block_ix: usize) -> Option<BlockId> {
   document.ids.block_ids.get(block_ix).copied()
@@ -484,7 +505,9 @@ pub fn range_contains_heading(document: &DocumentProjection, range: Range<usize>
   (range.start..end).any(|paragraph_ix| paragraph_is_heading(document, paragraph_ix))
 }
 
-#[hotpath::measure]
+// §perf: not hotpath-measured — a map probe per paragraph per outline pass;
+// the hooks dominated it at scale.
+#[inline]
 fn section_level_and_kind(document: &DocumentProjection, style: ParagraphStyle) -> Option<(usize, SectionKind)> {
   match style {
     ParagraphStyle::Normal => None,

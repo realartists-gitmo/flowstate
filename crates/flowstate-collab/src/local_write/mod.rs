@@ -30,6 +30,6 @@ pub use intents::{
   IntentCounters, JoinParagraphsIntent, LocalCommit, LocalIntent, LocalWriteOutcome, MoveBlockIntent, ProjectionReplace,
   ReplaceEquationSourceRangeIntent, ReplaceImageAltTextIntent, ReplaceImageCaptionIntent, ReplaceMatch, ReplaceMatchesIntent,
   ReplaceObjectIntent, SelectionSnapshot,
-  LocalWriteAuthority, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SplitParagraphIntent, TableIntent,
+  LocalWriteAuthority, SetImageLayoutIntent, SetMarksIntent, SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TableIntent,
   TextAnchor, UndoOutcome, WriteRejected,
 };

@@ -117,7 +117,7 @@ mod tests {
     }
   }
 
-  /// Full-mesh sync, iterated to quiescence (mirror of intent_fuzz):
+  /// Full-mesh sync, iterated to quiescence (mirror of `intent_fuzz)`:
   /// importing an undo can COMMIT convergent repairs (records whose cursor
   /// anchors died with the deleted content), and those repair updates need
   /// delivery too. A bounded pass count keeps a non-converging repair loop
@@ -1117,7 +1117,7 @@ mod tests {
   }
 
   /// Minimal repro scaffold for the undo+table derivation class the fuzz
-  /// caught (seed 7: SetCellSpan after undo/redo of column topology leaves
+  /// caught (seed 7: `SetCellSpan` after undo/redo of column topology leaves
   /// the maintained projection's spans stale vs a fresh rematerialization).
   #[test]
   fn table_ops_after_undo_redo_stay_canonical() {
@@ -1171,7 +1171,7 @@ mod tests {
   /// TEMP shrink harness: single-peer sweep (no imports) to shrink the fuzz
   /// finding to a local-only sequence.
   #[test]
-  #[ignore]
+  #[ignore = "shrink harness: single-peer seed sweep, run on demand with FUZZ_PER_OP_CHECK=1"]
   fn scratch_single_peer_table_sweep() {
     for seed in 1..200 {
       run_fuzz(seed, 1, 3, 12, seed_table, random_table_mix_intent);
@@ -1179,7 +1179,7 @@ mod tests {
   }
 
   #[test]
-  #[ignore]
+  #[ignore = "shrink harness: single-peer seed sweep, run on demand with FUZZ_PER_OP_CHECK=1"]
   fn scratch_single_peer_object_sweep() {
     for seed in 1..200 {
       run_fuzz(seed, 1, 3, 12, seed_structural, random_structural_intent);
@@ -1205,40 +1205,6 @@ mod tests {
       }
     };
     check("post-undo");
-    let dump_registry = |label: &str| {
-      let guard = peer.gate.lock(GateHolder::ExportUpdates).expect("gate");
-      let doc = guard.doc();
-      let root = doc.get_map("flowstate.root");
-      let Some(loro::ValueOrContainer::Container(loro::Container::Map(paragraphs))) = root.get("paragraphs_by_id") else {
-        eprintln!("{label}: no paragraphs_by_id");
-        return;
-      };
-      for key in paragraphs.keys() {
-        let record = match paragraphs.get(&key) {
-          Some(loro::ValueOrContainer::Container(loro::Container::Map(map))) => map,
-          _ => continue,
-        };
-        let cursor_state: Vec<String> = ["boundary_cursor", "start_cursor"]
-          .iter()
-          .map(|field| {
-            match record.get(field) {
-              Some(loro::ValueOrContainer::Value(loro::LoroValue::Binary(bytes))) => {
-                match loro::cursor::Cursor::decode(&bytes) {
-                  Ok(cursor) => match doc.get_cursor_pos(&cursor) {
-                    Ok(pos) => format!("{field}=pos {}", pos.current.pos),
-                    Err(error) => format!("{field}=unresolved({error})"),
-                  },
-                  Err(_) => format!("{field}=undecodable"),
-                }
-              },
-              _ => format!("{field}=absent"),
-            }
-          })
-          .collect();
-        eprintln!("{label}: record {key} {cursor_state:?}");
-      }
-    };
-    dump_registry("post-undo");
 
     let projection = peer.projection();
     let paragraph = projection.ids.paragraph_ids[0];
@@ -1252,20 +1218,6 @@ mod tests {
         },
       })
       .expect("insert object at paragraph start");
-    dump_registry("post-insert");
-    {
-      let guard = peer.gate.lock(GateHolder::ExportUpdates).expect("gate");
-      let (fresh_a, defects_a) = flowstate_document::document_from_loro_with_defects(guard.doc()).expect("fresh a");
-      let (fresh_b, defects_b) = flowstate_document::document_from_loro_with_defects(guard.doc()).expect("fresh b");
-      eprintln!(
-        "fresh determinism: a={:?} b={:?} body={:?}\n  defects_a={:?}\n  defects_b={:?}",
-        fresh_a.ids.paragraph_ids,
-        fresh_b.ids.paragraph_ids,
-        flowstate_document::loro_schema::body_text(guard.doc()).to_string(),
-        defects_a.iter().map(|d| d.stable_key()).collect::<Vec<_>>(),
-        defects_b.iter().map(|d| d.stable_key()).collect::<Vec<_>>(),
-      );
-    }
     check("post-insert-object");
   }
 }

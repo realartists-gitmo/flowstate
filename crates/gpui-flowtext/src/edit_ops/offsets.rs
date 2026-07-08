@@ -1,4 +1,6 @@
-#[hotpath::measure]
+// §perf: not hotpath-measured — a field sum called on every offset/length
+// query; the measurement hooks dwarfed the work and skewed profiles.
+#[inline]
 #[must_use]
 pub fn paragraph_runs_len(paragraph: &Paragraph) -> usize {
   paragraph.runs.iter().map(|run| run.len).sum()

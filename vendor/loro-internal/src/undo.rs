@@ -1002,7 +1002,7 @@ impl UndoManager {
 pub(crate) fn undo(
     spans: Vec<(IdSpan, Frontiers)>,
     last_frontiers_or_last_bi: Either<&Frontiers, &DiffBatch>,
-    calc_diff: impl Fn(&Frontiers, &Frontiers) -> DiffBatch,
+    mut calc_diff: impl FnMut(&Frontiers, &Frontiers) -> DiffBatch,
     on_last_event_a: &mut dyn FnMut(&DiffBatch),
 ) -> DiffBatch {
     // The process of performing undo is:

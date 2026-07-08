@@ -83,7 +83,12 @@ impl RichTextEditor {
     }
 
     if changed {
-      let _ = self.rebuild_item_sizes_cache(width, scroll_anchor, window, cx);
+      // Patch, don't rebuild: the materialized paragraphs recorded themselves
+      // in `pending_item_sizes_patch_range`; a full O(blocks) rebuild per
+      // scroll tick was ~10 ms of every scrolled frame on the reference doc.
+      if self.try_patch_item_sizes_cache(width, scroll_anchor.clone(), window, cx).is_none() {
+        let _ = self.rebuild_item_sizes_cache(width, scroll_anchor, window, cx);
+      }
       cx.notify();
     }
     changed

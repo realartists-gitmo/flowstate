@@ -1141,7 +1141,18 @@ impl LoroDoc {
             (was_recording, state.frontiers.clone())
         };
 
+        // Env-gated coarse timing (`LORO_UNDO_TIMING=1`): the undo of a large
+        // op spends seconds in here; these split the cost across span
+        // calculation, per-span checkout diffing, the return checkout, and
+        // the diff re-apply without a profiler run.
+        let timing = std::env::var_os("LORO_UNDO_TIMING").is_some();
+        let t0 = std::time::Instant::now();
         let spans = self.oplog.lock().split_span_based_on_deps(id_span);
+        let span_count = spans.len();
+        let t_split = t0.elapsed();
+        let mut calc_diff_calls = 0usize;
+        let mut calc_diff_total = std::time::Duration::ZERO;
+        let t1 = std::time::Instant::now();
         let diff = crate::undo::undo(
             spans,
             match post_transform_base {
@@ -1149,21 +1160,27 @@ impl LoroDoc {
                 None => Either::Left(&latest_frontiers),
             },
             |from, to| {
+                let t = std::time::Instant::now();
                 self._checkout_without_emitting(from, false, false).unwrap();
                 self.state.lock().start_recording();
                 self._checkout_without_emitting(to, false, false).unwrap();
                 let mut state = self.state.lock();
                 let e = state.take_events();
                 state.stop_and_clear_recording();
+                calc_diff_calls += 1;
+                calc_diff_total += t.elapsed();
                 DiffBatch::new(e)
             },
             before_diff,
         );
+        let t_undo_fn = t1.elapsed();
 
         // println!("\nundo_internal: diff: {:?}", diff);
         // println!("container remap: {:?}", container_remap);
 
+        let t2 = std::time::Instant::now();
         self._checkout_without_emitting(&latest_frontiers, false, false)?;
+        let t_return_checkout = t2.elapsed();
         self.set_detached(false);
         if was_recording {
             self.state.lock().start_recording();
@@ -1177,12 +1194,21 @@ impl LoroDoc {
         // slow on every later replay of the resulting change. The re-applied
         // content mints fresh contiguous op ids regardless, so merging
         // adjacent same-attribute inserts loses nothing.
+        let t3 = std::time::Instant::now();
         let diff = compact_text_diff_batch(diff);
+        let t_compact = t3.elapsed();
         // Try applying the diff, but ignore the error if it happens.
         // MovableList's undo behavior is too tricky to handle in a collaborative env
         // so in edge cases this may be an Error
+        let t4 = std::time::Instant::now();
         if let Err(e) = self._apply_diff(diff, container_remap, true) {
             warn!("Undo Failed {:?}", e);
+        }
+        if timing {
+            eprintln!(
+                "[loro-undo-timing] spans={span_count} split={t_split:?} undo_fn={t_undo_fn:?} (calc_diff n={calc_diff_calls} total={calc_diff_total:?}) return_checkout={t_return_checkout:?} compact={t_compact:?} apply_diff={:?}",
+                t4.elapsed()
+            );
         }
 
         if let Some(options) = options {

@@ -121,7 +121,7 @@ pub(super) fn shape_line(
 
   if segments.is_empty() {
     let format = run_format(document, &p_format, RunStyles::default());
-    let shaped = shape_fragment(window, "", &format);
+    let shaped = std::sync::Arc::new(shape_fragment(window, "", &format));
     #[cfg(target_os = "linux")]
     let (segment_ascent, segment_descent) = {
       let (font_ascent, font_descent) = font_metrics_for_format(&format, cx);
@@ -183,7 +183,10 @@ pub(super) fn shape_line(
 
 #[derive(Default)]
 pub(super) struct FragmentShapeCache {
-  shapes: FxHashMap<FragmentShapeCacheKey, ShapedLine>,
+  // Arc'd values: a cache HIT previously deep-cloned the `ShapedLine`
+  // (glyph runs + decorations, ~1.4KB) — ~1.3GB of pure hit-path churn per
+  // profiled session. An Arc bump serves the same layout.
+  shapes: FxHashMap<FragmentShapeCacheKey, std::sync::Arc<ShapedLine>>,
   line_widths: FxHashMap<LineMeasureCacheKey, Pixels>,
   fragment_scratch: Vec<FormattedFragment>,
   run_formats: FxHashMap<RunStyles, EffectiveRunFormat>,
@@ -210,17 +213,17 @@ pub(super) fn shape_fragment_cached(
   source_start: usize,
   styles: RunStyles,
   cache: &mut FragmentShapeCache,
-) -> ShapedLine {
+) -> std::sync::Arc<ShapedLine> {
   let key = FragmentShapeCacheKey {
     source_start,
     len: text.len(),
     styles,
   };
   if let Some(shaped) = cache.shapes.get(&key) {
-    return shaped.clone();
+    return std::sync::Arc::clone(shaped);
   }
-  let shaped = shape_fragment(window, text, format);
-  cache.shapes.insert(key, shaped.clone());
+  let shaped = std::sync::Arc::new(shape_fragment(window, text, format));
+  cache.shapes.insert(key, std::sync::Arc::clone(&shaped));
   shaped
 }
 

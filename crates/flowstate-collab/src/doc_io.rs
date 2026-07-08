@@ -75,6 +75,11 @@ pub enum IoRequest {
     path: PathBuf,
     reply: Sender<Result<()>>,
   },
+  /// §P3 (act two): revision-less cache flush at document close/idle so the
+  /// next preview/open of this package takes the projection-cache fast path.
+  FlushPackageCaches {
+    reply: Sender<Result<()>>,
+  },
   TakeRestoredUndoSelection {
     reply: Sender<Result<Option<UndoSelectionSnapshot>>>,
   },
@@ -128,6 +133,7 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::CheckpointPackage { .. } => "checkpoint-package",
     IoRequest::PackageBytes { .. } => "package-bytes",
     IoRequest::SavePackageTo { .. } => "save-package-to",
+    IoRequest::FlushPackageCaches { .. } => "flush-package-caches",
     IoRequest::TakeRestoredUndoSelection { .. } => "take-restored-undo-selection",
     IoRequest::AssetMetadata { .. } => "asset-metadata",
     IoRequest::Revisions { .. } => "revisions",
@@ -208,6 +214,10 @@ impl DocIoHandle {
     self.request(|reply| IoRequest::SavePackageTo { path, reply }).await
   }
 
+  pub async fn flush_package_caches(&self) -> Result<()> {
+    self.request(|reply| IoRequest::FlushPackageCaches { reply }).await
+  }
+
   pub async fn take_restored_undo_selection(&self) -> Result<Option<UndoSelectionSnapshot>> {
     self.request(|reply| IoRequest::TakeRestoredUndoSelection { reply }).await
   }
@@ -266,6 +276,12 @@ fn send_reply<T>(reply: &Sender<Result<T>>, value: Result<T>) {
 fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
   // Buffered non-import requests popped while coalescing an import chunk.
   let mut deferred: Vec<IoRequest> = Vec::new();
+  // Bytes imported since the diff-calculator/history caches were last freed.
+  // Bursts free at chunk end; a steady one-blob drip previously NEVER freed
+  // (the old `coalesced > 1` gate), so the caches grew without bound across a
+  // session — part of the receiving peer's 13.1 GB/run import churn.
+  let mut unfreed_import_bytes: usize = 0;
+  const IMPORT_CACHE_FREE_BYTES: usize = 4 * 1024 * 1024;
   loop {
     let request = if let Some(request) = deferred.pop() {
       request
@@ -296,15 +312,33 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         let coalesced = chunk.len();
         match core.lock(GateHolder::ImportChunk) {
           Ok(mut guard) => {
-            for (bytes, reply) in chunk {
-              send_reply(&reply, guard.import_remote_update(&bytes));
+            // §6.4 + field fix 2026-07-07: ONE batched import for the whole
+            // chunk — N cheap Loro imports, then ONE projection derive — where
+            // the old shape ran a full derive per blob (41.6% of a receiving
+            // peer's runtime).
+            let blobs: Vec<&[u8]> = chunk.iter().map(|(bytes, _)| bytes.as_slice()).collect();
+            unfreed_import_bytes += blobs.iter().map(|bytes| bytes.len()).sum::<usize>();
+            match guard.import_remote_updates(&blobs) {
+              Ok(event_batches) => {
+                for ((_, reply), events) in chunk.iter().zip(event_batches) {
+                  send_reply(reply, Ok(events));
+                }
+              },
+              Err(error) => {
+                let error = format!("{error:#}");
+                for (_, reply) in &chunk {
+                  send_reply(reply, Err(anyhow::anyhow!("batched remote import failed: {error}")));
+                }
+              },
             }
-            // Spec §6.4 memory hygiene: import bursts build diff-calculator and
-            // history caches; free them at chunk end (OOM history). Cheap
-            // no-ops when the caches are cold.
-            if coalesced > 1 {
+            // Spec §6.4 memory hygiene: imports build diff-calculator and
+            // history caches; free them at burst end OR once a steady drip
+            // has accumulated a real footprint (OOM history). Cheap no-ops
+            // when the caches are cold.
+            if coalesced > 1 || unfreed_import_bytes >= IMPORT_CACHE_FREE_BYTES {
               guard.doc().free_diff_calculator();
               guard.doc().free_history_cache();
+              unfreed_import_bytes = 0;
             }
           },
           Err(poisoned) => {
@@ -443,6 +477,41 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           Ok(None) => {
             send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.save_package_to(path).map_err(anyhow::Error::from)));
           },
+          Err(error) => send_reply(&reply, Err(error)),
+        }
+      },
+      IoRequest::FlushPackageCaches { reply } => {
+        // Same split shape as SavePackageTo: brief gate hold to fork +
+        // check out the package, heavy assembly + write off-thread, restore
+        // under the gate. `None` = no package or cache already current.
+        let begun = gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.begin_cache_flush()));
+        match begun {
+          Ok(Some(job)) => {
+            let core = Arc::clone(core);
+            if let Err(error) = std::thread::Builder::new()
+              .name("flowstate-cache-flush".to_string())
+              .spawn(move || {
+                let (package, wrote) = job.run();
+                let restore = core.lock(GateHolder::DocumentService).map(|mut guard| match wrote {
+                  Ok(wrote) => {
+                    guard.finish_checkpoint(package, wrote);
+                    Ok(())
+                  },
+                  Err(error) => {
+                    guard.finish_checkpoint(package, false);
+                    Err(anyhow::Error::from(error))
+                  },
+                });
+                match restore {
+                  Ok(result) => send_reply(&reply, result),
+                  Err(poisoned) => send_reply(&reply, Err(anyhow::anyhow!(poisoned))),
+                }
+              })
+            {
+              tracing::error!(%error, "spawning cache-flush worker failed");
+            }
+          },
+          Ok(None) => send_reply(&reply, Ok(())),
           Err(error) => send_reply(&reply, Err(error)),
         }
       },

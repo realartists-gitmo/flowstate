@@ -4,7 +4,8 @@ pub fn paragraph_text(document: &DocumentProjection, paragraph_ix: usize) -> Str
   document_text_slice(document, paragraph_byte_range(document, paragraph_ix))
 }
 
-#[hotpath::measure]
+// §perf: not hotpath-measured — see `paragraph_runs_len`.
+#[inline]
 #[must_use]
 pub fn paragraph_text_len(paragraph: &Paragraph) -> usize {
   paragraph_runs_len(paragraph)
