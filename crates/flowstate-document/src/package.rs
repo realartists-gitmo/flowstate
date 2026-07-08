@@ -32,6 +32,7 @@ const CHUNK_PROJECTION_CACHE: u32 = 6;
 const CHUNK_SEARCH_UNIT: u32 = 7;
 const CHUNK_THUMBNAIL: u32 = 8;
 const CHUNK_INTEGRITY_INDEX: u32 = 9;
+const CHUNK_PREVIEW_HEADER: u32 = 10;
 
 const PACKAGE_CHUNK_TABLE_ENTRY_BYTES: usize = 4 + 8 + 8 + 32;
 const MAX_PACKAGE_CHUNK_COUNT: usize = 1_048_576;
@@ -51,7 +52,19 @@ pub struct DocumentPackage {
   /// vector and still load; new packages always rebuild a complete index.
   #[serde(default)]
   pub integrity_index: Vec<IntegrityIndexEntry>,
+  /// §act-four M2: the always-written PREVIEW HEADER — a tiny projection of the
+  /// document's first `PREVIEW_HEADER_BLOCKS` blocks, written on every
+  /// checkpoint even when the full projection cache is stale or absent. Preview
+  /// reads ONLY this chunk (`read_preview_header`), never the snapshot, making
+  /// cold preview `O(viewport)` and independent of full-cache freshness. Older
+  /// packages without it decode to an empty vector.
+  #[serde(default)]
+  pub preview_headers: Vec<PreviewHeaderChunk>,
 }
+
+/// §act-four M2: the maximum number of leading blocks stored in the preview
+/// header — enough to fill a preview screen; independent of document size.
+pub const PREVIEW_HEADER_BLOCKS: usize = 16;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DocumentPackageManifest {
@@ -65,6 +78,18 @@ pub struct DocumentPackageManifest {
   pub asset_index: Vec<ChunkRef>,
   pub projection_cache_frontier: Option<Vec<u8>>,
   pub search_cache_frontier: Option<Vec<u8>>,
+  /// §act-four M2: frontier the preview header was written at. Older packages
+  /// without it decode to `None` (preview falls back to the projection cache /
+  /// full read).
+  #[serde(default)]
+  pub preview_header_frontier: Option<Vec<u8>>,
+  /// §act-four M4 (cold scroll): body-unicode position of each block's leading
+  /// boundary, in block order (see `body_block_boundaries`). Lets a cold open
+  /// map a block-index viewport to a unicode range in `O(1)` before calling
+  /// `materialize_viewport`, without the per-open `O(records)` boundary scan.
+  /// Older packages without it decode to an empty vector.
+  #[serde(default)]
+  pub block_boundaries: Vec<u32>,
   pub created_at_unix_secs: i64,
   pub modified_at_unix_secs: i64,
   /// §27 schema migration log. Empty at schema v1 (no migrations exist yet).
@@ -153,6 +178,15 @@ pub struct ProjectionCacheChunk {
   pub bytes: Vec<u8>,
 }
 
+/// §act-four M2: a tiny first-`PREVIEW_HEADER_BLOCKS`-blocks projection for
+/// `O(viewport)` cold preview. `bytes` is an encoded [`ProjectionBlocks`]
+/// trimmed to the leading blocks.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PreviewHeaderChunk {
+  pub frontier: Vec<u8>,
+  pub bytes: Vec<u8>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SearchUnitChunk {
   pub frontier: Vec<u8>,
@@ -206,6 +240,12 @@ enum PackageJournalDelta {
   Update {
     manifest: DocumentPackageManifest,
     segment: LoroUpdateSegmentChunk,
+    /// §act-four M2: the fresh preview header for this edit, so cold preview of
+    /// an edited-but-unflushed document stays `O(viewport)` (the header rides
+    /// the journal delta rather than waiting for the next full checkpoint).
+    /// `None` on older journals / when no header was maintained.
+    #[serde(default)]
+    preview_header: Option<PreviewHeaderChunk>,
   },
   Assets {
     manifest: DocumentPackageManifest,
@@ -245,6 +285,8 @@ impl DocumentPackage {
         asset_index: Vec::new(),
         projection_cache_frontier: None,
         search_cache_frontier: None,
+        preview_header_frontier: None,
+        block_boundaries: Vec::new(),
         created_at_unix_secs: now,
         modified_at_unix_secs: now,
         schema_migrations: Vec::new(),
@@ -287,6 +329,7 @@ impl DocumentPackage {
       search_units: Vec::new(),
       thumbnails: Vec::new(),
       integrity_index: Vec::new(),
+      preview_headers: Vec::new(),
     }
     .with_manifest_indexes()?;
     package.rebuild_projection_cache_from_loro(doc)?;
@@ -857,6 +900,42 @@ impl DocumentPackage {
     Ok(Some(document))
   }
 
+  /// §act-four M2: the CHEAPEST cold preview — decode ONLY the manifest + the
+  /// frontier-current preview header (the leading `PREVIEW_HEADER_BLOCKS`
+  /// blocks), never the snapshot, segments, projection cache, or assets. This
+  /// is `O(viewport)` regardless of document size, and — because the header
+  /// rides journal deltas — stays fresh for edited-but-unflushed documents
+  /// where the full projection cache is absent. Returns `Ok(None)` when no
+  /// frontier-current header exists (the caller falls back to
+  /// `read_cached_projection` → full read). Read-only.
+  pub fn read_preview_header(path: impl AsRef<Path>) -> io::Result<Option<crate::DocumentProjection>> {
+    let bytes = fs::read(path)?;
+    let extracted = if bytes.starts_with(JOURNAL_MAGIC) {
+      preview_header_from_journal_bytes(&bytes)?
+    } else {
+      preview_header_from_compact_bytes(&bytes)?
+    };
+    let Some((manifest, headers)) = extracted else {
+      return Ok(None);
+    };
+    let Some(frontier) = manifest.preview_header_frontier.as_deref() else {
+      return Ok(None);
+    };
+    if frontier != manifest.latest_frontier.as_slice() {
+      return Ok(None); // stale header — the caller falls back.
+    }
+    let Some(header) = headers.iter().find(|header| header.frontier == frontier) else {
+      return Ok(None);
+    };
+    let projection = decode_chunk::<crate::loro_projection::ProjectionBlocks>(&header.bytes, "preview header payload")?;
+    let mut document = crate::loro_projection::document_from_projection_blocks(projection);
+    if document.ids.document_id == 0 {
+      document.ids.document_id = manifest.document_id;
+    }
+    document.frontier = frontier.to_vec();
+    Ok(Some(document))
+  }
+
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
     fidelity::event(FidelityClass::Persistence, "write", || {
@@ -897,6 +976,7 @@ impl DocumentPackage {
     let payload = encode_journal_delta(&PackageJournalDelta::Update {
       manifest: self.manifest.clone(),
       segment,
+      preview_header: self.preview_headers.last().cloned(),
     })?;
     append_journal_transaction(path, &payload)
   }
@@ -912,6 +992,7 @@ impl DocumentPackage {
     let payload = encode_journal_delta(&PackageJournalDelta::Update {
       manifest: self.manifest.clone(),
       segment,
+      preview_header: self.preview_headers.last().cloned(),
     })?;
     append_journal_transaction_to_prepared_file(path, &payload)
   }
@@ -953,7 +1034,7 @@ impl DocumentPackage {
         .as_mut()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"))?;
       match delta {
-        PackageJournalDelta::Update { manifest, segment } => {
+        PackageJournalDelta::Update { manifest, segment, preview_header } => {
           if !current
             .loro_update_segments
             .iter()
@@ -967,6 +1048,11 @@ impl DocumentPackage {
           }
           if current.manifest.search_cache_frontier.is_none() {
             current.search_units.clear();
+          }
+          // §act-four M2: adopt the delta's fresh preview header (edited docs
+          // keep an up-to-date header even without a full checkpoint).
+          if let Some(header) = preview_header {
+            current.preview_headers = vec![header];
           }
         },
         PackageJournalDelta::Assets { manifest, assets } => {
@@ -1000,6 +1086,7 @@ impl DocumentPackage {
     let mut search_units = Vec::new();
     let mut thumbnails = Vec::new();
     let mut integrity_index = Vec::new();
+    let mut preview_headers = Vec::new();
 
     for (kind, payload) in chunks {
       match kind {
@@ -1012,6 +1099,7 @@ impl DocumentPackage {
         CHUNK_SEARCH_UNIT => search_units.push(decode_chunk(payload, "search unit")?),
         CHUNK_THUMBNAIL => thumbnails.push(decode_chunk(payload, "thumbnail")?),
         CHUNK_INTEGRITY_INDEX => integrity_index.push(decode_chunk(payload, "integrity index entry")?),
+        CHUNK_PREVIEW_HEADER => preview_headers.push(decode_chunk(payload, "preview header")?),
         _ => return Err(io::Error::new(io::ErrorKind::InvalidData, "unknown Flowstate package chunk kind")),
       }
     }
@@ -1026,6 +1114,7 @@ impl DocumentPackage {
       search_units,
       thumbnails,
       integrity_index,
+      preview_headers,
     };
     package.validate()?;
     Ok(package)
@@ -1066,6 +1155,12 @@ impl DocumentPackage {
       chunks.push(Chunk {
         kind: CHUNK_PROJECTION_CACHE,
         payload: encode_chunk(cache, "projection cache")?,
+      });
+    }
+    for header in &self.preview_headers {
+      chunks.push(Chunk {
+        kind: CHUNK_PREVIEW_HEADER,
+        payload: encode_chunk(header, "preview header")?,
       });
     }
     for unit in &self.search_units {
@@ -1260,6 +1355,12 @@ impl DocumentPackage {
     doc.commit();
     let frontier = encode_frontiers(&doc.state_frontiers());
     let projection = crate::loro_projection::projection_blocks_from_loro(doc)?;
+    // §act-four M2: the preview header is the leading blocks of the same
+    // materialization — O(K) to trim + serialize on top of the full cache.
+    self.write_preview_header(&frontier, &projection)?;
+    // §act-four M4 (cold scroll): persist the block-boundary index so a cold
+    // open can map a block-index viewport to a unicode range in O(1).
+    self.manifest.block_boundaries = crate::loro_projection::body_block_boundaries(doc)?;
     self.projection_caches.clear();
     self.projection_caches.push(ProjectionCacheChunk {
       frontier: frontier.clone(),
@@ -1268,6 +1369,77 @@ impl DocumentPackage {
     self.manifest.projection_cache_frontier = Some(frontier);
     self.manifest.modified_at_unix_secs = unix_time_secs();
     self.validate()?;
+    Ok(())
+  }
+
+  /// §act-four M4: the persisted block-boundary index (block-order body-unicode
+  /// positions). Empty for packages written before the index existed.
+  #[must_use]
+  pub fn block_boundaries(&self) -> &[u32] {
+    &self.manifest.block_boundaries
+  }
+
+  /// §act-four M4 cold scroll: materialize the viewport covering block indices
+  /// `[start, end)` from a cold-loaded `doc`. Uses the persisted boundary index
+  /// to map the block range to a body-unicode range in `O(1)` (no per-open
+  /// boundary scan), then the `O(viewport)` region materializer. Falls back to
+  /// deriving boundaries when the index is absent (older package). The result
+  /// is byte-identical to the corresponding slice of a full `document_from_loro`.
+  pub fn cold_viewport_blocks(&self, doc: &LoroDoc, start: usize, end: usize) -> io::Result<crate::loro_projection::RegionRows> {
+    let boundaries = if self.manifest.block_boundaries.is_empty() {
+      crate::loro_projection::body_block_boundaries(doc)?
+    } else {
+      self.manifest.block_boundaries.clone()
+    };
+    let start_unicode = boundaries.get(start).copied().unwrap_or(0) as usize;
+    let end_unicode = boundaries.get(end).copied().map_or(usize::MAX, |position| position as usize);
+    crate::loro_projection::materialize_viewport(doc, start_unicode, end_unicode)
+  }
+
+  /// §act-four M2: (re)write the preview header from a materialized
+  /// [`ProjectionBlocks`] — the leading `PREVIEW_HEADER_BLOCKS` blocks + their
+  /// ids, serialized into a tiny chunk at `frontier`. Idempotent: replaces any
+  /// existing header. The header is written on every checkpoint so cold preview
+  /// is always fresh and `O(viewport)`, independent of the full cache.
+  fn write_preview_header(&mut self, frontier: &[u8], projection: &crate::loro_projection::ProjectionBlocks) -> io::Result<()> {
+    let block_count = projection.blocks.len().min(PREVIEW_HEADER_BLOCKS);
+    // `paragraph_ids` is parallel to the PARAGRAPH blocks in order; count how
+    // many of the leading blocks are paragraphs to trim the ids in lockstep.
+    let paragraph_count = projection.blocks[..block_count]
+      .iter()
+      .filter(|block| matches!(block, crate::InputBlock::Paragraph(_)))
+      .count();
+    let header = crate::loro_projection::ProjectionBlocks {
+      document_id: projection.document_id,
+      blocks: projection.blocks[..block_count].to_vec(),
+      paragraph_ids: projection.paragraph_ids[..paragraph_count.min(projection.paragraph_ids.len())].to_vec(),
+      block_ids: projection.block_ids[..block_count.min(projection.block_ids.len())].to_vec(),
+      sections: Vec::new(),
+    };
+    self.preview_headers.clear();
+    self.preview_headers.push(PreviewHeaderChunk {
+      frontier: frontier.to_vec(),
+      bytes: encode_chunk(&header, "preview header payload")?,
+    });
+    self.manifest.preview_header_frontier = Some(frontier.to_vec());
+    Ok(())
+  }
+
+  /// §act-four M2: refresh the preview header from a LIVE, already-materialized
+  /// projection (the runtime's), keyed to the package's current latest
+  /// frontier — `O(PREVIEW_HEADER_BLOCKS)`, no re-materialization. Called on
+  /// every edit-persist so the header stays fresh even between full checkpoints
+  /// (it then rides the journal delta to disk). The caller guarantees the
+  /// projection reflects `latest_frontier`.
+  pub fn refresh_preview_header(&mut self, projection: &crate::DocumentProjection) -> io::Result<()> {
+    let frontier = self.manifest.latest_frontier.clone();
+    let header_blocks = preview_header_blocks_from_document(projection, PREVIEW_HEADER_BLOCKS);
+    self.preview_headers.clear();
+    self.preview_headers.push(PreviewHeaderChunk {
+      frontier: frontier.clone(),
+      bytes: encode_chunk(&header_blocks, "preview header payload")?,
+    });
+    self.manifest.preview_header_frontier = Some(frontier);
     Ok(())
   }
 
@@ -1612,6 +1784,85 @@ fn cached_projection_from_compact_bytes(bytes: &[u8]) -> io::Result<Option<Cache
   }
   let manifest = manifest.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package has no manifest"))?;
   Ok(Some((manifest, caches, assets)))
+}
+
+/// §act-four M2: build a trimmed [`ProjectionBlocks`] from the leading
+/// `k` blocks of a live projection — `O(k)`, the header's payload.
+fn preview_header_blocks_from_document(document: &crate::DocumentProjection, k: usize) -> crate::loro_projection::ProjectionBlocks {
+  let block_count = document.blocks.len().min(k);
+  // Paragraph blocks must carry their TEXT (a `Block::Paragraph`'s runs hold
+  // only lengths — the text lives in the document rope), so read each paragraph
+  // through the ranged reader; object blocks carry their content directly.
+  let mut blocks = Vec::with_capacity(block_count);
+  let mut paragraph_ix = 0usize;
+  for block in document.blocks.range(0..block_count) {
+    match block {
+      crate::Block::Paragraph(_) => {
+        blocks.push(crate::InputBlock::Paragraph(crate::input_paragraph_from_document_range(document, paragraph_ix, 0..usize::MAX)));
+        paragraph_ix += 1;
+      },
+      other => blocks.push(crate::input_block_from_block(other)),
+    }
+  }
+  crate::loro_projection::ProjectionBlocks {
+    document_id: document.ids.document_id,
+    blocks,
+    paragraph_ids: document.ids.paragraph_ids[..paragraph_ix.min(document.ids.paragraph_ids.len())].to_vec(),
+    block_ids: document.ids.block_ids[..block_count.min(document.ids.block_ids.len())].to_vec(),
+    sections: Vec::new(),
+  }
+}
+
+/// The preview-header pair: manifest + preview header chunks.
+type PreviewHeaderParts = (DocumentPackageManifest, Vec<PreviewHeaderChunk>);
+
+/// §act-four M2: decode ONLY the manifest + preview-header chunk(s) from raw
+/// compact bytes — skipping every heavy chunk and the `validate()` sweep.
+fn preview_header_from_compact_bytes(bytes: &[u8]) -> io::Result<Option<PreviewHeaderParts>> {
+  let chunks = read_chunk_slices(bytes, |kind| matches!(kind, CHUNK_MANIFEST | CHUNK_PREVIEW_HEADER))?;
+  let mut manifest: Option<DocumentPackageManifest> = None;
+  let mut headers = Vec::new();
+  for (kind, payload) in chunks {
+    match kind {
+      CHUNK_MANIFEST => manifest = Some(decode_chunk(payload, "manifest")?),
+      CHUNK_PREVIEW_HEADER => headers.push(decode_chunk(payload, "preview header")?),
+      _ => {},
+    }
+  }
+  let manifest = manifest.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package has no manifest"))?;
+  Ok(Some((manifest, headers)))
+}
+
+/// Journal-aware sibling: decode the last full generation's header, then fold
+/// each trailing `Update` delta's fresh header (an edited doc's latest header
+/// rides its journal delta).
+fn preview_header_from_journal_bytes(bytes: &[u8]) -> io::Result<Option<PreviewHeaderParts>> {
+  let payloads = committed_journal_payloads(bytes)?;
+  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+  let mut extracted: Option<PreviewHeaderParts> = None;
+  for payload in &payloads[latest_generation..] {
+    let payload = *payload;
+    if payload.starts_with(PACKAGE_MAGIC) {
+      extracted = preview_header_from_compact_bytes(payload)?;
+      continue;
+    }
+    let delta = decode_journal_delta(payload)?;
+    let Some((manifest, headers)) = extracted.as_mut() else {
+      return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"));
+    };
+    if let PackageJournalDelta::Update {
+      manifest: next_manifest,
+      preview_header,
+      ..
+    } = delta
+    {
+      *manifest = next_manifest;
+      if let Some(header) = preview_header {
+        *headers = vec![header];
+      }
+    }
+  }
+  Ok(extracted)
 }
 
 fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentPackageManifest, Vec<SearchUnitChunk>)> {
@@ -3035,6 +3286,104 @@ mod tests {
 
   fn loro_test_error(error: impl std::error::Error + Send + Sync + 'static) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, error)
+  }
+
+  /// §act-four M2: the preview header materializes the leading blocks and
+  /// matches the full document there; and — riding the journal delta — it stays
+  /// fresh for an edited-but-unflushed document, exactly the "preview without a
+  /// solid full cache" case. Read is O(header): only the manifest + header
+  /// §act-four M4 cold scroll: a checkpoint persists the block-boundary index,
+  /// and `cold_viewport_blocks` uses it to materialize an arbitrary block-index
+  /// viewport byte-identically to the corresponding slice of the full rebuild —
+  /// without building the whole projection.
+  #[test]
+  fn cold_viewport_uses_persisted_boundary_index_and_matches_full_rebuild() -> io::Result<()> {
+    use crate::loro_projection::{body_block_boundaries, document_from_loro, projection_blocks_from_loro};
+    use crate::{DocumentTheme, ParagraphStyle, document_from_input, import_document_projection};
+    use gpui_flowtext::{InputParagraph, InputRun, RunStyles};
+
+    let paras: Vec<InputParagraph> = (0..12)
+      .map(|i| InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: format!("paragraph {i} — naïve café ☃"),
+          styles: RunStyles::default(),
+        }],
+      })
+      .collect();
+    let projection = document_from_input(DocumentTheme::default(), paras);
+    let imported = import_document_projection(projection, "Cold viewport").map_err(loro_test_error)?;
+    let doc = imported.doc;
+    // `from_loro_snapshot` checkpoints, which persists the boundary index.
+    let package = DocumentPackage::from_loro_snapshot(&doc, "Cold viewport")?;
+    assert!(!package.block_boundaries().is_empty(), "checkpoint persisted the boundary index");
+    assert_eq!(
+      package.block_boundaries(),
+      body_block_boundaries(&doc)?.as_slice(),
+      "persisted index == freshly derived boundaries"
+    );
+
+    // A mid-doc viewport [6, 9) via the O(1) persisted lookup == full[6..9].
+    let full = projection_blocks_from_loro(&doc)?.blocks;
+    let viewport = package.cold_viewport_blocks(&doc, 6, 9)?;
+    assert_eq!(viewport.blocks, full[6..9].to_vec(), "cold viewport == full[6..9], byte-identical");
+    // And it agrees with the freshly-rebuilt projection.
+    let rebuilt = document_from_loro(&doc).map_err(loro_test_error)?;
+    assert_eq!(rebuilt.blocks.len(), full.len(), "full rebuild has all rows");
+    Ok(())
+  }
+
+  /// chunk decode.
+  #[test]
+  fn preview_header_matches_leading_blocks_and_stays_fresh_across_edits() -> io::Result<()> {
+    use crate::{DocumentTheme, ParagraphStyle, document_from_input, import_document_projection};
+
+    let paras: Vec<InputParagraph> = (0..60)
+      .map(|i| InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: format!("paragraph {i:03} of the document body"),
+          styles: RunStyles::default(),
+        }],
+      })
+      .collect();
+    let projection = document_from_input(DocumentTheme::default(), paras);
+    let imported = import_document_projection(projection, "Header Test").map_err(loro_test_error)?;
+    let doc = imported.doc;
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("header.db8");
+    let mut package = DocumentPackage::from_loro_snapshot(&doc, "Header Test")?;
+    package.write(&path)?;
+
+    // Checkpoint header == leading blocks of the full materialization.
+    let header = DocumentPackage::read_preview_header(&path)?.expect("fresh header at checkpoint");
+    assert!(!header.paragraphs.is_empty() && header.paragraphs.len() <= PREVIEW_HEADER_BLOCKS, "header trims to the leading blocks");
+    let full = document_from_loro(&doc).map_err(loro_test_error)?;
+    for ix in 0..header.paragraphs.len() {
+      assert_eq!(crate::paragraph_text(&header, ix), crate::paragraph_text(&full, ix), "header paragraph {ix} matches the full doc");
+    }
+
+    // Edit the document, persist as a journal delta (no full checkpoint). The
+    // full projection cache is nulled — but the header rides the delta and
+    // stays fresh.
+    let text = body_text(&doc);
+    let from_frontier = doc.state_frontiers();
+    let from_vv = doc.state_vv();
+    text.insert(1, "EDIT ").map_err(loro_test_error)?;
+    doc.commit();
+    let update = doc.export(loro::ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
+    assert!(package.manifest.projection_cache_frontier.is_none(), "an edit nulls the full projection cache");
+    let edited_projection = document_from_loro(&doc).map_err(loro_test_error)?;
+    package.refresh_preview_header(&edited_projection)?;
+    package.append_latest_update_to_path(&path)?;
+
+    // The full cache is absent, but the header preview is fresh and correct.
+    assert!(DocumentPackage::read_cached_projection(&path)?.is_none(), "no fresh full cache after the edit");
+    let header2 = DocumentPackage::read_preview_header(&path)?.expect("header fresh after edit via the journal delta");
+    assert_eq!(header2.frontier, package.manifest.latest_frontier, "header is at the latest frontier");
+    assert_eq!(crate::paragraph_text(&header2, 0), "EDIT paragraph 000 of the document body", "header reflects the edit");
+    Ok(())
   }
 
   /// 2026-07-07 .db8 first-edit-freeze regressions: (a) appending a segment
