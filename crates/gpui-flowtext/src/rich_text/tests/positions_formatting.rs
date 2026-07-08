@@ -15,7 +15,7 @@ fn document_position_round_trips_top_level_text_blocks() {
       },
     ],
   );
-  document.blocks = std::sync::Arc::new(vec![
+  document.blocks = crate::BlockSeq::from_vec(vec![
     Block::Paragraph(document.paragraphs[0].clone()),
     Block::Image(ImageBlock {
       asset_id: AssetId(42),

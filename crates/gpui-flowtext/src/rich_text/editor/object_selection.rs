@@ -354,8 +354,10 @@ impl RichTextEditor {
     }
     let start_block = self.block_ix_for_paragraph(range.start.paragraph)?;
     let end_block = self.block_ix_for_paragraph(range.end.paragraph)?;
-    let has_object = self.document.blocks[start_block.min(end_block)..=start_block.max(end_block)]
-      .iter()
+    let has_object = self
+      .document
+      .blocks
+      .range(start_block.min(end_block)..start_block.max(end_block) + 1)
       .any(|block| !matches!(block, Block::Paragraph(_)));
     if !has_object {
       return None;

@@ -271,7 +271,7 @@ mod tests {
       editor.set_selection(EditorSelection::range(selection.start, selection.end), cx);
       editor.clear_formatting(cx);
 
-      for paragraph in editor.document().paragraphs.iter() {
+      for paragraph in &editor.document().paragraphs {
         assert_eq!(paragraph.style, ParagraphStyle::Normal);
         assert!(
           paragraph

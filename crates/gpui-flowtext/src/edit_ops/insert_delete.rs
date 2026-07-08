@@ -8,7 +8,9 @@ pub fn insert_text_at(document: &mut DocumentProjection, paragraph_ix: usize, by
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   document.text.insert(paragraph_start + byte, text);
   {
-    let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
+    let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
+      return;
+    };
     bump_paragraph_version(paragraph);
     if paragraph.runs.is_empty() {
       paragraph.runs.push(TextRun { len: insert_len, styles });
@@ -101,7 +103,9 @@ pub fn delete_range_in_paragraph(document: &mut DocumentProjection, paragraph_ix
     .text
     .delete(paragraph_start + range.start..paragraph_start + range.end);
   {
-    let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
+    let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
+      return;
+    };
     bump_paragraph_version(paragraph);
     let mut offset = 0;
     let mut new_runs: Vec<TextRun> = Vec::with_capacity(paragraph.runs.len());

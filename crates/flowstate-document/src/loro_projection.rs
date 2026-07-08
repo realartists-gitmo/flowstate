@@ -103,6 +103,49 @@ pub fn materialize_body_region(
   })
 }
 
+/// §act-four M4 (cold viewport load): materialize just the body rows covering
+/// `[start_unicode, end_unicode)` from a cold-loaded document, WITHOUT building
+/// the whole projection. Content materialization is `O(viewport)` (the §6-R
+/// `slice_delta` region walk); the boundary→id maps reuse the SAME assembly the
+/// full [`document_from_loro`] uses, so the output is byte-identical to the
+/// corresponding slice of the full rebuild. `start_unicode` is snapped DOWN to
+/// the nearest row-leading boundary (the region walk must start at a sentinel);
+/// pass `[0, body_len)` for the whole doc, or a viewport for scroll.
+pub fn materialize_viewport(doc: &LoroDoc, start_unicode: usize, end_unicode: usize) -> io::Result<RegionRows> {
+  let projector = Projector::new(doc)?;
+  let body = projector.flow_text(ROOT_BODY_FLOW_ID)?;
+  // Metadata-only maps (no content materialization) — the same functions the
+  // full projection resolves once per flow.
+  let paragraph_map = paragraph_ids_by_boundary(doc, &body);
+  let pblock_map = paragraph_block_ids_by_boundary(doc, &body);
+  let mut defects = Vec::new();
+  let (object_map, _quarantined) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
+  // Snap the start to the row-leading boundary at or before it (0 covers the
+  // seed sentinel), so the region walk begins at a sentinel as required.
+  let sentinel = paragraph_map.keys().copied().filter(|boundary| *boundary <= start_unicode).max().unwrap_or(0);
+  let end = end_unicode.max(sentinel + 1).min(body.len_unicode());
+  materialize_body_region(doc, sentinel, end, &paragraph_map, &pblock_map, &object_map)
+}
+
+/// §act-four M4 (cold scroll): the body-unicode position of every block's
+/// leading boundary, in block order — paragraph leading `\n`s plus object
+/// U+FFFC placeholders, sorted + deduped. Persisted in the package manifest so
+/// a cold open maps a block-index viewport to a unicode range in `O(1)` (no
+/// per-open `O(records)` boundary scan) before calling [`materialize_viewport`].
+/// `boundaries[i]` is block `i`'s leading position; a viewport `[a, b)` decodes
+/// `[boundaries[a], boundaries[b])`. `O(records)` — metadata only, no content.
+pub fn body_block_boundaries(doc: &LoroDoc) -> io::Result<Vec<u32>> {
+  let projector = Projector::new(doc)?;
+  let body = projector.flow_text(ROOT_BODY_FLOW_ID)?;
+  let mut boundaries: Vec<usize> = paragraph_ids_by_boundary(doc, &body).into_keys().collect();
+  let mut defects = Vec::new();
+  let (objects, _quarantined) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
+  boundaries.extend(objects.keys().copied());
+  boundaries.sort_unstable();
+  boundaries.dedup();
+  Ok(boundaries.into_iter().map(|position| u32::try_from(position).unwrap_or(u32::MAX)).collect())
+}
+
 pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
   Ok(projection_from_loro(doc)?.blocks)
 }
@@ -1555,6 +1598,44 @@ mod tests {
     InputBlock, InputBlockAlignment, InputImageBlock, InputImageSizing, InputParagraph, InputRun, RunStyles, document_from_input_blocks,
   };
 
+  /// §act-four M4 cold viewport load: `materialize_viewport` materializes an
+  /// arbitrary body region byte-identically to the corresponding slice of the
+  /// full `document_from_loro` rebuild — WITHOUT building the whole projection.
+  #[test]
+  fn materialize_viewport_matches_the_full_rebuild_slice() -> io::Result<()> {
+    let source = document_from_input_blocks(
+      DocumentTheme::clone(&flowstate_document_theme()),
+      (0..12)
+        .map(|ix| {
+          InputBlock::Paragraph(InputParagraph {
+            style: gpui_flowtext::ParagraphStyle::Normal,
+            runs: vec![InputRun {
+              text: format!("paragraph {ix} — naïve café ☃"),
+              styles: RunStyles::default(),
+            }],
+          })
+        })
+        .collect(),
+    );
+    let doc = document_to_loro(&source, "Viewport load")?;
+    let body = body_text(&doc);
+    let full = projection_blocks_from_loro(&doc)?.blocks; // full rebuild, Vec<InputBlock>
+
+    // (1) The whole-doc viewport equals the full rebuild, block-for-block.
+    let whole = materialize_viewport(&doc, 0, body.len_unicode())?;
+    assert_eq!(whole.blocks, full, "whole-doc viewport == full rebuild");
+
+    // (2) A mid-doc sub-viewport equals the corresponding slice of the full
+    // rebuild — the cold random-scroll case. Boundaries (sorted by position)
+    // index paragraphs; [boundary[6], boundary[9]) covers paragraphs 6,7,8.
+    let mut boundaries: Vec<usize> = paragraph_ids_by_boundary(&doc, &body).keys().copied().collect();
+    boundaries.sort_unstable();
+    assert!(boundaries.len() >= 10, "enough rows to sub-viewport");
+    let viewport = materialize_viewport(&doc, boundaries[6], boundaries[9])?;
+    assert_eq!(viewport.blocks, full[6..9].to_vec(), "sub-viewport == full[6..9], byte-identical");
+    Ok(())
+  }
+
   /// The vendored Loro batch resolver (`query_text_id_positions`, driving
   /// `boundary_cursor_positions`) must produce EXACTLY the positions the per-id
   /// `get_cursor_pos` produces — that equivalence is the entire correctness basis
@@ -1786,7 +1867,7 @@ mod tests {
     assert_eq!(gpui_flowtext::paragraph_text(&projected, 0), "before");
     assert_eq!(gpui_flowtext::paragraph_text(&projected, 1), "after");
     assert!(matches!(
-      projected.blocks.as_slice(),
+      projected.blocks.to_vec().as_slice(),
       [
         gpui_flowtext::Block::Paragraph(_),
         gpui_flowtext::Block::Image(_),

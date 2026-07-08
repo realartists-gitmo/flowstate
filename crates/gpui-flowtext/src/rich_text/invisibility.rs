@@ -104,17 +104,17 @@ pub(super) fn invisibility_projected_document(document: &DocumentProjection, par
       .version
       .wrapping_add(INVISIBILITY_PROJECTED_VERSION_OFFSET),
   };
-  let paragraphs = Arc::new(vec![paragraph.clone()]);
+  let paragraphs = vec![paragraph.clone()];
+  let paragraph_count = paragraphs.len();
   let mut projected = DocumentProjection {
     frontier: document.frontier.clone(),
     text: Rope::from(text),
-    blocks: Arc::new(vec![Block::Paragraph(paragraph)]),
-    paragraphs: paragraphs.clone(),
+    blocks: BlockSeq::from_vec(vec![Block::Paragraph(paragraph)]),
+    paragraphs: ParagraphSeq::from_vec(paragraphs),
     assets: document.assets.clone(),
-    ids: document_ids_for_shape(paragraphs.len(), 1),
+    ids: document_ids_for_shape(paragraph_count, 1),
     sections: Arc::new(Vec::new()),
     outline: Arc::new(Vec::new()),
-    offset_index: ParagraphOffsetIndex::new(&paragraphs),
     theme: document.theme.clone(),
   };
   rebuild_document_sections(&mut projected);

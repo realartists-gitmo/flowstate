@@ -334,14 +334,13 @@ fn style_at(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> 
 /// Set a paragraph's style, keeping the mirrored `Block::Paragraph` copy in
 /// sync (the render reads paragraphs; the block copy backs structural patches).
 fn set_paragraph_style(document: &mut DocumentProjection, paragraph_ix: usize, style: ParagraphStyle) {
-  let paragraphs = std::sync::Arc::make_mut(&mut document.paragraphs);
-  let Some(paragraph) = paragraphs.get_mut(paragraph_ix) else {
+  let Some(paragraph) = document.paragraphs.get_mut(paragraph_ix) else {
     return;
   };
   paragraph.style = style;
   paragraph.version = paragraph.version.wrapping_add(1);
   if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
-    let blocks = std::sync::Arc::make_mut(&mut document.blocks);
+    let mut blocks = document.blocks.make_mut();
     if let Some(Block::Paragraph(block_paragraph)) = blocks.get_mut(block_ix) {
       block_paragraph.style = style;
       block_paragraph.version = block_paragraph.version.wrapping_add(1);

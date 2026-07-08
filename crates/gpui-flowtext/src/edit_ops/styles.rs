@@ -1,4 +1,4 @@
-use std::{ops::Range, sync::Arc};
+use std::ops::Range;
 
 use super::{DocumentProjection, RunStyle, paragraphs_mut, TextRun, update_paragraph_block, Paragraph, DocumentSpan, remove_paragraph_ids, insert_paragraph_id, replace_paragraph_blocks, rebuild_document_sections, DocumentOffset, SOFT_LINE_BREAK, RichClipboardFragment, InputRun, InputParagraph, block_ix_for_paragraph, Block, insert_block_id, RunStyles, ParagraphStyle, RunSemanticStyle, RICH_TEXT_CLIPBOARD_FORMAT};
 

@@ -32,6 +32,8 @@ Cardmirror feature parity
 https://github.com/ant981228/cardmirror/blob/main/MANUAL.md#18-whats-not-here-yet
 .cmir support, input-output, round trip
 
+Universal accessible citations---use fine-tuned FLAN to clean all incoming cites into structured JSON objects that act as normal citetext unless opened up, and expose conversion macroes. Expose a user config layer to make their cites appear however they want.
+
 Settings ui---fix
 
 Ribbon ui---fix

@@ -45,24 +45,27 @@ pub fn split_paragraph_at(document: &mut DocumentProjection, paragraph_ix: usize
   document.text.insert(global, "\n");
   let (left_runs, right_runs) = split_runs_at(&paragraph.runs, byte);
   let old_end = paragraph_range.end;
-  let paragraphs = paragraphs_mut(document);
-  paragraphs[paragraph_ix].byte_range = paragraph_range.start..global;
-  paragraphs[paragraph_ix].runs = left_runs;
-  bump_paragraph_version(&mut paragraphs[paragraph_ix]);
+  if let Some(target) = paragraphs_mut(document).get_mut(paragraph_ix) {
+    target.byte_range = paragraph_range.start..global;
+    target.runs = left_runs;
+    bump_paragraph_version(target);
+  }
   let new_paragraph = Paragraph {
     style: paragraph.style,
     byte_range: global + 1..old_end + 1,
     runs: right_runs,
     version: paragraph.version.wrapping_add(1),
   };
-  paragraphs.insert(paragraph_ix + 1, new_paragraph.clone());
+  paragraphs_mut(document).insert(paragraph_ix + 1, new_paragraph.clone());
   insert_paragraph_id(document, paragraph_ix + 1);
   if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
-    let blocks = Arc::make_mut(&mut document.blocks);
+    let updated = Block::Paragraph(document.paragraphs[paragraph_ix].clone());
+    let mut blocks = document.blocks.make_mut();
     if let Some(block) = blocks.get_mut(block_ix) {
-      *block = Block::Paragraph(document.paragraphs[paragraph_ix].clone());
+      *block = updated;
     }
     blocks.insert(block_ix + 1, Block::Paragraph(new_paragraph));
+    drop(blocks);
     insert_block_id(document, block_ix + 1);
   }
   rebuild_document_offset_index(document);
@@ -95,10 +98,13 @@ pub fn delete_cross_paragraph_range(document: &mut DocumentProjection, range: Ra
   let mut merged_runs = left_runs;
   merged_runs.extend(right_runs);
   let paragraphs = paragraphs_mut(document);
-  paragraphs[start_ix].runs = merge_adjacent_runs(merged_runs);
-  paragraphs[start_ix].byte_range = start_para_range.start..start_para_range.start + paragraph_runs_len(&paragraphs[start_ix]);
-  bump_paragraph_version(&mut paragraphs[start_ix]);
-  paragraphs.drain(start_ix + 1..=end_ix);
+  if let Some(target) = paragraphs.get_mut(start_ix) {
+    target.runs = merge_adjacent_runs(merged_runs);
+    let new_len = paragraph_runs_len(target);
+    target.byte_range = start_para_range.start..start_para_range.start + new_len;
+    bump_paragraph_version(target);
+  }
+  paragraphs.splice(start_ix + 1..end_ix + 1, Vec::new());
   remove_paragraph_ids(document, start_ix + 1..end_ix + 1);
   let replacement = document.paragraphs[start_ix].clone();
   replace_paragraph_blocks(document, start_ix, end_ix - start_ix + 1, &[replacement]);

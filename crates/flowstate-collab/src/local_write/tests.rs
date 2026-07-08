@@ -9,7 +9,8 @@ use super::commit::INJECT_FRAGMENT_FAULT;
 use super::gate::{GateHolder, WriteGate};
 use super::handle::{LocalDocHandle, LocalWriteConfig};
 use super::intents::{
-  DeleteRangeIntent, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, SplitParagraphIntent, TextAnchor, WriteRejected,
+  DeleteRangeIntent, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor,
+  WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent};
 
@@ -903,4 +904,134 @@ fn slow_undo_drops_object_placeholder_pre_existing() {
     0,
     "documents the pre-existing slow-path object-placeholder drop (see doc comment)"
   );
+}
+
+/// §act-four M1: a mass select-all restyle records its inverse; undo reverts
+/// every paragraph's style, redo re-applies — via the fast path (no checkout),
+/// with the debug audit inside each step verifying patch-vs-full-rebuild.
+#[test]
+fn recorded_inverse_fast_undo_round_trips_mass_restyle() {
+  let (handle, gate) = new_handle("recorded-inverse-restyle");
+  seed_mass_fragment(&handle, 40, None);
+  let ids = paragraph_ids(&handle);
+
+  let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
+    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  let before = styles_of(&handle);
+  assert!(before.iter().all(|style| *style == ParagraphStyle::Normal), "seed paragraphs start Normal");
+
+  // Select-all restyle to a custom style.
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: ids.clone(),
+      style: ParagraphStyle::Custom(3),
+    })
+    .expect("mass restyle commits");
+  let after = styles_of(&handle);
+  assert!(after.iter().all(|style| *style == ParagraphStyle::Custom(3)), "restyle sets every paragraph");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass restyle must arm the recorded inverse");
+
+  // Undo: fast path reverts every style.
+  let outcome = handle.apply_undo().expect("undo runs");
+  assert!(outcome.applied);
+  assert_eq!(styles_of(&handle), before, "undo must restore every paragraph's prior style");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Redo), "fast undo flips the slot to redo");
+
+  // Redo: fast path re-applies.
+  let outcome = handle.apply_redo().expect("redo runs");
+  assert!(outcome.applied);
+  assert_eq!(styles_of(&handle), after, "redo must re-apply the restyle");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "fast redo flips the slot back");
+
+  // Ping-pong once more + convergence: a fresh peer receives the full history
+  // (restyle + fast inverse + fast redo + fast inverse), and after a
+  // BIDIRECTIONAL exchange both replicas materialize the same converged
+  // document (each seeds its own sentinel, so convergence — not identity with a
+  // pre-sync snapshot — is the bar).
+  handle.apply_undo().expect("second undo runs");
+  assert_eq!(styles_of(&handle), before);
+  let mut peer = CrdtRuntime::new_empty("recorded-inverse-restyle").expect("peer");
+  let full_history = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  peer.import_remote_update(&full_history).expect("peer imports local history");
+  let peer_history = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  drop(guard);
+  let styles = |doc: &DocumentProjection| -> Vec<ParagraphStyle> { doc.paragraphs.iter().map(|paragraph| paragraph.style).collect() };
+  let local_fresh = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    flowstate_document::document_from_loro(guard.doc()).expect("local materializes")
+  };
+  let peer_fresh = flowstate_document::document_from_loro(peer.doc()).expect("peer materializes");
+  assert_eq!(styles(&peer_fresh), styles(&local_fresh), "replicas converge on the same styles after the fast-path history");
+  assert!(styles(&local_fresh).iter().all(|style| *style == ParagraphStyle::Normal), "converged on the undone (Normal) styles");
+}
+
+/// §act-four M1: a mass replace-all records its inverse; undo restores every
+/// original match, redo re-applies — via the fast path (no checkout), the
+/// projection side deriving through the regional ladder. Convergence verified
+/// against a peer receiving the whole fast-path history.
+#[test]
+fn recorded_inverse_fast_undo_round_trips_mass_replace() {
+  let (handle, gate) = new_handle("recorded-inverse-replace");
+  seed_mass_fragment(&handle, 40, None);
+
+  let body_before = body_string(&gate);
+  // Every seeded paragraph contains "row" exactly once (…"for row NNN"…).
+  let projection = handle.projection().expect("projection");
+  let ranges = flowstate_document::find_text_ranges(&projection, "row");
+  assert!(ranges.len() >= 8, "need a mass replace (got {} matches)", ranges.len());
+  let matches: Vec<super::intents::ReplaceMatch> = ranges
+    .iter()
+    .map(|range| super::intents::ReplaceMatch {
+      start: TextAnchor::new(projection.ids.paragraph_ids[range.start.paragraph], range.start.byte),
+      end: TextAnchor::new(projection.ids.paragraph_ids[range.end.paragraph], range.end.byte),
+      styles: None,
+    })
+    .collect();
+
+  handle
+    .replace_matches(super::intents::ReplaceMatchesIntent {
+      matches,
+      replacement: "COLUMN".into(),
+    })
+    .expect("mass replace commits");
+  let body_replaced = body_string(&gate);
+  assert!(!body_replaced.contains("row"), "replace removed every 'row'");
+  assert!(body_replaced.contains("COLUMN"), "replace inserted 'COLUMN'");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass replace must arm the recorded inverse");
+
+  // Undo: fast path restores the originals.
+  let outcome = handle.apply_undo().expect("undo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_before, "undo must restore every original match");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Redo));
+
+  // Redo: fast path re-applies the replacement.
+  let outcome = handle.apply_redo().expect("redo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_replaced, "redo must reproduce the replaced state");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo));
+
+  // Ping-pong + bidirectional convergence.
+  handle.apply_undo().expect("second undo runs");
+  assert_eq!(body_string(&gate), body_before);
+  let mut peer = CrdtRuntime::new_empty("recorded-inverse-replace").expect("peer");
+  let full_history = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  peer.import_remote_update(&full_history).expect("peer imports local history");
+  let peer_history = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  drop(guard);
+  let local_text = body_string(&gate);
+  let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
+  assert_eq!(local_text, peer_text, "replicas converge on the replace-all fast-path history");
+  assert!(!peer_text.contains("COLUMN"), "converged on the undone (original) content");
 }

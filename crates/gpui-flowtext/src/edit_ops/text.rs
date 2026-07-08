@@ -79,7 +79,7 @@ pub fn capture_document_span(document: &DocumentProjection, range: Range<usize>)
     .collect::<Vec<_>>();
   DocumentSpan {
     start_paragraph: start,
-    paragraphs: document.paragraphs[start..end].to_vec(),
+    paragraphs: document.paragraphs.range_to_vec(start..end),
     paragraph_ids,
     block_ids,
     text,

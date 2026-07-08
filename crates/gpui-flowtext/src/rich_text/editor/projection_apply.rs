@@ -242,7 +242,7 @@ impl ContentRollbackJournal {
           // runs' length and fixes the Fenwick index, trailing ranges, and
           // the block mirror.
           restored.byte_range = current_range;
-          paragraphs_mut(document)[paragraph_ix] = restored;
+          paragraphs_mut(document).set(paragraph_ix, restored);
           update_paragraph_offsets_after_len_change(document, paragraph_ix);
         },
         JournalEntry::InsertedRow { row, paragraph_at } => {
@@ -277,7 +277,7 @@ fn insert_paragraph_row_in_place(
   text: &str,
 ) {
   if paragraph_at < document.paragraphs.len() {
-    let start = document.offset_index.paragraph_start(paragraph_at);
+    let start = document.blocks.paragraph_start(paragraph_at);
     document.text.insert(start, text);
     document.text.insert(start + text.len(), "\n");
     paragraph.byte_range = start..start + text.len();
@@ -289,7 +289,7 @@ fn insert_paragraph_row_in_place(
   }
   paragraphs_mut(document).insert(paragraph_at, paragraph.clone());
   document.ids.paragraph_ids.insert(paragraph_at.min(document.ids.paragraph_ids.len()), paragraph_id);
-  Arc::make_mut(&mut document.blocks).insert(row, Block::Paragraph(paragraph));
+  document.blocks.insert(row, Block::Paragraph(paragraph));
   document.ids.block_ids.insert(row.min(document.ids.block_ids.len()), block_id);
   refresh_offsets_after_row_splice(document);
 }
@@ -314,7 +314,7 @@ fn delete_paragraph_row_in_place(document: &mut DocumentProjection, row: usize, 
     document.ids.paragraph_ids.remove(paragraph_at);
   }
   if row < document.blocks.len() {
-    Arc::make_mut(&mut document.blocks).remove(row);
+    document.blocks.remove(row);
   }
   if row < document.ids.block_ids.len() {
     document.ids.block_ids.remove(row);
@@ -328,16 +328,15 @@ fn delete_paragraph_row_in_place(document: &mut DocumentProjection, row: usize, 
 fn refresh_offsets_after_row_splice(document: &mut DocumentProjection) {
   crate::edit_ops::rebuild_document_offset_index(document);
   let ranges: Vec<std::ops::Range<usize>> = document.paragraphs.iter().map(|paragraph| paragraph.byte_range.clone()).collect();
-  let blocks = Arc::make_mut(&mut document.blocks);
   let mut paragraph_ord = 0usize;
-  for block in blocks.iter_mut() {
+  document.blocks.map_from_mut(0, |block| {
     if let Block::Paragraph(paragraph) = block {
       if let Some(range) = ranges.get(paragraph_ord) {
         paragraph.byte_range = range.clone();
       }
       paragraph_ord += 1;
     }
-  }
+  });
 }
 
 /// The content-only arms of [`apply_projection_patches_to_document`], applied
@@ -1056,7 +1055,7 @@ fn replace_paragraph_content(document: &mut DocumentProjection, paragraph_ix: us
   let mut replacement = paragraph_from_input_paragraph(paragraph);
   replacement.version = document.paragraphs[paragraph_ix].version.wrapping_add(1);
   replacement.byte_range = byte_range.clone();
-  paragraphs_mut(document)[paragraph_ix] = replacement;
+  paragraphs_mut(document).set(paragraph_ix, replacement);
   update_paragraph_offsets_after_len_change(document, paragraph_ix);
 }
 
@@ -1244,13 +1243,11 @@ fn rebuild_document_from_projection_patch_blocks(
     );
   }
 
-  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
   document.text = Rope::from(text);
-  document.paragraphs = Arc::new(paragraphs);
-  document.blocks = Arc::new(blocks);
+  document.paragraphs = ParagraphSeq::from_vec(paragraphs);
+  document.blocks = BlockSeq::from_vec(blocks);
   document.ids.block_ids = block_ids;
   document.ids.paragraph_ids = paragraph_ids;
-  document.offset_index = offset_index;
   reconcile_document_ids(document);
   Ok(())
 }
@@ -1291,7 +1288,7 @@ fn insert_projection_structural_block(
       return Err(ProjectionApplyError::DuplicateBlockId(block.block_id));
     }
     let row = row.min(document.blocks.len());
-    Arc::make_mut(&mut document.blocks).insert(row, block_from_input_block(&block.block));
+    document.blocks.insert(row, block_from_input_block(&block.block));
     document
       .ids
       .block_ids
@@ -1318,7 +1315,7 @@ fn delete_projection_block_at(document: &mut DocumentProjection, row: usize) -> 
     });
   };
   if matches!(block, Block::Image(_) | Block::Equation(_) | Block::Table(_)) {
-    Arc::make_mut(&mut document.blocks).remove(row);
+    document.blocks.remove(row);
     remove_block_ids(document, row..row + 1);
     reconcile_document_ids(document);
     return Ok(());
@@ -1347,10 +1344,11 @@ fn move_projection_block(document: &mut DocumentProjection, from: usize, to: usi
     });
   };
   if matches!(block, Block::Image(_) | Block::Equation(_) | Block::Table(_)) {
-    let blocks = Arc::make_mut(&mut document.blocks);
+    let mut blocks = document.blocks.make_mut();
     let block = blocks.remove(from);
     let to = to.min(blocks.len());
     blocks.insert(to, block);
+    drop(blocks);
     if from < document.ids.block_ids.len() {
       let block_id = document.ids.block_ids.remove(from);
       document
@@ -1396,9 +1394,7 @@ fn replace_projection_block(
     {
       return Err(ProjectionApplyError::DuplicateBlockId(block_id));
     }
-    if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(row) {
-      *block = block_from_input_block(&after);
-    }
+    document.blocks.set(row, block_from_input_block(&after));
     if row < document.ids.block_ids.len() {
       document.ids.block_ids[row] = block_id;
     }

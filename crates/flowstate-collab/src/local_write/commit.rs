@@ -202,10 +202,11 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
   let vv_before = core.doc().state_vv();
   let base_frontier = frontier_before.encode();
 
-  // §act-three B.1: a qualifying mass DeleteRange records its inverse BEFORE
-  // the mutation destroys the content (doc + projection are still pre-delete
-  // here). `None` for everything that doesn't qualify.
-  let pending_inverse = super::recorded_inverse::capture_before_delete(core, &plan);
+  // §act-four M1: a qualifying whole-doc op (mass DeleteRange, select-all
+  // restyle, …) records its inverse BEFORE the mutation changes the content
+  // (doc + projection are still pre-op here). `None` for anything that doesn't
+  // qualify — the op proceeds identically either way.
+  let pending_inverse = super::recorded_inverse::capture_before_execute(core, &plan);
   let peer_counter_before = local_peer_counter_end(core);
 
   // ---- Phase 2: mutate (Err → I-10 compensation) ---------------------------
@@ -259,6 +260,7 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
       core.merge_subscription_invalidation(&mut invalidation);
       core.apply_projection_patch_set(&patches);
       core.set_projection_frontier(new_frontier.clone());
+      core.record_projection_version();
       queue_publish_events(core, frontier_before, vv_before, invalidation);
       audit_patched_projection(core, intent.class());
       let batch = ProjectionPatchBatch {
@@ -288,6 +290,7 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
       if let Err(error) = core.refresh_projection() {
         return Err(compensate_failed_intent(core, &frontier_before, &vv_before, intent.class(), &error));
       }
+      core.record_projection_version();
       queue_publish_events(core, frontier_before, vv_before, invalidation);
       let replace = ProjectionReplace {
         document: core.projection_ref().clone(),
@@ -899,6 +902,27 @@ fn require_column(table: &flowstate_document::TableBlock, table_id: BlockId, col
 // ---------------------------------------------------------------------------
 
 #[hotpath::measure]
+/// §act-four M6: if `targets` is a GAP-FREE paragraph run (e.g. select-all), a
+/// uniform restyle can be one range mark over `[first_boundary, last_boundary+1)`
+/// instead of N per-boundary marks — the marked span covers exactly those
+/// paragraphs' boundary `\n`s and nothing beyond the last target's boundary.
+/// Returns `None` (keep the per-boundary path) for fewer than two targets or any
+/// gap, so a non-contiguous multi-select never restyles a paragraph between the
+/// gaps. `boundary` is `targets`' third field; `paragraph_ix` the second.
+fn contiguous_boundary_span(targets: &[(ParagraphId, usize, usize)]) -> Option<(usize, usize)> {
+  if targets.len() < 2 {
+    return None;
+  }
+  let mut indices: Vec<usize> = targets.iter().map(|(_, paragraph_ix, _)| *paragraph_ix).collect();
+  indices.sort_unstable();
+  if indices.windows(2).any(|pair| pair[1] != pair[0] + 1) {
+    return None; // a gap → a range mark would restyle a non-target paragraph.
+  }
+  let lo = targets.iter().map(|(_, _, boundary)| *boundary).min()?;
+  let hi = targets.iter().map(|(_, _, boundary)| *boundary).max()?;
+  Some((lo, hi + 1))
+}
+
 fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationSummary> {
   let doc = core.doc().clone();
   let projection = hotpath::measure_block!("execute_plan_projection_clone", core.projection_ref().clone());
@@ -1014,13 +1038,29 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
     ResolvedPlan::SetParagraphStyles { targets, style } => {
       let body = body_text(&doc);
       let value = paragraph_style_value(*style);
-      for (_, _, boundary) in targets {
+      // §act-four M6 (range-marked styles): a UNIFORM restyle of a CONTIGUOUS
+      // paragraph run collapses from `O(paragraphs)` per-boundary marks to ONE
+      // range mark over the boundary span — the sub-`O(change)` write lever for
+      // select-all-restyle. A Loro range mark sets `paragraph_style` on every
+      // covered boundary `\n`, which is exactly what the materializer reads
+      // per boundary; the same key on the spanned TEXT chars is inert (the
+      // materializer reads `paragraph_style` only at boundaries, and it is a
+      // distinct mark key from run styles). Gated on `targets` being a
+      // gap-free paragraph run so no non-target paragraph is restyled.
+      if let Some((lo, hi)) = contiguous_boundary_span(targets) {
         body
-          .mark(*boundary..*boundary + 1, MARK_PARAGRAPH_STYLE, value)
-          .context("marking paragraph style (batched)")?;
+          .mark(lo..hi, MARK_PARAGRAPH_STYLE, value)
+          .context("marking paragraph style (uniform range)")?;
+        summary.marks_emitted = 1;
+      } else {
+        for (_, _, boundary) in targets {
+          body
+            .mark(*boundary..*boundary + 1, MARK_PARAGRAPH_STYLE, value)
+            .context("marking paragraph style (batched)")?;
+        }
+        summary.marks_emitted = u32::try_from(targets.len()).unwrap_or(u32::MAX);
       }
       summary.containers_touched = 1;
-      summary.marks_emitted = u32::try_from(targets.len()).unwrap_or(u32::MAX);
     },
     ResolvedPlan::InsertObject {
       block_ix, new_block, block, ..

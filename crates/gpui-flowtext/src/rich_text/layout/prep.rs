@@ -433,7 +433,9 @@ mod prep_tests {
         },
       ],
     );
-    paragraphs_mut(&mut document)[1].byte_range = 6..19;
+    if let Some(paragraph) = paragraphs_mut(&mut document).get_mut(1) {
+      paragraph.byte_range = 6..19;
+    }
 
     let prep = build_paragraph_prep(&document, 1, 1, false).expect("paragraph prep");
 

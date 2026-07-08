@@ -26,12 +26,11 @@ fn insert_single_paragraph_fragment_at(document: &mut DocumentProjection, offset
   runs.extend(left_runs);
   runs.extend(input_paragraph_text_runs(paragraph));
   runs.extend(right_runs);
-  {
-    let target = &mut paragraphs_mut(document)[offset.paragraph];
+  if let Some(target) = paragraphs_mut(document).get_mut(offset.paragraph) {
     target.style = paragraph.style;
     target.runs = merge_adjacent_runs(runs);
     bump_paragraph_version(target);
-  };
+  }
   update_paragraph_offsets_after_len_change(document, offset.paragraph);
   rebuild_document_sections(document);
   DocumentOffset {
@@ -77,15 +76,12 @@ fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset:
   }
 
   let replacement_count = replacements.len();
-  {
-    let paragraphs = paragraphs_mut(document);
-    paragraphs.splice(offset.paragraph..=offset.paragraph, replacements)
-  };
+  paragraphs_mut(document).splice(offset.paragraph..offset.paragraph + 1, replacements);
   for insert_ix in 1..replacement_count {
     insert_paragraph_id(document, offset.paragraph + insert_ix);
   }
   rebuild_document_offset_index(document);
-  let block_replacements = document.paragraphs[offset.paragraph..offset.paragraph + replacement_count].to_vec();
+  let block_replacements = document.paragraphs.range_to_vec(offset.paragraph..offset.paragraph + replacement_count);
   replace_paragraph_blocks(document, offset.paragraph, 1, &block_replacements);
   rebuild_document_sections(document);
 

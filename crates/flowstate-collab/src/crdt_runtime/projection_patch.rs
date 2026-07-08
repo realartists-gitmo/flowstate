@@ -401,12 +401,11 @@ pub(crate) fn splice_region_patches(
   // Old-row lookup: block id → (block row, paragraph index if a paragraph).
   let mut old_paragraph_ix = projection
     .blocks
-    .get(..old_lo)?
-    .iter()
+    .get_range(0..old_lo)?
     .filter(|block| matches!(block, Block::Paragraph(_)))
     .count();
   let mut old_rows: FxHashMap<flowstate_document::BlockId, (usize, Option<usize>)> = FxHashMap::default();
-  for (offset, block) in projection.blocks.get(old_lo..old_hi)?.iter().enumerate() {
+  for (offset, block) in projection.blocks.get_range(old_lo..old_hi)?.enumerate() {
     let paragraph = matches!(block, Block::Paragraph(_)).then_some(old_paragraph_ix);
     if paragraph.is_some() {
       old_paragraph_ix += 1;

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crop::Rope;
 
 use super::{
-  AssetStore, DocumentParagraphInput, DocumentProjection, DocumentTheme, InputParagraph, InputRun, Paragraph, ParagraphOffsetIndex,
+  AssetStore, DocumentParagraphInput, DocumentProjection, DocumentTheme, InputParagraph, InputRun, Paragraph,
   ParagraphStyle, RunStyle, RunStyles, TextRun, document_ids_for_shape, merge_adjacent_runs, paragraph_blocks_from_paragraphs,
   rebuild_document_sections, reconcile_document_ids,
 };
@@ -94,20 +94,18 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
       version: 0,
     });
   }
-  let offset_index = ParagraphOffsetIndex::new(&stored_paragraphs);
   let blocks = paragraph_blocks_from_paragraphs(&stored_paragraphs);
   let paragraph_count = stored_paragraphs.len();
   let block_count = blocks.len();
   let mut document = DocumentProjection {
     frontier: Vec::new(),
     text: Rope::from(text),
-    paragraphs: Arc::new(stored_paragraphs),
+    paragraphs: crate::ParagraphSeq::from_vec(stored_paragraphs),
     ids: document_ids_for_shape(paragraph_count, block_count),
-    blocks: Arc::new(blocks),
+    blocks: crate::BlockSeq::from_vec(blocks),
     assets: AssetStore::default(),
     sections: Arc::new(Vec::new()),
     outline: Arc::new(Vec::new()),
-    offset_index,
     theme,
   };
   reconcile_document_ids(&mut document);

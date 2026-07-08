@@ -125,19 +125,17 @@ pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputB
     blocks.push(Block::Paragraph(paragraph));
   }
 
-  let offset_index = ParagraphOffsetIndex::new(&paragraphs);
   let paragraph_count = paragraphs.len();
   let block_count = blocks.len();
   let mut document = DocumentProjection {
     frontier: Vec::new(),
     text: Rope::from(text),
-    paragraphs: Arc::new(paragraphs),
-    blocks: Arc::new(blocks),
+    paragraphs: ParagraphSeq::from_vec(paragraphs),
+    blocks: BlockSeq::from_vec(blocks),
     assets: AssetStore::default(),
     ids: document_ids_for_shape(paragraph_count, block_count),
     sections: Arc::new(Vec::new()),
     outline: Arc::new(Vec::new()),
-    offset_index,
     theme,
   };
   reconcile_document_ids(&mut document);

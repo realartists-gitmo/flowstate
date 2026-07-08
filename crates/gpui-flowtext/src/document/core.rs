@@ -5,9 +5,7 @@ use gpui::{Hsla, Pixels, SharedString, black, px, rgb};
 use rustc_hash::{FxHashMap, FxHashSet};
 use serde::{Deserialize, Serialize};
 
-// `paragraph_widths` and `paragraph_width` are free helpers that still live in
-// the parent module. `ParagraphOffsetIndex`'s methods invoke them.
-use super::{paragraph_text_len, paragraph_width, paragraph_widths};
+use super::paragraph_text_len;
 
 pub const SOFT_LINE_BREAK: char = '\u{2028}';
 pub const SOFT_LINE_BREAK_STR: &str = "\u{2028}";
@@ -42,26 +40,26 @@ pub struct DocumentProjection {
   /// Empty for standalone projections that are not backed by a CRDT runtime.
   pub frontier: Vec<u8>,
   pub text: Rope,
-  pub paragraphs: Arc<Vec<Paragraph>>,
-  pub blocks: Arc<Vec<Block>>,
+  pub paragraphs: ParagraphSeq,
+  pub blocks: BlockSeq,
   pub assets: AssetStore,
   pub ids: DocumentIds,
   /// Canonical page/document sections projected from the CRDT.
   pub sections: Arc<Vec<DocumentSection>>,
   /// Disposable heading hierarchy derived from paragraph styles.
   pub outline: Arc<Vec<DocumentOutlineNode>>,
-  // Auxiliary Fenwick-tree index over per-paragraph byte widths. Kept in sync
-  // with `paragraphs` by the edit helpers in `edit_ops`. Not part of the
-  // public API.
-  pub offset_index: ParagraphOffsetIndex,
   pub theme: DocumentTheme,
 }
 
-// §perf: not hotpath-measured — usually an Arc uniqueness check; the rare
-// shared-Arc deep clone shows up in its callers' numbers instead.
+// §act-four M3 Slice 4: `document.paragraphs` is a persistent `ParagraphSeq`.
+// `paragraphs_mut` hands out `&mut ParagraphSeq` — NOT a `Drop` guard — so its
+// borrow of `document` is released by NLL at last use, letting the mutation
+// sites interleave a following block edit exactly as they did with the old
+// `&mut Vec`. Mutations go through the sequence's copy-on-write methods
+// (`set`/`get_mut`/`insert`/`remove`/`iter_mut`/`splice`), applied in place.
 #[inline]
-pub fn paragraphs_mut(document: &mut DocumentProjection) -> &mut Vec<Paragraph> {
-  Arc::make_mut(&mut document.paragraphs)
+pub fn paragraphs_mut(document: &mut DocumentProjection) -> &mut ParagraphSeq {
+  &mut document.paragraphs
 }
 
 #[hotpath::measure]
@@ -213,10 +211,8 @@ pub fn update_paragraph_block(document: &mut DocumentProjection, paragraph_ix: u
   let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
     return;
   };
-  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix)
-    && let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(block_ix)
-  {
-    *block = Block::Paragraph(paragraph);
+  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
+    document.blocks.set(block_ix, Block::Paragraph(paragraph));
   }
 }
 
@@ -230,9 +226,7 @@ pub fn replace_paragraph_blocks(document: &mut DocumentProjection, start_paragra
     && document.blocks.len() == document.paragraphs.len()
     && matches!(document.blocks.get(start_paragraph), Some(Block::Paragraph(_)))
   {
-    if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(start_paragraph) {
-      *block = Block::Paragraph(replacements[0].clone());
-    }
+    document.blocks.set(start_paragraph, Block::Paragraph(replacements[0].clone()));
     reconcile_document_ids(document);
     rebuild_document_sections(document);
     return;
@@ -273,7 +267,7 @@ pub fn replace_paragraph_blocks(document: &mut DocumentProjection, start_paragra
     output.push(Block::Paragraph(paragraph.clone()));
   }
 
-  document.blocks = Arc::new(output);
+  document.blocks = BlockSeq::from_vec(output);
   let block_end = (block_start + old_count).min(document.ids.block_ids.len());
   let replacement_ids = if old_count == replacements.len() {
     document.ids.block_ids[block_start..block_end].to_vec()
@@ -528,73 +522,7 @@ const fn section_id_for_heading(paragraph_id: ParagraphId, kind: SectionKind) ->
   SectionId(paragraph_id.0 ^ (kind_slot << 120))
 }
 
-/// Fenwick-tree (binary indexed tree) over the byte widths of each paragraph,
-/// plus the raw widths. Lets us compute the absolute byte offset of any
-/// paragraph in O(log N) and update it incrementally as the document is
-/// edited.
-#[derive(Clone, Debug)]
-pub struct ParagraphOffsetIndex {
-  pub widths: Vec<usize>,
-  pub tree: Vec<usize>,
-}
-
-#[hotpath::measure_all]
-impl ParagraphOffsetIndex {
-  #[must_use]
-  pub fn new(paragraphs: &[Paragraph]) -> Self {
-    let mut index = Self {
-      widths: paragraph_widths(paragraphs),
-      tree: vec![0; paragraphs.len() + 1],
-    };
-    for ix in 0..index.widths.len() {
-      index.add(ix, index.widths[ix] as isize);
-    }
-    index
-  }
-
-  pub fn rebuild(&mut self, paragraphs: &[Paragraph]) {
-    *self = Self::new(paragraphs);
-  }
-
-  #[must_use]
-  pub fn paragraph_start(&self, paragraph_ix: usize) -> usize {
-    self.prefix_sum(paragraph_ix)
-  }
-
-  pub fn update_paragraph_width(&mut self, paragraph_ix: usize, paragraphs: &[Paragraph]) {
-    if paragraph_ix >= self.widths.len() || self.tree.len() != self.widths.len() + 1 {
-      self.rebuild(paragraphs);
-      return;
-    }
-    let Some(width) = paragraph_width(paragraphs, paragraph_ix) else {
-      return;
-    };
-    let old_width = self.widths[paragraph_ix];
-    if old_width == width {
-      return;
-    }
-    self.widths[paragraph_ix] = width;
-    self.add(paragraph_ix, width as isize - old_width as isize);
-  }
-
-  fn add(&mut self, paragraph_ix: usize, delta: isize) {
-    if delta == 0 {
-      return;
-    }
-    let mut ix = paragraph_ix + 1;
-    while ix < self.tree.len() {
-      self.tree[ix] = self.tree[ix].saturating_add_signed(delta);
-      ix += ix & (!ix + 1);
-    }
-  }
-
-  fn prefix_sum(&self, paragraph_count: usize) -> usize {
-    let mut ix = paragraph_count.min(self.widths.len());
-    let mut sum = 0;
-    while ix > 0 {
-      sum += self.tree[ix];
-      ix &= ix - 1;
-    }
-    sum
-  }
-}
+// §act-four M3 Slice 2b: the Fenwick `ParagraphOffsetIndex` has been removed.
+// Paragraph offsets are now derived from the block tree's paragraph-space
+// monoid (`BlockSeq::paragraph_start`), which subsumes it at `O(log N)` with no
+// separate structure to keep in sync or snapshot per version.

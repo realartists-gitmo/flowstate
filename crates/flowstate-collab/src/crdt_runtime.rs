@@ -153,9 +153,34 @@ pub struct CrdtRuntime {
   /// any interleaving commit or import fails its frontier check and the slot
   /// is dropped. See `local_write::recorded_inverse`.
   recorded_inverse: Option<crate::local_write::recorded_inverse::RecordedInverse>,
+  /// §act-four M5 (Slice 5): the append-only version log. Every local commit
+  /// appends a `(frontier, root)` — the persistent read-model root (a `BlockSeq`,
+  /// `O(1)` to retain via structural sharing) at that frontier. This is the
+  /// spec's version graph made concrete over the migrated tree: retained roots
+  /// are the substrate for revisions/time-travel, and each is exactly the blocks
+  /// a peer would rematerialize at that frontier. Bounded by
+  /// `VERSION_HISTORY_CAP`; older roots drop and their shared nodes GC via `Arc`.
+  version_history: std::collections::VecDeque<ProjectionVersion>,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
 }
+
+/// One entry in the [`CrdtRuntime::version_history`] log (§act-four M5). Holds
+/// the whole read model at that frontier — cheap because the block and
+/// paragraph sequences are persistent trees (`O(1)` clone, shared with every
+/// version that didn't touch a given node), the body text is a `Rope` (`O(1)`
+/// clone), and the section/outline are `Arc`s. So retaining the bounded history
+/// is `O(history · change)` in the trees; only the id vectors are per-version.
+/// Opening a version is a pointer — [`CrdtRuntime::projection_at_version`] — not
+/// a rematerialization.
+#[derive(Clone, Debug)]
+pub(crate) struct ProjectionVersion {
+  pub frontier: Vec<u8>,
+  pub projection: DocumentProjection,
+}
+
+/// Retention bound for the version log (§act-four E ladder, applied to roots).
+const VERSION_HISTORY_CAP: usize = 256;
 
 /// §24 style interval index entry: one run's byte span within a paragraph plus
 /// its styles. `start`/`len` are byte offsets into the paragraph text.
@@ -1035,6 +1060,7 @@ impl CrdtRuntime {
       paragraph_registry_container_id,
       block_registry_container_id,
       recorded_inverse: None,
+      version_history: std::collections::VecDeque::new(),
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
     };
@@ -1084,6 +1110,46 @@ impl CrdtRuntime {
   /// §act-three B.1: the recorded-inverse slot (see `local_write::recorded_inverse`).
   pub(crate) fn recorded_inverse_slot(&mut self) -> &mut Option<crate::local_write::recorded_inverse::RecordedInverse> {
     &mut self.recorded_inverse
+  }
+
+  /// §act-four M5: append the current read model to the version log. Called
+  /// after a committed projection change (local intent, undo/redo, remote
+  /// import). `O(1)` in the trees — blocks + paragraphs are persistent and the
+  /// body is a `Rope`, so a version shares all untouched structure. Bounded by
+  /// [`VERSION_HISTORY_CAP`]; the oldest version drops (its unshared nodes GC
+  /// via `Arc`). Consecutive identical-frontier commits collapse so a no-op
+  /// re-projection does not grow the log.
+  pub(crate) fn record_projection_version(&mut self) {
+    let frontier = self.projection.frontier.clone();
+    if self.version_history.back().is_some_and(|version| version.frontier == frontier) {
+      self.version_history.back_mut().expect("checked").projection = self.projection.clone();
+      return;
+    }
+    self.version_history.push_back(ProjectionVersion {
+      frontier,
+      projection: self.projection.clone(),
+    });
+    while self.version_history.len() > VERSION_HISTORY_CAP {
+      self.version_history.pop_front();
+    }
+  }
+
+  /// Number of retained versions in the log (§act-four M5) — the public handle
+  /// the app uses to surface time-travel depth.
+  #[must_use]
+  pub fn version_history_len(&self) -> usize {
+    self.version_history.len()
+  }
+
+  /// The retained read model at `frontier`, if still within the horizon — an
+  /// `O(1)` handle to the whole projection as it was at that version. THE
+  /// revision/time-travel consumer: opening a version is a pointer, not a
+  /// rematerialization. Searches newest-first. (Read-only view of that
+  /// frontier; promoting it to the live editable state additionally requires
+  /// checking the Loro doc out to `frontier`.)
+  #[must_use]
+  pub fn projection_at_version(&self, frontier: &[u8]) -> Option<&DocumentProjection> {
+    self.version_history.iter().rev().find(|version| version.frontier == frontier).map(|version| &version.projection)
   }
 
   /// Push an editor-bound projection change onto the ordered stream (gate-held
@@ -1615,6 +1681,10 @@ impl CrdtRuntime {
     // whole-body string diff, no O(doc) before/after captures.
     let context = if restore_undo_selection { "undo_redo" } else { "semantic_command" };
     self.derive_body_projection_events(projection_invalidation, &drained, context, &mut events)?;
+    // §act-four M5: the semantic-command path (undo/redo, object inserts, direct
+    // text edits) commits and derives here — append its root to the version log,
+    // same as the intent path's `apply_local_intent` hooks.
+    self.record_projection_version();
     if restore_undo_selection && let Some(snapshot) = self.take_restored_undo_selection() {
       if let Some(selection) = self.resolve_undo_selection(&snapshot) {
         events.push(RuntimeEvent::SelectionRestored { selection });
@@ -1714,7 +1784,7 @@ impl CrdtRuntime {
   /// derive (the 19:28 churn class ends as a no-op, spec §13.13);
   /// non-structural → ranged paragraph patches; structural → regional
   /// rematerialization; any bail → full rebuild, loudly, with its cause.
-  fn derive_body_projection_events(
+  pub(crate) fn derive_body_projection_events(
     &mut self,
     mut invalidation: ProjectionInvalidation,
     drained: &DrainedBodyDelta,
@@ -1906,7 +1976,7 @@ impl CrdtRuntime {
     // on the live fast path.
     let is_paragraph_row = |ix: usize| matches!(self.projection.blocks.get(ix), Some(flowstate_document::Block::Paragraph(_)));
     let paragraph_ix_of_row =
-      |row: usize| self.projection.blocks[..row].iter().filter(|block| matches!(block, flowstate_document::Block::Paragraph(_))).count();
+      |row: usize| self.projection.blocks.range(0..row).filter(|block| matches!(block, flowstate_document::Block::Paragraph(_))).count();
     let body = body_text(&self.doc);
     let (region_lo, region_sentinel) = match (0..blk_lo).rev().find(|ix| is_paragraph_row(*ix)) {
       Some(row) => {
@@ -2178,6 +2248,11 @@ impl CrdtRuntime {
       self.refresh_projection()?;
       last.push(self.projection_event(invalidation)?);
     }
+    // §act-four §8 fork-and-share: a remote import advances the canonical
+    // frontier and forks a new read-model version. Because `blocks`/`paragraphs`
+    // are persistent trees, the forked root SHARES every subtree the import did
+    // not touch — the fork costs `O(change)`, not `O(document)`.
+    self.record_projection_version();
     if !any_pending {
       // The remote updates have already merged into the canonical Loro doc above;
       // durability (revision sync + update-segment persistence) is a SECONDARY
@@ -3260,6 +3335,13 @@ impl CrdtRuntime {
     if let Some(package) = &mut self.package {
       match package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update) {
         Ok(_) => {
+          // §act-four M2: refresh the tiny preview header from the live
+          // projection (O(header)) so cold preview of this edited-but-unflushed
+          // document stays O(viewport). The header rides the journal delta to
+          // disk with the segment. A failure here must not fail the persist.
+          if let Err(error) = package.refresh_preview_header(&self.projection) {
+            tracing::warn!(%error, "refreshing preview header after edit failed; cold preview may fall back to the full read");
+          }
           let compacted = package.compact_update_segments_if_needed(&self.doc, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD)?;
           if let Some(path) = &self.package_path {
             if compacted.is_some() {
@@ -6111,6 +6193,122 @@ mod tests {
     );
     assert_eq!(flowstate_document::paragraph_text(&runtime.projection_snapshot()?, 0), "hello");
     assert_eq!(body_text(runtime.doc()).to_string(), "\nhello");
+    Ok(())
+  }
+
+  #[test]
+  fn lazy_leaf_block_version_is_content_stable_across_edits_elsewhere() -> Result<()> {
+    // §act-four M4 oracle: the leaf key `(block_id, version)` must be
+    // CONTENT-STABLE — a block's version advances IFF an op touched THAT block,
+    // and is identical across unrelated edits elsewhere. That is the entire
+    // basis for the version-keyed leaf cache: two roots that didn't touch block
+    // b carry the same `(b, version)` → the same materialized `Arc<Block>`.
+    use gpui_flowtext::{LeafCache, LeafKey};
+    use std::sync::Arc;
+
+    fn block_version(block: &flowstate_document::Block) -> u64 {
+      match block {
+        flowstate_document::Block::Paragraph(paragraph) => paragraph.version,
+        flowstate_document::Block::Image(image) => image.version,
+        flowstate_document::Block::Equation(equation) => equation.version,
+        flowstate_document::Block::Table(table) => table.version,
+      }
+    }
+    // The intrinsic (position-independent) content of a block — a leaf caches
+    // THIS; the block's positional `byte_range` is derived from the tree offsets
+    // (§act-four Slice 2), not from the leaf.
+    fn intrinsic(block: &flowstate_document::Block) -> flowstate_document::Block {
+      let mut block = block.clone();
+      if let flowstate_document::Block::Paragraph(paragraph) = &mut block {
+        paragraph.byte_range = 0..0;
+      }
+      block
+    }
+
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "alpha\nbeta\ngamma".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    let before = runtime.projection_snapshot()?;
+    // Capture each block's key + intrinsic content, and prime the leaf cache.
+    let mut cache = LeafCache::with_capacity(64);
+    let keys_before: Vec<(LeafKey, Arc<flowstate_document::Block>)> = (0..before.blocks.len())
+      .map(|ix| {
+        let block = before.blocks.get(ix).expect("block").clone();
+        let key = LeafKey::new(before.ids.block_ids[ix], block_version(&block));
+        let cached = cache.get_or_insert(key, || Arc::new(intrinsic(&block)));
+        (key, cached)
+      })
+      .collect();
+
+    // Edit ONLY the LAST paragraph (index 2). Paragraphs 0 and 1 are untouched.
+    let edited_paragraph = before.blocks.len() - 1;
+    let insert_at = flowstate_document::paragraph_byte_range(&before, edited_paragraph).start + 1;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: body_text(runtime.doc()).to_string()[..insert_at].chars().count(),
+      text: "Z".to_string(),
+      styles: RunStyles::default(),
+    })?;
+
+    let after = runtime.projection_snapshot()?;
+    assert_eq!(after.blocks.len(), before.blocks.len(), "no rows added/removed");
+    for (ix, (before_key, before_arc)) in keys_before.iter().enumerate() {
+      let block = after.blocks.get(ix).expect("block").clone();
+      let key = LeafKey::new(after.ids.block_ids[ix], block_version(&block));
+      if ix == edited_paragraph {
+        // The edited block's version advanced → a distinct key → new content.
+        assert_ne!(key, *before_key, "edited block's leaf key must change");
+      } else {
+        // Untouched block: SAME key → the cache returns the SAME `Arc` (shared,
+        // materialized once), and its intrinsic content is unchanged.
+        assert_eq!(key, *before_key, "untouched block's leaf key must be stable (block {ix})");
+        let cached = cache.get_or_insert(key, || panic!("untouched block {ix} should hit the cache, not re-materialize"));
+        assert!(Arc::ptr_eq(&cached, before_arc), "untouched block shares its materialized leaf");
+        assert_eq!(intrinsic(&block), *cached, "untouched block's intrinsic content is unchanged");
+      }
+    }
+    Ok(())
+  }
+
+  #[test]
+  fn version_log_time_travel_returns_the_read_model_at_each_frontier() -> Result<()> {
+    // §act-four M5: every local commit appends a version whose retained
+    // projection is exactly the live read model at that frontier, and opening
+    // an OLD version is an O(1) pointer that still reflects that frontier's
+    // content (time-travel) even after later edits.
+    let mut runtime = CrdtRuntime::new_empty("Runtime")?;
+    let mut previous_len = runtime.version_history_len();
+    // Remember each committed frontier + the body text it produced.
+    let mut history: Vec<(Vec<u8>, String)> = Vec::new();
+    for text in ["a", "b", "c", "d"] {
+      runtime.command(SemanticCommand::InsertText {
+        unicode_index: 1,
+        text: text.to_string(),
+        styles: RunStyles::default(),
+      })?;
+      let len = runtime.version_history_len();
+      assert!(len > previous_len, "a commit appends at least one retained version");
+      previous_len = len;
+      let projection = runtime.projection_snapshot()?;
+      let logged = runtime
+        .projection_at_version(&projection.frontier)
+        .expect("a version is retained at the just-committed frontier");
+      // The retained version equals the live read model (blocks + paragraphs).
+      assert_eq!(logged.blocks.to_vec(), projection.blocks.to_vec(), "retained blocks == live");
+      assert_eq!(logged.paragraphs.to_vec(), projection.paragraphs.to_vec(), "retained paragraphs == live");
+      history.push((projection.frontier.clone(), flowstate_document::paragraph_text(&projection, 0).to_string()));
+    }
+    // Time-travel: every earlier version still returns ITS frontier's content,
+    // unchanged by the commits that came after it (persistence).
+    for (frontier, expected_text) in &history {
+      let past = runtime
+        .projection_at_version(frontier)
+        .expect("earlier version retained within the horizon");
+      assert_eq!(flowstate_document::paragraph_text(past, 0), *expected_text, "time-travel read reflects that frontier");
+    }
     Ok(())
   }
 

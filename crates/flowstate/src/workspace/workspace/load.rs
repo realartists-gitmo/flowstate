@@ -131,8 +131,15 @@ pub(crate) fn read_open_projection_fast(path: &Path) -> Option<DocumentProjectio
       return None;
     }
   }
-  // .db8 (and unknown extensions): the frontier-current projection cache.
-  flowstate_document::DocumentPackage::read_cached_projection(path).ok().flatten()
+  // .db8 (and unknown extensions): prefer the frontier-current FULL projection
+  // cache (whole document, best for scroll during the phase-V window); fall
+  // back to the §act-four M2 preview header (leading blocks — still an instant
+  // first-screen paint for an edited-but-unflushed doc the full cache misses).
+  // Phase G attaches the complete authority underneath either way.
+  flowstate_document::DocumentPackage::read_cached_projection(path)
+    .ok()
+    .flatten()
+    .or_else(|| flowstate_document::DocumentPackage::read_preview_header(path).ok().flatten())
 }
 
 fn peek_docx_preview_bridge(path: &Path) -> Option<DocumentProjection> {
@@ -169,10 +176,14 @@ fn load_document_preview(path: &Path) -> std::io::Result<DocumentProjection> {
       return flowstate_document::read_db8_bytes(&db8_bytes);
     }
   }
-  // §P3 preview fast path: a frontier-current projection cache renders the
-  // preview without decoding, hashing, or validating the package's snapshot
-  // and segment chunks (the ".db8 preview slower than the equivalent .docx"
-  // field report). Stale/absent cache falls back to the full read below.
+  // §act-four M2 preview fast path: the tiny preview header (leading blocks
+  // only) renders the preview in O(viewport), independent of document size AND
+  // of full-cache freshness — it rides journal deltas, so an edited-but-
+  // unflushed document still previews without touching the snapshot. Falls back
+  // to the §P3 full projection cache, then the full read.
+  if let Some(document) = flowstate_document::DocumentPackage::read_preview_header(path)? {
+    return Ok(document);
+  }
   if let Some(document) = flowstate_document::DocumentPackage::read_cached_projection(path)? {
     return Ok(document);
   }
