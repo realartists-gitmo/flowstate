@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FlowstateCitationTrainingTarget",
+  "description": "The SPARSE seq2seq target emitted by draft_label.to_target and stored in train_full_draft.jsonl. Only populated fields appear (absent field == null/empty). Keys follow TARGET_KEY_ORDER; per-author `index` is dropped (recoverable from array position); labeler bookkeeping (confidence, inferred_fields) is dropped. This is the exact string the model is trained to produce.",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reject_reason"],
+      "properties": {
+        "status": {"const": "reject"},
+        "reject_reason": {
+          "type": "string",
+          "enum": ["not_a_citation", "analytic_or_tag", "cross_reference_only", "too_malformed", "empty_or_placeholder"]
+        },
+        "evidence": {"type": "string"},
+        "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "source_type"],
+      "description": "Parsed citation. Every listed property is OPTIONAL except status and source_type; a property is present only when populated.",
+      "properties": {
+        "status": {"const": "parsed"},
+        "authors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "family": {"type": "string"},
+              "given": {"type": "string"},
+              "literal": {"type": "string"},
+              "qualifications": {
+                "type": "array",
+                "maxItems": 1,
+                "items": {"type": "string"},
+                "description": "Single blob string per author (project decision), <= 400 chars in target."
+              }
+            }
+          }
+        },
+        "year": {"type": "integer", "minimum": 1000, "maximum": 2099},
+        "no_date": {"const": true, "description": "Present only when true."},
+        "published_date": {"type": "string"},
+        "accessed_date": {"type": "string"},
+        "retrieved_date": {"type": "string"},
+        "title": {"type": "string"},
+        "container_title": {"type": "string"},
+        "publication": {"type": "string"},
+        "publisher": {"type": "string"},
+        "volume": {"type": "string"},
+        "issue": {"type": "string"},
+        "pages": {"type": "string"},
+        "url": {"type": "string"},
+        "doi": {"type": "string"},
+        "database": {"type": "string"},
+        "source_type": {
+          "type": "string",
+          "enum": ["journal_article", "law_review", "news_article", "web_page", "book", "book_chapter", "report", "thesis", "legal_source", "dictionary_or_reference", "interview", "unknown"]
+        },
+        "card_signatures": {"type": "array", "items": {"type": "string"}},
+        "debate_annotations": {"type": "array", "items": {"type": "string"}},
+        "raw_tail": {"type": "string"},
+        "spillover_start_index": {"type": "integer", "minimum": 0},
+        "spillover_start_text": {"type": "string"},
+        "warnings": {
+          "type": "array",
+          "description": "Filtered to the semantically-useful, non-redundant TARGET_WARNINGS set.",
+          "items": {
+            "type": "string",
+            "enum": ["incomplete_citation", "url_only", "conflicting_dates", "source_type_ambiguous", "et_al", "no_date", "body_spillover"]
+          }
+        }
+      }
+    }
+  ]
+}
