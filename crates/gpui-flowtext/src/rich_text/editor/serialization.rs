@@ -161,7 +161,7 @@ fn input_paragraph_from_paragraph(paragraph: &Paragraph) -> InputParagraph {
 }
 
 #[hotpath::measure]
-fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
+pub fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let start = range.start.min(paragraph_text_len(paragraph));

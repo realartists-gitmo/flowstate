@@ -68,6 +68,10 @@ pub struct Workspace {
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
   document_runtime_flush_pending: FxHashSet<Uuid>,
+  /// §act-three C (background open): panels painted read-only from a phase-V
+  /// cached projection whose authority runtime has not yet attached (phase G).
+  /// Editing is inert until attach; session-persist + autosave skip them.
+  pending_authority_panels: FxHashSet<Uuid>,
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,

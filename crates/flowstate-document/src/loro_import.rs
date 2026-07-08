@@ -131,7 +131,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
   clear_map(&sections)?;
 
   let plan = hotpath::measure_block!("import_plan_build", FlowTextImportPlan::for_document(document));
-  hotpath::measure_block!("import_plan_write_body", plan.write_to(&body_text)?);
+  hotpath::measure_block!("import_plan_write_body", plan.write_to(Some(doc), &body_text)?);
 
   let mut paragraph_ix = 0_usize;
   for (block_ix, (block, position)) in document
@@ -223,7 +223,7 @@ fn import_image_block(
     let caption_text = caption_flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
     let mut caption_plan = FlowTextImportPlan::new(1, caption.runs.len().saturating_add(1));
     caption_plan.push_paragraph(caption, "");
-    caption_plan.write_to(&caption_text)?;
+    caption_plan.write_to(None, &caption_text)?;
   }
   let attrs = block.ensure_mergeable_map("attrs")?;
   attrs.insert("alignment", alignment_name(image.alignment))?;
@@ -480,13 +480,95 @@ impl FlowTextImportPlan {
       .push(FlowBlockPosition::Object { anchor_pos });
   }
 
-  fn write_to(&self, text: &LoroText) -> LoroResult<()> {
+  /// `doc` enables the batched mark path (needs the inner-doc handle); the
+  /// tiny nested flows (captions, table cells) pass `None` and mark per run.
+  fn write_to(&self, doc: Option<&LoroDoc>, text: &LoroText) -> LoroResult<()> {
     let len = text.len_unicode();
     if len > 0 {
       text.delete(0, len)?;
     }
-    // Import text and its complete semantic mark state as one rich-text batch.
-    text.apply_delta(&self.delta)
+    // §perf (act three D.1/D.2): ONE contiguous insert op for the whole flow
+    // text, then explicit merged style-mark ranges. The former `apply_delta`
+    // minted one insert op (one op-id span) PER STYLE RUN — ~128k spans on
+    // the reference doc — which fragmented every later whole-range operation
+    // (a select-all delete became 128k delete ops, ~640 ms) and paid per-span
+    // tree insertion at build time. Marks are anchor ops over the contiguous
+    // text and do not fragment text ids; the end state (read back via
+    // `to_delta`/the style tree) is identical because `apply_delta` itself
+    // resolves attributes into `mark` calls after inserting.
+    let mut full_text = String::with_capacity(self.delta.iter().map(|span| span_text(span).map_or(0, str::len)).sum());
+    for span in &self.delta {
+      if let Some(insert) = span_text(span) {
+        full_text.push_str(insert);
+      }
+    }
+    hotpath::measure_block!("import_body_single_insert", text.insert(0, &full_text)?);
+
+    // Per-key run merging: adjacent spans that share one (key, value) pair
+    // become a single mark op even when their full attribute maps differ.
+    let mut runs_by_key: FxHashMap<&str, Vec<MarkRun>> = FxHashMap::default();
+    let mut unicode_pos = 0usize;
+    for span in &self.delta {
+      let TextDelta::Insert { insert, attributes } = span else {
+        continue;
+      };
+      let span_len = insert.chars().count();
+      if let Some(attributes) = attributes {
+        for (key, value) in attributes {
+          let runs = runs_by_key.entry(key.as_str()).or_default();
+          match runs.last_mut() {
+            Some(last) if last.end == unicode_pos && last.value == *value => last.end = unicode_pos + span_len,
+            _ => runs.push(MarkRun {
+              start: unicode_pos,
+              end: unicode_pos + span_len,
+              value: value.clone(),
+            }),
+          }
+        }
+      }
+      unicode_pos += span_len;
+    }
+    hotpath::measure_block!("import_body_marks", {
+      match doc {
+        // Batched mark application (vendored `mark_batch`): one transaction
+        // ceremony for the whole style set instead of two per mark — the mark
+        // pass dominated the body write (~730 ms) once the text became a
+        // single insert.
+        Some(doc) => {
+          let mut marks: Vec<(usize, usize, loro::InternalString, LoroValue)> = Vec::new();
+          for (key, runs) in runs_by_key {
+            for run in runs {
+              marks.push((run.start, run.end, key.into(), run.value));
+            }
+          }
+          doc
+            .inner()
+            .get_text(text.id())
+            .mark_batch(marks, loro::cursor::PosType::Unicode)?;
+        },
+        None => {
+          for (key, runs) in runs_by_key {
+            for run in runs {
+              text.mark(run.start..run.end, key, run.value)?;
+            }
+          }
+        },
+      }
+    });
+    Ok(())
+  }
+}
+
+struct MarkRun {
+  start: usize,
+  end: usize,
+  value: LoroValue,
+}
+
+fn span_text(span: &TextDelta) -> Option<&str> {
+  match span {
+    TextDelta::Insert { insert, .. } => Some(insert.as_str()),
+    _ => None,
   }
 }
 
@@ -620,7 +702,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
           TableCellBlock::Table(_) => cell_plan.push_object(),
         }
       }
-      cell_plan.write_to(&text)?;
+      cell_plan.write_to(None, &text)?;
       for (block_ix, (cell_block, position)) in cell
         .blocks
         .iter()

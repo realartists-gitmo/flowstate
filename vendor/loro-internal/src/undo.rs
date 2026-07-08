@@ -211,6 +211,11 @@ struct UndoManagerInner {
     on_push: Option<OnPush>,
     on_pop: Option<OnPop>,
     group: Option<UndoGroup>,
+    // §perf (flowstate vendor patch, act-three B.1): in-flight external
+    // fast-path step state — the popped item (for abort restore) and the
+    // saved last-popped-selection relay value (for the finish push).
+    external_popped: Option<(UndoOrRedo, StackItem)>,
+    external_next_push_selection: Option<Vec<CursorWithPos>>,
 }
 
 impl std::fmt::Debug for UndoManagerInner {
@@ -487,6 +492,24 @@ impl Stack {
         };
         last.meta = meta;
     }
+
+    /// §perf (flowstate vendor patch, act-three B.1): non-destructive top-item
+    /// probe for the external fast-path undo. Returns the top item's span plus
+    /// whether the stack tracks NO pending remote/excluded-origin diff anywhere
+    /// — the conservative "nothing interleaved since this item was pushed"
+    /// signal the external fast path requires before bypassing `perform`.
+    fn peek_top_span_and_clean(&self) -> Option<(CounterSpan, bool)> {
+        for (items, _) in self.stack.iter().rev() {
+            if let Some(item) = items.back() {
+                let clean = self
+                    .stack
+                    .iter()
+                    .all(|(_, diff)| diff.lock().cid_to_events.is_empty());
+                return Some((item.span, clean));
+            }
+        }
+        None
+    }
 }
 
 impl Default for Stack {
@@ -510,6 +533,8 @@ impl UndoManagerInner {
             on_pop: None,
             on_push: None,
             group: None,
+            external_popped: None,
+            external_next_push_selection: None,
         }
     }
 
@@ -952,6 +977,171 @@ impl UndoManager {
     /// Get the value associated with the top redo stack item, if any.
     pub fn top_redo_value(&self) -> Option<LoroValue> {
         self.top_redo_meta().map(|m| m.value)
+    }
+
+    /// §perf (flowstate vendor patch, act-three B.1): probe the top item of
+    /// the undo or redo stack without popping. Returns `(span, clean)` where
+    /// `clean` is true iff the stack tracks no pending remote/excluded-origin
+    /// diff — i.e. nothing has interleaved that would require transforming
+    /// the item before inverting it. Applications use this to validate a
+    /// recorded inverse before calling
+    /// [`UndoManager::external_step_applied`].
+    pub fn peek_top_span(&self, kind: UndoOrRedo) -> Option<(CounterSpan, bool)> {
+        let lock = self.inner.lock();
+        let inner = lock.borrow();
+        match kind {
+            UndoOrRedo::Undo => inner.undo_stack.peek_top_span_and_clean(),
+            UndoOrRedo::Redo => inner.redo_stack.peek_top_span_and_clean(),
+        }
+    }
+
+    /// §perf (flowstate vendor patch, act-three B.1): external fast-path
+    /// undo/redo — the application applies a RECORDED INVERSE of the top
+    /// stack item as an ordinary forward transaction instead of paying
+    /// `undo_internal`'s checkout-based diff computation, and this API keeps
+    /// the undo/redo stacks bookkeeping-identical to a native [`Self::undo`].
+    ///
+    /// Protocol:
+    /// 1. `external_step_begin(kind, expected_span)` — validates the top item
+    ///    of `kind`'s stack against `expected_span`, pops it, fires `on_pop`
+    ///    (selection restore), and sets `processing_undo` so the inverse
+    ///    commit is invisible to the recording subscriber — exactly like the
+    ///    transaction inside `perform`. Returns `false` (stack unchanged) if
+    ///    the top item is missing or mismatched: the caller must fall back to
+    ///    the slow path.
+    /// 2. The application commits the inverse transaction.
+    /// 3. `external_step_finish(kind, inverse_span)` — pushes the
+    ///    opposite-stack item covering the inverse commit with `on_push`
+    ///    metadata and clears `processing_undo`. On failure of step 2 call
+    ///    `external_step_abort(kind)` instead, which restores the popped item
+    ///    and clears the flag.
+    ///
+    /// Preconditions the caller MUST guarantee (via [`Self::peek_top_span`]
+    /// plus its own lineage check): every local edit is already committed and
+    /// recorded; the committed inverse EXACTLY inverts the popped item; no
+    /// remote/excluded diff is pending for the item (`clean == true`).
+    pub fn external_step_begin(&self, kind: UndoOrRedo, expected_span: CounterSpan) -> bool {
+        let doc = &self.doc.clone();
+        let popped = {
+            let lock = self.inner.lock();
+            let mut inner = lock.borrow_mut();
+            inner.processing_undo = true;
+            let stack = match kind {
+                UndoOrRedo::Undo => &mut inner.undo_stack,
+                UndoOrRedo::Redo => &mut inner.redo_stack,
+            };
+            stack.pop()
+        };
+        let Some((mut item, remote_diff)) = popped else {
+            self.inner.lock().borrow_mut().processing_undo = false;
+            return false;
+        };
+        if item.span != expected_span {
+            // Not the item the caller validated against — restore and bail so
+            // the caller can fall back to the checkout-based slow path.
+            let lock = self.inner.lock();
+            let mut inner = lock.borrow_mut();
+            let stack = match kind {
+                UndoOrRedo::Undo => &mut inner.undo_stack,
+                UndoOrRedo::Redo => &mut inner.redo_stack,
+            };
+            stack.push(item.span, item.meta);
+            inner.processing_undo = false;
+            return false;
+        }
+
+        // Mirror `perform`'s on_pop dance (cursor transform + the
+        // last-popped-selection relay that keeps undo/redo loops restoring
+        // the selection from two steps ago).
+        let lock = self.inner.lock();
+        let mut is_some = false;
+        if let Some(on_pop) = lock.borrow().on_pop.as_ref() {
+            is_some = true;
+            for cursor in item.meta.cursors.iter_mut() {
+                transform_cursor(
+                    cursor,
+                    &remote_diff.lock(),
+                    doc,
+                    &self.container_remap.lock(),
+                );
+            }
+            on_pop(kind, item.span, item.meta.clone());
+        }
+        if is_some {
+            let take = lock.borrow_mut().last_popped_selection.take();
+            lock.borrow_mut().external_next_push_selection = take;
+            lock.borrow_mut().last_popped_selection = Some(item.meta.cursors.clone());
+        }
+        // Stash the full popped item so an abort can restore it.
+        lock.borrow_mut().external_popped = Some((kind, item));
+        true
+    }
+
+    /// Completes an external fast-path step begun by
+    /// [`Self::external_step_begin`]; see its protocol docs. `inverse_span`
+    /// is the local-peer counter range of the inverse transaction the
+    /// application committed between the two calls.
+    pub fn external_step_finish(&self, kind: UndoOrRedo, inverse_span: CounterSpan) {
+        // Mirror `perform`'s opposite-stack push, with the app-committed
+        // inverse span standing in for the undo transaction's counter range.
+        let lock = self.inner.lock();
+        let next_push_selection = lock.borrow_mut().external_next_push_selection.take();
+        lock.borrow_mut().external_popped = None;
+        let mut meta = lock
+            .borrow()
+            .on_push
+            .as_ref()
+            .map(|x| x(kind.opposite(), inverse_span, None))
+            .unwrap_or_default();
+        let opposite_is_empty = {
+            let inner = lock.borrow();
+            match kind {
+                UndoOrRedo::Undo => inner.redo_stack.is_empty(),
+                UndoOrRedo::Redo => inner.undo_stack.is_empty(),
+            }
+        };
+        if matches!(kind, UndoOrRedo::Undo) && opposite_is_empty {
+            // First undo keeps the cursors captured by on_push.
+        } else if let Some(cursors) = next_push_selection {
+            meta.cursors = cursors;
+        }
+        let mut inner = lock.borrow_mut();
+        match kind {
+            UndoOrRedo::Undo => inner.redo_stack.push(inverse_span, meta),
+            UndoOrRedo::Redo => inner.undo_stack.push(inverse_span, meta),
+        }
+        inner.next_counter = Some(inverse_span.end);
+        inner.processing_undo = false;
+    }
+
+    /// Aborts an external fast-path step begun by
+    /// [`Self::external_step_begin`] (the application failed to commit the
+    /// inverse): restores the popped item and the selection relay, resyncs
+    /// `next_counter` past any compensation commits the application made
+    /// while `processing_undo` muted the recording subscriber, then clears
+    /// `processing_undo`. Any partial inverse ops must have been reverted by
+    /// the caller before this call.
+    pub fn external_step_abort(&self, kind: UndoOrRedo) {
+        let counter_end = get_counter_end(&self.doc, self.peer());
+        let lock = self.inner.lock();
+        let mut inner = lock.borrow_mut();
+        inner.next_counter = Some(counter_end);
+        if let Some((popped_kind, item)) = inner.external_popped.take() {
+            debug_assert!(matches!(
+                (popped_kind, kind),
+                (UndoOrRedo::Undo, UndoOrRedo::Undo) | (UndoOrRedo::Redo, UndoOrRedo::Redo)
+            ));
+            // Rewind the last-popped-selection relay that begin() advanced.
+            let previous = inner.external_next_push_selection.take();
+            inner.last_popped_selection = previous;
+            let stack = match kind {
+                UndoOrRedo::Undo => &mut inner.undo_stack,
+                UndoOrRedo::Redo => &mut inner.redo_stack,
+            };
+            stack.push(item.span, item.meta);
+        }
+        inner.external_next_push_selection = None;
+        inner.processing_undo = false;
     }
 
     pub fn set_on_push(&self, on_push: Option<OnPush>) {

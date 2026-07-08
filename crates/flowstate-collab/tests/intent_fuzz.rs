@@ -125,11 +125,62 @@ mod tests {
     let paragraph = projection.ids.paragraph_ids[paragraph_ix];
     let text_len = flowstate_document::paragraph_text_len(&projection.paragraphs[paragraph_ix]);
     let byte = rng.below(text_len + 1);
-    let arm = rng.below(16);
+    let arm = rng.below(17);
     if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
       eprintln!("step {step}: arm {arm} paragraph_ix {paragraph_ix} byte {byte}");
     }
     match arm {
+      // §act-three B.1 equivalence leg (spec §9.2): a qualifying MASS delete
+      // followed by undo (the recorded-inverse fast path when nothing
+      // interleaves; the checkout slow path when remote history or the arm's
+      // own coin flips got in the way — both must satisfy the same round
+      // oracle: projection == fresh canonical materialization, N-peer
+      // convergence). Seeds its own bulk so the capture threshold is met
+      // regardless of accumulated document size.
+      16 => {
+        let bulk: Vec<FragmentBlock> = (0..24)
+          .map(|ix| {
+            FragmentBlock::Paragraph(InputParagraph {
+              style: ParagraphStyle::Normal,
+              runs: vec![InputRun {
+                text: format!("m{step}r{ix:02} bulk row content padding padding padding padding padding padding padding padding padding padding padding"),
+                styles: if ix % 3 == 0 { random_styles(rng) } else { RunStyles::default() },
+              }],
+            })
+          })
+          .collect();
+        peer
+          .handle
+          .insert_rich_fragment(InsertRichFragmentIntent {
+            at: TextAnchor::new(paragraph, byte),
+            blocks: bulk,
+          })
+          .map(|_| ())?;
+        // Re-read the projection: the fragment changed the paragraph map.
+        let projection = peer.projection();
+        let start_ix = paragraph_ix.min(projection.paragraphs.len().saturating_sub(1));
+        let end_ix = (start_ix + 18 + rng.below(6)).min(projection.paragraphs.len() - 1);
+        if end_ix <= start_ix {
+          return Ok(());
+        }
+        let start_id = projection.ids.paragraph_ids[start_ix];
+        let end_id = projection.ids.paragraph_ids[end_ix];
+        let end_len = flowstate_document::paragraph_text_len(&projection.paragraphs[end_ix]);
+        peer
+          .handle
+          .delete_range(DeleteRangeIntent {
+            start: TextAnchor::new(start_id, rng.below(4)),
+            end: TextAnchor::new(end_id, rng.below(end_len + 1)),
+          })
+          .map(|_| ())?;
+        if rng.below(4) != 0 {
+          peer.handle.apply_undo().map(|_| ())?;
+          if rng.below(2) == 0 {
+            peer.handle.apply_redo().map(|_| ())?;
+          }
+        }
+        Ok(())
+      },
       // Weighted toward typing: inserts dominate real sessions.
       0..=3 => {
         let text = format!("s{step}p{paragraph_ix}");

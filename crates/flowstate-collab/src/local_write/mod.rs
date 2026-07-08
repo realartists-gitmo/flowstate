@@ -18,6 +18,7 @@ pub mod intents;
 
 pub(crate) mod commit;
 pub(crate) mod patch_synthesis;
+pub(crate) mod recorded_inverse;
 pub(crate) mod resolve;
 
 #[cfg(test)]

@@ -2171,25 +2171,52 @@ impl TextHandler {
         let pos = event_pos as isize;
         let len = event_len as isize;
         let mut event_end = pos + len;
-        for range in ranges.iter().rev() {
-            let event_start = event_end - range.event_len as isize;
-            txn.apply_local_op(
-                inner.container_idx,
-                crate::op::RawOpContent::List(ListOp::Delete(DeleteSpanWithId::new(
-                    range.id_start,
-                    range.entity_start as isize,
-                    range.entity_len() as isize,
-                ))),
-                EventHint::DeleteText {
-                    span: DeleteSpan {
-                        pos: event_start,
-                        signed_len: range.event_len as isize,
+        // §perf (act three D.2): a delete spanning many style anchors fans out
+        // into one op per text fragment; batch the per-op transaction ceremony
+        // for large fan-outs (see `Transaction::apply_local_ops_batch`).
+        const DELETE_BATCH_THRESHOLD: usize = 8;
+        if range_count > DELETE_BATCH_THRESHOLD {
+            let mut ops = Vec::with_capacity(range_count);
+            for range in ranges.iter().rev() {
+                let event_start = event_end - range.event_len as isize;
+                ops.push((
+                    crate::op::RawOpContent::List(ListOp::Delete(DeleteSpanWithId::new(
+                        range.id_start,
+                        range.entity_start as isize,
+                        range.entity_len() as isize,
+                    ))),
+                    EventHint::DeleteText {
+                        span: DeleteSpan {
+                            pos: event_start,
+                            signed_len: range.event_len as isize,
+                        },
+                        unicode_len: range.entity_len(),
                     },
-                    unicode_len: range.entity_len(),
-                },
-                &inner.doc,
-            )?;
-            event_end = event_start;
+                ));
+                event_end = event_start;
+            }
+            txn.apply_local_ops_batch(inner.container_idx, ops, &inner.doc)?;
+        } else {
+            for range in ranges.iter().rev() {
+                let event_start = event_end - range.event_len as isize;
+                txn.apply_local_op(
+                    inner.container_idx,
+                    crate::op::RawOpContent::List(ListOp::Delete(DeleteSpanWithId::new(
+                        range.id_start,
+                        range.entity_start as isize,
+                        range.entity_len() as isize,
+                    ))),
+                    EventHint::DeleteText {
+                        span: DeleteSpan {
+                            pos: event_start,
+                            signed_len: range.event_len as isize,
+                        },
+                        unicode_len: range.entity_len(),
+                    },
+                    &inner.doc,
+                )?;
+                event_end = event_start;
+            }
         }
         if delete_timing {
             eprintln!(
@@ -2412,6 +2439,62 @@ impl TextHandler {
         Ok(())
     }
 
+    /// §perf (flowstate vendor patch, act three D.1): apply MANY marks in one
+    /// batched pass — one transaction ceremony for the whole set instead of
+    /// two full `apply_local_op` rounds per mark. Positions are `pos_type`
+    /// indices into the CURRENT text (marks do not move text positions, so
+    /// caller-supplied positions stay valid across the batch). `Null` values
+    /// unmark, mirroring `unmark`. Only supported on attached containers.
+    pub fn mark_batch(
+        &self,
+        marks: Vec<(usize, usize, InternalString, LoroValue)>,
+        pos_type: PosType,
+    ) -> LoroResult<()> {
+        if marks.is_empty() {
+            return Ok(());
+        }
+        let inner = self.inner.try_attached_state()?;
+        let len = self.len(pos_type);
+        let mut prepared = Vec::with_capacity(marks.len());
+        {
+            let doc_state = inner.doc.state.lock();
+            let style_config = doc_state.config.text_style_config.read();
+            for (start, end, key, value) in marks {
+                if start >= end {
+                    return Err(loro_common::LoroError::ArgErr(
+                        "Start must be less than end".to_string().into_boxed_str(),
+                    ));
+                }
+                if end > len {
+                    return Err(LoroError::OutOfBound {
+                        pos: end,
+                        len,
+                        info: format!("Position: {}:{}", file!(), line!()).into_boxed_str(),
+                    });
+                }
+                ensure_no_regular_container_value(&value)?;
+                let flag = if matches!(value, LoroValue::Null) {
+                    style_config
+                        .get_style_flag_for_unmark(&key)
+                        .ok_or_else(|| LoroError::StyleConfigMissing(key.clone()))?
+                } else {
+                    style_config
+                        .get_style_flag(&key)
+                        .ok_or_else(|| LoroError::StyleConfigMissing(key.clone()))?
+                };
+                prepared.push((start, end, key, value, flag));
+            }
+        }
+        match &self.inner {
+            MaybeDetached::Detached(_) => Err(LoroError::NotImplemented(
+                "`mark_batch` on a detached text container",
+            )),
+            MaybeDetached::Attached(a) => a.with_txn(|txn| {
+                txn.apply_local_text_mark_batch(inner.container_idx, prepared, pos_type, &inner.doc)
+            }),
+        }
+    }
+
     pub fn check(&self) {
         match &self.inner {
             MaybeDetached::Detached(t) => {
@@ -2445,6 +2528,21 @@ impl TextHandler {
         txn: &mut Transaction,
         delta: &[TextDelta],
     ) -> LoroResult<()> {
+        // §perf (flowstate vendor patch, act three D.1): a many-span
+        // Insert/Retain delta (an undo restoring a mass deletion arrives as
+        // one span per style run — tens of thousands) pays the full per-op
+        // transaction ceremony per span. Route large well-formed deltas
+        // through the batched insert + batched mark path; op emission is
+        // byte-identical, so convergence and replay are untouched.
+        const APPLY_DELTA_BATCH_THRESHOLD: usize = 64;
+        if !cfg!(feature = "wasm")
+            && delta.len() > APPLY_DELTA_BATCH_THRESHOLD
+            && delta
+                .iter()
+                .all(|d| matches!(d, TextDelta::Insert { .. } | TextDelta::Retain { .. }))
+        {
+            return self.apply_delta_with_txn_batched(txn, delta);
+        }
         let mut index = 0;
         struct PendingMark {
             start: usize,
@@ -2542,6 +2640,103 @@ impl TextHandler {
         }
 
         Ok(())
+    }
+
+    /// §perf (act three D.1): the batched arm of [`Self::apply_delta_with_txn`]
+    /// for Insert/Retain-only deltas. Inserts flow through the batched insert
+    /// path; override + retain marks apply afterwards in delta-walk order
+    /// through the batched mark path — matching the per-span path's op
+    /// emission exactly.
+    fn apply_delta_with_txn_batched(
+        &self,
+        txn: &mut Transaction,
+        delta: &[TextDelta],
+    ) -> LoroResult<()> {
+        let inner = self.inner.try_attached_state()?;
+        let mut index = 0usize;
+        let mut seq = 0usize;
+        let mut inserts: Vec<(usize, usize, String, Option<FxHashMap<String, LoroValue>>)> =
+            Vec::new();
+        // (seq, start, end, key, value)
+        let mut retain_marks: Vec<(usize, usize, usize, InternalString, LoroValue)> = Vec::new();
+        for d in delta {
+            match d {
+                TextDelta::Insert { insert, attributes } => {
+                    let insert_len = event_len(insert.as_str());
+                    if insert_len == 0 {
+                        continue;
+                    }
+                    inserts.push((seq, index, insert.clone(), attributes.clone()));
+                    seq += 1;
+                    index += insert_len;
+                }
+                TextDelta::Retain { retain, attributes } => {
+                    if let Some(attr) = attributes {
+                        if !attr.is_empty() {
+                            for (key, value) in attr {
+                                retain_marks.push((
+                                    seq,
+                                    index,
+                                    index + *retain,
+                                    key.deref().into(),
+                                    value.clone(),
+                                ));
+                            }
+                            seq += 1;
+                        }
+                    }
+                    index += retain;
+                }
+                TextDelta::Delete { .. } => unreachable!("gated by the caller"),
+            }
+        }
+
+        let mut marks = txn.apply_local_text_insert_batch(inner.container_idx, inserts, &inner.doc)?;
+        marks.append(&mut retain_marks);
+        marks.sort_by_key(|(seq, ..)| *seq);
+
+        let len = match &self.inner {
+            MaybeDetached::Detached(_) => self.len_event(),
+            MaybeDetached::Attached(a) => {
+                a.with_state(|state| state.as_richtext_state_mut().unwrap().len(PosType::Event))
+            }
+        };
+        if marks.iter().any(|(_, start, ..)| *start >= len) {
+            // Rare malformed-delta shape (marks past the end require newline
+            // padding) — replicate the per-span path exactly for the whole
+            // mark set.
+            let mut len = len;
+            for (_, start, end, key, value) in marks {
+                if start >= len {
+                    self.insert_with_txn(txn, len, &"\n".repeat(start - len + 1), PosType::Event)?;
+                    len = start;
+                }
+                self.mark_with_txn(txn, start, end, key.deref(), value, PosType::Event)?;
+            }
+            return Ok(());
+        }
+
+        let mut prepared = Vec::with_capacity(marks.len());
+        {
+            let doc_state = inner.doc.state.lock();
+            let style_config = doc_state.config.text_style_config.read();
+            for (_, start, end, key, value) in marks {
+                if start >= end {
+                    continue;
+                }
+                let flag = if matches!(value, LoroValue::Null) {
+                    style_config
+                        .get_style_flag_for_unmark(&key)
+                        .ok_or_else(|| LoroError::StyleConfigMissing(key.clone()))?
+                } else {
+                    style_config
+                        .get_style_flag(&key)
+                        .ok_or_else(|| LoroError::StyleConfigMissing(key.clone()))?
+                };
+                prepared.push((start, end, key, value, flag));
+            }
+        }
+        txn.apply_local_text_mark_batch(inner.container_idx, prepared, PosType::Event, &inner.doc)
     }
 
     pub fn update(&self, text: &str, options: UpdateOptions) -> Result<(), UpdateTimeoutError> {

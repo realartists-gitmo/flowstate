@@ -24,6 +24,80 @@ pub(crate) fn attach_local_write(core: flowstate_collab::crdt_runtime::CrdtRunti
   })
 }
 
+/// Install the write authority + native save/export/recovery I/O hooks onto an
+/// editor (spec §5). Shared by the normal one-shot open (`create_document_panel`)
+/// and the §act-three C phase-G attach (`attach_runtime_to_pending_panel`), so
+/// both wire the editor identically. `set_write_authority` replaces the editor's
+/// projection with the authority's canonical one, so a read-only phase-V editor
+/// becomes editable and authoritative here.
+fn install_editor_write_authority(
+  editor: &Entity<RichTextEditor>,
+  attachment: &DocumentRuntimeAttachment,
+  document: DocumentProjection,
+  cx: &mut Context<Workspace>,
+) {
+  let smart_word_selection = load_smart_word_selection();
+  let save_io = attachment.io.clone();
+  let export_io = attachment.io.clone();
+  let recovery_io = attachment.io.clone();
+  let authority = std::sync::Arc::clone(&attachment.authority);
+  editor.update(cx, |editor, cx| {
+    editor.set_smart_word_selection(smart_word_selection, cx);
+    // Loro-first (spec §5): the editor's write authority IS the document.
+    // Local intents commit synchronously; hooks below are pure I/O — no
+    // pending-edit drains, no projection replacement, no undo hook (undo
+    // executes through the authority).
+    editor.set_write_authority(authority, document, cx);
+    editor.set_native_save_hook(Some(Rc::new(move |path, _assets| {
+      let io = save_io.clone();
+      Box::pin(async move {
+        let title = document_package_title_for_path(&path);
+        // The checkpoint's LocalUpdate events are intentionally dropped here:
+        // this UI-agnostic save hook future has no GPUI context to reach the
+        // collaboration session. The workspace re-syncs collaborators after
+        // the save completes via collab::refresh_after_external_checkpoint.
+        io.checkpoint_package(title, Some(path)).await.map_err(runtime_io_error)?;
+        Ok(())
+      })
+    })));
+    editor.set_native_export_hook(Some(Rc::new(move |path, format, _assets| {
+      let io = export_io.clone();
+      Box::pin(async move {
+        match format {
+          crate::rich_text_element::DocumentExportFormat::Native
+          | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
+            let bytes = io
+              .package_bytes(document_package_title_for_path(&path))
+              .await
+              .map_err(runtime_io_error)?;
+            write_bytes_to_path(&path, &bytes)?;
+          },
+          crate::rich_text_element::DocumentExportFormat::Docx => {
+            let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
+            crate::docx_conversion::write_docx(&path, &document)?;
+          },
+          crate::rich_text_element::DocumentExportFormat::Pdf => {
+            let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
+            let bytes = io.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+            crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
+          },
+        };
+        Ok(())
+      })
+    })));
+    editor.set_native_recovery_hook(Some(Rc::new(move |path| {
+      let io = recovery_io.clone();
+      Box::pin(async move {
+        let bytes = io
+          .package_bytes("Recovery snapshot".to_string())
+          .await
+          .map_err(runtime_io_error)?;
+        write_bytes_to_path(&path, &bytes)
+      })
+    })));
+  });
+}
+
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -77,6 +151,7 @@ impl Workspace {
     let mut this = Self {
       document_panels: Vec::new(),
       document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      pending_authority_panels: FxHashSet::default(),
       document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       flow_panels: Vec::new(),
       active_document_id: None,
@@ -239,66 +314,7 @@ impl Workspace {
     }
 
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document.clone(), path.clone(), cx));
-    let smart_word_selection = load_smart_word_selection();
-    let save_io = attachment.io.clone();
-    let export_io = attachment.io.clone();
-    let recovery_io = attachment.io.clone();
-    let authority = std::sync::Arc::clone(&attachment.authority);
-    editor.update(cx, |editor, cx| {
-      editor.set_smart_word_selection(smart_word_selection, cx);
-      // Loro-first (spec §5): the editor's write authority IS the document.
-      // Local intents commit synchronously; hooks below are pure I/O — no
-      // pending-edit drains, no projection replacement, no undo hook (undo
-      // executes through the authority).
-      editor.set_write_authority(authority, document, cx);
-      editor.set_native_save_hook(Some(Rc::new(move |path, _assets| {
-        let io = save_io.clone();
-        Box::pin(async move {
-          let title = document_package_title_for_path(&path);
-          // The checkpoint's LocalUpdate events are intentionally dropped here:
-          // this UI-agnostic save hook future has no GPUI context to reach the
-          // collaboration session. The workspace re-syncs collaborators after
-          // the save completes via collab::refresh_after_external_checkpoint.
-          io.checkpoint_package(title, Some(path)).await.map_err(runtime_io_error)?;
-          Ok(())
-        })
-      })));
-      editor.set_native_export_hook(Some(Rc::new(move |path, format, _assets| {
-        let io = export_io.clone();
-        Box::pin(async move {
-          match format {
-            crate::rich_text_element::DocumentExportFormat::Native
-            | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
-              let bytes = io
-                .package_bytes(document_package_title_for_path(&path))
-                .await
-                .map_err(runtime_io_error)?;
-              write_bytes_to_path(&path, &bytes)?;
-            },
-            crate::rich_text_element::DocumentExportFormat::Docx => {
-              let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
-              crate::docx_conversion::write_docx(&path, &document)?;
-            },
-            crate::rich_text_element::DocumentExportFormat::Pdf => {
-              let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
-              let bytes = io.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
-              crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
-            },
-          };
-          Ok(())
-        })
-      })));
-      editor.set_native_recovery_hook(Some(Rc::new(move |path| {
-        let io = recovery_io.clone();
-        Box::pin(async move {
-          let bytes = io
-            .package_bytes("Recovery snapshot".to_string())
-            .await
-            .map_err(runtime_io_error)?;
-          write_bytes_to_path(&path, &bytes)
-        })
-      })));
-    });
+    install_editor_write_authority(&editor, &attachment, document, cx);
     let workspace = cx.entity().downgrade();
     let title = title
       .or_else(|| {
@@ -587,6 +603,34 @@ impl Workspace {
     let path_for_recent = path.clone();
     cx.spawn(async move |workspace, cx| {
       let path_for_error = path.clone();
+      // §act-three C phase V: a cheap cached projection paints a read-only panel
+      // immediately, while phase G (the full Loro import + runtime) loads off
+      // thread. Editing enables when the authority attaches (phase G below).
+      let phase_v_path = path.clone();
+      let cached = cx
+        .background_executor()
+        .spawn(async move { read_open_projection_fast(&phase_v_path) })
+        .await;
+      let pending_panel_id = if let Some(projection) = cached {
+        let scroll_target = target_paragraph_ix;
+        window_handle
+          .update(cx, |_, window, cx| {
+            workspace
+              .update(cx, |workspace, cx| {
+                let id = workspace.create_pending_document_panel(projection, Some(path_for_recent.clone()), None, window, cx);
+                if let Some(paragraph_ix) = scroll_target {
+                  workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
+                }
+                id
+              })
+              .ok()
+          })
+          .ok()
+          .flatten()
+      } else {
+        None
+      };
+
       let loaded = cx
         .background_executor()
         .spawn(async move { load_workspace_document(path) })
@@ -604,7 +648,17 @@ impl Workspace {
                 .recent_document_previews
                 .insert(path_for_recent.clone(), recent_document_preview_document(&document));
               workspace.record_recent_document(path_for_recent.clone(), cx);
-              workspace.add_document_panel_with_title(*document, path, title, *runtime, window, cx);
+              // Phase G: attach the runtime to the phase-V panel if it is still
+              // open; otherwise (no cache existed, or the pending panel was
+              // closed while loading) open a fresh full panel. `attach` gives
+              // the runtime back when it cannot use it.
+              let fresh_runtime = match pending_panel_id {
+                Some(id) => workspace.attach_runtime_to_pending_panel(id, *runtime, cx).err().map(|boxed| *boxed),
+                None => Some(*runtime),
+              };
+              if let Some(runtime) = fresh_runtime {
+                workspace.add_document_panel_with_title(*document, path, title, runtime, window, cx);
+              }
               if let Some(paragraph_ix) = target_paragraph_ix {
                 workspace.scroll_active_editor_to_paragraph(paragraph_ix, window, cx);
                 cx.on_next_frame(window, move |workspace, window, cx| {
@@ -987,6 +1041,129 @@ impl Workspace {
     self.create_flow_panel(document, path, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
+  }
+
+  /// §act-three C (phase V): open a panel painting a cheap cached projection
+  /// with NO write authority — a read-only display surface (scroll/select/copy
+  /// work; editing is inert). The authority runtime attaches later via
+  /// [`Self::attach_runtime_to_pending_panel`] (phase G). Returns the panel id
+  /// so the caller can complete the attach when the runtime finishes loading.
+  ///
+  /// Session-persist and autosave skip pending panels (a read-only phase-V
+  /// panel has no runtime to save); both fire on attach. Because the panel is
+  /// read-only until attach, NO local edit can be made — so none can be lost in
+  /// the window (the fidelity-safe form of the spec's phase-V open).
+  fn create_pending_document_panel(
+    &mut self,
+    mut document: DocumentProjection,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Uuid {
+    document.theme = load_document_theme();
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(document, path.clone(), cx));
+    let smart_word_selection = load_smart_word_selection();
+    editor.update(cx, |editor, cx| {
+      editor.set_smart_word_selection(smart_word_selection, cx);
+      // No `set_write_authority` — the editor stays a read-only display surface
+      // (editor/local_write_path.rs: "No authority ⇒ read-only display surface").
+    });
+    let workspace = cx.entity().downgrade();
+    let title = title
+      .or_else(|| {
+        path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .map(|name| name.to_string_lossy().to_string())
+      })
+      .or_else(|| Some(self.next_untitled_title(cx)));
+    if let Some(title) = title.clone() {
+      editor.update(cx, |editor, cx| {
+        editor.set_document_display_name(title.into(), cx);
+      });
+    }
+    let panel = cx.new(|cx| DocumentPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
+    let id = panel.read(cx).id();
+    self.pending_authority_panels.insert(id);
+    self.active_document_id = Some(id);
+    self.active_editor = Some(editor);
+    self.active_flow = None;
+    self.document_panels.push(panel);
+    cx.notify();
+    id
+  }
+
+  /// §act-three C (phase G): attach the freshly-loaded runtime to a panel
+  /// opened read-only by [`Self::create_pending_document_panel`]. Installs the
+  /// write authority + I/O hooks (making the editor editable and swapping in
+  /// the runtime's canonical projection), registers the runtime, wires the
+  /// autosave observation, and binds the durable author identity — exactly the
+  /// wiring the one-shot open does. Returns `Ok(())` when attached (the runtime
+  /// is consumed). Returns `Err(runtime)` — handing the runtime back — when the
+  /// pending panel was closed before the runtime arrived, so the caller opens a
+  /// fresh full panel instead.
+  fn attach_runtime_to_pending_panel(
+    &mut self,
+    panel_id: Uuid,
+    runtime: flowstate_collab::crdt_runtime::CrdtRuntime,
+    cx: &mut Context<Self>,
+  ) -> Result<(), Box<flowstate_collab::crdt_runtime::CrdtRuntime>> {
+    // The panel closed while loading — hand the runtime back for a fresh open.
+    let Some(panel) = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+      .filter(|_| self.pending_authority_panels.contains(&panel_id))
+      .cloned()
+    else {
+      self.pending_authority_panels.remove(&panel_id);
+      return Err(Box::new(runtime));
+    };
+    // From here the panel exists; any failure leaves it read-only (degraded but
+    // safe) rather than opening a duplicate — attach failures are rare hard
+    // faults (I/O thread spawn / projection read).
+    self.pending_authority_panels.remove(&panel_id);
+    let attachment = match attach_local_write(runtime) {
+      Ok(attachment) => attachment,
+      Err(error) => {
+        tracing::error!(error = %format_args!("{error:#}"), "attaching Loro-first services to pending panel failed; leaving panel read-only");
+        return Ok(());
+      },
+    };
+    // Adopt the authority's canonical startup projection (the runtime advanced
+    // the frontier during construction; the editor must start from it).
+    let mut document = match attachment.authority.projection() {
+      Ok(document) => document,
+      Err(error) => {
+        tracing::error!(error = %format_args!("{error:#}"), "reading canonical startup projection for pending panel failed; leaving panel read-only");
+        return Ok(());
+      },
+    };
+    document.theme = load_document_theme();
+    let editor = panel.read(cx).editor();
+    install_editor_write_authority(&editor, &attachment, document, cx);
+    self.document_runtimes.insert(panel_id, attachment.io.clone());
+    self.editor_subscriptions.push((
+      panel_id,
+      cx.observe(&editor, move |workspace, editor, cx| {
+        let viewport_paragraph = workspace.active_editor_viewport_paragraph(cx);
+        workspace.update_outline_viewport_paragraph(viewport_paragraph, cx);
+        workspace.maybe_autosave_document(panel_id, editor.clone(), cx);
+      }),
+    ));
+    // Bind the durable author identity (fire-and-forget; never blocks open).
+    let identity_io = attachment.io.clone();
+    cx.spawn(async move |_, cx| {
+      let (user_id, display_name) = cx.background_executor().spawn(async { load_local_user_identity() }).await;
+      if let Err(error) = identity_io.set_author_identity(user_id, display_name).await {
+        tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to attached document runtime failed");
+      }
+    })
+    .detach();
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+    Ok(())
   }
 
   pub fn close_document_panel(&mut self, panel_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {

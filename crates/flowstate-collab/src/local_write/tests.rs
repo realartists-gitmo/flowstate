@@ -583,3 +583,324 @@ fn replace_matches_edge_cases() {
   });
   assert!(matches!(empty, Err(WriteRejected::EmptyIntent)));
 }
+
+// ---------------------------------------------------------------------------
+// §act-three B.1: recorded-inverse undo/redo fast path
+// ---------------------------------------------------------------------------
+
+/// Build a mass multi-paragraph document (large enough to qualify for the
+/// recorded-inverse capture) with a styled run per paragraph so mark restore
+/// is exercised, plus optional object rows.
+fn seed_mass_fragment(handle: &LocalDocHandle, paragraphs: usize, with_equation_at: Option<usize>) {
+  let projection = handle.projection().expect("projection");
+  let paragraph = first_paragraph(&projection);
+  let mut blocks = Vec::with_capacity(paragraphs + 1);
+  for ix in 0..paragraphs {
+    if Some(ix) == with_equation_at {
+      blocks.push(FragmentBlock::Object(flowstate_document::InputBlock::Equation(
+        flowstate_document::InputEquationBlock {
+          source: "e = mc^2".into(),
+          syntax: flowstate_document::InputEquationSyntax::Latex,
+          display: flowstate_document::InputEquationDisplay::Display,
+        },
+      )));
+    }
+    let styled = flowstate_document::RunStyles {
+      direct_underline: ix % 3 == 0,
+      strikethrough: ix % 5 == 0,
+      ..Default::default()
+    };
+    blocks.push(FragmentBlock::Paragraph(flowstate_document::InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: vec![
+        flowstate_document::InputRun {
+          text: format!("paragraph {ix:03} plain lead-in "),
+          styles: flowstate_document::RunStyles::default(),
+        },
+        flowstate_document::InputRun {
+          text: format!("styled body text for row {ix:03} padding padding padding padding"),
+          styles: styled,
+        },
+      ],
+    }));
+  }
+  handle
+    .insert_rich_fragment(InsertRichFragmentIntent {
+      at: TextAnchor::new(paragraph, 0),
+      blocks,
+    })
+    .expect("mass fragment seeds");
+}
+
+fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo> {
+  let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
+  guard.recorded_inverse_slot().as_ref().map(|slot| slot.direction())
+}
+
+fn paragraph_ids(handle: &LocalDocHandle) -> Vec<ParagraphId> {
+  handle.projection().expect("projection").ids.paragraph_ids.clone()
+}
+
+fn block_ids(handle: &LocalDocHandle) -> Vec<flowstate_document::BlockId> {
+  handle.projection().expect("projection").ids.block_ids.clone()
+}
+
+/// The core round trip: a qualifying mass delete arms the slot; undo replays
+/// the recorded inverse (no checkout), restoring text, marks, and the ORIGINAL
+/// paragraph/block identities; redo replays the delete; ping-pong stays fast.
+/// The debug-build audit inside every step compares the patched projection
+/// against a full rematerialization.
+#[test]
+fn recorded_inverse_fast_undo_round_trips_mass_delete() {
+  let (handle, gate) = new_handle("recorded-inverse");
+  seed_mass_fragment(&handle, 40, None);
+
+  let body_before = body_string(&gate);
+  let paragraph_ids_before = paragraph_ids(&handle);
+  let block_ids_before = block_ids(&handle);
+
+  // Cross-paragraph mass delete: from inside paragraph 2 to inside paragraph 37.
+  let start = paragraph_ids_before[2];
+  let end = paragraph_ids_before[37];
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(start, 9),
+      end: TextAnchor::new(end, 12),
+    })
+    .expect("mass delete commits");
+  let body_deleted = body_string(&gate);
+  assert!(body_deleted.len() + 2048 < body_before.len(), "delete must remove a qualifying mass range");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "mass delete must arm the recorded inverse");
+
+  // Undo: fast path (flips the slot; the slow path never touches it).
+  let outcome = handle.apply_undo().expect("undo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_before, "undo must restore the exact body text + boundaries");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Redo), "fast undo must flip the slot to redo");
+  assert_eq!(paragraph_ids(&handle), paragraph_ids_before, "undo must restore ORIGINAL paragraph identities");
+  assert_eq!(block_ids(&handle), block_ids_before, "undo must restore ORIGINAL block identities");
+
+  // Redo: fast replay of the recorded delete.
+  let outcome = handle.apply_redo().expect("redo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_deleted, "redo must reproduce the deleted state");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "fast redo must flip the slot back");
+
+  // Ping-pong once more.
+  let outcome = handle.apply_undo().expect("second undo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_before);
+  assert_eq!(paragraph_ids(&handle), paragraph_ids_before);
+
+  // Convergence bar: a fresh peer importing the full history (delete + fast
+  // inverse + fast redelete + fast inverse) must agree byte-for-byte.
+  let mut peer = CrdtRuntime::new_empty("recorded-inverse").expect("peer");
+  let full_history = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export full updates")
+  };
+  peer.import_remote_update(&full_history).expect("peer imports");
+  let peer_text = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
+  let peer_history = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("peer export");
+  let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+  guard.import_remote_update(&peer_history).expect("local imports peer seed");
+  drop(guard);
+  assert_eq!(body_string(&gate), peer_text, "replicas must converge on the fast-path history");
+}
+
+/// Object rows (equation) inside the deleted range restore with their ORIGINAL
+/// block ids and content.
+#[test]
+fn recorded_inverse_restores_object_blocks_with_original_ids() {
+  let (handle, gate) = new_handle("recorded-inverse-objects");
+  seed_mass_fragment(&handle, 36, Some(18));
+
+  let body_before = body_string(&gate);
+  let block_ids_before = block_ids(&handle);
+  let ids = paragraph_ids(&handle);
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[3], 4),
+      end: TextAnchor::new(ids[33], 6),
+    })
+    .expect("mass delete across the equation commits");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo), "object range must still qualify");
+
+  let outcome = handle.apply_undo().expect("undo runs");
+  assert!(outcome.applied);
+  assert_eq!(body_string(&gate), body_before);
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Redo), "fast path must have run");
+  assert_eq!(block_ids(&handle), block_ids_before, "equation block id must be restored, not re-minted");
+  let projection = handle.projection().expect("projection");
+  let equation = projection
+    .blocks
+    .iter()
+    .find_map(|block| match block {
+      flowstate_document::Block::Equation(equation) => Some(equation.source.to_string()),
+      _ => None,
+    })
+    .expect("equation row restored");
+  assert_eq!(equation, "e = mc^2");
+}
+
+/// A remote import between the delete and the undo kills the fast path (slot
+/// cleared) — undo still works through the checkout-based slow path and keeps
+/// BOTH the restored content and the remote edit.
+#[test]
+fn recorded_inverse_declines_after_remote_import() {
+  let (handle, gate) = new_handle("recorded-inverse-import");
+  seed_mass_fragment(&handle, 40, None);
+  let ids = paragraph_ids(&handle);
+
+  // Converged peer first.
+  let mut peer = CrdtRuntime::new_empty("recorded-inverse-import").expect("peer");
+  let seed = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard
+      .doc()
+      .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+      .expect("export")
+  };
+  peer.import_remote_update(&seed).expect("peer imports seed");
+  let peer_seed = peer
+    .doc()
+    .export(loro::ExportMode::updates(&loro::VersionVector::default()))
+    .expect("peer export");
+  let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+  guard.import_remote_update(&peer_seed).expect("local imports peer seed");
+  drop(guard);
+  let peer_vv = peer.doc().state_vv();
+
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[2], 0),
+      end: TextAnchor::new(ids[38], 3),
+    })
+    .expect("mass delete commits");
+  assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo));
+
+  // Remote edit lands between delete and undo.
+  let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
+  peer_body.insert(1, "REMOTE").expect("peer insert");
+  peer.doc().commit();
+  let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
+  let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+  guard.import_remote_update(&update).expect("import applies");
+  drop(guard);
+  assert_eq!(slot_direction(&gate), None, "an import must clear the recorded inverse");
+
+  let outcome = handle.apply_undo().expect("undo still runs via the slow path");
+  assert!(outcome.applied);
+  let body = body_string(&gate);
+  assert!(body.contains("REMOTE"), "slow-path undo must keep the remote edit");
+  assert!(body.contains("paragraph 020"), "slow-path undo must restore the deleted content");
+}
+
+/// Small or same-paragraph deletes never arm the slot; a table row inside the
+/// range gates the capture out (durable table ids cannot be re-minted).
+#[test]
+fn recorded_inverse_gating() {
+  let (handle, gate) = new_handle("recorded-inverse-gating");
+  seed_mass_fragment(&handle, 8, None);
+  let ids = paragraph_ids(&handle);
+
+  // Small cross-paragraph delete: below the capture threshold.
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[1], 0),
+      end: TextAnchor::new(ids[2], 4),
+    })
+    .expect("small delete commits");
+  assert_eq!(slot_direction(&gate), None, "sub-threshold deletes must not arm the slot");
+
+  // Table inside the range: gated out.
+  let (handle, gate) = new_handle("recorded-inverse-table-gate");
+  seed_mass_fragment(&handle, 40, None);
+  let projection = handle.projection().expect("projection");
+  let anchor = projection.ids.paragraph_ids[20];
+  let row_id = gpui_flowtext::RowId(1);
+  let column_id = gpui_flowtext::ColumnId(2);
+  handle
+    .insert_rich_fragment(InsertRichFragmentIntent {
+      at: TextAnchor::new(anchor, 0),
+      blocks: vec![FragmentBlock::Object(flowstate_document::InputBlock::Table(
+        flowstate_document::InputTableBlock {
+          rows: vec![flowstate_document::InputTableRow {
+            id: row_id,
+            cells: vec![flowstate_document::InputTableCell {
+              id: gpui_flowtext::CellId(3),
+              row_id,
+              column_id,
+              blocks: Vec::new(),
+              row_span: 1,
+              col_span: 1,
+            }],
+          }],
+          columns: vec![flowstate_document::InputTableColumn {
+            id: column_id,
+            width: flowstate_document::InputTableColumnWidth::Auto,
+          }],
+          style: flowstate_document::InputTableStyle { header_row: false },
+        },
+      ))],
+    })
+    .expect("table inserts");
+  let ids = paragraph_ids(&handle);
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[2], 0),
+      end: TextAnchor::new(ids[38], 3),
+    })
+    .expect("mass delete across the table commits");
+  // The one guarantee B.1 owns here: a durable-id table in range gates the
+  // recorded-inverse capture OUT (its row/column/cell ids cannot be re-minted
+  // losslessly), so undo takes the checkout-based slow path. (Whether that
+  // slow path perfectly restores an object placeholder deleted by a
+  // cross-paragraph range is a separate, pre-existing Loro-undo concern —
+  // demonstrated by `slow_undo_drops_object_placeholder_pre_existing` — that
+  // this fast path is not responsible for, and in fact improves upon.)
+  assert_eq!(slot_direction(&gate), None, "a table in range must gate the capture out");
+  let outcome = handle.apply_undo().expect("slow undo runs");
+  assert!(outcome.applied, "slow-path undo of the gated delete still applies");
+}
+
+/// Characterization of a PRE-EXISTING slow-path (checkout-based Loro undo)
+/// limitation, kept as a guardrail: undoing a cross-paragraph delete that
+/// removed an object placeholder restores all the TEXT but DROPS the U+FFFC
+/// object placeholder (the block record then projects as an unresolved anchor
+/// and is repaired away). This is independent of B.1 — the recorded-inverse
+/// fast path (`recorded_inverse_restores_object_blocks_with_original_ids`)
+/// restores the object correctly, so it is strictly more faithful than the
+/// slow path it replaces for qualifying deletes. If a Loro upgrade ever fixes
+/// the underlying checkout-undo behavior, this test will flip and flag it.
+#[test]
+fn slow_undo_drops_object_placeholder_pre_existing() {
+  let (handle, gate) = new_handle("slow-undo-object");
+  seed_mass_fragment(&handle, 4, Some(2));
+  let ids = paragraph_ids(&handle);
+  assert_eq!(body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(), 1);
+
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[1], 0),
+      end: TextAnchor::new(ids[3], 4),
+    })
+    .expect("small delete across the equation commits");
+  assert_eq!(slot_direction(&gate), None, "sub-threshold: no recorded-inverse capture");
+  assert_eq!(body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(), 0);
+
+  let outcome = handle.apply_undo().expect("slow undo runs");
+  assert!(outcome.applied);
+  // Pre-existing: the placeholder is NOT restored by the checkout-based undo.
+  assert_eq!(
+    body_string(&gate).chars().filter(|ch| *ch == '\u{FFFC}').count(),
+    0,
+    "documents the pre-existing slow-path object-placeholder drop (see doc comment)"
+  );
+}

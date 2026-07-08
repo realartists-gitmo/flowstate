@@ -109,6 +109,46 @@ mod tests {
   }
 
 
+  /// §act-three C (background open): a panel painted from a phase-V cached
+  /// projection is a READ-ONLY display surface (no authority) — edits are inert
+  /// — until phase G attaches the authority, after which editing commits
+  /// normally and the projection is the authority's canonical one. This is the
+  /// editor-level heart of the two-phase open (`create_pending_document_panel`
+  /// → `attach_runtime_to_pending_panel`).
+  #[gpui::test]
+  fn read_only_panel_becomes_editable_when_authority_attaches(cx: &mut gpui::TestAppContext) {
+    let projection = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![run("cached view", RunStyles::default())],
+      }],
+    );
+    // Phase V: editor built from the cached projection, NO authority.
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(projection.clone(), None, cx));
+
+    editor.update(cx, |editor, cx| {
+      assert!(!editor.has_write_authority(), "phase-V panel must have no write authority");
+      // An edit against a read-only surface is inert (no fallback editing).
+      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: "cached".len() }), cx);
+      editor.insert_text_command("X", cx);
+      assert_eq!(paragraph_text(editor.document(), 0), "cached view", "read-only surface must ignore edits");
+    });
+
+    // Phase G: the authority runtime finishes loading and attaches.
+    attach_test_authority(&editor, cx);
+
+    editor.update(cx, |editor, cx| {
+      assert!(editor.has_write_authority(), "phase-G attach must install the write authority");
+      // The projection is now the authority's canonical one (same content).
+      assert_eq!(paragraph_text(editor.document(), 0), "cached view");
+      // Editing now commits through the real write path.
+      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: "cached".len() }), cx);
+      editor.insert_text_command("X", cx);
+      assert_eq!(paragraph_text(editor.document(), 0), "cachedX view", "editing must work after attach");
+    });
+  }
+
   /// UTF-8 byte-offset law through the real write path: text anchors address
   /// paragraph bytes while the canonical Loro body is unicode — inserts and
   /// deletes around multi-byte characters must round-trip exactly.

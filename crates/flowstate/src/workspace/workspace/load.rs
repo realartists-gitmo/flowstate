@@ -111,6 +111,39 @@ fn load_document_for_open(path: &PathBuf) -> std::io::Result<LoadedDocumentForOp
   })
 }
 
+/// §act-three C (phase V): the cheapest renderable projection for `path`,
+/// WITHOUT constructing the authority runtime — the frontier-current `.db8`
+/// projection cache (~0.3s, no snapshot/segment decode or Loro import) or a
+/// still-warm docx preview-bridge projection. Returns `None` when no fast
+/// projection exists (the caller then just waits for the full phase-G load).
+/// Read-only: this projection paints immediately; editing enables when the
+/// authority attaches (phase G). Never fabricates or mutates state.
+pub(crate) fn read_open_projection_fast(path: &Path) -> Option<DocumentProjection> {
+  if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+    if extension.eq_ignore_ascii_case("docx") {
+      // The open screen's preview already materialized this exact file; reuse
+      // it for an instant paint (the Loro import still runs in phase G). Peek
+      // WITHOUT consuming — `load_document_for_open` takes the bridge entry.
+      return peek_docx_preview_bridge(path);
+    }
+    if extension.eq_ignore_ascii_case("pdf") {
+      // PDFs carry an embedded .db8 but need extraction; no cheap cache path.
+      return None;
+    }
+  }
+  // .db8 (and unknown extensions): the frontier-current projection cache.
+  flowstate_document::DocumentPackage::read_cached_projection(path).ok().flatten()
+}
+
+fn peek_docx_preview_bridge(path: &Path) -> Option<DocumentProjection> {
+  let (modified, len) = docx_fingerprint(path)?;
+  let bridge = DOCX_PREVIEW_BRIDGE.lock().ok()?;
+  bridge
+    .iter()
+    .find(|(existing, existing_modified, existing_len, _)| existing == path && *existing_modified == modified && *existing_len == len)
+    .map(|(.., document)| document.clone())
+}
+
 fn runtime_io_error(error: anyhow::Error) -> std::io::Error {
   if let Some(io_error) = error.root_cause().downcast_ref::<std::io::Error>() {
     return std::io::Error::new(io_error.kind(), error.to_string());

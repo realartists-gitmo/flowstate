@@ -6,6 +6,7 @@ mod editor;
 mod element;
 mod invisibility;
 mod layout;
+mod overlay;
 mod paint;
 mod selection;
 mod tools;
@@ -14,6 +15,7 @@ mod word_boundary;
 pub use benchmarks::{BenchmarkOptions, BenchmarkRunner};
 pub use editor::*;
 pub use element::RichTextDocumentElement;
+pub use overlay::{DeriveStats, MAX_QUEUE_DEPTH, OverlayIntentId, OverlayQueue, Predictability};
 pub use tools::ArmedInlineTool;
 
 use crate::*;

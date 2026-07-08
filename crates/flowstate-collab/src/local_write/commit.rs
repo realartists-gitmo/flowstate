@@ -202,6 +202,12 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
   let vv_before = core.doc().state_vv();
   let base_frontier = frontier_before.encode();
 
+  // §act-three B.1: a qualifying mass DeleteRange records its inverse BEFORE
+  // the mutation destroys the content (doc + projection are still pre-delete
+  // here). `None` for everything that doesn't qualify.
+  let pending_inverse = super::recorded_inverse::capture_before_delete(core, &plan);
+  let peer_counter_before = local_peer_counter_end(core);
+
   // ---- Phase 2: mutate (Err → I-10 compensation) ---------------------------
   let summary = match execute_plan(core, &plan) {
     Ok(summary) => summary,
@@ -239,6 +245,16 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
   let outcome = match invalidation_patches {
     PatchPlan::Patches { patches, invalidation } => {
       counters.patch_count = u32::try_from(patches.len()).unwrap_or(u32::MAX);
+      // §act-three B.1: arm (or clear) the recorded-inverse slot. The delete's
+      // own synthesized patches are the verbatim redo replay material; the
+      // committed counter span is the undo item this record must match.
+      match pending_inverse {
+        Some(pending) => {
+          let delete_span = loro::CounterSpan::new(peer_counter_before, local_peer_counter_end(core));
+          super::recorded_inverse::finalize_capture(core, pending, delete_span, &patches);
+        },
+        None => *core.recorded_inverse_slot() = None,
+      }
       let mut invalidation = invalidation;
       core.merge_subscription_invalidation(&mut invalidation);
       core.apply_projection_patch_set(&patches);
@@ -264,6 +280,8 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
     },
     PatchPlan::FullRebuild { invalidation, reason } => {
       counters.full_rebuild = true;
+      // §act-three B.1: no patch material to replay on redo — drop any capture.
+      *core.recorded_inverse_slot() = None;
       tracing::warn!(class = intent.class(), reason, "full-rebuild-after-local-write");
       let mut invalidation = invalidation;
       core.merge_subscription_invalidation(&mut invalidation);
@@ -303,6 +321,13 @@ fn pending_op_count(doc: &LoroDoc) -> u64 {
   u64::try_from(doc.get_pending_txn_len()).unwrap_or(u64::MAX)
 }
 
+/// §act-three B.1: local-peer oplog counter end — the coordinate the
+/// `UndoManager` records item spans in.
+fn local_peer_counter_end(core: &CrdtRuntime) -> loro::Counter {
+  let peer = core.doc().peer_id();
+  core.doc().oplog_vv().get(&peer).copied().unwrap_or(0)
+}
+
 /// I-10 recovery. Order is load-bearing (semantics-audit F4):
 /// 1. repair origin BEFORE `revert_to` — its internal `diff()` implicitly
 ///    commits the pending partial mutation, and that commit must be
@@ -320,6 +345,9 @@ fn compensate_failed_intent(
   error: &anyhow::Error,
 ) -> WriteRejected {
   tracing::error!(class, %error, "local intent failed mid-apply; compensating via revert_to (I-10)");
+  // §act-three B.1: the compensation commits change the frontier anyway, but
+  // drop the (possibly large) capture eagerly.
+  *core.recorded_inverse_slot() = None;
   core.doc().set_next_commit_origin("repair");
   core.doc().set_next_commit_message("intent-compensation");
   if let Err(revert_error) = core.doc().revert_to(frontier_before) {
@@ -392,7 +420,7 @@ fn queue_publish_events(
 /// independent full materialization. Release sampling is wired by the handle's
 /// config; this function is the debug-build always-on arm.
 #[hotpath::measure]
-fn audit_patched_projection(core: &mut CrdtRuntime, class: &'static str) {
+pub(crate) fn audit_patched_projection(core: &mut CrdtRuntime, class: &'static str) {
   #[cfg(debug_assertions)]
   {
     if let Err(error) = core.audit_projection_against_full_rebuild(class) {

@@ -5,6 +5,7 @@ pub mod loro_schema;
 pub mod package;
 mod package_search;
 pub mod projection_defects;
+pub mod revision_ladder;
 pub mod table_topology;
 
 pub use gpui_flowtext::*;

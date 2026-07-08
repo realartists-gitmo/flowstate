@@ -640,6 +640,429 @@ impl Transaction {
         Ok(())
     }
 
+    /// §perf (flowstate vendor patch, act three D.2): apply MANY local ops to
+    /// one container under ONE oplog/state lock acquisition, with ONE DAG
+    /// version update covering the whole consecutive counter run (the DAG
+    /// RLE-merges consecutive local spans, so one call with the total length
+    /// is equivalent to N per-op calls). A whole-document delete in a
+    /// heavily-styled document fans out into one op per text fragment between
+    /// style anchors (~128k on the reference doc); the per-op ceremony
+    /// (locking, DAG update, frontier rebuild) dominated the apply loop at
+    /// ~5 µs/op. STATE mutation stays strictly per-op — each op applies
+    /// exactly as a remote replay of the same ops would — so convergence
+    /// semantics are untouched.
+    pub(super) fn apply_local_ops_batch(
+        &mut self,
+        container: ContainerIdx,
+        ops: Vec<(RawOpContent, EventHint)>,
+        doc: &LoroDoc,
+    ) -> LoroResult<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let this_doc = self.doc.upgrade().unwrap();
+        if Arc::as_ptr(&this_doc.state) != Arc::as_ptr(&doc.state) {
+            return Err(LoroError::UnmatchedContext {
+                expected: this_doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                found: doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        let mut oplog = doc.oplog.lock();
+        let mut state = doc.state.lock();
+        if state.is_deleted(container) {
+            return Err(LoroError::ContainerDeleted {
+                container: Box::new(state.arena.idx_to_id(container).unwrap()),
+            });
+        }
+        if !self.is_peer_first_appearance && !oplog.dag.latest_vv_contains_peer(self.peer) {
+            self.is_peer_first_appearance = true;
+        }
+
+        let start_id = ID::new(self.peer, self.next_counter);
+        let start_lamport = self.next_lamport;
+        let deps = if self.local_ops.is_empty() {
+            self.frontiers.clone()
+        } else {
+            Frontiers::from_id(ID::new(self.peer, self.next_counter - 1))
+        };
+        let mut applied_len: usize = 0;
+        let mut result = Ok(());
+        for (content, event) in ops {
+            let len = content.content_len();
+            assert!(len > 0);
+            let raw_op = RawOp {
+                id: ID {
+                    peer: self.peer,
+                    counter: self.next_counter,
+                },
+                lamport: self.next_lamport,
+                container,
+                content,
+            };
+            let op = self.arena.convert_raw_op(&raw_op);
+            if let Err(error) = state.apply_local_op(&raw_op, &op) {
+                result = Err(error);
+                break;
+            }
+            self.next_counter += len as Counter;
+            self.next_lamport += len as Lamport;
+            applied_len += len;
+            debug_assert_eq!(event.rle_len(), op.atom_len());
+            let container_hints = self.event_hints.entry(container).or_default();
+            match container_hints.last_mut() {
+                Some(last) if last.can_merge(&event) => {
+                    last.merge_right(&event);
+                }
+                _ => {
+                    container_hints.push(event);
+                }
+            }
+            self.local_ops.push(op);
+        }
+        // ONE version update for the whole applied prefix (all of it on
+        // success; the consistent prefix on a mid-batch error).
+        if applied_len > 0 {
+            oplog
+                .dag
+                .update_version_on_new_local_op(&deps, start_id, start_lamport, applied_len);
+            oplog.refresh_visible_op_count();
+            state.frontiers = Frontiers::from_id(start_id.inc(applied_len as Counter - 1));
+        }
+        drop(state);
+        drop(oplog);
+        result
+    }
+
+    /// §perf (flowstate vendor patch, act three D.1): batched local TEXT
+    /// INSERTS for a multi-span delta. Entity/style resolution per span stays
+    /// live-interleaved (each insert shifts later positions), only the
+    /// transaction ceremony is hoisted — op emission is byte-identical to the
+    /// per-span `insert_with_txn_and_attr` path. Returns the override-style
+    /// marks (sequence, start, end, key, value) the caller must apply AFTER
+    /// the inserts, exactly as the per-span contract does. Event positions
+    /// are the delta-walk indices (post-prior-inserts), non-wasm builds only.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn apply_local_text_insert_batch(
+        &mut self,
+        container: ContainerIdx,
+        inserts: Vec<(usize, usize, String, Option<FxHashMap<String, LoroValue>>)>,
+        doc: &LoroDoc,
+    ) -> LoroResult<Vec<(usize, usize, usize, InternalString, LoroValue)>> {
+        use crate::container::list::list_op::ListOp;
+        use crate::op::ListSlice;
+        use std::ops::Deref as _;
+        if inserts.is_empty() {
+            return Ok(Vec::new());
+        }
+        let this_doc = self.doc.upgrade().unwrap();
+        if Arc::as_ptr(&this_doc.state) != Arc::as_ptr(&doc.state) {
+            return Err(LoroError::UnmatchedContext {
+                expected: this_doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                found: doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        let mut oplog = doc.oplog.lock();
+        let mut state = doc.state.lock();
+        if state.is_deleted(container) {
+            return Err(LoroError::ContainerDeleted {
+                container: Box::new(state.arena.idx_to_id(container).unwrap()),
+            });
+        }
+        if !self.is_peer_first_appearance && !oplog.dag.latest_vv_contains_peer(self.peer) {
+            self.is_peer_first_appearance = true;
+        }
+
+        let start_id = ID::new(self.peer, self.next_counter);
+        let start_lamport = self.next_lamport;
+        let deps = if self.local_ops.is_empty() {
+            self.frontiers.clone()
+        } else {
+            Frontiers::from_id(ID::new(self.peer, self.next_counter - 1))
+        };
+        let mut applied_len: usize = 0;
+        let mut override_marks: Vec<(usize, usize, usize, InternalString, LoroValue)> = Vec::new();
+        let mut result = Ok(());
+        for (seq, event_pos, text, attr) in inserts {
+            if text.is_empty() {
+                continue;
+            }
+            let probe = state.with_state_mut(container, |container_state| {
+                let richtext = container_state.as_richtext_state_mut().unwrap();
+                if event_pos > richtext.len(crate::cursor::PosType::Event) {
+                    return Err(LoroError::OutOfBound {
+                        pos: event_pos,
+                        len: richtext.len(crate::cursor::PosType::Event),
+                        info: format!("Position: {}:{}", file!(), line!()).into_boxed_str(),
+                    });
+                }
+                let (entity_index, _cursor) = richtext
+                    .get_entity_index_for_text_insert(event_pos, crate::cursor::PosType::Event)?;
+                let styles = richtext.get_styles_at_entity_index(entity_index);
+                Ok((entity_index, styles))
+            });
+            let (entity_index, styles) = match probe {
+                Ok(pair) => pair,
+                Err(error) => {
+                    result = Err(error);
+                    break;
+                }
+            };
+
+            if let Some(attr) = attr.as_ref() {
+                let map: FxHashMap<_, _> = styles.iter().map(|x| (x.0.clone(), x.1.data)).collect();
+                for (key, style) in map.iter() {
+                    match attr.get(key.deref()) {
+                        Some(v) if v == style => {}
+                        new_style_value => {
+                            let new_style_value = new_style_value.cloned().unwrap_or(LoroValue::Null);
+                            override_marks.push((
+                                seq,
+                                event_pos,
+                                event_pos + text.chars().count(),
+                                key.clone(),
+                                new_style_value,
+                            ));
+                        }
+                    }
+                }
+                for (key, style) in attr.iter() {
+                    let key: InternalString = key.as_str().into();
+                    if !map.contains_key(&key) {
+                        override_marks.push((
+                            seq,
+                            event_pos,
+                            event_pos + text.chars().count(),
+                            key,
+                            style.clone(),
+                        ));
+                    }
+                }
+            }
+
+            let unicode_len = text.chars().count();
+            let event_len = unicode_len; // non-wasm: event index == unicode index
+            let raw_op = RawOp {
+                id: ID {
+                    peer: self.peer,
+                    counter: self.next_counter,
+                },
+                lamport: self.next_lamport,
+                container,
+                content: RawOpContent::List(ListOp::Insert {
+                    slice: ListSlice::RawStr {
+                        str: std::borrow::Cow::Borrowed(text.as_str()),
+                        unicode_len,
+                    },
+                    pos: entity_index,
+                }),
+            };
+            let event = EventHint::InsertText {
+                pos: event_pos as u32,
+                styles,
+                unicode_len: unicode_len as u32,
+                event_len: event_len as u32,
+            };
+            let len = raw_op.content.content_len();
+            let op = self.arena.convert_raw_op(&raw_op);
+            if let Err(error) = state.apply_local_op(&raw_op, &op) {
+                result = Err(error);
+                break;
+            }
+            self.next_counter += len as Counter;
+            self.next_lamport += len as Lamport;
+            applied_len += len;
+            debug_assert_eq!(event.rle_len(), op.atom_len());
+            let container_hints = self.event_hints.entry(container).or_default();
+            match container_hints.last_mut() {
+                Some(last) if last.can_merge(&event) => {
+                    last.merge_right(&event);
+                }
+                _ => {
+                    container_hints.push(event);
+                }
+            }
+            self.local_ops.push(op);
+        }
+        if applied_len > 0 {
+            oplog
+                .dag
+                .update_version_on_new_local_op(&deps, start_id, start_lamport, applied_len);
+            oplog.refresh_visible_op_count();
+            state.frontiers = Frontiers::from_id(start_id.inc(applied_len as Counter - 1));
+        }
+        drop(state);
+        drop(oplog);
+        result.map(|()| override_marks)
+    }
+
+    /// §perf (flowstate vendor patch, act three D.1): batched local TEXT MARK
+    /// application — the mark-heavy import path (one styled document build =
+    /// tens of thousands of marks) paid the full per-op transaction ceremony
+    /// TWICE per mark (StyleStart + StyleEnd). Entity ranges are computed from
+    /// the LIVE state inside the loop (each mark's anchors shift later entity
+    /// positions, so precomputation would be wrong); only the surrounding
+    /// ceremony is batched. `LoroValue::Null` (unmark) is NOT supported here.
+    #[allow(clippy::type_complexity)]
+    pub(super) fn apply_local_text_mark_batch(
+        &mut self,
+        container: ContainerIdx,
+        marks: Vec<(
+            usize,
+            usize,
+            InternalString,
+            LoroValue,
+            crate::container::richtext::TextStyleInfoFlag,
+        )>,
+        pos_type: crate::cursor::PosType,
+        doc: &LoroDoc,
+    ) -> LoroResult<()> {
+        use crate::container::list::list_op::ListOp;
+        if marks.is_empty() {
+            return Ok(());
+        }
+        let this_doc = self.doc.upgrade().unwrap();
+        if Arc::as_ptr(&this_doc.state) != Arc::as_ptr(&doc.state) {
+            return Err(LoroError::UnmatchedContext {
+                expected: this_doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                found: doc
+                    .state
+                    .lock()
+                    .peer
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            });
+        }
+
+        let mut oplog = doc.oplog.lock();
+        let mut state = doc.state.lock();
+        if state.is_deleted(container) {
+            return Err(LoroError::ContainerDeleted {
+                container: Box::new(state.arena.idx_to_id(container).unwrap()),
+            });
+        }
+        if !self.is_peer_first_appearance && !oplog.dag.latest_vv_contains_peer(self.peer) {
+            self.is_peer_first_appearance = true;
+        }
+
+        let start_id = ID::new(self.peer, self.next_counter);
+        let start_lamport = self.next_lamport;
+        let deps = if self.local_ops.is_empty() {
+            self.frontiers.clone()
+        } else {
+            Frontiers::from_id(ID::new(self.peer, self.next_counter - 1))
+        };
+        let mut applied_len: usize = 0;
+        let mut result = Ok(());
+        'marks: for (start, end, key, value, flag) in marks {
+            let is_delete = matches!(value, LoroValue::Null);
+            let (event_start, event_end, entity_range, skip, missing_style_key) =
+                state.with_state_mut(container, |container_state| {
+                    let richtext = container_state.as_richtext_state_mut().unwrap();
+                    let event_start = richtext.index_to_event_index(start, pos_type);
+                    let event_end = richtext.index_to_event_index(end, pos_type);
+                    let (entity_range, styles) =
+                        richtext.get_entity_range_and_styles_at_range(start..end, pos_type);
+                    let skip = styles
+                        .map(|styles| styles.has_key_value(&key, &value))
+                        .unwrap_or(false);
+                    let has_target_style = richtext.has_style_key_in_entity_range(
+                        entity_range.clone(),
+                        &crate::container::richtext::StyleKey::Key(key.clone()),
+                    );
+                    (
+                        event_start,
+                        event_end,
+                        entity_range,
+                        skip,
+                        is_delete && !has_target_style,
+                    )
+                });
+            if skip || missing_style_key {
+                continue;
+            }
+            let pair: [(RawOpContent, crate::txn::EventHint); 2] = [
+                (
+                    RawOpContent::List(ListOp::StyleStart {
+                        start: entity_range.start as u32,
+                        end: entity_range.end as u32,
+                        key: key.clone(),
+                        value: value.clone(),
+                        info: flag,
+                    }),
+                    EventHint::Mark {
+                        start: event_start as u32,
+                        end: event_end as u32,
+                        style: Style { key, data: value },
+                    },
+                ),
+                (RawOpContent::List(ListOp::StyleEnd), EventHint::MarkEnd),
+            ];
+            for (content, event) in pair {
+                let len = content.content_len();
+                assert!(len > 0);
+                let raw_op = RawOp {
+                    id: ID {
+                        peer: self.peer,
+                        counter: self.next_counter,
+                    },
+                    lamport: self.next_lamport,
+                    container,
+                    content,
+                };
+                let op = self.arena.convert_raw_op(&raw_op);
+                if let Err(error) = state.apply_local_op(&raw_op, &op) {
+                    result = Err(error);
+                    break 'marks;
+                }
+                self.next_counter += len as Counter;
+                self.next_lamport += len as Lamport;
+                applied_len += len;
+                debug_assert_eq!(event.rle_len(), op.atom_len());
+                let container_hints = self.event_hints.entry(container).or_default();
+                match container_hints.last_mut() {
+                    Some(last) if last.can_merge(&event) => {
+                        last.merge_right(&event);
+                    }
+                    _ => {
+                        container_hints.push(event);
+                    }
+                }
+                self.local_ops.push(op);
+            }
+        }
+        if applied_len > 0 {
+            oplog
+                .dag
+                .update_version_on_new_local_op(&deps, start_id, start_lamport, applied_len);
+            oplog.refresh_visible_op_count();
+            state.frontiers = Frontiers::from_id(start_id.inc(applied_len as Counter - 1));
+        }
+        drop(state);
+        drop(oplog);
+        result
+    }
+
     /// id can be a str, ContainerID, or ContainerIdRaw.
     /// if it's str it will use Root container, which will not be None
     pub fn get_text<I: IntoContainerId>(&self, id: I) -> TextHandler {

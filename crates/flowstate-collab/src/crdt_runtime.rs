@@ -22,10 +22,16 @@ use flowstate_document::{
 };
 use loro::{
   Container, ContainerID, ExportMode, Frontiers, ID, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
-  UndoItemMeta, UndoManager, ValueOrContainer, VersionRange, VersionVector,
+  UndoItemMeta, ValueOrContainer, VersionRange, VersionVector,
   cursor::{Cursor, Side},
   event::{Diff, DiffEvent},
 };
+// §perf act-three B.1: the vendored `loro-internal` UndoManager (re-exported by
+// the wrapper as `InnerUndoManager`) — needed for the external fast-path undo
+// APIs (`peek_top_span` / `external_step_*`), which the thin wrapper type does
+// not surface. The wrapper's `UndoManager` is a passthrough over this exact
+// type, so behavior is otherwise identical.
+use loro::InnerUndoManager as UndoManager;
 use flowstate_fidelity::{self as fidelity, FidelityClass};
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
@@ -142,6 +148,11 @@ pub struct CrdtRuntime {
   /// harvest imported record keys for regional rematerialization.
   paragraph_registry_container_id: String,
   block_registry_container_id: String,
+  /// §act-three B.1: single-slot recorded inverse for the last qualifying mass
+  /// `DeleteRange` commit. Consumed (ping-ponged) by the undo/redo fast path;
+  /// any interleaving commit or import fails its frontier check and the slot
+  /// is dropped. See `local_write::recorded_inverse`.
+  recorded_inverse: Option<crate::local_write::recorded_inverse::RecordedInverse>,
   _root_subscription: Subscription,
   _local_update_subscription: Subscription,
 }
@@ -974,7 +985,7 @@ impl CrdtRuntime {
       }
       true
     }));
-    let mut undo = UndoManager::new(&doc);
+    let undo = UndoManager::new(doc.inner());
     // Loro-first spec §10 (D6): time-based merge OFF — undo units are explicit
     // group_start/group_end boundaries driven by input semantics.
     undo.set_merge_interval(0);
@@ -984,7 +995,7 @@ impl CrdtRuntime {
     // enter the local undo stack (they are convergent housekeeping, not edits).
     undo.add_exclude_origin_prefix("repair");
     let undo_selection = Arc::new(Mutex::new(UndoSelectionState::default()));
-    install_undo_selection_callbacks(&mut undo, &undo_selection);
+    install_undo_selection_callbacks(&undo, &undo_selection);
     let projection_index = ProjectionRuntimeIndex::from_projection(&projection);
     // §6-R: registry container ids, read-only (no `ensure_*` — construction
     // must not leave uncommitted marker writes in the pending txn).
@@ -1023,6 +1034,7 @@ impl CrdtRuntime {
       pending_publish: Vec::new(),
       paragraph_registry_container_id,
       block_registry_container_id,
+      recorded_inverse: None,
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
     };
@@ -1067,6 +1079,11 @@ impl CrdtRuntime {
 
   pub(crate) fn undo_manager_mut(&mut self) -> &mut UndoManager {
     &mut self.undo
+  }
+
+  /// §act-three B.1: the recorded-inverse slot (see `local_write::recorded_inverse`).
+  pub(crate) fn recorded_inverse_slot(&mut self) -> &mut Option<crate::local_write::recorded_inverse::RecordedInverse> {
+    &mut self.recorded_inverse
   }
 
   /// Push an editor-bound projection change onto the ordered stream (gate-held
@@ -1169,6 +1186,14 @@ impl CrdtRuntime {
       .lock()
       .ok()
       .and_then(|mut state| state.restored_selection.take())
+  }
+
+  /// Re-park a restored-selection snapshot that could not resolve against the
+  /// current projection yet (mirrors the slow undo path's deferral).
+  pub(crate) fn restore_undo_selection_later(&mut self, snapshot: UndoSelectionSnapshot) {
+    if let Ok(mut state) = self.undo_selection.lock() {
+      state.restored_selection = Some(snapshot);
+    }
   }
 
   #[hotpath::measure]
@@ -1373,6 +1398,9 @@ impl CrdtRuntime {
     };
     if mutates_document {
       flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for semantic command")?;
+      // §act-three B.1: any other mutation invalidates the recorded inverse
+      // (the frontier check would catch it; this frees the capture eagerly).
+      self.recorded_inverse = None;
     }
     #[allow(clippy::needless_late_init, reason = "assigned across match arms that interleave with diverging early-return arms")]
     let projection_invalidation;
@@ -1521,6 +1549,14 @@ impl CrdtRuntime {
         }]);
       },
       SemanticCommand::Undo => {
+        // §act-three B.1: replay the recorded inverse when the lineage checks
+        // hold — no checkout, no diff calc, no rebuild. Falls through to the
+        // UndoManager slow path on any mismatch.
+        if let Some(events) =
+          hotpath::measure_block!("recorded_inverse_undo", crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Undo)?)
+        {
+          return Ok(events);
+        }
         let applied = hotpath::measure_block!("loro_undo_manager_undo", self.undo.undo().context("applying Loro undo")?);
         // §fidelity: record the undo's frontier transition and assert it only
         // introduced local-peer ops (remote-origin ops are excluded from undo).
@@ -1543,6 +1579,12 @@ impl CrdtRuntime {
         };
       },
       SemanticCommand::Redo => {
+        // §act-three B.1: symmetric fast path — replays the recorded delete.
+        if let Some(events) =
+          hotpath::measure_block!("recorded_inverse_redo", crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Redo)?)
+        {
+          return Ok(events);
+        }
         let applied = hotpath::measure_block!("loro_undo_manager_redo", self.undo.redo().context("applying Loro redo")?);
         // §fidelity: record the redo's frontier transition and assert it only
         // introduced local-peer ops (remote-origin ops are excluded from redo).
@@ -1583,7 +1625,7 @@ impl CrdtRuntime {
     Ok(events)
   }
 
-  fn resolve_undo_selection(&mut self, snapshot: &UndoSelectionSnapshot) -> Option<EditorSelection> {
+  pub(crate) fn resolve_undo_selection(&mut self, snapshot: &UndoSelectionSnapshot) -> Option<EditorSelection> {
     // §16: restore the stored affinity onto the rebuilt selection. Gravity is
     // not persisted in the undo snapshot, so it resolves to neutral.
     // §24: `&mut self` so the cursor resolutions can memoize through the index's
@@ -2070,6 +2112,9 @@ impl CrdtRuntime {
     if chunks.is_empty() {
       return Ok(Vec::new());
     }
+    // §act-three B.1: a remote import invalidates the recorded inverse (the
+    // frontier check would catch it; this frees the capture eagerly).
+    self.recorded_inverse = None;
     let from_frontier = self.doc.state_frontiers();
     // §fidelity: capture the pre-import version only when tracing so a disabled
     // build pays nothing; used to assert the import advanced (never regressed) the
@@ -3655,6 +3700,34 @@ pub(crate) fn insert_input_object_block(doc: &LoroDoc, unicode_index: usize, blo
     InputBlock::Image(image) => insert_image_block_with_id(doc, unicode_index, block_id, image),
     InputBlock::Equation(equation) => insert_equation_block_with_id(doc, unicode_index, block_id, equation),
     InputBlock::Table(table) => insert_table_block_with_id(doc, unicode_index, block_id, table),
+    InputBlock::Paragraph(_) => Ok(()),
+  }
+}
+
+/// §act-three B.1: container-only sibling of [`insert_input_object_block`] for
+/// the recorded-inverse undo restore. The U+FFFC placeholder is already back
+/// in the body (it rode the verbatim bulk-text restore), so only the block
+/// registry record + nested containers are recreated — keyed by the ORIGINAL
+/// block id, which reproduces the exact durable key the delete pruned.
+/// Tables are gated out of the fast path (their durable row/column/cell ids
+/// cannot be re-minted losslessly here).
+pub(crate) fn restore_input_object_block_containers(
+  doc: &LoroDoc,
+  unicode_index: usize,
+  block_id: flowstate_document::BlockId,
+  input: &InputBlock,
+) -> Result<()> {
+  let body = body_text(doc);
+  match input {
+    InputBlock::Image(image) => {
+      let block = ensure_block_with_id(doc, &object_block_key("image", block_id), "image", ROOT_BODY_FLOW_ID, &body, unicode_index)?;
+      replace_image_block_from_input(doc, &block, image)
+    },
+    InputBlock::Equation(equation) => {
+      let block = ensure_block_with_id(doc, &object_block_key("equation", block_id), "equation", ROOT_BODY_FLOW_ID, &body, unicode_index)?;
+      replace_equation_block_from_input(doc, &block, equation)
+    },
+    InputBlock::Table(_) => anyhow::bail!("tables are excluded from the recorded-inverse fast path"),
     InputBlock::Paragraph(_) => Ok(()),
   }
 }
@@ -5493,7 +5566,7 @@ fn asset_record_metadata_changed(existing: &AssetRecord, next: &AssetRecord) -> 
   existing.mime_type != next.mime_type || existing.original_name != next.original_name || existing.content_hash != next.content_hash
 }
 
-fn install_undo_selection_callbacks(undo: &mut UndoManager, state: &Arc<Mutex<UndoSelectionState>>) {
+fn install_undo_selection_callbacks(undo: &UndoManager, state: &Arc<Mutex<UndoSelectionState>>) {
   let push_state = Arc::clone(state);
   undo.set_on_push(Some(Box::new(move |_, _, _| {
     let mut meta = UndoItemMeta::new();
@@ -6868,28 +6941,26 @@ mod tests {
       })
       .expect("insert");
     let revisions_before = DocumentPackage::read(&path)?.revisions.len();
-    {
-      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
-      assert!(
-        DocumentPackage::read_cached_projection(&path)?.is_none(),
-        "an edit must null the projection cache (preview falls back to the full read)"
-      );
-      let job = guard.begin_cache_flush().expect("edited package must need a cache flush");
-      drop(guard);
-      let (package, wrote) = job.run();
-      let wrote = wrote?;
-      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
-      guard.finish_checkpoint(package, wrote);
-      assert!(wrote, "the flush must reach disk");
-    }
+    let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+    assert!(
+      DocumentPackage::read_cached_projection(&path)?.is_none(),
+      "an edit must null the projection cache (preview falls back to the full read)"
+    );
+    let job = guard.begin_cache_flush().expect("edited package must need a cache flush");
+    drop(guard);
+    let (package, wrote) = job.run();
+    let wrote = wrote?;
+    let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+    guard.finish_checkpoint(package, wrote);
+    drop(guard);
+    assert!(wrote, "the flush must reach disk");
     let flushed = DocumentPackage::read_cached_projection(&path)?.expect("flushed package must preview via the cache fast path");
     assert_eq!(flowstate_document::paragraph_text(&flushed, 0), "flush me again");
     let revisions_after = DocumentPackage::read(&path)?.revisions.len();
     assert_eq!(revisions_before, revisions_after, "a cache flush must not mint a revision");
-    {
-      let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
-      assert!(guard.begin_cache_flush().is_none(), "a frontier-current package must skip the flush");
-    }
+    let mut guard = gate.lock(GateHolder::DocumentService).expect("gate");
+    assert!(guard.begin_cache_flush().is_none(), "a frontier-current package must skip the flush");
+    drop(guard);
     Ok(())
   }
 }

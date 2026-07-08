@@ -203,6 +203,68 @@ mod tests {
     assert_eq!(canonical.paragraphs.len(), 1, "redo re-empties the document");
   }
 
+  /// §act-three B.1 timing A/B (run on demand): seed a large multi-paragraph
+  /// document, mass-delete it, and time undo+redo with the recorded-inverse
+  /// fast path vs the checkout-based slow path
+  /// (`FLOWSTATE_DISABLE_FAST_UNDO=1`). Prints the deltas; not asserted (timing
+  /// is machine-dependent). Run with:
+  /// ```text
+  ///   cargo test -p flowstate-collab --test field_regressions --release \
+  ///     recorded_inverse_undo_timing -- --ignored --nocapture
+  /// ```
+  #[test]
+  #[ignore = "timing harness: run on demand with --nocapture"]
+  fn recorded_inverse_undo_timing() {
+    use std::time::Instant;
+    let paragraphs = std::env::var("B1_PARAGRAPHS").ok().and_then(|v| v.parse().ok()).unwrap_or(4000usize);
+    let (handle, _gate) = new_handle("b1-timing");
+    let mut paragraph = handle.projection().expect("projection").ids.paragraph_ids[0];
+    for i in 0..paragraphs {
+      handle
+        .insert_text(InsertTextIntent {
+          at: TextAnchor::new(paragraph, usize::MAX),
+          text: format!("paragraph {i} with a realistic amount of styled debate-card body text to weigh the range"),
+          style_override: Some(flowstate_document::RunStyles {
+            semantic: flowstate_document::RunSemanticStyle::Custom(2),
+            ..Default::default()
+          }),
+        })
+        .expect("seed insert");
+      handle
+        .split_paragraph(SplitParagraphIntent {
+          at: TextAnchor::new(paragraph, usize::MAX),
+          inherited_style: ParagraphStyle::Normal,
+        })
+        .expect("seed split");
+      paragraph = *handle.projection().expect("projection").ids.paragraph_ids.last().expect("last");
+    }
+    let projection = handle.projection().expect("projection");
+    let first = projection.ids.paragraph_ids[0];
+    let last = *projection.ids.paragraph_ids.last().expect("paragraphs");
+    let delete = |handle: &LocalDocHandle| {
+      handle
+        .delete_range(flowstate_collab::local_write::DeleteRangeIntent {
+          start: TextAnchor::new(first, 0),
+          end: TextAnchor::new(last, usize::MAX),
+        })
+        .expect("select-all delete");
+    };
+    delete(&handle);
+    // Warm one undo/redo cycle.
+    let t = Instant::now();
+    handle.apply_undo().expect("undo");
+    let undo_ms = t.elapsed().as_secs_f64() * 1e3;
+    let _ = handle.drain_projection_stream();
+    let t = Instant::now();
+    handle.apply_redo().expect("redo");
+    let redo_ms = t.elapsed().as_secs_f64() * 1e3;
+    let _ = handle.drain_projection_stream();
+    eprintln!(
+      "B.1 timing: paragraphs={paragraphs} fast_undo_disabled={} undo={undo_ms:.1}ms redo={redo_ms:.1}ms",
+      std::env::var("FLOWSTATE_DISABLE_FAST_UNDO").is_ok()
+    );
+  }
+
   /// Spec §6-R: a remote peer's structural edits (Enter/Backspace storms) must
   /// take the REGIONAL rematerializer — exact patches (`ProjectionPatched`),
   /// never a full-document rebuild (`ProjectionUpdated`) — and the ordered
@@ -497,7 +559,7 @@ mod tests {
       .command(flowstate_collab::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
       .expect("fork revision");
     assert_eq!(events.len(), 1, "revision fork emits exactly the fork event");
-    drop(guard);;
+    drop(guard);
 
     // The live document is untouched: same text, editing + undo keep working.
     assert!(body_string(&gate).contains("typed before open"));
