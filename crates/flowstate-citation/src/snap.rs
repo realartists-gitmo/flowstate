@@ -57,6 +57,27 @@ fn snap_word(val: &str, anchor: &[usize], w: &[String], folded: &[String]) -> Op
     if nv.chars().count() < 2 {
         return None;
     }
+    // restore the richer source form: a source token that folds identically but whose original
+    // differs carries characters the model dropped that folding can't recover — stroke letters
+    // (`Ø`,`ł`,`þ`) that don't NFKD-decompose, and case (`DWOSKIN`→`Dwoskin`). Prefer a form with
+    // non-ASCII (a real diacritic restoration) over a mere case change.
+    let has_na = |s: &str| s.chars().any(|c| !c.is_ascii());
+    let mut restore: Option<usize> = None;
+    for (j, ff) in folded.iter().enumerate() {
+        if *ff == nv && w[j] != val {
+            let better = restore.is_none_or(|ri| {
+                (has_na(&w[j]) && !has_na(&w[ri])) || w[j].chars().count() > w[ri].chars().count()
+            });
+            if better {
+                restore = Some(j);
+            }
+        }
+    }
+    if let Some(j) = restore
+        && has_na(&w[j])
+    {
+        return Some(w[j].clone()); // only auto-apply when it restores a real diacritic
+    }
     // adjacency candidates: neighbours of a confirmed sibling anchor
     let mut adj: Vec<usize> = Vec::new();
     for &ai in anchor {
