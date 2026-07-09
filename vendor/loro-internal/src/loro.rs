@@ -117,6 +117,10 @@ impl LoroDoc {
                 diff_calculator: Arc::new(
                     lock_group.new_lock(DiffCalculator::new(true), LockKind::DiffCalculator),
                 ),
+                // §act-five P1.B: retained import-path calculator (see lib.rs).
+                import_diff_calculator: Arc::new(
+                    lock_group.new_lock(DiffCalculator::new(true), LockKind::DiffCalculator),
+                ),
                 txn: global_txn,
                 arena,
                 local_update_subs: SubscriberSetWithQueue::new(),
@@ -659,8 +663,12 @@ impl LoroDoc {
             let old_frontiers = oplog.frontiers().clone();
             let result = f(&mut oplog);
             if &old_vv != oplog.vv() {
-                let mut diff = DiffCalculator::new(false);
-                let (diff, diff_mode) = diff.calc_diff_internal(
+                // §act-five P1.B: acquire state BEFORE the diff calculator so the
+                // retained calculator (LockKind::DiffCalculator=4) is taken after
+                // state (=3) — valid lock order (OpLog<DocState<DiffCalculator). The
+                // owned diff outlives the calc lock (dropped at the end of the let).
+                let mut state = self.state.lock();
+                let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal(
                     &oplog,
                     &old_vv,
                     &old_frontiers,
@@ -668,7 +676,6 @@ impl LoroDoc {
                     oplog.dag.get_frontiers(),
                     None,
                 );
-                let mut state = self.state.lock();
                 if let Err(e) = state.apply_diff(
                     InternalDocDiff {
                         origin,
@@ -774,8 +781,9 @@ impl LoroDoc {
 
         let result = encoding::apply_decoded_changes_to_oplog(&mut oplog, changes);
         if &old_vv != oplog.vv() {
-            let mut diff = DiffCalculator::new(false);
-            let (diff, diff_mode) = diff.calc_diff_internal(
+            // §act-five P1.B: state before the retained calculator (valid lock order).
+            let mut state = self.state.lock();
+            let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal(
                 &oplog,
                 &old_vv,
                 &old_frontiers,
@@ -783,7 +791,6 @@ impl LoroDoc {
                 oplog.dag.get_frontiers(),
                 None,
             );
-            let mut state = self.state.lock();
             if let Err(e) = state.apply_diff(
                 InternalDocDiff {
                     origin,
@@ -1134,6 +1141,27 @@ impl LoroDoc {
             return Err(LoroError::UndoInvalidIdSpan(id_span.id_last()));
         }
 
+        // §fidelity (flowstate vendor patch): the style keys each undone op
+        // actually MARKED, per container. The checkout-based undo diff below
+        // over-reports the full resolved style set of the affected span; used
+        // by `restrict_undo_diff_to_marked_keys` to keep only these keys so the
+        // undo cannot clobber a concurrent remote peer's mark of another key on
+        // the same range (field bug: a local run-style highlight undo reverting
+        // a concurrent remote paragraph-style tag).
+        let marked_keys_by_container: FxHashMap<ContainerID, FxHashSet<String>> = {
+            let oplog = self.oplog.lock();
+            let mut map: FxHashMap<ContainerID, FxHashSet<String>> = FxHashMap::default();
+            for rich_op in oplog.iter_ops(id_span) {
+                let op = rich_op.op();
+                if let InnerContent::List(InnerListOp::StyleStart { key, .. }) = &op.content {
+                    if let Some(cid) = oplog.arena.get_container_id(rich_op.container()) {
+                        map.entry(cid).or_default().insert(key.to_string());
+                    }
+                }
+            }
+            map
+        };
+
         let (was_recording, latest_frontiers) = {
             let mut state = self.state.lock();
             let was_recording = state.is_recording();
@@ -1196,6 +1224,14 @@ impl LoroDoc {
         // adjacent same-attribute inserts loses nothing.
         let t3 = std::time::Instant::now();
         let diff = compact_text_diff_batch(diff);
+        // §fidelity: restrict the undo to the style keys the undone ops actually
+        // marked, so it re-asserts ONLY those (never a concurrent remote peer's
+        // other-key marks on the same range). No-op when no mark ops were undone.
+        let diff = if marked_keys_by_container.is_empty() {
+            diff
+        } else {
+            restrict_undo_diff_to_marked_keys(diff, &marked_keys_by_container)
+        };
         let t_compact = t3.elapsed();
         // Try applying the diff, but ignore the error if it happens.
         // MovableList's undo behavior is too tricky to handle in a collaborative env
@@ -2010,6 +2046,13 @@ impl LoroDoc {
     /// Free the cached diff calculator that is used for checkout.
     pub fn free_diff_calculator(&self) {
         *self.diff_calculator.lock() = DiffCalculator::new(true);
+    }
+
+    /// §act-five P1.B: free the RETAINED import-path calculator (see lib.rs). The
+    /// receiving peer calls this on idle (not per import) so a burst/drip of
+    /// imports reuses the trackers, but a truly quiescent doc reclaims the memory.
+    pub fn free_import_diff_calculator(&self) {
+        *self.import_diff_calculator.lock() = DiffCalculator::new(true);
     }
 
     /// If you use checkout that switching to an old/concurrent version, the history cache will be built.
@@ -2963,6 +3006,52 @@ mod test {
         };
         assert!(msg.contains("poisoned LoroMutex"), "{msg}");
     }
+}
+
+/// §fidelity (flowstate vendor patch): restrict an undo diff's text RETAIN
+/// attributes to the style keys the undone ops actually marked (per container).
+///
+/// The checkout-based undo diff re-asserts the FULL resolved style set at every
+/// affected position — including keys the undone op never touched (e.g.
+/// `paragraph_style` at boundary sentinels when undoing a run-style highlight).
+/// Applied to a state a CONCURRENT REMOTE peer has changed, that over-assertion
+/// clobbers the peer's mark. Field bug (2026-07-08, two-peer hotpath): peer A's
+/// local whole-doc highlight undo reverted peer B's concurrent whole-doc
+/// paragraph-style tag on every paragraph. Keeping only the marked keys makes
+/// the undo the exact inverse of the undone ops. Inserts (restored text and its
+/// own styles) and containers with no undone mark ops pass through untouched.
+fn restrict_undo_diff_to_marked_keys(
+    mut batch: crate::undo::DiffBatch,
+    keys_by_container: &FxHashMap<ContainerID, FxHashSet<String>>,
+) -> crate::undo::DiffBatch {
+    use crate::event::{Diff, TextDiff};
+    use generic_btree::rle::HasLength as _;
+    for (cid, diff) in batch.cid_to_events.iter_mut() {
+        let Some(keys) = keys_by_container.get(cid) else {
+            continue;
+        };
+        let Diff::Text(text) = diff else { continue };
+        let mut restricted: TextDiff = TextDiff::new();
+        for item in text.iter() {
+            match item {
+                loro_delta::DeltaItem::Retain { len, attr } => {
+                    let mut meta = attr.clone();
+                    meta.0.retain(|key, _| keys.contains(key));
+                    restricted.push_retain(*len, meta);
+                }
+                loro_delta::DeltaItem::Replace { value, attr, delete } => {
+                    if *delete > 0 {
+                        restricted.push_delete(*delete);
+                    }
+                    if value.rle_len() > 0 {
+                        restricted.push_insert(value.clone(), attr.clone());
+                    }
+                }
+            }
+        }
+        *diff = Diff::Text(restricted);
+    }
+    batch
 }
 
 /// Merge adjacent same-attribute insert runs inside every text diff of the

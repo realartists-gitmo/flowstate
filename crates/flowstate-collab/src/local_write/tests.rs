@@ -9,8 +9,8 @@ use super::commit::INJECT_FRAGMENT_FAULT;
 use super::gate::{GateHolder, WriteGate};
 use super::handle::{LocalDocHandle, LocalWriteConfig};
 use super::intents::{
-  DeleteRangeIntent, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor,
-  WriteRejected,
+  DeleteRangeIntent, FragmentBlock, InsertRichFragmentIntent, InsertTextIntent, SetMarksIntent, SetParagraphStylesIntent, SplitParagraphIntent,
+  TextAnchor, WriteRejected,
 };
 use crate::crdt_runtime::{CrdtRuntime, RuntimeEvent};
 
@@ -633,9 +633,166 @@ fn seed_mass_fragment(handle: &LocalDocHandle, paragraphs: usize, with_equation_
     .expect("mass fragment seeds");
 }
 
-fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo> {
+/// `(undo_stack.len(), redo_stack.len())` — the fast-path stack depths. Because
+/// every fast step MOVES one entry between the stacks (and the slow path clears
+/// both), these depths prove exactly how many consecutive steps stayed fast.
+fn stack_depths(gate: &Arc<WriteGate<CrdtRuntime>>) -> (usize, usize) {
   let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
-  guard.recorded_inverse_slot().as_ref().map(|slot| slot.direction())
+  (guard.recorded_undo_stack().len(), guard.recorded_redo_stack().len())
+}
+
+/// §act-five P3-deep (fail-loud): a RUN of consecutive local undos must EACH
+/// replay via the fast path — not just the first. On the old single-slot design
+/// undo #2+ fell to the O(doc/history) Loro UndoManager; the stack keeps them
+/// all O(change). `stack_depths` is the proof: three undos move all three
+/// inverses undo→redo, which the single slot could not do.
+#[test]
+fn recorded_inverse_stack_chains_consecutive_fast_undos() {
+  let (handle, gate) = new_handle("recorded-inverse-chain");
+  seed_mass_fragment(&handle, 40, None);
+  // Restyle every paragraph EXCEPT the first: boundary 0 (`ROOT_FIRST_PARAGRAPH`)
+  // has a pre-existing live-vs-canonical style quirk orthogonal to this change,
+  // so excluding it keeps the convergence assertion a clean P3-deep signal.
+  let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
+  let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
+    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  let original = styles_of(&handle);
+
+  // THREE consecutive mass restyles — each arms its own recorded inverse.
+  for slot in [1_u8, 2, 3] {
+    handle
+      .set_paragraph_styles(SetParagraphStylesIntent {
+        paragraphs: ids.clone(),
+        style: ParagraphStyle::Custom(slot),
+      })
+      .expect("restyle commits");
+  }
+  let after_three = styles_of(&handle);
+  assert!(after_three.iter().skip(1).all(|style| *style == ParagraphStyle::Custom(3)), "third restyle wins for all restyled paragraphs");
+  assert_eq!(stack_depths(&gate), (3, 0), "three forward edits stack three undoable inverses");
+
+  // THREE undos — EACH must use the fast path (all three move undo→redo).
+  for _ in 0..3 {
+    assert!(handle.apply_undo().expect("undo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (0, 3), "P3-deep: all three consecutive undos replayed via the fast path");
+  assert_eq!(styles_of(&handle), original, "chained undo restores the original styles");
+
+  // THREE redos — each fast, back to the third restyle.
+  for _ in 0..3 {
+    assert!(handle.apply_redo().expect("redo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (3, 0), "P3-deep: all three consecutive redos replayed via the fast path");
+  assert_eq!(styles_of(&handle), after_three, "chained redo re-applies every restyle");
+
+  // The fast-path chain must produce the SAME canonical Loro state the slow path
+  // would: the maintained (live) projection equals a fresh materialization of the
+  // committed doc (P3-deep changes only WHICH replay path runs, not the ops).
+  let local_canonical: Vec<ParagraphStyle> = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  assert_eq!(styles_of(&handle), local_canonical, "the fast-path chain leaves live == canonical");
+}
+
+/// §act-five P3-deep convergence: a restyle→undo→redo run must converge with a
+/// peer after a BIDIRECTIONAL exchange. (An earlier one-way variant "diverged"
+/// only because the fresh peer seeds its OWN sentinel paragraph — `new_empty`
+/// mints ~84 init ops incl a `\n` boundary — so a one-way import leaves the peer
+/// with an extra sentinel; the real bar is convergence after both import each
+/// other, per the existing round-trip tests.)
+#[test]
+fn recorded_inverse_stack_restyle_undo_redo_converges_bidirectionally() {
+  let (handle, gate) = new_handle("chain-converge");
+  seed_mass_fragment(&handle, 12, None);
+  let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
+  for slot in [1_u8, 2, 3] {
+    handle.set_paragraph_styles(SetParagraphStylesIntent { paragraphs: ids.clone(), style: ParagraphStyle::Custom(slot) }).expect("restyle");
+  }
+  for _ in 0..3 {
+    handle.apply_undo().expect("undo");
+  }
+  for _ in 0..3 {
+    handle.apply_redo().expect("redo");
+  }
+  let styles = |doc: &loro::LoroDoc| -> Vec<ParagraphStyle> {
+    flowstate_document::document_from_loro(doc).expect("mat").paragraphs.iter().map(|p| p.style).collect()
+  };
+  // Bidirectional exchange: peer takes local's whole history, local takes the
+  // peer's seed back — now both hold both sentinels and must converge.
+  let local_history = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  let mut peer = CrdtRuntime::new_empty("chain-peer").expect("peer");
+  peer.import_remote_update(&local_history).expect("peer imports local");
+  let peer_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&peer_seed).expect("local imports peer seed");
+  }
+  let local_after = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    styles(g.doc())
+  };
+  assert_eq!(styles(peer.doc()), local_after, "restyle→undo→redo converges after a bidirectional exchange");
+}
+
+/// §act-five P1.B: a peer importing a LONG run of sequential remote updates
+/// (each advancing the RETAINED `import_diff_calculator`) must converge to the
+/// sender. Exercises the reuse path repeatedly — a bug in the retained-tracker
+/// advance would surface as body divergence here (and the retained calc uses
+/// Loro's general Checkout apply, which must stay bit-correct across imports).
+#[test]
+fn retained_import_calculator_converges_over_many_sequential_imports() {
+  let (handle_a, gate_a) = new_handle("p1b-a");
+  let a_init = {
+    let g = gate_a.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A init")
+  };
+  let mut peer = CrdtRuntime::new_empty("p1b-b").expect("peer B");
+  peer.import_remote_update(&a_init).expect("B imports A init");
+
+  let first = first_paragraph(&handle_a.projection().expect("projection"));
+  for i in 0..24 {
+    handle_a
+      .insert_text(InsertTextIntent { at: TextAnchor::new(first, 0), text: format!("x{i} "), style_override: None })
+      .expect("A edit commits");
+    // B imports A's whole history each round; only the new op applies, exercising
+    // the retained calculator once more (idempotent for already-present ops).
+    let full = {
+      let g = gate_a.lock(GateHolder::Test).expect("gate");
+      g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A")
+    };
+    peer.import_remote_update(&full).expect("B imports A");
+  }
+  // Bidirectional close: A takes B's seed back so both hold both sentinels; then
+  // the two canonical bodies must be identical (the real convergence bar).
+  let b_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B");
+  {
+    let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&b_seed).expect("A imports B seed");
+  }
+  let a_body = {
+    let g = gate_a.lock(GateHolder::Test).expect("gate");
+    flowstate_document::loro_schema::body_text(g.doc()).to_string()
+  };
+  let b_body = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
+  assert_eq!(b_body, a_body, "peer converges after 24 sequential retained-calculator imports");
+}
+
+fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo> {
+  // §act-five P3-deep: the fast path is now two stacks. A pending REDO (top of
+  // the redo stack) means the last fast step was an undo; else a pending UNDO.
+  let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
+  if !guard.recorded_redo_stack().is_empty() {
+    Some(loro::UndoOrRedo::Redo)
+  } else if !guard.recorded_undo_stack().is_empty() {
+    Some(loro::UndoOrRedo::Undo)
+  } else {
+    None
+  }
 }
 
 fn paragraph_ids(handle: &LocalDocHandle) -> Vec<ParagraphId> {
@@ -969,6 +1126,126 @@ fn recorded_inverse_fast_undo_round_trips_mass_restyle() {
   let peer_fresh = flowstate_document::document_from_loro(peer.doc()).expect("peer materializes");
   assert_eq!(styles(&peer_fresh), styles(&local_fresh), "replicas converge on the same styles after the fast-path history");
   assert!(styles(&local_fresh).iter().all(|style| *style == ParagraphStyle::Normal), "converged on the undone (Normal) styles");
+}
+
+/// §fidelity (field bug 2026-07-08, two-peer hotpath): a LOCAL undo must revert
+/// ONLY the local peer's op — NEVER a concurrent REMOTE op. Repro from the field:
+/// peer A highlights the whole body (a run-style mark), peer B concurrently tags
+/// every paragraph (a paragraph style); A imports B's tag, then A Ctrl-Z's its
+/// highlight. The observed bug: BOTH the highlight AND the remote tag reverted.
+///
+/// This asserts the invariant against the LIVE maintained projection (what the UI
+/// paints) AND a fresh canonical materialization — the pair localizes whether the
+/// fault is the CRDT undo-exclusion or the post-undo reprojection.
+#[test]
+fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
+  let (handle_a, gate_a) = new_handle("undo-isolation-a");
+  seed_mass_fragment(&handle_a, 8, None);
+
+  // Peer B starts from A's exact initial state (shared paragraph ids), then edits
+  // concurrently (neither peer has seen the other's edit).
+  let a_initial = {
+    let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A initial")
+  };
+  let mut core_b = CrdtRuntime::new_empty("undo-isolation-b").expect("peer B runtime");
+  core_b.import_remote_update(&a_initial).expect("B imports A initial state");
+  let (handle_b, gate_b) = LocalDocHandle::new(core_b, LocalWriteConfig::default());
+
+  let ids = paragraph_ids(&handle_a);
+  let tag = ParagraphStyle::Custom(7);
+
+  // Peer B: tag every paragraph (LOCAL to B).
+  handle_b
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: ids.clone(),
+      style: tag,
+    })
+    .expect("B tags every paragraph");
+
+  // Peer A: highlight the whole body (LOCAL to A) — a run-style mark.
+  let projection_a = handle_a.projection().expect("projection A");
+  let first = projection_a.ids.paragraph_ids[0];
+  let last = *projection_a.ids.paragraph_ids.last().expect("last paragraph id");
+  let last_len = paragraph_text(&projection_a, projection_a.paragraphs.len() - 1).len();
+  let highlight = flowstate_document::RunStyles {
+    highlight: Some(flowstate_document::HighlightStyle::Custom(3)),
+    ..Default::default()
+  };
+  handle_a
+    .set_marks(SetMarksIntent {
+      start: TextAnchor::new(first, 0),
+      end: TextAnchor::new(last, last_len),
+      styles: highlight,
+    })
+    .expect("A highlights the whole body");
+
+  // A imports B's concurrent tag (origin "remote" ⇒ excluded from A's undo stack).
+  let b_update = {
+    let guard = gate_b.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B")
+  };
+  {
+    let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
+    guard.import_remote_updates(&[&b_update]).expect("A imports B's tag");
+  }
+
+  // Read (styles, any-highlight) from the LIVE projection and from a fresh
+  // canonical materialization — divergence between them localizes the fault.
+  let live = |handle: &LocalDocHandle| {
+    let doc = handle.projection().expect("live projection");
+    let styles: Vec<ParagraphStyle> = doc.paragraphs.iter().map(|paragraph| paragraph.style).collect();
+    let any_highlight = doc.paragraphs.iter().any(|paragraph| paragraph.runs.iter().any(|run| run.styles.highlight.is_some()));
+    (styles, any_highlight)
+  };
+  let canonical = |gate: &Arc<WriteGate<CrdtRuntime>>| {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    let doc = flowstate_document::document_from_loro(guard.doc()).expect("materialize canonical");
+    let styles: Vec<ParagraphStyle> = doc.paragraphs.iter().map(|paragraph| paragraph.style).collect();
+    let any_highlight = doc.paragraphs.iter().any(|paragraph| paragraph.runs.iter().any(|run| run.styles.highlight.is_some()));
+    (styles, any_highlight)
+  };
+
+  // The remote tag defines the EXPECTED paragraph-style vector: A's local undo
+  // touches only its run-style highlight, so paragraph styles must be identical
+  // to B's tag result before undo, after undo, and after convergence.
+  let expected_styles = canonical(&gate_b).0;
+  assert!(expected_styles.iter().any(|style| *style == tag), "B's tag must land on the durable paragraphs: {expected_styles:?}");
+
+  // Before undo A already reflects BOTH edits.
+  let (styles_before, hl_before) = live(&handle_a);
+  assert_eq!(styles_before, expected_styles, "A must reflect the remote tag before undo");
+  assert!(hl_before, "A must see its own highlight before undo");
+
+  // A UNDOES its highlight.
+  assert!(handle_a.apply_undo().expect("A undo runs").applied, "undo must apply");
+
+  // THE INVARIANT: highlight gone, paragraph styles UNCHANGED — live AND canonical.
+  let (live_styles, live_hl) = live(&handle_a);
+  let (canon_styles, canon_hl) = canonical(&gate_a);
+  assert!(!live_hl, "undo must remove A's own highlight (live projection)");
+  assert!(!canon_hl, "undo must remove A's own highlight (canonical)");
+  assert_eq!(
+    canon_styles, expected_styles,
+    "CRDT undo-exclusion bug: local undo changed paragraph styles in canonical state (reverted the concurrent REMOTE tag)"
+  );
+  assert_eq!(
+    live_styles, expected_styles,
+    "reprojection bug: post-undo LIVE projection dropped the concurrent REMOTE tag"
+  );
+
+  // Convergence: B receives A's post-undo history; both replicas agree, tag intact.
+  let a_after = {
+    let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A after undo")
+  };
+  {
+    let mut guard = gate_b.lock(GateHolder::ImportChunk).expect("gate healthy");
+    guard.import_remote_updates(&[&a_after]).expect("B imports A's post-undo history");
+  }
+  let (styles_b, hl_b) = canonical(&gate_b);
+  assert!(!hl_b, "peer B converges on highlight-removed");
+  assert_eq!(styles_b, expected_styles, "peer B keeps the remote tag after convergence");
 }
 
 /// §act-four M1: a mass replace-all records its inverse; undo restores every

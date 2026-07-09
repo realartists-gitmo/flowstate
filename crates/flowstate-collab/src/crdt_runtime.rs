@@ -152,7 +152,17 @@ pub struct CrdtRuntime {
   /// `DeleteRange` commit. Consumed (ping-ponged) by the undo/redo fast path;
   /// any interleaving commit or import fails its frontier check and the slot
   /// is dropped. See `local_write::recorded_inverse`.
-  recorded_inverse: Option<crate::local_write::recorded_inverse::RecordedInverse>,
+  /// §act-five P3-deep: the recorded-inverse fast path is now a STACK, not a
+  /// single slot — so a RUN of consecutive local undos (the Ctrl-Z mash) each
+  /// replay `O(change)` instead of only the first, with the rest falling to the
+  /// `O(doc/history)` Loro `UndoManager`. `recorded_undo` holds inverses that can
+  /// be fast-undone (LIFO); `recorded_redo` holds their opposites after an undo.
+  /// A forward edit pushes to `recorded_undo` and clears `recorded_redo`. Both
+  /// clear on any remote import / frontier break. FAIL-SAFE: every fast step is
+  /// still validated against the Loro `UndoManager`'s actual top span
+  /// (`peek_top_span`), so a stale entry bails to the correct slow path.
+  recorded_undo: Vec<crate::local_write::recorded_inverse::RecordedInverse>,
+  recorded_redo: Vec<crate::local_write::recorded_inverse::RecordedInverse>,
   /// §act-four M5 (Slice 5): the append-only version log. Every local commit
   /// appends a `(frontier, root)` — the persistent read-model root (a `BlockSeq`,
   /// `O(1)` to retain via structural sharing) at that frontier. This is the
@@ -1059,7 +1069,8 @@ impl CrdtRuntime {
       pending_publish: Vec::new(),
       paragraph_registry_container_id,
       block_registry_container_id,
-      recorded_inverse: None,
+      recorded_undo: Vec::new(),
+      recorded_redo: Vec::new(),
       version_history: std::collections::VecDeque::new(),
       _root_subscription: root_subscription,
       _local_update_subscription: local_update_subscription,
@@ -1107,9 +1118,21 @@ impl CrdtRuntime {
     &mut self.undo
   }
 
-  /// §act-three B.1: the recorded-inverse slot (see `local_write::recorded_inverse`).
-  pub(crate) fn recorded_inverse_slot(&mut self) -> &mut Option<crate::local_write::recorded_inverse::RecordedInverse> {
-    &mut self.recorded_inverse
+  /// §act-three B.1 / §act-five P3-deep: the recorded-inverse fast-path stacks
+  /// (see `local_write::recorded_inverse`).
+  pub(crate) fn recorded_undo_stack(&mut self) -> &mut Vec<crate::local_write::recorded_inverse::RecordedInverse> {
+    &mut self.recorded_undo
+  }
+
+  pub(crate) fn recorded_redo_stack(&mut self) -> &mut Vec<crate::local_write::recorded_inverse::RecordedInverse> {
+    &mut self.recorded_redo
+  }
+
+  /// Drop the whole fast-path cache — a frontier break (remote import, checkout,
+  /// or a slow-path step) invalidates every recorded inverse at once.
+  pub(crate) fn clear_recorded_inverse(&mut self) {
+    self.recorded_undo.clear();
+    self.recorded_redo.clear();
   }
 
   /// §act-four M5: append the current read model to the version log. Called
@@ -1466,7 +1489,7 @@ impl CrdtRuntime {
       flowstate_document::touch_document_metadata(&self.doc).context("updating canonical document metadata for semantic command")?;
       // §act-three B.1: any other mutation invalidates the recorded inverse
       // (the frontier check would catch it; this frees the capture eagerly).
-      self.recorded_inverse = None;
+      self.clear_recorded_inverse();
     }
     #[allow(clippy::needless_late_init, reason = "assigned across match arms that interleave with diverging early-return arms")]
     let projection_invalidation;
@@ -2184,7 +2207,7 @@ impl CrdtRuntime {
     }
     // §act-three B.1: a remote import invalidates the recorded inverse (the
     // frontier check would catch it; this frees the capture eagerly).
-    self.recorded_inverse = None;
+    self.clear_recorded_inverse();
     let from_frontier = self.doc.state_frontiers();
     // §fidelity: capture the pre-import version only when tracing so a disabled
     // build pays nothing; used to assert the import advanced (never regressed) the
@@ -2243,10 +2266,18 @@ impl CrdtRuntime {
       let drained = self.merge_subscription_invalidation(&mut invalidation);
       self.derive_body_projection_events(invalidation, &drained, "remote_import", last)?;
     } else {
-      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before, frontier_after.clone(), "remote_update_pending_projection_fallback");
+      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before.clone(), frontier_after.clone(), "remote_update_pending_projection_fallback");
+      // Drain the subscription regardless so no stale events linger.
       self.merge_subscription_invalidation(&mut invalidation);
-      self.refresh_projection()?;
-      last.push(self.projection_event(invalidation)?);
+      // §act-five P4: a fully-pending import APPLIED NOTHING — Loro buffered the
+      // out-of-order updates and the canonical frontier is unchanged, so the
+      // projection is byte-identical (same frontier ⇒ same Loro state). Skip the
+      // O(doc) full rebuild + event; the pending version range already rode the
+      // `RemoteUpdateApplied` reply above, which drives the anti-entropy pull.
+      if frontier_after != frontier_before {
+        self.refresh_projection()?;
+        last.push(self.projection_event(invalidation)?);
+      }
     }
     // §act-four §8 fork-and-share: a remote import advances the canonical
     // frontier and forks a new read-model version. Because `blocks`/`paragraphs`
@@ -6076,8 +6107,9 @@ impl CheckpointJob {
   pub fn run(mut self) -> (DocumentPackage, io::Result<bool>) {
     let result = (|| -> io::Result<bool> {
       self.package.replace_assets_from_document(&self.projection)?;
-      self.package.rebuild_projection_cache_from_loro(&self.fork)?;
-      self.package.rebuild_search_units_from_loro(&self.fork)?;
+      // §act-five P9: ONE materialization feeds both the projection cache and the
+      // search units (was two full `document_from_loro` walks per checkpoint).
+      self.package.rebuild_caches_from_loro(&self.fork)?;
       self.package.compact_to_snapshot(&self.fork)?;
       if self.record_revision {
         self.package.create_named_revision_at_with_id(
@@ -6105,8 +6137,8 @@ impl CheckpointJob {
 pub fn assemble_package_bytes(fork: &LoroDoc, projection: &DocumentProjection, title: &str) -> io::Result<Vec<u8>> {
   let mut package = DocumentPackage::from_loro_snapshot_with_assets(fork, title, assets_from_document(projection))?;
   package.replace_assets_from_document(projection)?;
-  package.rebuild_projection_cache_from_loro(fork)?;
-  package.rebuild_search_units_from_loro(fork)?;
+  // §act-five P9: one materialization for both caches (see `rebuild_caches_from_loro`).
+  package.rebuild_caches_from_loro(fork)?;
   package.to_bytes()
 }
 

@@ -112,6 +112,10 @@ pub struct Workspace {
   autosave_enabled: bool,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   autosave_document_generations: FxHashMap<Uuid, u64>,
+  /// §act-five P9-throttle: the latest edit generation a debounced autosave is
+  /// SCHEDULED for. A newer edit overwrites it, so the trailing timer coalesces a
+  /// burst into ONE checkpoint instead of a full checkpoint per keystroke.
+  autosave_pending_generation: FxHashMap<Uuid, u64>,
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,

@@ -254,7 +254,7 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
           let delete_span = loro::CounterSpan::new(peer_counter_before, local_peer_counter_end(core));
           super::recorded_inverse::finalize_capture(core, pending, delete_span, &patches);
         },
-        None => *core.recorded_inverse_slot() = None,
+        None => core.clear_recorded_inverse(),
       }
       let mut invalidation = invalidation;
       core.merge_subscription_invalidation(&mut invalidation);
@@ -283,7 +283,7 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
     PatchPlan::FullRebuild { invalidation, reason } => {
       counters.full_rebuild = true;
       // §act-three B.1: no patch material to replay on redo — drop any capture.
-      *core.recorded_inverse_slot() = None;
+      core.clear_recorded_inverse();
       tracing::warn!(class = intent.class(), reason, "full-rebuild-after-local-write");
       let mut invalidation = invalidation;
       core.merge_subscription_invalidation(&mut invalidation);
@@ -350,7 +350,7 @@ fn compensate_failed_intent(
   tracing::error!(class, %error, "local intent failed mid-apply; compensating via revert_to (I-10)");
   // §act-three B.1: the compensation commits change the frontier anyway, but
   // drop the (possibly large) capture eagerly.
-  *core.recorded_inverse_slot() = None;
+  core.clear_recorded_inverse();
   core.doc().set_next_commit_origin("repair");
   core.doc().set_next_commit_message("intent-compensation");
   if let Err(revert_error) = core.doc().revert_to(frontier_before) {

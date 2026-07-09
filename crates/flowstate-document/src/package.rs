@@ -938,6 +938,7 @@ impl DocumentPackage {
 
   pub fn write(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    reject_foreign_package_path(path)?;
     fidelity::event(FidelityClass::Persistence, "write", || {
       format!(
         "snapshots={} segments={} revisions={} assets={} frontier={}",
@@ -967,6 +968,7 @@ impl DocumentPackage {
 
   pub fn append_latest_update_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    reject_foreign_package_path(path)?;
     let Some(segment) = self.loro_update_segments.last().cloned() else {
       return self.write(path);
     };
@@ -983,6 +985,7 @@ impl DocumentPackage {
 
   pub fn append_latest_update_to_prepared_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    reject_foreign_package_path(path)?;
     let Some(segment) = self.loro_update_segments.last().cloned() else {
       return self.write(path);
     };
@@ -999,6 +1002,7 @@ impl DocumentPackage {
 
   pub fn append_assets_to_path(&self, path: impl AsRef<Path>) -> io::Result<()> {
     let path = path.as_ref();
+    reject_foreign_package_path(path)?;
     if !file_has_journal_header(path)? {
       return self.write(path);
     }
@@ -1361,6 +1365,32 @@ impl DocumentPackage {
     // §act-four M4 (cold scroll): persist the block-boundary index so a cold
     // open can map a block-index viewport to a unicode range in O(1).
     self.manifest.block_boundaries = crate::loro_projection::body_block_boundaries(doc)?;
+    self.projection_caches.clear();
+    self.projection_caches.push(ProjectionCacheChunk {
+      frontier: frontier.clone(),
+      bytes: encode_chunk(&projection, "projection cache payload")?,
+    });
+    self.manifest.projection_cache_frontier = Some(frontier);
+    self.manifest.modified_at_unix_secs = unix_time_secs();
+    self.validate()?;
+    Ok(())
+  }
+
+  /// §act-five P9: rebuild BOTH the projection cache and the search units from a
+  /// SINGLE `document_from_loro` materialization. The separate
+  /// `rebuild_projection_cache_from_loro` + `rebuild_search_units_from_loro`
+  /// calls each ran a full projection walk — a double materialization per
+  /// checkpoint that pegged the off-gate package thread during collaboration.
+  /// The search units derive from the SAME materialized blocks the cache does.
+  pub fn rebuild_caches_from_loro(&mut self, doc: &LoroDoc) -> io::Result<()> {
+    doc.commit();
+    let frontier = encode_frontiers(&doc.state_frontiers());
+    let projection = crate::loro_projection::projection_blocks_from_loro(doc)?;
+    self.write_preview_header(&frontier, &projection)?;
+    self.manifest.block_boundaries = crate::loro_projection::body_block_boundaries(doc)?;
+    self.search_units =
+      crate::package_search::search_units_from_input_blocks(doc, &projection.blocks, self.manifest.document_id, &frontier)?;
+    self.manifest.search_cache_frontier = Some(frontier.clone());
     self.projection_caches.clear();
     self.projection_caches.push(ProjectionCacheChunk {
       frontier: frontier.clone(),
@@ -2064,6 +2094,29 @@ fn write_u64(bytes: &mut Vec<u8>, value: u64) {
   bytes.extend_from_slice(&value.to_le_bytes());
 }
 
+/// Extensions that name a foreign *source / export* document format — never a
+/// Flowstate package. Writing package/journal bytes onto one of these would
+/// clobber a user's source file (the 2026-07-08 docx-overwrite data-loss bug,
+/// where a phase-V open leaked the source `.docx` path into the autosave
+/// target). The package writers below refuse it, turning any future regression
+/// of that class into a safe error instead of silent data loss.
+///
+/// Export to `.docx`/`.pdf` is UNAFFECTED: it goes through the docx/pdf writers
+/// (`write_docx` / `write_pdf_with_db8_bytes`) and the app's own
+/// `write_bytes_to_path`, none of which call these package methods.
+fn reject_foreign_package_path(path: &Path) -> io::Result<()> {
+  if let Some(extension) = path.extension().and_then(|extension| extension.to_str()) {
+    let extension = extension.to_ascii_lowercase();
+    if matches!(extension.as_str(), "docx" | "doc" | "docm" | "dotx" | "pdf" | "rtf" | "odt") {
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidInput,
+        format!("refusing to write a Flowstate package to a foreign document path (would overwrite the source): {}", path.display()),
+      ));
+    }
+  }
+  Ok(())
+}
+
 fn file_has_journal_header(path: &Path) -> io::Result<bool> {
   let mut file = match fs::File::open(path) {
     Ok(file) => file,
@@ -2323,6 +2376,43 @@ mod tests {
 
     repaired.validate()?;
     assert_eq!(fs::metadata(&path)?.len(), committed_len);
+    Ok(())
+  }
+
+  #[test]
+  fn package_write_refuses_to_clobber_a_foreign_source_document() -> io::Result<()> {
+    // §data-loss regression (2026-07-08): a phase-V open leaked the source
+    // `.docx` path into the autosave target, so a checkpoint wrote a `.db8`
+    // journal ON TOP of the user's original docx. The guard makes every package
+    // writer refuse a foreign-format path, so this can never silently destroy a
+    // source file again — regardless of how the path was derived upstream.
+    let dir = tempfile::tempdir()?;
+    let doc = new_loro_document("Guard").map_err(loro_test_error)?;
+    let package = DocumentPackage::from_loro_snapshot(&doc, "Guard")?;
+
+    // A pre-existing "source" docx (arbitrary non-package bytes) must survive.
+    let docx_path = dir.path().join("source.docx");
+    let original = b"PK\x03\x04 pretend this is a real docx zip";
+    fs::write(&docx_path, original)?;
+
+    for foreign in ["source.docx", "paper.pdf", "brief.doc", "legacy.rtf", "notes.odt"] {
+      let path = dir.path().join(foreign);
+      let error = package.write(&path).expect_err("package write to a foreign path must be rejected");
+      assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{foreign}");
+    }
+    // The append entry points guard identically.
+    assert_eq!(
+      package.append_latest_update_to_path(&docx_path).expect_err("append must reject foreign path").kind(),
+      io::ErrorKind::InvalidInput
+    );
+
+    // The original docx bytes are untouched — nothing was written.
+    assert_eq!(fs::read(&docx_path)?, original);
+
+    // The same package writes cleanly to a real `.db8` path.
+    let db8_path = dir.path().join("source.db8");
+    package.write(&db8_path)?;
+    assert!(file_has_journal_header(&db8_path)?);
     Ok(())
   }
 

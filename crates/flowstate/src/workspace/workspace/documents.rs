@@ -191,6 +191,7 @@ impl Workspace {
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),
       autosave_document_generations: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      autosave_pending_generation: FxHashMap::default(), // §act-five P9-throttle debounce
       autosave_flow_in_flight: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
@@ -653,7 +654,10 @@ impl Workspace {
               // closed while loading) open a fresh full panel. `attach` gives
               // the runtime back when it cannot use it.
               let fresh_runtime = match pending_panel_id {
-                Some(id) => workspace.attach_runtime_to_pending_panel(id, *runtime, cx).err().map(|boxed| *boxed),
+                Some(id) => workspace
+                  .attach_runtime_to_pending_panel(id, *runtime, path.clone(), cx)
+                  .err()
+                  .map(|boxed| *boxed),
                 None => Some(*runtime),
               };
               if let Some(runtime) = fresh_runtime {
@@ -1107,6 +1111,7 @@ impl Workspace {
     &mut self,
     panel_id: Uuid,
     runtime: flowstate_collab::crdt_runtime::CrdtRuntime,
+    canonical_path: Option<PathBuf>,
     cx: &mut Context<Self>,
   ) -> Result<(), Box<flowstate_collab::crdt_runtime::CrdtRuntime>> {
     // The panel closed while loading — hand the runtime back for a fresh open.
@@ -1143,6 +1148,12 @@ impl Workspace {
     document.theme = load_document_theme();
     let editor = panel.read(cx).editor();
     install_editor_write_authority(&editor, &attachment, document, cx);
+    // §data-loss fix (2026-07-08): the pending panel seeded the editor with the
+    // SOURCE path for phase-V display/recents. Now that the authority is
+    // attached and the editor becomes writable, reconcile its write path to the
+    // authoritative open path — `None` for imported docx/pdf, so autosave never
+    // targets (and overwrites) the source file. Mirrors the one-shot open path.
+    editor.update(cx, |editor, cx| editor.set_runtime_document_path(canonical_path, cx));
     self.document_runtimes.insert(panel_id, attachment.io.clone());
     self.editor_subscriptions.push((
       panel_id,
@@ -1397,14 +1408,36 @@ impl Workspace {
     if !has_path || !has_unsaved_changes {
       return;
     }
-    if self.autosave_document_generations.get(&panel_id) == Some(&generation) {
+    // Already saved (or already scheduled) for this exact generation? Skip.
+    if self.autosave_document_generations.get(&panel_id) == Some(&generation)
+      || self.autosave_pending_generation.get(&panel_id) == Some(&generation)
+    {
       return;
     }
-    self
-      .autosave_document_generations
-      .insert(panel_id, generation);
-    let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+    // §act-five P9-throttle: DEBOUNCE. Every keystroke bumps the generation and
+    // used to fire a full checkpoint (document_from_loro + search reindex +
+    // snapshot) — pegging the off-gate package thread during typing/collab.
+    // Record the latest pending generation and schedule a TRAILING save; a newer
+    // edit overwrites `autosave_pending_generation`, so only the last edit of a
+    // burst survives the debounce and ONE checkpoint runs per quiet period. No
+    // edit is lost: the trailing timer always fires for the final generation, and
+    // close-time `flush_package_caches` covers the tail.
+    const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(900);
+    self.autosave_pending_generation.insert(panel_id, generation);
     cx.spawn(async move |workspace, cx| {
+      cx.background_executor().timer(AUTOSAVE_DEBOUNCE).await;
+      // Superseded by a newer edit within the debounce window? Let that one save.
+      let save_task = workspace.update(cx, |workspace, cx| {
+        if workspace.autosave_pending_generation.get(&panel_id) != Some(&generation) {
+          return None;
+        }
+        workspace.autosave_pending_generation.remove(&panel_id);
+        workspace.autosave_document_generations.insert(panel_id, generation);
+        Some(editor.update(cx, |editor, cx| editor.save(cx)))
+      });
+      let Ok(Some(save_task)) = save_task else {
+        return;
+      };
       match save_task.await {
         // Keep collaborating peers in sync with the autosave checkpoint; a
         // no-op for solo documents (no session registered for the panel).

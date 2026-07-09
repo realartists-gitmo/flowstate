@@ -171,8 +171,16 @@ impl DiffCalculator {
 
         let affected_set = {
             loro_common::debug!("LCA: {:?} mode={:?}", &lca, diff_mode);
+            // §act-five P1.0 (flowstate vendor patch): quantify the import diff's
+            // LCA→after op span. `DiffMode::Checkout` + a LARGE span = a genuine
+            // concurrent retreat (needs the incremental-checkout fix, P1.C); a
+            // SMALL span that is still slow = the fixed per-import tracker rebuild
+            // (needs the retained-calculator fix, P1.B). Gated behind a cached env
+            // flag; the accumulation is one add/op and the read is one atomic load.
+            let mut probe_span_ops: u64 = 0;
             let mut started_set = FxHashSet::default();
             for (change, (start_counter, end_counter), vv) in iter {
+                probe_span_ops += u64::try_from(end_counter - start_counter).unwrap_or(0);
                 let iter_start = change
                     .ops
                     .binary_search_by(|op| op.ctr_last().cmp(&start_counter))
@@ -235,6 +243,13 @@ impl DiffCalculator {
                 }
             }
 
+            static P1_DIFF_SPAN_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *P1_DIFF_SPAN_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_DIFF_SPAN_PROBE").is_some()) {
+                eprintln!(
+                    "[flowstate-diff-span] ops={probe_span_ops} containers={} mode={diff_mode:?}",
+                    started_set.len()
+                );
+            }
             Some(started_set)
         };
 

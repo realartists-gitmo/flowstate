@@ -8,8 +8,21 @@ use crate::{
 };
 
 pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier: &[u8]) -> io::Result<Vec<SearchUnitChunk>> {
-  let body = crate::loro_schema::body_text(doc);
   let input_blocks = crate::loro_projection::input_blocks_from_loro(doc)?;
+  search_units_from_input_blocks(doc, &input_blocks, document_id, frontier)
+}
+
+/// §act-five P9: build search units from PRE-MATERIALIZED input blocks, so a
+/// checkpoint that already materialized the projection (for the projection cache)
+/// does not re-run the full `document_from_loro` a SECOND time just for search —
+/// the two independent materializations pegged the off-gate package thread.
+pub(crate) fn search_units_from_input_blocks(
+  doc: &LoroDoc,
+  input_blocks: &[InputBlock],
+  document_id: u128,
+  frontier: &[u8],
+) -> io::Result<Vec<SearchUnitChunk>> {
+  let body = crate::loro_schema::body_text(doc);
   let mut builder = SearchUnitBuilder {
     document_id,
     frontier,
@@ -20,7 +33,7 @@ pub(crate) fn search_units_from_loro(doc: &LoroDoc, document_id: u128, frontier:
     body_paragraph_ix: 0,
     theme: flowstate_document_theme(),
   };
-  for block in &input_blocks {
+  for block in input_blocks {
     builder.push_block(block, &body);
   }
   builder.push_loro_object_units(doc)?;

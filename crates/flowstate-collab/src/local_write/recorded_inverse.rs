@@ -155,14 +155,6 @@ pub(crate) struct RecordedInverse {
   redo: RecordedDelta,
 }
 
-impl RecordedInverse {
-  /// Probe (tests/diagnostics): the direction the slot currently serves.
-  #[cfg(test)]
-  pub(crate) fn direction(&self) -> UndoOrRedo {
-    self.direction
-  }
-}
-
 impl std::fmt::Debug for RecordedInverse {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     let reproject_kind = |delta: &RecordedDelta| match &delta.reproject {
@@ -564,14 +556,21 @@ pub(crate) fn finalize_capture(core: &mut CrdtRuntime, pending: PendingInverseCa
         }
       }
       if !ok {
-        *core.recorded_inverse_slot() = None;
+        // A partial capture is worse than none: this forward edit is NOT
+        // fast-undoable, and any older stacked inverse is now unreachable behind
+        // it (the Loro top span no longer matches), so drop the whole cache.
+        core.clear_recorded_inverse();
         return;
       }
       RecordedMutation::SpliceRichRanges { splices }
     },
     None => pending.redo_mutation,
   };
-  *core.recorded_inverse_slot() = Some(RecordedInverse {
+  // §act-five P3-deep: a forward edit PUSHES its inverse onto the undo stack and
+  // invalidates the redo stack (the redo timeline is now unreachable). Consecutive
+  // pushes let a run of undos each replay `O(change)`.
+  core.recorded_redo_stack().clear();
+  core.recorded_undo_stack().push(RecordedInverse {
     direction: UndoOrRedo::Undo,
     expected_frontier,
     expected_span: op_span,
@@ -592,28 +591,45 @@ fn counter_end(core: &CrdtRuntime) -> loro::Counter {
   core.doc().oplog_vv().get(&peer).copied().unwrap_or(0)
 }
 
+/// The active fast-path stack for `kind` (undo stack for Undo, redo for Redo) —
+/// its TOP is the entry a `kind` step would replay.
+fn active_stack(core: &mut CrdtRuntime, kind: UndoOrRedo) -> &mut Vec<RecordedInverse> {
+  match kind {
+    UndoOrRedo::Undo => core.recorded_undo_stack(),
+    UndoOrRedo::Redo => core.recorded_redo_stack(),
+  }
+}
+
+/// The stack a replayed `kind` entry moves to (so the reverse step replays it).
+fn opposite_stack(core: &mut CrdtRuntime, kind: UndoOrRedo) -> &mut Vec<RecordedInverse> {
+  match kind {
+    UndoOrRedo::Undo => core.recorded_redo_stack(),
+    UndoOrRedo::Redo => core.recorded_undo_stack(),
+  }
+}
+
 /// The undo/redo fast path. Returns `Ok(Some(events))` when the recorded
 /// inverse was replayed, `Ok(None)` when the slow path must run instead. Never
 /// leaves partial state behind: a replay failure compensates via `revert_to`.
+///
+/// §act-five P3-deep: STACK-based — the top of `kind`'s stack is the active
+/// entry; on success it moves to the opposite stack, so a RUN of consecutive
+/// undos each replays `O(change)`. Fail-safe: every step is validated against
+/// the Loro `UndoManager`'s real top span (`peek_top_span`), so a stale entry
+/// bails to the correct slow path and the whole cache is dropped.
 pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<Option<Vec<RuntimeEvent>>> {
-  if fast_undo_disabled() || core.recorded_inverse_slot().is_none() {
+  if fast_undo_disabled() {
     return Ok(None);
   }
-  {
-    let Some(inverse) = core.recorded_inverse_slot().as_ref() else {
-      return Ok(None);
-    };
-    if inverse.direction != kind {
-      return Ok(None);
-    }
-  }
   let expected_frontier = core.doc().state_frontiers().encode();
-  let (expected_span, matches) = {
-    let inverse = core.recorded_inverse_slot().as_ref().expect("checked above");
-    (inverse.expected_span, inverse.expected_frontier == expected_frontier)
+  let (expected_span, matches) = match active_stack(core, kind).last() {
+    Some(inverse) => (inverse.expected_span, inverse.expected_frontier == expected_frontier),
+    None => return Ok(None),
   };
   if !matches {
-    *core.recorded_inverse_slot() = None;
+    // The top entry is stale (a concurrent change moved the frontier). The whole
+    // local fast-path timeline is now unreachable — drop it; the slow path runs.
+    core.clear_recorded_inverse();
     return Ok(None);
   }
   match core.undo_manager_mut().peek_top_span(kind) {
@@ -637,7 +653,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     core.doc().set_next_commit_message("recorded-inverse-compensation");
     if let Err(revert_error) = core.doc().revert_to(&from_frontier) {
       core.undo_manager_mut().external_step_abort(kind);
-      *core.recorded_inverse_slot() = None;
+      core.clear_recorded_inverse();
       return Err(anyhow::anyhow!(
         "recorded-inverse replay failed ({error:#}) and revert_to failed ({revert_error}); runtime must be reloaded"
       ));
@@ -646,7 +662,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     core.doc().set_next_commit_message("recorded-inverse-compensation-inverse");
     core.doc().commit();
     core.undo_manager_mut().external_step_abort(kind);
-    *core.recorded_inverse_slot() = None;
+    core.clear_recorded_inverse();
     let mut invalidation = ProjectionInvalidation::full_rebuild(
       from_frontier.encode(),
       core.doc().state_frontiers().encode(),
@@ -668,7 +684,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
   if counter_after == counter_before {
     tracing::error!(?kind, "recorded-inverse replay committed no ops; falling back");
     core.undo_manager_mut().external_step_abort(kind);
-    *core.recorded_inverse_slot() = None;
+    core.clear_recorded_inverse();
     return Ok(None);
   }
   let inverse_span = CounterSpan::new(counter_before, counter_after);
@@ -680,7 +696,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     UndoOrRedo::Redo => "recorded-inverse-redo",
   };
   let (recorded_patches, inval_start, inval_len, style_only) = {
-    let inverse = core.recorded_inverse_slot().as_ref().expect("slot survives replay");
+    let inverse = active_stack(core, kind).last().expect("active entry survives replay");
     let delta = match kind {
       UndoOrRedo::Undo => &inverse.undo,
       UndoOrRedo::Redo => &inverse.redo,
@@ -732,16 +748,29 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     )
   });
 
-  // Flip the slot: the pushed opposite-stack item is exactly the transaction we
-  // just committed, so the next opposite-direction step replays for free.
+  // MOVE the replayed entry to the OPPOSITE stack, re-armed for the reverse
+  // step: the transaction we just committed is exactly what the reverse step
+  // replays. The entries BELOW it on the active stack keep their arming, so the
+  // NEXT same-direction step (the Ctrl-Z mash) replays for free too.
   let new_frontier = core.doc().state_frontiers().encode();
-  let slot = core.recorded_inverse_slot().as_mut().expect("slot survives replay");
-  slot.direction = match kind {
+  let mut entry = active_stack(core, kind).pop().expect("active entry survives replay");
+  entry.direction = match kind {
     UndoOrRedo::Undo => UndoOrRedo::Redo,
     UndoOrRedo::Redo => UndoOrRedo::Undo,
   };
-  slot.expected_frontier = new_frontier;
-  slot.expected_span = inverse_span;
+  entry.expected_frontier = new_frontier.clone();
+  entry.expected_span = inverse_span;
+  opposite_stack(core, kind).push(entry);
+  // §act-five P3-deep: replaying the top committed a NEW inverse op, so the
+  // frontier advanced. The entry now exposed at the top of the active stack was
+  // recorded at its OWN commit frontier, which no longer matches — but it IS
+  // replayable at THIS new frontier (we just moved to it). Re-arm it so the next
+  // chained step's frontier check passes. Its `expected_span` still matches the
+  // Loro `UndoManager`'s now-top (external_step popped exactly this direction), so
+  // only the frontier needs refreshing.
+  if let Some(next) = active_stack(core, kind).last_mut() {
+    next.expected_frontier = new_frontier;
+  }
 
   Ok(Some(events))
 }
@@ -750,9 +779,8 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
 fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<()> {
   let doc = core.doc().clone();
   let body = body_text(&doc);
-  // Clone out the mutation's plan so we don't hold a borrow across doc mutation.
-  // (Mutations are small: a range descriptor + ids, or a Vec of marks.)
-  let inverse = core.recorded_inverse_slot().as_ref().expect("caller checked the slot");
+  // The active entry is the top of `kind`'s stack (validated by the caller).
+  let inverse = active_stack(core, kind).last().expect("caller checked the active stack");
   match &(match kind {
     UndoOrRedo::Undo => &inverse.undo,
     UndoOrRedo::Redo => &inverse.redo,

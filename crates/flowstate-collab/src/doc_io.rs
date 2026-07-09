@@ -309,9 +309,26 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             Err(_) => break,
           }
         }
-        let coalesced = chunk.len();
         match core.lock(GateHolder::ImportChunk) {
           Ok(mut guard) => {
+            // §act-five P1.A: a SECOND drain after the gate is held. Acquiring the
+            // gate can BLOCK behind a checkpoint/save; every remote blob that
+            // arrived during that wait is now queued. Folding them into this same
+            // chunk makes a steady remote drip coalesce into ONE import + ONE
+            // derive (each import pays a fixed per-call rich-text tracker rebuild,
+            // so fewer imports is a direct win) — with NO added latency, since we
+            // were already blocked on the gate.
+            while chunk.len() < IMPORT_COALESCE_MAX {
+              match receiver.try_recv() {
+                Ok(IoRequest::ImportRemoteUpdate { bytes, reply }) => chunk.push((bytes, reply)),
+                Ok(other) => {
+                  deferred.push(other);
+                  break;
+                },
+                Err(_) => break,
+              }
+            }
+            let coalesced = chunk.len();
             // §6.4 + field fix 2026-07-07: ONE batched import for the whole
             // chunk — N cheap Loro imports, then ONE projection derive — where
             // the old shape ran a full derive per blob (41.6% of a receiving
@@ -340,15 +357,15 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               guard.doc().free_history_cache();
               unfreed_import_bytes = 0;
             }
+            if coalesced > 1 {
+              tracing::debug!(coalesced, "coalesced import chunk under one gate hold");
+            }
           },
           Err(poisoned) => {
             for (_, reply) in chunk {
               send_reply(&reply, Err(anyhow::anyhow!(poisoned)));
             }
           },
-        }
-        if coalesced > 1 {
-          tracing::debug!(coalesced, "coalesced import chunk under one gate hold");
         }
       },
       IoRequest::PumpPublish { reply } => {

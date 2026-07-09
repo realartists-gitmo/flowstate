@@ -471,8 +471,18 @@ fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<Direct
 
 #[hotpath::measure]
 fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
-  let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error)?;
-  let run_borders_by_paragraph = direct_run_borders_by_paragraph_xml(doc_xml)?;
+  // §act-five P6: the two INDEPENDENT parses of the same bytes — the heavy
+  // structured `CT_Document::from_xml` and the light streaming run-border pass —
+  // overlap on a scoped thread so the border parse hides under the structured
+  // one (both borrow `doc_xml` immutably; the scope guarantees it outlives them).
+  let (document, run_borders_by_paragraph) = std::thread::scope(|scope| {
+    let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
+    let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error);
+    let borders = borders.join().unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+    (document, borders)
+  });
+  let document = document?;
+  let run_borders_by_paragraph = run_borders_by_paragraph?;
   Ok(
     document
       .body

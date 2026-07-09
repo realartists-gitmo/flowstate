@@ -328,6 +328,21 @@ impl RichTextEditor {
     cx.notify();
   }
 
+  /// §data-loss fix (2026-07-08): reconcile the editor's WRITE path to the
+  /// authority's canonical open path when the runtime attaches — including
+  /// resetting it to `None`. Imported formats (docx/pdf) load with `None`: the
+  /// source file is NOT a save target, so save/autosave must stay disabled
+  /// until the user picks a `.db8` via Save As. The phase-V pending panel seeds
+  /// the editor with the *source* path for display/recents; without this reset
+  /// that source path becomes the autosave target and gets overwritten with a
+  /// `.db8` journal (the docx-clobber bug). Mirrors the one-shot open path,
+  /// which builds the editor with `loaded.path` directly.
+  pub fn set_runtime_document_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+    self.recovery_path = path.as_ref().map(|path| recovery_path_for_document(path));
+    self.document_path = path;
+    cx.notify();
+  }
+
   pub fn set_document_display_name(&mut self, name: SharedString, cx: &mut Context<Self>) {
     self.document_display_name = Some(name);
     cx.notify();

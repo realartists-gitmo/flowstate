@@ -1,0 +1,20 @@
+[package]
+name = "flowstate-citation"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+ct2rs = { version = "0.9.19", optional = true, features = ["dnnl"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+strsim = "0.11.1"
+unicode-normalization = "0.1.25"
+
+[lints]
+workspace = true
+
+[features]
+default = ["ct2"]
+ct2 = ["dep:ct2rs"]

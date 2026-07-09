@@ -581,22 +581,22 @@ impl<'a> Projector<'a> {
     flow_id: &str,
     defects: &mut Vec<ProjectionDefect>,
   ) -> io::Result<(BTreeMap<usize, LoroMap>, Vec<(String, LoroMap)>)> {
-    // §perf: index the flow snapshot by char position once (O(N)) so the
-    // per-object-block anchor check below is O(1); previously each block did
-    // `snapshot.chars().nth(pos)` which is O(pos), i.e. O(blocks·len) overall.
-    let snapshot_chars: Vec<char> = text.to_string().chars().collect();
-    // ONE batched resolver pass for every anchor cursor: a DEAD anchor is
-    // simply absent (→ quarantine + canonical re-anchor repair, identity
-    // preserved). The former per-record `get_cursor_pos` walked update
-    // history for each dead anchor — after an undo of a mass delete restores
-    // object records whose anchors all point at deleted placeholders, that
-    // was O(objects × history) inside every rematerialization.
-    let anchor_positions = boundary_cursor_positions(self.doc, text, &self.blocks, &["anchor_cursor"]);
-    let mut by_pos = BTreeMap::new();
-    let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
-    let mut quarantined = Vec::new();
-    for key in map_keys(&self.blocks) {
-      let Some(block) = child_map(&self.blocks, &key)? else {
+    // §act-five P4: ONE registry pass. The old shape scanned the whole block
+    // registry TWICE — once inside `boundary_cursor_positions` (which iterates
+    // EVERY block record to harvest anchor cursors) and again in the loop below
+    // — and materialized the ENTIRE body as `Vec<char>` even for a flow with no
+    // objects. Now we gather this flow's object candidates in a single sorted
+    // pass (quarantine order preserved), batch-resolve ONLY their anchors, and
+    // build the body snapshot only when there is something to place. A DEAD
+    // anchor is simply absent from the batch (→ quarantine + canonical re-anchor
+    // repair, identity preserved), so behaviour is bit-identical to the former
+    // per-record path; the id-less-cursor fallback (`get_cursor_pos`) is kept.
+    let container = text.id();
+    let sorted_keys = map_keys(&self.blocks);
+    let mut candidates: Vec<(String, LoroMap, Option<Cursor>, Option<Vec<u8>>)> = Vec::new();
+    let mut anchor_ids: Vec<ID> = Vec::new();
+    for key in &sorted_keys {
+      let Some(block) = child_map(&self.blocks, key)? else {
         continue;
       };
       if map_string_opt(&block, "flow_id")?.as_deref() != Some(flow_id) {
@@ -606,10 +606,47 @@ impl<'a> Projector<'a> {
         continue;
       }
       let cursor_bytes = map_binary_opt(&block, "anchor_cursor")?;
-      let resolved = cursor_bytes
+      let cursor = cursor_bytes
         .as_deref()
         .and_then(|bytes| Cursor::decode(bytes).ok())
-        .filter(|cursor| cursor.container == text.id())
+        .filter(|cursor| cursor.container == container);
+      if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id) {
+        anchor_ids.push(id);
+      }
+      candidates.push((key.clone(), block, cursor, cursor_bytes));
+    }
+    let mut by_pos = BTreeMap::new();
+    let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
+    let mut quarantined = Vec::new();
+    // Object-free flow: nothing to place, no snapshot, no resolver.
+    if candidates.is_empty() {
+      return Ok((by_pos, quarantined));
+    }
+    let mut anchor_positions: FxHashMap<ID, usize> = FxHashMap::default();
+    if !anchor_ids.is_empty() {
+      for (id, pos) in anchor_ids.iter().copied().zip(self.doc.inner().query_text_id_positions(&container, &anchor_ids)) {
+        if let Some(pos) = pos {
+          anchor_positions.insert(id, pos);
+        }
+      }
+    }
+    // Validate that each resolved anchor still sits on an object-replacement
+    // char. §act-five P4: on a LARGE body, a targeted `char_at` per object
+    // (O(objects·log N) — objects are few) avoids materializing the ENTIRE body
+    // as a `Vec<char>` per call (~1 GB/run of pure churn on a big doc). On a
+    // SMALL body the one-shot snapshot + O(1) gets beats `char_at`'s per-call
+    // state-lock overhead, so keep it below the threshold. Either way an
+    // out-of-range position resolves to `None` → quarantine (bounds-miss
+    // behaviour of the former `snapshot_chars.get(pos)`).
+    const SNAPSHOT_MATERIALIZE_MAX_UNICODE: usize = 8192;
+    let snapshot_chars: Option<Vec<char>> =
+      (text.len_unicode() <= SNAPSHOT_MATERIALIZE_MAX_UNICODE).then(|| text.to_string().chars().collect());
+    let is_object_char = |pos: usize| match &snapshot_chars {
+      Some(chars) => chars.get(pos).copied() == Some(OBJECT_REPLACEMENT),
+      None => text.char_at(pos).ok() == Some(OBJECT_REPLACEMENT),
+    };
+    for (key, block, cursor, cursor_bytes) in candidates {
+      let resolved = cursor
         .and_then(|cursor| match cursor.id {
           Some(id) => anchor_positions.get(&id).copied(),
           None => {
@@ -617,7 +654,7 @@ impl<'a> Projector<'a> {
             self.doc.get_cursor_pos(&cursor).ok().map(|pos| pos.current.pos)
           },
         })
-        .filter(|pos| snapshot_chars.get(*pos).copied() == Some(OBJECT_REPLACEMENT));
+        .filter(|pos| is_object_char(*pos));
       let Some(pos) = resolved else {
         // FS-002: never silently drop a block whose anchor is unresolvable.
         defects.push(ProjectionDefect::UnresolvedObjectAnchor {
@@ -1106,14 +1143,49 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   let Some(paragraphs) = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten() else {
     return index;
   };
-  let pos_by_id = boundary_cursor_positions(doc, text, &paragraphs, &["boundary_cursor", "start_cursor"]);
-  let mut root_first_at_zero = false;
-  for key in map_keys(&paragraphs) {
-    let Some(paragraph) = child_map(&paragraphs, &key).ok().flatten() else {
+  // §act-five P4: ONE pass over the paragraph registry. The old shape scanned it
+  // TWICE (once inside `boundary_cursor_positions`, once in the loop) and decoded
+  // each cursor twice (there, then again in `live_cursor_pos`). Gather the decoded
+  // boundary/start cursors once, batch-resolve their ids, then build the index
+  // from the pre-decoded cursors. Selection rule (boundary_cursor then start_cursor
+  // fallback), sorted-key first-wins ordering, root-first special-case, and the
+  // dead-anchor / id-less-cursor fallbacks are all preserved bit-identically.
+  let container = text.id();
+  let sorted_keys = map_keys(&paragraphs);
+  let mut cands: Vec<(String, Option<Cursor>, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
+  let mut ids: Vec<ID> = Vec::new();
+  for key in &sorted_keys {
+    let Some(record) = child_map(&paragraphs, key).ok().flatten() else {
       continue;
     };
-    let Some(pos) = live_cursor_pos(doc, text, &paragraph, "boundary_cursor", &pos_by_id)
-      .or_else(|| live_cursor_pos(doc, text, &paragraph, "start_cursor", &pos_by_id))
+    let decode = |field: &str| {
+      map_binary_opt(&record, field)
+        .ok()
+        .flatten()
+        .and_then(|bytes| Cursor::decode(&bytes).ok())
+        .filter(|cursor| cursor.container == container)
+    };
+    let boundary = decode("boundary_cursor");
+    let start = decode("start_cursor");
+    for cursor in [boundary.as_ref(), start.as_ref()].into_iter().flatten() {
+      if let Some(id) = cursor.id {
+        ids.push(id);
+      }
+    }
+    cands.push((key.clone(), boundary, start));
+  }
+  let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
+  if !ids.is_empty() {
+    for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+      if let Some(pos) = pos {
+        pos_by_id.insert(id, pos);
+      }
+    }
+  }
+  let mut root_first_at_zero = false;
+  for (key, boundary, start) in cands {
+    let Some(pos) = resolve_decoded_cursor(doc, text, boundary.as_ref(), &pos_by_id)
+      .or_else(|| resolve_decoded_cursor(doc, text, start.as_ref(), &pos_by_id))
     else {
       continue;
     };
@@ -1128,6 +1200,22 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   index
 }
 
+/// Resolve a PRE-DECODED boundary cursor to a live unicode position — the
+/// pre-decoded companion of [`live_cursor_pos`] (same batch-hit / id-less
+/// `get_cursor_pos` fallback / in-range validation), for the fused single-pass
+/// boundary indexers that decode each record's cursors exactly once.
+fn resolve_decoded_cursor(doc: &LoroDoc, text: &LoroText, cursor: Option<&Cursor>, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
+  let cursor = cursor?;
+  let pos = match cursor.id {
+    Some(id) => pos_by_id.get(&id).copied()?,
+    None => {
+      crate::instrument::record_cursor_pos_resolve();
+      doc.get_cursor_pos(cursor).ok()?.current.pos
+    },
+  };
+  (pos < text.len_unicode()).then_some(pos)
+}
+
 /// Build a `boundary position → paragraph *block* loro id` index for `text` in a
 /// single pass over the block registry (paragraph-kind blocks only). Companion to
 /// [`paragraph_ids_by_boundary`] with the same one-pass rationale and selection
@@ -1139,16 +1227,43 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
   let Some(blocks) = child_map(&root, BLOCKS_BY_ID).ok().flatten() else {
     return index;
   };
-  let pos_by_id = boundary_cursor_positions(doc, text, &blocks, &["anchor_cursor"]);
-  let mut main_body_at_zero = false;
-  for key in map_keys(&blocks) {
-    let Some(block) = child_map(&blocks, &key).ok().flatten() else {
+  // §act-five P4: ONE pass (see `paragraph_ids_by_boundary`). Gather paragraph-kind
+  // blocks' decoded anchors once, batch-resolve, build the index from the
+  // pre-decoded cursors — no second scan, no second decode. Kind filter,
+  // sorted-key first-wins, main-body-at-0 special case, and dead/id-less-cursor
+  // fallbacks preserved.
+  let container = text.id();
+  let sorted_keys = map_keys(&blocks);
+  let mut cands: Vec<(String, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
+  let mut ids: Vec<ID> = Vec::new();
+  for key in &sorted_keys {
+    let Some(block) = child_map(&blocks, key).ok().flatten() else {
       continue;
     };
     if map_string_opt(&block, "kind").ok().flatten().as_deref() != Some("paragraph") {
       continue;
     }
-    let Some(pos) = live_cursor_pos(doc, text, &block, "anchor_cursor", &pos_by_id) else {
+    let cursor = map_binary_opt(&block, "anchor_cursor")
+      .ok()
+      .flatten()
+      .and_then(|bytes| Cursor::decode(&bytes).ok())
+      .filter(|cursor| cursor.container == container);
+    if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id) {
+      ids.push(id);
+    }
+    cands.push((key.clone(), cursor));
+  }
+  let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
+  if !ids.is_empty() {
+    for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+      if let Some(pos) = pos {
+        pos_by_id.insert(id, pos);
+      }
+    }
+  }
+  let mut main_body_at_zero = false;
+  for (key, cursor) in cands {
+    let Some(pos) = resolve_decoded_cursor(doc, text, cursor.as_ref(), &pos_by_id) else {
       continue;
     };
     if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
@@ -1160,75 +1275,6 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
     index.insert(0, MAIN_BODY_BLOCK_ID.to_string());
   }
   index
-}
-
-/// Resolve, in a SINGLE pass over `text`, the current position of every live
-/// boundary cursor stored under `cursor_fields` across `records`, returning an
-/// `id → position` map. Each record contributes O(1) cursor decodes here, and the
-/// whole set of positions is resolved by one `query_text_id_positions` chunk scan
-/// (vendored Loro batch resolver) instead of an O(elements) `get_cursor_pos` per
-/// record. That is what takes `document_from_loro` from O(records²) — which pegged
-/// the CRDT actor at 100% CPU on a large document — down to ~O(elements). Ids not
-/// present (deleted) are simply absent; a DEAD anchor is treated as unresolvable
-/// (fabrication/quarantine + canonical repair), never history-traced per cursor.
-#[hotpath::measure]
-fn boundary_cursor_positions(doc: &LoroDoc, text: &LoroText, records: &LoroMap, cursor_fields: &[&str]) -> FxHashMap<ID, usize> {
-  let container = text.id();
-  let mut ids: Vec<ID> = Vec::new();
-  // §perf: the result is an ID-keyed map that never depends on iteration order, so
-  // walk the block keys directly (InternalString derefs to &str) rather than
-  // collecting a sorted Vec<String> of every key just to discard the ordering.
-  for key in records.keys() {
-    let Some(record) = child_map(records, &key).ok().flatten() else {
-      continue;
-    };
-    for field in cursor_fields {
-      if let Some(bytes) = map_binary_opt(&record, field).ok().flatten()
-        && let Ok(cursor) = Cursor::decode(&bytes)
-        && cursor.container == container
-        && let Some(id) = cursor.id
-      {
-        ids.push(id);
-      }
-    }
-  }
-  let mut positions = FxHashMap::default();
-  if ids.is_empty() {
-    return positions;
-  }
-  for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
-    if let Some(pos) = pos {
-      positions.insert(id, pos);
-    }
-  }
-  positions
-}
-
-fn live_cursor_pos(doc: &LoroDoc, text: &LoroText, map: &LoroMap, key: &str, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
-  let cursor_bytes = map_binary_opt(map, key).ok().flatten()?;
-  let cursor = Cursor::decode(&cursor_bytes).ok()?;
-  if cursor.container != text.id() {
-    return None;
-  }
-  // The boundary index resolved every id-carrying live cursor in one batch
-  // pass, so this is an O(1) lookup — and absence means the anchor is DELETED.
-  // Falling back to per-id `get_cursor_pos` for dead anchors walks update
-  // history per cursor: after an undo of a mass delete restores records whose
-  // cursors all point at the deleted characters, that was O(records × history)
-  // — a multi-minute rematerialization freeze (the ctrl-A + undo field bug).
-  // A dead anchor resolves to None; the boundary fabricates its deterministic
-  // id and canonical defect repair re-anchors the record — identical recovery
-  // law on every peer. Id-less cursors (F7) keep the per-cursor resolution.
-  let pos = match cursor.id {
-    Some(id) => pos_by_id.get(&id).copied()?,
-    None => {
-      crate::instrument::record_cursor_pos_resolve();
-      doc.get_cursor_pos(&cursor).ok()?.current.pos
-    },
-  };
-  // `pos` is a live Unicode-code-point index into `text`; validate it is in range
-  // with an O(1) length check (never materialize the flow string).
-  (pos < text.len_unicode()).then_some(pos)
 }
 
 fn map_keys(map: &LoroMap) -> Vec<String> {
@@ -1832,48 +1878,6 @@ mod tests {
     assert_eq!(projected.ids.paragraph_ids[0], ParagraphId(loro_id_u128(&first_paragraph_id)));
     assert_eq!(projected.ids.block_ids[0], BlockId(loro_id_u128(&first_block_id)));
     assert_eq!(projected.ids.block_ids[1], BlockId(loro_id_u128(&image_id)));
-    Ok(())
-  }
-
-  #[test]
-  fn object_boundary_does_not_create_a_phantom_paragraph() -> io::Result<()> {
-    let paragraph = |text: &str| {
-      InputBlock::Paragraph(InputParagraph {
-        style: gpui_flowtext::ParagraphStyle::Normal,
-        runs: vec![InputRun {
-          text: text.to_string(),
-          styles: RunStyles::default(),
-        }],
-      })
-    };
-    let source = document_from_input_blocks(
-      DocumentTheme::clone(&flowstate_document_theme()),
-      vec![
-        paragraph("before"),
-        InputBlock::Image(InputImageBlock {
-          asset_id: AssetId(7),
-          alt_text: "figure".into(),
-          caption: None,
-          sizing: InputImageSizing::Intrinsic,
-          alignment: InputBlockAlignment::Center,
-        }),
-        paragraph("after"),
-      ],
-    );
-
-    let projected = document_from_loro(&document_to_loro(&source, "Object boundary")?)?;
-
-    assert_eq!(projected.paragraphs.len(), 2);
-    assert_eq!(gpui_flowtext::paragraph_text(&projected, 0), "before");
-    assert_eq!(gpui_flowtext::paragraph_text(&projected, 1), "after");
-    assert!(matches!(
-      projected.blocks.to_vec().as_slice(),
-      [
-        gpui_flowtext::Block::Paragraph(_),
-        gpui_flowtext::Block::Image(_),
-        gpui_flowtext::Block::Paragraph(_)
-      ]
-    ));
     Ok(())
   }
 

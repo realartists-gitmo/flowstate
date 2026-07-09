@@ -147,6 +147,18 @@ pub struct LoroDocInner {
     visible_op_count: Arc<AtomicUsize>,
     observer: Arc<Observer>,
     diff_calculator: Arc<LoroMutex<DiffCalculator>>,
+    /// §act-five P1.B (flowstate vendor patch): a RETAINED diff calculator for the
+    /// IMPORT path. Upstream imports build a FRESH `DiffCalculator::new(false)` per
+    /// import (loro.rs), so each import rebuilds every affected container's tracker
+    /// from the LCA — the fixed ~O(history-to-LCA) cost that dominates a receiving
+    /// peer's runtime (154 MB/import on the impact doc, all reallocated each time).
+    /// Reusing a persistent calculator advances the trackers incrementally: a
+    /// sequential import (the common case) skips the rebuild entirely. Bounded
+    /// memory (one O(doc) calculator, not the 33 GB/run churn of transient ones)
+    /// and correctness-safe (persist mode uses Loro's general `Checkout` apply,
+    /// valid for any version transition). Separate from `diff_calculator` (which
+    /// checkout uses) so the two never contend; freed on `free_diff_calculator`.
+    import_diff_calculator: Arc<LoroMutex<DiffCalculator>>,
     /// When dropping the doc, the txn will be committed
     ///
     /// # Internal Notes
