@@ -47,3 +47,7 @@ rustc-ice-*.txt
 # Vendored-crate build artifacts (Acts 5-14 vendoring)
 vendor/*/target/
 vendor/*/*/target/
+
+# Root scratch/analysis slop (keep it out of the repo)
+/scratchpad_*
+/citation_*.xlsx

@@ -1,5 +1,0 @@
-SELECT DISTINCT ?label WHERE {
-  VALUES ?t { wd:Q202444 wd:Q12308941 wd:Q11879590 wd:Q3409032 }
-  ?item wdt:P31 ?t ; rdfs:label ?label .
-  FILTER(LANG(?label) = "en")
-}

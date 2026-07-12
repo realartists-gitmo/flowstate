@@ -1,5 +1,0 @@
-SELECT ?label (COUNT(?p) AS ?c) WHERE {
-  ?gn wdt:P31/wdt:P279* wd:Q202444 ; rdfs:label ?label .
-  FILTER(LANG(?label) = "en") FILTER(STRSTARTS(?label, "Tim"))
-  ?p wdt:P735 ?gn .
-} GROUP BY ?label ORDER BY DESC(?c)
