@@ -527,9 +527,20 @@ fn strip_affiliation_markers(authors: &mut [Value]) {
             continue;
         }
         let Some(map) = a.as_object_mut() else { continue };
-        if let Some(s) = map.get("surname").and_then(Value::as_str) {
-            let stem: String = s.chars().take(s.chars().count() - 1).collect();
-            map.insert("surname".into(), Value::String(stem));
+        let surname = map.get("surname").and_then(Value::as_str).map(str::to_string);
+        if let Some(surname) = surname {
+            let stem: String = surname.chars().take(surname.chars().count() - 1).collect();
+            map.insert("surname".into(), Value::String(stem.clone()));
+            // Keep the full name consistent too. Otherwise the next normalization pass derives
+            // the marked surname again from `Thomas Dietza` / `Michael P. Vandenberghe`.
+            if let Some(name) = map.get("name").and_then(Value::as_str).map(str::to_string) {
+                let mut words: Vec<&str> = name.split_whitespace().collect();
+                if words.last().is_some_and(|last| fold(last) == fold(&surname)) {
+                    words.pop();
+                    let rebuilt = if words.is_empty() { stem } else { format!("{} {stem}", words.join(" ")) };
+                    map.insert("name".into(), Value::String(rebuilt));
+                }
+            }
         }
     }
 }

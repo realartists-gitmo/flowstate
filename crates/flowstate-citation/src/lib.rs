@@ -122,8 +122,14 @@ fn repair(raw: &str, source: &str) -> Option<Value> {
         snap::recover_semicolon_record_authors(o, source);
         snap::recover_bibliographic_roster_authors(o, source);
         snap::recover_conjunction_chain_authors(o, source);
+        snap::recover_contribution_statement_authors(o, source);
+        snap::recover_about_authors_section(o, source);
+        snap::recover_semicolon_bio_authors(o, source);
+        snap::recover_degree_delimited_authors(o, source);
         snap::recover_marked_bracket_authors(o, source);
+        snap::recover_numbered_inline_authors(o, source);
         snap::recover_strong_empty_author(o, source);
+        snap::recover_ranked_key_author(o, source);
         snap::recover_bare_author_shorthand(o, source);
         snap::recover_role_prefixed_authors(o, source);
         snap::reconcile_explicit_key_authors(o, source);
@@ -131,10 +137,13 @@ fn repair(raw: &str, source: &str) -> Option<Value> {
         snap::repair_repeated_single_initial_surname(o, source);
         snap::repair_concatenated_role_byline(o, source);
         snap::restore_source_confirmed_decoded_families(o, source, &decoded_authors);
+        snap::repair_speech_marker_family(o, source);
         snap::repair_starred_surname_first_byline(o, source);
         snap::repair_conjunction_byline_spelling(o, source);
+        snap::repair_pipe_volume_author_tail(o, source);
         snap::repair_leading_inverted_author(o, source);
         snap::repair_sole_author_byline_spelling(o, source);
+        snap::retain_primary_credit_group(o, source);
         snap::drop_fabricated_near_dups(o, source);
         snap::drop_structural_nonperson_authors(o, source);
         snap::drop_obvious_publication_author(o, source);

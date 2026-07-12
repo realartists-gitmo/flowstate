@@ -834,10 +834,23 @@ pub fn restore_source_confirmed_decoded_families(
                 fold(&pair[1]) == "al"
                     && first.strip_suffix("et").is_some_and(|stem| sim(stem, &family) >= 0.82)
             });
+        let bracketed_card_family = s[..head_end].rfind(']').is_some_and(|close| {
+            let key_words = words(&s[close + 1..head_end]);
+            key_words.len() == 1
+                && fold(&key_words[0]) == family
+                && s[head_end..].chars().take(12).collect::<String>().contains('[')
+        });
         let family_is_container = source_words.windows(2).any(|pair| {
             fold(&pair[0]) == family && BIBLIO.contains(&fold(&pair[1]).as_str())
         });
-        if family_is_container || !(tail_family || head_family || role_family || omitted_follow || glued_et_al_family) {
+        if family_is_container
+            || !(tail_family
+                || head_family
+                || role_family
+                || omitted_follow
+                || glued_et_al_family
+                || bracketed_card_family)
+        {
             continue;
         }
         let first_given = decoded_folds.get(first_person).cloned().unwrap_or_default();
@@ -1575,6 +1588,91 @@ pub fn recover_marked_bracket_authors(obj: &mut Value, source: &str) -> usize {
     old.symmetric_difference(&new).count()
 }
 
+/// Recover a compact author list whose names carry numbered affiliation markers and whose
+/// affiliations immediately repeat those markers: `Given Surname1 and Given Surname2,
+/// 1Institution, 2Institution`. The complete marker round-trip is the safety proof; a bare digit
+/// after a name is not enough. The parsed author count must already equal the source-list count and
+/// at least one surname must anchor the list before it is rebuilt.
+pub fn recover_numbered_inline_authors(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    let s = source.trim_start_matches("parse citation:").trim_start();
+    let Some(open) = s.find('(') else { return 0 };
+    let Some(comma_rel) = s[open + 1..].find(',') else { return 0 };
+    let comma = open + 1 + comma_rel;
+    let byline = s[open + 1..comma].trim();
+    let parts: Vec<&str> = byline.split(" and ").collect();
+    if parts.len() < 2 {
+        return 0;
+    }
+    let mut parsed: Vec<(String, String, String)> = Vec::new();
+    for part in parts {
+        let tokens: Vec<&str> = part.split_whitespace().collect();
+        if !(2..=5).contains(&tokens.len()) {
+            return 0;
+        }
+        let marked = tokens.last().unwrap().trim_matches(|c: char| matches!(c, ')' | ']' | ';'));
+        let marker_start = marked
+            .char_indices()
+            .find(|(_, c)| c.is_ascii_digit())
+            .map(|(at, _)| at)
+            .unwrap_or(marked.len());
+        let (surname, marker) = marked.split_at(marker_start);
+        if surname.chars().filter(|c| c.is_alphabetic()).count() < 2
+            || marker.is_empty()
+            || !marker.chars().all(|c| c.is_ascii_digit())
+            || !tokens[..tokens.len() - 1].iter().all(|token| {
+                token.chars().next().is_some_and(char::is_uppercase)
+            })
+        {
+            return 0;
+        }
+        let mut name_tokens = tokens[..tokens.len() - 1].to_vec();
+        name_tokens.push(surname);
+        parsed.push((surname.to_string(), name_tokens.join(" "), marker.to_string()));
+    }
+    let affiliations = &s[comma + 1..];
+    if parsed.iter().any(|(_, _, marker)| {
+        !affiliations.split_whitespace().any(|token| {
+            let token = token.trim_matches(|c: char| matches!(c, ',' | ';' | '(' | ')' | '[' | ']'));
+            token.strip_prefix(marker.as_str()).is_some_and(|rest| rest.chars().next().is_some_and(char::is_uppercase))
+        })
+    }) {
+        return 0;
+    }
+    let Some(authors) = obj.get("authors").and_then(Value::as_array) else { return 0 };
+    if authors.len() != parsed.len() {
+        return 0;
+    }
+    let anchored = parsed.iter().any(|(surname, _, _)| {
+        authors.iter().any(|author| {
+            author.get("surname").and_then(Value::as_str).is_some_and(|value| fold(value) == fold(surname))
+        })
+    });
+    if !anchored {
+        return 0;
+    }
+    let old: std::collections::BTreeSet<String> = authors
+        .iter()
+        .filter_map(|author| author.get("surname").and_then(Value::as_str))
+        .map(fold)
+        .collect();
+    let new: std::collections::BTreeSet<String> = parsed.iter().map(|(surname, _, _)| fold(surname)).collect();
+    if let Some(map) = obj.as_object_mut() {
+        map.insert(
+            "authors".into(),
+            Value::Array(
+                parsed
+                    .into_iter()
+                    .map(|(surname, name, _)| serde_json::json!({ "surname": surname, "name": name }))
+                    .collect(),
+            ),
+        );
+    }
+    old.symmetric_difference(&new).count()
+}
+
 /// Reconcile an `et al.` author list whose records are homogeneously separated by semicolons.
 ///
 /// In these long records each semicolon starts either a new `Name[, bio]` record or a visibly
@@ -1999,6 +2097,403 @@ pub fn recover_conjunction_chain_authors(obj: &mut Value, source: &str) -> usize
     missing.len()
 }
 
+/// Recover omissions from scientific contribution statements. Each candidate must occur before
+/// an explicit authorship predicate (`prepared`, `were responsible`, `contributed`, or `provided`),
+/// and the source must contain at least three such statements. At least eight candidate surnames
+/// and 75% of all parsed candidates must already be present in the model output; those anchors make
+/// this a completion pass, not a free-form person-name extractor.
+pub fn recover_contribution_statement_authors(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    let s = source.trim_start_matches("parse citation:");
+    let author_region = s
+        .to_ascii_lowercase()
+        .find("all other authors")
+        .map_or(s, |at| &s[..at]);
+    const PREDICATES: &[&str] = &[" prepared ", " were responsible ", " contributed ", " provided "];
+    let mut statement_count = 0;
+    let mut candidates: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for sentence in author_region.split('.') {
+        let lower = sentence.to_ascii_lowercase();
+        let Some(predicate_at) = PREDICATES.iter().filter_map(|predicate| lower.find(predicate)).min() else {
+            continue;
+        };
+        statement_count += 1;
+        let subject = sentence[..predicate_at].trim();
+        for field in subject.split(',').flat_map(|field| field.split(" and ")) {
+            let mut tokens: Vec<&str> = field
+                .split_whitespace()
+                .map(|token| token.trim_matches(|c: char| !c.is_alphabetic() && c != '-' && c != '.'))
+                .filter(|token| !token.is_empty())
+                .collect();
+            if tokens.last().is_some_and(|token| fold(token) == "all") {
+                tokens.pop();
+            }
+            if !(2..=5).contains(&tokens.len())
+                || !crate::gazetteer::GIVEN_NAMES.contains(fold(tokens[0]).as_str())
+                || !tokens.iter().all(|token| {
+                    let alpha: String = token.chars().filter(|c| c.is_alphabetic()).collect();
+                    !alpha.is_empty()
+                        && (token.chars().next().is_some_and(char::is_uppercase)
+                            || (alpha.chars().count() == 1 && alpha.chars().all(|c| c.is_uppercase())))
+                })
+            {
+                continue;
+            }
+            let surname = tokens.last().unwrap().trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+            let family = fold(surname);
+            if family.chars().count() >= 2 && !crate::gazetteer::is_common_word(&family) {
+                candidates.entry(family).or_insert((surname.to_string(), tokens.join(" ")));
+            }
+        }
+    }
+    if statement_count < 3 || candidates.len() < 10 {
+        return 0;
+    }
+    let existing: std::collections::BTreeSet<String> = obj
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|author| author.get("surname").and_then(Value::as_str))
+                .map(fold)
+                .collect()
+        })
+        .unwrap_or_default();
+    let anchors = candidates.keys().filter(|family| existing.contains(*family)).count();
+    if anchors < 8 || anchors * 4 < candidates.len() * 3 {
+        return 0;
+    }
+    let missing: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter_map(|(family, person)| (!existing.contains(&family)).then_some(person))
+        .collect();
+    if let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) {
+        for (surname, name) in &missing {
+            authors.push(serde_json::json!({ "surname": surname, "name": name }));
+        }
+    }
+    missing.len()
+}
+
+/// Complete an explicit `About the authors:` bio section. Candidates must be immediately followed
+/// by a biographical copula (`is`, `was`, `has`), and at least two candidates plus two-thirds of
+/// the section must already match extracted surnames. This makes the heading and model anchors—not
+/// capitalization alone—the evidence for adding an omitted bio.
+pub fn recover_about_authors_section(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    let lower = source.to_ascii_lowercase();
+    let Some(start) = lower.find("about the authors:").map(|at| at + "about the authors:".len()) else {
+        return 0;
+    };
+    let end = lower[start..].find("http").map_or(source.len(), |at| start + at);
+    let section_words = words(&source[start..end]);
+    let is_initial = |word: &str| {
+        let alpha: String = word.chars().filter(|c| c.is_alphabetic()).collect();
+        alpha.chars().count() == 1 && alpha.chars().all(|c| c.is_uppercase())
+    };
+    let mut candidates: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for copula in 2..section_words.len() {
+        if !matches!(fold(&section_words[copula]).as_str(), "is" | "was" | "has") {
+            continue;
+        }
+        let surname = section_words[copula - 1].trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+        let mut given_at = copula - 2;
+        while given_at > 0 && is_initial(&section_words[given_at]) && copula - given_at <= 3 {
+            given_at -= 1;
+        }
+        let given = &section_words[given_at];
+        if !crate::gazetteer::GIVEN_NAMES.contains(fold(given).as_str())
+            || !surname.chars().next().is_some_and(char::is_uppercase)
+            || surname.chars().filter(|c| c.is_alphabetic()).count() < 2
+        {
+            continue;
+        }
+        let name = section_words[given_at..copula].join(" ");
+        candidates.entry(fold(surname)).or_insert((surname.to_string(), name));
+    }
+    if candidates.len() < 3 {
+        return 0;
+    }
+    let existing: std::collections::BTreeSet<String> = obj
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|author| author.get("surname").and_then(Value::as_str))
+                .map(fold)
+                .collect()
+        })
+        .unwrap_or_default();
+    let anchors = candidates.keys().filter(|family| existing.contains(*family)).count();
+    if anchors < 2 || anchors * 3 < candidates.len() * 2 {
+        return 0;
+    }
+    let missing: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter_map(|(family, person)| (!existing.contains(&family)).then_some(person))
+        .collect();
+    if let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) {
+        for (surname, name) in &missing {
+            authors.push(serde_json::json!({ "surname": surname, "name": name }));
+        }
+    }
+    missing.len()
+}
+
+/// Complete a semicolon-delimited sequence of short biographies (`Given Surname is ...;
+/// Given Surname with ...; ...`). A candidate surname must immediately precede the first bio
+/// predicate in its segment and have a known given name within the preceding three tokens. At
+/// least four candidates, three anchors, and 75% model coverage are required.
+pub fn recover_semicolon_bio_authors(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    let s = source.trim_start_matches("parse citation:").trim_start();
+    let Some(year_at) = s.char_indices().find(|(_, c)| c.is_ascii_digit()).map(|(at, _)| at) else {
+        return 0;
+    };
+    if !s[..year_at].to_ascii_lowercase().contains("et al") || s.matches(';').count() < 3 {
+        return 0;
+    }
+    let title_at = s
+        .char_indices()
+        .find(|(_, c)| matches!(c, '"' | '\u{201C}'))
+        .map_or(s.len(), |(at, _)| at);
+    let mut candidates: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for segment in s[..title_at].split(';') {
+        let tokens = words(segment);
+        let Some(predicate) = tokens
+            .iter()
+            .position(|token| matches!(fold(token).as_str(), "is" | "was" | "has" | "with"))
+        else {
+            continue;
+        };
+        if predicate < 2 {
+            continue;
+        }
+        let surname = tokens[predicate - 1].trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+        let given_start = predicate.saturating_sub(4);
+        let Some(given_at) = (given_start..predicate - 1)
+            .find(|index| crate::gazetteer::GIVEN_NAMES.contains(fold(&tokens[*index]).as_str()))
+        else {
+            continue;
+        };
+        if surname.chars().filter(|c| c.is_alphabetic()).count() < 2
+            || !surname.chars().next().is_some_and(char::is_uppercase)
+        {
+            continue;
+        }
+        let name = tokens[given_at..predicate].join(" ");
+        candidates.entry(fold(surname)).or_insert((surname.to_string(), name));
+    }
+    if candidates.len() < 4 {
+        return 0;
+    }
+    let existing: std::collections::BTreeSet<String> = obj
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|author| author.get("surname").and_then(Value::as_str))
+                .map(fold)
+                .collect()
+        })
+        .unwrap_or_default();
+    let anchors = candidates.keys().filter(|family| existing.contains(*family)).count();
+    if anchors < 3 || anchors * 4 < candidates.len() * 3 {
+        return 0;
+    }
+    let missing: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter_map(|(family, person)| (!existing.contains(&family)).then_some(person))
+        .collect();
+    if let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) {
+        for (surname, name) in &missing {
+            authors.push(serde_json::json!({ "surname": surname, "name": name }));
+        }
+    }
+    missing.len()
+}
+
+/// Complete a comma-delimited academic byline where every candidate is followed by a degree field:
+/// `Given Surname, Ph.D., Given Surname, M.A., ...`. At least four candidates and two-thirds model
+/// coverage are required. Degree delimiters are unambiguous roster syntax and prevent prose names
+/// or institutions from becoming authors.
+pub fn recover_degree_delimited_authors(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    const DEGREES: &[&str] = &[
+        "phd", "edd", "ma", "ms", "msc", "mba", "mph", "jd", "md", "dphil", "llm", "ba", "bs",
+    ];
+    let s = source.trim_start_matches("parse citation:").trim_start();
+    let title_at = s
+        .char_indices()
+        .find(|(_, c)| matches!(c, '"' | '\u{201C}'))
+        .map_or(s.len(), |(at, _)| at);
+    let fields: Vec<&str> = s[..title_at].split(',').collect();
+    let mut candidates: std::collections::BTreeMap<String, (String, String)> =
+        std::collections::BTreeMap::new();
+    for pair in fields.windows(2) {
+        let degree = pair[1].split_whitespace().next().map(fold).unwrap_or_default();
+        if !DEGREES.contains(&degree.as_str()) {
+            continue;
+        }
+        let person = pair[0]
+            .rsplit_once('(')
+            .map_or(pair[0], |(_, tail)| tail)
+            .trim();
+        let tokens: Vec<&str> = person
+            .split_whitespace()
+            .map(|token| token.trim_matches(|c: char| !c.is_alphabetic() && c != '-' && c != '.'))
+            .filter(|token| !token.is_empty())
+            .collect();
+        if !(2..=5).contains(&tokens.len())
+            || !crate::gazetteer::GIVEN_NAMES.contains(fold(tokens[0]).as_str())
+        {
+            continue;
+        }
+        let surname = tokens.last().unwrap().trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+        if surname.chars().filter(|c| c.is_alphabetic()).count() < 2
+            || !surname.chars().next().is_some_and(char::is_uppercase)
+        {
+            continue;
+        }
+        candidates.entry(fold(surname)).or_insert((surname.to_string(), tokens.join(" ")));
+    }
+    if candidates.len() < 4 {
+        return 0;
+    }
+    let existing: std::collections::BTreeSet<String> = obj
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|author| author.get("surname").and_then(Value::as_str))
+                .map(fold)
+                .collect()
+        })
+        .unwrap_or_default();
+    let anchors = candidates.keys().filter(|family| existing.contains(*family)).count();
+    if anchors < 3 || anchors * 3 < candidates.len() * 2 {
+        return 0;
+    }
+    let missing: Vec<(String, String)> = candidates
+        .into_iter()
+        .filter_map(|(family, person)| (!existing.contains(&family)).then_some(person))
+        .collect();
+    if let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) {
+        for (surname, name) in &missing {
+            authors.push(serde_json::json!({ "surname": surname, "name": name }));
+        }
+    }
+    missing.len()
+}
+
+/// Respect an explicit primary-credit boundary in report acknowledgements. Phrases such as
+/// `core team comprised of [names], with inputs from [contributors]` distinguish authors from
+/// downstream contributors. The primary list is installed only when it contains at least five
+/// person-shaped names and at least 75% already match model authors, so the wording is a scope
+/// boundary while the model anchors the name parsing.
+pub fn retain_primary_credit_group(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    const STARTS: &[&str] = &[
+        "core team comprised of ",
+        "core team composed of ",
+        "core team consisting of ",
+        "core team consisted of ",
+    ];
+    const ENDS: &[&str] = &[", with inputs from ", ", with contributions from "];
+    let lower = source.to_ascii_lowercase();
+    let Some((start_at, start_phrase)) = STARTS
+        .iter()
+        .filter_map(|phrase| lower.find(phrase).map(|at| (at, *phrase)))
+        .min_by_key(|(at, _)| *at)
+    else {
+        return 0;
+    };
+    let list_start = start_at + start_phrase.len();
+    let Some((end_rel, _)) = ENDS
+        .iter()
+        .filter_map(|phrase| lower[list_start..].find(phrase).map(|at| (at, *phrase)))
+        .min_by_key(|(at, _)| *at)
+    else {
+        return 0;
+    };
+    let primary = &source[list_start..list_start + end_rel];
+    let mut parsed: Vec<(String, String)> = Vec::new();
+    for field in primary.split(',').flat_map(|field| field.split(" and ")) {
+        let person = field.split('(').next().unwrap_or("").trim();
+        let tokens: Vec<&str> = person.split_whitespace().collect();
+        if !(2..=5).contains(&tokens.len())
+            || !tokens.iter().all(|token| {
+                let alpha: String = token.chars().filter(|c| c.is_alphabetic()).collect();
+                !alpha.is_empty()
+                    && (token.chars().next().is_some_and(char::is_uppercase)
+                        || (alpha.chars().count() == 1 && alpha.chars().all(|c| c.is_uppercase())))
+            })
+        {
+            continue;
+        }
+        let surname = tokens.last().unwrap().trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+        let family = fold(surname);
+        if !parsed.iter().any(|(existing, _)| fold(existing) == family) {
+            parsed.push((surname.to_string(), tokens.join(" ")));
+        }
+    }
+    if parsed.len() < 5 {
+        return 0;
+    }
+    let Some(authors) = obj.get("authors").and_then(Value::as_array) else { return 0 };
+    let anchors = parsed
+        .iter()
+        .filter(|(surname, name)| {
+            let given = name.split_whitespace().next().map(fold).unwrap_or_default();
+            authors.iter().any(|author| {
+                let current_name = author.get("name").and_then(Value::as_str).unwrap_or("");
+                let current_surname = author.get("surname").and_then(Value::as_str).unwrap_or("");
+                fold(current_name) == fold(name)
+                    || (current_name.split_whitespace().next().is_some_and(|word| fold(word) == given)
+                        && sim(&fold(current_surname), &fold(surname)) >= 0.82)
+            })
+        })
+        .count();
+    if anchors < 5 || anchors * 4 < parsed.len() * 3 {
+        return 0;
+    }
+    let old: std::collections::BTreeSet<String> = authors
+        .iter()
+        .filter_map(|author| author.get("surname").and_then(Value::as_str))
+        .map(fold)
+        .collect();
+    let new: std::collections::BTreeSet<String> = parsed.iter().map(|(surname, _)| fold(surname)).collect();
+    if let Some(map) = obj.as_object_mut() {
+        map.insert(
+            "authors".into(),
+            Value::Array(
+                parsed
+                    .into_iter()
+                    .map(|(surname, name)| serde_json::json!({ "surname": surname, "name": name }))
+                    .collect(),
+            ),
+        );
+    }
+    old.symmetric_difference(&new).count()
+}
+
 /// Recover a zero-author result only from one of two source-internal proofs:
 /// (1) the pre-year key surname reappears in an immediate `Given [INITIALS] Surname` person span;
 /// (2) a capitalized hyphenated surname + year occupies its own line.  The latter is a strong
@@ -2084,6 +2579,108 @@ pub fn recover_strong_empty_author(obj: &mut Value, source: &str) -> usize {
         return 1;
     }
     0
+}
+
+/// Recover the lead author of an `et al.` cite when the source independently repeats the cite-key
+/// surname in a ranked bio (`Khan et al. ... Dr. Khan is ...`). The rank + repeated surname +
+/// copula is a person proof; a bare shorthand key alone is not sufficient.
+pub fn recover_ranked_key_author(obj: &mut Value, source: &str) -> usize {
+    if obj.get("status").and_then(Value::as_str) != Some("parsed") {
+        return 0;
+    }
+    let s = source.trim_start_matches("parse citation:").trim_start();
+    let Some(year_at) = s.char_indices().find_map(|(at, c)| {
+        (c.is_ascii_digit()
+            && !s[at + c.len_utf8()..].chars().next().is_some_and(char::is_alphabetic))
+        .then_some(at)
+    }) else {
+        return 0;
+    };
+    let head = &s[..year_at];
+    if !head.to_ascii_lowercase().contains("et al") {
+        return 0;
+    }
+    let key = head
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_matches(|c: char| !c.is_alphabetic() && c != '-' && c != '\'');
+    let family = fold(key);
+    if family.chars().count() < 3 || !key.chars().next().is_some_and(char::is_uppercase) {
+        return 0;
+    }
+    let existing: std::collections::BTreeSet<String> = obj
+        .get("authors")
+        .and_then(Value::as_array)
+        .map(|authors| {
+            authors
+                .iter()
+                .filter_map(|author| author.get("surname").and_then(Value::as_str))
+                .map(fold)
+                .collect()
+        })
+        .unwrap_or_default();
+    if existing.contains(&family) {
+        return 0;
+    }
+    const RANK: &[&str] = &["dr", "prof", "professor", "judge", "justice", "ambassador"];
+    const COPULA: &[&str] = &["is", "has", "serves"];
+    let body = words(&s[year_at..]);
+    let proven = body.windows(3).any(|triple| {
+        RANK.contains(&fold(&triple[0]).as_str())
+            && fold(&triple[1]) == family
+            && COPULA.contains(&fold(&triple[2]).as_str())
+    });
+    if !proven {
+        return 0;
+    }
+    if let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) {
+        authors.push(serde_json::json!({ "surname": key, "name": key }));
+        return 1;
+    }
+    0
+}
+
+/// Repair a surname separated from its given names by a debate speech marker:
+/// `Given Middle 1AC Surname et al.`. The current full name must exactly equal the tokens before
+/// the marker, and the token after it must be followed by `et al`, making the marker an explicit
+/// boundary rather than a generic preference for a cite-tag token.
+pub fn repair_speech_marker_family(obj: &mut Value, source: &str) -> usize {
+    let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) else { return 0 };
+    if authors.len() != 1 {
+        return 0;
+    }
+    const MARKERS: &[&str] = &["1ac", "2ac", "1nc", "2nc", "1ar", "2ar", "1nr", "2nr"];
+    let s = source.trim_start_matches("parse citation:").trim_start();
+    let Some(year_at) = s.char_indices().find_map(|(at, c)| {
+        (c.is_ascii_digit()
+            && !s[at + c.len_utf8()..].chars().next().is_some_and(char::is_alphabetic))
+        .then_some(at)
+    }) else {
+        return 0;
+    };
+    let head = words(&s[..year_at]);
+    let Some(marker_at) = head.iter().position(|word| MARKERS.contains(&fold(word).as_str())) else {
+        return 0;
+    };
+    if marker_at == 0 || marker_at + 3 > head.len() || fold(&head[marker_at + 2]) != "et" {
+        return 0;
+    }
+    if head.get(marker_at + 3).is_some_and(|word| fold(word) != "al") {
+        return 0;
+    }
+    let current_name = authors[0].get("name").and_then(Value::as_str).map(fold).unwrap_or_default();
+    let given_span = head[..marker_at].iter().map(|word| fold(word)).collect::<String>();
+    let surname = head[marker_at + 1].trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+    if current_name != given_span
+        || surname.chars().filter(|c| c.is_alphabetic()).count() < 3
+        || !surname.chars().next().is_some_and(char::is_uppercase)
+    {
+        return 0;
+    }
+    authors[0]["surname"] = Value::String(surname.to_string());
+    authors[0]["name"] = Value::String(format!("{} {surname}", head[..marker_at].join(" ")));
+    1
 }
 
 /// Recover an empty result from one long all-caps token that is a known surname and not an
@@ -2599,6 +3196,33 @@ pub fn repair_conjunction_byline_spelling(obj: &mut Value, source: &str) -> usiz
             continue;
         }
         author["surname"] = Value::String(candidate.to_string());
+        changes += 1;
+    }
+    changes
+}
+
+/// Remove a publication token fused onto the final author when the source immediately introduces
+/// it as a pipe-delimited volume (`Given SURNAME JOURNAL | Vol 2`). The model name must contain both
+/// adjacent tokens and its current surname must be the token directly before `| Vol`; the preceding
+/// name token is then the source-grounded family.
+pub fn repair_pipe_volume_author_tail(obj: &mut Value, source: &str) -> usize {
+    let lower = source.to_lowercase();
+    let Some(authors) = obj.get_mut("authors").and_then(Value::as_array_mut) else { return 0 };
+    let mut changes = 0;
+    for author in authors {
+        let surname = author.get("surname").and_then(Value::as_str).unwrap_or("").to_string();
+        let name = author.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+        let tokens: Vec<&str> = name.split_whitespace().collect();
+        if tokens.len() < 3 || fold(tokens.last().unwrap()) != fold(&surname) {
+            continue;
+        }
+        let candidate = tokens[tokens.len() - 2].trim_matches(|c: char| !c.is_alphabetic() && c != '-');
+        let boundary = format!("{} {} | vol", candidate.to_lowercase(), surname.to_lowercase());
+        if candidate.chars().filter(|c| c.is_alphabetic()).count() < 3 || !lower.contains(&boundary) {
+            continue;
+        }
+        author["surname"] = Value::String(candidate.to_string());
+        author["name"] = Value::String(tokens[..tokens.len() - 1].join(" "));
         changes += 1;
     }
     changes
