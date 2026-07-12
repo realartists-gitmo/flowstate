@@ -126,6 +126,12 @@ fn repair(raw: &str, source: &str) -> Option<Value> {
         snap::recover_about_authors_section(o, source);
         snap::recover_semicolon_bio_authors(o, source);
         snap::recover_degree_delimited_authors(o, source);
+        snap::repair_mixed_inverted_byline(o, source);
+        snap::recover_ranked_roster_authors(o, source);
+        snap::recover_juxtaposed_bio_author(o, source);
+        snap::recover_starred_footnote_authors(o, source);
+        snap::recover_allcaps_bio_authors(o, source);
+        snap::recover_post_affiliation_author(o, source);
         snap::recover_marked_bracket_authors(o, source);
         snap::recover_numbered_inline_authors(o, source);
         snap::recover_strong_empty_author(o, source);
