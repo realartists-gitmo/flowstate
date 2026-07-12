@@ -768,4 +768,58 @@ mod tests {
     });
     assert_eq!(forks_after - forks_before, 0, "an armed caret must use the fast cursor path, not fork_at");
   }
+
+  /// FAST-path guard after a CARET MOVE (no write): moving the caret re-arms the
+  /// anchor (via `emit_selection_changed`), so a subsequent remote insert-before-
+  /// caret RESOLVES the stored cursors instead of the O(doc) `fork_at`. Regression
+  /// guard for the freeze that shipped when re-arm happened only after a
+  /// write/sync: the first edit — and any incoming remote edit — after every
+  /// click/arrow fell to the ~350ms fork on a large doc.
+  #[gpui::test]
+  fn moved_caret_uses_fast_cursor_path_not_fork(cx: &mut gpui::TestAppContext) {
+    use flowstate_collab::crdt_runtime::{caret_rebase_fork_count, CrdtRuntime};
+    use flowstate_collab::local_write::GateHolder;
+
+    let fixture = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XYZW")] }],
+    );
+    let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
+    let doc_b = core_a.doc().fork();
+    doc_b.set_peer_id(0x00B0_B0B0).expect("distinct peer id");
+    let base_vv = doc_b.state_vv();
+    let body_b = flowstate_document::loro_schema::body_text(&doc_b);
+
+    let (handle_a, gate_a) = LocalDocHandle::new(core_a, LocalWriteConfig::default());
+    let projection_a = handle_a.projection().expect("A projection");
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(projection_a.clone(), None, cx));
+    editor.update(cx, |editor, cx| {
+      editor.set_write_authority(std::sync::Arc::new(handle_a), projection_a, cx);
+    });
+
+    // A MOVES the caret (no edit) to byte 2 ("XY|ZW"). The re-arm on selection
+    // change captures the fast-path anchor for this position — the crux of the fix.
+    editor.update(cx, |editor, cx| {
+      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: 2 }), cx);
+    });
+
+    // B (concurrent) prepends "ABC" before the shared text.
+    body_b.insert(1, "ABC").expect("B inserts");
+    doc_b.commit();
+    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B delta");
+
+    let forks_before = caret_rebase_fork_count();
+    let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
+    guard.import_remote_update(&update_b).expect("A imports B");
+    drop(guard);
+    editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
+    let forks_after = caret_rebase_fork_count();
+
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "ABCXYZW", "B's prepend merges before the shared text");
+      // Caret at byte 2 ("XY|ZW") shifts past the 3-char prepend to byte 5 ("ABCXY|ZW").
+      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 0, byte: 5 }, "moved caret repositions across the remote insert");
+    });
+    assert_eq!(forks_after - forks_before, 0, "a caret moved (not written) must still use the fast cursor path, not fork_at");
+  }
 }

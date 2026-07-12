@@ -232,7 +232,7 @@ impl RichTextEditor {
     self.caret_anchor = self
       .write_authority
       .as_ref()
-      .and_then(|authority| authority.encode_selection_anchor(&self.selection))
+      .and_then(|authority| authority.encode_selection_anchor(&self.selection, &self.document.frontier))
       .map(|(head_cursor, anchor_cursor)| CaretAnchor {
         selection: self.selection.clone(),
         head_cursor,

@@ -555,8 +555,12 @@ pub trait LocalWriteAuthority: Send + Sync {
   /// stores these at synced moments and, when the caret hasn't moved, resolves
   /// them via [`Self::resolve_selection_anchor`] after a remote patch — O(log n),
   /// no `fork_at`. `(head_cursor, anchor_cursor)`.
-  fn encode_selection_anchor(&self, selection: &EditorSelection) -> Option<(Vec<u8>, Vec<u8>)> {
-    let _ = selection;
+  /// `editor_frontier` is the editor's current projection frontier; the
+  /// authority must return `None` when the core has advanced past it (an
+  /// undrained remote import), so a re-arm racing that window can't encode the
+  /// caret against a body position the editor hasn't caught up to yet.
+  fn encode_selection_anchor(&self, selection: &EditorSelection, editor_frontier: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let _ = (selection, editor_frontier);
     None
   }
   /// Resolve stored caret cursors to offsets in the current state.

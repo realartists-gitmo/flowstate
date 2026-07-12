@@ -311,8 +311,16 @@ impl LocalWriteAuthority for LocalDocHandle {
     rebased
   }
 
-  fn encode_selection_anchor(&self, selection: &gpui_flowtext::EditorSelection) -> Option<(Vec<u8>, Vec<u8>)> {
+  fn encode_selection_anchor(&self, selection: &gpui_flowtext::EditorSelection, editor_frontier: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
     let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
+    // Only encode while the editor is in sync with the core. If a remote import
+    // has advanced the core but the editor has not yet drained it, the editor's
+    // offsets are in a stale projection; encoding them here would anchor the
+    // caret to the wrong body position. Skip → the next drain re-arms (or the
+    // rebase fork covers this rare window correctly).
+    if guard.doc().state_frontiers().encode() != editor_frontier {
+      return None;
+    }
     let encoded = guard.encode_selection_anchor(selection);
     drop(guard);
     encoded

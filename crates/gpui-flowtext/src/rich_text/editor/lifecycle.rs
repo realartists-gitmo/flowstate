@@ -162,7 +162,15 @@ impl RichTextEditor {
     &self.document
   }
 
-  fn emit_selection_changed(&self, cx: &mut Context<Self>) {
+  fn emit_selection_changed(&mut self, cx: &mut Context<Self>) {
+    // Re-arm the caret's CRDT anchor for the NEW selection while we are in sync
+    // with the core (the fast O(log n) path for repositioning the caret across a
+    // remote edit). Without this the anchor only refreshed after a write/sync,
+    // so the first edit — or an incoming remote edit — after any caret move fell
+    // to the O(doc) `fork_at` rebase (~350ms on a large doc). Fires once per
+    // selection change; `encode_selection_anchor` is a no-op when out of sync or
+    // the caret is non-body.
+    self.capture_caret_anchor();
     cx.emit(EditorEvent::SelectionChanged {
       selection: self.selection.clone(),
     });
