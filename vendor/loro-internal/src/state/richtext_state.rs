@@ -1743,14 +1743,19 @@ mod snapshot {
                             ));
                         }
 
-                        // Text
-                        if s.as_str().chars().count() < len as usize {
+                        // Text — §flowstate vendor patch (oom-leads #2): ONE
+                        // O(len) walk that validates bounds AND splits, replacing
+                        // the per-span `chars().count()` check over the ENTIRE
+                        // remaining document string (which made snapshot decode
+                        // O(spans × chars) — 84% of a 2.6M-char doc's cold open,
+                        // a ~13x cold-projection regression when this caller was
+                        // lost in the vendored-file git-checkout revert). The
+                        // method survived in str_slice.rs; this caller did not.
+                        let Some((new, rest)) = s.try_split_at_unicode_pos(len as usize) else {
                             return Err(state_decode_error(
                                 "Decode richtext state failed: text span exceeds value length",
                             ));
-                        }
-
-                        let (new, rest) = s.split_at_unicode_pos(len as usize);
+                        };
                         s = rest;
                         RichtextStateChunk::new_text(new.bytes().clone(), id_full)
                     }
