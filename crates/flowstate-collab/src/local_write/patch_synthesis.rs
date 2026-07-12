@@ -246,9 +246,14 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
       let Some((mut paragraph_start, _)) = resolved_paragraph_span(projection, start) else {
         return rebuild("set-marks-position-misaligned");
       };
+      // Rows for every paragraph in one O(blocks) pass — the loop below needs
+      // both `row` and the following paragraph's row, and calling
+      // `block_ix_for_paragraph` twice per iteration is the §perf-heaven T2
+      // quadratic on object docs.
+      let rows = flowstate_document::paragraph_block_rows(projection);
       let mut patches = Vec::new();
       for paragraph_ix in start.paragraph_ix..=end.paragraph_ix {
-        let Some(row) = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix) else {
+        let Some(&row) = rows.get(paragraph_ix) else {
           return rebuild("set-marks-block-missing");
         };
         let chars = flowstate_document::paragraph_text(projection, paragraph_ix).chars().count();
@@ -261,7 +266,7 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
           return rebuild("set-marks-readback-missing");
         };
         if paragraph_ix < end.paragraph_ix {
-          let Some(next_row) = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix + 1) else {
+          let Some(&next_row) = rows.get(paragraph_ix + 1) else {
             return rebuild("set-marks-next-block-missing");
           };
           paragraph_start += chars + 1 + next_row.saturating_sub(row).saturating_sub(1);
@@ -421,13 +426,16 @@ pub(crate) fn synthesize_patches(core: &CrdtRuntime, intent: &LocalIntent, plan:
         ix += group_len;
       }
 
+      // Rows for every paragraph in one O(blocks) pass instead of an O(blocks)
+      // scan per matched group (§perf-heaven T2 quadratic on object docs).
+      let rows = flowstate_document::paragraph_block_rows(projection);
       let mut patches = Vec::new();
       let mut invalid_lo = usize::MAX;
       let mut invalid_hi = 0usize;
       let mut shift = 0isize;
       for group in groups.into_iter().rev() {
         let paragraph_ix = group[0].0.paragraph_ix;
-        let Some(row) = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix) else {
+        let Some(&row) = rows.get(paragraph_ix) else {
           return rebuild("replace-matches-block-missing");
         };
         let Some((paragraph_start, old_chars)) = resolved_paragraph_span(projection, &group[0].0) else {

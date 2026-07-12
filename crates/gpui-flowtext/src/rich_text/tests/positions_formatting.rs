@@ -23,6 +23,7 @@ fn document_position_round_trips_top_level_text_blocks() {
       caption: None,
       sizing: ImageSizing::Intrinsic,
       alignment: BlockAlignment::Center,
+      external_url: None,
       version: 0,
     }),
     Block::Paragraph(document.paragraphs[1].clone()),

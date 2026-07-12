@@ -32,7 +32,12 @@ impl RichTextEditor {
   /// audited full rebuilds, remote `ProjectionUpdated`).
   pub fn install_canonical_projection(&mut self, projection: DocumentProjection, cx: &mut Context<Self>) {
     let theme = self.document.theme.clone();
-    self.document = projection_with_local_theme(projection, &theme);
+    let mut incoming = projection_with_local_theme(projection, &theme);
+    // §act-nine A9.3: canonical output restarts every paragraph version at 0;
+    // carry surviving ids' versions forward so the content-keyed layout caches
+    // can never serve a stale (style, version) collision.
+    carry_forward_paragraph_versions(&self.document, &mut incoming);
+    self.document = incoming;
     self.identity_map.reconcile(&self.document);
     self.clamp_selection_to_document(cx);
     let generation = self.next_edit_generation;
@@ -81,6 +86,10 @@ impl RichTextEditor {
       let caret = self.clamp_offset_to_document(selection.head.offset);
       self.set_caret_after_local_write(caret, cx);
     }
+    // Re-arm the fast path for the NEW post-write caret (the capture inside the
+    // sync above was for the pre-write selection). Keeps the typing peer on the
+    // O(log n) path when a remote edit lands between its own keystrokes.
+    self.capture_caret_anchor();
     commit
   }
 
@@ -102,6 +111,19 @@ impl RichTextEditor {
     if items.is_empty() {
       return;
     }
+    // §caret-anchor: reposition the caret across the remote edit. FAST path — when
+    // the caret hasn't moved since its last synced capture, resolve the stored CRDT
+    // cursors (O(log n)); SLOW fallback — reconstruct the pre-patch body and rebase
+    // (O(doc) `fork_at`). Either way a remote insert/delete before the caret shifts
+    // it instead of stranding it at a stale offset (the interleave bug). Captured
+    // BEFORE the patches mutate `self.document`. `None` ⇒ clamp fallback.
+    let reanchored_selection = self
+      .caret_anchor
+      .as_ref()
+      .filter(|anchor| anchor.selection == self.selection)
+      .and_then(|anchor| authority.resolve_selection_anchor(&anchor.head_cursor, &anchor.anchor_cursor))
+      .map(|(head, anchor)| EditorSelection { anchor, head, ..self.selection.clone() })
+      .or_else(|| authority.rebase_selection(&self.selection, &self.document, &self.document.frontier));
     let mut needs_self_heal = false;
     for item in items {
       match item {
@@ -139,7 +161,11 @@ impl RichTextEditor {
             document.assets.assets.entry(*id).or_insert_with(|| record.clone());
           }
           let theme = self.document.theme.clone();
-          self.document = projection_with_local_theme(document, &theme);
+          let mut incoming = projection_with_local_theme(document, &theme);
+          // §act-nine A9.3: canonical replace = all versions 0; carry
+          // surviving ids' versions forward (see install_canonical_projection).
+          carry_forward_paragraph_versions(&self.document, &mut incoming);
+          self.document = incoming;
         },
       }
     }
@@ -148,18 +174,45 @@ impl RichTextEditor {
     {
       tracing::error!("projection stream self-heal: installing canonical projection");
       let theme = self.document.theme.clone();
-      self.document = projection_with_local_theme(document, &theme);
+      let mut incoming = projection_with_local_theme(document, &theme);
+      // §act-nine A9.3: same version carry-forward as every canonical install.
+      carry_forward_paragraph_versions(&self.document, &mut incoming);
+      self.document = incoming;
     }
     self.identity_map.reconcile(&self.document);
-    let head = self.clamp_offset_to_document(self.selection.head);
-    let anchor = self.clamp_offset_to_document(self.selection.anchor);
+    // §caret-anchor: prefer the CRDT-reanchored selection (repositioned across the
+    // remote edit); clamp only as a fallback when it couldn't be resolved. Both are
+    // then clamped to the freshly-applied document as a final safety net.
+    let next = reanchored_selection.unwrap_or_else(|| self.selection.clone());
+    let head = self.clamp_offset_to_document(next.head);
+    let anchor = self.clamp_offset_to_document(next.anchor);
     if head != self.selection.head || anchor != self.selection.anchor {
-      self.selection = EditorSelection::range(anchor, head);
+      self.selection = EditorSelection { anchor, head, ..next };
       self.emit_selection_changed(cx);
     }
+    // Re-arm the fast path against the now-current core for the next remote patch.
+    self.capture_caret_anchor();
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     self.mark_document_changed(generation, false, cx);
+  }
+
+  /// §caret-anchor: snapshot the current selection's CRDT cursors while the editor
+  /// and canonical core are in sync, so a subsequent remote patch can reposition
+  /// the caret via [`crate::LocalWriteAuthority::resolve_selection_anchor`] without
+  /// the O(doc) `fork_at` of the rebase fallback. Cheap no-op without an authority
+  /// or when the caret can't be encoded (e.g. a non-body caret) — the fork rebase
+  /// then covers it. Call at synced moments only (after a sync or a local write).
+  pub(super) fn capture_caret_anchor(&mut self) {
+    self.caret_anchor = self
+      .write_authority
+      .as_ref()
+      .and_then(|authority| authority.encode_selection_anchor(&self.selection))
+      .map(|(head_cursor, anchor_cursor)| CaretAnchor {
+        selection: self.selection.clone(),
+        head_cursor,
+        anchor_cursor,
+      });
   }
 
   /// Spec I-15 rejection handling: nearest-valid caret + loud notice; never an

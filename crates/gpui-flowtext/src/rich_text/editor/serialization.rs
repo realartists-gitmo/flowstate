@@ -46,6 +46,7 @@ pub fn input_block_from_block(block: &Block) -> InputBlock {
         ImageSizing::Fixed { width_px, height_px } => InputImageSizing::Fixed { width_px, height_px },
       },
       alignment: input_alignment_from_alignment(image.alignment),
+      external_url: image.external_url.as_ref().map(ToString::to_string),
     }),
     Block::Equation(equation) => InputBlock::Equation(InputEquationBlock {
       source: equation.source.to_string(),
@@ -73,6 +74,7 @@ pub fn block_from_input_block(block: &InputBlock) -> Block {
         InputImageSizing::Fixed { width_px, height_px } => ImageSizing::Fixed { width_px, height_px },
       },
       alignment: alignment_from_input_alignment(image.alignment),
+      external_url: image.external_url.clone().map(Into::into),
       version: 0,
     }),
     InputBlock::Equation(equation) => Block::Equation(EquationBlock {
@@ -101,10 +103,8 @@ pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputB
         if !paragraphs.is_empty() {
           text.push('\n');
         }
-        let start = text.len();
         text.push_str(&input_paragraph_text(&paragraph));
-        let mut paragraph = paragraph_from_input_paragraph(&paragraph);
-        paragraph.byte_range = start..text.len();
+        let paragraph = paragraph_from_input_paragraph(&paragraph);
         paragraphs.push(paragraph.clone());
         blocks.push(Block::Paragraph(paragraph));
       },
@@ -117,7 +117,6 @@ pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputB
   if paragraphs.is_empty() {
     let paragraph = Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..0,
       runs: Vec::new(),
       version: 0,
     };
@@ -238,10 +237,8 @@ fn input_paragraph_from_table_cell_range(paragraph: &TableCellParagraph, range: 
 
 #[hotpath::measure]
 fn paragraph_from_input_paragraph(paragraph: &InputParagraph) -> Paragraph {
-  let len = paragraph.runs.iter().map(|run| run.text.len()).sum();
   Paragraph {
     style: paragraph.style,
-    byte_range: 0..len,
     runs: merge_adjacent_runs(
       paragraph
         .runs

@@ -143,6 +143,16 @@ pub enum RuntimeEvent {
     invalidation: ProjectionInvalidation,
     version_vector: Vec<u8>,
   },
+  /// §A12.1.3 slice 4: a remote payload depended on history below this
+  /// shallow session's root. It was durably merged into the PACKAGE (full
+  /// history) but the in-memory doc cannot hold it — the session must reopen
+  /// the document to see the merged state. Rare by construction (requires a
+  /// peer offline since before the shallow root reconnecting with unsynced
+  /// edits); until the reopen, the local view lacks those foreign edits.
+  HistoryRebaseRequired {
+    /// Merged PACKAGE tip (not the in-memory doc's frontier).
+    merged_frontier: Vec<u8>,
+  },
 }
 
 impl RuntimeEvent {
@@ -154,7 +164,9 @@ impl RuntimeEvent {
       },
       Self::ProjectionPatched { batch, .. } => Some(&batch.new_frontier),
       Self::RevisionOpened { document, .. } | Self::RevisionForked { document, .. } => Some(&document.frontier),
-      Self::SelectionRestored { .. } => None,
+      // The merged frontier is the PACKAGE tip, not this runtime's — never
+      // report it as a runtime frontier.
+      Self::SelectionRestored { .. } | Self::HistoryRebaseRequired { .. } => None,
     }
   }
 }
@@ -220,6 +232,28 @@ impl ProjectionInvalidation {
 
   pub(crate) fn body_style(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_start: usize, unicode_len: usize) -> Self {
     Self::body_text(frontier_before, frontier_after, unicode_start, unicode_len)
+  }
+
+  /// §act-ten A10.2: multi-range body invalidation. A mass op (replace-all,
+  /// sparse restyle) touches MANY disjoint spans; a single covering span forces
+  /// the derive ladder to rematerialize every paragraph in between (O(doc) for
+  /// a whole-document replace-all). One range per touched span keeps the
+  /// readback proportional to the actual change set.
+  pub(crate) fn body_text_ranges(frontier_before: Vec<u8>, frontier_after: Vec<u8>, ranges: &[(usize, usize)]) -> Self {
+    Self {
+      frontier_before,
+      frontier_after,
+      changed_flows: vec![ROOT_BODY_FLOW_ID.to_string()],
+      changed_text_ranges: ranges
+        .iter()
+        .map(|&(unicode_start, unicode_len)| ProjectionTextRange {
+          flow_id: ROOT_BODY_FLOW_ID.to_string(),
+          unicode_start,
+          unicode_len,
+        })
+        .collect(),
+      ..Self::default()
+    }
   }
 
   pub(crate) fn body_object(frontier_before: Vec<u8>, frontier_after: Vec<u8>, unicode_index: usize, block_kind: &'static str) -> Self {

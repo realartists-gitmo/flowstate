@@ -36,6 +36,49 @@ use super::{
 
 pub(crate) use crate::cursor::PosType;
 
+/// §act-eleven A11.10 (flowstate vendor patch): folds a stream of
+/// `(text, styles)` spans into the delta-shaped `LoroValue` list that
+/// `get_richtext_value` has always produced — adjacent spans whose VISIBLE
+/// (null-filtered) attribute values are equal merge into one insert entry.
+/// Both the built-state and loader-fast-path value functions are expressed on
+/// this single builder, so the merge law lives in exactly one place.
+#[derive(Default)]
+struct RichtextValueBuilder {
+    ans: Vec<LoroValue>,
+    last_attributes: Option<LoroValue>,
+}
+
+impl RichtextValueBuilder {
+    fn push(&mut self, text: &str, styles: &StyleMeta) {
+        let attributes: LoroValue = styles.to_value();
+        if let Some(last) = self.last_attributes.as_ref() {
+            if &attributes == last {
+                let hash_map = self.ans.last_mut().unwrap().as_map_mut().unwrap();
+                let s = hash_map
+                    .make_mut()
+                    .get_mut("insert")
+                    .unwrap()
+                    .as_string_mut()
+                    .unwrap();
+                s.make_mut().push_str(text);
+                return;
+            }
+        }
+
+        let mut value = FxHashMap::default();
+        value.insert("insert".into(), LoroValue::String(text.into()));
+        if !attributes.as_map().unwrap().is_empty() {
+            value.insert("attributes".into(), attributes.clone());
+        }
+        self.ans.push(LoroValue::Map(value.into()));
+        self.last_attributes = Some(attributes);
+    }
+
+    fn finish(self) -> LoroValue {
+        LoroValue::List(self.ans.into())
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct RichtextState {
     tree: BTree<RichtextTreeTrait>,
@@ -2413,44 +2456,101 @@ impl RichtextState {
     }
 
     pub fn get_richtext_value(&self) -> LoroValue {
+        let mut builder = RichtextValueBuilder::default();
+        self.for_each_richtext_span(&mut |text, styles| builder.push(text, styles));
+        builder.finish()
+    }
+
+    /// §act-eleven A11.10 (flowstate vendor patch): visit every text span of the
+    /// built state as `(text, styles)` WITHOUT allocating the intermediate
+    /// `Vec<LoroValue>` delta value. [`Self::get_richtext_value`] is expressed on
+    /// top of this walker via [`RichtextValueBuilder`], so every existing
+    /// value-equivalence net (T1 verify, corpus, fuzz oracles) transitively pins
+    /// the walk. Spans arrive UNMERGED (one per text chunk); callers that need
+    /// delta segmentation merge on the same visible-attribute equality the
+    /// builder uses ([`StyleMeta::visible_eq`]).
+    pub fn for_each_richtext_span(&self, f: &mut dyn FnMut(&str, &StyleMeta)) {
         self.check_cache();
-        let result = {
-            let mut ans: Vec<LoroValue> = Vec::new();
-            let mut last_attributes: Option<LoroValue> = None;
-            for span in self.iter() {
-                let attributes: LoroValue = span.attributes.to_value();
-                if let Some(last) = last_attributes.as_ref() {
-                    if &attributes == last {
-                        let hash_map = ans.last_mut().unwrap().as_map_mut().unwrap();
-                        let s = hash_map
-                            .make_mut()
-                            .get_mut("insert")
-                            .unwrap()
-                            .as_string_mut()
-                            .unwrap();
-                        s.make_mut().push_str(span.text.as_str());
-                        continue;
+        for span in self.iter() {
+            f(span.text.as_str(), &span.attributes);
+        }
+        self.check_cache();
+    }
+
+    /// §perf-heaven T1 (flowstate vendor patch): produce the richtext value
+    /// DIRECTLY from a decoded-snapshot loader's `elements` + resolved
+    /// `style_ranges`, WITHOUT building the text B-tree (`from_chunks`) — the
+    /// dominant cost of the cold projection body decode (`get_richtext_value`
+    /// on an attached text forces the whole `LazyLoad::Src -> Dst` conversion).
+    ///
+    /// The style map is built with the EXACT same `annotate_style_range` calls
+    /// `into_state` uses, so style resolution is bit-identical; only the text
+    /// tree is skipped. Text chunks never straddle a style boundary (style
+    /// anchors are their own chunks), so the no-split walk here matches
+    /// [`Self::iter`] chunk-for-chunk. The output is bit-identical to
+    /// [`Self::get_richtext_value`] on the fully built state — an equivalence a
+    /// debug/verify pass asserts on every call (see the caller).
+    pub(crate) fn richtext_value_from_src(
+        elements: &[RichtextStateChunk],
+        style_ranges: &[(Arc<StyleOp>, std::ops::Range<usize>)],
+    ) -> LoroValue {
+        let mut builder = RichtextValueBuilder::default();
+        Self::for_each_span_from_src(elements, style_ranges, &mut |text, styles| {
+            builder.push(text, styles)
+        });
+        builder.finish()
+    }
+
+    /// §act-eleven A11.10 (flowstate vendor patch): the streaming twin of
+    /// [`Self::richtext_value_from_src`] — same loader walk, but each text chunk
+    /// is handed to `f` instead of being folded into a `LoroValue` list.
+    /// `richtext_value_from_src` is expressed on top of THIS function, so the T1
+    /// fast-path verify (fast == built-state value) transitively validates the
+    /// walk order and style resolution here too.
+    pub(crate) fn for_each_span_from_src(
+        elements: &[RichtextStateChunk],
+        style_ranges: &[(Arc<StyleOp>, std::ops::Range<usize>)],
+        f: &mut dyn FnMut(&str, &StyleMeta),
+    ) {
+        // Style map ONLY (no text tree): reuses the exact merge semantics.
+        let mut style_state = Self::from_chunks(std::iter::empty::<RichtextStateChunk>());
+        for (style, range) in style_ranges {
+            style_state.annotate_style_range(range.clone(), style.clone());
+        }
+
+        let mut entity_index = 0usize;
+        let mut style_range_iter: Box<dyn Iterator<Item = (std::ops::Range<usize>, &Styles)>> =
+            match &style_state.style_ranges {
+                Some(s) => Box::new(s.iter()),
+                None => Box::new(Some((0..usize::MAX / 2, &*EMPTY_STYLES)).into_iter()),
+            };
+        let mut cur_style_range = style_range_iter.next();
+        let mut cur_styles: Option<StyleMeta> = cur_style_range.as_ref().map(|x| x.1.clone().into());
+
+        for chunk in elements {
+            match chunk {
+                RichtextStateChunk::Text(s) => {
+                    let mut styles: StyleMeta = Default::default();
+                    while let Some((inner_cur_range, _)) = cur_style_range.as_ref() {
+                        if entity_index < inner_cur_range.start {
+                            break;
+                        }
+                        if entity_index < inner_cur_range.end {
+                            styles = cur_styles.as_ref().unwrap().clone();
+                            break;
+                        } else {
+                            cur_style_range = style_range_iter.next();
+                            cur_styles = cur_style_range.as_ref().map(|x| x.1.clone().into());
+                        }
                     }
+                    entity_index += s.rle_len();
+                    f(s.as_str(), &styles);
                 }
-
-                let mut value = FxHashMap::default();
-                value.insert(
-                    "insert".into(),
-                    LoroValue::String(span.text.as_str().into()),
-                );
-
-                if !attributes.as_map().unwrap().is_empty() {
-                    value.insert("attributes".into(), attributes.clone());
+                RichtextStateChunk::Style { .. } => {
+                    entity_index += 1;
                 }
-
-                ans.push(LoroValue::Map(value.into()));
-                last_attributes = Some(attributes);
             }
-
-            LoroValue::List(ans.into())
-        };
-        self.check_cache();
-        result
+        }
     }
 
     #[allow(unused)]

@@ -43,3 +43,7 @@ rustc-ice-*.txt
 /*.log
 /output.json
 /fb_122_output.json
+
+# Vendored-crate build artifacts (Acts 5-14 vendoring)
+vendor/*/target/
+vendor/*/*/target/

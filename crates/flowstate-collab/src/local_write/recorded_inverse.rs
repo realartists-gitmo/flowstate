@@ -34,6 +34,8 @@
 //! Anything else falls through to the checkout-based slow path unchanged.
 //! Kill switch: `FLOWSTATE_DISABLE_FAST_UNDO=1`.
 
+use std::sync::Arc;
+
 use anyhow::{Context as _, Result};
 use flowstate_document::{
   Block, BlockId, InputBlock, MARK_PARAGRAPH_STYLE, ParagraphId, ProjectionPatch, ProjectionStructuralBlock, block_ix_for_paragraph,
@@ -43,6 +45,7 @@ use flowstate_fidelity::{self as fidelity, FidelityClass};
 use loro::{CounterSpan, TextDelta, UndoOrRedo, cursor::PosType};
 
 use super::commit::ResolvedPlan;
+use super::resolve::ResolvedTextPosition;
 use crate::crdt_runtime::{
   CrdtRuntime, ProjectionInvalidation, RuntimeEvent, delete_projection_paragraph_metadata, paragraph_style_value, projection_text_delta,
   prune_orphaned_body_object_blocks, repair_paragraph_metadata_after_stable_split, restore_input_object_block_containers,
@@ -109,6 +112,22 @@ enum RecordedMutation {
   /// no earlier splice shifts a later one. Covers replace-all in either
   /// direction (restore originals / re-apply replacements).
   SpliceRichRanges { splices: Vec<RichSplice> },
+  /// §act-twelve A12.2.2: (re)create a paragraph boundary — insert the `\n`,
+  /// mark its paragraph style, strip absorbed run-style keys from the
+  /// sentinel, and (re)write the paragraph's durable records with the
+  /// ORIGINAL ids. The exact `SplitParagraph` executor sequence; also the
+  /// exact inverse of a `JoinParagraphs`.
+  CreateBoundary {
+    at: usize,
+    style_value: i64,
+    paragraph_id: ParagraphId,
+    block_id: BlockId,
+  },
+  /// §act-twelve A12.2.2: re-apply captured run styles per span via the
+  /// `mark_run_styles` law (clear the four run keys, re-mark the set ones).
+  /// Mark-only — never touches text identity, so replay cannot interleave
+  /// with concurrent remote text. Spans are absolute body-unicode.
+  MarkRunRanges { spans: Vec<(usize, usize, flowstate_document::RunStyles)> },
 }
 
 /// One rich splice: replace `[start, start+delete_len)` with `insert` (a
@@ -122,8 +141,9 @@ struct RichSplice {
 /// How a direction reprojects after its doc-side mutation.
 enum Reproject {
   /// Apply these exact intent-synthesized patches to the maintained
-  /// projection — `O(change)`, no readback.
-  Patches(Vec<ProjectionPatch>),
+  /// projection — `O(change)`, no readback. §perf-heaven T8.19: `Arc<[…]>` so the
+  /// hot undo/redo shares the (possibly mass-op-sized) set with the event.
+  Patches(Arc<[ProjectionPatch]>),
   /// Run the standard post-commit derive ladder (regional / ranged readback
   /// off the committed doc). For classes whose exact patches are complex to
   /// pre-record; still `O(change)` (regional), just via the proven remote
@@ -137,10 +157,11 @@ enum Reproject {
 struct RecordedDelta {
   mutation: RecordedMutation,
   reproject: Reproject,
-  invalidation_start: usize,
-  invalidation_len: usize,
-  /// Style-only change ⇒ `body_style` invalidation; else `body_text`.
-  style_only: bool,
+  /// §act-ten A10.2: one `(unicode_start, unicode_len)` per touched span. A
+  /// single covering span made a whole-doc replace-all's undo rematerialize
+  /// EVERY paragraph between the first and last match; per-span ranges keep the
+  /// derive ladder proportional to the actual change set.
+  invalidation_ranges: Vec<(usize, usize)>,
 }
 
 /// Everything needed to replay one committed op in either direction.
@@ -151,6 +172,17 @@ pub(crate) struct RecordedInverse {
   expected_frontier: Vec<u8>,
   /// The top stack item's counter span that must match exactly.
   expected_span: CounterSpan,
+  /// §mass-op collab (oom-leads #9): remote diffs are pending in the Loro undo
+  /// stacks' buffers, but this entry was REBASED through the import's net
+  /// delta ([`rebase_recorded_inverse_through_remote`]) — coordinates shifted
+  /// (content entries: proven hull-disjoint; mark entries: per-coordinate).
+  /// The fast step may proceed despite `peek_top_span`'s conservative dirty
+  /// flag: the replay content is coordinate-correct, and the buffered diffs
+  /// stay valid for any later slow-path pop of deeper (uncaptured) items —
+  /// kept replays are position-neutral at every buffered position, and vendor
+  /// patch #22 transforms the buffers through every external-step commit
+  /// besides (the native `undo_internal` mirror).
+  survives_pending_remote: bool,
   undo: RecordedDelta,
   redo: RecordedDelta,
 }
@@ -178,9 +210,7 @@ impl std::fmt::Debug for RecordedInverse {
 pub(crate) struct PendingInverseCapture {
   undo: RecordedDelta,
   redo_mutation: RecordedMutation,
-  redo_invalidation_start: usize,
-  redo_invalidation_len: usize,
-  redo_style_only: bool,
+  redo_invalidation_ranges: Vec<(usize, usize)>,
   /// Redo reprojects via the derive ladder (rather than the op's synthesized
   /// patches) — set for classes whose exact patches are complex to pre-record.
   redo_derive: bool,
@@ -208,11 +238,118 @@ pub(crate) fn capture_before_execute(core: &CrdtRuntime, plan: &ResolvedPlan) ->
     return None;
   }
   match plan {
+    ResolvedPlan::InsertText { .. } => capture_insert_text(plan),
     ResolvedPlan::DeleteRange { .. } => capture_delete_range(core, plan),
     ResolvedPlan::SetParagraphStyles { .. } => capture_set_paragraph_styles(core, plan),
     ResolvedPlan::ReplaceMatches { .. } => capture_replace_matches(core, plan),
+    // §act-twelve A12.2.2 (capture-coverage completion): the everyday
+    // structural/mark ops. An uncaptured op both takes the O(history)
+    // checkout slow path on its own undo AND clears every deeper captured
+    // fast path behind it — Enter, backspace-join, bold/italic and
+    // single-paragraph restyle were doing exactly that to typing sessions.
+    ResolvedPlan::SplitParagraph { .. } => capture_split_paragraph(plan),
+    ResolvedPlan::JoinParagraphs { .. } => capture_join_paragraphs(core, plan),
+    ResolvedPlan::SetMarks { .. } => capture_set_marks(core, plan),
+    ResolvedPlan::SetParagraphStyle { .. } => capture_set_paragraph_style(core, plan),
     _ => None,
   }
+}
+
+/// §oom-leads #9 (keystroke undo): EVERY text insert records its inverse — the
+/// keystroke is the most common op there is, and an uncaptured op both takes
+/// the O(history) checkout slow path on its own undo AND clears every deeper
+/// captured fast path behind it (a single typed char used to kill a recorded
+/// mass-op undo). The record is O(insert) and needs no doc reads at capture:
+/// undo = delete the inserted span (derive reprojection — a ranged readback of
+/// one paragraph), redo = re-insert the post-op rich slice (captured at
+/// finalize, so a `style_override`'s marks ride along verbatim; the op's own
+/// synthesized patches replay the projection).
+fn capture_insert_text(plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::InsertText { at, text, .. } = plan else {
+    return None;
+  };
+  let len = text.chars().count();
+  if len == 0 {
+    return None;
+  }
+  let pos = at.body_unicode;
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::DeleteRange {
+        clamped_start: pos,
+        clamped_len: len,
+        prune_objects: false,
+        boundaries: Vec::new(),
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(pos, len)],
+    },
+    // Filled at finalize from the post-op doc (see `redo_replace_finalize`).
+    redo_mutation: RecordedMutation::SpliceRichRanges { splices: Vec::new() },
+    redo_invalidation_ranges: vec![(pos, len)],
+    redo_derive: false,
+    redo_replace_finalize: Some(vec![ReplaceFinalize {
+      redo_start: pos,
+      redo_delete_len: 0,
+      post_slice_start: pos,
+      post_slice_len: len,
+    }]),
+  })
+}
+
+/// §oom-leads #9 (keystroke undo): backspace and small intra-paragraph deletes.
+/// A single paragraph's interior can contain neither `\n` nor U+FFFC, so there
+/// are no boundaries or objects to retire — the record is a verbatim rich slice
+/// (undo re-inserts it) plus a re-delete, both O(len).
+fn capture_intra_paragraph_delete(core: &CrdtRuntime, start: &ResolvedTextPosition, end: &ResolvedTextPosition) -> Option<PendingInverseCapture> {
+  let len = end.body_unicode.saturating_sub(start.body_unicode);
+  if len == 0 {
+    return None;
+  }
+  let (clamped_start, clamped_len) = sentinel_protected_delete_range(start.body_unicode, len)?;
+  if (clamped_start, clamped_len) != (start.body_unicode, len) {
+    return None;
+  }
+  let body = body_text(core.doc());
+  let restore_delta = match body.slice_delta(clamped_start, clamped_start + clamped_len, PosType::Unicode) {
+    Ok(delta) => delta,
+    Err(error) => {
+      tracing::warn!(%error, "recorded-inverse intra-paragraph capture declined: slice_delta failed");
+      return None;
+    },
+  };
+  // Defensive: the slice must be pure interior text. A boundary or placeholder
+  // here means the resolved positions and the projection disagree — decline
+  // rather than record a structural restore without its metadata.
+  for segment in &restore_delta {
+    let TextDelta::Insert { insert, .. } = segment else {
+      return None;
+    };
+    if insert.contains('\n') || insert.contains(flowstate_document::OBJECT_REPLACEMENT) {
+      return None;
+    }
+  }
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::RestoreRange {
+        clamped_start,
+        restore_delta,
+        boundaries: Vec::new(),
+        objects: Vec::new(),
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(clamped_start, clamped_len)],
+    },
+    redo_mutation: RecordedMutation::DeleteRange {
+      clamped_start,
+      clamped_len,
+      prune_objects: false,
+      boundaries: Vec::new(),
+    },
+    redo_invalidation_ranges: vec![(clamped_start, clamped_len)],
+    redo_derive: false,
+    redo_replace_finalize: None,
+  })
 }
 
 /// Minimum match count worth a `ReplaceMatches` capture — a MASS replace-all.
@@ -251,8 +388,8 @@ fn capture_replace_matches(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pe
 
   let mut undo_splices = Vec::with_capacity(matches.len());
   let mut redo_finalize = Vec::with_capacity(matches.len());
-  let (mut undo_min, mut undo_max) = (usize::MAX, 0usize);
-  let (mut redo_min, mut redo_max) = (usize::MAX, 0usize);
+  let mut undo_ranges = Vec::with_capacity(matches.len());
+  let mut redo_ranges = Vec::with_capacity(matches.len());
   for (start, end, _styles) in matches {
     let s = start.body_unicode;
     let orig_len = end.body_unicode - s;
@@ -270,25 +407,23 @@ fn capture_replace_matches(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pe
       post_slice_start: q,
       post_slice_len: repl_len,
     });
-    undo_min = undo_min.min(q);
-    undo_max = undo_max.max(q + repl_len);
-    redo_min = redo_min.min(s);
-    redo_max = redo_max.max(s + orig_len);
+    // §act-ten A10.2: one invalidation range PER MATCH — the readback then
+    // touches only the matched paragraphs, not the whole covered span.
+    undo_ranges.push((q, repl_len.max(1)));
+    redo_ranges.push((s, orig_len.max(1)));
   }
+  undo_ranges.sort_unstable();
+  redo_ranges.sort_unstable();
 
   Some(PendingInverseCapture {
     undo: RecordedDelta {
       mutation: RecordedMutation::SpliceRichRanges { splices: undo_splices },
       reproject: Reproject::Derive,
-      invalidation_start: undo_min,
-      invalidation_len: undo_max.saturating_sub(undo_min).max(1),
-      style_only: false,
+      invalidation_ranges: undo_ranges,
     },
     // Filled at finalize from the post-op doc (see `redo_replace_finalize`).
     redo_mutation: RecordedMutation::SpliceRichRanges { splices: Vec::new() },
-    redo_invalidation_start: redo_min,
-    redo_invalidation_len: redo_max.saturating_sub(redo_min).max(1),
-    redo_style_only: false,
+    redo_invalidation_ranges: redo_ranges,
     redo_derive: true,
     redo_replace_finalize: Some(redo_finalize),
   })
@@ -310,8 +445,7 @@ fn capture_set_paragraph_styles(core: &CrdtRuntime, plan: &ResolvedPlan) -> Opti
   let mut undo_marks: Vec<(usize, i64)> = Vec::with_capacity(targets.len());
   let mut redo_marks: Vec<(usize, i64)> = Vec::with_capacity(targets.len());
   let mut undo_patches: Vec<ProjectionPatch> = Vec::with_capacity(targets.len());
-  let mut min_boundary = usize::MAX;
-  let mut max_boundary = 0usize;
+  let mut boundary_ranges: Vec<(usize, usize)> = Vec::with_capacity(targets.len());
   for (paragraph, paragraph_ix, boundary) in targets {
     let before_style = projection.paragraphs.get(*paragraph_ix).map(|paragraph| paragraph.style)?;
     let before_value = paragraph_style_value(before_style);
@@ -324,23 +458,236 @@ fn capture_set_paragraph_styles(core: &CrdtRuntime, plan: &ResolvedPlan) -> Opti
       row_hint: row,
       style: before_style,
     });
-    min_boundary = min_boundary.min(*boundary);
-    max_boundary = max_boundary.max(*boundary);
+    boundary_ranges.push((*boundary, 1));
   }
-  let inval_len = max_boundary.saturating_sub(min_boundary) + 1;
+  boundary_ranges.sort_unstable();
 
   Some(PendingInverseCapture {
     undo: RecordedDelta {
       mutation: RecordedMutation::MarkParagraphStyles { targets: undo_marks },
-      reproject: Reproject::Patches(undo_patches),
-      invalidation_start: min_boundary,
-      invalidation_len: inval_len,
-      style_only: true,
+      reproject: Reproject::Patches(undo_patches.into()),
+      invalidation_ranges: boundary_ranges.clone(),
     },
     redo_mutation: RecordedMutation::MarkParagraphStyles { targets: redo_marks },
-    redo_invalidation_start: min_boundary,
-    redo_invalidation_len: inval_len,
-    redo_style_only: true,
+    redo_invalidation_ranges: boundary_ranges,
+    redo_derive: false,
+    redo_replace_finalize: None,
+  })
+}
+
+/// §act-twelve A12.2.2: `SplitParagraph` (Enter). The plan carries the
+/// PRE-MINTED new paragraph/block ids, so both directions are fully formable
+/// before execution: undo deletes the boundary and retires the new records
+/// (the exact join sequence); redo re-creates the boundary with the SAME ids
+/// (identity preservation — collab cursors and records survive the cycle).
+fn capture_split_paragraph(plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::SplitParagraph {
+    at,
+    inherited_style,
+    new_paragraph,
+    new_block,
+  } = plan
+  else {
+    return None;
+  };
+  let pos = at.body_unicode;
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::DeleteRange {
+        clamped_start: pos,
+        clamped_len: 1,
+        prune_objects: false,
+        boundaries: vec![RestoredBoundary {
+          unicode: pos,
+          paragraph_id: *new_paragraph,
+          block_id: *new_block,
+        }],
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(pos, 1)],
+    },
+    redo_mutation: RecordedMutation::CreateBoundary {
+      at: pos,
+      style_value: paragraph_style_value(*inherited_style),
+      paragraph_id: *new_paragraph,
+      block_id: *new_block,
+    },
+    redo_invalidation_ranges: vec![(pos, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+/// §act-twelve A12.2.2: `JoinParagraphs` (Backspace at paragraph start). Undo
+/// re-creates the boundary with the SECOND paragraph's prior style and its
+/// ORIGINAL ids; redo re-deletes it. Mirrors `join_projection_paragraphs`'
+/// own guards so a capture never outlives an executor no-op (the executor
+/// bails on those shapes, which discards the pending capture anyway).
+fn capture_join_paragraphs(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::JoinParagraphs { second, first_ix, .. } = plan else {
+    return None;
+  };
+  let projection = core.projection_ref();
+  let second_ix = first_ix + 1;
+  if projection.ids.paragraph_ids.get(second_ix) != Some(second) {
+    return None;
+  }
+  let second_style = projection.paragraphs.get(second_ix)?.style;
+  let second_block_ix = block_ix_for_paragraph(projection, second_ix)?;
+  let second_block = projection.ids.block_ids.get(second_block_ix).copied()?;
+  let boundary = crate::crdt_runtime::paragraph_boundary_loro_unicode_index(core.doc(), projection, second_ix);
+  if body_text(core.doc()).char_at(boundary) != Ok('\n') {
+    return None;
+  }
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::CreateBoundary {
+        at: boundary,
+        style_value: paragraph_style_value(second_style),
+        paragraph_id: *second,
+        block_id: second_block,
+      },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(boundary, 1)],
+    },
+    redo_mutation: RecordedMutation::DeleteRange {
+      clamped_start: boundary,
+      clamped_len: 1,
+      prune_objects: false,
+      boundaries: vec![RestoredBoundary {
+        unicode: boundary,
+        paragraph_id: *second,
+        block_id: second_block,
+      }],
+    },
+    redo_invalidation_ranges: vec![(boundary, 1)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+/// §act-twelve A12.2.2: `SetMarks` (bold/italic/highlight over a range). The
+/// executor's law REPLACES the four run-style keys over the range
+/// (`mark_run_styles`: unmark all four, re-mark the set ones), so undo =
+/// re-apply the captured PRIOR per-span styles through the same law, redo =
+/// one span with the op's styles. Truth source is `slice_delta` (doc-level,
+/// includes boundary chars' actual run keys); non-run attrs are ignored by
+/// the mapper, so paragraph-style marks are never touched.
+fn capture_set_marks(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::SetMarks { start, end, styles } = plan else {
+    return None;
+  };
+  let s = start.body_unicode;
+  let e = end.body_unicode;
+  if e <= s {
+    return None;
+  }
+  let body = body_text(core.doc());
+  let prior = match body.slice_delta(s, e, PosType::Unicode) {
+    Ok(delta) => delta,
+    Err(error) => {
+      tracing::warn!(%error, "recorded-inverse set-marks capture declined: slice_delta failed");
+      return None;
+    },
+  };
+  let mut spans: Vec<(usize, usize, flowstate_document::RunStyles)> = Vec::new();
+  let mut cursor = s;
+  for segment in &prior {
+    let TextDelta::Insert { insert, attributes } = segment else {
+      return None;
+    };
+    let len = insert.chars().count();
+    if len == 0 {
+      continue;
+    }
+    let span_styles = run_styles_from_mark_attrs(attributes.as_ref());
+    match spans.last_mut() {
+      Some((last_start, last_len, last_styles)) if *last_styles == span_styles && *last_start + *last_len == cursor => {
+        *last_len += len;
+      },
+      _ => spans.push((cursor, len, span_styles)),
+    }
+    cursor += len;
+  }
+  if spans.is_empty() {
+    return None;
+  }
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::MarkRunRanges { spans },
+      reproject: Reproject::Derive,
+      invalidation_ranges: vec![(s, e - s)],
+    },
+    redo_mutation: RecordedMutation::MarkRunRanges {
+      spans: vec![(s, e - s, *styles)],
+    },
+    redo_invalidation_ranges: vec![(s, e - s)],
+    redo_derive: true,
+    redo_replace_finalize: None,
+  })
+}
+
+/// The four run-style keys `mark_run_styles` manages, mapped back from Loro
+/// mark attributes — the exact inverse of that writer (other keys, e.g.
+/// paragraph style or vert-align, are deliberately ignored: `SetMarks` never
+/// touches them, so neither may its undo).
+fn run_styles_from_mark_attrs<S: std::hash::BuildHasher>(attrs: Option<&std::collections::HashMap<String, loro::LoroValue, S>>) -> flowstate_document::RunStyles {
+  use flowstate_document::loro_schema::{MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH};
+  let mut styles = flowstate_document::RunStyles::default();
+  let Some(attrs) = attrs else {
+    return styles;
+  };
+  if let Some(loro::LoroValue::I64(slot)) = attrs.get(MARK_RUN_SEMANTIC_STYLE)
+    && let Ok(slot) = u8::try_from(*slot)
+  {
+    styles.semantic = flowstate_document::RunSemanticStyle::Custom(slot);
+  }
+  if let Some(loro::LoroValue::I64(slot)) = attrs.get(MARK_HIGHLIGHT_STYLE)
+    && let Ok(slot) = u8::try_from(*slot)
+  {
+    styles.highlight = Some(flowstate_document::HighlightStyle::Custom(slot));
+  }
+  if matches!(attrs.get(MARK_DIRECT_UNDERLINE), Some(loro::LoroValue::Bool(true))) {
+    styles.direct_underline = true;
+  }
+  if matches!(attrs.get(MARK_STRIKETHROUGH), Some(loro::LoroValue::Bool(true))) {
+    styles.strikethrough = true;
+  }
+  styles
+}
+
+/// §act-twelve A12.2.2: single-paragraph `SetParagraphStyle` — the plural
+/// capture's law with one target (no minimum gate: the capture is O(1)).
+fn capture_set_paragraph_style(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<PendingInverseCapture> {
+  let ResolvedPlan::SetParagraphStyle { paragraph, paragraph_ix, style } = plan else {
+    return None;
+  };
+  let projection = core.projection_ref();
+  if projection.ids.paragraph_ids.get(*paragraph_ix) != Some(paragraph) {
+    return None;
+  }
+  let before_style = projection.paragraphs.get(*paragraph_ix)?.style;
+  let boundary = crate::crdt_runtime::paragraph_boundary_loro_unicode_index(core.doc(), projection, *paragraph_ix);
+  let rows = flowstate_document::paragraph_block_rows(projection);
+  let &row = rows.get(*paragraph_ix)?;
+  let undo_patch = ProjectionPatch::ParagraphStyle {
+    block_id: *projection.ids.block_ids.get(row)?,
+    paragraph_id: *paragraph,
+    row_hint: row,
+    style: before_style,
+  };
+  Some(PendingInverseCapture {
+    undo: RecordedDelta {
+      mutation: RecordedMutation::MarkParagraphStyles {
+        targets: vec![(boundary, paragraph_style_value(before_style))],
+      },
+      reproject: Reproject::Patches(vec![undo_patch].into()),
+      invalidation_ranges: vec![(boundary, 1)],
+    },
+    redo_mutation: RecordedMutation::MarkParagraphStyles {
+      targets: vec![(boundary, paragraph_style_value(*style))],
+    },
+    redo_invalidation_ranges: vec![(boundary, 1)],
     redo_derive: false,
     redo_replace_finalize: None,
   })
@@ -352,7 +699,12 @@ fn capture_delete_range(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pendi
     return None;
   };
   let len = end.body_unicode.saturating_sub(start.body_unicode);
-  if len < MIN_CAPTURE_CHARS || start.paragraph_ix == end.paragraph_ix {
+  // §oom-leads #9: intra-paragraph deletes (backspace, word/selection deletes)
+  // capture at ANY size — the record is O(len) with no structural bookkeeping.
+  if start.paragraph_ix == end.paragraph_ix {
+    return capture_intra_paragraph_delete(core, start, end);
+  }
+  if len < MIN_CAPTURE_CHARS {
     return None;
   }
   let (clamped_start, clamped_len) = sentinel_protected_delete_range(start.body_unicode, len)?;
@@ -503,10 +855,8 @@ fn capture_delete_range(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pendi
         boundaries,
         objects,
       },
-      reproject: Reproject::Patches(undo_patches),
-      invalidation_start: clamped_start,
-      invalidation_len: clamped_len,
-      style_only: false,
+      reproject: Reproject::Patches(undo_patches.into()),
+      invalidation_ranges: vec![(clamped_start, clamped_len)],
     },
     redo_mutation: RecordedMutation::DeleteRange {
       clamped_start,
@@ -514,9 +864,7 @@ fn capture_delete_range(core: &CrdtRuntime, plan: &ResolvedPlan) -> Option<Pendi
       prune_objects,
       boundaries: redo_boundaries,
     },
-    redo_invalidation_start: clamped_start,
-    redo_invalidation_len: clamped_len,
-    redo_style_only: false,
+    redo_invalidation_ranges: vec![(clamped_start, clamped_len)],
     redo_derive: false,
     redo_replace_finalize: None,
   })
@@ -530,7 +878,7 @@ pub(crate) fn finalize_capture(core: &mut CrdtRuntime, pending: PendingInverseCa
   let redo_reproject = if pending.redo_derive {
     Reproject::Derive
   } else {
-    Reproject::Patches(redo_patches.to_vec())
+    Reproject::Patches(Arc::from(redo_patches))
   };
   // Replace-all: the redo splices can only be captured now, from the POST-op
   // doc where the replacements' applied rich content lives. If any slice fails,
@@ -574,15 +922,393 @@ pub(crate) fn finalize_capture(core: &mut CrdtRuntime, pending: PendingInverseCa
     direction: UndoOrRedo::Undo,
     expected_frontier,
     expected_span: op_span,
+    survives_pending_remote: false,
     undo: pending.undo,
     redo: RecordedDelta {
       mutation: redo_mutation,
       reproject: redo_reproject,
-      invalidation_start: pending.redo_invalidation_start,
-      invalidation_len: pending.redo_invalidation_len,
-      style_only: pending.redo_style_only,
+      invalidation_ranges: pending.redo_invalidation_ranges,
     },
   });
+  // §oom-leads #9: keystrokes capture too now, so a long typing session grows
+  // the stack one entry per char. Bound it: undos deeper than the cap fall to
+  // the slow path exactly as an uncaptured op would (the Loro stack has its
+  // own `max_stack_size` for the same reason).
+  const MAX_RECORDED_ENTRIES: usize = 512;
+  let stack = core.recorded_undo_stack();
+  if stack.len() > MAX_RECORDED_ENTRIES {
+    let excess = stack.len() - MAX_RECORDED_ENTRIES;
+    stack.drain(..excess);
+  }
+}
+
+/// §act-ten A10.2: re-arm the recorded fast-path stacks across a known-INERT
+/// frontier advance (a "meta"-origin metadata/revision commit, e.g. the
+/// autosave checkpoint). Those commits touch only meta containers — the body
+/// state the recorded inverses replay against is unchanged — but they advance
+/// the frontier, which the strict `expected_frontier` equality at step time
+/// would read as "concurrent change, drop everything": the exact bug that made
+/// fast undo dead in the field (anyone pausing >900ms before Ctrl-Z hit the
+/// O(doc) slow path). Only the TOPS need re-arming — the step-time check reads
+/// the active top, and each fast step re-arms the next entry as it goes. The
+/// `expected_span` fail-safe still validates against the Loro `UndoManager`'s
+/// real top (meta commits are origin-excluded there, so it is unchanged).
+pub(crate) fn rearm_recorded_inverse_frontier(core: &mut CrdtRuntime) {
+  let frontier = core.doc().state_frontiers().encode();
+  if let Some(top) = core.recorded_undo_stack().last_mut() {
+    top.expected_frontier.clone_from(&frontier);
+  }
+  if let Some(top) = core.recorded_redo_stack().last_mut() {
+    top.expected_frontier = frontier;
+  }
+}
+
+/// §mass-op collab (oom-leads #9): the lowest body-unicode coordinate a
+/// recorded direction addresses — mutation positions plus invalidation-range
+/// starts. `None` for a direction with no coordinates at all (nothing to
+/// anchor a disjointness proof to — callers must clear).
+fn delta_min_coordinate(delta: &RecordedDelta) -> Option<usize> {
+  let mut min: Option<usize> = None;
+  let mut fold = |value: usize| min = Some(min.map_or(value, |current| current.min(value)));
+  match &delta.mutation {
+    RecordedMutation::RestoreRange {
+      clamped_start,
+      boundaries,
+      objects,
+      ..
+    } => {
+      fold(*clamped_start);
+      for boundary in boundaries {
+        fold(boundary.unicode);
+      }
+      for object in objects {
+        fold(object.unicode);
+      }
+    },
+    RecordedMutation::DeleteRange {
+      clamped_start, boundaries, ..
+    } => {
+      fold(*clamped_start);
+      for boundary in boundaries {
+        fold(boundary.unicode);
+      }
+    },
+    RecordedMutation::MarkParagraphStyles { targets } => {
+      for (unicode, _) in targets {
+        fold(*unicode);
+      }
+    },
+    RecordedMutation::SpliceRichRanges { splices } => {
+      for splice in splices {
+        fold(splice.start);
+      }
+    },
+    RecordedMutation::CreateBoundary { at, .. } => fold(*at),
+    RecordedMutation::MarkRunRanges { spans } => {
+      for (start, _, _) in spans {
+        fold(*start);
+      }
+    },
+  }
+  for (start, _) in &delta.invalidation_ranges {
+    fold(*start);
+  }
+  min
+}
+
+/// Shift every body-unicode coordinate in one recorded direction by `by`.
+/// Returns `false` on arithmetic failure (callers clear the cache).
+fn shift_delta_coordinates(delta: &mut RecordedDelta, by: isize) -> bool {
+  let shift = |value: &mut usize| -> bool {
+    match value.checked_add_signed(by) {
+      Some(next) => {
+        *value = next;
+        true
+      },
+      None => false,
+    }
+  };
+  let mutation_ok = match &mut delta.mutation {
+    RecordedMutation::RestoreRange {
+      clamped_start,
+      boundaries,
+      objects,
+      ..
+    } => shift(clamped_start) && boundaries.iter_mut().all(|b| shift(&mut b.unicode)) && objects.iter_mut().all(|o| shift(&mut o.unicode)),
+    RecordedMutation::DeleteRange {
+      clamped_start, boundaries, ..
+    } => shift(clamped_start) && boundaries.iter_mut().all(|b| shift(&mut b.unicode)),
+    RecordedMutation::MarkParagraphStyles { targets } => targets.iter_mut().all(|(unicode, _)| shift(unicode)),
+    RecordedMutation::SpliceRichRanges { splices } => splices.iter_mut().all(|splice| shift(&mut splice.start)),
+    RecordedMutation::CreateBoundary { at, .. } => shift(at),
+    RecordedMutation::MarkRunRanges { spans } => spans.iter_mut().all(|(start, _, _)| shift(start)),
+  };
+  mutation_ok && delta.invalidation_ranges.iter_mut().all(|(start, _)| shift(start))
+}
+
+/// The import's shape, precomputed once for the per-entry rebase laws.
+struct RemoteNetLaw {
+  /// Highest PRE-space position any net insert lands at.
+  max_insert_pos: Option<usize>,
+  /// Highest PRE-space position any net delete ends at.
+  max_delete_end: Option<usize>,
+  /// Net length change (Σ inserts − Σ deletes) — the coordinate shift for an
+  /// entry whose hull sits above every remote op.
+  total_delta: isize,
+  /// Deleted PRE-space ranges, merged and ordered (for per-target drops).
+  deleted_ranges: Vec<(usize, usize)>,
+  /// End of the last `changed_text_ranges` entry (POST space) — remote
+  /// rich/mark changes ride the invalidation without touching the net, and a
+  /// CONTENT replay (restore/splice re-applies captured text+marks) would
+  /// clobber one; they must end at/before a content entry's hull. Mark-only
+  /// replays are exempt: re-marking a surviving boundary char with the
+  /// recorded value is exactly what the native slow path replays too.
+  max_changed_end_post: Option<usize>,
+}
+
+impl RemoteNetLaw {
+  fn from_net(net: &crate::crdt_runtime::import_delta::NetBodyDelta, changed_body_ranges_post: &[(usize, usize)]) -> Self {
+    use crate::crdt_runtime::import_delta::NetOp;
+    let mut max_insert_pos = None;
+    let mut max_delete_end = None;
+    let mut total_delta = 0_isize;
+    let mut old_pos = 0_usize;
+    for op in &net.ops {
+      match op {
+        NetOp::Retain(n) => old_pos += n,
+        NetOp::Insert { len, .. } => {
+          max_insert_pos = Some(max_insert_pos.map_or(old_pos, |current: usize| current.max(old_pos)));
+          total_delta += *len as isize;
+        },
+        NetOp::Delete(n) => {
+          old_pos += n;
+          max_delete_end = Some(max_delete_end.map_or(old_pos, |current: usize| current.max(old_pos)));
+          total_delta -= *n as isize;
+        },
+      }
+    }
+    Self {
+      max_insert_pos,
+      max_delete_end,
+      total_delta,
+      deleted_ranges: net.deleted_pre_ranges(),
+      max_changed_end_post: changed_body_ranges_post.iter().map(|(start, len)| start + len).max(),
+    }
+  }
+
+  /// The v1 hull law against ONE entry's hull floor `lo` (PRE space): every
+  /// remote insert strictly before it (an insert AT the floor is ambiguous —
+  /// the CRDT parks a remote edit whose original neighbors were locally
+  /// deleted at the deletion point, i.e. exactly where a recorded restore
+  /// would replay, and the native undo would interleave it INSIDE the restored
+  /// range); deletes and rich changes may END exactly at the floor.
+  fn before_hull(&self, lo: usize) -> bool {
+    if !(self.max_insert_pos.is_none_or(|pos| pos < lo) && self.max_delete_end.is_none_or(|end| end <= lo)) {
+      return false;
+    }
+    let Some(lo_post) = lo.checked_add_signed(self.total_delta) else {
+      return false;
+    };
+    self.max_changed_end_post.is_none_or(|end| end <= lo_post)
+  }
+
+  /// Whether PRE-space `position`'s char was deleted by the import.
+  fn position_deleted(&self, position: usize) -> bool {
+    let ix = self.deleted_ranges.partition_point(|(start, _)| *start <= position);
+    ix > 0 && {
+      let (start, len) = self.deleted_ranges[ix - 1];
+      position < start + len
+    }
+  }
+}
+
+/// Per-coordinate rebase of one mark-only direction: `shift_positions` tracks
+/// each targeted boundary char exactly (net-delta space math — survivors never
+/// land inside inserted runs); a target whose boundary char the import DELETED
+/// is dropped, which is what the native slow path's remote-diff transform
+/// would do. (Re-marking a KEPT boundary with the recorded value even when a
+/// remote rich change touched it is also native semantics — the slow path's
+/// transform shifts inverse-mark positions, never removes them.) Returns
+/// `(ok, any_dropped)`; `ok == false` truncates the entry — unsorted targets
+/// (never produced by capture) or all targets dropped (an empty replay can't
+/// drive the external-step protocol).
+fn rebase_mark_delta(delta: &mut RecordedDelta, net: &crate::crdt_runtime::import_delta::NetBodyDelta, law: &RemoteNetLaw) -> (bool, bool) {
+  let RecordedMutation::MarkParagraphStyles { targets } = &mut delta.mutation else {
+    return (false, false);
+  };
+  if !targets.windows(2).all(|pair| pair[0].0 <= pair[1].0) {
+    return (false, false);
+  }
+  let positions: Vec<usize> = targets.iter().map(|(unicode, _)| *unicode).collect();
+  let shifted = net.shift_positions(&positions);
+  let mut kept: Vec<(usize, i64)> = Vec::with_capacity(targets.len());
+  for (ix, (position, value)) in targets.iter().enumerate() {
+    if law.position_deleted(*position) {
+      continue;
+    }
+    kept.push((shifted[ix], *value));
+  }
+  if kept.is_empty() {
+    return (false, false);
+  }
+  let dropped = kept.len() < targets.len();
+  // Mark captures record one `(boundary, 1)` invalidation range per target —
+  // rebuild the set from the kept, shifted boundaries.
+  delta.invalidation_ranges = kept.iter().map(|(unicode, _)| (*unicode, 1)).collect();
+  *targets = kept;
+  (true, dropped)
+}
+
+/// Rebase ONE entry through the import: `true` keeps it (coordinates now in
+/// POST space); `false` means the entry — and everything DEEPER in its stack —
+/// must be truncated.
+fn rebase_entry(entry: &mut RecordedInverse, net: &crate::crdt_runtime::import_delta::NetBodyDelta, law: &RemoteNetLaw, structure_neutral: bool) -> bool {
+  let mark_only = matches!(entry.undo.mutation, RecordedMutation::MarkParagraphStyles { .. })
+    && matches!(entry.redo.mutation, RecordedMutation::MarkParagraphStyles { .. });
+  let keep_patches = if mark_only {
+    let (undo_ok, undo_dropped) = rebase_mark_delta(&mut entry.undo, net, law);
+    if !undo_ok {
+      return false;
+    }
+    let (redo_ok, redo_dropped) = rebase_mark_delta(&mut entry.redo, net, law);
+    if !redo_ok {
+      return false;
+    }
+    // A dropped target means the import deleted a boundary — the projection's
+    // row set changed, so pre-recorded row-addressed patches are stale.
+    // (`structure_neutral` is false in that case too; the explicit check keeps
+    // the coupling local.)
+    structure_neutral && !undo_dropped && !redo_dropped
+  } else {
+    // Content entries (restore/delete/splice) keep the v1 law against their
+    // OWN hull: all remote ops proven before it, so every recorded coordinate
+    // shifts by the net's total length delta.
+    let lo = match (delta_min_coordinate(&entry.undo), delta_min_coordinate(&entry.redo)) {
+      (Some(a), Some(b)) => a.min(b),
+      (Some(a), None) => a,
+      (None, Some(b)) => b,
+      (None, None) => return false,
+    };
+    if !law.before_hull(lo) {
+      return false;
+    }
+    if law.total_delta != 0 && !(shift_delta_coordinates(&mut entry.undo, law.total_delta) && shift_delta_coordinates(&mut entry.redo, law.total_delta)) {
+      return false;
+    }
+    structure_neutral
+  };
+  // Pre-recorded projection patches survive a remote change that neither adds
+  // nor removes rows: patches are row/id-addressed, and a nonstructural
+  // character shift touches neither the patched rows' indices nor their
+  // contents. A STRUCTURAL remote change (paragraph boundary added/removed)
+  // shifts row indices — those entries downgrade to the derive ladder, which
+  // recomputes patches at O(change).
+  if !(keep_patches && patches_survive_rebase(&entry.undo)) {
+    entry.undo.reproject = Reproject::Derive;
+  }
+  if !(keep_patches && patches_survive_rebase(&entry.redo)) {
+    entry.redo.reproject = Reproject::Derive;
+  }
+  true
+}
+
+/// §mass-op collab v2 (oom-leads #9): REBASE the recorded fast-path stacks
+/// through a remote import instead of dropping them. Each stack is walked from
+/// its TOP (the next entry a fast step replays) downward, deciding PER ENTRY:
+///
+/// * Mark-only entries (select-all restyle — both directions re-mark boundary
+///   chars, a position-neutral replay) rebase PER-COORDINATE via
+///   [`rebase_mark_delta`]: remote edits may land anywhere, including inside
+///   the marked span.
+/// * Content entries keep the v1 hull law against their OWN hull
+///   ([`RemoteNetLaw::before_hull`]) and shift by the net length delta.
+/// * The first entry that fails truncates ITSELF AND EVERYTHING DEEPER; the
+///   kept suffix stays aligned with the Loro stack tops (once the recorded
+///   stack runs dry, `try_fast_step` returns `None` and the slow path serves
+///   the deeper items).
+///
+/// Space soundness (why no cross-entry position mapping is needed): a deeper
+/// entry replays only AFTER the entries above it, so its coordinates live in a
+/// space that differs from the current doc by those replays — but every KEPT
+/// entry's replay is position-IDENTITY at every remote-op position (mark
+/// replays move nothing anywhere; a kept content entry touches only positions
+/// at/above its hull, strictly above every remote op). Inductively the remote
+/// positions mean the same thing in every kept entry's space, so per-entry
+/// checks and shifts against the raw net are exact — and the first entry where
+/// the induction would break is exactly where the walk truncates.
+///
+/// The Loro stacks' buffered remote diffs stay valid across kept fast steps
+/// for the same reason (kept replays are position-neutral at every buffered
+/// position) — and vendor patch #22 additionally transforms them through
+/// every external-step inverse commit, mirroring the native
+/// `undo_internal` path, so a later slow-path pop of a deeper item is
+/// coordinate-correct unconditionally.
+///
+/// Returns `false` when both stacks ended up empty (the old "cleared" signal).
+pub(crate) fn rebase_recorded_inverse_through_remote(
+  core: &mut CrdtRuntime,
+  net: &crate::crdt_runtime::import_delta::NetBodyDelta,
+  changed_body_ranges_post: &[(usize, usize)],
+  structure_neutral: bool,
+) -> bool {
+  if core.recorded_undo_stack().is_empty() && core.recorded_redo_stack().is_empty() {
+    return true;
+  }
+  let law = RemoteNetLaw::from_net(net, changed_body_ranges_post);
+  static REBASE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  let debug = *REBASE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some());
+  let frontier = core.doc().state_frontiers().encode();
+  let mut any_kept = false;
+  for kind in [UndoOrRedo::Undo, UndoOrRedo::Redo] {
+    let stack = active_stack(core, kind);
+    let before = stack.len();
+    let mut cut = None;
+    for ix in (0..stack.len()).rev() {
+      if !rebase_entry(&mut stack[ix], net, &law, structure_neutral) {
+        cut = Some(ix);
+        break;
+      }
+    }
+    if let Some(ix) = cut {
+      stack.drain(..=ix);
+    }
+    for entry in stack.iter_mut() {
+      entry.survives_pending_remote = true;
+    }
+    if let Some(top) = stack.last_mut() {
+      top.expected_frontier.clone_from(&frontier);
+      any_kept = true;
+    }
+    if debug {
+      let kept = active_stack(core, kind).len();
+      eprintln!("rebase[recorded-inverse]: {kind:?} kept {kept}/{before} pre_span={:?} changed_post={changed_body_ranges_post:?}", net.pre_change_span());
+    }
+  }
+  any_kept
+}
+
+/// §mass-op collab (oom-leads #9, soundness): whether a pre-recorded patch set
+/// stays exact through a (structure-neutral, before-hull) rebase. The hull only
+/// bounds the MUTATION coordinates — but `ParagraphText.new`/`delta_utf8` and
+/// `ParagraphRuns.runs` snapshot the WHOLE patched paragraph, which extends
+/// back before the mutation start (to the paragraph's first char), and
+/// `InsertBlocks`/`ReplaceObjectBlock` carry block content snapshots. A remote
+/// edit that is hull-disjoint can still land INSIDE the first patched
+/// paragraph, ahead of the mutation start; replaying the stale snapshot would
+/// clobber it in the projection (the doc-side mutation is position-shifted and
+/// stays correct — the divergence is projection-only, which is worse: silent).
+/// Only id-addressed, content-free patches survive; everything else downgrades
+/// to the derive ladder (still O(change), recomputed from the true doc).
+fn patches_survive_rebase(delta: &RecordedDelta) -> bool {
+  match &delta.reproject {
+    Reproject::Derive => true,
+    Reproject::Patches(patches) => patches.iter().all(|patch| {
+      matches!(
+        patch,
+        ProjectionPatch::ParagraphStyle { .. } | ProjectionPatch::DeleteBlocks { .. } | ProjectionPatch::MoveBlock { .. } | ProjectionPatch::AssetArrived { .. }
+      )
+    }),
+  }
 }
 
 /// Current local-peer counter end (oplog space).
@@ -622,8 +1348,12 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     return Ok(None);
   }
   let expected_frontier = core.doc().state_frontiers().encode();
-  let (expected_span, matches) = match active_stack(core, kind).last() {
-    Some(inverse) => (inverse.expected_span, inverse.expected_frontier == expected_frontier),
+  let (expected_span, matches, survives_pending_remote) = match active_stack(core, kind).last() {
+    Some(inverse) => (
+      inverse.expected_span,
+      inverse.expected_frontier == expected_frontier,
+      inverse.survives_pending_remote,
+    ),
     None => return Ok(None),
   };
   if !matches {
@@ -632,8 +1362,14 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     core.clear_recorded_inverse();
     return Ok(None);
   }
+  // §oom-leads #9: `clean == false` means remote diffs are buffered in the Loro
+  // stacks. Normally that kills the fast path (the recorded coordinates would
+  // be stale), but the rebase proved THIS entry's replay is coordinate-correct,
+  // and the buffered diffs survive the inverse commit (kept replays are
+  // position-neutral at every buffered position; vendor patch #22 transforms
+  // the buffers through the commit besides) — proceed.
   match core.undo_manager_mut().peek_top_span(kind) {
-    Some((span, clean)) if clean && span == expected_span => {},
+    Some((span, clean)) if (clean || survives_pending_remote) && span == expected_span => {},
     _ => return Ok(None),
   }
 
@@ -695,7 +1431,7 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
     UndoOrRedo::Undo => "recorded-inverse-undo",
     UndoOrRedo::Redo => "recorded-inverse-redo",
   };
-  let (recorded_patches, inval_start, inval_len, style_only) = {
+  let (recorded_patches, inval_ranges) = {
     let inverse = active_stack(core, kind).last().expect("active entry survives replay");
     let delta = match kind {
       UndoOrRedo::Undo => &inverse.undo,
@@ -705,13 +1441,13 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
       Reproject::Patches(patches) => Some(patches.clone()),
       Reproject::Derive => None,
     };
-    (patches, delta.invalidation_start, delta.invalidation_len, delta.style_only)
+    (patches, delta.invalidation_ranges.clone())
   };
-  let mut invalidation = if style_only {
-    ProjectionInvalidation::body_style(from_frontier.encode(), core.doc().state_frontiers().encode(), inval_start, inval_len)
-  } else {
-    ProjectionInvalidation::body_text(from_frontier.encode(), core.doc().state_frontiers().encode(), inval_start, inval_len)
-  };
+  // Style-only and text deltas build the same range-carrying invalidation
+  // (`body_style` has always delegated to `body_text`), so one multi-range
+  // constructor serves both directions.
+  let mut invalidation =
+    ProjectionInvalidation::body_text_ranges(from_frontier.encode(), core.doc().state_frontiers().encode(), &inval_ranges);
   let drained = core.merge_subscription_invalidation(&mut invalidation);
   let mut events = core.events_after_local_change(from_frontier.clone(), from_vv, invalidation.clone(), false)?;
   match recorded_patches {
@@ -729,9 +1465,6 @@ pub(crate) fn try_fast_step(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<
       super::commit::audit_patched_projection(core, context);
     },
   }
-  // §act-four M5: undo/redo lands a new frontier — append its root to the log.
-  core.record_projection_version();
-
   if let Some(snapshot) = core.take_restored_undo_selection() {
     if let Some(selection) = core.resolve_undo_selection(&snapshot) {
       events.push(RuntimeEvent::SelectionRestored { selection });
@@ -831,6 +1564,31 @@ fn apply_recorded_mutation(core: &mut CrdtRuntime, kind: UndoOrRedo) -> Result<(
         body
           .mark(*boundary..*boundary + 1, MARK_PARAGRAPH_STYLE, *value)
           .context("re-marking paragraph style for recorded-inverse step")?;
+      }
+    },
+    RecordedMutation::CreateBoundary {
+      at,
+      style_value,
+      paragraph_id,
+      block_id,
+    } => {
+      body.insert(*at, "\n").context("re-creating paragraph boundary for recorded-inverse step")?;
+      body
+        .mark(*at..*at + 1, MARK_PARAGRAPH_STYLE, *style_value)
+        .context("marking re-created boundary's paragraph style")?;
+      // Sentinel hygiene, mirroring the SplitParagraph executor: expand-After
+      // run marks absorb the inserted newline; strip the run keys so styling
+      // never bleeds across the boundary. `mark_run_styles` with default
+      // styles IS the four-key unmark.
+      crate::crdt_runtime::mark_run_styles(&body, *at..*at + 1, flowstate_document::RunStyles::default())
+        .context("stripping run keys from re-created boundary")?;
+      repair_paragraph_metadata_after_stable_split(&doc, &body, *at, *paragraph_id, *block_id, "recorded_inverse_boundary")
+        .context("re-writing paragraph records for recorded-inverse boundary")?;
+    },
+    RecordedMutation::MarkRunRanges { spans } => {
+      for (start, len, styles) in spans {
+        crate::crdt_runtime::mark_run_styles(&body, *start..*start + *len, *styles)
+          .context("re-applying run styles for recorded-inverse step")?;
       }
     },
     RecordedMutation::SpliceRichRanges { splices } => {

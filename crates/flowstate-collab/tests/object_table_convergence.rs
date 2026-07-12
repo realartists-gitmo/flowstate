@@ -335,6 +335,7 @@ mod tests {
       caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Left,
+      external_url: None,
     })
   }
 
@@ -895,6 +896,27 @@ mod tests {
       run_fuzz(seed, 2, 6, 10, seed_table, random_table_mix_intent);
     }
     run_fuzz(0x2222, 3, 5, 8, seed_table, random_table_mix_intent);
+  }
+
+  /// §act-eleven C10: long-horizon object/table soak — see `intent_fuzz_soak`.
+  #[test]
+  #[ignore = "long-horizon soak — run via `heaven.sh soak`"]
+  fn object_table_fuzz_soak() {
+    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let ops: usize = std::env::var("FUZZ_SOAK_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(12);
+    for seed in 1..=seeds {
+      let peers = 2 + (seed % 2) as usize; // 2–3 peers
+      let mixed = seed.wrapping_mul(0xD1B5_4A32_D192_ED03);
+      if seed % 2 == 0 {
+        run_fuzz(mixed, peers, rounds, ops, seed_structural, random_structural_intent);
+      } else {
+        run_fuzz(mixed, peers, rounds, ops, seed_table, random_table_mix_intent);
+      }
+      if seed % 25 == 0 {
+        eprintln!("[soak] object_table {seed}/{seeds}");
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------

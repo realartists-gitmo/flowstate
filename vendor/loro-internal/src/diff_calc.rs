@@ -108,6 +108,12 @@ pub(crate) struct DiffCalcVersionInfo<'a> {
     to_vv: &'a VersionVector,
     from_frontiers: &'a Frontiers,
     to_frontiers: &'a Frontiers,
+    /// §flowstate vendor patch (oom-leads #4): the diff mode INFERRED from the
+    /// version transition, BEFORE the retained-calculator `Persist` override
+    /// forces `Checkout`. The override is an apply-law decision; per-container
+    /// calculators may still pick the cheap forward-content path when the
+    /// transition itself is provably forward (`Linear`/`ImportGreaterUpdates`).
+    origin_mode: DiffMode,
 }
 
 impl DiffCalculator {
@@ -132,12 +138,18 @@ impl DiffCalculator {
         self.calculators.get(&container).map(|(_, c)| c)
     }
 
+
     /// Calculate the diff between two versions.
     ///
     /// Return the diff and the origin diff mode (it's not the diff mode used by the diff calculator.
     /// It's the expected diff mode inferred from the two version, which can reflect the direction of the
     /// change).
-    pub(crate) fn calc_diff_internal(
+    ///
+    /// §act-eleven A11.5 (flowstate vendor patch): `caller` is a static tag
+    /// naming the CALL SITE, printed by the `FLOWSTATE_DIFF_SPAN_PROBE` line so
+    /// duplicate same-calculator spans can be attributed to the code path that
+    /// requested them.
+    pub(crate) fn calc_diff_internal_tagged(
         &mut self,
         oplog: &super::oplog::OpLog,
         before: &crate::VersionVector,
@@ -145,6 +157,7 @@ impl DiffCalculator {
         after: &crate::VersionVector,
         after_frontiers: &Frontiers,
         container_filter: Option<&dyn Fn(ContainerIdx) -> bool>,
+        caller: &'static str,
     ) -> (Vec<InternalContainerDiff>, DiffMode) {
         if before == after {
             return (Vec::new(), DiffMode::Linear);
@@ -155,8 +168,29 @@ impl DiffCalculator {
 
         let mut merged = before.clone();
         merged.merge(after);
-        let (lca, origin_diff_mode, iter) =
-            oplog.iter_from_lca_causally(before, before_frontiers, after, after_frontiers);
+        // §patch #24b: the meet decides both the clamp (below) and the main
+        // walk's enumeration FLOOR — computed before the iterator so the
+        // dominator-to-meet prefix is never even enumerated (it was ~64.5M
+        // op-units of pure skip-checking per dirty-history checkout). The
+        // meet-clamp kill switch disables the floor too.
+        static MEET_CLAMP_DISABLED_EARLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let meet_clamp_early = matches!(self.retain_mode, DiffCalculatorRetainMode::Persist)
+            && !*MEET_CLAMP_DISABLED_EARLY
+                .get_or_init(|| std::env::var_os("FLOWSTATE_DISABLE_MEET_CLAMP").is_some());
+        let floor_vv = if meet_clamp_early {
+            let m = before.intersection(after);
+            if m.is_empty() { None } else { Some(m) }
+        } else {
+            None
+        };
+        let (lca, origin_diff_mode, iter) = oplog.iter_from_lca_causally_floored(
+            before,
+            before_frontiers,
+            after,
+            after_frontiers,
+            None,
+            floor_vv.as_ref(),
+        );
         let mut diff_mode = origin_diff_mode;
         match &mut self.retain_mode {
             DiffCalculatorRetainMode::Once { used } => {
@@ -169,6 +203,125 @@ impl DiffCalculator {
             }
         }
 
+        // §flowstate vendor patch #21 (meet-clamped diff feed — oom-leads #9
+        // P1.C): ops at-or-below `meet = before ∧ after` (pointwise-min
+        // version vector) are common to BOTH diffed versions — they can never
+        // appear in the diff, and a calculator only needs them as positional
+        // CONTEXT, which it already has when its tracker covers the meet
+        // (`meet_clamp_safe`). The dominator LCA anchoring this walk sits
+        // arbitrarily deep under persistent concurrency (a peer holding
+        // unexchanged local ops pins it at the last full exchange), so the
+        // unclamped walk re-iterated the ENTIRE history on EVERY import
+        // (measured 64.5M op-units per bare-boundary import — ~0.7-1.3s/round
+        // of pure skip-checking) and mis-marked thousands of untouched
+        // containers as affected. Containers whose calculator cannot prove
+        // the clamp safe (typically a tracker that legitimately rebuilt at
+        // the dominator) are re-fed unclamped in a second, container-filtered
+        // pass — exactly the old behavior, but only for those containers.
+        // `Once` calculators are always fresh (every container would need the
+        // full pass): they keep the single unclamped walk.
+        // Kill switch: `FLOWSTATE_DISABLE_MEET_CLAMP=1` restores the original
+        // single unclamped full-span walk (also the A/B lever for the guards).
+        static MEET_CLAMP_DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let meet_clamp = matches!(self.retain_mode, DiffCalculatorRetainMode::Persist)
+            && !*MEET_CLAMP_DISABLED
+                .get_or_init(|| std::env::var_os("FLOWSTATE_DISABLE_MEET_CLAMP").is_some());
+        let meet = if meet_clamp {
+            before.intersection(after)
+        } else {
+            crate::VersionVector::new()
+        };
+        // §patch #21 phase-0 (gap pre-feed): retained trackers that will
+        // REUSE at this dominator but are missing common ops below the meet
+        // (they are never fed local commits) get exactly their gap
+        // `(floor, meet]` BEFORE the main walk — the main walk then feeds
+        // their ∆ inline instead of deferring the whole ∆ to the full-span
+        // fallback (which double-walks the DAG: ~2× on big-divergence
+        // imports). Ordering is sound: every gap op is common to both
+        // versions, so no gap op can causally descend from a ∆ op; feeding
+        // gap-then-∆ preserves every dependency.
+        let mut probe_gap_ops: u64 = 0;
+        let mut probe_gap_floors: u64 = 0;
+        if meet_clamp && !meet.is_empty() {
+            let mut gap_floors: FxHashMap<ContainerIdx, crate::VersionVector> = FxHashMap::default();
+            for (idx, (_, calc)) in self.calculators.iter() {
+                if let Some(floor) = calc.pre_gap_floor(&lca, &meet) {
+                    gap_floors.insert(*idx, floor);
+                }
+            }
+            probe_gap_floors = gap_floors.len() as u64;
+            if !gap_floors.is_empty() {
+                let (_l0, _m0, gap_iter) = oplog.iter_from_lca_causally(
+                    before,
+                    before_frontiers,
+                    after,
+                    after_frontiers,
+                    Some(&meet),
+                );
+                for (change, (start_counter, end_counter), vv) in gap_iter {
+                    let peer = change.peer();
+                    if gap_floors
+                        .values()
+                        .all(|floor| end_counter <= floor.get(&peer).copied().unwrap_or(0))
+                    {
+                        continue;
+                    }
+                    let iter_start = change
+                        .ops
+                        .binary_search_by(|op| op.ctr_last().cmp(&start_counter))
+                        .unwrap_or_else(|e| e);
+                    let mut visited = FxHashSet::default();
+                    for mut op in &change.ops.vec()[iter_start..] {
+                        if op.counter >= end_counter {
+                            break;
+                        }
+                        let Some(floor) = gap_floors.get(&op.container) else {
+                            continue;
+                        };
+                        if op.ctr_end() <= floor.get(&peer).copied().unwrap_or(0) {
+                            continue;
+                        }
+                        let stack_sliced_op;
+                        if op.ctr_last() < start_counter {
+                            continue;
+                        }
+                        if op.counter < start_counter || op.ctr_end() > end_counter {
+                            stack_sliced_op = Some(op.slice(
+                                (start_counter as usize).saturating_sub(op.counter as usize),
+                                op.atom_len().min((end_counter - op.counter) as usize),
+                            ));
+                            op = stack_sliced_op.as_ref().unwrap();
+                        }
+                        let vv = &mut vv.borrow_mut();
+                        vv.extend_to_include_end_id(ID::new(change.peer(), op.counter));
+                        let container = op.container;
+                        let depth = oplog.arena.get_depth(container);
+                        let (old_depth, calculator) = self.get_or_create_calc(container, depth);
+                        if *old_depth != depth {
+                            *old_depth = depth;
+                        }
+                        probe_gap_ops += op.atom_len() as u64;
+                        if visited.contains(&container) {
+                            calculator.apply_change(oplog, RichOp::new_by_change(&change, op), None);
+                        } else {
+                            calculator.apply_change(
+                                oplog,
+                                RichOp::new_by_change(&change, op),
+                                Some(vv),
+                            );
+                            visited.insert(container);
+                        }
+                    }
+                }
+                // Every gap container is now hole-free up to the meet —
+                // whether ops were fed or the walk found none to feed.
+                for idx in gap_floors.keys() {
+                    if let Some((_, calc)) = self.calculators.get_mut(idx) {
+                        calc.note_covered(&meet);
+                    }
+                }
+            }
+        }
         let affected_set = {
             loro_common::debug!("LCA: {:?} mode={:?}", &lca, diff_mode);
             // §act-five P1.0 (flowstate vendor patch): quantify the import diff's
@@ -178,9 +331,25 @@ impl DiffCalculator {
             // (needs the retained-calculator fix, P1.B). Gated behind a cached env
             // flag; the accumulation is one add/op and the read is one atomic load.
             let mut probe_span_ops: u64 = 0;
+            let mut probe_clamped_ops: u64 = 0;
             let mut started_set = FxHashSet::default();
+            // Container → the floor ABOVE which it must be re-fed unclamped
+            // (its tracker's coverage gap; empty floor = full re-feed).
+            let mut needs_full: FxHashMap<ContainerIdx, crate::VersionVector> = FxHashMap::default();
             for (change, (start_counter, end_counter), vv) in iter {
                 probe_span_ops += u64::try_from(end_counter - start_counter).unwrap_or(0);
+                let mut start_counter = start_counter;
+                if meet_clamp {
+                    let meet_end = meet.get(&change.peer()).copied().unwrap_or(0);
+                    if end_counter <= meet_end {
+                        probe_clamped_ops += u64::try_from(end_counter - start_counter).unwrap_or(0);
+                        continue;
+                    }
+                    if start_counter < meet_end {
+                        probe_clamped_ops += u64::try_from(meet_end - start_counter).unwrap_or(0);
+                        start_counter = meet_end;
+                    }
+                }
                 let iter_start = change
                     .ops
                     .binary_search_by(|op| op.ctr_last().cmp(&start_counter))
@@ -196,6 +365,10 @@ impl DiffCalculator {
                         if !filter(idx) {
                             continue;
                         }
+                    }
+                    if needs_full.contains_key(&idx) {
+                        // Fed from its coverage floor in the second pass below.
+                        continue;
                     }
 
                     // slice the op if needed
@@ -227,6 +400,12 @@ impl DiffCalculator {
                     if !started_set.contains(&op.container) {
                         started_set.insert(container);
                         calculator.start_tracking(oplog, &lca, diff_mode);
+                        if meet_clamp {
+                            if let Some(floor) = calculator.meet_clamp_floor(&meet) {
+                                needs_full.insert(container, floor);
+                                continue;
+                            }
+                        }
                     }
 
                     if visited.contains(&op.container) {
@@ -243,11 +422,110 @@ impl DiffCalculator {
                 }
             }
 
+            // §patch #21 second pass: the containers that could not take the
+            // clamped feed are re-fed from their OWN coverage floors — the
+            // retained import calculator's gap is "local ops since the last
+            // import", not the whole span from the dominator; only a genuinely
+            // rebuilt tracker (empty floor) pays the full walk. Whole changes
+            // below EVERY floor are skipped without touching their ops.
+            // `start_tracking` already ran in the first pass; this pass only
+            // feeds.
+            let mut probe_phase2_changes: u64 = 0;
+            let mut probe_phase2_ops: u64 = 0;
+            if !needs_full.is_empty() {
+                let (_lca2, _mode2, full_iter) =
+                    oplog.iter_from_lca_causally(before, before_frontiers, after, after_frontiers, None);
+                for (change, (start_counter, end_counter), vv) in full_iter {
+                    // A change at-or-below every needed floor has nothing to
+                    // feed — skip it without touching its ops.
+                    let peer = change.peer();
+                    if needs_full
+                        .values()
+                        .all(|floor| end_counter <= floor.get(&peer).copied().unwrap_or(0))
+                    {
+                        continue;
+                    }
+                    probe_phase2_changes += 1;
+                    let iter_start = change
+                        .ops
+                        .binary_search_by(|op| op.ctr_last().cmp(&start_counter))
+                        .unwrap_or_else(|e| e);
+                    let mut visited = FxHashSet::default();
+                    for mut op in &change.ops.vec()[iter_start..] {
+                        if op.counter >= end_counter {
+                            break;
+                        }
+                        let Some(floor) = needs_full.get(&op.container) else {
+                            continue;
+                        };
+                        // Fully below this container's floor ⇒ already in its
+                        // tracker; partial overlaps feed whole (the tracker's
+                        // skip-applied logic handles the known prefix).
+                        if op.ctr_end() <= floor.get(&peer).copied().unwrap_or(0) {
+                            continue;
+                        }
+
+                        let stack_sliced_op;
+                        if op.ctr_last() < start_counter {
+                            continue;
+                        }
+                        if op.counter < start_counter || op.ctr_end() > end_counter {
+                            stack_sliced_op = Some(op.slice(
+                                (start_counter as usize).saturating_sub(op.counter as usize),
+                                op.atom_len().min((end_counter - op.counter) as usize),
+                            ));
+                            op = stack_sliced_op.as_ref().unwrap();
+                        }
+
+                        let vv = &mut vv.borrow_mut();
+                        vv.extend_to_include_end_id(ID::new(change.peer(), op.counter));
+                        let container = op.container;
+                        let depth = oplog.arena.get_depth(container);
+                        let (old_depth, calculator) = self.get_or_create_calc(container, depth);
+                        if *old_depth != depth {
+                            *old_depth = depth;
+                        }
+                        probe_phase2_ops += op.atom_len() as u64;
+                        if visited.contains(&container) {
+                            calculator.apply_change(oplog, RichOp::new_by_change(&change, op), None);
+                        } else {
+                            calculator.apply_change(
+                                oplog,
+                                RichOp::new_by_change(&change, op),
+                                Some(vv),
+                            );
+                            visited.insert(container);
+                        }
+                    }
+                }
+            }
+
             static P1_DIFF_SPAN_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
             if *P1_DIFF_SPAN_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_DIFF_SPAN_PROBE").is_some()) {
+                // §act-ten A9.1: `calc` is this DiffCalculator's identity — the
+                // fuzz runs many peers in ONE process, so identical back-to-back
+                // spans from DIFFERENT calc pointers are cross-peer mirrors of
+                // the same divergence (each peer legitimately reconciles once),
+                // while repeats from the SAME pointer are genuine recomputation
+                // (the dedup/memoization candidate).
+                // Compact (before, after) identity so REPEATED lines can be told
+                // apart from equal-sized mirrors (a checkout there-and-back has
+                // identical op counts but swapped endpoints).
+                let endpoint_hash = |frontiers: &Frontiers| -> u64 {
+                    use std::hash::{Hash, Hasher};
+                    let mut hasher = std::hash::DefaultHasher::new();
+                    for id in frontiers.iter() {
+                        id.hash(&mut hasher);
+                    }
+                    hasher.finish() & 0xffff
+                };
                 eprintln!(
-                    "[flowstate-diff-span] ops={probe_span_ops} containers={} mode={diff_mode:?}",
-                    started_set.len()
+                    "[flowstate-diff-span] calc={:p} caller={caller} ops={probe_span_ops} clamped={probe_clamped_ops} gap_floors={probe_gap_floors} gap_ops={probe_gap_ops} needs_full={} p2_changes={probe_phase2_changes} p2_ops={probe_phase2_ops} containers={} mode={diff_mode:?} before={:04x} after={:04x}",
+                    self as *const _,
+                    needs_full.len(),
+                    started_set.len(),
+                    endpoint_hash(before_frontiers),
+                    endpoint_hash(after_frontiers),
                 );
             }
             Some(started_set)
@@ -277,6 +555,7 @@ impl DiffCalculator {
             to_vv: after,
             from_frontiers: before_frontiers,
             to_frontiers: after_frontiers,
+            origin_mode: origin_diff_mode,
         };
         while !all.is_empty() {
             // sort by depth and lamport, ensure we iterate from top to bottom
@@ -286,6 +565,9 @@ impl DiffCalculator {
                     continue;
                 }
                 let (depth, calc) = self.calculators.get_mut(&container_idx).unwrap();
+                // §patch #21: this round fed (or verified coverage of) every
+                // op of this container up to the merged version.
+                calc.note_covered(&merged);
                 if depth.is_none() {
                     let d = oplog.arena.get_depth(container_idx);
                     if d != *depth {
@@ -404,6 +686,47 @@ impl DiffCalculator {
 #[enum_dispatch]
 pub(crate) trait DiffCalculatorTrait {
     fn start_tracking(&mut self, oplog: &OpLog, vv: &crate::VersionVector, mode: DiffMode);
+    /// §flowstate vendor patch #21 (meet-clamped diff feed): how much of the
+    /// common prefix (ops at-or-below `meet = before ∧ after`) this calculator
+    /// can safely SKIP being fed. Common ops can never appear IN the diff,
+    /// but a positional tracker still needs them PRESENT (holes corrupt
+    /// retain offsets).
+    ///
+    /// - `None`: fully clamp — feed only ops above the meet. Correct for
+    ///   calculators with no positional tracker (map/unknown/counter — their
+    ///   content strategies only need the ∆ ops) and for trackers that
+    ///   provably contain everything up to the meet (`all_vv ⊇ meet`).
+    /// - `Some(floor)`: feed this container every op above `floor` (⊆ meet).
+    ///   A retained tracker returns its coverage floor (`all_vv ∧ meet`) so
+    ///   only its GAP is re-walked — e.g. the retained import calculator is
+    ///   never fed local commits, so its gap is exactly "local ops since the
+    ///   last import", not the whole history from the dominator. A REBUILT
+    ///   tracker (empty `all_vv`) returns an empty floor = the full walk.
+    ///
+    /// Called AFTER `start_tracking` for the round, so the answer reflects
+    /// the tracker state the round will actually use.
+    fn meet_clamp_floor(&self, _meet: &crate::VersionVector) -> Option<crate::VersionVector> {
+        None
+    }
+    /// §flowstate vendor patch #21 (gap pre-feed): BEFORE the round's walk, a
+    /// retained tracker that (a) will REUSE at this round's `lca` and (b) is
+    /// missing common ops below the meet (it is never fed local commits)
+    /// returns its coverage floor — the caller then feeds it exactly
+    /// `(floor, meet]` up front, so the main walk can feed its ∆ inline
+    /// instead of deferring the whole ∆ to the full-span fallback (which
+    /// double-walks the DAG). `None` = no pre-feed needed or possible.
+    fn pre_gap_floor(
+        &self,
+        _lca: &crate::VersionVector,
+        _meet: &crate::VersionVector,
+    ) -> Option<crate::VersionVector> {
+        None
+    }
+    /// §flowstate vendor patch #21: advance the coverage watermark — the
+    /// caller guarantees every op of this container at-or-below `vv` has now
+    /// been fed (or was already covered). No-op for calculators without a
+    /// positional tracker.
+    fn note_covered(&mut self, _vv: &crate::VersionVector) {}
     fn apply_change(
         &mut self,
         oplog: &OpLog,
@@ -468,11 +791,14 @@ impl DiffCalculatorTrait for MapDiffCalculator {
         op: crate::op::RichOp,
         _vv: Option<&crate::VersionVector>,
     ) {
-        if matches!(self.current_mode, DiffMode::Checkout) {
-            // We need to use history cache anyway
-            return;
-        }
-
+        // §flowstate vendor patch (oom-leads #4): record in EVERY mode. The
+        // retained import calculator (patch #11) forces `Checkout`, which used
+        // to skip recording and push every registry-map diff onto the history
+        // cache — an O(all keys the container ever had) walk per import
+        // (28ms/remote-split on a 5k-paragraph doc, 147× a text import).
+        // `calculate_diff` only CONSUMES the recording when the ORIGIN mode
+        // proves the transition forward; retreats still use the history cache
+        // and ignore this (cleared per round by `start_tracking`).
         let map = op.raw_op().content.as_map().unwrap();
         let new_value = MapValue {
             value: map.value.clone(),
@@ -496,9 +822,98 @@ impl DiffCalculatorTrait for MapDiffCalculator {
         &mut self,
         _idx: ContainerIdx,
         oplog: &super::oplog::OpLog,
-        DiffCalcVersionInfo { from_vv, to_vv, .. }: DiffCalcVersionInfo,
+        DiffCalcVersionInfo {
+            from_vv,
+            to_vv,
+            origin_mode,
+            ..
+        }: DiffCalcVersionInfo,
         mut on_new_container: impl FnMut(&ContainerID),
     ) -> (InternalDiff, DiffMode) {
+        // §flowstate vendor patch (oom-leads #4): pick the CONTENT strategy by
+        // the ORIGIN mode. For `Linear`/`ImportGreaterUpdates` every span op is
+        // causally after the whole pre-state, so the span's per-key
+        // (lamport, peer)-max IS the CRDT winner and overwrite-apply (the
+        // forced `Checkout` law) is correct. `Import` (concurrent with the
+        // current version) and true `Checkout` retreats keep the history-cache
+        // walk. The RETURNED mode stays `self.current_mode` — the apply law is
+        // unchanged.
+        let use_recorded = matches!(
+            origin_mode,
+            DiffMode::Linear | DiffMode::ImportGreaterUpdates
+        ) && !matches!(self.current_mode, DiffMode::Linear | DiffMode::ImportGreaterUpdates);
+        if use_recorded {
+            let changed = std::mem::take(&mut self.changed);
+            let mode = self.current_mode;
+            self.current_mode = DiffMode::Checkout;
+            return (
+                InternalDiff::Map(MapDelta {
+                    updated: changed
+                        .into_iter()
+                        .map(|(key, value)| {
+                            let value = value.map(|v| {
+                                if let Some(LoroValue::Container(c)) = &v.value {
+                                    on_new_container(c);
+                                }
+                                v
+                            });
+                            (key, value)
+                        })
+                        .collect(),
+                }),
+                mode,
+            );
+        }
+        // §flowstate vendor patch (oom-leads #4): `Import` origin guarantees
+        // `from ⊆ to`, so a key's winner can only change if the SPAN carries an
+        // op for it — restrict the from/to winner comparison to the recorded
+        // span keys via per-key prefix queries. Same computation as the
+        // whole-container walk, minus every untouched key (registry maps hold
+        // thousands). True `Checkout` retreats keep the full walk: the
+        // retreated branch's keys have no span ops.
+        if matches!(origin_mode, DiffMode::Import)
+            && matches!(self.current_mode, DiffMode::Checkout | DiffMode::Import)
+        {
+            let recorded = std::mem::take(&mut self.changed);
+            self.current_mode = DiffMode::Checkout;
+            return oplog.with_history_cache(|h| {
+                let checkout_index = &h.get_checkout_index().map;
+                let mut updated =
+                    FxHashMap::with_capacity_and_hasher(recorded.len(), Default::default());
+                for (key, _) in recorded {
+                    let peek_from = checkout_index.get_container_key_latest_op_at_vv(
+                        self.container_idx,
+                        &key,
+                        from_vv,
+                        oplog,
+                    );
+                    let peek_to = checkout_index.get_container_key_latest_op_at_vv(
+                        self.container_idx,
+                        &key,
+                        to_vv,
+                        oplog,
+                    );
+                    let changed_value = match (&peek_from, &peek_to) {
+                        (Some(a), Some(b)) if a.value == b.value => continue,
+                        (None, None) => continue,
+                        _ => peek_to,
+                    };
+                    let value = changed_value.map(|v| {
+                        let value = v.value.clone();
+                        if let Some(LoroValue::Container(c)) = &value {
+                            on_new_container(c);
+                        }
+                        MapValue {
+                            value,
+                            lamp: v.lamport,
+                            peer: v.peer,
+                        }
+                    });
+                    updated.insert(key, value);
+                }
+                (InternalDiff::Map(MapDelta { updated }), DiffMode::Checkout)
+            });
+        }
         match self.current_mode {
             DiffMode::Checkout | DiffMode::Import => oplog.with_history_cache(|h| {
                 let checkout_index = &h.get_checkout_index().map;
@@ -571,6 +986,9 @@ use rle::{HasLength as _, Sliceable};
 pub(crate) struct ListDiffCalculator {
     start_vv: VersionVector,
     tracker: Box<RichtextTracker>,
+    /// §flowstate vendor patch #21: per-container coverage watermark (see the
+    /// richtext calculator's `covered_vv`).
+    covered_vv: VersionVector,
 }
 
 impl ListDiffCalculator {
@@ -600,9 +1018,43 @@ impl DiffCalculatorTrait for ListDiffCalculator {
         if !vv.includes_vv(&self.start_vv) || !self.tracker.all_vv().includes_vv(vv) {
             *self.tracker = RichtextTracker::new_with_unknown();
             self.start_vv = vv.clone();
+            // §patch #21: everything at-or-below the rebuild point is frozen
+            // prefix — covered by construction.
+            self.covered_vv = vv.clone();
         }
 
         self.tracker.checkout(vv);
+    }
+
+    fn meet_clamp_floor(&self, meet: &crate::VersionVector) -> Option<crate::VersionVector> {
+        // §patch #21: positional tracker — fully clamp only when every common
+        // op up to the meet is provably tracked (no retain-offset holes);
+        // otherwise re-feed exactly the coverage gap.
+        if self.covered_vv.includes_vv(meet) {
+            None
+        } else {
+            Some(self.covered_vv.intersection(meet))
+        }
+    }
+
+    fn pre_gap_floor(
+        &self,
+        lca: &crate::VersionVector,
+        meet: &crate::VersionVector,
+    ) -> Option<crate::VersionVector> {
+        // Pre-feed only when this round will REUSE the tracker (same law as
+        // `start_tracking`) and common ops below the meet are missing.
+        let all_vv = self.tracker.all_vv();
+        if lca.includes_vv(&self.start_vv) && all_vv.includes_vv(lca) && !self.covered_vv.includes_vv(meet)
+        {
+            Some(self.covered_vv.intersection(meet))
+        } else {
+            None
+        }
+    }
+
+    fn note_covered(&mut self, vv: &crate::VersionVector) {
+        self.covered_vv.extend_to_include_vv(vv.iter());
     }
 
     fn apply_change(
@@ -779,6 +1231,14 @@ enum RichtextCalcMode {
         /// (op, end_pos)
         styles: Vec<(StyleOp, usize)>,
         start_vv: VersionVector,
+        /// §flowstate vendor patch #21: coverage watermark — every op of THIS
+        /// container at-or-below `covered_vv` is in the tracker (no holes).
+        /// The tracker's own `all_vv` cannot serve this purpose: it is seeded
+        /// with the whole-doc rebuild vv and only ever extended by this
+        /// container's fed ops, so comparing it against a whole-doc meet
+        /// (which advances with OTHER containers' ops) is permanently false.
+        /// Advanced by `note_covered` when a round's feed completes.
+        covered_vv: VersionVector,
     },
     Linear {
         diff: DeltaRope<RichtextStateChunk, ()>,
@@ -793,6 +1253,7 @@ impl RichtextDiffCalculator {
                 tracker: Box::new(RichtextTracker::new_with_unknown()),
                 styles: Vec::new(),
                 start_vv: VersionVector::new(),
+                covered_vv: VersionVector::new(),
             }),
         }
     }
@@ -836,16 +1297,69 @@ impl DiffCalculatorTrait for RichtextDiffCalculator {
                 tracker,
                 styles,
                 start_vv,
+                covered_vv,
             } => {
                 if !vv.includes_vv(start_vv) || !tracker.all_vv().includes_vv(vv) {
                     **tracker = RichtextTracker::new_with_unknown();
                     styles.clear();
                     *start_vv = vv.clone();
+                    // §patch #21: everything at-or-below the rebuild point is
+                    // frozen prefix — covered by construction.
+                    *covered_vv = vv.clone();
                 }
 
                 tracker.checkout(vv);
             }
             RichtextCalcMode::Linear { .. } => {}
+        }
+    }
+
+    fn meet_clamp_floor(&self, meet: &crate::VersionVector) -> Option<crate::VersionVector> {
+        // §patch #21: positional tracker — fully clamp only when every common
+        // op up to the meet is already tracked (no retain-offset holes);
+        // otherwise re-feed exactly the coverage gap. Linear mode rebuilds a
+        // throwaway delta from the full feed: never clamp.
+        match &*self.mode {
+            RichtextCalcMode::Crdt { covered_vv, .. } => {
+                if covered_vv.includes_vv(meet) {
+                    None
+                } else {
+                    Some(covered_vv.intersection(meet))
+                }
+            }
+            RichtextCalcMode::Linear { .. } => Some(crate::VersionVector::new()),
+        }
+    }
+
+    fn pre_gap_floor(
+        &self,
+        lca: &crate::VersionVector,
+        meet: &crate::VersionVector,
+    ) -> Option<crate::VersionVector> {
+        // Pre-feed only when this round will REUSE the tracker (same law as
+        // `start_tracking`) and common ops below the meet are missing.
+        match &*self.mode {
+            RichtextCalcMode::Crdt {
+                tracker,
+                start_vv,
+                covered_vv,
+                ..
+            } => {
+                let all_vv = tracker.all_vv();
+                if lca.includes_vv(start_vv) && all_vv.includes_vv(lca) && !covered_vv.includes_vv(meet)
+                {
+                    Some(covered_vv.intersection(meet))
+                } else {
+                    None
+                }
+            }
+            RichtextCalcMode::Linear { .. } => None,
+        }
+    }
+
+    fn note_covered(&mut self, vv: &crate::VersionVector) {
+        if let RichtextCalcMode::Crdt { covered_vv, .. } = &mut *self.mode {
+            covered_vv.extend_to_include_vv(vv.iter());
         }
     }
 
@@ -954,6 +1468,7 @@ impl DiffCalculatorTrait for RichtextDiffCalculator {
                 tracker,
                 styles,
                 start_vv: _,
+                covered_vv: _,
             } => {
                 if let Some(vv) = vv {
                     tracker.checkout(vv);
@@ -1277,6 +1792,14 @@ impl DiffCalculatorTrait for MovableListDiffCalculator {
 
         self.list.tracker.checkout(vv);
         self.inner.current_mode = mode;
+    }
+
+    fn meet_clamp_floor(&self, _meet: &crate::VersionVector) -> Option<crate::VersionVector> {
+        // §patch #21: `changed_elements`/`move_id_to_elem_id` accumulate
+        // per-op element state during the feed that `calculate_diff` consumes;
+        // tracker coverage alone doesn't prove those complete under a clamp.
+        // Movable lists are not on flowstate's hot path — never clamp.
+        Some(crate::VersionVector::new())
     }
 
     fn apply_change(

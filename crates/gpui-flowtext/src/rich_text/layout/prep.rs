@@ -2,13 +2,22 @@ use std::sync::Arc;
 
 use crop::Rope;
 
+// §act-nine A9.3: prep validity is CONTENT-keyed — (style, version) via
+// `ParagraphCacheKey` plus the invisibility mode. There is deliberately NO
+// global `edit_generation` here: an edit to one paragraph must not invalidate
+// every other paragraph's prep. Correctness rests on version discipline —
+// every content change bumps `paragraph.version`, and structural rebuilds /
+// canonical installs carry surviving versions FORWARD (never reset to 0), so
+// a (style, version) pair is never reused for possibly-different content.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ParagraphPrepKey {
   pub(super) paragraph_key: ParagraphCacheKey,
   pub(super) invisibility_mode: bool,
-  pub(super) edit_generation: u64,
 }
 
+// Shaping/work validity inherits the content-keyed `prep_key` (generation-free
+// per §act-nine A9.3) and KEEPS `layout_generation`: theme/zoom/width clears
+// bump it deliberately, and those inputs are invisible to the per-paragraph key.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ParagraphLayoutWorkKey {
   pub(super) prep_key: ParagraphPrepKey,
@@ -19,6 +28,11 @@ pub(super) struct ParagraphLayoutWorkKey {
 #[derive(Clone, Debug)]
 pub(super) struct ParagraphPrep {
   pub(super) key: ParagraphPrepKey,
+  /// Stable identity of the paragraph this prep was built from — the install
+  /// gate and validity checks pin the prep to it, so a positional shift can
+  /// never install or serve one paragraph's prep for another that happens to
+  /// share a (style, version) pair.
+  pub(super) paragraph_id: ParagraphId,
   pub(super) paragraph_ix: usize,
   pub(super) paragraph_text: Arc<str>,
   pub(super) layout_runs: Arc<[TextRun]>,
@@ -32,7 +46,6 @@ pub(super) struct ParagraphPrep {
 pub(super) struct ParagraphPrepBatchRequest {
   pub(super) text: Rope,
   pub(super) theme: DocumentTheme,
-  pub(super) edit_generation: u64,
   pub(super) invisibility_mode: bool,
   pub(super) requested: usize,
   pub(super) paragraphs: Vec<ParagraphPrepSource>,
@@ -41,13 +54,13 @@ pub(super) struct ParagraphPrepBatchRequest {
 }
 
 pub(super) struct ParagraphPrepSource {
+  paragraph_id: ParagraphId,
   paragraph_ix: usize,
   paragraph: Paragraph,
   byte_range: Range<usize>,
 }
 
 pub(super) struct ParagraphPrepBatchResult {
-  pub(super) edit_generation: u64,
   pub(super) invisibility_mode: bool,
   pub(super) requested: usize,
   pub(super) completed: usize,
@@ -71,10 +84,10 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
     let Some(prep) = build_paragraph_prep_from_parts(
       &request.text,
       &request.theme,
+      source.paragraph_id,
       source.paragraph_ix,
       &source.paragraph,
       source.byte_range.clone(),
-      request.edit_generation,
       request.invisibility_mode,
     ) else {
       continue;
@@ -93,7 +106,6 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
     .collect::<Vec<_>>();
 
   ParagraphPrepBatchResult {
-    edit_generation: request.edit_generation,
     invisibility_mode: request.invisibility_mode,
     requested: request.requested,
     completed: preps.len(),
@@ -106,7 +118,6 @@ pub(super) fn build_paragraph_prep_batch(request: ParagraphPrepBatchRequest) -> 
 #[hotpath::measure]
 pub(super) fn paragraph_prep_batch_request(
   document: &DocumentProjection,
-  edit_generation: u64,
   invisibility_mode: bool,
   paragraphs: Vec<usize>,
   max_paragraphs: usize,
@@ -116,11 +127,13 @@ pub(super) fn paragraph_prep_batch_request(
   let paragraphs = paragraphs
     .into_iter()
     .filter_map(|paragraph_ix| {
+      let paragraph_id = document.ids.paragraph_ids.get(paragraph_ix).copied()?;
       document
         .paragraphs
         .get(paragraph_ix)
         .cloned()
         .map(|paragraph| ParagraphPrepSource {
+          paragraph_id,
           paragraph_ix,
           byte_range: paragraph_byte_range(document, paragraph_ix),
           paragraph,
@@ -130,7 +143,6 @@ pub(super) fn paragraph_prep_batch_request(
   ParagraphPrepBatchRequest {
     text: document.text.clone(),
     theme: document.theme.clone(),
-    edit_generation,
     invisibility_mode,
     requested,
     paragraphs,
@@ -139,21 +151,42 @@ pub(super) fn paragraph_prep_batch_request(
   }
 }
 
+thread_local! {
+  // §act-eleven C4 tripwire: counts full prep BUILDS since the last reset.
+  // Equality tests prove the content-keyed caches are CORRECT; this counter
+  // proves they are EFFECTIVE — a regression that quietly reverts to
+  // whole-viewport re-prep per keystroke (the T8.12 "landed but inert" class)
+  // fails the bounded-recompute test instead of surfacing as a perf mystery.
+  static PREP_BUILD_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Prep builds since the last [`reset_prep_build_count`]. Test observability.
+#[allow(dead_code, reason = "consumed by the in-crate C4 tripwire tests; unused in non-test builds")]
+#[must_use]
+pub fn prep_build_count() -> u64 {
+  PREP_BUILD_COUNT.with(std::cell::Cell::get)
+}
+
+#[allow(dead_code, reason = "consumed by the in-crate C4 tripwire tests; unused in non-test builds")]
+pub fn reset_prep_build_count() {
+  PREP_BUILD_COUNT.with(|count| count.set(0));
+}
+
 #[hotpath::measure]
-fn build_paragraph_prep_from_parts(
+pub(super) fn build_paragraph_prep_from_parts(
   text: &Rope,
   theme: &DocumentTheme,
+  paragraph_id: ParagraphId,
   paragraph_ix: usize,
   paragraph: &Paragraph,
   paragraph_byte_range: Range<usize>,
-  edit_generation: u64,
   invisibility_mode: bool,
 ) -> Option<ParagraphPrep> {
+  PREP_BUILD_COUNT.with(|count| count.set(count.get() + 1));
   let source_len = paragraph_text_len(paragraph);
   let key = ParagraphPrepKey {
     paragraph_key: paragraph_cache_key_for_paragraph(paragraph),
     invisibility_mode,
-    edit_generation,
   };
 
   if invisibility_mode && matches!(paragraph.style, ParagraphStyle::Normal) {
@@ -162,6 +195,7 @@ fn build_paragraph_prep_from_parts(
       // project, so it is hidden rather than rendered as a blank visible line.
       return Some(ParagraphPrep {
         key,
+        paragraph_id,
         paragraph_ix,
         paragraph_text: Arc::from(""),
         layout_runs: Arc::from(Vec::<TextRun>::new().into_boxed_slice()),
@@ -176,6 +210,7 @@ fn build_paragraph_prep_from_parts(
     let wrap_break_ends = wrap_break_ends(&text);
     return Some(ParagraphPrep {
       key,
+      paragraph_id,
       paragraph_ix,
       paragraph_text: Arc::from(text),
       layout_runs: Arc::from(runs.into_boxed_slice()),
@@ -190,6 +225,7 @@ fn build_paragraph_prep_from_parts(
   if invisibility_mode && !paragraph_is_visible_for_theme(theme, paragraph) {
     return Some(ParagraphPrep {
       key,
+      paragraph_id,
       paragraph_ix,
       paragraph_text: Arc::from(""),
       layout_runs: Arc::from(Vec::<TextRun>::new().into_boxed_slice()),
@@ -205,6 +241,7 @@ fn build_paragraph_prep_from_parts(
   let wrap_break_ends = wrap_break_ends(&text);
   Some(ParagraphPrep {
     key,
+    paragraph_id,
     paragraph_ix,
     paragraph_text: Arc::from(text),
     layout_runs: Arc::from(paragraph.runs.clone().into_boxed_slice()),
@@ -220,18 +257,18 @@ fn build_paragraph_prep_from_parts(
 pub(super) fn build_paragraph_prep(
   document: &DocumentProjection,
   paragraph_ix: usize,
-  edit_generation: u64,
   invisibility_mode: bool,
 ) -> Option<ParagraphPrep> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
+  let paragraph_id = document.ids.paragraph_ids.get(paragraph_ix).copied()?;
   let paragraph_byte_range = paragraph_byte_range(document, paragraph_ix);
   build_paragraph_prep_from_parts(
     &document.text,
     &document.theme,
+    paragraph_id,
     paragraph_ix,
     paragraph,
     paragraph_byte_range,
-    edit_generation,
     invisibility_mode,
   )
 }
@@ -329,9 +366,10 @@ mod prep_tests {
       }],
     );
 
-    let prep = build_paragraph_prep(&document, 0, 7, false).expect("paragraph prep");
+    let prep = build_paragraph_prep(&document, 0, false).expect("paragraph prep");
 
-    assert_eq!(prep.key.edit_generation, 7);
+    assert!(!prep.key.invisibility_mode);
+    assert_eq!(prep.paragraph_id, document.ids.paragraph_ids[0]);
     assert_eq!(prep.paragraph_text.as_ref(), "alpha beta/gamma");
     assert_eq!(prep.layout_runs.len(), 1);
     assert!(prep.visible);
@@ -365,7 +403,7 @@ mod prep_tests {
       }],
     );
 
-    let prep = build_paragraph_prep(&document, 0, 3, true).expect("paragraph prep");
+    let prep = build_paragraph_prep(&document, 0, true).expect("paragraph prep");
 
     assert!(prep.visible);
     assert_eq!(prep.paragraph_text.as_ref(), "cite spoken");
@@ -384,7 +422,7 @@ mod prep_tests {
       }],
     );
 
-    let prep = build_paragraph_prep(&document, 0, 1, true).expect("paragraph prep");
+    let prep = build_paragraph_prep(&document, 0, true).expect("paragraph prep");
 
     assert!(!prep.visible);
     assert_eq!(prep.paragraph_text.as_ref(), "");
@@ -411,7 +449,7 @@ mod prep_tests {
       ],
     );
 
-    let result = build_paragraph_prep_batch(paragraph_prep_batch_request(&document, 9, false, vec![0, 1, 2], 16, 1));
+    let result = build_paragraph_prep_batch(paragraph_prep_batch_request(&document, false, vec![0, 1, 2], 16, 1));
 
     assert_eq!(result.completed, 1);
     assert_eq!(result.deferred_paragraphs, vec![1, 2]);
@@ -420,7 +458,7 @@ mod prep_tests {
   #[test]
   #[hotpath::measure]
   fn prep_uses_offset_index_range_instead_of_stale_paragraph_field() {
-    let mut document = document_from_input(
+    let document = document_from_input(
       DocumentTheme::default(),
       vec![
         InputParagraph {
@@ -433,11 +471,8 @@ mod prep_tests {
         },
       ],
     );
-    if let Some(paragraph) = paragraphs_mut(&mut document).get_mut(1) {
-      paragraph.byte_range = 6..19;
-    }
 
-    let prep = build_paragraph_prep(&document, 1, 1, false).expect("paragraph prep");
+    let prep = build_paragraph_prep(&document, 1, false).expect("paragraph prep");
 
     assert_eq!(prep.paragraph_text.as_ref(), "Kepe et al. ‘23");
   }

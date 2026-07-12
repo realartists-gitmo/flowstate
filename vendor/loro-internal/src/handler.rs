@@ -1476,6 +1476,76 @@ impl TextHandler {
         }
     }
 
+    /// §act-eleven A11.10 (flowstate vendor patch): the streaming twin of
+    /// [`Self::get_richtext_value`] — visits every text span as
+    /// `(text, styles)` without allocating the intermediate delta
+    /// `Vec<LoroValue>` (or, downstream in the `loro` facade, a second
+    /// `Vec<TextDelta>` copy of every string). Spans arrive UNMERGED, one per
+    /// text chunk; delta-shaped consumers merge adjacent spans whose visible
+    /// attributes are equal ([`StyleMeta::visible_eq`]) — the exact merge law
+    /// `get_richtext_value` applies.
+    pub fn for_each_richtext_span(&self, f: &mut dyn FnMut(&str, &crate::delta::StyleMeta)) {
+        match &self.inner {
+            MaybeDetached::Detached(t) => {
+                let t = t.lock();
+                t.value.for_each_richtext_span(f);
+            }
+            MaybeDetached::Attached(a) => a.with_state(|state| {
+                state
+                    .as_richtext_state_mut()
+                    .unwrap()
+                    .for_each_richtext_span(f)
+            }),
+        }
+    }
+
+    /// FLOWSTATE vendor patch #26 (§A13.4.2): batch cursor resolution — ONE
+    /// state acquisition for N `(event_index, side)` queries instead of one
+    /// lock + tree setup per call (a 5k-paragraph search reindex made ~21k
+    /// `get_cursor` calls; the per-call overhead dominated). Per-query
+    /// semantics are identical to `get_cursor` (event-index flavor).
+    pub fn get_cursors_batch(&self, queries: &[(usize, Side)]) -> Vec<Option<Cursor>> {
+        match &self.inner {
+            MaybeDetached::Detached(_) => queries.iter().map(|_| None).collect(),
+            MaybeDetached::Attached(a) => {
+                let container = self.id();
+                a.with_state(|s| {
+                    let s = s.as_richtext_state_mut().unwrap();
+                    let len = s.len_event();
+                    queries
+                        .iter()
+                        .map(|&(index, side)| {
+                            if len == 0 {
+                                return Some(Cursor {
+                                    id: None,
+                                    container: container.clone(),
+                                    side: if side == Side::Middle { Side::Left } else { side },
+                                    origin_pos: 0,
+                                });
+                            }
+                            if len <= index {
+                                return Some(Cursor {
+                                    id: None,
+                                    container: container.clone(),
+                                    side: Side::Right,
+                                    origin_pos: len,
+                                });
+                            }
+                            let id = s.get_stable_position(index, true)?;
+                            let origin_pos = s.event_index_to_unicode_index(index);
+                            Some(Cursor {
+                                id: Some(id),
+                                container: container.clone(),
+                                side,
+                                origin_pos,
+                            })
+                        })
+                        .collect()
+                })
+            }
+        }
+    }
+
     pub fn is_empty(&self) -> bool {
         match &self.inner {
             MaybeDetached::Detached(t) => t.lock().value.is_empty(),
@@ -1646,12 +1716,11 @@ impl TextHandler {
             }
             MaybeDetached::Attached(a) if a.has_decoded_state() || pos_type == PosType::Entity => a
                 .with_state(|state| {
-                    let state = state.as_richtext_state_mut().unwrap();
-                    let event_pos = match pos_type {
-                        PosType::Event => pos,
-                        _ => state.index_to_event_index(pos, pos_type),
-                    };
-                    state.get_char_by_event_index(event_pos)
+                    // §perf-heaven T1: `char_at_pos` answers a unicode `pos` from
+                    // the Src loader without forcing the `Src -> Dst` build, so the
+                    // projection's object-anchor validation keeps object flows on
+                    // the cold-decode fast path (Dst path is the exact prior code).
+                    state.as_richtext_state_mut().unwrap().char_at_pos(pos, pos_type)
                 }),
             MaybeDetached::Attached(a) => {
                 return text_char_at(a.get_value().as_string().unwrap(), pos, pos_type);

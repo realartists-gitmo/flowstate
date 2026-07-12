@@ -535,4 +535,33 @@ pub trait LocalWriteAuthority: Send + Sync {
   fn drain_projection_stream(&self) -> Result<Vec<ProjectionStreamItem>, WriteRejected>;
   /// Clone the canonical projection (attach + self-heal fallback).
   fn canonical_projection(&self) -> Result<DocumentProjection, WriteRejected>;
+  /// Re-anchor a selection across a remote projection patch using CRDT cursors:
+  /// `selection` and `before` are the editor's PRE-patch selection and projection,
+  /// `base_frontier` its pre-patch frontier. Returns the equivalent selection in
+  /// the current canonical state (so a concurrent insert/delete before the caret
+  /// repositions it), or `None` when it can't be resolved — the editor then falls
+  /// back to clamping. Default `None` keeps non-collab authorities trivial.
+  fn rebase_selection(
+    &self,
+    selection: &EditorSelection,
+    before: &DocumentProjection,
+    base_frontier: &[u8],
+  ) -> Option<EditorSelection> {
+    let _ = (selection, before, base_frontier);
+    None
+  }
+  /// FAST-path companion to [`Self::rebase_selection`]: encode the selection's
+  /// endpoints as CRDT cursors against the current (synced) state. The editor
+  /// stores these at synced moments and, when the caret hasn't moved, resolves
+  /// them via [`Self::resolve_selection_anchor`] after a remote patch — O(log n),
+  /// no `fork_at`. `(head_cursor, anchor_cursor)`.
+  fn encode_selection_anchor(&self, selection: &EditorSelection) -> Option<(Vec<u8>, Vec<u8>)> {
+    let _ = selection;
+    None
+  }
+  /// Resolve stored caret cursors to offsets in the current state.
+  fn resolve_selection_anchor(&self, head_cursor: &[u8], anchor_cursor: &[u8]) -> Option<(DocumentOffset, DocumentOffset)> {
+    let _ = (head_cursor, anchor_cursor);
+    None
+  }
 }

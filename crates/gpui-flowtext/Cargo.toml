@@ -37,7 +37,9 @@ cosmic-text = { workspace = true }
 
 [dev-dependencies]
 flowstate-collab = { path = "../flowstate-collab" }
+flowstate-document.workspace = true
 gpui = { workspace = true, features = ["test-support"] }
+loro = "1.13"
 
 [features]
 hotpath = ["hotpath/hotpath"]

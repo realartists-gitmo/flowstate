@@ -100,7 +100,6 @@ fn default_table_cell_paragraph() -> TableCellParagraph {
   TableCellParagraph {
     paragraph: Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..0,
       runs: Vec::new(),
       version: 0,
     },
@@ -157,12 +156,10 @@ pub(super) fn split_table_cell_paragraph_at(cell: &mut TableCell, paragraph_bloc
   paragraph.text.truncate(byte);
   let (left_runs, right_runs) = split_runs_at(&paragraph.paragraph.runs, byte);
   paragraph.paragraph.runs = left_runs;
-  paragraph.paragraph.byte_range = 0..paragraph.text.len();
   paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
   let new_paragraph = TableCellParagraph {
     paragraph: Paragraph {
       style: paragraph.paragraph.style,
-      byte_range: 0..right_text.len(),
       runs: right_runs,
       version: paragraph.paragraph.version,
     },
@@ -202,7 +199,6 @@ pub(super) fn insert_table_cell_paragraphs_at(
   paragraph.text.truncate(byte);
   let (left_runs, right_runs) = split_runs_at(&paragraph.paragraph.runs, byte);
   paragraph.paragraph.runs = left_runs;
-  paragraph.paragraph.byte_range = 0..paragraph.text.len();
   paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
 
   let mut inserted = paragraphs
@@ -215,7 +211,6 @@ pub(super) fn insert_table_cell_paragraphs_at(
   let mut paragraph_runs = std::mem::take(&mut paragraph.paragraph.runs);
   paragraph_runs.extend(first.paragraph.runs);
   paragraph.paragraph.runs = merge_adjacent_runs(paragraph_runs);
-  paragraph.paragraph.byte_range = 0..paragraph.text.len();
   paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
   let mut caret_block_ix = paragraph_ix;
   let mut caret_byte = first_insert_start + first.text.len();
@@ -235,7 +230,6 @@ pub(super) fn insert_table_cell_paragraphs_at(
   let mut caret_runs = std::mem::take(&mut caret_paragraph.paragraph.runs);
   caret_runs.extend(right_runs);
   caret_paragraph.paragraph.runs = merge_adjacent_runs(caret_runs);
-  caret_paragraph.paragraph.byte_range = 0..caret_paragraph.text.len();
   caret_paragraph.paragraph.version = caret_paragraph.paragraph.version.wrapping_add(1);
   Some((caret_block_ix, caret_byte))
 }
@@ -255,7 +249,6 @@ pub(super) fn merge_table_cell_paragraph_with_previous(cell: &mut TableCell, par
   let mut runs = std::mem::take(&mut previous.paragraph.runs);
   runs.extend(current.paragraph.runs);
   previous.paragraph.runs = merge_adjacent_runs(runs);
-  previous.paragraph.byte_range = 0..previous.text.len();
   previous.paragraph.version = previous.paragraph.version.wrapping_add(1);
   Some((previous_ix, caret))
 }
@@ -275,7 +268,6 @@ fn merge_table_cell_paragraph_with_next(cell: &mut TableCell, paragraph_block_ix
   let mut runs = std::mem::take(&mut current.paragraph.runs);
   runs.extend(next.paragraph.runs);
   current.paragraph.runs = merge_adjacent_runs(runs);
-  current.paragraph.byte_range = 0..current.text.len();
   current.paragraph.version = current.paragraph.version.wrapping_add(1);
   Some((current_ix, caret))
 }
@@ -306,7 +298,6 @@ fn insert_text_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph, 
   left.push(TextRun { len: insert_len, styles });
   left.extend(right);
   cell_paragraph.paragraph.runs = merge_adjacent_runs(left);
-  cell_paragraph.paragraph.byte_range = 0..cell_paragraph.text.len();
   cell_paragraph.paragraph.version = cell_paragraph.paragraph.version.wrapping_add(1);
 }
 
@@ -342,7 +333,6 @@ fn delete_range_in_table_cell_paragraph(cell_paragraph: &mut TableCellParagraph,
     }
   }
   cell_paragraph.paragraph.runs = merge_adjacent_runs(output);
-  cell_paragraph.paragraph.byte_range = 0..cell_paragraph.text.len();
   cell_paragraph.paragraph.version = cell_paragraph.paragraph.version.wrapping_add(1);
 }
 

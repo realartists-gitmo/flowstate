@@ -96,7 +96,6 @@ pub(super) fn invisibility_projected_document(document: &DocumentProjection, par
 
   let paragraph = Paragraph {
     style: ParagraphStyle::Normal,
-    byte_range: 0..text.len(),
     runs,
     // Give the projected paragraph a distinct cache key from the source
     // paragraph so invisible-mode layout cannot reuse a full-text layout.

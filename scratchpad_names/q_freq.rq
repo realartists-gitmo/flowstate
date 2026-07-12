@@ -1,0 +1,4 @@
+SELECT ?label (COUNT(?p) AS ?c) WHERE {
+  ?p wdt:P735 ?gn .
+  ?gn rdfs:label ?label . FILTER(LANG(?label) = "en")
+} GROUP BY ?label ORDER BY DESC(?c) LIMIT 30000

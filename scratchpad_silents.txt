@@ -1,0 +1,893 @@
+total rows 1416  silents 176
+taxonomy: {'omission': 16, 'corruption/disjoint': 146, 'over-extract': 14}
+
+
+===== corruption/disjoint  (146) =====
+
+[674328] miss=['atkinson', 'chhetri', 'pielke', 'shellenberger'] extra=['arkinson']
+  GOLD : [('Atkinson', 'Rob Atkinson'), ('Chhetri', 'Netra Chhetri'), ('Freed', 'Joshua Freed'), ('Galiana', 'Isabel Galiana'), ('Green', 'Christopher Green'), ('Hayward', 'Steven Hayward'), ('Jenkins', 'Jesse Jenkins'), ('Malone', 'Elizabeth Malone'), ('Nordhaus', 'Ted Nordhaus'), ('Pielke', 'Roger Pielke Jr.'), ('Prins', 'Gwyn Prins'), ('Rayner', 'Steve Rayner'), ('Sarewitz', 'Daniel Sarewitz'), ('Shellenberger', 'Michael Shellenberger')]
+  MODEL: [('Arkinson', 'Rob Atkinson'), ('Freed', 'Joshua Freed'), ('Galiana', 'Elizabeth Galiana'), ('Green', 'Christopher Green'), ('Hayward', 'Steven Hayward'), ('Jenkins', 'Jesse Jenkins'), ('Malone', 'Elizabeth Malone'), ('Nordhaus', 'Ted Nordhaus'), ('Prins', 'Gwyn Prins'), ('Rayner', 'Steve Rayner'), ('Sarewitz', 'Daniel Sarewitz')]
+  SRC  : Arkinson et al. 11 Dr. Rob Atkinson, President, Information Technology and Innovation Foundation Professor Netra Chhetri, School of Geographical Sciences and Consortium for Science, Policy, and Outcomes, Arizona State University Joshua Free
+
+[1017605] miss=['berardi'] extra=['bifo']
+  GOLD : [('Berardi', 'Franco “Bifo” Berardi')]
+  MODEL: [('Bifo', 'Franco “Bifo” Berardi')]
+  SRC  : Bifo 11 (Franco “Bifo” Berardi, Italian post-autonomist activist, artist, and theorist, professor of Social History of the Media at the Accademia di Brera, “After the Future” pp 108-111)
+In the old time of industrial capitalism, the working
+
+[1061424] miss=['rosario'] extra=['sanchez']
+  GOLD : [('Rosario', 'Sanchez Rosario'), ('Eckstein', 'Gabriel Eckstein')]
+  MODEL: [('Sanchez', 'Sanchez Rosario'), ('Eckstein', 'Gabriel Eckstein')]
+  SRC  : Sanchez & Eckstein 20 (Sanchez Rosario, Texas Water Resources Institute, Texas A&M University, Gabriel Eckstein, School of Law, Texas A&M University, “Groundwater Management in the Borderlands of Mexico and Texas: The Beauty of the Unknown,
+
+[1306599] miss=['kim'] extra=['kimassociate']
+  GOLD : [('Kim', 'Duyeon Kim')]
+  MODEL: [('Kim-associate', 'Duyeon Kim-associate')]
+  SRC  : Kim 8/31 (Duyeon Kim-associate in the Nuclear Policy Program and Asia Program at the Carnegie Endowment for International Peace, “The Inter-Korean Deal: Defusing Recent Tensions, Carnegie Endowment for International Peace”, http://carnegiee
+
+[1311954] miss=['magnet'] extra=['amielle']
+  GOLD : [('Dubrofsky', 'Rachel E. Dubrofsky'), ('Magnet', 'Shoshana Amielle Magnet')]
+  MODEL: [('Dubrofsky', 'Rachel E. Dubrofsky'), ('Amielle', 'Shoshana Amielle')]
+  SRC  : Dubrofsky and Magnet, PhD in comm and associate professor at the University of Southern Florida, PhD and associate professor of feminist and gender studies at Ottowa,15 [Rachel E. and Shoshana Amielle, FEMINIST SURVEILLANCE STUDIES: Critica
+
+[2181701] miss=['carter', 'crawford', 'quesenbery', 'singh', 'wang', 'warren', 'wright'] extra=['allegra', 'andre', 'carolyn', 'joshua', 'norman', 'terry', 'william']
+  GOLD : [('Bishop', 'Michelle Bishop'), ('Carter', 'C Nick Carter'), ('Brooks', 'W William Brooks'), ('Chapman', 'Allegra Chapman'), ('Crawford', 'C Cheryl Crawford'), ('Douglas', 'A Joshua Douglas'), ('Folwer', 'Anthony Folwer'), ('Fung', 'Archon Fung'), ('Galston', 'A William Galston'), ('Herrle', 'Amber Herrle'), ('Hines', 'Cindy Hines'), ('Kumar', 'T Maria Kumar'), ('Lukensmeyer', 'J Carolyn Lukensmeyer'), ('Mann', 'E Thomas Mann'), ('Minnis', 'A Terry Minnis'), ('Nelson', 'Janai Nelson'), ('Nyhart', 'Nick Nyhart'), ('Ornstein', 'J Norman Ornstein'), ('Perry', 'M Andre Perry'), ('Quesenbery', 'Whitney Quesenbery'), ('Singh', 'P Shane Singh'), ('Wang', 'Tova Wang'), ('Warren', 'Dorian Warren'), ('Wright', 'Brenda Wright')]
+  MODEL: [('Bishop', 'Michelle Bishop'), ('Brooks', 'C Nick. Brooks'), ('Chapman', 'W William. Chapman'), ('Allegra', 'Allegra'), ('Douglas', 'C. Cheryl Douglas'), ('Joshua', 'A Joshua'), ('Folwer', 'Folwer'), ('Fung', 'Anthony Fung'), ('Galston', 'Archon Galston'), ('William', 'A William'), ('Herrle', 'Herrle'), ('Hines', 'Amber Hines'), ('Hines', 'Cindy Hines'), ('Kumar', 'Kumar'), ('Lukensmeyer', 'T Maria. Lukensmeyer'), ('Carolyn', 'J Carolyn'), ('Mann', 'Mann'), ('Minnis', 'E Thomas Minnis'), ('Terry', 'A Terry'), ('Nelson', 'Nelson'), ('Nyhart', 'Janai Nyhart'), ('Ornstein', 'Nick. Ornstein'), ('Norman', 'J Norman'), ('Perry', 'Perry'), ('Andre', 'M Andre')]
+  SRC  : Bishop et al 2: Bishop, Michelle. Carter, C Nick. Brooks, W William. Chapman, Allegra. Crawford, C Cheryl. Douglas, A Joshua. Folwer, Anthony. Fung, Archon. Galston, A William. Herrle, Amber. Hines, Cindy. Kumar, T Maria. Lukensmeyer, J Car
+
+[2570619] miss=['oberg'] extra=['university']
+  GOLD : [('Nordin', 'Astrid H.M. Nordin'), ('Öberg', 'Dan Öberg')]
+  MODEL: [('University', 'Astrid H.M. Lancaster University'), ('Nordin', 'Dan Nordin')]
+  SRC  : Nordin and Öberg 15 (Astrid H.M. Lancaster University, UK, and Dan, Swedish Defence College, Sweden, “Targeting the Ontology of War: From Clausewitz to Baudrillard”, Millennium: Journal of International Studies, 2015, Vol. 43(2) 392–410) DB
+
+[3750634] miss=['c'] extra=['nadia']
+  GOLD : [('C', 'Nadia C')]
+  MODEL: [('Nadia', 'Nadia C')]
+  SRC  : Nadia C ND(Nadia C – CrimeThinc Ex-Worker’s Collective – “Your Politics Are Boring As Fuck” from CWC Collective Texts, accessed 2 September 2016, http://www.crimethinc.com/texts/selected/asfuck.php cVs)
+
+[3844950] miss=['kwokchuen'] extra=['kwok']
+  GOLD : [('Kwok-chuen', 'Kwok-chuen')]
+  MODEL: [('Kwok', 'Kwok-chuen')]
+  SRC  : Kwok-chuen 13: Honorary Senior Research Fellow of the School of Economics & Finance, University of Hong Kong Former Government Economist of the Hong Kong SAR Government, 2004 to 2008, 04/24/2013, “Difficulties and Impediments in the U.S.-Ch
+
+[90001217] miss=['belkin', 'svetlic'] extra=['sebastien']
+  GOLD : [('Wohlforth', 'William Wohlforth'), ('Saharia', 'Amy Mason Saharia'), ('Nordhaus', 'Ted Nordhaus'), ('Gattie', 'Gattie'), ('Porter', 'Patrick Porter'), ('Svetlič', 'Rok Svetlič'), ('Roblin', 'Sebastien Roblin'), ('Krugman', 'Paul Krugman'), ('Dower', 'John Dower'), ('Devins', 'Neal Devins'), ('Belkin', 'Paul Belkin'), ('Klieman', 'Aharon Klieman'), ('Kao', 'Grace Y. Kao'), ('Sánchez', 'Dr Joan-Pau Sánchez'), ('Larsen', 'Anne Marie Engtoft Larsen'), ('Oluseyi', 'Temilola Oluseyi'), ('Carlson', 'Elizabeth Carlson'), ('Levy', 'Richard E. Levy'), ('Dean', 'Jodi Dean'), ('Hartung', 'Hartung'), ('Mank', 'Mank'), ('Managi', 'Shunsuke Managi'), ('Freedberg', 'Sydney J. Freedberg Jr.'), ('Nojeim', 'Greg Nojeim'), ('Collins', 'Patricia Hill Collins'), ('Rapp-Hooper', 'Mira Rapp-Hooper'), ('Kentikelenis', 'Alexander Kentikelenis'), ('Bradford', 'Anu H. Bradford'), ('Kronsell', 'Annica Kronsell'), ('Neukermans', 'Armand Neukermans'), ('Wilder', 'Gary Wilder'), ('Itzkowitz', 'Kenneth Itzkowitz'), ('Unegbu', 'Cindy C. Unegbu')]
+  MODEL: [('Wohlforth', 'William Wohlforth'), ('Saharia', 'Amy Mason Saharia'), ('Nordhaus', 'Ted Nordhaus'), ('Gattie', 'Gattie'), ('Porter', 'Patrick Porter'), ('Sebastien', 'Rok Sebastien'), ('Roblin', 'Sebastien Roblin'), ('Krugman', 'Paul Krugman'), ('Kao', 'Grace Y. Kao'), ('Sánchez', 'Dr Joan-Pau Sánchez'), ('Larsen', 'Anne Marie Engtoft Larsen'), ('Oluseyi', 'Temilola Oluseyi'), ('Carlson', 'Elizabeth Carlson'), ('Levy', 'Richard E. Levy'), ('Dean', 'Jodi Dean'), ('Hartung', 'Hartung'), ('Mank', 'Mank'), ('Managi', 'Shunsuke Managi'), ('Freedberg', 'Sydney J. Freedberg Jr.'), ('Nojeim', 'Greg Nojeim'), ('Collins', 'Patricia Hill Collins'), ('Rapp-Hooper', 'Mira Rapp-Hooper'), ('Kentikelenis', 'Alexander Kentikelenis'), ('Bradford', 'Anu H. Bradford'), ('Kronsell', 'Annica Kronsell'), ('Neukermans', 'Armand Neukermans'), ('Wilder', 'Gary Wilder'), ('Itzkowitz', 'Kenneth Itzkowitz'), ('Unegbu', 'Cindy C. Unegbu'), ('Dower', 'John Dower'), ('Devins', 'Neal Devins'), ('Klieman', 'Aharon Klieman')]
+  SRC  : Wohlforth et al 09 (William Wohlforth; Amy Mason Saharia; Ted Nordhaus; Gattie; Patrick Porter; Rok Svetlič; Sebastien Roblin, Journalist focused international security and military history with more than 500 published articles at The Natio
+
+[90001219] miss=['harsanyi', 'krulwich', 'leidig'] extra=['harsany', 'krulwic', 'leidi']
+  GOLD : [('Lo', 'Alex Lo'), ('Tritten', 'Travis Tritten'), ('Tellis', 'Tellis'), ('Passavant', 'Paul Passavant'), ('Serratos', 'Isaac Serratos'), ('Rothman', 'David J. Rothman'), ('Cullen', 'John Cullen'), ('Elek', 'Elvira Elek'), ('Nakagawa', 'Roy Nakagawa'), ('Jaffer', 'Jamil N. Jaffer'), ('Engstrom', 'Engstrom'), ('Wassener', 'Bettina Wassener'), ('O’Doherty', 'Kieran O’Doherty'), ('Leidig', 'Eviane Leidig'), ('Krulwich', 'Robert Krulwich'), ('Harsanyi', 'John Harsanyi'), ('Chapman', 'Emilee Booth Chapman'), ('Narducci', 'Lucas Narducci'), ('Beres', 'Louis Beres'), ('Gorka', 'Sebastian L.V. Gorka'), ('Woolhandler', 'Steffie Woolhandler'), ('Swenson', 'David Swenson'), ('Alpher', 'Yossi Alpher'), ('Quashie', 'Kevin Everod Quashie'), ('Madhav', 'Nita Madhav'), ('Breetz', 'Hanna L. Breetz'), ('Redecker', 'Eva von Redecker'), ('Hudson', 'Hudson'), ('Hanley', 'Steve Hanley'), ('Miao', 'Hui Miao'), ('Schulze', 'William D. Schulze'), ('Cooper', 'Zack Cooper'), ('Hyman', 'David Hyman'), ('Wuthnow', 'Joel Wuthnow'), ('Johnson', 'Christopher Keith Johnson')]
+  MODEL: [('Lo', 'Alex Lo'), ('Tritten', 'Travis Tritten'), ('Tellis', 'Tellis'), ('Passavant', 'Paul Passavant'), ('Serratos', 'Isaac Serratos'), ('Rothman', 'David J. Rothman'), ('Cullen', 'John Cullen'), ('Elek', 'Elvira Elek'), ('Nakagawa', 'Roy Nakagawa'), ('Jaffer', 'Jamil N. Jaffer'), ('Engstrom', 'Engstrom'), ('Wassener', 'Bettina Wassener'), ('O’Doherty', 'Kieran O’Doherty'), ('Leidi', 'Eviane Leidig'), ('Krulwic', 'Robert Krulwich'), ('Harsany', 'John Harsanyi'), ('Chapman', 'Emilee Booth Chapman'), ('Narducci', 'Lucas Narducci'), ('Beres', 'Louis Beres'), ('Gorka', 'Sebastian L.V. Gorka'), ('Woolhandler', 'Steffie Woolhandler'), ('Swenson', 'David Swenson'), ('Alpher', 'Yossi Alpher'), ('Madhav', 'Nita Madhav'), ('Breetz', 'Hanna L. Breetz'), ('Redecker', 'Eva von Redecker'), ('Hudson', 'Hudson'), ('Hanley', 'Steve Hanley'), ('Miao', 'Hui Miao'), ('Schulze', 'William D. Schulze'), ('Cooper', 'Zack Cooper'), ('Hyman', 'David Hyman'), ('Wuthnow', 'Joel Wuthnow'), ('Johnson', 'Christopher Keith Johnson'), ('Quashie', 'Kevin Everod Quashie')]
+  SRC  : Lo et al 14 (Alex Lo; Travis Tritten, staff writer; Tellis; Paul Passavant; Isaac Serratos; David J. Rothman, Professor of Social Medicine, Professor of History, Director for the Center for the Study of Society and Medicine, and Director fo
+
+[90001223] miss=['vega'] extra=['leuven']
+  GOLD : [('Chavla', 'Leah Chavla'), ('Friedman', 'Friedman'), ('Sorenson', 'David Sorenson'), ('Schulhofer', 'Stephen J. Schulhofer'), ('Sokolsky', 'Richard Sokolsky'), ('Greenstone', 'Michael Greenstone'), ('Barbier', 'Carl Barbier'), ('Cook', 'Malcolm Cook'), ('Kasler', 'Dale Kasler'), ('Neumann', 'Peter G. Neumann'), ('Kuiken', 'Thijs Kuiken'), ('Fellows', 'Mary Louise Fellows'), ('Ford', 'Michael Ford'), ('Carnevale', 'Anthony P. Carnevale'), ('Masi', 'Masi'), ('Neocleous', 'Mark Neocleous'), ('Ochab', 'Ewelina U. Ochab'), ('Shaikh', 'Nermeen Shaikh'), ('Seeletso', 'Mmabaledi K. Seeletso'), ('Benz', 'Richard Benz'), ('Chapin', 'Abigail Chapin'), ('Mouffe', 'Chantal Mouffe'), ('Oprysko', 'Caitlin Oprysko'), ('Sapolsky', 'Harvey M. Sapolsky'), ('Vega', 'Connie de la Vega'), ('Spade', 'Dean Spade'), ('Nakagawa', 'Roy Nakagawa'), ('Brecher', 'Brecher'), ('Farivar', 'Farivar'), ('Roberts-Miller', 'Roberts-Miller'), ('Hill', 'Lisa Hill'), ('Shabani', 'Mahsa Shabani'), ('Payne', 'Dr. Keith B. Payne'), ('Buch-Hansen', 'Hubert Buch-Hansen'), ('Harvey', 'David Harvey')]
+  MODEL: [('Chavla', 'Leah Chavla'), ('Friedman', 'Friedman'), ('Sorenson', 'David Sorenson'), ('Schulhofer', 'Stephen J. Schulhofer'), ('Sokolsky', 'Richard Sokolsky'), ('Greenstone', 'Michael Greenstone'), ('Barbier', 'Carl Barbier'), ('Cook', 'Malcolm Cook'), ('Kasler', 'Dale Kasler'), ('Neumann', 'Peter G. Neumann'), ('Kuiken', 'Thijs Kuiken'), ('Fellows', 'Mary Louise Fellows'), ('Ford', 'Michael Ford'), ('Carnevale', 'Anthony P. Carnevale'), ('Masi', 'Masi'), ('Neocleous', 'Mark Neocleous'), ('Ochab', 'Ewelina U. Ochab'), ('Shaikh', 'Nermeen Shaikh'), ('Seeletso', 'Mmabaledi K. Seeletso'), ('Benz', 'Richard Benz'), ('Chapin', 'Abigail Chapin'), ('Mouffe', 'Chantal Mouffe'), ('Oprysko', 'Caitlin Oprysko'), ('Sapolsky', 'Connie de la Vega'), ('Spade', 'Dean Spade'), ('Nakagawa', 'Roy Nakagawa'), ('Brecher', 'Brecher'), ('Farivar', 'Farivar'), ('Roberts-Miller', 'Roberts-Miller'), ('Hill', 'Lisa Hill'), ('Shabani', 'Mahsa Shabani'), ('Payne', 'Dr. Keith B. Payne'), ('Buch-Hansen', 'Hubert Buch-Hansen'), ('Harvey', 'David Harvey'), ('Leuven', 'KU Leuven')]
+  SRC  : Chavla et al 09 (Leah Chavla, Council of Hemispheric Affairs Research Associate; Friedman, Chief Intelligence Officer of STRATFOR; David Sorenson; Stephen J. Schulhofer, Professor of Law and Director for Studies in Criminal Justice at the U
+
+[90001225] miss=['bolton'] extra=['rice']
+  GOLD : [('Hudson', 'Blake Hudson'), ('Srnicek', 'Nick Srnicek'), ('Boone', 'Jeb Boone'), ('Moore', 'John Norton Moore'), ('Zembylas', 'Michalinos Zembylas'), ('Overholt', 'William Overholt'), ('Bolton', 'Bolton'), ('Miller', 'Thomas Miller'), ('Meinrath', 'Sascha Meinrath'), ('Eichengreen', 'Barry Eichengreen'), ('Lowther', 'Adam B. Lowther'), ('Ikenberry', 'John Ikenberry'), ('Balos', 'Beverly Balos'), ('Roiphe', 'Rebecca Roiphe'), ('Poulin', 'Robert Poulin'), ('Delgado', 'Richard Delgado'), ('Haraway', 'Donna J. Haraway'), ('Thompson', 'Thompson'), ('Lovenduski', 'Nicole S. Lovenduski'), ('Bourgois', 'Philippe Bourgois'), ('Goldberg', 'Fred Goldberg'), ('Kilmer', 'Beau Kilmer'), ('Hargraves', 'Drew Hargraves'), ('Hyde-Lay', 'Robyn Hyde-Lay'), ('Henry', 'Henry'), ('Leeds', 'Brett Ashley Leeds'), ('Peterson', 'Townsend Peterson'), ('Morton', 'Adam David Morton'), ('Archer', 'Dale Archer'), ('Larrinaga', 'De Larrinaga'), ('Berry', 'Berry'), ('Ikenberry', 'Ikenberry')]
+  MODEL: [('Hudson', 'Blake Hudson'), ('Srnicek', 'Nick Srnicek'), ('Boone', 'Jeb Boone'), ('Moore', 'John Norton Moore'), ('Zembylas', 'Michalinos Zembylas'), ('Overholt', 'William Overholt'), ('Miller', 'Thomas Miller'), ('Meinrath', 'Sascha Meinrath'), ('Eichengreen', 'Barry Eichengreen'), ('Lowther', 'Adam B. Lowther'), ('Ikenberry', 'John Ikenberry'), ('Balos', 'Beverly Balos'), ('Roiphe', 'Rebecca Roiphe'), ('Poulin', 'Robert Poulin'), ('Delgado', 'Richard Delgado'), ('Haraway', 'Donna J. Haraway'), ('Thompson', 'Thompson'), ('Lovenduski', 'Nicole S. Lovenduski'), ('Bourgois', 'Philippe Bourgois'), ('Goldberg', 'Fred Goldberg'), ('Kilmer', 'Beau Kilmer'), ('Hargraves', 'Drew Hargraves'), ('Hyde-Lay', 'Robyn Hyde-Lay'), ('Henry', 'Henry'), ('Leeds', 'Brett Ashley Leeds'), ('Peterson', 'Townsend Peterson'), ('Morton', 'Adam David Morton'), ('Archer', 'Dale Archer'), ('Larrinaga', 'De Larrinaga'), ('Berry', 'Berry'), ('Rice', 'Poli Sci Prof Rice')]
+  SRC  : Hudson et al 05 (Blake Hudson; Nick Srnicek; Jeb Boone; John Norton Moore; Michalinos Zembylas, Program of Educational Studies @ Open U of Cyprus; William Overholt; Bolton; Thomas Miller; Sascha Meinrath, Vice President and Founder and Dire
+
+[90001239] miss=['borene', 'dalton', 'moline', 'rando', 'tobey', 'torres'] extra=['routledge']
+  GOLD : [('McFerran', 'McFerran'), ('Barnes', 'David J. Barnes'), ('Beres', 'Louis Beres'), ('Torres', 'Phil Torres'), ('Tobey', 'William H. Tobey'), ('Dalton', 'Toby Dalton'), ('Moline', 'Moline'), ('Borene', 'Andrew Borene'), ('Rando', 'Rando')]
+  MODEL: [('McFerran', 'McFerran'), ('Barnes', 'David J. Barnes'), ('Beres', 'Louis Beres'), ('Routledge', 'Routledge')]
+  SRC  : McFerran et al 02 (McFerran; David J. Barnes; Louis Beres, July 9; Associate Professor of Political Science at Purdue University, Ph.D. who has lectured and published extensively on the subject of nuclear terrorism; Routledge; Phil Torres; 
+
+[90001245] miss=['kuncel', 'shum', 'tikkanen'] extra=['kunce', 'shu', 'tikkane']
+  GOLD : [('Rodriguez', 'Dylan Rodriguez'), ('MacNeil', 'Robert MacNeil'), ('Mansfield', 'Becky Mansfield'), ('Barkfelt', 'Shawn Barkfelt'), ('Bokat-Lindell', 'Spencer Bokat-Lindell'), ('Crane', 'Daniel A. Crane'), ('Navarro', 'Peter Navarro'), ('Nyquist', 'J.R. Nyquist'), ('Nietzsche', 'Friedrich Nietzsche'), ('Kuncel', 'Nathan Kuncel'), ('Shum', 'Garrett Shum'), ('Tikkanen', 'Roosa Tikkanen'), ('Scott', 'Scott'), ('Bothma', 'Sarah F. Bothma'), ('Ossola', 'Alessandro Ossola'), ('Brender', 'Student Brender'), ('Mertha', 'Andrew Mertha'), ('Durrani', 'Haris Durrani'), ('Paul', 'Modeste Paul'), ('Whyte', 'Kyle Whyte'), ('Vandenbergh', 'Michael Vandenbergh'), ('Greenberg', 'Michael Greenberg'), ('Fettweis', 'Christopher J. Fettweis'), ('Rayner', 'Steve Rayner'), ('Callinicos', 'Callinicos'), ('Kaidanow', 'Tina Kaidanow'), ('Sohail', 'Humna Sohail')]
+  MODEL: [('Rodriguez', 'Dylan Rodriguez'), ('MacNeil', 'Robert MacNeil'), ('Mansfield', 'Becky Mansfield'), ('Barkfelt', 'Shawn Barkfelt'), ('Bokat-Lindell', 'Spencer Bokat-Lindell'), ('Crane', 'Daniel A. Crane'), ('Navarro', 'Peter Navarro'), ('Nyquist', 'J.R. Nyquist'), ('Nietzsche', 'Friedrich Nietzsche'), ('Kunce', 'Nathan Kuncel'), ('Shu', 'Garrett Shum'), ('Tikkane', 'Roosa Tikkanen'), ('Scott', 'Scott'), ('Bothma', 'Sarah F. Bothma'), ('Ossola', 'Alessandro Ossola'), ('Brender', 'Student Brender'), ('Mertha', 'Andrew Mertha'), ('Durrani', 'Haris Durrani'), ('Paul', 'Modeste Paul'), ('Whyte', 'Kyle Whyte'), ('Vandenbergh', 'Michael Vandenbergh'), ('Greenberg', 'Michael Greenberg'), ('Fettweis', 'Christopher J. Fettweis'), ('Rayner', 'Steve Rayner'), ('Callinicos', 'Callinicos'), ('Kaidanow', 'Tina Kaidanow'), ('Sohail', 'Humna Sohail')]
+  SRC  : Rodriguez et al 22 (Dylan Rodriguez; Robert MacNeil, '12 Robert, Thesis submitted to the Faculty of Graduate and Postdoctoral Studies In partial fulfillment of the requirements For the PhD degree in Political Science School of Political Stu
+
+[90001250] miss=['castro'] extra=['soares']
+  GOLD : [('Ruger', 'Jennifer Prah Ruger'), ('Freeley', 'Freeley'), ('Waśko-Owsiejczuk', 'Ewelina Waśko-Owsiejczuk'), ('Guy', 'Kate Guy'), ('Beaulieu', 'Brittany Beaulieu'), ('Warren', 'Dorian Warren'), ('Pollack', 'Kenneth Pollack'), ('Rythoven', 'Eric Van Rythoven'), ('Castro', 'Andreia Soares e Castro'), ('Sutton', 'Trevor Sutton'), ('Zuckerman', 'Mortimer Zuckerman'), ('Park', 'Woojung Park')]
+  MODEL: [('Ruger', 'Jennifer Prah Ruger'), ('Freeley', 'Freeley'), ('Waśko-Owsiejczuk', 'Ewelina Waśko-Owsiejczuk'), ('Guy', 'Kate Guy'), ('Beaulieu', 'Brittany Beaulieu'), ('Warren', 'Dorian Warren'), ('Pollack', 'Kenneth Pollack'), ('Rythoven', 'Eric Van Rythoven'), ('Soares', 'Andreia Soares e Castro'), ('Sutton', 'Trevor Sutton'), ('Zuckerman', 'Mortimer Zuckerman'), ('Park', 'Woojung Park')]
+  SRC  : Ruger et al 17 (Jennifer Prah Ruger, Assistant Professor, Yale School of Medicine, Adjunct Professor at Yale School of Law; Freeley; Ewelina Waśko-Owsiejczuk; Kate Guy; Brittany Beaulieu; Dorian Warren; Kenneth Pollack; Eric Van Rythoven, 
+
+[90001655] miss=['du'] extra=['ft', 'lw']
+  GOLD : [('Delgado', 'Delgado PP'), ('Beres', 'Beres CE'), ('Lanoszka', 'Lanoszka NJ'), ('Lanoszka', 'Lanoszka DJ'), ('Novic', 'Novic G'), ('Du', 'Du LW'), ('Nordin', 'Nordin FT'), ('Anthony', 'Anthony HC')]
+  MODEL: [('Delgado', 'Delgado PP'), ('Beres', 'Beres CE'), ('Lanoszka', 'Lanoszka NJ'), ('Novic', 'Novic G'), ('LW', 'Du LW'), ('Nordin', 'Nordin FT'), ('Anthony', 'Anthony HC'), ('FT', 'Nordin FT')]
+  SRC  : Delgado et al. 16 Wall Street Journal. 2016;4(7):519-219. Delgado PP, Beres CE, Lanoszka NJ, Lanoszka DJ, Novic G, Du LW, Nordin FT, Anthony HC. Greening Capitalism? A Marxist Critique of Carbon Markets.
+
+[90001684] miss=['blondeel'] extra=['b']
+  GOLD : [('Monteiro', 'Monteiro J'), ('Reynolds', 'Reynolds PGS'), ('Djankov', 'Djankov CR'), ('Sommer', 'Sommer CN'), ('Pawlett', 'Pawlett PEG'), ('Cassidy', 'Cassidy B'), ('Blondeel', 'Blondeel FM'), ('Sirgi', 'Sirgi J'), ('Klein', 'Klein AMF'), ('Rohatyn', 'Rohatyn DJ')]
+  MODEL: [('Monteiro', 'Monteiro J'), ('Reynolds', 'Reynolds PGS'), ('Djankov', 'Djankov CR'), ('Sommer', 'Sommer CN'), ('Pawlett', 'Pawlett PEG'), ('Cassidy', 'Cassidy B'), ('B', 'Blondeel FM'), ('Sirgi', 'Sirgi J'), ('Klein', 'Klein AMF'), ('Rohatyn', 'Rohatyn DJ')]
+  SRC  : Monteiro et al. 09 Carnegie Endowment for International Peace Publications. 2009;206(8):620-696. Monteiro J, Reynolds PGS, Djankov CR, Sommer CN, Pawlett PEG, Cassidy B, Blondeel FM, Sirgi J, Klein AMF, Rohatyn DJ. Abolition Collective.
+
+[90001690] miss=['dahl'] extra=['al']
+  GOLD : [('Lambakis', 'Lambakis DE'), ('Su', 'Su B'), ('Roy', 'Roy WB'), ('Mueller', 'Mueller KPT'), ('Burns', 'Burns MM'), ('Kafura', 'Kafura KW'), ('Kopan', 'Kopan CS'), ('Dean', 'Dean FJR'), ('Wigley', 'Wigley KAD'), ('Smith', 'Smith PM'), ('Clark', 'Clark KN'), ('Kaelbling', 'Kaelbling CP'), ('Gupta', 'Gupta FTC'), ('Alter', 'Alter F'), ('Rashad', 'Rashad EL'), ('Alexander', 'Alexander GK'), ('Dahl', 'Dahl R'), ('Dunn', 'Dunn MJ'), ('Pesha', 'Pesha N')]
+  MODEL: [('Lambakis', 'Lambakis DE'), ('Su', 'Su B'), ('Roy', 'Roy WB'), ('Mueller', 'Mueller KPT'), ('Burns', 'Burns MM'), ('Kafura', 'Kafura KW'), ('Kopan', 'Kopan CS'), ('Dean', 'Dean FJR'), ('Wigley', 'Wigley KAD'), ('Smith', 'Smith PM'), ('Clark', 'Clark KN'), ('Kaelbling', 'Kaelbling CP'), ('Gupta', 'Gupta FTC'), ('Alter', 'Alter F'), ('Rashad', 'Rashad EL'), ('Alexander', 'Alexander GK'), ('al', 'al R'), ('Dunn', 'Dunn MJ'), ('Pesha', 'Pesha N')]
+  SRC  : Lambakis et al. 09 The Department of the Army's Office of the Assistant G-1 for Civilian Personnel. 2009;413(3):553-142. Lambakis DE, Su B, Roy WB, Mueller KPT, Burns MM, Kafura KW, Kopan CS, Dean FJR, Wigley KAD, Smith PM, Clark KN, Kaelbl
+
+[90001695] miss=['best', 'mueller', 'reeves'] extra=['bes', 'muelle', 'reeve']
+  GOLD : [('Quesenbery', 'Quesenbery NP'), ('Farah', 'Farah J'), ('Gitlin', 'Gitlin GP'), ('Nilsen', 'Nilsen AK'), ('Mueller', 'Mueller C'), ('Reeves', 'Reeves FGC'), ('Best', 'Best GF'), ('Rudy', 'Rudy DN'), ('McIntosh', 'McIntosh NC'), ('Baldwin', 'Baldwin LT')]
+  MODEL: [('Quesenbery', 'Quesenbery NP'), ('Farah', 'Farah J'), ('Gitlin', 'Gitlin GP'), ('Nilsen', 'Nilsen AK'), ('Muelle', 'Mueller C'), ('Reeve', 'Reeves FGC'), ('Bes', 'Best GF'), ('Rudy', 'Rudy DN'), ('McIntosh', 'McIntosh NC'), ('Baldwin', 'Baldwin LT')]
+  SRC  : Quesenbery et al. 14 Plos One. 2014;139(6):78-729. Quesenbery NP, Farah J, Gitlin GP, Nilsen AK, Mueller C, Reeves FGC, Best GF, Rudy DN, McIntosh NC, Baldwin LT. Addressing the Risk of a Cuban Oil Spill.
+
+[90001700] miss=['segerson'] extra=['bs', 'dfl', 'ep', 'hb', 'hf', 'jm', 'kb', 'pe', 'se']
+  GOLD : [('Clary', 'Clary AH'), ('Buren', 'Buren HF'), ('Alesina', 'Alesina JM'), ('Go', 'Go PE'), ('Kagan', 'Kagan KB'), ('Cox', 'Cox EP'), ('Yoo', 'Yoo DFL'), ('Pettersen', 'Pettersen HB'), ('Segerson', 'Segerson SE'), ('Wood', 'Wood BS'), ('Kolar', 'Kolar EP'), ('Dovere', 'Dovere R'), ('Harthun', 'Harthun CR'), ('Rostbøll', 'Rostbøll ED'), ('Freiwald', 'Freiwald MBH'), ('Kodjak', 'Kodjak TP'), ('Wal', 'Wal N')]
+  MODEL: [('Clary', 'Clary AH'), ('Buren', 'Buren HF'), ('Alesina', 'Alesina JM'), ('Go', 'Go PE'), ('Kagan', 'Kagan KB'), ('Cox', 'Cox EP'), ('Yoo', 'Yoo DFL'), ('Pettersen', 'Pettersen HB'), ('SE', 'Segerson SE'), ('Wood', 'Wood BS'), ('Kolar', 'Kolar EP'), ('Dovere', 'Dovere R'), ('Harthun', 'Harthun CR'), ('Rostbøll', 'Rostbøll ED'), ('Freiwald', 'Freiwald MBH'), ('Kodjak', 'Kodjak TP'), ('Wal', 'Wal N'), ('HF', 'Buren HF'), ('JM', 'Alesina JM'), ('PE', 'Go PE'), ('KB', 'Kagan KB'), ('EP', 'Cox EP'), ('DFL', 'Yoo DFL'), ('HB', 'Pettersen HB'), ('BS', 'Wood BS')]
+  SRC  : Clary et al. 21 BBC Worldwide Monitoring. 2021;320(4):734-53. Clary AH, Buren HF, Alesina JM, Go PE, Kagan KB, Cox EP, Yoo DFL, Pettersen HB, Segerson SE, Wood BS, Kolar EP, Dovere R, Harthun CR, Rostbøll ED, Freiwald MBH, Kodjak TP, Wal N.
+
+[90004134] miss=['gordon'] extra=['pearlstein']
+  GOLD : [('Gordon', 'Danny Pearlstein Gordon')]
+  MODEL: [('Pearlstein', 'Danny Pearlstein Gordon')]
+  SRC  : Pearlstein 13 (Danny Pearlstein Gordon, associate prof @ The Swinburne Institute, “The logic of competitive influence-seeking: Russia, Ukraine, and the conflict in Donbas,” 2013)
+
+[90004137] miss=['nobile'] extra=['yan']
+  GOLD : [('Nobile', 'Doug Yan Nobile')]
+  MODEL: [('Yan', 'Doug Yan Nobile')]
+  SRC  : Yan‘08 (Doug Yan Nobile, Senior Fellow and Director of the Technology and National Security Program at the Center for a New American Security, “Climate Change and Implications for National Security,” 2008)
+
+[90004141] miss=['cornell'] extra=['greer']
+  GOLD : [('Cornell', 'Constance Greer Cornell')]
+  MODEL: [('Greer', 'Constance Greer Cornell')]
+  SRC  : Greer 24 (Constance Greer Cornell, Professor of IR at Tulane, “Debris removal missions face technical, legal and financial hurdles,” 2024)
+
+[90004149] miss=['weiss'] extra=['choi']
+  GOLD : [('Weiss', 'Annie Choi Weiss')]
+  MODEL: [('Choi', 'Annie Choi Weiss')]
+  SRC  : Choi 23 (Annie Choi Weiss, The University of Calgary, “DOUBLE ABSURDITY: REGULATING GREENHOUSE GAS UNDER THE CLEAN AIR ACT,” 2023)
+
+[90004151] miss=['zembylas'] extra=['wuthnow']
+  GOLD : [('Zembylas', 'Graham Wuthnow Zembylas')]
+  MODEL: [('Wuthnow', 'Graham Wuthnow Zembylas')]
+  SRC  : Wuthnow‘18 (Graham Wuthnow Zembylas, professor of philosophy with affiliations in Judaic studies, Caribbean and Latina/o studies, and Asian and Asian American studies at UCONN-Storrs, “Human dignity is in danger. In 2019 we must stand as on
+
+[90004153] miss=['foran'] extra=['boas']
+  GOLD : [('Foran', 'David Boas Foran')]
+  MODEL: [('Boas', 'David Boas Foran')]
+  SRC  : Boas, 2014 (David Boas Foran, a China correspondent for the WorldPost, “Excitable Speech: A Politics of the Performative,” 2014)
+
+[90004155] miss=['davies'] extra=['lewers']
+  GOLD : [('Davies', 'Rob Lewers Davies')]
+  MODEL: [('Lewers', 'Rob Lewers Davies')]
+  SRC  : Lewers, 2013 (Rob Lewers Davies, senior director of policy at the Americas Society and Council of the Americas and founder and editor-in-chief of the hemispheric policy magazine Americas Quarterly, chair at the Cuba Working group, “United S
+
+[90004165] miss=['nislow'] extra=['yellowlees']
+  GOLD : [('Nislow', 'Daniel Yellowlees Nislow')]
+  MODEL: [('Yellowlees', 'Daniel Yellowlees Nislow')]
+  SRC  : Yellowlees‘19 (Daniel Yellowlees Nislow, Assistant Cooperative Extension Specialist, Department of Environmental Science, Policy, & Management, UC Berkeley, “China's aggressive tactics aim to bolster the Communist Party's legitimacy,” 2019)
+
+[90004167] miss=['wetteland'] extra=['parvin']
+  GOLD : [('Wetteland', 'MEDINA Parvin Wetteland')]
+  MODEL: [('Parvin', 'MEDINA Parvin Wetteland')]
+  SRC  : Parvin 14 (MEDINA Parvin Wetteland, Assistant Director, Public Opinion and Foreign Policy, “Capitalism and Environmental Collapse,” 2014)
+
+[90004168] miss=['johnston'] extra=['fenster']
+  GOLD : [('Johnston', 'John Fenster Johnston')]
+  MODEL: [('Fenster', 'John Fenster Johnston')]
+  SRC  : Fenster‘10 (John Fenster Johnston, President of the Association of American Colleges and Universities, which promotes liberal education as a resource for economic creativity and democratic vitality, “The Tragedy of Great Power Politics,” 20
+
+[90004171] miss=['remler'] extra=['whiteduck']
+  GOLD : [('Remler', 'James Whiteduck Remler')]
+  MODEL: [('Whiteduck', 'James Whiteduck Remler')]
+  SRC  : Whiteduck, 2007 (James Whiteduck Remler, Professor of Anthropology at the University of California, “How to Read the Arctic: Structural Theory and the Balance of Arctic Powers,” 2007)
+
+[90004173] miss=['carter'] extra=['skelley']
+  GOLD : [('Carter', 'Martin Skelley Carter')]
+  MODEL: [('Skelley', 'Martin Skelley Carter')]
+  SRC  : Skelley‘23 (Martin Skelley Carter, Technische Universitat Dresden, ifo Institute, “Reliability and Alliance Politics: Interdependence and America’s Asian Alliance System,” 2023)
+
+[90004178] miss=['crabb'] extra=['cohen']
+  GOLD : [('Crabb', 'Luke Cohen Crabb')]
+  MODEL: [('Cohen', 'Luke Cohen Crabb')]
+  SRC  : Cohen‘00 (Luke Cohen Crabb, director of the East Asia Nonproliferation Program at the James Martin Center for Nonproliferation Studies, “New circuit split raises questions about ‘permit shield’ defense in Clean Water Act cases,” 2000)
+
+[90004180] miss=['bradley'] extra=['kohler']
+  GOLD : [('Bradley', 'Chandni Kohler Bradley')]
+  MODEL: [('Kohler', 'Chandni Kohler Bradley')]
+  SRC  : Kohler‘21 (Chandni Kohler Bradley, Segal Family Professor of Regulatory Law and Policy and Faculty Director, Center on the Administration of Criminal Law, New York University School of Law, “The Discovery of Global Warming: The Impacts of C
+
+[90004184] miss=['chand'] extra=['hansen']
+  GOLD : [('Chand', 'Riccardo Hansen Chand')]
+  MODEL: [('Hansen', 'Riccardo Hansen Chand')]
+  SRC  : Hansen 00 (Riccardo Hansen Chand, Director of the Institute for Communitarian Policy Studies at George Washington University, “Brief for the American Insurance Association in Township of Mount Holly v. Mt. Holly Gardens Citizens in Action,”
+
+[90004191] miss=['weigert'] extra=['zimmerman']
+  GOLD : [('Weigert', 'Jerzy Zimmerman Weigert')]
+  MODEL: [('Zimmerman', 'Jerzy Zimmerman Weigert')]
+  SRC  : Zimmerman'06 (Jerzy Zimmerman Weigert, J.D. Candidate, University of California, Berkeley School of Law, 2015, “Reducing Family-Based Admissions Is Essential to Reforming the American Immigration System,,” 2006)
+
+[90004192] miss=['moltz'] extra=['sundaram']
+  GOLD : [('Moltz', 'Richard Sundaram Moltz')]
+  MODEL: [('Sundaram', 'Richard Sundaram Moltz')]
+  SRC  : Sundaram'17 (Richard Sundaram Moltz, covers climate change for NPR's Science Desk, from the scientists on the front lines of documenting the warming climate to the way those changes are reshaping communities and ecosystems around the world,
+
+[90004198] miss=['andersen'] extra=['lethbridge']
+  GOLD : [('Andersen', 'Daniel Lethbridge Andersen')]
+  MODEL: [('Lethbridge', 'Daniel Lethbridge Andersen')]
+  SRC  : Lethbridge‘19 (Daniel Lethbridge Andersen, Senior research fellow in the Institute for National Strategic Studies at the National Defense University, “SCIENCE AND TECHNOLOGY COMMITTEE (STC) NATO IN THE CYBER AGE: STRENGTHENING SECURITY & DE
+
+[90004205] miss=['heginbotham'] extra=['crockford']
+  GOLD : [('Heginbotham', 'Timothy Crockford Heginbotham')]
+  MODEL: [('Crockford', 'Timothy Crockford Heginbotham')]
+  SRC  : Crockford, 2009 (Timothy Crockford Heginbotham, Assistant Professor of International Relations at the University of Waterloo, “To Boldly Go: A One-Way Human Mission to Mars,” 2009)
+
+[90004212] miss=['jalil'] extra=['gleeson']
+  GOLD : [('Jalil', 'Daniel Gleeson Jalil')]
+  MODEL: [('Gleeson', 'Daniel Gleeson Jalil')]
+  SRC  : Gleeson 24 (Daniel Gleeson Jalil, dual degree candidate pursuing a PhD in political science at Northwestern University and a PhD in Law at iCourts Center of Excellence in International Courts at the University of Copenhagen, “Manhattan Inst
+
+[90004213] miss=['aghakouchak'] extra=['bogage']
+  GOLD : [('AghaKouchak', 'Carolyn Bogage AghaKouchak')]
+  MODEL: [('Bogage', 'Carolyn Bogage AghaKouchak')]
+  SRC  : Bogage 11 (Carolyn Bogage AghaKouchak, European Technology Correspondent for the New York Times, Reporter for Bloomberg News, Former Reporter for Congressional Quarterly, BA in Politics and Journalism from UC Santa Cruz, “The Myth of the Mi
+
+[90004216] miss=['gallucci'] extra=['pomeroy']
+  GOLD : [('Gallucci', 'Clint Pomeroy Gallucci')]
+  MODEL: [('Pomeroy', 'Clint Pomeroy Gallucci')]
+  SRC  : Pomeroy'12 (Clint Pomeroy Gallucci, Professor of International Law and Security, University of Glasgow, “We’re All Infected: Legal Personhood, Bare Life and The Walking Dead,” 2012)
+
+[90004217] miss=['chavla'] extra=['verbeek']
+  GOLD : [('Chavla', 'Emily Verbeek Chavla')]
+  MODEL: [('Verbeek', 'Emily Verbeek Chavla')]
+  SRC  : Verbeek, 2001 (Emily Verbeek Chavla, Professor at Hankuk University of Foreign Studies, “Can Patents Deter Innovation? The Anticommons in Biomedical Research,” 2001)
+
+[90004219] miss=['sokolsky'] extra=['micah']
+  GOLD : [('Sokolsky', 'Dr. Micah Sokolsky')]
+  MODEL: [('Micah', 'Dr. Micah Sokolsky')]
+  SRC  : Micah‘14 (Dr. Micah Sokolsky, policy fellow at the european council on foreign relations, “Buying into conspiracy theories can be exciting—that's what makes them dangerous,” 2014)
+
+[90004225] miss=['greenstone'] extra=['haakenstad']
+  GOLD : [('Greenstone', 'Stephen Haakenstad Greenstone')]
+  MODEL: [('Haakenstad', 'Stephen Haakenstad Greenstone')]
+  SRC  : Haakenstad 21 (Stephen Haakenstad Greenstone, Executive Secretary, Committee of Scientist for Global Security and Arms Control and Senior Fellow for EastWest Institute, “Our Separate & Unequal Public Colleges,” 2021)
+
+[90004228] miss=['traber'] extra=['coronado']
+  GOLD : [('Traber', 'Darryl Coronado Traber')]
+  MODEL: [('Coronado', 'Darryl Coronado Traber')]
+  SRC  : Coronado 06 (Darryl Coronado Traber, fellow at the Center for American Progress and former Harvard professor, “Towards common ground in the biodiversity–disease debate,” 2006)
+
+[90004231] miss=['marohasy'] extra=['sambanis']
+  GOLD : [('Marohasy', 'Marston Sambanis Marohasy')]
+  MODEL: [('Sambanis', 'Marston Sambanis Marohasy')]
+  SRC  : Sambanis'01 (Marston Sambanis Marohasy, Associate Professors at Loyola Marymount University and have worked as Assistant Professors of Arts and Humanities at Teachers College, Columbia University, “Chaos, Order and Morality: Nietzsche’s Inf
+
+[90004233] miss=['grosz'] extra=['lopucki']
+  GOLD : [('Grosz', 'Minteer Lopucki Grosz')]
+  MODEL: [('Lopucki', 'Minteer Lopucki Grosz')]
+  SRC  : Lopucki, 2004 (Minteer Lopucki Grosz, Associate Professor Department of Agricultural Economics National Chung Hsing University, “An Applied Theory of ‘Fiscal Attention,” 2004)
+
+[90004239] miss=['sharma'] extra=['saladrigas']
+  GOLD : [('Sharma', 'David Saladrigas Sharma')]
+  MODEL: [('Saladrigas', 'David Saladrigas Sharma')]
+  SRC  : Saladrigas, 2000 (David Saladrigas Sharma, JD candidate, May 2012, “Debris, Traffic Management, and Weaponization: Opportunities for and Challenges to Cooperation in Space,” 2000)
+
+[90004247] miss=['bandow'] extra=['abercrombie']
+  GOLD : [('Bandow', 'Kimbell Abercrombie Bandow')]
+  MODEL: [('Abercrombie', 'Kimbell Abercrombie Bandow')]
+  SRC  : Abercrombie 00 (Kimbell Abercrombie Bandow, Master of Public Policy student with concentrations in Global Policy and International Development, “Japan Rearmed,” 2000)
+
+[90004252] miss=['sikorsky'] extra=['steffen']
+  GOLD : [('Sikorsky', 'Michael Steffen Sikorsky')]
+  MODEL: [('Steffen', 'Michael Steffen Sikorsky')]
+  SRC  : Steffen 15 (Michael Steffen Sikorsky, New York Times, citing Ruth Bader Ginsburg, Supreme Court Justice, “Arctic Thaw: Arctic Cooperation and Russian Rapprochement,” 2015)
+
+[90004253] miss=['martin'] extra=['etzioni']
+  GOLD : [('Martin', 'Scott Etzioni Martin')]
+  MODEL: [('Etzioni', 'Scott Etzioni Martin')]
+  SRC  : Etzioni 12 (Scott Etzioni Martin, senior reporter with over a 10-year history of reporting and editorial leadership on publications covering US and international energy markets, “Toward a More Proliferated World?,” 2012)
+
+[90004255] miss=['williams'] extra=['grant']
+  GOLD : [('Williams', 'Black Grant Williams')]
+  MODEL: [('Grant', 'Black Grant Williams')]
+  SRC  : Grant, 2006 (Black Grant Williams, Professor at Quinnipiac University School of Law, “Report: Climate change may pose threat to economic growth,” 2006)
+
+[90004256] miss=['kee'] extra=['malik']
+  GOLD : [('Kee', 'Kimberly Malik Kee')]
+  MODEL: [('Malik', 'Kimberly Malik Kee')]
+  SRC  : Malik‘15 (Kimberly Malik Kee, Chair of Applied and Molecular Microbiology at Technische Universität Berlin, “Antibiotic resistance could wipe out human race before climate change,” 2015)
+
+[90004262] miss=['juarez'] extra=['kohl']
+  GOLD : [('Juárez', 'Fleitz Kohl Juárez')]
+  MODEL: [('Kohl', 'Fleitz Kohl Juárez')]
+  SRC  : Kohl'12 (Fleitz Kohl Juárez, U.S. National Security Adviser from 1977 to 1981. His most recent book is Second Chance: Three Presidents and the Crisis of American Superpower, “The Mystery of Capital: why capitalism triumphs in the West and f
+
+[90004266] miss=['barney'] extra=['hansen']
+  GOLD : [('Barney', 'Thomas Hansen Barney')]
+  MODEL: [('Hansen', 'Thomas Hansen Barney')]
+  SRC  : Hansen'01 (Thomas Hansen Barney, JD, worked in Washington Office on Latin America and National Alliance for Hispanic Health, “Personalized medicine: Better results, but at what cost?,” 2001)
+
+[90004267] miss=['passavant'] extra=['jasso']
+  GOLD : [('Passavant', 'Dave Jasso Passavant')]
+  MODEL: [('Jasso', 'Dave Jasso Passavant')]
+  SRC  : Jasso, 2020 (Dave Jasso Passavant, Assistant Professor, Yale School of Medicine, Adjunct Professor at Yale School of Law, “Postscript on the Societies of Control,” 2020)
+
+[90004273] miss=['robinson'] extra=['tonn']
+  GOLD : [('Robinson', 'Stoddard Tonn Robinson')]
+  MODEL: [('Tonn', 'Stoddard Tonn Robinson')]
+  SRC  : Tonn, 2006 (Stoddard Tonn Robinson, International affairs and history analyst and software engineer in the field of artificial intelligence, “1. Why Promote Democracy?,” 2006)
+
+[90004279] miss=['eliason'] extra=['weyl']
+  GOLD : [('Eliason', 'Matthew Weyl Eliason')]
+  MODEL: [('Weyl', 'Matthew Weyl Eliason')]
+  SRC  : Weyl 18 (Matthew Weyl Eliason, PhD in Pure Mathematics, Oxford, Lecturer in Mathematics at Oxford, Research Associate at the Future of Humanity Institute, “Biden: I'll Scrap Federal Death Penalty,” 2018)
+
+[90004280] miss=['gilliard'] extra=['robinson']
+  GOLD : [('Gilliard', 'P. Robinson Gilliard')]
+  MODEL: [('Robinson', 'P. Robinson Gilliard')]
+  SRC  : Robinson, 2016 (P. Robinson Gilliard, doctoral candidate at Texas A&M University, “Exercising the Amendment Power,” 2016)
+
+[90004284] miss=['corcoran'] extra=['chernomas']
+  GOLD : [('Corcoran', 'Royal Chernomas Corcoran')]
+  MODEL: [('Chernomas', 'Royal Chernomas Corcoran')]
+  SRC  : Chernomas'04 (Royal Chernomas Corcoran, Legislative Counsel for the Committee on Education, “Brussels Summit Declaration,” 2004)
+
+[90004286] miss=['venable'] extra=['perlow']
+  GOLD : [('Venable', 'Heather Perlow Venable')]
+  MODEL: [('Perlow', 'Heather Perlow Venable')]
+  SRC  : Perlow‘22 (Heather Perlow Venable, Peace Research Institute in Oslo and Norwegian University of Science and Technology, “Re-Theorizing Politics in Water Governance,” 2022)
+
+[90004287] miss=['earnhart'] extra=['mieszkowski']
+  GOLD : [('Earnhart', 'Peter Mieszkowski Earnhart')]
+  MODEL: [('Mieszkowski', 'Peter Mieszkowski Earnhart')]
+  SRC  : Mieszkowski‘17 (Peter Mieszkowski Earnhart, R. Wendell Harrison Distinguished Service Professor of Political Science at the University of Chicago, “Iraq studying new plan on where to bury radioactive waste, says official,” 2017)
+
+[90004288] miss=['brown'] extra=['brucato']
+  GOLD : [('Brown', 'Michael Brucato Brown')]
+  MODEL: [('Brucato', 'Michael Brucato Brown')]
+  SRC  : Brucato'13 (Michael Brucato Brown, Reporter for America Fellow and Staff Writer for Immigration at the Dallas News, “Comrade: An essay on political belonging,” 2013)
+
+[90004289] miss=['jaureguicorrea'] extra=['brown']
+  GOLD : [('Jauregui-Correa', 'Tarek Brown Jauregui-Correa')]
+  MODEL: [('Brown', 'Tarek Brown Jauregui-Correa')]
+  SRC  : Brown‘09 (Tarek Brown Jauregui-Correa, Ph.D., former tenured associate professor of U.S.-Japan relations and Okinawan history at Osaka University, currently works for the U.S. Marine Corps Bases Japan, “Unmarked: The Politics of Performance
+
+[90004290] miss=['hunter'] extra=['howarth']
+  GOLD : [('Hunter', 'Chad Howarth Hunter')]
+  MODEL: [('Howarth', 'Chad Howarth Hunter')]
+  SRC  : Howarth‘07 (Chad Howarth Hunter, Technology Research Associates, “Leave None Who Served With Us Behind,” 2007)
+
+[90004634] miss=['lal', 'rosen'] extra=['lala', 'r']
+  GOLD : [('Ackermann', 'Mark R. Ackermann'), ('Rosen', 'Rosen'), ('Lal', 'Bhavya Lal')]
+  MODEL: [('Ackermann', 'Mark R. Ackermann'), ('R', 'Rosend'), ('Lala', 'Bhavya Lala')]
+  SRC  : Ackermann et al 17 [Mark R. Ackermannb,a, Rosend, Bhavya Lala,a, “Climate Politics and the Crisis of the Liberal International Order,” Disaster Medicine and Public Health Preparedness, 2017]
+
+[90004635] miss=['jenkins'] extra=['jenkinsd']
+  GOLD : [('McNicholas', 'Celine McNicholas'), ('Jenkins', 'Isaac Jenkins')]
+  MODEL: [('McNicholas', 'Celine McNicholas'), ('Jenkinsd', 'Isaac Jenkinsd')]
+  SRC  : McNicholas et al 23 [Celine McNicholasd, Isaac Jenkinsd, “Decolonization is not a metaphor,” Cornell Law Review, 2023]
+
+[90004636] miss=['deudney', 'kovacic', 'medina', 'schiller'] extra=['deudneyd', 'kovacicb', 'schillerb']
+  GOLD : [('Heckman', 'Jory Heckman'), ('Medina', 'MEDINA'), ('Kovacic', 'William E. Kovacic'), ('Schiller', 'Jeffrey I. Schiller'), ('Deudney', 'Deudney')]
+  MODEL: [('Heckman', 'Jory Heckman'), ('Kovacicb', 'William E. Kovacicb'), ('Schillerb', 'Jeffrey I. Schillerb'), ('Deudneyd', 'Deudneyd')]
+  SRC  : Heckman et al 22 [Jory Heckmand, MEDINAb, William E. Kovacicb,a, Jeffrey I. Schillerb, Deudneyd, “ОБСЕ в эпоху вызовов европейской безопасности - проблемы и перспективы,” International Community Law Review, 2022]
+
+[90004637] miss=['ahmad', 'curtis', 'tzimas'] extra=['ahmada', 'curtisb', 'tzimasd']
+  GOLD : [('Johnson-Freese', 'Johnson-Freese'), ('Curtis', 'Simon Curtis'), ('Tzimas', 'Themistoklis Tzimas'), ('Ahmad', 'Talmiz Ahmad')]
+  MODEL: [('Johnson-Freese', 'Johnson-Freese'), ('Curtisb', 'Simon Curtisb'), ('Tzimasd', 'Themistoklis Tzimasd'), ('Ahmada', 'Talmiz Ahmada')]
+  SRC  : Johnson-Freese et al 17 [Johnson-Freesea, Simon Curtisb,b, Themistoklis Tzimasd, Talmiz Ahmada, “Security, the State and Political Agency: Putting ‘Politics’ back into UK Energy,” Cultural Politics, 2017]
+
+[90004638] miss=['neves', 'phillips', 'umbrello', 'walsh', 'weeden'] extra=['nevesb', 'phillipsb', 'umbrellod', 'walshd', 'weedenc']
+  GOLD : [('Cha', 'Victor Cha'), ('Weeden', 'Brian Weeden'), ('Phillips', 'Phillips'), ('Neves', 'Richard J. Neves'), ('Umbrello', 'Steven Umbrello'), ('Walsh', 'Deirdre Walsh')]
+  MODEL: [('Cha', 'Victor Cha'), ('Weedenc', 'Brian Weedenc'), ('Phillipsb', 'Phillipsb'), ('Nevesb', 'Richard J. Nevesb'), ('Umbrellod', 'Steven Umbrellod'), ('Walshd', 'Deirdre Walshd')]
+  SRC  : Cha et al 18 [Victor Chaa, Brian Weedenc, Phillipsb, Richard J. Nevesb, Steven Umbrellod,a, Deirdre Walshd, “The Influence of Congressional Preferences on Legislative Overrides of Supreme Court Decisions,” Rethinking Marxism, 2018]
+
+[90004639] miss=['mutikani', 'vrasti', 'wisner', 'yauch'] extra=['mutikanic', 'vrastib', 'wisnerb', 'yauchb']
+  GOLD : [('Nelson', 'Louis Nelson'), ('Mutikani', 'Lucia Mutikani'), ('Yauch', 'Brady Yauch'), ('Vrasti', 'Wanda Vrasti'), ('Wisner', 'Wisner')]
+  MODEL: [('Nelson', 'Louis Nelson'), ('Mutikanic', 'Lucia Mutikanic'), ('Yauchb', 'Brady Yauchb'), ('Vrastib', 'Wanda Vrastib'), ('Wisnerb', 'Wisnerb')]
+  SRC  : Nelson et al 19 [Louis Nelsond,c, Lucia Mutikanic,c, Brady Yauchb,c, Wanda Vrastib,c, Wisnerb,c, “Should Doctors strike?,” Legal Dictionary, 2019]
+
+[90004640] miss=['aleksashenko', 'feldstein', 'harrison'] extra=['aleksashenkob', 'feldsteina', 'harrisonc']
+  GOLD : [('Cannon', 'Bob Cannon'), ('Feldstein', 'Steven Feldstein'), ('Harrison', 'Todd Harrison'), ('Aleksashenko', 'Sergey Aleksashenko')]
+  MODEL: [('Cannon', 'Bob Cannon'), ('Feldsteina', 'Steven Feldsteina'), ('Harrisonc', 'Todd Harrisonc'), ('Aleksashenkob', 'Sergey Aleksashenkob')]
+  SRC  : Cannon et al 21 [Bob Cannond,c, Steven Feldsteina, Todd Harrisonc,a, Sergey Aleksashenkob, “New poll shows Trump with historically low approval rating,” Think Global Health, 2021]
+
+[90004641] miss=['ferzacca'] extra=['ferzaccaa']
+  GOLD : [('McGinnis', 'John McGinnis'), ('Ferzacca', 'Dustin Ferzacca')]
+  MODEL: [('McGinnis', 'John McGinnis'), ('Ferzaccaa', 'Dustin Ferzaccaa')]
+  SRC  : McGinnis et al 19 [John McGinnisa, Dustin Ferzaccaa,b, “Federal Bureau of Prisons (BOP),” Revista Chilena de Derecho, 2019]
+
+[90004642] miss=['graham', 'montgomery', 'rame'] extra=['grahamd', 'montgomeryd', 'rameb']
+  GOLD : [('Fabian', 'Jordan Fabian'), ('Ramé', 'Bertrand Ramé'), ('Graham', 'Phil Graham'), ('Montgomery', 'Marcus Montgomery')]
+  MODEL: [('Fabian', 'Jordan Fabian'), ('Raméb', 'Bertrand Raméb'), ('Grahamd', 'Phil Grahamd'), ('Montgomeryd', 'Marcus Montgomeryd')]
+  SRC  : Fabian et al 12 [Jordan Fabiand, Bertrand Raméb,a, Phil Grahamd, Marcus Montgomeryd, “Private Environmental Governance (Encyclopedia Chapter),” US EPA, 2012]
+
+[90004643] miss=['collins', 'cummings', 'heer', 'lal', 'stein'] extra=['collinsc', 'cummingsb', 'heerc', 'lalc', 'steinb']
+  GOLD : [('Capos', 'Claudia Capos'), ('Lal', 'Lal'), ('Collins', 'Patricia Hill Collins'), ('Stein', 'Jeff Stein'), ('Cummings', 'Scott L. Cummings'), ('Heer', 'Jeet Heer')]
+  MODEL: [('Capos', 'Claudia Capos'), ('Lalc', 'Lalc'), ('Collinsc', 'Patricia Hill Collinsc'), ('Steinb', 'Jeff Steinb'), ('Cummingsb', 'Scott L. Cummingsb'), ('Heerc', 'Jeet Heerc')]
+  SRC  : Capos et al 11 [Claudia Caposd,a, Lalc,b, Patricia Hill Collinsc, Jeff Steinb,c, Scott L. Cummingsb,b, Jeet Heerc,b, “Of, for, and by the people: the legal lacuna of synthetic persons,” Conflict and Health, 2011]
+
+[90004644] miss=['liebfritz', 'steinberg', 'thompson'] extra=['liebfritzd', 'steinbergb', 'thompsond']
+  GOLD : [('Fergusson', 'Ian F. Fergusson'), ('Liebfritz', 'Willi Liebfritz'), ('Steinberg', 'Allen Steinberg'), ('Thompson', 'G.B Thompson')]
+  MODEL: [('Fergusson', 'Ian F. Fergusson'), ('Liebfritzd', 'Willi Liebfritzd'), ('Steinbergb', 'Allen Steinbergb'), ('Thompsond', 'G.B Thompsond')]
+  SRC  : Fergusson et al 18 [Ian F. Fergussonc, Willi Liebfritzd, Allen Steinbergb,b, G.B Thompsond,c, “As China’s Woes Mount, Xi Jinping Faces Rare Rebuke at Home,” United Nations Convention on Biological Diversity, 2018]
+
+[90004645] miss=['crowl', 'sweeney'] extra=['crowlb', 'sweeneyb']
+  GOLD : [('Koplow', 'David A. Koplow'), ('Crowl', 'Adam Crowl'), ('Sweeney', 'Sweeney')]
+  MODEL: [('Koplow', 'David A. Koplow'), ('Crowlb', 'Adam Crowlb'), ('Sweeneyb', 'Sweeneyb')]
+  SRC  : Koplow et al 20 [David A. Koplowb,a, Adam Crowlb, Sweeneyb, “The Risk of Disruption or Destruction of Critical U.S. Infrastructure by an Offensive Cyber Attack,,” Cornell Legal Information Institute, 2020]
+
+[90004646] miss=['latka'] extra=['latkad']
+  GOLD : [('Frederick', 'Brian Frederick'), ('Latka', 'Bill Latka')]
+  MODEL: [('Frederick', 'Brian Frederick'), ('Latkad', 'Bill Latkad')]
+  SRC  : Frederick et al 19 [Brian Frederickb, Bill Latkad,a, “Promises of the political: Insurgent cities in a post-political environment,” Orange County Register, 2019]
+
+[90004647] miss=['ammori', 'glaser', 'huffman', 'kupchan', 'mccormick'] extra=['ammoric', 'glasera', 'huffmand', 'kupchand', 'mccormickd']
+  GOLD : [('Cuervo', 'Cristina Cuervo'), ('Ammori', 'Marvin Ammori'), ('Glaser', 'Charles L. Glaser'), ('McCormick', 'McCormick'), ('Huffman', 'James L. Huffman'), ('Kupchan', 'Cliff Kupchan')]
+  MODEL: [('Cuervo', 'Cristina Cuervo'), ('Ammoric', 'Marvin Ammoric'), ('Glasera', 'Charles L. Glasera'), ('McCormickd', 'McCormickd'), ('Huffmand', 'James L. Huffmand'), ('Kupchand', 'Cliff Kupchand')]
+  SRC  : Cuervo et al 10 [Cristina Cuervod,a, Marvin Ammoric, Charles L. Glasera,b, McCormickd, James L. Huffmand, Cliff Kupchand,a, “Introduction: On Colonial Unknowing,” The Loop: The European Consortium for Political Research’s Political Science 
+
+[90004648] miss=['franks'] extra=['franksd']
+  GOLD : [('Porter', 'Patrick Porter'), ('Franks', 'Franks')]
+  MODEL: [('Porter', 'Patrick Porter'), ('Franksd', 'Franksd')]
+  SRC  : Porter et al 19 [Patrick Porterc,a, Franksd, “THE THIRTEENTH AMENDMENT: MODERN SLAVERY, CAPITALISM, AND MASS INCARCERATION,” Ecology, 2019]
+
+[90004649] miss=['howarth', 'kluth', 'leff'] extra=['howarthb', 'klutha', 'leffa']
+  GOLD : [('Monica', 'Paul R. La Monica'), ('Kluth', 'Kluth'), ('Howarth', 'Kirsten Howarth'), ('Leff', 'Ben Leff')]
+  MODEL: [('Monica', 'Paul R. La Monica'), ('Klutha', 'Klutha'), ('Howarthb', 'Kirsten Howarthb'), ('Leffa', 'Ben Leffa')]
+  SRC  : Monica et al 13 [Paul R. La Monicab,b, Klutha,a, Kirsten Howarthb,a, Ben Leffa, “Right-Wing Extremism in the Military A typology of the threat,” U.S. Government interagency website managed by the Office of U.S. Global AIDS Coordinator and t
+
+[90004650] miss=['kich'] extra=['kicha']
+  GOLD : [('Koizumi', 'Shinjiro Koizumi'), ('Kich', 'Kich')]
+  MODEL: [('Koizumi', 'Shinjiro Koizumi'), ('Kicha', 'Kicha')]
+  SRC  : Koizumi et al 14 [Shinjiro Koizumib,a, Kicha, “STEM-ification of Education: The Zombie Reform Strikes Again,” Howard Law Journal, 2014]
+
+[90004651] miss=['brinton', 'franke', 'law', 'orlins', 'reuter'] extra=['brintona', 'frankeb', 'lawc', 'orlinsb', 'peter']
+  GOLD : [('Bian', 'Alice Bian'), ('Law', 'David S. Law'), ('Orlins', 'Stephen A. Orlins'), ('Brinton', 'Samuel Brinton'), ('Franke', 'Ulrike Franke'), ('Reuter', 'Peter H. Reuter')]
+  MODEL: [('Bian', 'Alice Bian'), ('Lawc', 'David S. Lawc'), ('Orlinsb', 'Stephen A. Orlinsb'), ('Brintona', 'Samuel Brintona'), ('Frankeb', 'Ulrike Frankeb'), ('Peter', 'Peter H. Peter')]
+  SRC  : Bian et al 12 [Alice Biand, David S. Lawc, Stephen A. Orlinsb,a, Samuel Brintona, Ulrike Frankeb,a, Peter H. Reuterd, “ОБСЕ в эпоху вызовов европейской безопасности - проблемы и перспективы,” Stars and Stripes, 2012]
+
+[90004652] miss=['arkhis'] extra=['arkhisc']
+  GOLD : [('Hanson', 'Marianne Hanson'), ('Arkhis', 'Hanna Rigault Arkhis')]
+  MODEL: [('Hanson', 'Marianne Hanson'), ('Arkhisc', 'Hanna Rigault Arkhisc')]
+  SRC  : Hanson et al 18 [Marianne Hansona,a, Hanna Rigault Arkhisc,a, “Categorization of International Mechanisms for Cooperation in the Peaceful Exploration and Use of Outer Space,” Press Release, 2018]
+
+[90004653] miss=['critchley', 'fleischmann', 'hannah', 'kerry', 'peck'] extra=['christine', 'fleischmannd', 'hannahc', 'kerrya', 'peckb']
+  GOLD : [('Scheper-Hughes', 'Scheper-Hughes'), ('Fleischmann', 'Daniel J. Fleischmann'), ('Peck', 'Peck'), ('Kerry', 'Cameron Kerry'), ('Critchley', 'Christine Critchley'), ('Hannah', 'John Hannah')]
+  MODEL: [('Scheper-Hughes', 'Scheper-Hughes'), ('Fleischmannd', 'Daniel J. Fleischmannd'), ('Peckb', 'Peckb'), ('Kerrya', 'Cameron Kerrya'), ('Christine', 'Christine Christine'), ('Hannahc', 'John Hannahc')]
+  SRC  : Scheper-Hughes et al 23 [Scheper-Hughesc,a, Daniel J. Fleischmannd,b, Peckb,a, Cameron Kerrya, Christine Critchleya,a, John Hannahc, “Trump Confronts the Prospect of a ‘Nonstop Political War’ for Survival,” Think Progress, 2023]
+
+[90004654] miss=['anderson'] extra=['andersonc']
+  GOLD : [('Timofeev', 'Ivan Timofeev'), ('Anderson', 'Gerard Anderson')]
+  MODEL: [('Timofeev', 'Ivan Timofeev'), ('Andersonc', 'Gerard Andersonc')]
+  SRC  : Timofeev et al 09 [Ivan Timofeevd, Gerard Andersonc,c, “Ending U.S. Military Support for Saudi Arabia in Yemen Would Trigger Dangerous Consequences,” The Federal Circuit Bar Journal, 2009]
+
+[90004655] miss=['sokolsky'] extra=['sokolskyb']
+  GOLD : [('Hazarika', 'Sanjay Hazarika'), ('Sokolsky', 'Richard Sokolsky')]
+  MODEL: [('Hazarika', 'Sanjay Hazarika'), ('Sokolskyb', 'Richard Sokolskyb')]
+  SRC  : Hazarika et al 10 [Sanjay Hazarikac, Richard Sokolskyb,a, “The Relevance of Constitutional Amendments: A Response to David Strauss,,” The Leadership Conference, 2010]
+
+[90004656] miss=['fetter', 'lala', 'pepper', 'schulhofer', 'thiessen'] extra=['fetterd', 'lalab', 'peace', 'schulhoferb', 'thiessenc']
+  GOLD : [('Farr', 'Farr'), ('Fetter', 'Steve Fetter'), ('Thiessen', 'Marc Thiessen'), ('Lála', 'Petr Lála'), ('Schulhofer', 'Stephen J. Schulhofer'), ('Pepper', 'Rachel Pepper')]
+  MODEL: [('Farr', 'Farr'), ('Fetterd', 'Steve Fetterd'), ('Thiessenc', 'Marc Thiessenc'), ('Lálab', 'Petr Lálab'), ('Schulhoferb', 'Stephen J. Schulhoferb'), ('Peace', 'Rachel Peace')]
+  SRC  : Farr et al 12 [Farra,b, Steve Fetterd, Marc Thiessenc, Petr Lálab,c, Stephen J. Schulhoferb,c, Rachel Peppera, “Ensuring Peace: Foreign-Imposed Regime Change and Postwar Peace Duration, 1914-2001.,” International Service for the Acquisition
+
+[90004657] miss=['jones', 'kaserman', 'rosen'] extra=['kasermanc', 'rosenb']
+  GOLD : [('Fuchs', 'Michael H. Fuchs'), ('Jones', 'Jones'), ('Rosen', 'Rosen'), ('Kaserman', 'David L. Kaserman')]
+  MODEL: [('Fuchs', 'Michael H. Fuchs'), ('Rosenb', 'Jonesd Rosenb'), ('Kasermanc', 'David L. Kasermanc')]
+  SRC  : Fuchs et al 11 [Michael H. Fuchsc, Jonesd,b, Rosenb, David L. Kasermanc, “Introduction,” Chiron Health, 2011]
+
+[90004658] miss=['burford', 'critchley', 'evans', 'navarro', 'peckler'] extra=['burfordc', 'christine', 'evansa', 'navarroc', 'peter']
+  GOLD : [('Fraser', 'Olivia Lucca Fraser'), ('Burford', 'Ellen Burford'), ('Peckler', 'Peckler'), ('Navarro', 'Peter Navarro'), ('Critchley', 'Christine Critchley'), ('Evans', 'Gareth Evans')]
+  MODEL: [('Fraser', 'Olivia Lucca Fraser'), ('Burfordc', 'Ellen Burfordc'), ('Peter', 'Pecklera Peter'), ('Navarroc', 'Peter Navarroc'), ('Christine', 'Christine Christine'), ('Evansa', 'Gareth Evansa')]
+  SRC  : Fraser et al 14 [Olivia Lucca Frasera,a, Ellen Burfordc,c, Pecklera,b, Peter Navarroc, Christine Critchleyd,c, Gareth Evansa,a, “The “China Threat,” FCNL, 2014]
+
+[90004659] miss=['mooney', 'roy'] extra=['mooneyb', 'royd']
+  GOLD : [('Farley', 'Farley'), ('Roy', 'Denny Roy'), ('Mooney', 'Tom Mooney')]
+  MODEL: [('Farley', 'Farley'), ('Royd', 'Denny Royd'), ('Mooneyb', 'Tom Mooneyb')]
+  SRC  : Farley et al 23 [Farleyb,b, Denny Royd,c, Tom Mooneyb,a, “A Cyber Force for Persistent Operations,” ISEAS, 2023]
+
+[90004660] miss=['mcgovern'] extra=['mcgovernb']
+  GOLD : [('Tonn', 'Mari Boor Tonn'), ('McGovern', 'Shannon McGovern')]
+  MODEL: [('Tonn', 'Mari Boor Tonn'), ('McGovernb', 'Shannon McGovernb')]
+  SRC  : Tonn et al 20 [Mari Boor Tonnd,a, Shannon McGovernb, “The problem within: Biden targets lead pipes, pushes equity,,” California, 2020]
+
+[90004661] miss=['butler', 'fitts', 'goldberg'] extra=['butlera', 'fittsd', 'goldberga']
+  GOLD : [('Schuster', 'Schuster'), ('Goldberg', 'Goldberg'), ('Fitts', 'Michael Fitts'), ('Butler', 'Judith Butler')]
+  MODEL: [('Schuster', 'Schuster'), ('Goldberga', 'Goldberga'), ('Fittsd', 'Michael Fittsd'), ('Butlera', 'Judith Butlera')]
+  SRC  : Schuster et al 20 [Schusterc, Goldberga, Michael Fittsd, Judith Butlera,b, “Human extinction: it is possible?,” Mercury News, 2020]
+
+[90004662] miss=['madhani', 'murphy', 'strick', 'zweibelson'] extra=['ben', 'madhanic', 'murphyb', 'strickb']
+  GOLD : [('Gruender', 'Raymond W. Gruender'), ('MADHANI', 'AAMER MADHANI'), ('Murphy', 'John Murphy'), ('Zweibelson', 'Ben Zweibelson'), ('Strick', 'Strick')]
+  MODEL: [('Gruender', 'Raymond W. Gruender'), ('MADHANIc', 'AAMER MADHANIc'), ('Murphyb', 'John Murphyb'), ('Ben', 'Ben Ben'), ('Strickb', 'Strickb')]
+  SRC  : Gruender et al 18 [Raymond W. Gruenderd, AAMER MADHANIc, John Murphyb, Ben Zweibelsond, Strickb,c, “On violence, intersectionality and transversal politics,” World Scientific, 2018]
+
+[90004663] miss=['guarasci'] extra=['guarascia']
+  GOLD : [('Rodl', 'Rodl'), ('Guarasci', 'Richard Guarasci')]
+  MODEL: [('Rodl', 'Rodl'), ('Guarascia', 'Richard Guarascia')]
+  SRC  : Rodl et al 20 [Rodla,c, Richard Guarascia,c, “China’s Belt and Road,” Macmillan Dictionary, 2020]
+
+[90004664] miss=['barbieri'] extra=['barbieric']
+  GOLD : [('Calonzo', 'Andreo Calonzo'), ('Barbieri', 'Katherine Barbieri')]
+  MODEL: [('Calonzo', 'Andreo Calonzo'), ('Barbieric', 'Katherine Barbieric')]
+  SRC  : Calonzo et al 19 [Andreo Calonzob, Katherine Barbieric,c, “MARIJUANA LEGALIZATION: ARE THERE ALTERNATIVES TO STATE-FEDERAL CONFLICT?,” EVN Report, 2019]
+
+[90004665] miss=['bailey', 'bernstein', 'gebre', 'moro', 'white'] extra=['baileyc', 'bernsteinb', 'gebrec', 'morob', 'whitec']
+  GOLD : [('Eanelli', 'Teagan Eanelli'), ('Gebre', 'Samuel Gebre'), ('Bernstein', 'Bernstein'), ('Moro', 'Francesco Niccolò Moro'), ('White', 'David White'), ('Bailey', 'Ronald Bailey')]
+  MODEL: [('Eanelli', 'Teagan Eanelli'), ('Gebrec', 'Samuel Gebrec'), ('Bernsteinb', 'Bernsteinb'), ('Morob', 'Francesco Niccolò Morob'), ('Whitec', 'David Whitec'), ('Baileyc', 'Ronald Baileyc')]
+  SRC  : Eanelli et al 11 [Teagan Eanellib,a, Samuel Gebrec,a, Bernsteinb, Francesco Niccolò Morob, David Whitec, Ronald Baileyc,a, “Slavery is a Metaphor: A Critical Commentary on Eve Tuck and K. Wayne Yang’s “Decolonization is Not a Metaphor”,” Na
+
+[90004666] miss=['eckstein', 'smart'] extra=['ecksteina', 'smartb']
+  GOLD : [('Scoville', 'Ryan M. Scoville'), ('Smart', 'Lewis Smart'), ('Eckstein', 'Eckstein')]
+  MODEL: [('Scoville', 'Ryan M. Scoville'), ('Smartb', 'Lewis Smartb'), ('Ecksteina', 'Ecksteina')]
+  SRC  : Scoville et al 23 [Ryan M. Scovillec, Lewis Smartb, Ecksteina, “Could European Populism Go Nuclear on NATO?,” IEEE, 2023]
+
+[90004667] miss=['berman', 'dsouza', 'thompson'] extra=['bermand', 'dsouzab', 'thompsonc']
+  GOLD : [('Hennig', 'Jutta Hennig'), ('Thompson', 'Julia A. Thompson'), ('Berman', 'Mark Berman'), ('D’Souza', 'Frank D’Souza')]
+  MODEL: [('Hennig', 'Jutta Hennig'), ('Thompsonc', 'Julia A. Thompsonc'), ('Bermand', 'Mark Bermand'), ('D’Souzab', 'Frank D’Souzab')]
+  SRC  : Hennig et al 12 [Jutta Hennigb, Julia A. Thompsonc,a, Mark Bermand, Frank D’Souzab, “No First Use and Nuclear Weapons,” Asian Journal of International Law, 2012]
+
+[90004668] miss=['hyman'] extra=['hymanc']
+  GOLD : [('Burke', 'Andrea Burke'), ('Hyman', 'David Hyman')]
+  MODEL: [('Burke', 'Andrea Burke'), ('Hymanc', 'David Hymanc')]
+  SRC  : Burke et al 15 [Andrea Burkeb,a, David Hymanc,b, “Is Global Warming the Number One Threat to Humanity?,” Journal of Economic Perspectives, 2015]
+
+[90004669] miss=['borshchevskaya'] extra=['borshchevskayac']
+  GOLD : [('Delahunty', 'Delahunty'), ('Borshchevskaya', 'Anna Borshchevskaya')]
+  MODEL: [('Delahunty', 'Delahunty'), ('Borshchevskayac', 'Anna Borshchevskayac')]
+  SRC  : Delahunty et al 08 [Delahuntyd, Anna Borshchevskayac,b, “COMMENTARY: Is a Nuclear War with China Possible?,” The Atlantic, 2008]
+
+[90004670] miss=['goldstein', 'johnston'] extra=['goldsteinb', 'johnstond']
+  GOLD : [('Silver', 'Nate Silver'), ('Goldstein', 'Steven M. Goldstein'), ('Johnston', 'Jane Johnston')]
+  MODEL: [('Silver', 'Nate Silver'), ('Goldsteinb', 'Steven M. Goldsteinb'), ('Johnstond', 'Jane Johnstond')]
+  SRC  : Silver et al 18 [Nate Silvera,c, Steven M. Goldsteinb,a, Jane Johnstond,a, “Big Pharma VCs and LPs Accelerate their Entry into Early Stage Venture Investment in the Life Science Sector,” TRIBUNAL CONTRA LA GUERRA, 2018]
+
+[90004671] miss=['epic', 'goldberg', 'pramuk', 'ranciere'] extra=['epicb', 'goldberga', 'pramukc', 'rancierec']
+  GOLD : [('Gibbons', 'Anthony Gibbons'), ('Epic', 'Epic'), ('Rancière', 'Rancière'), ('Goldberg', 'Mitchell S. Goldberg'), ('Pramuk', 'Jacob Pramuk')]
+  MODEL: [('Gibbons', 'Anthony Gibbons'), ('Epicb', 'Epicb'), ('Rancièrec', 'Rancièrec'), ('Goldberga', 'Mitchell S. Goldberga'), ('Pramukc', 'Jacob Pramukc')]
+  SRC  : Gibbons et al 15 [Anthony Gibbonsb,b, Epicb,a, Rancièrec, Mitchell S. Goldberga, Jacob Pramukc,b, “WHAT MAKES GREAT POWER WAR POSSIBLE,” National Journal, 2015]
+
+[90004672] miss=['jackson', 'litowitz', 'weheliye'] extra=['jacksona', 'litowitzd', 'weheliyec']
+  GOLD : [('Gilbert', 'Emily Gilbert'), ('Jackson', 'James K. Jackson'), ('Litowitz', 'Douglas E. Litowitz'), ('Weheliye', 'Alexander Weheliye')]
+  MODEL: [('Gilbert', 'Emily Gilbert'), ('Jacksona', 'James K. Jacksona'), ('Litowitzd', 'Douglas E. Litowitzd'), ('Weheliyec', 'Alexander Weheliyec')]
+  SRC  : Gilbert et al 20 [Emily Gilbertd,c, James K. Jacksona,b, Douglas E. Litowitzd, Alexander Weheliyec,b, “Economic Integration, Economic Signaling and the Problem of Economic Crises,” Administrative Office of the U.S. Courts, 2020]
+
+[90004673] miss=['lade', 'orlins', 'vermeule', 'winter'] extra=['ladec', 'orlinsd', 'vermeuleb', 'winterd']
+  GOLD : [('Eiler', 'Ashley Eiler'), ('Orlins', 'Stephen A. Orlins'), ('Lade', 'Steven J. Lade'), ('Winter', 'Winter'), ('Vermeule', 'Adrian Vermeule')]
+  MODEL: [('Eiler', 'Ashley Eiler'), ('Orlinsd', 'Stephen A. Orlinsd'), ('Ladec', 'Steven J. Ladec'), ('Winterd', 'Winterd'), ('Vermeuleb', 'Adrian Vermeuleb')]
+  SRC  : Eiler et al 14 [Ashley Eilerb, Stephen A. Orlinsd,b, Steven J. Ladec, Winterd,b, Adrian Vermeuleb,a, “AMERICA’S ARMS SALES POLICY: SECURITY ABROAD, NOT JOBS AT HOME,” Legal Dictionary, 2014]
+
+[90004674] miss=['ross', 'yoo'] extra=['rossc', 'yooa']
+  GOLD : [('Giroux', 'Henry A. Giroux'), ('Yoo', 'John Yoo'), ('Ross', 'Shawna Ross')]
+  MODEL: [('Giroux', 'Henry A. Giroux'), ('Yooa', 'John Yooa'), ('Rossc', 'Shawna Rossc')]
+  SRC  : Giroux et al 08 [Henry A. Girouxc, John Yooa, Shawna Rossc,a, “A scoping review on incentives for adoption of sustainable agricultural practices and their outcomes,” LobeLog, 2008]
+
+[90004675] miss=['lederer', 'mcgregor'] extra=['ledererb', 'mcgregorc']
+  GOLD : [('Campbell', 'Shannon Campbell'), ('McGregor', 'James McGregor'), ('Lederer', 'Edith Lederer')]
+  MODEL: [('Campbell', 'Shannon Campbell'), ('McGregorc', 'James McGregorc'), ('Ledererb', 'Edith Ledererb')]
+  SRC  : Campbell et al 14 [Shannon Campbella,b, James McGregorc, Edith Ledererb, “Slaying The Inequality Villain In School Finance: Is The Right To Education The Silver Bullet?,,” Sustainable Business Forum, 2014]
+
+[90004676] miss=['mcintosh', 'simendinger'] extra=['justice', 'mcintosha', 'simendingerb']
+  GOLD : [('Gillett', 'Gillett'), ('Simendinger', 'Alexis Simendinger'), ('McIntosh', 'Christopher McIntosh')]
+  MODEL: [('Gillett', 'Gillett'), ('Simendingerb', 'Alexis Simendingerb'), ('McIntosha', 'Christopher McIntosha'), ('JUSTICE', 'INDIGENOUS WATER JUSTICE')]
+  SRC  : Gillett et al 14 [Gillettc, Alexis Simendingerb,a, Christopher McIntosha, “INDIGENOUS WATER JUSTICE,” SUPREME COURT OF DELAWARE, 2014]
+
+[90004677] miss=['goldberg', 'kanavos', 'kutilek', 'quinn', 'tamdgidi'] extra=['goldbergd', 'kutileka', 'panos', 'quinnb', 'tamdgidib']
+  GOLD : [('Singh', 'Sabrina Singh'), ('Goldberg', 'Fred Goldberg'), ('Tamdgidi', 'Mohammad H. Tamdgidi'), ('Kanavos', 'Dr. Panos Kanavos'), ('Quinn', 'Michael C. Quinn'), ('Kutilek', 'Miroslav Kutilek')]
+  MODEL: [('Singh', 'Sabrina Singh'), ('Goldbergd', 'Fred Goldbergd'), ('Tamdgidib', 'Mohammad H. Tamdgidib'), ('Panos', 'Dr. Panos Panos'), ('Quinnb', 'Michael C. Quinnb'), ('Kutileka', 'Miroslav Kutileka')]
+  SRC  : Singh et al 11 [Sabrina Singhb,b, Fred Goldbergd, Mohammad H. Tamdgidib, Dr. Panos Kanavosc, Michael C. Quinnb, Miroslav Kutileka,a, “Recovering Strong: A Federal Policy Blueprint. Transforming Water Management Post COVID-19,” Science Magaz
+
+[90004678] miss=['wilkins'] extra=['wilkinsd']
+  GOLD : [('Yoshihara', 'Toshi Yoshihara'), ('Wilkins', 'Brooke Wilkins')]
+  MODEL: [('Yoshihara', 'Toshi Yoshihara'), ('Wilkinsd', 'Brooke Wilkinsd')]
+  SRC  : Yoshihara et al 14 [Toshi Yoshiharac,b, Brooke Wilkinsd,c, “Glossary Term | Enacted,” Pro-Posições [online], 2014]
+
+[90004679] miss=['wilderson'] extra=['wildersond']
+  GOLD : [('Elliot', 'Diana Elliot'), ('Wilderson', 'Wilderson')]
+  MODEL: [('Elliot', 'Diana Elliot'), ('Wildersond', 'Wildersond')]
+  SRC  : Elliot et al 10 [Diana Elliotc, Wildersond,a, “Making America Safe for the World: Multilateralism and the Rehabilitation of US authority,” Turkish Minute, 2010]
+
+[90004680] miss=['dodge', 'persson', 'shalal'] extra=['dodgeb', 'michaela', 'perssona']
+  GOLD : [('Koplow', 'David A. Koplow'), ('Shalal', 'Andrea Shalal'), ('Dodge', 'Michaela Dodge'), ('Persson', 'J. Persson')]
+  MODEL: [('Koplow', 'David A. Koplow'), ('Michaela', 'Andrea Michaela'), ('Dodgeb', 'Michaela Dodgeb'), ('Perssona', 'J. Perssona')]
+  SRC  : Koplow et al 22 [David A. Koplowd,c, Andrea Shalald, Michaela Dodgeb,b, J. Perssona,c, “What Is Ocean Exploration and Why Is It Important?,” Kansas Journal of Law and Public Policy, 2022]
+
+[90004681] miss=['miller', 'woller'] extra=['millerd', 'wollerb']
+  GOLD : [('Romanosky', 'Sasha Romanosky'), ('Miller', 'Peter Miller'), ('Woller', 'Gary Woller')]
+  MODEL: [('Romanosky', 'Sasha Romanosky'), ('Wollerb', 'Peter Wollerb'), ('Millerd', 'Gary Millerd')]
+  SRC  : Romanosky et al 11 [Sasha Romanoskyb,b, Peter Millerd, Gary Wollerb, “Bulldozing the Subject,” CReST, 2011]
+
+[90004682] miss=['miron', 'romm', 'stettner', 'vossler'] extra=['mirond', 'rommb', 'stettnerb', 'vosslerc']
+  GOLD : [('Jones', 'Branwen Gruffydd Jones'), ('Miron', 'Jeffrey A. Miron'), ('Vossler', 'Christian A. Vossler'), ('Romm', 'Tony Romm'), ('Stettner', 'Andrew Stettner')]
+  MODEL: [('Jones', 'Branwen Gruffydd Jones'), ('Mirond', 'Jeffrey A. Mirond'), ('Vosslerc', 'Christian A. Vosslerc'), ('Rommb', 'Tony Rommb'), ('Stettnerb', 'Andrew Stettnerb')]
+  SRC  : Jones et al 22 [Branwen Gruffydd Jonesc,b, Jeffrey A. Mirond,c, Christian A. Vosslerc,a, Tony Rommb,c, Andrew Stettnerb, “How productive are lame duck Congresses?,” IEF, 2022]
+
+[90004683] miss=['moeller', 'rolleri'] extra=['m', 'rolleria']
+  GOLD : [('Hansche', 'M. Hansche'), ('Moeller', 'Moeller'), ('Rolleri', 'Jacqueline S. Rolleri')]
+  MODEL: [('Hansche', 'M. Hansche'), ('M', 'Moellera'), ('Rolleria', 'Jacqueline S. Rolleria')]
+  SRC  : Hansche et al 14 [M. Hansched,b, Moellera,a, Jacqueline S. Rolleria, “I Change Myself, I Change the World: Gloria Anzaldua’s Sociological Imagination in Borderlands/La Frontera: The New Mestiza,” Ethnic And Racial Studies, 2014]
+
+[90004684] miss=['chandler', 'karapetyan', 'ohare'] extra=['chandlerb', 'karapetyanb', 'ohared']
+  GOLD : [('Bostrom', 'Bostrom'), ('Chandler', 'Redonna K. Chandler'), ('Karapetyan', 'Lili Karapetyan'), ('O’Hare', 'Paul O’Hare')]
+  MODEL: [('Bostrom', 'Bostrom'), ('Chandlerb', 'Redonna K. Chandlerb'), ('Karapetyanb', 'Lili Karapetyanb'), ('O’Hared', 'Paul O’Hared')]
+  SRC  : Bostrom et al 12 [Bostromd,b, Redonna K. Chandlerb,c, Lili Karapetyanb,b, Paul O’Hared, “Auer and the Incentives Issue, by Ronald M. Levin,,” NATIONAL INTEREST, 2012]
+
+[90004685] miss=['adams', 'gilli', 'ingram', 'kulesa', 'rudy'] extra=['adamsa', 'gillic', 'ingramb', 'kulesac', 'rudyd']
+  GOLD : [('Groove', 'Stephen Groove'), ('Gilli', 'Andrea Gilli'), ('Rudy', 'Samuel Rudy'), ('Ingram', 'Cindi Ingram'), ('Kulesa', 'Łukasz Kulesa'), ('Adams', 'Rachel Adams')]
+  MODEL: [('Groove', 'Stephen Groove'), ('Gillic', 'Andrea Gillic'), ('Rudyd', 'Samuel Rudyd'), ('Ingramb', 'Cindi Ingramb'), ('Kulesac', 'Łukasz Kulesac'), ('Adamsa', 'Rachel Adamsa')]
+  SRC  : Groove et al 10 [Stephen Grooveb, Andrea Gillic,c, Samuel Rudyd,c, Cindi Ingramb,b, Łukasz Kulesac, Rachel Adamsa,b, “LEGAL RIGHT Definition & Legal Meaning,” RAND, 2010]
+
+[90004686] miss=['andrews', 'biden', 'chollet', 'guarasci'] extra=['andrewsd', 'bidend', 'cholletb', 'guarascic']
+  GOLD : [('Crespo', 'Juan Manuel Crespo'), ('Andrews', 'Andrews'), ('Chollet', 'Chollet'), ('Biden', 'Joe Biden'), ('Guarasci', 'Richard Guarasci')]
+  MODEL: [('Crespo', 'Juan Manuel Crespo'), ('Andrewsd', 'Andrewsd'), ('Cholletb', 'Cholletb'), ('Bidend', 'Joe Bidend'), ('Guarascic', 'Richard Guarascic')]
+  SRC  : Crespo et al 20 [Juan Manuel Crespoc, Andrewsd, Cholletb, Joe Bidend, Richard Guarascic, “UNDERSTANDING AND ROLLING BACK DIGITAL AUTHORITARIANISM,” International Journal of Politics, Culture, and Society, 2020]
+
+[90004687] miss=['clayton', 'collins', 'paust'] extra=['claytond', 'collinsd', 'pausta']
+  GOLD : [('Rogin', 'Josh Rogin'), ('Collins', 'Patricia Hill Collins'), ('Paust', 'Jordan J. Paust'), ('Clayton', 'Blake Clayton')]
+  MODEL: [('Rogin', 'Josh Rogin'), ('Collinsd', 'Patricia Hill Collinsd'), ('Pausta', 'Jordan J. Pausta'), ('Claytond', 'Blake Claytond')]
+  SRC  : Rogin et al 11 [Josh Rogind, Patricia Hill Collinsd, Jordan J. Pausta,b, Blake Claytond, “Nodes of resistance to green grabbing: a political ecology,” Middle East Journal, 2011]
+
+[90004688] miss=['pratt'] extra=['prattb']
+  GOLD : [('Serwer', 'Serwer'), ('Pratt', 'Yvonne Poitras Pratt')]
+  MODEL: [('Serwer', 'Serwer'), ('Prattb', 'Yvonne Poitras Prattb')]
+  SRC  : Serwer et al 20 [Serwerd,c, Yvonne Poitras Prattb,a, “High-Priced Pain: What to Expect from a Single-Payer Health Care System,” Alternet, 2020]
+
+[90004689] miss=['buhaug', 'buren', 'scharre'] extra=['buhaugb', 'burenb', 'scharrea']
+  GOLD : [('Hanson', 'Michael Hanson'), ('Buren', 'April Van Buren'), ('Buhaug', 'Halvard Buhaug'), ('Scharre', 'Paul Scharre')]
+  MODEL: [('Hanson', 'Michael Hanson'), ('Burenb', 'April Van Burenb'), ('Buhaugb', 'Halvard Buhaugb'), ('Scharrea', 'Paul Scharrea')]
+  SRC  : Hanson et al 15 [Michael Hansona, April Van Burenb, Halvard Buhaugb, Paul Scharrea, “When Defense Contractors Face Criticism,” Vision of Earth, 2015]
+
+[90004690] miss=['blair', 'rasch', 'rosiek', 'sacket', 'teubner'] extra=['blaira', 'raschc', 'rosiekb', 'sacketa', 'teubnerc']
+  GOLD : [('Neves', 'Richard J. Neves'), ('Rosiek', 'Jerry Lee Rosiek'), ('Teubner', 'Gunther Teubner'), ('Sacket', 'Paul Sacket'), ('Blair', 'Bruce Blair'), ('Rasch', 'Phillip Rasch')]
+  MODEL: [('Neves', 'Richard J. Neves'), ('Rosiekb', 'Jerry Lee Rosiekb'), ('Teubnerc', 'Gunther Teubnerc'), ('Sacketa', 'Paul Sacketa'), ('Blaira', 'Bruce Blaira'), ('Raschc', 'Phillip Raschc')]
+  SRC  : Neves et al 18 [Richard J. Nevesd, Jerry Lee Rosiekb, Gunther Teubnerc, Paul Sacketa,a, Bruce Blaira,c, Phillip Raschc,c, “The Elements of Biodiversity,” Politico EU, 2018]
+
+[90004691] miss=['asquith', 'bartels', 'cirincione', 'tcherneva'] extra=['asquithb', 'bartelsb', 'cirincionec', 'tchernevab']
+  GOLD : [('Lindemenn', 'Lisa M. Lindemenn'), ('Cirincione', 'Joseph Cirincione'), ('Tcherneva', 'Pavlina Tcherneva'), ('Bartels', 'Meghan Bartels'), ('Asquith', 'Nicole L. Asquith')]
+  MODEL: [('Lindemenn', 'Lisa M. Lindemenn'), ('Cirincionec', 'Joseph Cirincionec'), ('Tchernevab', 'Pavlina Tchernevab'), ('Bartelsb', 'Michael Bartelsb'), ('Asquithb', 'Nicole L. Asquithb')]
+  SRC  : Lindemenn et al 11 [Lisa M. Lindemennc, Joseph Cirincionec, Pavlina Tchernevab, Meghan Bartelsb,c, Nicole L. Asquithb, “North Korea: Why War Is the Only Option Now,” NY Times, 2011]
+
+[90004692] miss=['cornell', 'destler', 'ehrlich', 'ginsburg', 'pfeifer'] extra=['cornellc', 'destlerc', 'ehrlichc', 'ginsburgc', 'pfeiferb']
+  GOLD : [('Slabykh', 'Igor Slabykh'), ('Ginsburg', 'Tom Ginsburg'), ('Cornell', 'Drucilla Cornell'), ('Destler', 'Mac Destler'), ('Pfeifer', 'Marion Pfeifer'), ('Ehrlich', 'Sean D. Ehrlich')]
+  MODEL: [('Slabykh', 'Igor Slabykh'), ('Ginsburgc', 'Tom Ginsburgc'), ('Cornellc', 'Drucilla Cornellc'), ('Destlerc', 'Mac Destlerc'), ('Pfeiferb', 'Marion Pfeiferb'), ('Ehrlichc', 'Sean D. Ehrlichc')]
+  SRC  : Slabykh et al 19 [Igor Slabykhc, Tom Ginsburgc,c, Drucilla Cornellc, Mac Destlerc,c, Marion Pfeiferb, Sean D. Ehrlichc,c, “Taiwan Just Became A Huge Variable In The China Trade War,” Albany Government Law Review, 2019]
+
+[90004693] miss=['lorber', 'lubroth', 'verbeek', 'zivo'] extra=['lorberc', 'lubrothb', 'verbeeka', 'zivoa']
+  GOLD : [('Saletan', 'William Saletan'), ('Verbeek', 'Thomas Verbeek'), ('Lorber', 'Eric Lorber'), ('Lubroth', 'Juan Lubroth'), ('Zivo', 'Adam Zivo')]
+  MODEL: [('Saletan', 'William Saletan'), ('Verbeeka', 'Thomas Verbeeka'), ('Lorberc', 'Eric Lorberc'), ('Lubrothb', 'Juan Lubrothb'), ('Zivoa', 'Adam Zivoa')]
+  SRC  : Saletan et al 15 [William Saletana, Thomas Verbeeka, Eric Lorberc, Juan Lubrothb,b, Adam Zivoa,c, “Right-Wing Extremism in the Military A typology of the threat,” Communist Party USA Healthcare Commission, 2015]
+
+[90004694] miss=['lim', 'russell'] extra=['limd', 'russella']
+  GOLD : [('Dollar', 'David Dollar'), ('Lim', 'Julian Lim'), ('Russell', 'Marta Russell')]
+  MODEL: [('Dollar', 'David Dollar'), ('Limd', 'Julian Limd'), ('Russella', 'Marta Russella')]
+  SRC  : Dollar et al 22 [David Dollara,b, Julian Limd, Marta Russella,c, “The University and the Undercommons,” Yale Law Journal, 2022]
+
+[90004695] miss=['go', 'kay'] extra=['goa', 'kayb']
+  GOLD : [('Elverdin', 'Pablo Elverdin'), ('Kay', 'Jonathan Kay'), ('Go', 'Julian Go')]
+  MODEL: [('Elverdin', 'Pablo Elverdin'), ('Kayb', 'Jonathan Kayb'), ('Goa', 'Julian Goa')]
+  SRC  : Elverdin et al 09 [Pablo Elverdind, Jonathan Kayb, Julian Goa,a, “Have wars and violence declined?,” Atlantic Council, 2009]
+
+[90004696] miss=['akhter', 'finneronburns', 'freeley', 'guarasci', 'omi', 'spigariol'] extra=['akhterb', 'finneronburnsc', 'freeleyc', 'guarascib', 'omic', 'spigariola']
+  GOLD : [('Omi', 'Michael Omi'), ('Spigariol', 'A. Spigariol'), ('Guarasci', 'Richard Guarasci'), ('Akhter', 'Majed Akhter'), ('Finneron-Burns', 'Elizabeth Finneron-Burns'), ('Freeley', 'Freeley')]
+  MODEL: [('Omic', 'Michael Omic'), ('Spigariola', 'A. Spigariola'), ('Guarascib', 'Richard Guarascib'), ('Akhterb', 'Majed Akhterb'), ('Finneron-Burnsc', 'Elizabeth Finneron-Burnsc'), ('Freeleyc', 'Freeleyc')]
+  SRC  : Omi et al 23 [Michael Omic, A. Spigariola, Richard Guarascib, Majed Akhterb,a, Elizabeth Finneron-Burnsc, Freeleyc, “Representation and Democracy: Uneasy Alliance,” Carnegie Endowment, 2023]
+
+[90004697] miss=['bader', 'huneeus', 'meyer', 'shiva'] extra=['baderc', 'huneeusd', 'meyerd', 'shivac']
+  GOLD : [('James', 'Kevin James'), ('Shiva', 'Vandana Shiva'), ('Meyer', 'Vera Meyer'), ('Huneeus', 'Alexandra Huneeus'), ('Bader', 'Jeffrey Bader')]
+  MODEL: [('James', 'Kevin James'), ('Shivac', 'Vandana Shivac'), ('Meyerd', 'Vera Meyerd'), ('Huneeusd', 'Alexandra Huneeusd'), ('Baderc', 'Jeffrey Baderc')]
+  SRC  : James et al 18 [Kevin Jamesd, Vandana Shivac,b, Vera Meyerd,c, Alexandra Huneeusd, Jeffrey Baderc, “Court’s Potential to Goad Voters Swings to Democrats,” The Korean Journal of International Studies, 2018]
+
+[90004698] miss=['hernandez', 'leys', 'mueller', 'nowak'] extra=['hernandezc', 'leysb', 'muellera', 'nowakb']
+  GOLD : [('Bennett', 'Keith D. Bennett'), ('Mueller', 'Robert S. Mueller'), ('Leys', 'Nathan Leys'), ('Nowak', 'David Nowak'), ('Hernández', 'Hernández')]
+  MODEL: [('Bennett', 'Keith D. Bennett'), ('Muellera', 'Robert S. Muellera'), ('Leysb', 'Nathan Leysb'), ('Nowakb', 'David Nowakb'), ('Hernándezc', 'Hernándezc')]
+  SRC  : Bennett et al 10 [Keith D. Bennettb,b, Robert S. Muellera,c, Nathan Leysb, David Nowakb, Hernándezc,b, “Global Warming and the Green Paradox: A Review of Adverse Effects of Climate Policies,” Center for Public Integrity, 2010]
+
+[90004699] miss=['allen', 'ess', 'fair', 'jaureguicorrea', 'pramuk'] extra=['allenb', 'essc', 'faira', 'jaureguicorread', 'pramukd']
+  GOLD : [('Okamoto', 'Yukio Okamoto'), ('Ess', 'Charles Ess'), ('Jauregui-Correa', 'Juan Carlos Jauregui-Correa'), ('Pramuk', 'Jacob Pramuk'), ('Allen', 'Craig Allen'), ('Fair', 'C. Christine Fair')]
+  MODEL: [('Okamoto', 'Yukio Okamoto'), ('Essc', 'Charles Essc'), ('Jauregui-Corread', 'Juan Carlos Jauregui-Corread'), ('Pramukd', 'Jacob Pramukd'), ('Allenb', 'Craig Allenb'), ('Faira', 'C. Christine Faira')]
+  SRC  : Okamoto et al 15 [Yukio Okamotoa, Charles Essc,b, Juan Carlos Jauregui-Corread,c, Jacob Pramukd, Craig Allenb,b, C. Christine Faira,b, “IS DREDGING GOOD FOR THE ENVIRONMENT?,” Child and Youth Services, 2015]
+
+[90004701] miss=['heiner'] extra=['heinerb']
+  GOLD : [('Weinstein', 'Franklin B. Weinstein'), ('Heiner', 'Heiner')]
+  MODEL: [('Weinstein', 'Franklin B. Weinstein'), ('Heinerb', 'Heinerb')]
+  SRC  : Weinstein et al 20 [Franklin B. Weinsteind, Heinerb, “NOBODY BENEFITS FROM A NUCLEAR-ARMED SOUTH KOREA,” TEConomy Partners, LLC, 2020]
+
+[90004702] miss=['ormord'] extra=['ormordd']
+  GOLD : [('Chilton', 'Kevin P. Chilton'), ('Ormord', 'James Ormord')]
+  MODEL: [('Chilton', 'Kevin P. Chilton'), ('Ormordd', 'James Ormordd')]
+  SRC  : Chilton et al 22 [Kevin P. Chiltonb, James Ormordd,a, “Immigration and Nationality Act,” Pharmaceutical Online, 2022]
+
+[90004703] miss=['diamond', 'halperin', 'luke', 'tickell'] extra=['diamondd', 'halperinb', 'lukeb', 'tickella']
+  GOLD : [('Clarke', 'Colin P. Clarke'), ('Luke', 'Timothy W. Luke'), ('Tickell', 'Oliver Tickell'), ('Diamond', 'Larry Diamond'), ('Halperin', 'Morton H. Halperin')]
+  MODEL: [('Clarke', 'Colin P. Clarke'), ('Lukeb', 'Timothy W. Lukeb'), ('Tickella', 'Oliver Tickella'), ('Diamondd', 'Larry Diamondd'), ('Halperinb', 'Morton H. H')]
+  SRC  : Clarke et al 18 [Colin P. Clarkea,c, Timothy W. Lukeb, Oliver Tickella, Larry Diamondd, Morton H. Halperinb,b, “IN RE LAWRENCE D. GOLDBERG, DEBTOR; DWAYNE M. MURRAY, TRUSTEE, PLAINTIFF VERSUS MAE M. STACY TRUST AND F. EUGENE RICHARDSON, DEF
+
+[90004704] miss=['tannenwald'] extra=['tannenwaldd']
+  GOLD : [('Hartcher', 'Peter Hartcher'), ('Tannenwald', 'Nina Tannenwald')]
+  MODEL: [('Hartcher', 'Peter Hartcher'), ('Tannenwaldd', 'Nina Tannenwaldd')]
+  SRC  : Hartcher et al 17 [Peter Hartcherd,b, Nina Tannenwaldd,c, “Inhuman Power: Artificial Intelligence and the Future of Capitalism,” The Odyssey, 2017]
+
+[90004705] miss=['leuprecht'] extra=['leuprechtb']
+  GOLD : [('Argyros', 'George Argyros'), ('Leuprecht', 'Christian Leuprecht')]
+  MODEL: [('Argyros', 'George Argyros'), ('Leuprechtb', 'Christian Leuprechtb')]
+  SRC  : Argyros et al 19 [George Argyrosb,c, Christian Leuprechtb,a, “Euthanasia; Research Suggests Doctor-Assisted Suicide Wouldn't Undermine Patient Trust,” Food and Drug Law Journal, 2019]
+
+[90004706] miss=['borenstein', 'carden', 'chachavalpongpun', 'swanson'] extra=['borensteinb', 'cardenc', 'chachavalpongpunc', 'swansonc']
+  GOLD : [('Ruyle', 'Leslie Ruyle'), ('Borenstein', 'Severin Borenstein'), ('Chachavalpongpun', 'Pavin Chachavalpongpun'), ('Swanson', 'Ana Swanson'), ('Carden', 'Robert Carden')]
+  MODEL: [('Ruyle', 'Leslie Ruyle'), ('Borensteinb', 'Severin Borensteinb'), ('Chachavalpongpunc', 'Pavin Chachavalpongpunc'), ('Swansonc', 'Ana Swansonc'), ('Cardenc', 'Robert Cardenc')]
+  SRC  : Ruyle et al 12 [Leslie Ruyleb, Severin Borensteinb,b, Pavin Chachavalpongpunc, Ana Swansonc, Robert Cardenc, “Profit and Pleasure : Sexual Identities in Late Capitalism,” Annals of the American Association of Geographers, 2012]
+
+[90004707] miss=['hitchens', 'robinson', 'vaheesan', 'witze'] extra=['hitchensa', 'robinsona', 'vaheesand', 'witzec']
+  GOLD : [('Hazarika', 'Sanjay Hazarika'), ('Hitchens', 'Hitchens'), ('Robinson', 'Andrew Robinson'), ('Vaheesan', 'Sandeep Vaheesan'), ('Witze', 'Witze')]
+  MODEL: [('Hazarika', 'Sanjay Hazarika'), ('Hitchensa', 'Hitchensa'), ('Robinsona', 'Andrew Robinsona'), ('Vaheesand', 'Sandeep Vaheesand'), ('Witzec', 'Witzec')]
+  SRC  : Hazarika et al 11 [Sanjay Hazarikaa,a, Hitchensa,b, Andrew Robinsona,b, Sandeep Vaheesand, Witzec,b, “War, Politics and Race: Reflections on Violence in the 'War on Terror',” Comparative Migration Studies, 2011]
+
+[90004708] miss=['kulesa', 'pasquale'] extra=['kulesad', 'pasqualea']
+  GOLD : [('Kamper', 'Dave Kamper'), ('Pasquale', 'Frank Pasquale'), ('Kulesa', 'Łukasz Kulesa')]
+  MODEL: [('Kamper', 'Dave Kamper'), ('Pasqualea', 'Frank Pasqualea'), ('Kulesad', 'Łukasz Kulesad')]
+  SRC  : Kamper et al 16 [Dave Kamperb, Frank Pasqualea,b, Łukasz Kulesad,a, “As the Climate Warms, Could the U.S. Face Another Dust Bowl?,” Cornell Law Dictionary, 2016]
+
+[90004709] miss=['bokatlindell', 'fandos', 'sunar', 'white'] extra=['bokatlindella', 'fandosd', 'sunarb', 'whitea']
+  GOLD : [('Yoo', 'April Yoo'), ('Sunar', 'Nur Sunar'), ('White', 'Hugh White'), ('Fandos', 'Nicholas Fandos'), ('Bokat-Lindell', 'Spencer Bokat-Lindell')]
+  MODEL: [('Yoo', 'April Yoo'), ('Sunarb', 'Nur Sunarb'), ('Whitea', 'Hugh Whitea'), ('Fandosd', 'Nicholas Fandosd'), ('Bokat-Lindella', 'Spencer Bokat-Lindella')]
+  SRC  : Yoo et al 13 [April Yood, Nur Sunarb, Hugh Whitea, Nicholas Fandosd, Spencer Bokat-Lindella, “Report: Surveillance programs may cost US tech over $35 billion and its competitive edge,” Thomson Reuters Practical Law, 2013]
+
+[90004710] miss=['peterson'] extra=['petersonc']
+  GOLD : [('Rainey', 'John Rainey'), ('Peterson', 'Peterson')]
+  MODEL: [('Rainey', 'John Rainey'), ('Petersonc', 'Petersonc')]
+  SRC  : Rainey et al 23 [John Raineyd,c, Petersonc, “What is an Arbitration? Artificial Intelligence and the Vanishing Human Arbitrator,” Wikipedia Administrator, 2023]
+
+[90004711] miss=['fields', 'harutyunyan', 'moran', 'suvin', 'weitzner'] extra=['fieldsd', 'harutyunyanb', 'morana', 'suvinc', 'weitznerc']
+  GOLD : [('Kelly', 'Claire R. Kelly'), ('Suvin', 'Darko Suvin'), ('Moran', 'Michael Moran'), ('Fields', 'Katharine Fields'), ('Harutyunyan', 'Liana Harutyunyan'), ('Weitzner', 'Daniel Weitzner')]
+  MODEL: [('Kelly', 'Claire R. Kelly'), ('Suvinc', 'Darko Suvinc'), ('Morana', 'Michael Morana'), ('Fieldsd', 'Katharine Fieldsd'), ('Harutyunyanb', 'Liana Harutyunyanb'), ('Weitznerc', 'Daniel Weitznerc')]
+  SRC  : Kelly et al 23 [Claire R. Kellyd,c, Darko Suvinc,c, Michael Morana, Katharine Fieldsd,c, Liana Harutyunyanb,a, Daniel Weitznerc,a, “The Coronavirus and the Crisis of Global Capitalism,” Science Magazine, 2023]
+
+[90004712] miss=['anderson', 'bergengruen', 'convey', 'goldstein', 'legrand'] extra=['andersond', 'bergengruenc', 'conveya', 'goldsteinc', 'legrandd']
+  GOLD : [('Mansdorf', 'Irwin J. (Yitzchak) Mansdorf'), ('Anderson', 'Anderson'), ('Bergengruen', 'Vera Bergengruen'), ('Goldstein', 'David Goldstein'), ('Legrand', 'J. Legrand'), ('Convey', 'Peter Convey')]
+  MODEL: [('Mansdorf', 'Irwin J.'), ('Andersond', 'Andersond'), ('Bergengruenc', 'Vera Bergengruenc'), ('Goldsteinc', 'David Goldsteinc'), ('Legrandd', 'J. Legrandd'), ('Conveya', 'Peter Conveya')]
+  SRC  : Mansdorf et al 09 [Irwin J. (Yitzchak) Mansdorfb, Andersond,a, Vera Bergengruenc,b, David Goldsteinc,c, J. Legrandd, Peter Conveya, “Definition of Company Contract,” Politico EU, 2009]
+
+[90004713] miss=['bandow', 'healey', 'kasler', 'raine'] extra=['bandowb', 'dale', 'healeyb', 'rained']
+  GOLD : [('Stanley-Lockman', 'Zoe Stanley-Lockman'), ('Bandow', 'Doug Bandow'), ('Raine', 'John Raine'), ('Kasler', 'Dale Kasler'), ('Healey', 'Healey')]
+  MODEL: [('Stanley-Lockman', 'Zoe Stanley-Lockman'), ('Bandowb', 'Doug Bandowb'), ('Rained', 'John Rained'), ('Dale', 'Dale Dale'), ('Healeyb', 'Healeyb')]
+  SRC  : Stanley-Lockman et al 14 [Zoe Stanley-Lockmand, Doug Bandowb,c, John Rained, Dale Kaslerb,b, Healeyb,c, “Overpopulation Is Not the Problem,” Theor Soc, 2014]
+
+===== omission  (16) =====
+
+[139716] miss=['moon'] extra=[]
+  GOLD : [('Moon', 'Katharine H.S. Moon')]
+  MODEL: []
+  SRC  : Congress’s control over FMS credit to South Korea results in South Korea forcing womxn into sex work for US officials
+Moon 97 Sex Among Allies: Military Prostitution in U.S./Korea Relations Katharine H.S. Moon New York Columbia University P
+
+[438781] miss=['pinch'] extra=[]
+  GOLD : [('Mulkay', 'Michael Mulkay'), ('Pinch', 'Trevor Pinch'), ('Ashmore', 'Malcolm Ashmore')]
+  MODEL: [('Mulkay', 'Michael Mulkay'), ('Ashmore', 'Malcolm Ashmore')]
+  SRC  : Michael Mulkay, et al, 5/1987 Trevor Pinch and Malcolm Ashmore, Ashmore: Loughborough University, Social Sciences, Professor, Pinch: chair of the Science and Technology Studies department at Cornell University, Mulkay: Former researcher at 
+
+[1081192] miss=['prieto'] extra=[]
+  GOLD : [('Bordera', 'Juan Bordera'), ('Valladares', 'Fernando Valladares'), ('Turiel', 'Antonio Turiel'), ('Vilar', 'Ferran Puig Vilar'), ('Prieto', 'Fernando Prieto'), ('Hewlett', 'Tim Hewlett')]
+  MODEL: [('Bordera', 'Juan Bordera'), ('Valladares', 'Fernando Valladares'), ('Turiel', 'Antonio Turiel'), ('Vilar', 'Ferran Puig Vilar'), ('Hewlett', 'Tim Hewlett')]
+  SRC  : Juan Bordera et al 8-23. journalist, screenwriter and activist, and Fernando Valladares, doctor of biological sciences, a research professor at the CSIC, and recipient of the Rey Jaime I Award (for environmental protection), and Antonio Tur
+
+[1407480] miss=['maciel'] extra=[]
+  GOLD : [('Barbosa', 'Barbosa'), ('Maciel', 'Maciel'), ('Ferreira', 'Luis Ferreira'), ('Farinha', 'Torres Farinha'), ('Fonsec', 'Inácio Fonsec'), ('Marques', 'Viriato Marques'), ('Simões', 'António Simões')]
+  MODEL: [('Barbosa', 'Maciel Barbosa'), ('Ferreira', 'Luis Ferreira'), ('Simões', 'António Simões'), ('Farinha', 'Torres Farinha'), ('Fonsec', 'Inácio Fonsec'), ('Marques', 'Viriato Marques')]
+  SRC  : Barbosa et al. 9 (Professor of Engineering at the University of Portugal. Maciel, Luis Ferreira, Torres Farinha, Inácio Fonsec, Viriato Marques, and António Simões, “Integrating Wind Power energy into electric grids an environmental issue”,
+
+[2793822] miss=['bulmanpozen'] extra=[]
+  GOLD : [('Bulman-Pozen', 'Bulman-Pozen')]
+  MODEL: []
+  SRC  : --Unprecedented federal power is in many ways a good thing, BUT requires a new way to effectively protect the states from executive overreach
+Bulman-Pozen 17
+
+[3203442] miss=['belkin'] extra=[]
+  GOLD : [('Nelson', 'Rebecca M. Nelson'), ('Belkin', 'Paul Belkin'), ('Jackson', 'James K. Jackson')]
+  MODEL: [('Nelson', 'Rebecca M. Nelson'), ('Jackson', 'James K. Jackson')]
+  SRC  : Nelson et al. 17 (Rebecca M. Nelson, Coordinator Specialist in International Trade and Finance Paul Belkin Analyst in European Affairs James K. Jackson Specialist in International Trade and Finance “The Greek Debt Crisis: Overview and Impli
+
+[90001212] miss=['larison'] extra=[]
+  GOLD : [('Ermarth', 'Fritz Ermarth'), ('CACN', 'CACN'), ('Poling', 'Gregory Poling'), ('Havercroft', 'Jonathan Havercroft'), ('Smith', 'Noah Smith'), ('Stanley', 'Stanley'), ('Yarhi-Milo', 'Keren Yarhi-Milo'), ('Foster', 'John Bellamy Foster'), ('Wagner', 'Anne Wagner'), ('Lateef', 'Samaan Lateef'), ('Brown', 'Brown'), ('Nunn', 'Sam Nunn'), ('Hoffmann', 'Volker Hoffmann'), ('Efferth', 'Thomas Efferth'), ('Waxman', 'Matthew C. Waxman'), ('Soto', 'Sandy Soto'), ('Ferejohn', 'John A. Ferejohn'), ('Piper', 'Kelsey Piper'), ('Gostin', 'Lawrence O. Gostin'), ('Selee', 'Andrew Selee'), ('Miller', 'Jonathan Miller'), ('Majumdar', 'Dave Majumdar'), ('Hayes', 'Dave Hayes'), ('Vrasti', 'Wanda Vrasti'), ('Alphin', 'Caroline Alphin'), ('Ollier', 'Cliff Ollier'), ('Weyl', 'Glen Weyl'), ('Stern', 'Bezalel Stern'), ('Fettweis', 'Christopher J. Fettweis'), ('Montgomery', 'Evan Braden Montgomery'), ('Willis', 'Kathy Willis'), ('Nader', 'Laura Nader'), ('Poneman', 'Daniel B. Poneman'), ('Wade', 'Christian M. Wade'), ('Apse', 'Colin Apse'), ('Büscher', 'Bram Büscher'), ('Lauter', 'Louis Lauter'), ('Johnson', 'Ragina Johnson'), ('Massy', 'Kevin Massy'), ('Lee', 'Thomas R. Lee'), ('Larison', 'Larison')]
+  MODEL: [('Ermarth', 'Fritz Ermarth'), ('CACN', 'CACN CACN'), ('Poling', 'Gregory Poling'), ('Havercroft', 'Jonathan Havercroft'), ('Smith', 'Noah Smith'), ('Stanley', 'Stanley'), ('Yarhi-Milo', 'Keren Yarhi-Milo'), ('Foster', 'John Bellamy Foster'), ('Wagner', 'Anne Wagner'), ('Lateef', 'Samaan Lateef'), ('Brown', 'Brown'), ('Nunn', 'Sam Nunn'), ('Hoffmann', 'Volker Hoffmann'), ('Efferth', 'Thomas Efferth'), ('Waxman', 'Matthew C. Waxman'), ('Soto', 'Sandy Soto'), ('Ferejohn', 'John A. Ferejohn'), ('Piper', 'Kelsey Piper'), ('Gostin', 'Lawrence O. Gostin'), ('Selee', 'Andrew Selee'), ('Miller', 'Jonathan Miller'), ('Majumdar', 'Dave Majumdar'), ('Hayes', 'Dave Hayes'), ('Vrasti', 'Wanda Vrasti'), ('Alphin', 'Caroline Alphin'), ('Ollier', 'Cliff Ollier'), ('Weyl', 'Glen Weyl'), ('Stern', 'Bezalel Stern'), ('Fettweis', 'Christopher J. Fettweis'), ('Montgomery', 'Evan Braden Montgomery'), ('Willis', 'Kathy Willis'), ('Nader', 'Laura Nader'), ('Poneman', 'Daniel B. Poneman'), ('Wade', 'Christian M. Wade'), ('Apse', 'Colin Apse'), ('Büscher', 'Bram Büscher'), ('Lauter', 'Louis Lauter'), ('Johnson', 'Ragina Johnson'), ('Massy', 'Kevin Massy'), ('Lee', 'Thomas R. Lee')]
+  SRC  : Ermarth et al 13 (Fritz Ermarth; CACN; Gregory Poling; Jonathan Havercroft; Noah Smith; Stanley; Keren Yarhi-Milo; John Bellamy Foster; Anne Wagner; Samaan Lateef, who according to news agency Kashmir Dot Com was awarded Bronze Medal, a cit
+
+[90001218] miss=['dariansmith', 'kirby', 'kroenig', 'lanoszka', 'pearl', 'spigariol', 'weiner', 'xia'] extra=[]
+  GOLD : [('Gerson', 'Joseph Gerson'), ('Pifer', 'Steven Pifer'), ('HORNE', 'HORNE'), ('Ollove', 'Michael Ollove'), ('Caruso', 'Giuseppe Caruso'), ('Büscher', 'Bram Büscher'), ('Michael', 'Michael'), ('Tollu', 'Hortense Tollu'), ('Dean', 'Tim Dean'), ('Bakke', 'Erik Bakke'), ("O'Hanlon", 'Michael O’Hanlon'), ('Ferri', 'Beth A. Ferri'), ('Redish', 'Martin H. Redish'), ('Cikara', 'Mina Cikara'), ('Ridge', 'Tom Ridge'), ('Oyeniyi', 'Adeleye Oyeniyi'), ('Roy', 'Roy'), ('Chow', 'Brian Chow'), ('Rao', 'Y. Srinivasa Rao'), ('Lee', 'John Lee'), ('Oprysko', 'Caitlin Oprysko'), ('Buck', 'Bela H. Buck'), ('Giddens', 'Christopher Giddens'), ('Kaelbling', 'Leslie Kaelbling'), ('Dillon', 'Robert G. Dillon'), ('Berman', 'Glenn J. Berman'), ('Scranton', 'Roy Scranton'), ('Newsome', 'Ted Adam Newsome'), ('Murphy', 'Murphy'), ('Lanoszka', 'Alexander Lanoszka'), ('Darian-Smith', 'Darian-Smith'), ('Kirby', 'William Kirby'), ('Spigariol', 'A. Spigariol'), ('Pearl', 'Pearl'), ('Xia', 'Lili Xia'), ('Weiner', 'Daniel I. Weiner'), ('Kroenig', 'Matthew Kroenig'), ('DeSoto', 'Hernando DeSoto'), ('Steies', 'John Steies'), ('Rascoff', 'Samuel J. Rascoff'), ('Specter', 'Michael Specter')]
+  MODEL: [('Gerson', 'Joseph Gerson'), ('Pifer', 'Steven Pifer'), ('HORNE', 'HORNE'), ('Ollove', 'Michael Ollove'), ('Caruso', 'Giuseppe Caruso'), ('Büscher', 'Bram Büscher'), ('Michael', 'Michael'), ('Tollu', 'Hortense Tollu'), ('Dean', 'Tim Dean'), ('Bakke', 'Erik Bakke'), ('O’Hanlon', 'Michael O’Hanlon'), ('Ferri', 'Beth A. Ferri'), ('Redish', 'Martin H. Redish'), ('Cikara', 'Mina Cikara'), ('Ridge', 'Tom Ridge'), ('Oyeniyi', 'Adeleye Oyeniyi'), ('Roy', 'Roy'), ('Chow', 'Brian Chow'), ('Rao', 'Y. Srinivasa Rao'), ('Lee', 'John Lee'), ('Oprysko', 'Caitlin Oprysko'), ('Buck', 'Bela H. Buck'), ('Giddens', 'Christopher Giddens'), ('Kaelbling', 'Leslie Kaelbling'), ('Dillon', 'Robert G. Dillon'), ('Berman', 'Glenn J. Berman'), ('Scranton', 'Roy Scranton'), ('Newsome', 'Ted Adam Newsome'), ('Murphy', 'Murphy'), ('DeSoto', 'Hernando DeSoto'), ('Steies', 'John Steies'), ('Rascoff', 'Samuel J. Rascoff'), ('Specter', 'Michael Specter')]
+  SRC  : Gerson et al 04 (Joseph Gerson; Steven Pifer, senior fellow in the Center on the United States and Europe and director of the Arms Control Initiative at The Brookings Institution; HORNE; Michael Ollove; Giuseppe Caruso; Bram Büscher; Michae
+
+[90001224] miss=['anderson', 'bennett', 'epic', 'robock'] extra=[]
+  GOLD : [('Leontief', 'Wassily Leontief'), ('Bakke', 'Erik Bakke'), ('Hunt', 'John Hunt'), ('Sovocool', 'Kelly Sovocool'), ('Fleitz', 'Fleitz'), ('Lamothe', 'Dave Lamothe'), ('Epic', 'Epic'), ('Ekland-Olson', 'Sheldon Ekland-Olson'), ('Jones', 'Kevin C. Jones'), ('Wohlforth', 'William C. Wohlforth'), ('Meyer', 'John Meyer'), ('Kravitz', 'Ben Kravitz'), ('Luther', 'Linda Luther'), ('Wohlforth', 'William Wohlforth'), ('Goldstein', 'Joshua Goldstein'), ('Wapner', 'Paul Wapner'), ('Byrd', 'Byrd'), ('Henry', 'Henry'), ('Lateef', 'Samaan Lateef'), ('Adams', 'Matthew Robert Adams'), ('Stent', 'Angela Stent'), ('Phillips', 'alan phillips'), ('Bennett', 'Nathan J. Bennett'), ('Anderson', 'Ben Anderson'), ('Robock', 'Alan Robock'), ('Ahmed', 'Nafeez Ahmed'), ('Blair', 'Bruce Blair'), ('Kasler', 'Dale Kasler')]
+  MODEL: [('Leontief', 'Wassily Leontief'), ('Bakke', 'Erik Bakke'), ('Hunt', 'John Hunt'), ('Sovocool', 'Kelly Sovocool'), ('Fleitz', 'Fleitz'), ('Lamothe', 'Dave Lamothe'), ('Ekland-Olson', 'Epic Ekland-Olson'), ('Ekland-Olson', 'Sheldon Ekland-Olson'), ('Jones', 'Kevin C. Jones'), ('Wohlforth', 'William C. Wohlforth'), ('Meyer', 'John Meyer'), ('Kravitz', 'Ben Kravitz'), ('Luther', 'Linda Luther'), ('Goldstein', 'Joshua Goldstein'), ('Wapner', 'Paul Wapner'), ('Byrd', 'Byrd'), ('Henry', 'Henry'), ('Lateef', 'Samaan Lateef'), ('Adams', 'Matthew Robert Adams'), ('Stent', 'Angela Stent'), ('phillips', 'alan phillips'), ('Ahmed', 'Nafeez Ahmed'), ('Blair', 'Bruce Blair'), ('Kasler', 'Dale Kasler')]
+  SRC  : Leontief et al 24 (Wassily Leontief, New York University; Erik Bakke; John Hunt; Kelly Sovocool, Research Fellow in the Energy Governance Program at the Centre on Asia and Globalization. He is also an Assistant Professor at the Lee Kuan Yew
+
+[90001231] miss=['dore'] extra=[]
+  GOLD : [('Goodman', 'H.A. Goodman'), ('Bleiker', 'Roland Bleiker'), ('Fowers', 'Alyssa Fowers'), ('White', 'David White'), ('Horne', 'Jonathan Horne'), ('Weil', 'Danny Weil'), ('Holland', 'Steve Holland'), ('Lohmann', 'U. Lohmann'), ('Overholt', 'William Overholt'), ('Schouten', 'Fredreka Schouten'), ('Dvorak', 'Petula Dvorak'), ('Liverman', 'Diana Liverman'), ('Sterling', 'Eric Sterling'), ('Klarman', 'Michael J. Klarman'), ('Schrogl', 'Kai-Uwe Schrogl'), ('Papageorgiou', 'Evan Papageorgiou'), ('Sass', 'Jennifer Sass'), ('Johnson', 'Drew Johnson'), ('Christian', 'Molly Christian'), ('Talmadge', 'Caitlin Talmadge'), ('Burbach', 'David T. Burbach'), ('Markarian', 'Vania Markarian'), ('Smith', 'Noah Smith'), ('Birch', 'Sarah Birch'), ('Ford', 'Christopher A. Ford'), ('Rubin', 'Rubin'), ('McWhorter', 'McWhorter'), ('Pitt', 'Pitt'), ('Kliman', 'Daniel Kliman'), ('Andres', 'Richard B. Andres'), ('French', 'French'), ('Lai', 'Alicia Lai'), ('Grant', 'Grant'), ('Sankaran', 'Jaganath Sankaran'), ('Riblett', 'Phillip Riblett'), ('Nelson', 'Vednita Nelson'), ('Meer', 'Sico Van Der Meer'), ('Mhiret', 'Worku N. Mhiret'), ('Ikenberry', 'John Ikenberry'), ('Dore', 'Dore')]
+  MODEL: [('Goodman', 'H.A. Goodman'), ('Bleiker', 'Roland Bleiker'), ('Fowers', 'Alyssa Fowers'), ('White', 'David White'), ('Horne', 'Jonathan Horne'), ('Weil', 'Danny Weil'), ('Holland', 'Steve Holland'), ('Lohmann', 'U. Lohmann'), ('Overholt', 'William Overholt'), ('Schouten', 'Fredreka Schouten'), ('Dvorak', 'Petula Dvorak'), ('Liverman', 'Diana Liverman'), ('Sterling', 'Eric Sterling'), ('Klarman', 'Michael J. Klarman'), ('Schrogl', 'Kai-Uwe Schrogl'), ('Papageorgiou', 'Evan Papageorgiou'), ('Sass', 'Jennifer Sass'), ('Johnson', 'Drew Johnson'), ('Christian', 'Molly Christian'), ('Talmadge', 'Caitlin Talmadge'), ('Burbach', 'David T. Burbach'), ('Markarian', 'Vania Markarian'), ('Smith', 'Noah Smith'), ('Birch', 'Sarah Birch'), ('Ford', 'Christopher A. Ford'), ('Rubin', 'Rubin'), ('McWhorter', 'McWhorter'), ('Pitt', 'Pitt'), ('Kliman', 'Daniel Kliman'), ('Andres', 'Richard B. Andres'), ('French', 'French'), ('Lai', 'Alicia Lai'), ('Grant', 'Grant'), ('Sankaran', 'Jaganath Sankaran'), ('Riblett', 'Phillip Riblett'), ('Nelson', 'Vednita Nelson'), ('Meer', 'Sico Van Der Meer'), ('Mhiret', 'Worku N. Mhiret'), ('Ikenberry', 'John Ikenberry')]
+  SRC  : Goodman et al 05 (H.A. Goodman, Columnist published in The Cleveland Plain Dealer, The Baltimore Sun, The Hill, Salon, The Jerusalem Post; Roland Bleiker; Alyssa Fowers; David White; Jonathan Horne; Danny Weil; Steve Holland; U. Lohmann; Wi
+
+[90001243] miss=['anderson', 'johnsonfreese', 'montgomery'] extra=[]
+  GOLD : [('McConachie', 'Brian McConachie'), ('Anderson-Nathe', 'Ben Anderson-Nathe'), ('Lukianoff', 'Lukianoff'), ('Inocencio', 'Ramy Inocencio'), ('Traber', 'Becca Traber'), ('Hunt', 'John Hunt'), ('Holtz', 'David Holtz'), ('Buzhinsky', 'Evgeny P. Buzhinsky'), ('Perry', 'M Andre Perry'), ('Allsup', 'Andrew Allsup'), ('Reisig', 'Greg Reisig'), ('Colvin', 'Colvin'), ('Coronado', 'Gloria D. Coronado'), ('Donnelly', 'CA Donnelly'), ('Vershbow', 'Alexander Vershbow'), ('Katulis', 'Brian Katulis'), ('Dunt', 'Ian Dunt'), ('Kauristie', 'Kirsti Kauristie'), ('Studebaker', 'Benjamin Studebaker'), ('Howarth', 'Richard Howarth'), ('Johnson-Freese', 'Joan Johnson-Freese'), ('Montgomery', 'Evan Braden Montgomery'), ('Zalloua', 'Zalloua'), ('Elmendorf', 'Christopher S. Elmendorf'), ('Inverarity', 'Calum Inverarity'), ('Uniacke', 'Suzanne Uniacke'), ('Wordsworth', 'Rich Wordsworth'), ('Vilar', 'Ferran Puig Vilar'), ('Kumar', 'A Vinod Kumar'), ('Kaddouh', 'Bilal Y. Kaddouh'), ('Hopkins', 'Cheyenne Hopkins'), ('Hilborn', 'Ray Hilborn'), ('Nier', 'Erlend Nier'), ('Ozselcuk', 'Ceren Ozselcuk'), ('Nawrath', 'Maximilian Nawrath'), ('Davis', 'Lois M. Davis'), ('Plate', 'Thomas Plate'), ('Anderson', 'Philip W. Anderson'), ('Valle', 'Fernando Berdion Del Valle'), ('Tan', 'Andrew T.H. Tan'), ('Schrogl', 'Kai-Uwe Schrogl'), ('Masi', 'Masi'), ('Messineo', 'Carl Messineo')]
+  MODEL: [('McConachie', 'Brian McConachie'), ('Anderson-Nathe', 'Ben Anderson-Nathe'), ('Lukianoff', 'Lukianoff'), ('Inocencio', 'Ray Inocencio'), ('Traber', 'Becca Traber'), ('Hunt', 'John Hunt'), ('Holtz', 'David Holtz'), ('Buzhinsky', 'Evgeny P. Buzhinsky'), ('Perry', 'M Andre Perry'), ('Allsup', 'Andrew Allsup'), ('Reisig', 'Greg Reisig'), ('Colvin', 'Colvin'), ('Coronado', 'Gloria D. Coronado'), ('Donnelly', 'CA Donnelly'), ('Vershbow', 'Alexander Vershbow'), ('Katulis', 'Brian Katulis'), ('Zalloua', 'Zalloua'), ('Elmendorf', 'Christopher S. Elmendorf'), ('Inverarity', 'Calum Inverarity'), ('Uniacke', 'Suzanne Uniacke'), ('Wordsworth', 'Rich Wordsworth'), ('Vilar', 'Ferran Puig Vilar'), ('Kumar', 'A Vinod Kumar'), ('Kaddouh', 'Bilal Y. Kaddouh'), ('Hopkins', 'Cheyenne Hopkins'), ('Hilborn', 'Ray Hilborn'), ('Nier', 'Erlend Nier'), ('Ozselcuk', 'Ceren Ozselcuk'), ('Nawrath', 'Maximilian Nawrath'), ('Davis', 'Lois M. Davis'), ('Plate', 'Thomas Plate'), ('Anderson-Nathe', 'Philip W. Anderson-Nathe'), ('Valle', 'Fernando Berdion Del Valle'), ('Tan', 'Andrew T.H. Tan'), ('Schrogl', 'Kai-Uwe Schrogl'), ('Masi', 'Masi'), ('Messineo', 'Carl Messineo'), ('Dunt', 'Ian Dunt'), ('Kauristie', 'Kirsti Kauristie'), ('Studebaker', 'Benjamin Studebaker'), ('Howarth', 'Richard Howarth')]
+  SRC  : McConachie et al 06 (Brian McConachie, Chair of Theatre Arts at the University of Pittsburgh; Ben Anderson-Nathe, Assistant Professor in Child and Family Studies at Portland State University in Portland, Oregon, where he also coordinates un
+
+[90001248] miss=['webb'] extra=[]
+  GOLD : [('Grijalva', 'James M. Grijalva'), ('Woods', 'Jay Woods'), ('Krulwich', 'Robert Krulwich'), ('Storey', 'Ian Storey'), ('Gibbins', 'Goodwin Gibbins'), ('Tugwell', 'Tugwell'), ('Gordon', 'Lewis Gordon'), ('Meinrath', 'Sascha Meinrath'), ('Connolly', 'William E. Connolly'), ('Wilkins', 'Brooke Wilkins'), ('Inoue', 'Asao B. Inoue'), ('Araujo', 'Marcelo de Araujo'), ('Taylor', 'Stuart Taylor'), ('Hudson', 'John Hudson'), ('Anderson-Nathe', 'Ben Anderson-Nathe'), ('Rawn', 'Rawn'), ('Kilmer', 'Beau Kilmer'), ('Chapman', 'Allegra Chapman'), ('Noutcheva', 'Gergana Noutcheva'), ('Driesen', 'Driesen'), ('Szacki', 'Jerzy Szacki'), ('Lanoszka', 'Alexander Lanoszka'), ('Corrigan', 'Alyssa Corrigan'), ('Briggle', 'Adam Briggle'), ('Garza', 'Andrew Garza'), ('Collins', 'Patricia Hill Collins'), ('Deleuze', 'Gilles Deleuze'), ('Perry', 'Elizabeth J. Perry'), ('Wilderson', 'Frank B. Wilderson'), ('Smeeeding', 'Timothy M. Smeeeding'), ('Cromley', 'JoAnne Cromley'), ('Webb', 'Webb')]
+  MODEL: [('Grijalva', 'James M. Grijalva'), ('Woods', 'Jay Woods'), ('Krulwich', 'Robert Krulwich'), ('Storey', 'Ian Storey'), ('Gibbins', 'Goodwin Gibbins'), ('Tugwell', 'Tugwell'), ('Gordon', 'Lewis Gordon'), ('Meinrath', 'Sascha Meinrath'), ('Connolly', 'William E. Connolly'), ('Wilkins', 'Brooke Wilkins'), ('Inoue', 'Asao B. Inoue'), ('Araujo', 'Marcelo de Araujo'), ('Taylor', 'Stuart Taylor'), ('Hudson', 'John Hudson'), ('Anderson-Nathe', 'Ben Anderson-Nathe'), ('Rawn', 'Rawn'), ('Kilmer', 'Beau Kilmer'), ('Chapman', 'Allegra Chapman'), ('Noutcheva', 'Gergana Noutcheva'), ('Driesen', 'Driesen'), ('Szacki', 'Jerzy Szacki'), ('Lanoszka', 'Alexander Lanoszka'), ('Corrigan', 'Alyssa Corrigan'), ('Briggle', 'Adam Briggle'), ('Garza', 'Andrew Garza'), ('Collins', 'Patricia Hill Collins'), ('Deleuze', 'Gilles Deleuze'), ('Perry', 'Elizabeth J. Perry'), ('Wilderson', 'Frank B. Wilderson'), ('Smeeeding', 'Timothy M. Smeeeding'), ('Cromley', 'JoAnne Cromley')]
+  SRC  : Grijalva et al 00 (James M. Grijalva; Jay Woods; Robert Krulwich, works on radio, podcasts, video, the blogosphere. He has been called "the most inventive network reporter in television" by TV Guide. He is the co-host of Radiolab, a nationa
+
+[90001256] miss=['marshall', 'tellis'] extra=[]
+  GOLD : [('Darian-Smith', 'Darian-Smith'), ('Lai', 'Alicia Lai'), ('Seckel', 'Scott Seckel'), ('Izunobi', 'Josephat U. Izunobi'), ('Marshall', 'Marshall'), ('Soare', 'Simona R. Soare'), ('Malyarenko', 'Tatyana Malyarenko'), ('Gardner', 'Dan Gardner'), ('Makau', 'Josina Makau'), ('Henttonen', 'Heikki Henttonen'), ('Rodriguez', 'Dylan Rodriguez'), ('Robertson', 'Ian D. Robertson'), ('Caldwell', 'Becaja M. Caldwell'), ('Sandick', 'Harry Sandick'), ('Pummer', 'Theron Pummer'), ('Ansley', 'Greg Ansley'), ('Doran', 'Kevin L. Doran'), ('Scutti', 'Scutti'), ('Tellis', 'Ashley J. Tellis'), ('Hartcher', 'Peter Hartcher'), ('Morton', 'Timothy Morton'), ('Araujo', 'Marcelo de Araujo'), ('Ehrlich', 'Sean D. Ehrlich'), ('Purnell', 'Phil Purnell'), ('Madra', 'Yahya M. Madra')]
+  MODEL: [('Darian-Smith', 'Darian-Smith'), ('Lai', 'Alicia Lai'), ('Seckel', 'Scott Seckel'), ('Makau', 'Josina Makau'), ('Henttonen', 'Heikki Henttonen'), ('Rodriguez', 'Dylan Rodriguez'), ('Robertson', 'Ian D. Robertson'), ('Caldwell', 'Becaja M. Caldwell'), ('Sandick', 'Harry Sandick'), ('Pummer', 'Theron Pummer'), ('Ansley', 'Greg Ansley'), ('Doran', 'Kevin L. Doran'), ('Scutti', 'Scutti'), ('Hartcher', 'Peter Hartcher'), ('Morton', 'Timothy Morton'), ('Araujo', 'Marcelo de Araujo'), ('Ehrlich', 'Sean D. Ehrlich'), ('Purnell', 'Phil Purnell'), ('Madra', 'Yahya M. Madra'), ('Izunobi', 'Josephat U. Izunobi'), ('Soare', 'Simona R. Soare'), ('Malyarenko', 'Tatyana Malyarenko'), ('Gardner', 'Dan Gardner')]
+  SRC  : Darian-Smith et al 05 (Darian-Smith; Alicia Lai; Scott Seckel; Josephat U. Izunobi; Marshall; Simona R. Soare; Tatyana Malyarenko; Dan Gardner; Josina Makau, Professor of Humanities and Communication at CSU Monterey Bay; Heikki Henttonen; D
+
+[90001266] miss=['robinson'] extra=[]
+  GOLD : [('Hamilton', 'Clive Hamilton'), ('Horton', 'Michael Horton'), ('Kaserman', 'David L. Kaserman'), ('Brooks', 'Stephen Brooks'), ('Pope', 'James Gray Pope'), ('Drezner', 'Dan Drezner'), ('Omi', 'Michael Omi'), ('Taylor', 'Mitchell Taylor'), ('Cheng', 'Cheng'), ('Dodge', 'Michaela Dodge'), ('Fritz', 'Alarik Fritz'), ('Jasso', 'Guillermina Jasso'), ('Ostrowski', 'James Ostrowski'), ('Åslund', 'Anders Åslund'), ('Krepinevich', 'Andrew F. Krepinevich'), ('McCarthy', 'Andrew C. McCarthy'), ('Singer', 'S. Fred Singer'), ('Weil', 'Danny Weil'), ('Hargett-Robinson', 'Hargett-Robinson'), ('Henry', 'Henry'), ('Blaze', 'Matt Blaze'), ('Ross', 'Phillip Ross'), ('Dwoskin', 'Dwoskin'), ('Haouas', 'Wissem Haouas'), ('Rosenberg', 'Gerald N. Rosenberg'), ('Sanborn', 'Sanborn'), ('Reader', 'Ruth Reader'), ('Ladd', 'Helen F. Ladd'), ('Bedard', 'Paul Bedard'), ('Bothma', 'Sarah F. Bothma'), ('Dalton', 'Melissa Dalton'), ('Pace', 'Pace'), ('Robinson', 'Rowland Robinson')]
+  MODEL: [('Hamilton', 'Clive Hamilton'), ('Horton', 'Michael Horton'), ('Kaserman', 'David L. Kaserman'), ('Brooks', 'Stephen Brooks'), ('Pope', 'James Gray Pope'), ('Drezner', 'Dan Drezner'), ('Omi', 'Michael Omi'), ('Taylor', 'Mitchell Taylor'), ('Cheng', 'Cheng'), ('Dodge', 'Michaela Dodge'), ('Fritz', 'Alarik Fritz'), ('Jasso', 'Guillermina Jasso'), ('Ostrowski', 'James Ostrowski'), ('Åslund', 'Anders Åslund'), ('Krepinevich', 'Andrew F. Krepinevich'), ('McCarthy', 'Andrew C. McCarthy'), ('Singer', 'S. Fred Singer'), ('Weil', 'Danny Weil'), ('Hargett-Robinson', 'Hargett-Robinson'), ('Henry', 'Henry'), ('Blaze', 'Matt Blaze'), ('Ross', 'Phillip Ross'), ('Dwoskin', 'Dwoskin'), ('Haouas', 'Wissem Haouas'), ('Rosenberg', 'Gerald N. Rosenberg'), ('Sanborn', 'Sanborn'), ('Reader', 'Ruth Reader'), ('Ladd', 'Helen F. Ladd'), ('Bedard', 'Paul Bedard'), ('Bothma', 'Sarah F. Bothma'), ('Dalton', 'Melissa Dalton'), ('Pace', 'Pace')]
+  SRC  : Hamilton et al 11 (Clive Hamilton, professor of public ethics at Charles Sturt University in Canberra, Australia; Michael Horton; David L. Kaserman, Torchmark Professor of Economics at Auburn University; Stephen Brooks; James Gray Pope; Dan
+
+[90001267] miss=['blackman', 'gillett', 'saadfilho', 'storey'] extra=[]
+  GOLD : [('Lal', 'Bhavya Lal'), ('Blackman', 'Josh Blackman'), ('Wall', 'Plava Wall'), ('Lanoszka', 'Alexander Lanoszka'), ('Kweifio-Okai', 'Kweifio-Okai'), ('Ongweso', 'Edward Ongweso Jr'), ('Borene', 'Andrew Borene'), ('Vermeule', 'Adrian Vermeule'), ('Kuzniar', 'Roman Kuzniar'), ('Park', 'Hwee Rhak Park'), ('Merges', 'Robert P. Merges'), ('Magsamen', 'Kelly Magsamen'), ('Gillett', 'Gillett'), ('Storey', 'Ian Storey'), ('Saad-Filho', 'Alfredo Saad-Filho'), ('Schmidt', 'Eric Schmidt'), ('Nakashima', 'Nakashima'), ('Franke', 'Ulrike Franke'), ('Friedberg', 'Friedberg'), ('Sith', 'Kate Sith')]
+  MODEL: [('Lal', 'Bhavya Lal'), ('Wall', 'Plava Wall'), ('Lanoszka', 'Alexander Lanoszka'), ('Kweifio-Okai', 'Kweifio-Okai'), ('Ongweso', 'Edward Ongweso Jr'), ('Borene', 'Andrew Borene'), ('Vermeule', 'Adrian Vermeule'), ('Kuzniar', 'Roman Kuzniar'), ('Park', 'Hwee Rhak Park'), ('Schmidt', 'Eric Schmidt'), ('Nakashima', 'Nakashima'), ('Franke', 'Ulrike Franke'), ('Friedberg', 'Friedberg'), ('Sith', 'Kate Sith'), ('Merges', 'Robert P. Merges'), ('Magsamen', 'Kelly Magsamen')]
+  SRC  : Lal et al 15 (Bhavya Lal; Josh Blackman, Associate Professor of Law at the South Texas College of Law in Houston who specializes in constitutional law, the United States Supreme Court, and the intersection of law and technology; Plava Wall;
+
+[90001278] miss=['barkow', 'bew', 'buren', 'carafano', 'dhillon', 'golovics', 'handley', 'idso', 'jimichi', 'krepon', 'lee', 'lukacs', 'nunn', 'powell', 'robb', 'romanosky', 'schneider', 'shanley', 'trinkunas', 'walsh', 'wendehorst'] extra=[]
+  GOLD : [('Wainwright', 'Richard Wainwright'), ('Berenson', 'Robert Berenson'), ('Bradley', 'Rizvana Bradley'), ('Lehmann', 'Jean-Pierre Lehmann'), ('Stephens', 'Sarah Stephens'), ('Bleek', 'Philipp Bleek'), ('McIntosh', 'Christopher McIntosh'), ('Dillon', 'Thomas P. Dillon'), ('Colbert', 'Daniel Colbert'), ('Grant', 'Don Sherman Grant'), ('Marmor', 'Theodore R. Marmor'), ('Handler', 'Milton Handler'), ('Lane', 'Sylvan Lane'), ('Buren', 'Peter Van Buren'), ('Lee', 'Thomas R. Lee'), ('Krepon', 'Michael Krepon'), ('Walsh', 'John Walsh'), ('Schneider', 'Mark Schneider'), ('Lukacs', 'Martin Lukacs'), ('Golovics', 'József Golovics'), ('Wendehorst', 'Christiane Wendehorst'), ('Jimichi', 'Masayuki Jimichi'), ('Powell', 'David L. Powell'), ('Romanosky', 'Sasha Romanosky'), ('Carafano', 'Carafano'), ('Handley', 'James Handley'), ('Idso', 'Idso'), ('Robb', 'Charles Robb'), ('Dhillon', 'Ranu Dhillon'), ('Bew', 'John Bew'), ('Shanley', 'Jake Shanley'), ('Nunn', 'Sam Nunn'), ('Trinkunas', 'Harold Trinkunas'), ('Barkow', 'Rachel E. Barkow'), ('Choi', 'Choi'), ('Drezner', 'Daniel W. Drezner'), ('Shifrinson', 'Joshua R. Itzkowitz Shifrinson'), ('Malik', 'Kauser Malik'), ('Halliday', 'Fred Halliday'), ('Riddle', 'Pam Riddle'), ('Stindl', 'Reinhard Stindl')]
+  MODEL: [('Wainwright', 'Richard Wainwright'), ('Berenson', 'Robert Berenson'), ('Bradley', 'Rizvana Bradley'), ('Lehmann', 'Jean-Pierre Lehmann'), ('Stephens', 'Sarah Stephens'), ('Bleek', 'Philipp Bleek'), ('McIntosh', 'Christopher McIntosh'), ('Dillon', 'Thomas P. Dillon'), ('Colbert', 'Daniel Colbert'), ('Grant', 'Don Sherman Grant'), ('Marmor', 'Theodore R. Marmor'), ('Handler', 'Milton Handler'), ('Choi', 'Choi'), ('Drezner', 'Daniel W. Drezner'), ('Shifrinson', 'Joshua R. Itzkowitz Shifrinson'), ('Malik', 'Kauser Malik'), ('Halliday', 'Fred Halliday'), ('Riddle', 'Pablo Riddle'), ('Stindl', 'Reinhard Stindl'), ('Lane', 'Sylvan Lane')]
+  SRC  : Wainwright et al 19 (Richard Wainwright; Robert Berenson; Rizvana Bradley; Jean-Pierre Lehmann, Professor of International Political Economy at IMD in Lausanne; Founding Director of the Evian Group; obtained undergraduate degree from George
+
+===== over-extract  (14) =====
+
+[1253859] miss=[] extra=['citizen', 'nation']
+  GOLD : [('Robinson', 'Jason Robinson'), ('Cosens', 'Barbara Cosens'), ('Jackson', 'Sue Jackson'), ('Leonard', 'Kelsey Leonard'), ('McCool', 'Daniel McCool')]
+  MODEL: [('Robinson', 'Jason Robinson'), ('Cosens', 'Barbara Cosens'), ('Jackson', 'Sue Jackson'), ('Leonard', 'Kelsey Leonard'), ('McCool', 'Daniel McCool'), ('Citizen', 'Enrolled Citizen'), ('Nation', 'Shinnecock Indian Nation')]
+  SRC  : Robison et al. ’18 — Jason Robinson, Associate Professor, University of Wyoming, College of Law. S.J.D., Harvard Law School, LL.M., Harvard Law School, J.D., University of Oregon School of Law, B.S., Environmental Studies, University of Uta
+
+[1286419] miss=[] extra=['welle']
+  GOLD : []
+  MODEL: [('Welle', 'Desutche Welle')]
+  SRC  : Welle 17 (Desutche, Www.Dw, 11-10-2017, "Workers' rights in Germany: Not everyone can go on strike," DW, https://www.dw.com/en/workers-rights-in-germany-not-everyone-can-go-on-strike/a-40908443) KD
+
+[1723216] miss=[] extra=['khaleej']
+  GOLD : []
+  MODEL: [('Khaleej', 'Al Khaleej Today')]
+  SRC  : Al Khaleej 20 (Al Khaleej Today, daily English language newspaper published in Dubai, United Arab Emirates. Launched on April 16, 1978, Khaleej Times is the UAE's longest running English daily newspaper; “Turkey seeks to implicate NATO in t
+
+[2511050] miss=[] extra=['lumen']
+  GOLD : []
+  MODEL: [('Lumen', 'Lumen')]
+  SRC  : Lumen, nd. – (“The Organization of Bureacracy,” https://courses.lumenlearning.com/boundless-politicalscience/chapter/the-organization-of-bureaucracy/ VL)
+
+[3293022] miss=[] extra=['saenz']
+  GOLD : []
+  MODEL: [('Saenz', 'Saenz')]
+  SRC  : Saenz:
+
+[4481951] miss=[] extra=['yaroslav']
+  GOLD : [('Slabykh', 'Igor Slabykh'), ('Eferin', 'Yaroslav Eferin')]
+  MODEL: [('Slabykh', 'Igor Slabykh'), ('Eferin', 'Yaroslav Eferin'), ('Yaroslav', 'Yaroslav Eferin Yaroslav')]
+  SRC  : Slabykh and Yaroslav 4/5
+Igor Slabykh (Igor Slabykh is a highly-accomplished lawyer and legal manager with a record of repeated success over nineteen years of legal, management, and business experience, specializing in intellectual property
+
+[4748340] miss=[] extra=['porous']
+  GOLD : []
+  MODEL: [('Porous', 'Porous')]
+  SRC  : Porous:
+
+[90000557] miss=[] extra=['power']
+  GOLD : [('Bo', 'Jiang Bo'), ('Ning', 'Yu Ning')]
+  MODEL: [('Bo', 'Jiang Bo'), ('Ning', 'Yu Ning'), ('Power', 'Outsource Power')]
+  SRC  : Bo et al‘14 (Jiang Bo, senior policy researcher at the RAND Corporation; Yu Ning, “Outsource Power, Import Safety? Challenges and Opportunities of the U.S.-China Food Safety Regulatory Cooperation,” WGNO, 2014)
+
+[90000558] miss=[] extra=['peace']
+  GOLD : [('Ji-hoon', 'Kang Ji-hoon'), ('Ji-hoon', 'Choi Ji-hoon'), ('Min-soon', 'Choi Min-soon')]
+  MODEL: [('Ji-hoon', 'Kang Ji-hoon'), ('Ji-hoon', 'Choi Ji-hoon'), ('Min-soon', 'Choi Min-soon'), ('Peace', 'Postcolonial Peace')]
+  SRC  : Ji-hoon et al 16 (Kang Ji-hoon, Author, Journalist, and Distinguished Writer in Residence, New York University’s Arthur L. Carter Journalism Institute; Choi Ji-hoon; Choi Min-soon, “Postcolonial Peace,” NATO Defense College Research Reports
+
+[90001238] miss=[] extra=['uk']
+  GOLD : [('Picchi', 'Aimee Picchi'), ('Edwards', 'Kelly Edwards'), ('Kemp', 'Luke Kemp'), ('Altmann', 'Altmann'), ('Hokowhitu', 'Brendan Hokowhitu'), ('Yampolskiy', 'Roman Yampolskiy'), ('Smith', 'M.V. “Coyote” Smith'), ('Welsh', 'Scott Welsh'), ('Weheliye', 'Alexander Weheliye'), ('Smith', 'Daniel W. Smith'), ('Yusoff', 'Kathryn Yusoff'), ('Wallace', 'Helen Wallace'), ('Craco', 'Louis A. Craco'), ('Curtis', 'Simon Curtis'), ('Forbes', 'Kate Forbes'), ('Cooper', 'Zack Cooper'), ('Frantzeskaki', 'Niki Frantzeskaki'), ('DeWeaver', 'DeWeaver'), ('Feldman', 'Robin Feldman'), ('Mundkur', 'Mundkur'), ('Bleek', 'Philipp C. Bleek'), ('Chan-Lau', 'Jorge Chan-Lau'), ('Jobst', 'Andy Jobst'), ('Miller', 'Thomas Miller'), ('Toosi', 'Toosi')]
+  MODEL: [('Picchi', 'Aimee Picchi'), ('Edwards', 'Kelly Edwards'), ('Kemp', 'Luke Kemp'), ('Altmann', 'Altmann'), ('Hokowhitu', 'Brendan Hokowhitu'), ('Yampolskiy', 'Roman Yampolskiy'), ('Smith', 'M.V. “Coyote” Smith'), ('Welsh', 'Scott Welsh'), ('Weheliye', 'Alexander Weheliye'), ('Smith', 'Daniel W. Smith'), ('Yusoff', 'Kathryn Yusoff'), ('Wallace', 'Helen Wallace'), ('Craco', 'Louis A. Craco'), ('Curtis', 'Simon Curtis'), ('Forbes', 'Kate Forbes'), ('Cooper', 'Zack Cooper'), ('Frantzeskaki', 'Niki Frantzeskaki'), ('DeWeaver', 'DeWeaver'), ('Feldman', 'Robin Feldman'), ('Mundkur', 'Mundkur'), ('Bleek', 'Philipp C. Bleek'), ('Chan-Lau', 'Jorge Chan-Lau'), ('Jobst', 'Andy Jobst'), ('Miller', 'Thomas Miller'), ('Toosi', 'Toosi'), ('UK', 'Gene Watch UK')]
+  SRC  : Picchi et al 09 (Aimee Picchi; Kelly Edwards; Luke Kemp; Altmann; Brendan Hokowhitu; Roman Yampolskiy, Associate Professor in the Speed School of Engineering, Ph.D. in Computer Science, Director of the Cybersecurity Laboratory; M.V. “Coyote
+
+[90001263] miss=[] extra=['diego']
+  GOLD : [('Scheber', 'Thomas Scheber'), ('Carter', 'Zach Carter'), ('Phillips', 'alan phillips'), ('Majumdar', 'Dave Majumdar'), ('Chmara-Huff', 'Fletcher Chmara-Huff'), ('Merrell', 'Brandon Merrell'), ('Kearnes', 'Kearnes'), ('Salvi', 'Aatish Salvi'), ('Bates', 'Jordan Bates'), ('Paschali', 'Elena Paschali'), ('Ochab', 'Ewelina U. Ochab'), ('Holloway', 'Henry Holloway'), ('Bardeen', 'Charles G. Bardeen'), ('Ganderup', 'Mathilde Skydt Ganderup'), ('Brenkert', 'Brenkert')]
+  MODEL: [('Scheber', 'Thomas Scheber'), ('Carter', 'Zach Carter'), ('phillips', 'alan phillips'), ('Majumdar', 'Dave Majumdar'), ('Chmara-Huff', 'Fletcher Chmara-Huff'), ('Merrell', 'Brandon Merrell'), ('Kearnes', 'Kearnes'), ('Salvi', 'Aatish Salvi'), ('Bates', 'Jordan Bates'), ('Paschali', 'Eva Paschali'), ('Ochab', 'Ewelina U. Ochab'), ('Holloway', 'Henry Holloway'), ('Bardeen', 'Charles G. Bardeen'), ('Ganderup', 'Mathilde Skydt Ganderup'), ('Brenkert', 'Brenkert'), ('Diego', 'UC San Diego')]
+  SRC  : Scheber et al 08 (Thomas Scheber; Zach Carter; alan phillips; Dave Majumdar; Fletcher Chmara-Huff, 14, Assistant Professor of Environmental Studies at Temple University, 2014; Brandon Merrell, Graduate Student, UC San Diego; Kearnes; Aatish
+
+[90001269] miss=[] extra=['capitalism']
+  GOLD : [('Wheeler', 'Elizabeth Wheeler'), ('Bloomfield', 'Mark Bloomfield'), ('Shapiro', 'Michael J. Shapiro'), ('Hobbs', 'Madison Hobbs'), ('Jæger', 'Øyvind Jæger'), ('Hubbard', 'Ben Hubbard'), ('Espinoza', 'Noah Espinoza'), ('Young', 'Ernest A. Young'), ('Panda', 'Ankit Panda'), ('Hartman', 'Saidiya Hartman'), ('Kagan', 'Robert Kagan'), ('Breger', 'Michael Breger'), ('Hansen', 'Dale Hansen'), ('Borjas', 'George J. Borjas'), ('Khong', 'Yuen Foong Khong'), ('Fuhrmann', 'Matthew Fuhrmann'), ('Diamond', 'Diamond'), ('Steinhoff', 'James Steinhoff'), ('Wall', 'Kristin Wall'), ('Davis', 'Seth Davis'), ('Kothari', 'Rajni Kothari'), ('Blankenship', 'Blankenship'), ('Grossman', 'Zoltán Grossman')]
+  MODEL: [('Wheeler', 'Elizabeth Wheeler'), ('Bloomfield', 'Mark Bloomfield'), ('Shapiro', 'Michael J. Shapiro'), ('Hobbs', 'Matthew Hobbs'), ('Jæger', 'Øyvind Jæger'), ('Hubbard', 'Ben Hubbard'), ('Espinoza', 'Noah Espinoza'), ('Young', 'Ernest A. Young'), ('Panda', 'Ankit Panda'), ('Hartman', 'Saidiya Hartman'), ('Kagan', 'Robert Kagan'), ('Breger', 'Michael Breger'), ('Hansen', 'Dale Hansen'), ('Borjas', 'George J. Borjas'), ('Khong', 'Yuen Foong Khong'), ('Fuhrmann', 'Matthew Fuhrmann'), ('Diamond', 'Diamond'), ('Steinhoff', 'James Steinhoff'), ('Wall', 'Kristin Wall'), ('Davis', 'Seth Davis'), ('Kothari', 'Rajni Kothari'), ('Blankenship', 'Blankenship'), ('Grossman', 'Zoltán Grossman'), ('Capitalism', 'Caring Capitalism')]
+  SRC  : Wheeler et al 06 (Elizabeth Wheeler; Mark Bloomfield; Michael J. Shapiro; Madison Hobbs; Øyvind Jæger, Norwegian Institute of International Affairs and the Copenhagen Peace Research Institute; Ben Hubbard; Noah Espinoza; Ernest A. Young, As
+
+[90001270] miss=[] extra=['diego']
+  GOLD : [('Eskridge', 'Eskridge'), ('Khandekar', 'Madhav Khandekar'), ('Olawole', 'Olukunle Charles Olawole'), ('Oers', 'Bert Oers'), ('Merrell', 'Brandon Merrell'), ('Wittner', 'Wittner'), ('Daalder', 'Ivo H. Daalder'), ('Scheper-Hughes', 'Scheper-Hughes'), ('Bagwe', 'Ahaan Bagwe'), ('Drezner', 'Daniel W. Drezner'), ('Sikorsky', 'Erin Sikorsky'), ('Shear', 'David Shear'), ('Patel', 'Eboo Patel'), ('Krznar', 'Ivo Krznar'), ('Bisson', 'Claude Bisson'), ('Marrone', 'Alessandro Marrone'), ('Lorber', 'Eric Lorber'), ('Antai', 'Sylvester Peter Antai'), ('Nasu', 'Hitoshi Nasu'), ('Kim', 'Jina B. Kim'), ('Parisi', 'Francesco Parisi'), ('Povilenaite', 'Monika Povilenaite')]
+  MODEL: [('Eskridge', 'Eskridge'), ('Khandekar', 'Madhav Khandekar'), ('Olawole', 'Olukunle Charles Olawole'), ('Oers', 'Bert Oers'), ('Merrell', 'Brandon Merrell'), ('Wittner', 'Wittner'), ('Daalder', 'Ivo H. Daalder'), ('Scheper-Hughes', 'Scheper-Hughes'), ('Bagwe', 'Ahaan Bagwe'), ('Drezner', 'Daniel W. Drezner'), ('Sikorsky', 'Erin Sikorsky'), ('Shear', 'David Shear'), ('Patel', 'Eboo Patel'), ('Krznar', 'Ivo Krznar'), ('Bisson', 'Claude Bisson'), ('Marrone', 'Alessandro Marrone'), ('Lorber', 'Eric Lorber'), ('Antai', 'Sylvester Peter Antai'), ('Nasu', 'Hitoshi Nasu'), ('Kim', 'Jina B. Kim'), ('Parisi', 'Francesco Parisi'), ('Povilenaite', 'Monika Povilenaite'), ('Diego', 'UC San Diego')]
+  SRC  : Eskridge et al 07 (Eskridge; Madhav Khandekar, Environment Canada (retired) Canada; Olukunle Charles Olawole; Bert Oers; Brandon Merrell, Graduate Student, UC San Diego; Wittner; Ivo H. Daalder; Scheper-Hughes; Ahaan Bagwe; Daniel W. Drezne
+
+[90001277] miss=[] extra=['dresden']
+  GOLD : [('Guzman', 'Alicia Inez Guzmán'), ('Pegues', 'Juliana Hu Pegues'), ('Williams', 'Matt Williams'), ('Saborowski', 'Christian Saborowski'), ('Roesel', 'Felix Roesel'), ('Xiong', 'Choua Xiong'), ('Fisher', 'Lawrence M. Fisher'), ('Stabile', 'Susan J. Stabile'), ('Cohen', 'Steve Cohen'), ('Pannett', 'Rachel Pannett'), ('Rovner', 'Joshua Rovner'), ('Nathan', 'Richard P. Nathan'), ('Saunders', 'Sarah Saunders')]
+  MODEL: [('Guzmán', 'Alicia Inez Guzmán'), ('Pegues', 'Juliana Hu Pegues'), ('Williams', 'Matt Williams'), ('Saborowski', 'Christian Saborowski'), ('Roesel', 'Felix Roesel'), ('Xiong', 'Choua Xiong'), ('Fisher', 'Lawrence M. Fisher'), ('Stabile', 'Susan J. Stabile'), ('Cohen', 'Steve Cohen'), ('Pannett', 'Rachel Pannett'), ('Rovner', 'Joshua Rovner'), ('Nathan', 'Richard P. Nathan'), ('Saunders', 'Sarah Saunders'), ('Dresden', 'Technische Universitat Dresden')]
+  SRC  : Guzman et al 17 (Alicia Inez Guzmán; Juliana Hu Pegues; Matt Williams; Christian Saborowski; Felix Roesel, Technische Universitat Dresden, ifo Institute; Choua Xiong, a graduate student pursing a joint degree in Cultural Anthropology and Ed

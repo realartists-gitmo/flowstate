@@ -29,6 +29,25 @@ use crate::{
 
 use super::{ApplyLocalOpReturn, ContainerState, DiffApplyContext};
 
+/// §perf-heaven T1: whether the `Src`-loader richtext-value fast path is active
+/// (default ON; set `FLOWSTATE_RICHTEXT_NO_FASTPATH` to fall back to the full
+/// `Src -> Dst` build). Read once and cached.
+fn richtext_src_fastpath_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("FLOWSTATE_RICHTEXT_NO_FASTPATH").is_none())
+}
+
+/// §perf-heaven T1: whether to ALSO build the full state and assert the fast
+/// path matches it (the fuzz-guided recovery guard). On in debug builds — where
+/// the convergence/intent fuzz runs — and in any build via
+/// `FLOWSTATE_RICHTEXT_VERIFY`, so `heaven.sh` can validate over the real corpus
+/// in release. When on, `get_richtext_value` returns the BUILT value, so debug
+/// behaviour is identical to before the patch regardless of the fast path.
+fn richtext_verify_enabled() -> bool {
+    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *VERIFY.get_or_init(|| cfg!(debug_assertions) || std::env::var_os("FLOWSTATE_RICHTEXT_VERIFY").is_some())
+}
+
 #[derive(Debug)]
 pub struct RichtextState {
     idx: ContainerIdx,
@@ -115,6 +134,37 @@ impl RichtextState {
     #[allow(unused)]
     pub(crate) fn get_char_by_event_index(&mut self, pos: usize) -> Result<char, ()> {
         self.state.get_mut().get_char_by_event_index(pos)
+    }
+
+    /// §perf-heaven T1/T7.3: serve the char straight from the Src loader when
+    /// the index space maps to unicode chunks, so object-anchor validation and
+    /// event-index lookups don't force the `Src -> Dst` build. On non-wasm the
+    /// EVENT index IS the unicode index, so `Event` reuses the same net-guarded
+    /// walker as `Unicode` (guarded by the corpus Src-path equivalence net,
+    /// T7.26). `Utf16` and wasm `Event` still fall through to the built state:
+    /// there is no net exercising a utf16 chunk walk, so adding one would be
+    /// unguarded dead code (the T1 trap).
+    pub(crate) fn char_at_pos(&mut self, pos: usize, pos_type: PosType) -> Result<char, ()> {
+        if let LazyLoad::Src(loader) = &self.state {
+            let char_at = match pos_type {
+                PosType::Unicode => Some(loader.char_at_unicode(pos)),
+                PosType::Event => Some(if cfg!(feature = "wasm") {
+                    loader.char_at_utf16(pos)
+                } else {
+                    loader.char_at_unicode(pos)
+                }),
+                PosType::Utf16 => Some(loader.char_at_utf16(pos)),
+                _ => None,
+            };
+            if let Some(char_at) = char_at {
+                return char_at.ok_or(());
+            }
+        }
+        let event_pos = match pos_type {
+            PosType::Event => pos,
+            _ => self.index_to_event_index(pos, pos_type),
+        };
+        self.get_char_by_event_index(event_pos)
     }
 
     pub(crate) fn iter(&mut self, mut callback: impl FnMut(&str) -> bool) {
@@ -1009,16 +1059,40 @@ impl ContainerState for RichtextState {
 impl RichtextState {
     #[inline(always)]
     pub fn len_utf8(&mut self) -> usize {
+        // §perf-heaven T8.15: O(1) from the Src loader (net-guarded accumulator).
+        if let LazyLoad::Src(loader) = &self.state {
+            return loader.bytes_len;
+        }
         self.state.get_mut().len_utf8()
     }
 
     #[inline(always)]
     pub fn len(&mut self, pos_type: PosType) -> usize {
+        // §perf-heaven T1: unicode/entity length from the Src loader (O(1)) so the
+        // `char_at` bounds check (`len(Unicode)`) does not force the `Src -> Dst`
+        // build ahead of the object-anchor validation fast path.
+        if let LazyLoad::Src(loader) = &self.state {
+            match pos_type {
+                PosType::Unicode => return loader.unicode_len,
+                PosType::Entity => return loader.entity_index,
+                PosType::Utf16 => return loader.utf16_len,
+                PosType::Event => {
+                    return if cfg!(feature = "wasm") { loader.utf16_len } else { loader.unicode_len };
+                },
+                PosType::Bytes => return loader.bytes_len,
+                #[allow(unreachable_patterns)]
+                _ => {},
+            }
+        }
         self.state.get_mut().len(pos_type)
     }
 
     #[inline(always)]
     pub fn len_utf16(&mut self) -> usize {
+        // §perf-heaven T7.2: O(1) from the Src loader (net-guarded accumulator).
+        if let LazyLoad::Src(loader) = &self.state {
+            return loader.utf16_len;
+        }
         self.state.get_mut().len_utf16()
     }
 
@@ -1068,6 +1142,13 @@ impl RichtextState {
 
     #[inline]
     pub fn len_unicode(&mut self) -> usize {
+        // §perf-heaven T1: answer from the Src loader (O(1)) instead of forcing
+        // the `Src -> Dst` B-tree build. The projection calls this per boundary
+        // BEFORE `to_delta`; forcing the build here would defeat the whole
+        // cold-decode fast path.
+        if let LazyLoad::Src(loader) = &self.state {
+            return loader.unicode_len;
+        }
         self.state.get_mut().len_unicode()
     }
 
@@ -1120,7 +1201,61 @@ impl RichtextState {
 
     #[inline]
     pub fn get_richtext_value(&mut self) -> LoroValue {
-        self.state.get_mut().get_richtext_value()
+        // §perf-heaven T1: on a freshly decoded snapshot the state is still
+        // `LazyLoad::Src` (a cheap loader of chunks + resolved style ranges).
+        // `get_mut()` here would force the whole O(doc) `Src -> Dst` B-tree build
+        // — the dominant cost of the cold projection body decode. Resolve the
+        // value directly from the loader instead, skipping the text tree. Debug
+        // (and `FLOWSTATE_RICHTEXT_VERIFY`) builds ALSO build the tree and assert
+        // the fast path is bit-identical, then return the built value — so the
+        // fuzz/corpus oracle validates the cut and a divergence trips loudly.
+        let fast = if richtext_src_fastpath_enabled() {
+            match &self.state {
+                LazyLoad::Src(loader) => Some(InnerState::richtext_value_from_src(&loader.elements, &loader.style_ranges)),
+                LazyLoad::Dst(_) => None,
+            }
+        } else {
+            None
+        };
+        match fast {
+            Some(fast) if !richtext_verify_enabled() => fast,
+            Some(fast) => {
+                let slow = self.state.get_mut().get_richtext_value();
+                assert!(
+                    fast == slow,
+                    "FLOWSTATE perf-heaven T1: richtext_value_from_src diverged from the built richtext state"
+                );
+                slow
+            }
+            None => self.state.get_mut().get_richtext_value(),
+        }
+    }
+
+    /// §act-eleven A11.10 (flowstate vendor patch): stream `(text, styles)`
+    /// spans to `f` without materializing the delta `Vec<LoroValue>`. Mirrors
+    /// [`Self::get_richtext_value`]'s T1 discipline exactly: on a freshly
+    /// decoded snapshot (`LazyLoad::Src`) the spans come straight from the
+    /// loader without forcing the O(doc) B-tree build; verify builds take the
+    /// value-level equivalence assert first (same oracle — both value functions
+    /// are expressed on these walkers), then stream from the built state.
+    pub fn for_each_richtext_span(&mut self, f: &mut dyn FnMut(&str, &crate::delta::StyleMeta)) {
+        if richtext_src_fastpath_enabled() {
+            if let LazyLoad::Src(loader) = &self.state {
+                if !richtext_verify_enabled() {
+                    InnerState::for_each_span_from_src(&loader.elements, &loader.style_ranges, f);
+                    return;
+                }
+                let fast =
+                    InnerState::richtext_value_from_src(&loader.elements, &loader.style_ranges);
+                let slow = self.state.get_mut().get_richtext_value();
+                assert!(
+                    fast == slow,
+                    "FLOWSTATE act-eleven A11.10: for_each_span_from_src diverged from the built richtext state"
+                );
+                // fall through to the built state below
+            }
+        }
+        self.state.get_mut().for_each_richtext_span(f);
     }
 
     #[inline]
@@ -1162,6 +1297,22 @@ pub(crate) struct RichtextStateLoader {
     elements: SmallVec<[RichtextStateChunk; 1]>,
     style_ranges: Vec<(Arc<StyleOp>, Range<usize>)>,
     entity_index: usize,
+    /// §perf-heaven T1: running unicode length of the pushed text chunks, so
+    /// `RichtextState::len_unicode` can answer O(1) from the loader WITHOUT
+    /// forcing the `Src -> Dst` B-tree build. The projection's boundary resolver
+    /// calls `len_unicode` per boundary; if that forced the build, the whole
+    /// cold-decode fast path would be defeated before `to_delta` ever runs.
+    unicode_len: usize,
+    /// §perf-heaven T7.2: running UTF-16 length, mirroring `unicode_len`, so
+    /// `len_utf16` / `len(Utf16)` / `len(Event)` (and the wasm event index) can
+    /// also answer O(1) from the loader. Both accumulators are validated against
+    /// the built B-tree in `into_state` (a debug-assert net), which also
+    /// retroactively guards the T1 `unicode_len` field.
+    utf16_len: usize,
+    /// §perf-heaven T8.15: running UTF-8 BYTE length, so `len_utf8` / `len(Bytes)`
+    /// also answer O(1) from the loader instead of forcing the `Src -> Dst` build.
+    /// Validated against the built B-tree in `into_state`.
+    bytes_len: usize,
 }
 
 impl From<RichtextStateLoader> for InnerState {
@@ -1171,6 +1322,53 @@ impl From<RichtextStateLoader> for InnerState {
 }
 
 impl RichtextStateLoader {
+    /// §perf-heaven T1: the char at a UNICODE offset, straight from the Src
+    /// chunks (no `Src -> Dst` build). Backs `char_at_pos` on a still-loaded
+    /// snapshot; guarded by the corpus Src-path equivalence net (T7.26).
+    fn char_at_unicode(&self, pos: usize) -> Option<char> {
+        let mut remaining = pos;
+        for elem in &self.elements {
+            if let RichtextStateChunk::Text(chunk) = elem {
+                let chunk_len = chunk.unicode_len() as usize;
+                if remaining < chunk_len {
+                    return chunk.as_str().chars().nth(remaining);
+                }
+                remaining -= chunk_len;
+            }
+        }
+        None
+    }
+
+    /// §perf-heaven T8.16: the char at a UTF-16 offset, straight from the Src
+    /// chunks (mirrors `char_at_unicode`, walking by `utf16_len`). Returns `None`
+    /// for an out-of-range OR mid-surrogate offset (a position inside a surrogate
+    /// pair is not a char boundary), matching the built state's `char_at`. Backs
+    /// the wasm event-index / `Utf16` `char_at` so they don't force the `Dst`
+    /// build. Guarded by the same `utf16_len` net as `len_utf16` (`into_state`).
+    fn char_at_utf16(&self, pos: usize) -> Option<char> {
+        let mut remaining = pos;
+        for elem in &self.elements {
+            if let RichtextStateChunk::Text(chunk) = elem {
+                let chunk_len = chunk.utf16_len() as usize;
+                if remaining < chunk_len {
+                    let mut acc = 0usize;
+                    for ch in chunk.as_str().chars() {
+                        if acc == remaining {
+                            return Some(ch);
+                        }
+                        acc += ch.len_utf16();
+                        if acc > remaining {
+                            return None; // `pos` fell inside a surrogate pair
+                        }
+                    }
+                    return None;
+                }
+                remaining -= chunk_len;
+            }
+        }
+        None
+    }
+
     pub fn push(&mut self, elem: RichtextStateChunk) {
         if let RichtextStateChunk::Style { style, anchor_type } = &elem {
             if *anchor_type == AnchorType::Start {
@@ -1188,17 +1386,45 @@ impl RichtextStateLoader {
             }
         }
 
+        if let RichtextStateChunk::Text(text) = &elem {
+            self.unicode_len += text.unicode_len() as usize;
+            self.utf16_len += text.utf16_len() as usize;
+            self.bytes_len += text.bytes().len();
+        }
         self.entity_index += elem.rle_len();
         self.elements.push(elem);
     }
 
     pub fn into_state(self) -> InnerState {
+        // §perf-heaven T7.2 net: capture the running accumulators BEFORE the
+        // elements are consumed, then assert they equal the built B-tree's real
+        // lengths. This is the oracle for the Src-safe `len_unicode`/`len_utf16`
+        // /`len_utf8` fast paths — if `push` ever mis-accumulates, the very act
+        // of building the state (any `Src -> Dst` promotion) trips here.
+        let expected_unicode = self.unicode_len;
+        let expected_utf16 = self.utf16_len;
+        let expected_bytes = self.bytes_len;
         let mut state = InnerState::from_chunks(self.elements.into_iter());
         for (style, range) in self.style_ranges {
             state.annotate_style_range(range, style);
         }
 
         if cfg!(debug_assertions) {
+            debug_assert_eq!(
+                state.len_unicode(),
+                expected_unicode,
+                "T7 loader unicode_len accumulation diverged from the built B-tree"
+            );
+            debug_assert_eq!(
+                state.len_utf16(),
+                expected_utf16,
+                "T7.2 loader utf16_len accumulation diverged from the built B-tree"
+            );
+            debug_assert_eq!(
+                state.len_utf8(),
+                expected_bytes,
+                "T8.15 loader bytes_len accumulation diverged from the built B-tree"
+            );
             state.check();
         }
 

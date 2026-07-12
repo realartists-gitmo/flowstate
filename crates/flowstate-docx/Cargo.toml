@@ -19,6 +19,10 @@ imagesize = { workspace = true }
 lopdf = { workspace = true }
 memchr = "2.8.2"
 quick-xml = { workspace = true }
+# rdocx-oxml links quick-xml 0.37; the fragment-parallel document.xml parse
+# drives its public `from_xml(reader)` entry points, so the Reader type must
+# come from the same quick-xml build.
+quick-xml-oxml = { package = "quick-xml", version = "0.37" }
 rdocx = { workspace = true }
 rdocx-opc = { workspace = true }
 rdocx-oxml = { workspace = true }

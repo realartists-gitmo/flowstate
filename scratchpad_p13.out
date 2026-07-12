@@ -1,0 +1,8 @@
+
+=== definitive review path over 521 cites (author-set) ===
+PASSED & correct (perfect):  490 (94.0%)
+PASSED & wrong  (SILENT):    2 (0.4%)
+FLAGGED & wrong (good):      15
+FLAGGED & correct(over):     14 (2.7%)
+total flagged: 29 (5.6%) | precision 52%
+reasons: {"author_from_allcaps_source": 1, "author_ungrounded": 3, "decode_perturbation_disagreement": 10, "et_al_undercount": 13, "named_chair_over_extraction": 1, "role_person_no_author": 1}

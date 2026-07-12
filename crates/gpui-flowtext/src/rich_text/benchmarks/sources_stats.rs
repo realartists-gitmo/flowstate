@@ -232,7 +232,7 @@ fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: 
         match block {
           TableCellBlock::Paragraph(paragraph) => {
             report.check(
-              paragraph.paragraph.byte_range.len() == paragraph.text.len(),
+              crate::paragraph_runs_len(&paragraph.paragraph) == paragraph.text.len(),
               format!("{label} cell {row_ix}:{cell_ix} paragraph {block_ix} byte range must match cell text"),
             );
           },

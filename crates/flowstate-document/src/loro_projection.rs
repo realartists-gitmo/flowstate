@@ -12,11 +12,22 @@ use rustc_hash::FxHashMap;
 
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
-  MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
-  SECTIONS_BY_ID, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER, flowstate_document_theme,
+  MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID,
+  ROOT_FIRST_PARAGRAPH_ID, SECTIONS_BY_ID, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
+  flowstate_document_theme,
   parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id, table_topology,
   projection_defects::{ProjectionDefect, TableTopologyKind},
 };
+
+// §perf-heaven T7.24: object-anchor validation resolves positions from
+// `query_text_id_positions(use_event_index = true)` and then checks them with
+// `char_at`, which treats the index as UNICODE. That identity (event index ==
+// unicode index) holds only on non-wasm Loro builds; on wasm the event index is
+// UTF-16 and the object anchors would silently misresolve. Flowstate is a native
+// desktop app — fail loudly at compile time if that ever changes, rather than
+// shipping a subtly wrong projection.
+#[cfg(target_arch = "wasm32")]
+compile_error!("loro_projection object-anchor validation assumes non-wasm event indexing (event index == unicode index)");
 
 pub fn document_from_loro(doc: &LoroDoc) -> io::Result<DocumentProjection> {
   // Callers that cannot repair still get the deterministic projection; the
@@ -117,9 +128,10 @@ pub fn materialize_viewport(doc: &LoroDoc, start_unicode: usize, end_unicode: us
   // Metadata-only maps (no content materialization) — the same functions the
   // full projection resolves once per flow.
   let paragraph_map = paragraph_ids_by_boundary(doc, &body);
-  let pblock_map = paragraph_block_ids_by_boundary(doc, &body);
   let mut defects = Vec::new();
-  let (object_map, _quarantined) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
+  // §perf-heaven T4: the paragraph-block boundary map comes from the SAME scan
+  // that finds the objects (was a separate `paragraph_block_ids_by_boundary`).
+  let (object_map, _quarantined, pblock_map) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
   // Snap the start to the row-leading boundary at or before it (0 covers the
   // seed sentinel), so the region walk begins at a sentinel as required.
   let sentinel = paragraph_map.keys().copied().filter(|boundary| *boundary <= start_unicode).max().unwrap_or(0);
@@ -139,7 +151,7 @@ pub fn body_block_boundaries(doc: &LoroDoc) -> io::Result<Vec<u32>> {
   let body = projector.flow_text(ROOT_BODY_FLOW_ID)?;
   let mut boundaries: Vec<usize> = paragraph_ids_by_boundary(doc, &body).into_keys().collect();
   let mut defects = Vec::new();
-  let (objects, _quarantined) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
+  let (objects, _quarantined, _paragraph_block_index) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
   boundaries.extend(objects.keys().copied());
   boundaries.sort_unstable();
   boundaries.dedup();
@@ -166,6 +178,101 @@ pub fn object_input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<(BlockId, 
   }
   blocks.sort_by_key(|(id, _)| id.0);
   Ok(blocks)
+}
+
+/// §act-ten A10.4: the object readback, scoped to the given registry block
+/// keys — a remote table-cell keystroke re-projects ONE table instead of every
+/// object block in the document. Keys not present in the registry (or that are
+/// paragraph records) are skipped; the caller matches ids against its own rows
+/// and falls back to the full readback on any surprise.
+pub fn object_input_blocks_for_ids(doc: &LoroDoc, ids: &[u128]) -> io::Result<Vec<(BlockId, InputBlock)>> {
+  let projector = Projector::new(doc)?;
+  let mut blocks = Vec::new();
+  let mut defect_sink = Vec::new();
+  for key in projector.blocks.keys().map(|key| key.to_string()) {
+    // Registry keys embed the durable id's trailing numeric segment — match on
+    // it WITHOUT materializing the block (materialization is the cost this
+    // scoping exists to avoid; the key iteration is a cheap map-key walk).
+    if !crate::loro_schema::loro_id_trailing_u128(&key).is_some_and(|id| ids.contains(&id)) {
+      continue;
+    }
+    let Some(block) = child_map(&projector.blocks, &key)? else {
+      continue;
+    };
+    if map_string_opt(&block, "kind")?.as_deref() == Some("paragraph") {
+      continue;
+    }
+    let id = map_string_opt(&block, "id")?.unwrap_or(key);
+    blocks.push((BlockId(loro_id_u128(&id)), projector.object_block(&block, &mut defect_sink)?));
+  }
+  blocks.sort_by_key(|(id, _)| id.0);
+  blocks.dedup_by_key(|(id, _)| id.0);
+  Ok(blocks)
+}
+
+/// §act-ten A10.4: attribute a changed Loro container to its owning registry
+/// entry by walking the container's path to the root. `Block(key)` for a
+/// container under `blocks_by_id/<key>/...`; `Flow(key)` for one under
+/// `flows_by_id/<key>/...`; `None` when the container cannot be attributed
+/// (unparseable id, deleted container, a registry ROOT itself, or any other
+/// shape) — callers must treat `None` as "fall back to the full readback".
+pub fn owner_of_changed_container(doc: &LoroDoc, target: &str) -> Option<ChangedContainerOwner> {
+  let id = loro::ContainerID::try_from(target).ok()?;
+  let path = doc.inner().get_path_to_container(&id)?;
+  let mut segments = path.iter();
+  loop {
+    let (_, index) = segments.next()?;
+    let loro::Index::Key(key) = index else {
+      continue;
+    };
+    enum Registry {
+      Blocks,
+      Flows,
+      Paragraphs,
+      Replicas,
+    }
+    let registry = match key.as_ref() {
+      crate::loro_schema::BLOCKS_BY_ID => Registry::Blocks,
+      crate::loro_schema::FLOWS_BY_ID => Registry::Flows,
+      crate::loro_schema::PARAGRAPHS_BY_ID => Registry::Paragraphs,
+      crate::loro_schema::REPLICAS_BY_ID => Registry::Replicas,
+      _ => continue,
+    };
+    // The registry ROOT map itself (its key set changed — e.g. a paragraph
+    // split registering new records): the accompanying child-record entries in
+    // the same invalidation carry the specifics, so the root change alone is
+    // object-readback-inert.
+    let Some((_, owner_index)) = segments.next() else {
+      return Some(ChangedContainerOwner::ObjectReadbackInert);
+    };
+    let loro::Index::Key(owner_key) = owner_index else {
+      return None;
+    };
+    return Some(match registry {
+      Registry::Blocks => ChangedContainerOwner::Block(owner_key.to_string()),
+      Registry::Flows => ChangedContainerOwner::Flow(owner_key.to_string()),
+      // Paragraph records are owned by the ranged/regional paragraph readback
+      // paths; replica records are presence state outside the projection. The
+      // full object readback skips both (it materializes object blocks only),
+      // so classifying them inert keeps scoped ≡ full for these shapes.
+      Registry::Paragraphs | Registry::Replicas => ChangedContainerOwner::ObjectReadbackInert,
+    });
+  }
+}
+
+/// §act-ten A10.4: owner classification for [`owner_of_changed_container`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChangedContainerOwner {
+  /// A container under `blocks_by_id/<key>`.
+  Block(String),
+  /// A container under `flows_by_id/<key>`.
+  Flow(String),
+  /// A change the OBJECT readback provably never patches: a registry root map
+  /// itself, a paragraph record (`paragraphs_by_id/<key>` — the paragraph
+  /// readback paths own those), or a replica/presence record. Callers scoping
+  /// an object readback skip these instead of falling back to the full
+  /// O(objects) walk (which skips them too).
+  ObjectReadbackInert,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -199,10 +306,10 @@ pub(crate) fn document_from_projection_blocks(projection: ProjectionBlocks) -> D
     document.ids.document_id = projection.document_id;
   }
   if projection.paragraph_ids.len() == document.paragraphs.len() {
-    document.ids.paragraph_ids = projection.paragraph_ids;
+    document.ids.paragraph_ids = Arc::new(projection.paragraph_ids);
   }
   if projection.block_ids.len() == document.blocks.len() {
-    document.ids.block_ids = projection.block_ids;
+    document.ids.block_ids = Arc::new(projection.block_ids);
   }
   if !projection.sections.is_empty() {
     document.sections = Arc::new(projection.sections);
@@ -226,11 +333,21 @@ impl<'a> Projector<'a> {
 
   fn body_projection(&self, defects: &mut Vec<ProjectionDefect>) -> io::Result<ProjectionBlocks> {
     let body = self.flow_text(ROOT_BODY_FLOW_ID)?;
-    let (body_blocks, quarantined) = self.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, defects)?;
+    let (body_blocks, quarantined, paragraph_block_index) = self.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, defects)?;
     let mut blocks = Vec::new();
     let mut paragraph_ids = Vec::new();
     let mut block_ids = Vec::new();
-    self.push_flow_blocks(&body, &body_blocks, ROOT_BODY_FLOW_ID, Some(&mut paragraph_ids), Some(&mut block_ids), &mut blocks, defects, true)?;
+    self.push_flow_blocks(
+      &body,
+      &body_blocks,
+      ROOT_BODY_FLOW_ID,
+      Some(&mut paragraph_ids),
+      Some(&mut block_ids),
+      Some(paragraph_block_index),
+      &mut blocks,
+      defects,
+      true,
+    )?;
     // §5 quarantine: blocks whose anchors no longer resolve are appended at the
     // end in stable (sorted block key) order instead of vanishing. Their defects
     // were already recorded by `object_blocks_for_flow`.
@@ -351,19 +468,26 @@ impl<'a> Projector<'a> {
     flow_id: &str,
     paragraph_ids: Option<&mut Vec<ParagraphId>>,
     block_ids: Option<&mut Vec<BlockId>>,
+    // §perf-heaven T4: the paragraph-block boundary index, PRE-COMPUTED by the
+    // caller in the same BLOCKS_BY_ID pass that found the objects (body flow); a
+    // cell flow that collects no block ids passes `None`.
+    paragraph_block_index: Option<FxHashMap<usize, String>>,
     output: &mut Vec<InputBlock>,
     defects: &mut Vec<ProjectionDefect>,
     flush_trailing_after_object: bool,
   ) -> io::Result<()> {
-    // §perf: resolve this flow's boundary→id maps ONCE (only for the id sinks that
-    // are actually collected — cell flows pass `None` and skip the build), then do
-    // O(1) lookups per boundary below. Replaces a per-boundary full rescan of every
-    // paragraph/block record — an O(records²·chars) blow-up that pegged the CRDT
-    // actor thread at 100% CPU and never returned when materializing a large document.
+    // §perf: resolve this flow's paragraph boundary→id map ONCE (only for the id
+    // sinks that are actually collected — cell flows pass `None` and skip the
+    // build), then do O(1) lookups per boundary below. Replaces a per-boundary
+    // full rescan — an O(records²·chars) blow-up that pegged the CRDT actor
+    // thread. The paragraph-BLOCK index arrives pre-built (§perf-heaven T4).
     let paragraph_index = paragraph_ids.as_ref().map(|_| paragraph_ids_by_boundary(self.doc, text));
-    let paragraph_block_index = block_ids.as_ref().map(|_| paragraph_block_ids_by_boundary(self.doc, text));
 
-    let delta = hotpath::measure_block!("projector_body_to_delta", text.to_delta());
+    // §perf-heaven T3 tripwire: this materializes the WHOLE body as a delta
+    // Vec (the cold-path allocation). Per-keystroke edits must take the regional
+    // rematerializer instead and never reach here.
+    crate::instrument::record_body_to_delta_tagged(if flow_id == crate::BODY_FLOW_ID { "body-flow" } else { "cell-flow" });
+    let delta = hotpath::measure_block!("projector_body_to_delta", crate::streaming_delta::streaming_to_delta(text));
     hotpath::measure_block!("projector_walk_flow_delta", Self::walk_flow_delta(
       text,
       delta,
@@ -573,14 +697,14 @@ impl<'a> Projector<'a> {
   /// maps live placeholder positions to their blocks; the second collects the
   /// quarantined blocks (unresolved or displaced-by-collision anchors) in stable
   /// sorted-key order, with one defect recorded per quarantined block.
-  #[allow(clippy::type_complexity, reason = "returns resolved-by-position blocks plus stable-key-ordered quarantined blocks in one pass")]
+  #[allow(clippy::type_complexity, reason = "returns resolved-by-position blocks, quarantined blocks, and the paragraph-block boundary index from ONE registry pass")]
   #[hotpath::measure]
   fn object_blocks_for_flow(
     &self,
     text: &LoroText,
     flow_id: &str,
     defects: &mut Vec<ProjectionDefect>,
-  ) -> io::Result<(BTreeMap<usize, LoroMap>, Vec<(String, LoroMap)>)> {
+  ) -> io::Result<(BTreeMap<usize, LoroMap>, Vec<(String, LoroMap)>, FxHashMap<usize, String>)> {
     // §act-five P4: ONE registry pass. The old shape scanned the whole block
     // registry TWICE — once inside `boundary_cursor_positions` (which iterates
     // EVERY block record to harvest anchor cursors) and again in the loop below
@@ -592,17 +716,19 @@ impl<'a> Projector<'a> {
     // repair, identity preserved), so behaviour is bit-identical to the former
     // per-record path; the id-less-cursor fallback (`get_cursor_pos`) is kept.
     let container = text.id();
-    let sorted_keys = map_keys(&self.blocks);
+    // §perf-heaven T4: ONE pass over BLOCKS_BY_ID builds BOTH this flow's object
+    // candidates AND the paragraph-block boundary index (formerly a SECOND full
+    // scan in `paragraph_block_ids_by_boundary`). Every block is decoded once,
+    // partitioned by kind; both anchor sets resolve through ONE batched
+    // `query_text_id_positions`. Keys are consumed by value (no per-key clone).
     let mut candidates: Vec<(String, LoroMap, Option<Cursor>, Option<Vec<u8>>)> = Vec::new();
+    let mut paragraph_candidates: Vec<(String, Option<Cursor>)> = Vec::new();
     let mut anchor_ids: Vec<ID> = Vec::new();
-    for key in &sorted_keys {
-      let Some(block) = child_map(&self.blocks, key)? else {
+    for key in map_keys(&self.blocks) {
+      let Some(block) = child_map(&self.blocks, &key)? else {
         continue;
       };
       if map_string_opt(&block, "flow_id")?.as_deref() != Some(flow_id) {
-        continue;
-      }
-      if map_string_opt(&block, "kind")?.as_deref() == Some("paragraph") {
         continue;
       }
       let cursor_bytes = map_binary_opt(&block, "anchor_cursor")?;
@@ -613,15 +739,14 @@ impl<'a> Projector<'a> {
       if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id) {
         anchor_ids.push(id);
       }
-      candidates.push((key.clone(), block, cursor, cursor_bytes));
+      if map_string_opt(&block, "kind")?.as_deref() == Some("paragraph") {
+        paragraph_candidates.push((key, cursor));
+      } else {
+        candidates.push((key, block, cursor, cursor_bytes));
+      }
     }
-    let mut by_pos = BTreeMap::new();
-    let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
-    let mut quarantined = Vec::new();
-    // Object-free flow: nothing to place, no snapshot, no resolver.
-    if candidates.is_empty() {
-      return Ok((by_pos, quarantined));
-    }
+    // ONE batched resolution feeds both the object placement and the
+    // paragraph-block boundary index below.
     let mut anchor_positions: FxHashMap<ID, usize> = FxHashMap::default();
     if !anchor_ids.is_empty() {
       for (id, pos) in anchor_ids.iter().copied().zip(self.doc.inner().query_text_id_positions(&container, &anchor_ids)) {
@@ -630,56 +755,95 @@ impl<'a> Projector<'a> {
         }
       }
     }
-    // Validate that each resolved anchor still sits on an object-replacement
-    // char. §act-five P4: on a LARGE body, a targeted `char_at` per object
-    // (O(objects·log N) — objects are few) avoids materializing the ENTIRE body
-    // as a `Vec<char>` per call (~1 GB/run of pure churn on a big doc). On a
-    // SMALL body the one-shot snapshot + O(1) gets beats `char_at`'s per-call
-    // state-lock overhead, so keep it below the threshold. Either way an
-    // out-of-range position resolves to `None` → quarantine (bounds-miss
-    // behaviour of the former `snapshot_chars.get(pos)`).
-    const SNAPSHOT_MATERIALIZE_MAX_UNICODE: usize = 8192;
-    let snapshot_chars: Option<Vec<char>> =
-      (text.len_unicode() <= SNAPSHOT_MATERIALIZE_MAX_UNICODE).then(|| text.to_string().chars().collect());
-    let is_object_char = |pos: usize| match &snapshot_chars {
-      Some(chars) => chars.get(pos).copied() == Some(OBJECT_REPLACEMENT),
-      None => text.char_at(pos).ok() == Some(OBJECT_REPLACEMENT),
-    };
-    for (key, block, cursor, cursor_bytes) in candidates {
-      let resolved = cursor
-        .and_then(|cursor| match cursor.id {
-          Some(id) => anchor_positions.get(&id).copied(),
-          None => {
-            crate::instrument::record_cursor_pos_resolve();
-            self.doc.get_cursor_pos(&cursor).ok().map(|pos| pos.current.pos)
-          },
-        })
-        .filter(|pos| is_object_char(*pos));
-      let Some(pos) = resolved else {
-        // FS-002: never silently drop a block whose anchor is unresolvable.
-        defects.push(ProjectionDefect::UnresolvedObjectAnchor {
-          block_key: key.clone(),
-          flow_id: flow_id.to_string(),
-          anchor_cursor: cursor_bytes,
-        });
-        quarantined.push((key, block));
+
+    let mut by_pos = BTreeMap::new();
+    let mut keys_by_pos: BTreeMap<usize, String> = BTreeMap::new();
+    let mut quarantined = Vec::new();
+    // Object placement: skip the body snapshot/resolver entirely when the flow
+    // has no objects. Validate that each resolved anchor still sits on an
+    // object-replacement char via a Src-safe `char_at` per object.
+    //
+    // §perf-heaven T7.1: the former ≤8192-unicode branch materialized the body as
+    // a `Vec<char>` via `text.to_string()`. That call drives the container store's
+    // Lazy-VALUE decode (path 1) — a full bytes-decode that leaves the container
+    // `Lazy`-with-cached-value — and object validation runs BEFORE the body delta
+    // (`push_flow_blocks` → `text.to_delta()`), which then forces the Src STATE
+    // decode (path 2, `decode_snapshot_fast`) from the same bytes. So the small
+    // body paid a DOUBLE bytes-decode plus a `Vec<char>` allocation. (This is the
+    // real cause of the reverted materialize-once "4× slower" — `to_string` never
+    // forced `Dst`; it drove a redundant second decode.) `char_at` instead promotes
+    // the container to `LazyLoad::Src` ONCE (path 2) and the later `to_delta`
+    // reuses that state — a single decode, no `Vec<char>`. Bounded per-object
+    // O(elements) walk; object counts on a real body are tiny. Out-of-range
+    // positions resolve to `None` → quarantine. Guarded by the corpus Src-path
+    // equivalence net (T7.26) + the convergence fuzz.
+    if !candidates.is_empty() {
+      let is_object_char = |pos: usize| text.char_at(pos).ok() == Some(OBJECT_REPLACEMENT);
+      for (key, block, cursor, cursor_bytes) in candidates {
+        let resolved = cursor
+          .and_then(|cursor| match cursor.id {
+            Some(id) => anchor_positions.get(&id).copied(),
+            None => {
+              crate::instrument::record_cursor_pos_resolve();
+              self.doc.get_cursor_pos(&cursor).ok().map(|pos| pos.current.pos)
+            },
+          })
+          .filter(|pos| is_object_char(*pos));
+        let Some(pos) = resolved else {
+          // FS-002: never silently drop a block whose anchor is unresolvable.
+          defects.push(ProjectionDefect::UnresolvedObjectAnchor {
+            block_key: key.clone(),
+            flow_id: flow_id.to_string(),
+            anchor_cursor: cursor_bytes,
+          });
+          quarantined.push((key, block));
+          continue;
+        };
+        if let Some(kept_key) = keys_by_pos.get(&pos) {
+          // FS-003: colliding cursors previously overwrote each other in the map.
+          defects.push(ProjectionDefect::CollidingObjectAnchors {
+            flow_id: flow_id.to_string(),
+            anchor_unicode: pos,
+            kept_block_key: kept_key.clone(),
+            displaced_block_key: key.clone(),
+          });
+          quarantined.push((key, block));
+          continue;
+        }
+        keys_by_pos.insert(pos, key);
+        by_pos.insert(pos, block);
+      }
+    }
+
+    // §perf-heaven T4: the paragraph-block boundary index, built from the SAME
+    // pass + query (was a whole second BLOCKS_BY_ID scan). Selection rule matches
+    // `paragraph_block_ids_by_boundary` exactly: first sorted key wins per
+    // boundary; boundary 0 prefers `MAIN_BODY_BLOCK_ID`.
+    let mut paragraph_block_index: FxHashMap<usize, String> = FxHashMap::default();
+    let mut main_body_at_zero = false;
+    let text_len = text.len_unicode();
+    for (key, cursor) in paragraph_candidates {
+      let Some(pos) = resolve_decoded_cursor(self.doc, text_len, cursor.as_ref(), &anchor_positions) else {
         continue;
       };
-      if let Some(kept_key) = keys_by_pos.get(&pos) {
-        // FS-003: colliding cursors previously overwrote each other in the map.
-        defects.push(ProjectionDefect::CollidingObjectAnchors {
-          flow_id: flow_id.to_string(),
-          anchor_unicode: pos,
-          kept_block_key: kept_key.clone(),
-          displaced_block_key: key.clone(),
-        });
-        quarantined.push((key, block));
-        continue;
+      if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
+        main_body_at_zero = true;
       }
-      keys_by_pos.insert(pos, key);
-      by_pos.insert(pos, block);
+      paragraph_block_index.entry(pos).or_insert(key);
     }
-    Ok((by_pos, quarantined))
+    if main_body_at_zero {
+      paragraph_block_index.insert(0, MAIN_BODY_BLOCK_ID.to_string());
+    }
+    // The specific net: prove the fused index is bit-identical to the standalone
+    // scan. Runs in debug (tests / fuzz / debug corpus); release trusts the
+    // corpus sweep (projection == reimport).
+    debug_assert_eq!(
+      paragraph_block_index,
+      paragraph_block_ids_by_boundary(self.doc, text),
+      "T4 fused paragraph-block index diverged from paragraph_block_ids_by_boundary",
+    );
+
+    Ok((by_pos, quarantined, paragraph_block_index))
   }
 
   fn object_block(&self, block: &LoroMap, defects: &mut Vec<ProjectionDefect>) -> io::Result<InputBlock> {
@@ -714,6 +878,8 @@ impl<'a> Projector<'a> {
         .transpose()?,
       sizing: image_sizing(attrs.as_ref())?,
       alignment: alignment(attrs.as_ref())?,
+      // §A11.9: the linked-image URL; absent/empty means an embedded image.
+      external_url: map_string_opt(block, "external_url")?.filter(|url| !url.is_empty()),
     })
   }
 
@@ -847,7 +1013,7 @@ impl<'a> Projector<'a> {
     let flow = self.flow_text(&flow_id)?;
     let object_blocks = self.cell_nested_tables(cell, &flow)?;
     let mut projected = Vec::new();
-    self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, &mut projected, defects, false)?;
+    self.push_flow_blocks(&flow, &object_blocks, &flow_id, None, None, None, &mut projected, defects, false)?;
     let mut blocks = projected
       .into_iter()
       .filter_map(|block| match block {
@@ -957,7 +1123,7 @@ fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usi
   // (b) Every boundary newline must carry a paragraph-style mark. Walk the rich
   // delta so we see each insert's attributes, mirroring the projector's own scan.
   let mut unicode_pos = 0_usize;
-  for item in body.to_delta() {
+  for item in crate::streaming_delta::streaming_to_delta(body) {
     let loro::TextDelta::Insert { insert, attributes } = item else {
       continue;
     };
@@ -1016,7 +1182,7 @@ impl ParagraphOnlyProjector {
     };
     let mut pending_style = gpui_flowtext::ParagraphStyle::Normal;
     let mut seen_sentinel = false;
-    for item in text.to_delta() {
+    for item in crate::streaming_delta::streaming_to_delta(text) {
       let loro::TextDelta::Insert { insert, attributes } = item else {
         continue;
       };
@@ -1095,6 +1261,15 @@ fn push_paragraph_projection_metadata(
         let fabricated_id = fabricated_keys.as_ref().map(|(paragraph_key, _)| paragraph_key.clone()).unwrap_or_else(|| {
           interstitial_anchor.map_or_else(|| format!("paragraph.projection.{block_ix}"), |anchor| format!("paragraph.after.{anchor}"))
         });
+        {
+          static FAB_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+          if *FAB_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+            eprintln!(
+              "project[fabricate]: boundary {boundary:?} block_ix {block_ix} → {fabricated_id} (u128 {})",
+              loro_id_u128(&fabricated_id)
+            );
+          }
+        }
         defects.push(ProjectionDefect::MissingParagraphMetadata {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -1151,11 +1326,12 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   // fallback), sorted-key first-wins ordering, root-first special-case, and the
   // dead-anchor / id-less-cursor fallbacks are all preserved bit-identically.
   let container = text.id();
+  // §perf-heaven T4: consume the sorted keys by value (no per-key clone).
   let sorted_keys = map_keys(&paragraphs);
   let mut cands: Vec<(String, Option<Cursor>, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
   let mut ids: Vec<ID> = Vec::new();
-  for key in &sorted_keys {
-    let Some(record) = child_map(&paragraphs, key).ok().flatten() else {
+  for key in sorted_keys {
+    let Some(record) = child_map(&paragraphs, &key).ok().flatten() else {
       continue;
     };
     let decode = |field: &str| {
@@ -1172,7 +1348,7 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
         ids.push(id);
       }
     }
-    cands.push((key.clone(), boundary, start));
+    cands.push((key, boundary, start));
   }
   let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
   if !ids.is_empty() {
@@ -1183,9 +1359,10 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
     }
   }
   let mut root_first_at_zero = false;
+  let text_len = text.len_unicode();
   for (key, boundary, start) in cands {
-    let Some(pos) = resolve_decoded_cursor(doc, text, boundary.as_ref(), &pos_by_id)
-      .or_else(|| resolve_decoded_cursor(doc, text, start.as_ref(), &pos_by_id))
+    let Some(pos) = resolve_decoded_cursor(doc, text_len, boundary.as_ref(), &pos_by_id)
+      .or_else(|| resolve_decoded_cursor(doc, text_len, start.as_ref(), &pos_by_id))
     else {
       continue;
     };
@@ -1204,7 +1381,10 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
 /// pre-decoded companion of [`live_cursor_pos`] (same batch-hit / id-less
 /// `get_cursor_pos` fallback / in-range validation), for the fused single-pass
 /// boundary indexers that decode each record's cursors exactly once.
-fn resolve_decoded_cursor(doc: &LoroDoc, text: &LoroText, cursor: Option<&Cursor>, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
+fn resolve_decoded_cursor(doc: &LoroDoc, text_len: usize, cursor: Option<&Cursor>, pos_by_id: &FxHashMap<ID, usize>) -> Option<usize> {
+  // §perf-heaven T7.8: takes the body's unicode length precomputed once by the
+  // caller, rather than calling `text.len_unicode()` per boundary. Even O(1),
+  // hoisting it out of the per-record loop drops N redundant calls.
   let cursor = cursor?;
   let pos = match cursor.id {
     Some(id) => pos_by_id.get(&id).copied()?,
@@ -1213,13 +1393,20 @@ fn resolve_decoded_cursor(doc: &LoroDoc, text: &LoroText, cursor: Option<&Cursor
       doc.get_cursor_pos(cursor).ok()?.current.pos
     },
   };
-  (pos < text.len_unicode()).then_some(pos)
+  (pos < text_len).then_some(pos)
 }
 
 /// Build a `boundary position → paragraph *block* loro id` index for `text` in a
 /// single pass over the block registry (paragraph-kind blocks only). Companion to
 /// [`paragraph_ids_by_boundary`] with the same one-pass rationale and selection
 /// rule, except boundary 0 prefers `MAIN_BODY_BLOCK_ID`.
+///
+/// §perf-heaven T4: the projection now builds this index inside
+/// `object_blocks_for_flow` (same `BLOCKS_BY_ID` pass as the objects). This
+/// standalone function is retained as the REFERENCE the fused index is
+/// `debug_assert_eq!`'d against (and used by tests); hence `dead_code` in a
+/// release non-test build where the debug assert compiles out.
+#[allow(dead_code, reason = "reference implementation for the T4 fused-index debug_assert_eq + tests; unused only in release non-test builds")]
 #[hotpath::measure]
 fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
   let mut index: FxHashMap<usize, String> = FxHashMap::default();
@@ -1233,11 +1420,12 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
   // sorted-key first-wins, main-body-at-0 special case, and dead/id-less-cursor
   // fallbacks preserved.
   let container = text.id();
+  // §perf-heaven T4: consume the sorted keys by value (no per-key clone).
   let sorted_keys = map_keys(&blocks);
   let mut cands: Vec<(String, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
   let mut ids: Vec<ID> = Vec::new();
-  for key in &sorted_keys {
-    let Some(block) = child_map(&blocks, key).ok().flatten() else {
+  for key in sorted_keys {
+    let Some(block) = child_map(&blocks, &key).ok().flatten() else {
       continue;
     };
     if map_string_opt(&block, "kind").ok().flatten().as_deref() != Some("paragraph") {
@@ -1251,7 +1439,7 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
     if let Some(id) = cursor.as_ref().and_then(|cursor| cursor.id) {
       ids.push(id);
     }
-    cands.push((key.clone(), cursor));
+    cands.push((key, cursor));
   }
   let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
   if !ids.is_empty() {
@@ -1262,8 +1450,9 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
     }
   }
   let mut main_body_at_zero = false;
+  let text_len = text.len_unicode();
   for (key, cursor) in cands {
-    let Some(pos) = resolve_decoded_cursor(doc, text, cursor.as_ref(), &pos_by_id) else {
+    let Some(pos) = resolve_decoded_cursor(doc, text_len, cursor.as_ref(), &pos_by_id) else {
       continue;
     };
     if pos == 0 && key.as_str() == MAIN_BODY_BLOCK_ID {
@@ -1455,6 +1644,9 @@ fn run_styles_from_attrs(attrs: Option<&FxHashMap<String, LoroValue>>) -> RunSty
   }
   if matches!(attrs.get(MARK_STRIKETHROUGH), Some(LoroValue::Bool(true))) {
     styles.strikethrough = true;
+  }
+  if let Some(LoroValue::I64(value)) = attrs.get(MARK_VERT_ALIGN) {
+    styles.vert_align = gpui_flowtext::VertAlign::from_mark_value(*value);
   }
   styles
 }
@@ -1852,6 +2044,7 @@ mod tests {
           caption: None,
           sizing: InputImageSizing::FitWidth,
           alignment: InputBlockAlignment::Left,
+          external_url: None,
         }),
       ],
     );
@@ -1942,6 +2135,7 @@ mod tests {
         caption: None,
         sizing: InputImageSizing::FitWidth,
         alignment: InputBlockAlignment::Left,
+        external_url: None,
       })],
     );
     let doc = document_to_loro(&source, "Unresolved anchor")?;
@@ -1974,6 +2168,7 @@ mod tests {
         caption: None,
         sizing: InputImageSizing::FitWidth,
         alignment: InputBlockAlignment::Left,
+        external_url: None,
       })],
     );
     let doc = document_to_loro(&source, "Invalid asset")?;

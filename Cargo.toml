@@ -76,6 +76,13 @@ zip = { version = "0.6.6", default-features = false, features = ["deflate"] }
 zstd = "0.13.3"
 
 [patch.crates-io]
+# §perf (bimodal-undo fix): vendored to add `BTree::next_leaf_matching`, a
+# cache-predicate-skipping next-leaf walk. The rich-text tracker's
+# `CrdtRope::insert` needs "first NON-FUTURE element to the right" per fed op;
+# upstream only offers linear iteration, which goes O(ops²) when a tracker
+# rebuild retreats a large concurrent branch (the 80-195s dirty-history undo
+# regime). One added method; re-apply on generic-btree upgrades.
+generic-btree = { path = "vendor/generic-btree" }
 gpui-component = { path = "vendor/gpui-component" }
 # §perf: vendored to add `LoroDoc::query_text_id_positions`, a single-pass batch
 # resolver for many text cursor ids. Upstream Loro 1.13 only offers per-id cursor
@@ -84,6 +91,18 @@ gpui-component = { path = "vendor/gpui-component" }
 # the CRDT actor on large documents. The patch is one added method (see
 # `richtext_state.rs` get_text_indices_of_ids); re-apply it on Loro upgrades.
 loro-internal = { path = "vendor/loro-internal" }
+# §act-eleven A11.2: vendored for the 2→1 parse collapse (from_parsed_parts +
+# into_typed_document accessors; upstream 0.1.2 keeps Document internals private).
+rdocx = { path = "vendor/rdocx" }
+# §perf: vendored to add lossless prompt-lookup speculative decoding to the greedy
+# search (CTranslate2/src/decoding.cc). The citation model's output is ~76% fixed
+# JSON scaffold + spans copied verbatim from the input; drafting those from the
+# (source ∥ output-so-far) n-grams and verifying with the existing batched decoder
+# forward (`layers::Decoder::operator()`) cuts real forward passes with an output
+# distribution identical to greedy. Exposed as `speculative_lookup`/`ngram_max` on
+# `TranslationOptions`; the loop stays in C++ to avoid a per-token FFI/tensor tax.
+# Re-apply on ct2rs upgrades.
+ct2rs = { path = "vendor/ct2rs" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }
@@ -276,3 +295,9 @@ strip = true
 lto = "fat"
 codegen-units = 1
 rustflags = ["-C", "target-cpu=native", "-Z", "tune-cpu=native"]
+
+# Profiling builds: release codegen + debug symbols, separate cache so samply
+# runs never invalidate the plain release artifacts.
+[profile.release-debug]
+inherits = "release"
+debug = true

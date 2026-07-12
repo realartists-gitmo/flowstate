@@ -126,6 +126,40 @@ impl StyleMeta {
         LoroValue::Map(self.to_map_without_null_value().into())
     }
 
+    /// §act-eleven A11.10 (flowstate vendor patch): the null-filtered attribute
+    /// map exactly as the delta value's `attributes` entry carries it — an
+    /// unmarked style (key → null) is INVISIBLE. Public so streaming-span
+    /// consumers (`TextHandler::for_each_richtext_span`) can build delta
+    /// segments identical to `get_richtext_value`'s.
+    pub fn to_visible_attributes(&self) -> FxHashMap<String, LoroValue> {
+        self.to_map_without_null_value()
+    }
+
+    /// §act-eleven A11.10 (flowstate vendor patch): equality on the VISIBLE
+    /// (null-filtered) attribute values — the exact merge criterion
+    /// `get_richtext_value` applies between adjacent spans (it compares the
+    /// null-filtered `to_value()` maps). Allocation-free, so streaming
+    /// consumers can use it per span.
+    pub fn visible_eq(&self, other: &Self) -> bool {
+        let visible_len = |meta: &Self| {
+            meta.map
+                .values()
+                .filter(|item| !item.value.is_null())
+                .count()
+        };
+        visible_len(self) == visible_len(other)
+            && self
+                .map
+                .iter()
+                .filter(|(_, item)| !item.value.is_null())
+                .all(|(key, item)| {
+                    other
+                        .map
+                        .get(key)
+                        .is_some_and(|o| !o.value.is_null() && o.value == item.value)
+                })
+    }
+
     fn to_map_without_null_value(&self) -> FxHashMap<String, LoroValue> {
         self.map
             .iter()

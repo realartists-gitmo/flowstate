@@ -93,20 +93,24 @@ impl RichTextEditor {
     self.resize_layout_aux_caches();
     let paragraph = self.document.paragraphs.get(paragraph_ix)?;
     let key = paragraph_cache_key(&self.document, paragraph);
+    // §perf-heaven T5: identity-scoped validity — the estimate survives edits to
+    // OTHER paragraphs (their key/id are unchanged), so a keystroke recomputes
+    // only the touched paragraph's estimate instead of the whole document.
+    let paragraph_id = self.document.ids.paragraph_ids.get(paragraph_ix).copied().unwrap_or(ParagraphId(0));
     let expected = ParagraphEstimateHeightCacheEntry {
       key,
+      paragraph_id,
       width,
       invisibility_mode: self.invisibility_mode,
-      edit_generation: self.edit_generation,
       layout_generation: self.layout_generation,
       height: px(0.0),
       source_len: 0,
     };
-    if let Some(entry) = self.paragraph_estimate_height_cache.get(paragraph_ix).and_then(|entry| *entry)
+    if let Some(entry) = self.paragraph_estimate_height_cache.get(&paragraph_id).copied()
       && entry.key == expected.key
+      && entry.paragraph_id == expected.paragraph_id
       && entry.width == expected.width
       && entry.invisibility_mode == expected.invisibility_mode
-      && entry.edit_generation == expected.edit_generation
       && entry.layout_generation == expected.layout_generation
     {
       return Some((entry.height, entry.source_len));
@@ -114,19 +118,22 @@ impl RichTextEditor {
 
     let prep = self.valid_paragraph_prep(paragraph_ix);
     let (height, source_len) = match prep.as_deref() {
-      Some(prep) => (estimate_paragraph_prep_item_height(&self.document, prep, width), prep.source_len),
+      Some(prep) => (estimate_paragraph_prep_item_height(&self.document, prep, paragraph_ix, width), prep.source_len),
       None => (
         estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode),
         paragraph_text_len(paragraph),
       ),
     };
-    if let Some(slot) = self.paragraph_estimate_height_cache.get_mut(paragraph_ix) {
-      *slot = Some(ParagraphEstimateHeightCacheEntry {
+    // §perf-heaven T7.14: keyed by the stable paragraph id, so a later
+    // structural shift keeps this estimate instead of invalidating it.
+    self.paragraph_estimate_height_cache.insert(
+      paragraph_id,
+      ParagraphEstimateHeightCacheEntry {
         height,
         source_len,
         ..expected
-      });
-    }
+      },
+    );
     Some((height, source_len))
   }
 

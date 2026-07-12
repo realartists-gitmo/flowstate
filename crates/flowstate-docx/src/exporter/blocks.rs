@@ -2,12 +2,12 @@ use std::borrow::Cow;
 
 use docx_rs::{
   AlignmentType, BreakType, Docx, Paragraph as DocxParagraph, Pic, Run, SectionProperty, Shading, Table as DocxTable,
-  TableCell as DocxTableCell, TableLayoutType, TableRow as DocxTableRow, VMergeType, WidthType,
+  TableCell as DocxTableCell, TableLayoutType, TableRow as DocxTableRow, VMergeType, VertAlignType, WidthType,
 };
 use flowstate_document::{
   Block, BlockAlignment, DocumentProjection, DocumentTheme, EquationBlock, EquationDisplay, HighlightStyle, ImageBlock, ImageSizing,
   Paragraph, ParagraphStyle, RunSemanticStyle, RunStyles, SOFT_LINE_BREAK, TableBlock, TableCell, TableCellBlock, TableCellParagraph,
-  TableColumnWidth, document_text_slice,
+  TableColumnWidth, VertAlign, document_text_slice,
 };
 use flowstate_fidelity::FidelityClass;
 
@@ -23,6 +23,7 @@ use super::{
 pub(super) fn add_block(
   docx: Docx,
   document: &DocumentProjection,
+  paragraph_ix: usize,
   block: &Block,
   theme: &DocumentTheme,
   context: &SectionContext,
@@ -31,7 +32,7 @@ pub(super) fn add_block(
 ) -> Docx {
   match block {
     Block::Paragraph(paragraph) => {
-      let mut docx_paragraph = export_document_paragraph(document, paragraph, theme);
+      let mut docx_paragraph = export_document_paragraph(document, paragraph_ix, paragraph, theme);
       // FS-126: a non-final section terminates in the last paragraph before its
       // boundary, carrying that section's page properties in its `w:sectPr`.
       if let Some(section_property) = boundary {
@@ -41,13 +42,16 @@ pub(super) fn add_block(
     },
     Block::Table(table) => docx.add_table(export_table(table, theme, context)),
     Block::Image(image) => docx.add_paragraph(export_image(document, image, theme, context, side)),
-    Block::Equation(equation) => docx.add_paragraph(placeholder_paragraph_for_equation(equation, theme, side)),
+    Block::Equation(equation) => docx.add_paragraph(omml_paragraph_for_equation(equation, theme, side)),
   }
 }
 
 #[hotpath::measure]
-fn export_document_paragraph(document: &DocumentProjection, paragraph: &Paragraph, theme: &DocumentTheme) -> DocxParagraph {
-  let text = document_text_slice(document, paragraph.byte_range.clone());
+fn export_document_paragraph(document: &DocumentProjection, paragraph_ix: usize, paragraph: &Paragraph, theme: &DocumentTheme) -> DocxParagraph {
+  // §perf-heaven T8.6: `byte_range` is no longer a `Paragraph` field; the text
+  // span is derived on demand via `paragraph_byte_range` (block tree `O(log N)`
+  // `paragraph_start`, which includes the inter-block `\n` separators).
+  let text = document_text_slice(document, flowstate_document::paragraph_byte_range(document, paragraph_ix));
   export_paragraph_with_text(paragraph, &text, theme, false)
 }
 
@@ -70,7 +74,14 @@ fn export_paragraph_with_text(paragraph: &Paragraph, text: &str, theme: &Documen
     out = out.add_run(Run::new());
   }
   if matches!(paragraph.style, flowstate_document::PARAGRAPH_POCKET | flowstate_document::PARAGRAPH_HAT) {
-    out = out.add_run(Run::new().add_break(BreakType::Page));
+    // §act6 (round-trip fidelity): start the header on a new page via the
+    // `w:pageBreakBefore` PARAGRAPH PROPERTY, not a trailing page-break RUN. The
+    // run form reimports as body text — the importer maps EVERY `<w:br>` (page
+    // included, structured.rs) to `SOFT_LINE_BREAK` — so it injected a spurious
+    // U+2028 after every pocket/hat header, breaking export->reimport idempotency
+    // on ~80% of the corpus. A property does not reimport as text, and a header
+    // beginning a new page is the correct layout regardless.
+    out = out.page_break_before(true);
   }
   out
 }
@@ -137,6 +148,14 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
   }
   if styles.strikethrough {
     run = run.strike();
+  }
+  // Superscript/subscript (orthogonal to the semantic style). docx-rs exposes
+  // this only on `RunProperty`, so set it there directly; `clone` keeps the
+  // partial move off `run` and is negligible on the export path.
+  match styles.vert_align {
+    VertAlign::Baseline => {},
+    VertAlign::Superscript => run.run_property = run.run_property.clone().vert_align(VertAlignType::SuperScript),
+    VertAlign::Subscript => run.run_property = run.run_property.clone().vert_align(VertAlignType::SubScript),
   }
   if let Some(highlight) = styles.highlight {
     run = run.shading(
@@ -406,6 +425,27 @@ fn export_image(
       EmbedResult::Fallback(reason) => side.push_warning(reason),
     }
   }
+  // §A11.9: a genuinely-LINKED image (external URL, no embeddable asset bytes)
+  // exports as an inline drawing whose blip carries `r:link` to an external
+  // `TargetMode="External"` relationship. docx-rs has no `r:link` API, so a
+  // sentinel run is emitted here and the post-process pass swaps it for the
+  // full drawing (the equation-injection seam); the package writer adds the
+  // relationship. NOT `push_image` — that ledger pairs with the docx-rs-emitted
+  // `wp:docPr` literals in document order, and no such literal exists here (the
+  // injected drawing carries its own `docPr` with the alt text baked in).
+  if let Some(url) = image.external_url.as_deref().filter(|url| !url.is_empty()) {
+    let (width_px, height_px) = match image.sizing {
+      ImageSizing::Fixed { width_px, height_px } => (width_px.max(1), height_px.unwrap_or(width_px).max(1)),
+      // No bytes to sniff intrinsic dimensions from; match the embedded path's
+      // unknown-size default.
+      ImageSizing::Intrinsic | ImageSizing::FitWidth => (640, 480),
+    };
+    let (width_emu, height_emu) =
+      fit_width_emu(image, context, width_px, height_px).unwrap_or((px_to_emu(width_px), px_to_emu(height_px)));
+    let alt = image_alt_text(document, image);
+    let sentinel = side.push_linked_image(url, alt.as_deref(), width_emu, height_emu);
+    return aligned_paragraph(image.alignment).add_run(Run::new().add_text(sentinel));
+  }
   // FS-127 fidelity: reaching the text fallback means no `<w:drawing>` (and thus
   // no `wp:docPr descr`) is emitted, so an image carrying alt text loses its
   // accessible descr sentinel on export.
@@ -432,6 +472,29 @@ fn prepare_embeddable_image(bytes: &[u8]) -> EmbedResult {
   if is_png(bytes) || is_jpeg(bytes) {
     return EmbedResult::Ready(bytes.to_vec());
   }
+  // §perf-heaven T8.8: Windows metafiles (EMF/WMF) are VALID docx image parts
+  // but the `image` crate can't decode them — they used to fall back to
+  // `[Picture N]` body text (the dominant docx round-trip residual, +chars).
+  // Embed the original bytes as-is; docx-rs writes them to `word/media/imageN.png`
+  // and the recompress pass (`package::write_recompressed_docx`) sniffs the magic
+  // and gives the part its real `.emf`/`.wmf` extension + content-type + rel — so
+  // the image round-trips LOSSLESSLY as an object instead of corrupting the text.
+  if is_metafile(bytes).is_some() {
+    return EmbedResult::Ready(bytes.to_vec());
+  }
+  // §act-ten A9.6: some real-world docx media parts are HEADERLESS raw DIBs
+  // (a bare BITMAPINFOHEADER, e.g. 44-byte 1x1 tracking pixels) — valid Word
+  // media, but no `BM` magic, so `image` can't sniff them and they degraded to
+  // the bracketed alt-text fallback (2 of the 4 corpus roundtrip residuals).
+  // Prepend the 14-byte BITMAPFILEHEADER to make a decodable BMP and transcode.
+  let dib_shimmed;
+  let bytes = match shim_headerless_dib(bytes) {
+    Some(bmp) => {
+      dib_shimmed = bmp;
+      dib_shimmed.as_slice()
+    },
+    None => bytes,
+  };
   match image::load_from_memory(bytes) {
     Ok(decoded) => {
       let mut buffer = std::io::Cursor::new(Vec::new());
@@ -444,6 +507,80 @@ fn prepare_embeddable_image(bytes: &[u8]) -> EmbedResult {
       "unsupported image format for DOCX embedding ({error}); exported as descriptive text"
     )),
   }
+}
+
+/// §act-ten A9.6: detect a headerless raw DIB (a bare `BITMAPINFOHEADER` — or
+/// the ancient `BITMAPCOREHEADER` — with no `BM` file header) and wrap it into
+/// a decodable BMP by prepending the 14-byte `BITMAPFILEHEADER`. Word accepts
+/// such raw DIBs as media parts; the `image` crate needs the file header.
+fn shim_headerless_dib(bytes: &[u8]) -> Option<Vec<u8>> {
+  if bytes.len() < 12 || bytes.starts_with(b"BM") {
+    return None;
+  }
+  let header_size = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+  // 40 = BITMAPINFOHEADER, 108/124 = V4/V5, 12 = BITMAPCOREHEADER.
+  if !matches!(header_size, 12 | 40 | 108 | 124) || bytes.len() <= header_size as usize {
+    return None;
+  }
+  // Plausibility: positive dimensions bounded to Word-realistic sizes, so a
+  // random binary that happens to start with 0x28 doesn't get mis-shimmed.
+  let (width, height, bit_count, palette_len) = if header_size == 12 {
+    let width = u16::from_le_bytes(bytes[4..6].try_into().ok()?) as i64;
+    let height = u16::from_le_bytes(bytes[6..8].try_into().ok()?) as i64;
+    let bit_count = u16::from_le_bytes(bytes[10..12].try_into().ok()?);
+    let palette = if bit_count <= 8 { (1usize << bit_count) * 3 } else { 0 };
+    (width, height, bit_count, palette)
+  } else {
+    if bytes.len() < 40 {
+      return None;
+    }
+    let width = i32::from_le_bytes(bytes[4..8].try_into().ok()?) as i64;
+    let height = (i32::from_le_bytes(bytes[8..12].try_into().ok()?) as i64).abs();
+    let bit_count = u16::from_le_bytes(bytes[14..16].try_into().ok()?);
+    let colors_used = u32::from_le_bytes(bytes[32..36].try_into().ok()?) as usize;
+    let palette = if bit_count <= 8 {
+      (if colors_used == 0 { 1usize << bit_count } else { colors_used }) * 4
+    } else {
+      0
+    };
+    (width, height, bit_count, palette)
+  };
+  if width <= 0 || height <= 0 || width > 30_000 || height > 30_000 {
+    return None;
+  }
+  if !matches!(bit_count, 1 | 4 | 8 | 16 | 24 | 32) {
+    return None;
+  }
+  let pixel_offset = 14usize + header_size as usize + palette_len;
+  let mut bmp = Vec::with_capacity(14 + bytes.len());
+  bmp.extend_from_slice(b"BM");
+  bmp.extend_from_slice(&(14u32 + bytes.len() as u32).to_le_bytes());
+  bmp.extend_from_slice(&[0, 0, 0, 0]);
+  bmp.extend_from_slice(&(pixel_offset as u32).to_le_bytes());
+  bmp.extend_from_slice(bytes);
+  Some(bmp)
+}
+
+/// The docx media extension for a Windows metafile, by magic bytes: EMF (the
+/// signature `" EMF"` at offset 40) or WMF (placeable `0xD7CDC69A`, or a standard
+/// `META_HEADER` `0x0001`/`0x0002` with mtype `0x0009`). Used by both the export
+/// pass-through and the recompress rename. §perf-heaven T8.8.
+pub(crate) fn is_metafile(bytes: &[u8]) -> Option<&'static str> {
+  if bytes.len() >= 44 && bytes[0..4] == [0x01, 0x00, 0x00, 0x00] && bytes[40..44] == *b" EMF" {
+    return Some("emf");
+  }
+  if bytes.starts_with(&[0xD7, 0xCD, 0xC6, 0x9A])
+    || bytes.starts_with(&[0x01, 0x00, 0x09, 0x00])
+    || bytes.starts_with(&[0x02, 0x00, 0x09, 0x00])
+  {
+    return Some("wmf");
+  }
+  None
+}
+
+/// Pixels to EMU at the `DrawingML` convention of 9,525 EMU per 96-dpi pixel.
+fn px_to_emu(px: u32) -> u32 {
+  px.saturating_mul(9_525)
 }
 
 fn is_png(bytes: &[u8]) -> bool {
@@ -519,7 +656,7 @@ fn image_text_fallback(document: &DocumentProjection, image: &ImageBlock, theme:
 // -- Equations (FS-125 OMML) -------------------------------------------------
 
 #[hotpath::measure]
-fn placeholder_paragraph_for_equation(equation: &EquationBlock, theme: &DocumentTheme, side: &mut SideChannel) -> DocxParagraph {
+fn omml_paragraph_for_equation(equation: &EquationBlock, theme: &DocumentTheme, side: &mut SideChannel) -> DocxParagraph {
   let display = matches!(equation.display, EquationDisplay::Display);
   if let Some(omml) = latex_to_omml(&equation.source, display) {
     // Emit a placeholder run; the post-process pass swaps the enclosing run for

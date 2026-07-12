@@ -35,6 +35,11 @@ pub const MARK_RUN_SEMANTIC_STYLE: &str = "run_semantic_style_id";
 pub const MARK_HIGHLIGHT_STYLE: &str = "highlight_style_id";
 pub const MARK_DIRECT_UNDERLINE: &str = "direct_underline";
 pub const MARK_STRIKETHROUGH: &str = "strikethrough";
+/// Superscript/subscript run mark (OOXML `w:vertAlign`). Value: `1` superscript,
+/// `2` subscript; absent ⇒ baseline. Currently written by the `.docx` import and
+/// read by the projection (round-trips), but not yet emitted by the live editor —
+/// see [`gpui_flowtext::VertAlign`].
+pub const MARK_VERT_ALIGN: &str = "vert_align";
 
 pub const OBJECT_REPLACEMENT: char = '\u{FFFC}';
 pub const SENTINEL_NEWLINE: &str = "\n";
@@ -82,6 +87,10 @@ pub fn cell_flow_loro_id(cell_loro_id: &str) -> String {
 }
 
 /// Parse the trailing numeric segment of a dotted Loro id into a `u128`.
+pub fn loro_id_trailing_u128(id: &str) -> Option<u128> {
+  parse_trailing_u128(id)
+}
+
 fn parse_trailing_u128(id: &str) -> Option<u128> {
   id.rsplit('.').next().and_then(|segment| segment.parse().ok())
 }
@@ -395,6 +404,7 @@ pub fn configure_text_styles(doc: &LoroDoc) {
   styles.insert(MARK_HIGHLIGHT_STYLE.into(), expand_after);
   styles.insert(MARK_DIRECT_UNDERLINE.into(), expand_after);
   styles.insert(MARK_STRIKETHROUGH.into(), expand_after);
+  styles.insert(MARK_VERT_ALIGN.into(), expand_after);
   doc.config_text_style(styles);
 }
 
@@ -435,7 +445,12 @@ pub fn record_revision(
   if let Some(author_user_id) = author_user_id {
     revision.insert("author_user_id", author_user_id.to_string())?;
   }
-  doc.commit();
+  // §act-ten A10.2: revision/metadata commits are INERT for undo — they touch
+  // only the meta/revisions containers, never the body. The "meta" origin is
+  // excluded from the UndoManager (like "remote"/"repair"), so an autosave
+  // checkpoint no longer pushes a bogus undo step; the runtime re-arms the
+  // recorded-inverse stacks across this commit for the same reason.
+  doc.commit_with(loro::CommitOptions::new().origin("meta"));
   Ok(())
 }
 
@@ -490,13 +505,40 @@ pub fn touch_document_metadata(doc: &LoroDoc) -> LoroResult<()> {
   Ok(())
 }
 
+/// §act-twelve A12.1.1: the OPEN-time replica invariant without the commit.
+/// `register_replica` unconditionally rewrites `last_seen_at`/`app_version`
+/// and commits — which advanced the frontier on EVERY open, permanently
+/// invalidating the package's frontier-stamped projection/search caches for
+/// all later opens. This variant writes (and commits) only when the record is
+/// genuinely absent or from another app version; the `last_seen_at` touch
+/// rides the first real local edit instead (see the collab layer's deferred
+/// author-identity hook). Returns whether it committed.
+pub fn register_replica_if_absent(doc: &LoroDoc) -> LoroResult<bool> {
+  let root = root_map(doc);
+  let replicas = root.ensure_mergeable_map(REPLICAS_BY_ID)?;
+  let replica_id = doc.peer_id().to_string();
+  let existing = replicas.get(&replica_id).and_then(|value| match value {
+    loro::ValueOrContainer::Container(loro::Container::Map(map)) => Some(map),
+    _ => None,
+  });
+  if let Some(replica) = existing {
+    let same_version = matches!(
+      replica.get("app_version"),
+      Some(loro::ValueOrContainer::Value(loro::LoroValue::String(version))) if version.as_str() == env!("CARGO_PKG_VERSION")
+    );
+    if same_version {
+      return Ok(false);
+    }
+  }
+  register_replica(doc, None)
+}
+
 pub fn register_replica(doc: &LoroDoc, user_id: Option<u128>) -> LoroResult<bool> {
   let root = root_map(doc);
   let replicas = root.ensure_mergeable_map(REPLICAS_BY_ID)?;
   let replica_id = doc.peer_id().to_string();
   let replica = replicas.ensure_mergeable_map(&replica_id)?;
   replica.insert("id", replica_id.as_str())?;
-  replica.insert("container_id", replica.id().to_string())?;
   replica.insert("app_version", env!("CARGO_PKG_VERSION"))?;
   if replica.get("created_at").is_none() {
     replica.insert("created_at", unix_time_secs())?;
@@ -524,7 +566,6 @@ pub fn register_user(doc: &LoroDoc, user_id: u128, display_name: Option<&str>) -
   let user_key = user_id.to_string();
   let user = users.ensure_mergeable_map(&user_key)?;
   user.insert("id", user_key.as_str())?;
-  user.insert("container_id", user.id().to_string())?;
   if let Some(display_name) = display_name {
     user.insert("display_name", display_name)?;
   }
@@ -554,9 +595,7 @@ pub fn ensure_section(doc: &LoroDoc, section_id: &str) -> LoroResult<LoroMap> {
   let sections = root.ensure_mergeable_map(SECTIONS_BY_ID)?;
   let section = sections.ensure_mergeable_map(section_id)?;
   section.insert("id", section_id)?;
-  section.insert("container_id", section.id().to_string())?;
-  let attrs = section.ensure_mergeable_map("attrs")?;
-  section.insert("attrs_container_id", attrs.id().to_string())?;
+  let _attrs = section.ensure_mergeable_map("attrs")?;
   Ok(section)
 }
 
@@ -660,10 +699,8 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  let attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
-  flow.insert("container_id", flow.id().to_string())?;
+  let _attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   flow.insert("text_container_id", text.id().to_string())?;
-  flow.insert("attrs_container_id", attrs.id().to_string())?;
   Ok(flow)
 }
 
@@ -678,7 +715,6 @@ fn ensure_sentinel(text: &LoroText) -> LoroResult<()> {
 fn ensure_initial_paragraph(paragraphs: &LoroMap, blocks: &LoroMap, body: &LoroText) -> LoroResult<()> {
   let paragraph = paragraphs.ensure_mergeable_map(ROOT_FIRST_PARAGRAPH_ID)?;
   paragraph.insert("id", ROOT_FIRST_PARAGRAPH_ID)?;
-  paragraph.insert("container_id", paragraph.id().to_string())?;
   paragraph.insert("flow_id", ROOT_BODY_FLOW_ID)?;
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     paragraph.insert("start_cursor", cursor.encode())?;
@@ -686,21 +722,17 @@ fn ensure_initial_paragraph(paragraphs: &LoroMap, blocks: &LoroMap, body: &LoroT
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     paragraph.insert("boundary_cursor", cursor.encode())?;
   }
-  let paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
-  paragraph.insert("attrs_container_id", paragraph_attrs.id().to_string())?;
+  let _paragraph_attrs = paragraph.ensure_mergeable_map("attrs")?;
 
   let block = blocks.ensure_mergeable_map(MAIN_BODY_BLOCK_ID)?;
   block.insert("id", MAIN_BODY_BLOCK_ID)?;
-  block.insert("container_id", block.id().to_string())?;
   block.insert("kind", "paragraph")?;
   block.insert("flow_id", ROOT_BODY_FLOW_ID)?;
   if let Some(cursor) = body.get_cursor(0, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  let block_attrs = block.ensure_mergeable_map("attrs")?;
-  let nested_refs = block.ensure_mergeable_map("nested_refs")?;
-  block.insert("attrs_container_id", block_attrs.id().to_string())?;
-  block.insert("nested_refs_container_id", nested_refs.id().to_string())?;
+  let _block_attrs = block.ensure_mergeable_map("attrs")?;
+  let _nested_refs = block.ensure_mergeable_map("nested_refs")?;
   Ok(())
 }
 

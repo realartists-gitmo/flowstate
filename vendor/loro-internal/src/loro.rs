@@ -668,13 +668,14 @@ impl LoroDoc {
                 // state (=3) — valid lock order (OpLog<DocState<DiffCalculator). The
                 // owned diff outlives the calc lock (dropped at the end of the let).
                 let mut state = self.state.lock();
-                let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal(
+                let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal_tagged(
                     &oplog,
                     &old_vv,
                     &old_frontiers,
                     oplog.vv(),
                     oplog.dag.get_frontiers(),
                     None,
+                    "import-oplog-delta",
                 );
                 if let Err(e) = state.apply_diff(
                     InternalDocDiff {
@@ -783,13 +784,14 @@ impl LoroDoc {
         if &old_vv != oplog.vv() {
             // §act-five P1.B: state before the retained calculator (valid lock order).
             let mut state = self.state.lock();
-            let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal(
+            let (diff, diff_mode) = self.import_diff_calculator.lock().calc_diff_internal_tagged(
                 &oplog,
                 &old_vv,
                 &old_frontiers,
                 oplog.vv(),
                 oplog.dag.get_frontiers(),
                 None,
+                "import-changes",
             );
             if let Err(e) = state.apply_diff(
                 InternalDocDiff {
@@ -1178,6 +1180,16 @@ impl LoroDoc {
         let spans = self.oplog.lock().split_span_based_on_deps(id_span);
         let span_count = spans.len();
         let t_split = t0.elapsed();
+        // §flowstate: a "warm the checkout diff calculator once from
+        // spans[0].deps" pre-pass was tried here (vendor #20, 2026-07-10) to
+        // collapse the undo's two backward-LCA tracker rebuilds into one
+        // build. REVERTED: across five bench runs it produced 1.5s / 3.2s /
+        // 79s / 99s tail undos (the pathological mode is a future-status
+        // `in_between` scan quadratic inside `CrdtRope::insert` when the
+        // build starts one op deeper, at the undone span's deps). The slow
+        // path stays at its BOUNDED two-rebuild cost; the durable fix is the
+        // P1.C incremental checkout (bounded walk from retained coverage
+        // instead of the LCA), tracked in flowstate_oom_leads.md #9.
         let mut calc_diff_calls = 0usize;
         let mut calc_diff_total = std::time::Duration::ZERO;
         let t1 = std::time::Instant::now();
@@ -1690,7 +1702,30 @@ impl LoroDoc {
         }
 
         let mut state = self.state.lock();
-        let mut calc = self.diff_calculator.lock();
+        // §flowstate vendor patch #24 (act-twelve A12.2.1): route checkout
+        // diffs through the RETAINED import calculator instead of the
+        // separate checkout calculator. The import calculator's trackers are
+        // fed continuously (every import, plus the #21 gap feeds that cover
+        // local commits), so an undo/checkout between covered versions is a
+        // bounded tracker SWING + extraction — no rebuild. The dedicated
+        // checkout calculator started every deep undo COLD: `start_tracking`
+        // anchored the rebuild at the deep dominator and re-fed the ENTIRE
+        // history (measured 130s on a 64.5M-op-unit dirty-history tail undo;
+        // the "bimodal" good runs were the ones where an earlier slow-path
+        // undo happened to have paid that warm-up already). Sharing one
+        // calculator also makes undo feeds extend IMPORT coverage and vice
+        // versa. Cold behavior is unchanged (same rebuild law); lock order
+        // matches the import path (state before calc, P1.B). Kill switch:
+        // `FLOWSTATE_DISABLE_UNIFIED_CHECKOUT_CALC=1` restores the dedicated
+        // checkout calculator.
+        static UNIFIED_DISABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let unified = !*UNIFIED_DISABLED
+            .get_or_init(|| std::env::var_os("FLOWSTATE_DISABLE_UNIFIED_CHECKOUT_CALC").is_some());
+        let mut calc = if unified {
+            self.import_diff_calculator.lock()
+        } else {
+            self.diff_calculator.lock()
+        };
         for i in frontiers.iter() {
             if !oplog.dag.contains(i) {
                 return Err(LoroError::FrontiersNotFound(i));
@@ -1714,7 +1749,7 @@ impl LoroDoc {
 
         self.set_detached(true);
         let (diff, diff_mode) =
-            calc.calc_diff_internal(&oplog, &before, &state.frontiers, after, &frontiers, None);
+            calc.calc_diff_internal_tagged(&oplog, &before, &state.frontiers, after, &frontiers, None, "checkout");
         state.apply_diff(
             InternalDocDiff {
                 origin: "checkout".into(),
@@ -1920,13 +1955,14 @@ impl LoroDoc {
                     let before_frontiers: Frontiers = oplog.dag.find_deps_of_id(delete_op_id);
                     let before = &oplog.dag.frontiers_to_vv(&before_frontiers).unwrap();
                     // TODO: PERF: it doesn't need to calc the effects here
-                    diff_calc.calc_diff_internal(
+                    diff_calc.calc_diff_internal_tagged(
                         &oplog,
                         before,
                         &before_frontiers,
                         oplog.vv(),
                         oplog.frontiers(),
                         Some(&|target| idx == target),
+                        "cursor-deleted-pos",
                     );
                     // TODO: remove depth info
                     let depth = self.arena.get_depth(idx);
@@ -2053,6 +2089,50 @@ impl LoroDoc {
     /// imports reuses the trackers, but a truly quiescent doc reclaims the memory.
     pub fn free_import_diff_calculator(&self) {
         *self.import_diff_calculator.lock() = DiffCalculator::new(true);
+    }
+
+    /// §perf-heaven T8.18 (first cold import): eagerly build the RETAINED import
+    /// calculator's per-container trackers up to the current oplog frontier, so
+    /// the FIRST remote import of a collaboration session reuses the built
+    /// `id_to_cursor` index instead of constructing it cold on the
+    /// latency-critical receive path (the "first cold import tracker" the P1.B
+    /// retained calculator does not cover — it only helps the SECOND import
+    /// onward).
+    ///
+    /// This is a pure precomputation: the computed diff is discarded, and it is
+    /// SAFE by construction. `RichtextDiffCalculator::start_tracking` re-validates
+    /// each tracker against the requested version on every real import and
+    /// rebuilds it from scratch if it does not cover that version — so a warmed
+    /// tracker can only ever save the cold build, never change a computed diff.
+    /// If a later import diverges from the warmed frontier the guard simply
+    /// rebuilds, costing exactly what the un-warmed path would have.
+    ///
+    /// Callers should invoke this once per session while idle (e.g. just after a
+    /// collaboration channel attaches, before the peer starts receiving remote
+    /// updates). A no-op on a detached doc or an empty oplog.
+    pub fn warm_import_diff_calculator(&self) {
+        if self.is_detached() {
+            return;
+        }
+        let oplog = self.oplog.lock();
+        if oplog.vv().is_empty() {
+            return;
+        }
+        let empty_vv = VersionVector::default();
+        let empty_frontiers = Frontiers::default();
+        // Same acquisition order as the import path (OpLog < DocState <
+        // DiffCalculator): take state before the retained calculator even though
+        // the diff is discarded, so the lock order is identical and deadlock-free.
+        let _state = self.state.lock();
+        let _ = self.import_diff_calculator.lock().calc_diff_internal_tagged(
+            &oplog,
+            &empty_vv,
+            &empty_frontiers,
+            oplog.vv(),
+            oplog.dag.get_frontiers(),
+            None,
+            "warm-import-calc",
+        );
     }
 
     /// If you use checkout that switching to an old/concurrent version, the history cache will be built.
@@ -2887,6 +2967,11 @@ mod test {
         assert_eq!(dst.oplog_frontiers(), src.oplog_frontiers());
         assert_eq!(dst.get_deep_value(), src.get_deep_value());
     }
+
+    // §perf-heaven T8.18: `warm_import_diff_calculator` convergence is validated
+    // by `flowstate-collab/tests/warm_import_calculator.rs` (a workspace member —
+    // this vendored crate cannot unit-test standalone: the isolated build lacks
+    // the `counter` feature + `dev_utils` dev-dependency the integrated build has).
 
     #[test]
     fn failed_import_json_updates_does_not_emit_or_leave_events() {

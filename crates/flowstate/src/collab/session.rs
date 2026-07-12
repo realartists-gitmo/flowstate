@@ -915,6 +915,7 @@ impl CollabSession {
           RuntimeEvent::SelectionRestored { .. } => "selection-restored",
           RuntimeEvent::ProjectionUpdated { .. } => "projection-updated",
           RuntimeEvent::ProjectionPatched { .. } => "projection-patched",
+          RuntimeEvent::HistoryRebaseRequired { .. } => "history-rebase-required",
         };
         format!("session={} kind={kind} apply_projection={apply_projection}", self.session)
       });
@@ -922,6 +923,18 @@ impl CollabSession {
         RuntimeEvent::LocalUpdate { bytes, version_vector, .. } => {
           self.update_runtime_vv(version_vector, "local-update", true);
           self.publish_update_bytes(bytes);
+        },
+        // §A12.1.3 slice 4: a below-root remote payload was merged into the
+        // PACKAGE (durable, full history) but this shallow session's
+        // in-memory doc cannot hold it — the document must be reopened to
+        // show the merged state. Rare by construction; surfaced loudly.
+        // Follow-up (design Q4): auto-reopen instead of warn-only.
+        RuntimeEvent::HistoryRebaseRequired { merged_frontier } => {
+          tracing::warn!(
+            session = %self.session,
+            merged_frontier_len = merged_frontier.len(),
+            "offline collaborator history merged on disk; reopen the document to see it"
+          );
         },
         RuntimeEvent::RemoteUpdateApplied { pending, version_vector, .. } => {
           self.update_runtime_vv(version_vector, "remote-update-applied", true);

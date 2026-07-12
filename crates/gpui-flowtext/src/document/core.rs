@@ -107,6 +107,31 @@ pub fn deferred_document_section_rebuild_requested() -> bool {
   DOCUMENT_SECTION_REBUILD_DEFERRED_DIRTY.with(Cell::get)
 }
 
+thread_local! {
+  // §perf-heaven T2 tripwire: counts how many times `block_ix_for_paragraph`
+  // fell through past the aligned fast path. The fallthrough is an O(log N)
+  // tree rank query since T7.11 (the counter predates that and kept its role):
+  // a hot path calling it once per paragraph still shows up here as O(paragraphs)
+  // growth, which is why hot loops hoist a single `paragraph_block_rows` pass
+  // instead. Regression tests reset it, drive a mass op, and assert it stayed
+  // bounded.
+  static BLOCK_IX_SCAN_COUNT: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Number of fallthrough (non-aligned) lookups performed by
+/// [`block_ix_for_paragraph`] since the last reset — O(log N) each since
+/// T7.11. A per-paragraph caller on an object-bearing doc drives this to
+/// O(paragraphs); the batched [`paragraph_block_rows`] path leaves it at zero.
+#[must_use]
+pub fn block_ix_scan_count() -> u64 {
+  BLOCK_IX_SCAN_COUNT.with(Cell::get)
+}
+
+/// Reset the [`block_ix_scan_count`] tripwire (test/measurement harness use).
+pub fn reset_block_ix_scan_count() {
+  BLOCK_IX_SCAN_COUNT.with(|count| count.set(0));
+}
+
 #[hotpath::measure]
 #[must_use]
 pub fn block_ix_for_paragraph(document: &DocumentProjection, target_paragraph_ix: usize) -> Option<usize> {
@@ -119,16 +144,14 @@ pub fn block_ix_for_paragraph(document: &DocumentProjection, target_paragraph_ix
     return Some(target_paragraph_ix);
   }
 
-  let mut paragraph_ix = 0;
-  for (block_ix, block) in document.blocks.iter().enumerate() {
-    if matches!(block, Block::Paragraph(_)) {
-      if paragraph_ix == target_paragraph_ix {
-        return Some(block_ix);
-      }
-      paragraph_ix += 1;
-    }
-  }
-  None
+  // §perf-heaven T7.11: an O(log N) tree rank-select replaces the former
+  // O(blocks) linear scan. The counter still records this object-doc, per-call
+  // resolution so the intent-complexity guard keeps proving that mass ops hoist
+  // `paragraph_block_rows` once instead of resolving per paragraph (the per-call
+  // cost is now O(log N), but calling it O(paragraphs) times is still worse than
+  // one O(blocks) pass, so the guard remains meaningful).
+  BLOCK_IX_SCAN_COUNT.with(|count| count.set(count.get().saturating_add(1)));
+  document.blocks.block_row_for_paragraph_ix(target_paragraph_ix)
 }
 
 /// Block row for EVERY paragraph in one pass — the batched sibling of
@@ -178,29 +201,18 @@ pub fn document_offset_for_position(document: &DocumentProjection, position: &Do
         return None;
       }
 
-      let mut paragraph_ix = 0_usize;
-      for (ix, block) in document.blocks.iter().enumerate() {
-        match block {
-          Block::Paragraph(paragraph) => {
-            if ix == *block_ix {
-              if *byte <= paragraph_text_len(paragraph) {
-                return Some(DocumentOffset {
-                  paragraph: paragraph_ix,
-                  byte: *byte,
-                });
-              }
-              return None;
-            }
-            paragraph_ix += 1;
-          },
-          Block::Image(_) | Block::Equation(_) | Block::Table(_) => {
-            if ix == *block_ix {
-              return None;
-            }
-          },
-        }
-      }
-      None
+      // §perf-heaven T7.12: O(log N) rank query replaces the O(blocks) scan.
+      // `paragraph_ix_for_block_row` returns `Some` only when the row is a
+      // paragraph (object rows and out-of-range → `None`), so the following
+      // `get` is guaranteed to hand back that paragraph for the byte-bound check.
+      let paragraph_ix = document.blocks.paragraph_ix_for_block_row(*block_ix)?;
+      let Some(Block::Paragraph(paragraph)) = document.blocks.get(*block_ix) else {
+        return None;
+      };
+      (*byte <= paragraph_text_len(paragraph)).then_some(DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: *byte,
+      })
     },
     DocumentPosition::Object { .. } | DocumentPosition::TableCell { .. } => None,
   }
@@ -208,10 +220,21 @@ pub fn document_offset_for_position(document: &DocumentProjection, position: &Do
 
 #[hotpath::measure]
 pub fn update_paragraph_block(document: &mut DocumentProjection, paragraph_ix: usize) {
+  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
+    update_paragraph_block_at(document, paragraph_ix, block_ix);
+  }
+}
+
+/// Row-aware variant of [`update_paragraph_block`] for callers that have
+/// ALREADY resolved the paragraph's block row (the projection patch-apply
+/// carries an accurate `row_hint`). Skips the O(blocks) `block_ix_for_paragraph`
+/// re-scan — the §perf-heaven T2 quadratic behind mass restyle: one scan per
+/// patch over an object-bearing doc was O(paragraphs²).
+pub fn update_paragraph_block_at(document: &mut DocumentProjection, paragraph_ix: usize, block_ix: usize) {
   let Some(paragraph) = document.paragraphs.get(paragraph_ix).cloned() else {
     return;
   };
-  if let Some(block_ix) = block_ix_for_paragraph(document, paragraph_ix) {
+  if matches!(document.blocks.get(block_ix), Some(Block::Paragraph(_))) {
     document.blocks.set(block_ix, Block::Paragraph(paragraph));
   }
 }
@@ -281,10 +304,7 @@ pub fn replace_paragraph_blocks(document: &mut DocumentProjection, start_paragra
     }
     ids
   };
-  document
-    .ids
-    .block_ids
-    .splice(block_start..block_end, replacement_ids);
+  std::sync::Arc::make_mut(&mut document.ids.block_ids).splice(block_start..block_end, replacement_ids);
   reconcile_document_ids(document);
   rebuild_document_sections(document);
 }
@@ -318,12 +338,8 @@ pub fn new_section_id() -> SectionId {
 pub fn document_ids_for_shape(paragraph_count: usize, block_count: usize) -> DocumentIds {
   DocumentIds {
     document_id: new_document_id(),
-    paragraph_ids: std::iter::repeat_with(new_paragraph_id)
-      .take(paragraph_count)
-      .collect(),
-    block_ids: std::iter::repeat_with(new_block_id)
-      .take(block_count)
-      .collect(),
+    paragraph_ids: std::sync::Arc::new(std::iter::repeat_with(new_paragraph_id).take(paragraph_count).collect()),
+    block_ids: std::sync::Arc::new(std::iter::repeat_with(new_block_id).take(block_count).collect()),
   }
 }
 
@@ -333,18 +349,21 @@ pub fn reconcile_document_ids(document: &mut DocumentProjection) {
     document.ids.document_id = new_document_id();
   }
 
-  while document.ids.paragraph_ids.len() < document.paragraphs.len() {
-    document.ids.paragraph_ids.push(new_paragraph_id());
+  if document.ids.paragraph_ids.len() != document.paragraphs.len() {
+    let ids = std::sync::Arc::make_mut(&mut document.ids.paragraph_ids);
+    while ids.len() < document.paragraphs.len() {
+      ids.push(new_paragraph_id());
+    }
+    ids.truncate(document.paragraphs.len());
   }
-  document
-    .ids
-    .paragraph_ids
-    .truncate(document.paragraphs.len());
 
-  while document.ids.block_ids.len() < document.blocks.len() {
-    document.ids.block_ids.push(new_block_id());
+  if document.ids.block_ids.len() != document.blocks.len() {
+    let ids = std::sync::Arc::make_mut(&mut document.ids.block_ids);
+    while ids.len() < document.blocks.len() {
+      ids.push(new_block_id());
+    }
+    ids.truncate(document.blocks.len());
   }
-  document.ids.block_ids.truncate(document.blocks.len());
 }
 
 #[hotpath::measure]
@@ -374,20 +393,16 @@ pub fn block_id_at(document: &DocumentProjection, block_ix: usize) -> Option<Blo
 #[hotpath::measure]
 pub fn insert_paragraph_id(document: &mut DocumentProjection, paragraph_ix: usize) -> ParagraphId {
   let id = new_paragraph_id();
-  document
-    .ids
-    .paragraph_ids
-    .insert(paragraph_ix.min(document.ids.paragraph_ids.len()), id);
+  let at = paragraph_ix.min(document.ids.paragraph_ids.len());
+  std::sync::Arc::make_mut(&mut document.ids.paragraph_ids).insert(at, id);
   id
 }
 
 #[hotpath::measure]
 pub fn insert_block_id(document: &mut DocumentProjection, block_ix: usize) -> BlockId {
   let id = new_block_id();
-  document
-    .ids
-    .block_ids
-    .insert(block_ix.min(document.ids.block_ids.len()), id);
+  let at = block_ix.min(document.ids.block_ids.len());
+  std::sync::Arc::make_mut(&mut document.ids.block_ids).insert(at, id);
   id
 }
 
@@ -396,7 +411,7 @@ pub fn remove_paragraph_ids(document: &mut DocumentProjection, range: Range<usiz
   let start = range.start.min(document.ids.paragraph_ids.len());
   let end = range.end.min(document.ids.paragraph_ids.len());
   if start < end {
-    document.ids.paragraph_ids.drain(start..end);
+    std::sync::Arc::make_mut(&mut document.ids.paragraph_ids).drain(start..end);
   }
 }
 
@@ -405,7 +420,7 @@ pub fn remove_block_ids(document: &mut DocumentProjection, range: Range<usize>) 
   let start = range.start.min(document.ids.block_ids.len());
   let end = range.end.min(document.ids.block_ids.len());
   if start < end {
-    document.ids.block_ids.drain(start..end);
+    std::sync::Arc::make_mut(&mut document.ids.block_ids).drain(start..end);
   }
 }
 

@@ -11,6 +11,10 @@
 //!   document order) so the k-th `docPr` gets the k-th image's alt text.
 //! * Each convertible equation emits a placeholder run whose text is a unique
 //!   sentinel; the enclosing `<w:r>…</w:r>` is replaced by the injected OMML.
+//! * §A11.9: each LINKED image (external URL, no media part) emits a sentinel
+//!   run the same way; the enclosing run is replaced by a full inline drawing
+//!   whose `a:blip` carries `r:link`, and the package writer injects the
+//!   matching `TargetMode="External"` relationship.
 //! * Header rows are tagged with `<w:cantSplit />` (the only per-row marker
 //!   docx-rs exposes), rewritten here to `<w:tblHeader />`.
 //!
@@ -20,7 +24,9 @@
 const MATH_NAMESPACE: &str = " xmlns:m=\"http://schemas.openxmlformats.org/officeDocument/2006/math\"";
 const DOC_PR_TARGET: &str = "<wp:docPr id=\"1\" name=\"Figure\" />";
 const EQUATION_SENTINEL_PREFIX: &str = "@@FLOWSTATE_OMML_";
-const EQUATION_SENTINEL_SUFFIX: &str = "@@";
+const SENTINEL_SUFFIX: &str = "@@";
+/// §A11.9: sentinel prefix for LINKED images (`a:blip r:link`, no media part).
+const LINKED_IMAGE_SENTINEL_PREFIX: &str = "@@FLOWSTATE_LINKIMG_";
 
 /// Alt-text destined for one image's `wp:docPr`.
 pub(super) struct ImageDocPr {
@@ -48,17 +54,24 @@ impl ImageDocPr {
   }
 }
 
-/// One equation to inject: the placeholder sentinel and its OMML replacement.
-pub(super) struct EquationInjection {
+/// One run-level injection: the placeholder sentinel and the OOXML that
+/// replaces the sentinel's enclosing `<w:r>…</w:r>` (an equation's OMML, or a
+/// linked image's drawing run — §A11.9).
+pub(super) struct RunInjection {
   sentinel: String,
-  omml: String,
+  xml: String,
 }
 
 /// Data collected during block export and consumed by [`rewrite_document_xml`].
 #[derive(Default)]
 pub(super) struct SideChannel {
   image_doc_prs: Vec<ImageDocPr>,
-  equations: Vec<EquationInjection>,
+  equations: Vec<RunInjection>,
+  /// §A11.9: linked-image drawing runs, injected alongside the equations.
+  linked_images: Vec<RunInjection>,
+  /// §A11.9: `(rId, url)` pairs to add to `word/_rels/document.xml.rels` as
+  /// `TargetMode="External"` image relationships.
+  linked_image_rels: Vec<(String, String)>,
   warnings: Vec<String>,
 }
 
@@ -72,12 +85,36 @@ impl SideChannel {
   /// Register an equation's OMML and return the sentinel text to embed in the
   /// placeholder run so the rewrite pass can locate and replace it.
   pub(super) fn push_equation(&mut self, omml: String) -> String {
-    let sentinel = format!("{EQUATION_SENTINEL_PREFIX}{}{EQUATION_SENTINEL_SUFFIX}", self.equations.len());
-    self.equations.push(EquationInjection {
+    let sentinel = format!("{EQUATION_SENTINEL_PREFIX}{}{SENTINEL_SUFFIX}", self.equations.len());
+    self.equations.push(RunInjection {
       sentinel: sentinel.clone(),
-      omml,
+      xml: omml,
     });
     sentinel
+  }
+
+  /// §A11.9: register a LINKED image (external URL, no media part) and return
+  /// the sentinel text for its placeholder run. docx-rs has no `a:blip r:link`
+  /// API, so the drawing is injected whole by the rewrite pass and the external
+  /// relationship is added to the rels part by the package writer. The `rId`
+  /// scheme (`rIdFsLink1`, …) cannot collide with docx-rs's numeric `rIdN` ids.
+  pub(super) fn push_linked_image(&mut self, url: &str, descr: Option<&str>, width_emu: u32, height_emu: u32) -> String {
+    let index = self.linked_images.len();
+    let sentinel = format!("{LINKED_IMAGE_SENTINEL_PREFIX}{index}{SENTINEL_SUFFIX}");
+    let relationship_id = format!("rIdFsLink{}", index + 1);
+    let xml = linked_image_drawing_run(&relationship_id, descr, width_emu, height_emu, index);
+    self.linked_images.push(RunInjection {
+      sentinel: sentinel.clone(),
+      xml,
+    });
+    self.linked_image_rels.push((relationship_id, url.to_string()));
+    sentinel
+  }
+
+  /// §A11.9: the `(rId, url)` external image relationships to inject into
+  /// `word/_rels/document.xml.rels`.
+  pub(super) fn linked_image_rels(&self) -> &[(String, String)] {
+    &self.linked_image_rels
   }
 
   /// Record a non-fatal export degradation (e.g. an image format that could not
@@ -103,10 +140,12 @@ pub(super) fn rewrite_document_xml(bytes: Vec<u8>, side: &SideChannel) -> Vec<u8
     xml = ensure_math_namespace(xml);
   }
   xml = rewrite_doc_prs(&xml, &side.image_doc_prs);
-  // §perf: splice every equation's run in one forward pass over the xml instead
-  // of rebuilding the whole String once per equation (O(N) vs O(N·equations)).
-  if !side.equations.is_empty() {
-    xml = inject_equations(&xml, &side.equations);
+  // §perf: splice every injected run (equations + linked images) in one forward
+  // pass over the xml instead of rebuilding the whole String once per
+  // injection (O(N) vs O(N·injections)). Runs AFTER `rewrite_doc_prs` so the
+  // linked images' own `wp:docPr` tags are never re-matched by it.
+  if !side.equations.is_empty() || !side.linked_images.is_empty() {
+    xml = inject_run_replacements(&xml, side.equations.iter().chain(side.linked_images.iter()));
   }
   // §perf: the two whole-document `.replace()` scans below only ever match the
   // `<w:cantSplit` marker; skip both when it is absent (header rows are rare).
@@ -157,20 +196,21 @@ fn rewrite_doc_prs(xml: &str, entries: &[ImageDocPr]) -> String {
   out
 }
 
-/// Replace every placeholder run containing an equation sentinel with its OMML
-/// in a single forward pass. Each sentinel occupies a run of its own, so the
-/// enclosing `<w:r>…</w:r>` maps 1:1 to the equation.
+/// Replace every placeholder run containing an injection sentinel (equation
+/// OMML or linked-image drawing — §A11.9) with its OOXML in a single forward
+/// pass. Each sentinel occupies a run of its own, so the enclosing
+/// `<w:r>…</w:r>` maps 1:1 to the injection.
 ///
 /// §perf: the previous implementation rebuilt the whole document `String` once
-/// per equation (O(N·equations)). Each equation lives in a disjoint run, so the
+/// per equation (O(N·equations)). Each injection lives in a disjoint run, so the
 /// run bounds are computed against the original `xml` once, ordered by position,
 /// then spliced into a single output buffer — byte-identical to the sequential
-/// per-equation rewrite but linear in the document length.
-fn inject_equations(xml: &str, equations: &[EquationInjection]) -> String {
-  // Resolve each equation to its enclosing run span in the original xml.
-  let mut spans: Vec<(usize, usize, &str)> = Vec::with_capacity(equations.len());
-  for equation in equations {
-    let Some(pos) = xml.find(&equation.sentinel) else {
+/// per-injection rewrite but linear in the document length.
+fn inject_run_replacements<'injections>(xml: &str, injections: impl Iterator<Item = &'injections RunInjection>) -> String {
+  // Resolve each injection to its enclosing run span in the original xml.
+  let mut spans: Vec<(usize, usize, &str)> = Vec::new();
+  for injection in injections {
+    let Some(pos) = xml.find(&injection.sentinel) else {
       continue;
     };
     // docx-rs emits run opens as the exact literal `<w:r>` (no attributes) and
@@ -182,21 +222,60 @@ fn inject_equations(xml: &str, equations: &[EquationInjection]) -> String {
       continue;
     };
     let run_end = pos + relative_end + "</w:r>".len();
-    spans.push((run_start, run_end, equation.omml.as_str()));
+    spans.push((run_start, run_end, injection.xml.as_str()));
   }
   // Sentinels are unique but may be registered in any order; splicing requires
   // ascending, non-overlapping spans (runs are disjoint by construction).
   spans.sort_by_key(|(run_start, _, _)| *run_start);
-  let omml_len: usize = spans.iter().map(|(_, _, omml)| omml.len()).sum();
-  let mut out = String::with_capacity(xml.len() + omml_len);
+  let injected_len: usize = spans.iter().map(|(_, _, injected)| injected.len()).sum();
+  let mut out = String::with_capacity(xml.len() + injected_len);
   let mut cursor = 0usize;
-  for (run_start, run_end, omml) in spans {
+  for (run_start, run_end, injected) in spans {
     out.push_str(&xml[cursor..run_start]);
-    out.push_str(omml);
+    out.push_str(injected);
     cursor = run_end;
   }
   out.push_str(&xml[cursor..]);
   out
+}
+
+/// §A11.9: the full `<w:r><w:drawing>…</w:drawing></w:r>` for a LINKED image —
+/// an inline drawing whose `a:blip` carries `r:link` (an external-mode image
+/// relationship) instead of `r:embed`. Namespaces are declared locally so the
+/// fragment is valid even when docx-rs emitted no drawing of its own (a
+/// document whose only images are linked declares no `wp:`/`a:`/`pic:` on the
+/// root). `wp:docPr` ids for embedded images are `1..=n` (see
+/// [`rewrite_doc_prs`]); linked images start far above to stay unique.
+fn linked_image_drawing_run(relationship_id: &str, descr: Option<&str>, width_emu: u32, height_emu: u32, index: usize) -> String {
+  let doc_pr_id = 9000 + index;
+  let descr_attr = descr
+    .map(|descr| format!(" descr=\"{}\"", escape_attr(descr)))
+    .unwrap_or_default();
+  format!(
+    concat!(
+      "<w:r><w:drawing>",
+      "<wp:inline xmlns:wp=\"http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing\"",
+      " distT=\"0\" distB=\"0\" distL=\"0\" distR=\"0\">",
+      "<wp:extent cx=\"{cx}\" cy=\"{cy}\"/>",
+      "<wp:docPr id=\"{id}\" name=\"Figure\"{descr}/>",
+      "<a:graphic xmlns:a=\"http://schemas.openxmlformats.org/drawingml/2006/main\">",
+      "<a:graphicData uri=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">",
+      "<pic:pic xmlns:pic=\"http://schemas.openxmlformats.org/drawingml/2006/picture\">",
+      "<pic:nvPicPr><pic:cNvPr id=\"{id}\" name=\"Figure\"{descr}/><pic:cNvPicPr/></pic:nvPicPr>",
+      "<pic:blipFill>",
+      "<a:blip xmlns:r=\"http://schemas.openxmlformats.org/officeDocument/2006/relationships\" r:link=\"{rid}\"/>",
+      "<a:stretch><a:fillRect/></a:stretch>",
+      "</pic:blipFill>",
+      "<pic:spPr><a:xfrm><a:off x=\"0\" y=\"0\"/><a:ext cx=\"{cx}\" cy=\"{cy}\"/></a:xfrm>",
+      "<a:prstGeom prst=\"rect\"><a:avLst/></a:prstGeom></pic:spPr>",
+      "</pic:pic></a:graphicData></a:graphic></wp:inline></w:drawing></w:r>"
+    ),
+    cx = width_emu,
+    cy = height_emu,
+    id = doc_pr_id,
+    descr = descr_attr,
+    rid = relationship_id,
+  )
 }
 
 /// Rewrite header-row markers into `w:tblHeader`.
@@ -206,7 +285,9 @@ fn inject_table_headers(xml: &str) -> String {
     .replace("<w:cantSplit/>", "<w:tblHeader />")
 }
 
-fn escape_attr(value: &str) -> String {
+/// XML attribute-value escaping, shared with the package writer's external-rel
+/// injection (§A11.9 — URLs routinely carry `&` in query strings).
+pub(super) fn escape_attr(value: &str) -> String {
   value
     .replace('&', "&amp;")
     .replace('<', "&lt;")
@@ -246,14 +327,28 @@ mod tests {
   fn equation_injection_replaces_enclosing_run() {
     let sentinel = "@@FLOWSTATE_OMML_0@@";
     let xml = format!("<w:p><w:r><w:rPr/><w:t xml:space=\"preserve\">{sentinel}</w:t></w:r></w:p>");
-    let out = inject_equations(
-      &xml,
-      &[EquationInjection {
-        sentinel: sentinel.to_string(),
-        omml: "<m:oMath/>".to_string(),
-      }],
-    );
+    let injections = [RunInjection {
+      sentinel: sentinel.to_string(),
+      xml: "<m:oMath/>".to_string(),
+    }];
+    let out = inject_run_replacements(&xml, injections.iter());
     assert_eq!(out, "<w:p><m:oMath/></w:p>");
+  }
+
+  /// §A11.9: a linked-image sentinel run is replaced by a full inline drawing
+  /// whose blip carries `r:link` to the allocated relationship id.
+  #[test]
+  fn linked_image_injection_replaces_enclosing_run_with_drawing() {
+    let mut side = SideChannel::default();
+    let sentinel = side.push_linked_image("https://example.com/a.png?x=1&y=2", Some("alt <text>"), 914_400, 685_800);
+    assert_eq!(side.linked_image_rels(), &[("rIdFsLink1".to_string(), "https://example.com/a.png?x=1&y=2".to_string())]);
+    let xml = format!("<w:p><w:r><w:rPr/><w:t xml:space=\"preserve\">{sentinel}</w:t></w:r></w:p>").into_bytes();
+    let out = String::from_utf8(rewrite_document_xml(xml, &side)).expect("utf8");
+    assert!(out.contains("r:link=\"rIdFsLink1\""), "blip link missing: {out}");
+    assert!(out.contains("descr=\"alt &lt;text&gt;\""), "docPr descr missing/unescaped: {out}");
+    assert!(out.contains("cx=\"914400\""), "extent missing: {out}");
+    assert!(!out.contains("FLOWSTATE_LINKIMG"), "sentinel leaked into output: {out}");
+    assert!(!out.contains("r:embed"), "linked image must not emit r:embed: {out}");
   }
 
   #[test]

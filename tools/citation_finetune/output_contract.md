@@ -57,17 +57,18 @@ database, source_type, card_signatures, debate_annotations, raw_tail,
 spillover_start_index, spillover_start_text, warnings          (reject: reject_reason, evidence)
 ```
 
-Author object key order: `family, given, literal, qualifications`. `qualifications` is a
-**single-element** array (one blob string). Target-side caps: **≤12 authors**, each
-**qualification ≤400 chars** (keeps mega-cites learnable). See `target_schema.json` for
-the machine-readable version; keep it in sync with this doc.
+Author object key order: `surname, name, qualifications`. `surname` is the short cite-reference
+surname and `name` is the full in-text name (a mononym may use the same value for both).
+`qualifications` is a **single-element** array (one blob string), with each qualification capped at
+400 chars. Long bylines retain every named author; the 3072-token target ceiling replaces the old
+author-count cap. See `target_schema.json` for the machine-readable version.
 
 ## 4. Reconstruction rules (Rust)
 
 Only OBJECT braces are missing; everything else is intact.
 - Wrap the whole output in `{ }` (top-level object).
 - The `authors` value is `[ ... ]`; split it into author objects — a new author begins at
-  each top-level `"family"` (first key of every author object) — and wrap each in `{ }`.
+  each top-level `"surname"` (first key of every author object) — and wrap each in `{ }`.
 - Arrays of strings (`warnings`, `card_signatures`, `qualifications`) already carry `[ ]`.
 - Quote/escape/bracket-depth aware scanning (reference impl in the notebook `reconstruct`).
 
@@ -184,9 +185,9 @@ layer recomputes the rest at inference.
 
 - Enumerate **every** named author in the body (incl. `et al.` expansions); add `et_al`
   warning when the head says "et al".
-- `family` = **head surname is authoritative**; `given` = first/given name from the body
-  (handle reversed order: `Morton, 13—Timothy` → family Morton, given Timothy).
-- `literal` = the full name as written. `qualifications` = one blob string of the
+- `surname` = **head surname is authoritative**; `name` = full name from the body
+  (handle reversed order: `Morton, 13—Timothy` → surname Morton, name Timothy Morton).
+- `qualifications` = one blob string of the
   title/affiliation prose between the name and the title (no title/pub/date/url inside it).
 - Never promote institutions (University, Foundation, Press, Journal…) to authors.
 
@@ -201,16 +202,17 @@ layer recomputes the rest at inference.
 
 - Tokenizer: stock Flan-T5 SentencePiece (`tokenizer.json`), **unchanged**. Loaded in Rust
   via the `tokenizers` crate.
-- `max_source = 768`, `max_target = 640`. Rationale from the tokenized corpus: target
-  p99 ≈ 537 tokens → 640 gives zero truncation with margin; 768 source captures more
-  spillover boundaries. **Every training target MUST fit `max_target` with zero truncation**
-  (gate in §13). Mega-cites are bounded by the §3 caps.
+- `max_source = 3072`, `max_target = 3072`, matching the deployed checkpoint/tokenizer and the
+  long-list training run. CTranslate2's lower defaults must always be overridden at inference.
+  Hitting either ceiling is a loud failure, never an input/output prefix that bracket repair may
+  turn into apparently complete JSON. **Every training target MUST fit `max_target` with zero
+  truncation** (gate in §13).
 
 ## 12. Labeling policy (Phase 1)
 
 - **Primary labeler: Claude Haiku**, single pass, full corpus (~5,700 rows), labeling to
   this contract (conventions + §7 rubric + §8 policy in the prompt).
-  - Validated: Haiku ≈ Sonnet on the structural fields (author count 0.996, given 0.827,
+  - Validated: Haiku ≈ Sonnet on the structural fields (author count 0.996, name 0.827,
     year 1.00, url 0.99, title 0.98). Residual gap is source_type/reject *ambiguity*, fixed
     by §7/§8 + constrained enums — not a capacity gap.
 - **No self-flag gate** — Haiku's `needs_review` was miscalibrated (recall 0.42, precision
@@ -241,7 +243,8 @@ Only when 1–5 pass do we spend a training credit.
 - **User sign-off on §7 (source_type rubric) + §8 (reject/bare-cite policy)** — the gate
   before the Phase-1 relabel spend.
 - Confirm §5 override field list (esp. whether `year` override is worth the edge cases).
-- Confirm `max_source`/`max_target` (768/640) — tune after the full relabel's length dist.
+- Keep the checkpoint, tokenizer, training script, and native runtime on the same 3072-token
+  source/target contract.
 
 ## Resolved
 - **Candle feasibility (de-risk spike, done):** T5 generation ✅ well-supported;

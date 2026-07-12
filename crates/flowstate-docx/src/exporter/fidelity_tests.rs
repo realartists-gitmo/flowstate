@@ -106,6 +106,135 @@ fn insert_asset(document: &mut DocumentProjection, id: AssetId, mime: &'static s
   );
 }
 
+/// §act-eleven C7: a headerless raw DIB media part (a bare BITMAPINFOHEADER,
+/// the 44-byte tracking-pixel shape — 2 of the 4 old corpus residuals) must
+/// export as an EMBEDDED image via the `BM`-header shim, not degrade to the
+/// bracketed alt-text fallback.
+#[test]
+fn headerless_dib_asset_exports_as_an_image_not_bracket_text() {
+  // A 1x1 32-bit headerless DIB: BITMAPINFOHEADER (40 bytes) + one BGRA pixel.
+  let mut dib = Vec::new();
+  dib.extend_from_slice(&40u32.to_le_bytes()); // biSize
+  dib.extend_from_slice(&1i32.to_le_bytes()); // biWidth
+  dib.extend_from_slice(&1i32.to_le_bytes()); // biHeight
+  dib.extend_from_slice(&1u16.to_le_bytes()); // biPlanes
+  dib.extend_from_slice(&32u16.to_le_bytes()); // biBitCount
+  dib.extend_from_slice(&[0u8; 24]); // compression..colors-important
+  dib.extend_from_slice(&[10u8, 20, 30, 255]); // one pixel
+  assert_eq!(dib.len(), 44, "fixture must be the 44-byte field shape");
+
+  let mut document = document_from_input_blocks(
+    flowstate_document_theme(),
+    vec![
+      InputBlock::Paragraph(InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: "before".into(),
+          styles: RunStyles::default(),
+        }],
+      }),
+      InputBlock::Image(InputImageBlock {
+        asset_id: AssetId(77),
+        alt_text: "https://pixel.example/track".into(),
+        caption: None,
+        sizing: InputImageSizing::Intrinsic,
+        alignment: InputBlockAlignment::Left,
+        external_url: None,
+      }),
+    ],
+  );
+  insert_asset(&mut document, AssetId(77), "image/bmp", "pixel.bmp", dib);
+
+  let path = std::env::temp_dir().join(format!("flowstate-dib-{}.docx", std::process::id()));
+  write_docx(&path, &document).expect("write docx");
+  let bytes = std::fs::read(&path).expect("read exported docx");
+  let _ = std::fs::remove_file(&path);
+
+  let (imported, _report) = crate::import_docx_bytes_to_loro(&bytes, "dib-shim").expect("reimport");
+  let (projection, defects) = flowstate_document::document_from_loro_with_defects(&imported.doc).expect("project");
+  assert!(defects.is_empty(), "reimport produced defects: {defects:?}");
+  let images = projection
+    .blocks
+    .iter()
+    .filter(|block| matches!(block, flowstate_document::Block::Image(_)))
+    .count();
+  assert_eq!(images, 1, "the DIB image must survive as an IMAGE block");
+  assert!(
+    !projection.text.to_string().contains("[https://pixel.example/track]"),
+    "the bracketed alt-text fallback fired — the DIB shim regressed"
+  );
+}
+
+/// §act-eleven A11.9(c): an image block carrying an external URL (and no
+/// embeddable asset) exports as a LINKED drawing (`a:blip r:link` + a
+/// `TargetMode="External"` relationship) and survives reimport with the SAME
+/// URL — no bracketed `[alt]` text fabricated anywhere in the cycle.
+#[test]
+fn external_url_image_roundtrips_as_linked_drawing() {
+  let url = "https://example.com/linked.png?season=2026&side=aff";
+  let document = document_from_input_blocks(
+    flowstate_document_theme(),
+    vec![
+      paragraph_block("before"),
+      InputBlock::Image(InputImageBlock {
+        asset_id: AssetId(0xA119),
+        alt_text: "linked alt".to_string(),
+        caption: None,
+        sizing: InputImageSizing::Fixed {
+          width_px: 96,
+          height_px: Some(72),
+        },
+        alignment: InputBlockAlignment::Left,
+        external_url: Some(url.to_string()),
+      }),
+      paragraph_block("after"),
+    ],
+  );
+
+  let path = temp_path("docx");
+  let warnings = crate::write_docx_with_report(&path, &document).expect("write docx");
+  let xml = read_zip_entry(&path, "word/document.xml");
+  let rels = read_zip_entry(&path, "word/_rels/document.xml.rels");
+  let bytes = std::fs::read(&path).expect("read exported docx");
+  let _ = std::fs::remove_file(&path);
+
+  assert!(warnings.is_empty(), "a linked image must not warn: {warnings:?}");
+  assert!(xml.contains("r:link=\"rIdFsLink1\""), "a:blip r:link missing: {xml}");
+  assert!(!xml.contains("FLOWSTATE_LINKIMG"), "linked-image sentinel leaked: {xml}");
+  assert!(rels.contains("TargetMode=\"External\""), "external relationship mode missing: {rels}");
+  assert!(
+    rels.contains("Id=\"rIdFsLink1\"") && rels.contains("Target=\"https://example.com/linked.png?season=2026&amp;side=aff\""),
+    "external relationship target missing/unescaped: {rels}"
+  );
+
+  let (imported, _report) = crate::import_docx_bytes_to_loro(&bytes, "linked-roundtrip").expect("reimport");
+  let (projection, defects) = flowstate_document::document_from_loro_with_defects(&imported.doc).expect("project");
+  assert!(defects.is_empty(), "reimport produced defects: {defects:?}");
+  let images: Vec<_> = projection
+    .blocks
+    .iter()
+    .filter_map(|block| match block {
+      flowstate_document::Block::Image(image) => Some(image.clone()),
+      _ => None,
+    })
+    .collect();
+  assert_eq!(images.len(), 1, "the linked image must survive as ONE image block");
+  assert_eq!(images[0].external_url.as_ref().map(|url| -> &str { url.as_ref() }), Some(url), "external URL must roundtrip unchanged");
+  assert_eq!(images[0].alt_text, "linked alt", "alt text must roundtrip via the injected docPr descr");
+  assert_eq!(
+    images[0].sizing,
+    flowstate_document::ImageSizing::Fixed {
+      width_px: 96,
+      height_px: Some(72)
+    },
+    "the injected wp:extent must roundtrip the fixed sizing"
+  );
+  assert!(
+    !projection.text.to_string().contains("[linked alt]"),
+    "the bracketed alt-text fallback fired — the linked-image export regressed"
+  );
+}
+
 #[test]
 fn table_spans_grid_and_header_are_emitted() {
   // FS-123 spans + FS-124 grid/header: a 2-column table with a spanning header
@@ -164,6 +293,7 @@ fn image_alt_text_and_png_part_are_emitted() {
       caption: None,
       sizing: InputImageSizing::FitWidth,
       alignment: InputBlockAlignment::Center,
+      external_url: None,
     })],
   );
   insert_asset(&mut document, AssetId(1), "image/png", "red.png", encode_image(image::ImageFormat::Png));
@@ -192,6 +322,7 @@ fn non_png_image_is_transcoded_and_embedded() {
       caption: None,
       sizing: InputImageSizing::Intrinsic,
       alignment: InputBlockAlignment::Left,
+      external_url: None,
     })],
   );
   insert_asset(&mut document, AssetId(7), "image/gif", "loop.gif", encode_image(image::ImageFormat::Gif));

@@ -18,3 +18,27 @@ workspace = true
 [features]
 default = ["ct2"]
 ct2 = ["dep:ct2rs"]
+
+[[bin]]
+name = "diverge"
+path = "src/bin/diverge.rs"
+required-features = ["ct2"]
+
+[[bin]]
+name = "probe"
+path = "src/bin/probe.rs"
+required-features = ["ct2"]
+
+[[bin]]
+name = "specbench"
+path = "src/bin/specbench.rs"
+required-features = ["ct2"]
+
+[[bin]]
+name = "dumpraw"
+path = "src/bin/dumpraw.rs"
+required-features = ["ct2"]
+
+[[bin]]
+name = "replay"
+path = "src/bin/replay.rs"

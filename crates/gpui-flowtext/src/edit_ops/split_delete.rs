@@ -44,15 +44,12 @@ pub fn split_paragraph_at(document: &mut DocumentProjection, paragraph_ix: usize
   let global = paragraph_range.start + byte;
   document.text.insert(global, "\n");
   let (left_runs, right_runs) = split_runs_at(&paragraph.runs, byte);
-  let old_end = paragraph_range.end;
   if let Some(target) = paragraphs_mut(document).get_mut(paragraph_ix) {
-    target.byte_range = paragraph_range.start..global;
     target.runs = left_runs;
     bump_paragraph_version(target);
   }
   let new_paragraph = Paragraph {
     style: paragraph.style,
-    byte_range: global + 1..old_end + 1,
     runs: right_runs,
     version: paragraph.version.wrapping_add(1),
   };
@@ -68,7 +65,6 @@ pub fn split_paragraph_at(document: &mut DocumentProjection, paragraph_ix: usize
     drop(blocks);
     insert_block_id(document, block_ix + 1);
   }
-  rebuild_document_offset_index(document);
   rebuild_document_sections(document);
 }
 
@@ -100,8 +96,6 @@ pub fn delete_cross_paragraph_range(document: &mut DocumentProjection, range: Ra
   let paragraphs = paragraphs_mut(document);
   if let Some(target) = paragraphs.get_mut(start_ix) {
     target.runs = merge_adjacent_runs(merged_runs);
-    let new_len = paragraph_runs_len(target);
-    target.byte_range = start_para_range.start..start_para_range.start + new_len;
     bump_paragraph_version(target);
   }
   paragraphs.splice(start_ix + 1..end_ix + 1, Vec::new());
@@ -109,6 +103,5 @@ pub fn delete_cross_paragraph_range(document: &mut DocumentProjection, range: Ra
   let replacement = document.paragraphs[start_ix].clone();
   replace_paragraph_blocks(document, start_ix, end_ix - start_ix + 1, &[replacement]);
   let _ = delete_len;
-  rebuild_document_offset_index(document);
   rebuild_document_sections(document);
 }

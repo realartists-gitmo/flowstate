@@ -61,7 +61,7 @@ impl CrdtRope {
         let pos = pos as i32;
         let start = self.tree.query::<ActiveLenQueryPreferLeft>(&pos).unwrap();
 
-        let (parent_right_leaf, in_between) = {
+        let (parent_right_leaf, in_between, lazy_tail_from) = {
             // calculate origin_left and origin_right
             // origin_left is the alive op at `pos-1`, origin_right is the first non-future op between `pos-1` and `pos`.
 
@@ -87,10 +87,34 @@ impl CrdtRope {
                 Some(left_node.elem().id.inc(start.offset() as Counter - 1).id())
             };
 
-            let (origin_right, parent_right_leaf, in_between) = {
+            let (origin_right, parent_right_leaf, in_between, lazy_tail_from) = {
+                // §flowstate vendor patch (bimodal-undo fix): upstream scanned
+                // linearly to the first NON-FUTURE element, collecting every
+                // future element on the way — O(future-run) per insert, which
+                // goes O(ops²) when a tracker rebuild retreats a large
+                // concurrent branch and every insert faces a document-sized
+                // future run (the 80-195s dirty-history undo regime). Probe a
+                // BOUNDED prefix (identical to upstream within the bound);
+                // past it, jump the run in O(log n) via the `non_future_len`
+                // cache, and let the Fugue walk below stream the rest of the
+                // run LAZILY (it almost always breaks within a few elements).
+                fn future_probe_limit() -> usize {
+                    // Kill switch: restores upstream's unbounded linear scan
+                    // (for A/B attribution; the guard test flips quadratic).
+                    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+                    *LIMIT.get_or_init(|| {
+                        if std::env::var_os("FLOWSTATE_DISABLE_FUTURE_JUMP").is_some() {
+                            usize::MAX
+                        } else {
+                            32
+                        }
+                    })
+                }
                 let mut in_between = Vec::new();
                 let mut origin_right = None;
                 let mut parent_right_idx = None;
+                let mut lazy_tail_from = None;
+                let mut overflowed = false;
                 for iter in self.tree.iter_range(start.cursor..) {
                     if let Some(offset) = iter.start {
                         if offset >= iter.elem.rle_len() {
@@ -121,16 +145,130 @@ impl CrdtRope {
                         break;
                     }
 
+                    if in_between.len() >= future_probe_limit() {
+                        overflowed = true;
+                        break;
+                    }
+
                     // elem must be from future
                     in_between.push((iter.cursor().leaf, *iter.elem));
                 }
 
-                (origin_right, parent_right_idx, in_between)
+                {
+                    // §flowstate probe (FLOWSTATE_FUTURE_RUN_PROBE=1): count
+                    // probe overflows + total probed future elems, to verify
+                    // the accelerated path engages on the pathological shape.
+                    static PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_FUTURE_RUN_PROBE").is_some()) {
+                        use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
+                        static INSERTS: AtomicU64 = AtomicU64::new(0);
+                        static PROBED: AtomicU64 = AtomicU64::new(0);
+                        static OVERFLOWS: AtomicU64 = AtomicU64::new(0);
+                        let inserts = INSERTS.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                        let probed = PROBED.fetch_add(in_between.len() as u64, AtomicOrdering::Relaxed) + in_between.len() as u64;
+                        let overflows = OVERFLOWS.fetch_add(u64::from(overflowed), AtomicOrdering::Relaxed) + u64::from(overflowed);
+                        if inserts.is_multiple_of(4096) || (overflowed && overflows.is_multiple_of(1024)) {
+                            eprintln!("future-run-probe: inserts={inserts} probed_elems={probed} overflows={overflows}");
+                        }
+                    }
+                }
+                if overflowed {
+                    let (from_leaf, from_elem) = *in_between.last().unwrap();
+                    if let Some(leaf_idx) = self.tree.next_leaf_matching(
+                        Cursor {
+                            leaf: from_leaf,
+                            offset: 0,
+                        },
+                        &mut |cache: &Cache| cache.non_future_len > 0,
+                    ) {
+                        let elem = self.tree.get_leaf(leaf_idx.into()).elem();
+                        debug_assert!(!elem.status.future);
+                        // A mid-range element always enters the upstream loop
+                        // with `iter.start == None` (only the cursor's own
+                        // leaf carries an offset, and the probe consumed it),
+                        // so `inc(0)` and the origin_left-equality branch
+                        // mirror upstream exactly.
+                        let or = elem.id.id();
+                        origin_right = Some(or);
+                        parent_right_idx = if elem.origin_left.map(|x| x.to_id()) == origin_left {
+                            Some(leaf_idx)
+                        } else {
+                            None
+                        };
+                    }
+                    // The Fugue walk streams the rest of the future run from
+                    // after the last probed element (whether or not a
+                    // non-future element exists to its right).
+                    lazy_tail_from = Some((from_leaf, from_elem));
+
+                    // §debug (FLOWSTATE_FUTURE_JUMP_VERIFY=1): re-run the
+                    // upstream unbounded scan and compare the jump's answers.
+                    static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *VERIFY.get_or_init(|| std::env::var_os("FLOWSTATE_FUTURE_JUMP_VERIFY").is_some()) {
+                        let mut ref_origin_right = None;
+                        let mut ref_parent_right_idx = None;
+                        let mut ref_run_len = 0usize;
+                        for iter in self.tree.iter_range(start.cursor..) {
+                            if let Some(offset) = iter.start {
+                                if offset >= iter.elem.rle_len() {
+                                    continue;
+                                }
+                            }
+                            if !iter.elem.status.future {
+                                ref_origin_right =
+                                    Some(iter.elem.id.inc(iter.start.unwrap_or(0) as Counter).id());
+                                let parent_right = match iter.start {
+                                    Some(offset) if offset > 0 => Some(ref_origin_right),
+                                    _ => {
+                                        if iter.elem.origin_left.map(|x| x.to_id()) == origin_left {
+                                            Some(ref_origin_right)
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                };
+                                ref_parent_right_idx = parent_right.map(|_| iter.cursor().leaf);
+                                break;
+                            }
+                            ref_run_len += 1;
+                        }
+                        if (origin_right, parent_right_idx) != (ref_origin_right, ref_parent_right_idx) {
+                            eprintln!("future-jump verify MISMATCH: run_len={ref_run_len}");
+                            eprintln!("  jump:   origin_right={origin_right:?} parent_right={parent_right_idx:?}");
+                            eprintln!("  linear: origin_right={ref_origin_right:?} parent_right={ref_parent_right_idx:?}");
+                            // Dump the tree neighborhood: every elem from the cursor
+                            // with id/status, until past the linear answer.
+                            let mut dumped = 0;
+                            for iter in self.tree.iter_range(start.cursor..) {
+                                let e = iter.elem;
+                                eprintln!(
+                                    "    elem leaf={:?} start={:?} id={:?} len={} future={} del={} ",
+                                    iter.cursor().leaf, iter.start, e.id, e.rle_len(), e.status.future, e.status.delete_times
+                                );
+                                dumped += 1;
+                                if (!e.status.future && dumped > ref_run_len) || dumped > ref_run_len + 8 {
+                                    break;
+                                }
+                            }
+                            // Climb from the linear answer's leaf, dumping every
+                            // ancestor level's child caches — shows where the
+                            // `non_future_len` pred loses the subtree.
+                            if let Some(answer_leaf) = ref_parent_right_idx {
+                                self.tree.debug_dump_ancestor_caches(answer_leaf, &mut |cache: &Cache| {
+                                    format!("len={} changed={} non_future={}", cache.len, cache.changed_num, cache.non_future_len)
+                                });
+                            }
+                            panic!("future-jump verify: jump answers diverge from the linear scan");
+                        }
+                    }
+                }
+
+                (origin_right, parent_right_idx, in_between, lazy_tail_from)
             };
 
             content.origin_left = origin_left.map(|x| x.try_into().unwrap());
             content.origin_right = origin_right.map(|x| x.try_into().unwrap());
-            (parent_right_leaf, in_between)
+            (parent_right_leaf, in_between, lazy_tail_from)
         };
 
         let mut insert_pos = start.cursor;
@@ -139,7 +277,21 @@ impl CrdtRope {
             // find insert pos
             let mut scanning = false;
             let mut visited: SmallVec<[IdSpan; 4]> = Default::default();
-            for (other_leaf, other_elem) in in_between.iter() {
+            // §flowstate vendor patch: the probed prefix chained with a LAZY
+            // stream of the remaining future run (upstream pre-collected the
+            // whole run; the walk visits only what its break conditions need).
+            let tail = lazy_tail_from.into_iter().flat_map(|(leaf, elem)| {
+                let resume = Cursor {
+                    leaf,
+                    offset: elem.rle_len(),
+                };
+                self.tree
+                    .iter_range(resume..)
+                    .filter(|it| it.start.is_none_or(|offset| offset < it.elem.rle_len()))
+                    .take_while(|it| it.elem.status.future)
+                    .map(|it| (it.cursor().leaf, *it.elem))
+            });
+            for (other_leaf, other_elem) in in_between.iter().copied().chain(tail) {
                 // tracing::info!("Visiting {}", &other_elem.id);
                 let other_origin_left = other_elem.origin_left;
                 if other_origin_left != content.origin_left
@@ -208,7 +360,7 @@ impl CrdtRope {
 
                 if !scanning {
                     insert_pos = Cursor {
-                        leaf: *other_leaf,
+                        leaf: other_leaf,
                         offset: other_elem.rle_len(),
                     };
                     // tracing::info!("updating insert pos {:?}", &insert_pos);
@@ -307,6 +459,8 @@ impl CrdtRope {
                 Some(Cache {
                     len: -(elem.rle_len() as i32),
                     changed_num: 0,
+                    // Deletion flips `delete_times`, never `future`.
+                    non_future_len: 0,
                 })
             } else {
                 None
@@ -470,11 +624,25 @@ pub(super) struct CrdtRopeTrait;
 pub(super) struct Cache {
     pub(super) len: i32,
     pub(super) changed_num: i32,
+    /// §flowstate patch (bimodal-undo fix): total `rle_len` of the subtree's
+    /// NON-`future` elements. `CrdtRope::insert` must find the first
+    /// non-future element to the right of every fed op (its `origin_right`);
+    /// this lets `next_leaf_matching` skip whole future subtrees in O(log n)
+    /// where the upstream linear scan went O(ops²) whenever a tracker rebuild
+    /// retreated a large concurrent branch (the 80-195s dirty-history undo
+    /// regime). A LENGTH, not an element count, because generic-btree
+    /// propagates split accounting assuming elem caches are ADDITIVE UNDER
+    /// SLICING (`split_leaf_if_needed` recomputes the halves but the ancestor
+    /// diff only carries the inserted elem) — an element count drifts negative
+    /// on splits (caught by the fuzz soak as a projection divergence); lengths
+    /// sum exactly. Every live elem has `rle_len ≥ 1` (zero-len spans are
+    /// `can_remove`), so `> 0` still means "contains a non-future element".
+    pub(super) non_future_len: i32,
 }
 
 impl CanRemove for Cache {
     fn can_remove(&self) -> bool {
-        self.len == 0 && self.changed_num == 0
+        self.len == 0 && self.changed_num == 0 && self.non_future_len == 0
     }
 }
 
@@ -491,13 +659,17 @@ impl BTreeTrait for CrdtRopeTrait {
     ) -> Self::CacheDiff {
         let new_len = caches.iter().map(|x| x.cache.len).sum();
         let new_changed_num = caches.iter().map(|x| x.cache.changed_num).sum();
+        let new_non_future_len = caches.iter().map(|x| x.cache.non_future_len).sum();
         let len_diff = new_len - cache.len;
         let changed_num_diff = new_changed_num - cache.changed_num;
+        let non_future_len_diff = new_non_future_len - cache.non_future_len;
         cache.len = new_len;
         cache.changed_num = new_changed_num;
+        cache.non_future_len = new_non_future_len;
         Cache {
             len: len_diff,
             changed_num: changed_num_diff,
+            non_future_len: non_future_len_diff,
         }
     }
 
@@ -505,12 +677,14 @@ impl BTreeTrait for CrdtRopeTrait {
     fn apply_cache_diff(cache: &mut Self::Cache, diff: &Self::CacheDiff) {
         cache.len += diff.len;
         cache.changed_num += diff.changed_num;
+        cache.non_future_len += diff.non_future_len;
     }
 
     #[inline(always)]
     fn merge_cache_diff(diff1: &mut Self::CacheDiff, diff2: &Self::CacheDiff) {
         diff1.len += diff2.len;
         diff1.changed_num += diff2.changed_num;
+        diff1.non_future_len += diff2.non_future_len;
     }
 
     #[inline(always)]
@@ -518,6 +692,7 @@ impl BTreeTrait for CrdtRopeTrait {
         Cache {
             len: elem.activated_len() as i32,
             changed_num: if elem.diff_status.is_some() { 1 } else { 0 },
+            non_future_len: if elem.status.future { 0 } else { elem.rle_len() as i32 },
         }
     }
 
@@ -530,6 +705,7 @@ impl BTreeTrait for CrdtRopeTrait {
         Cache {
             len: cache_lhs.len - cache_rhs.len,
             changed_num: cache_lhs.changed_num - cache_rhs.changed_num,
+            non_future_len: cache_lhs.non_future_len - cache_rhs.non_future_len,
         }
     }
 }

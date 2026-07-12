@@ -570,6 +570,10 @@ impl OpLog {
     /// You can trim it by the provided counter value. It should start with the counter.
     ///
     /// If frontiers are provided, it will be faster (because we don't need to calculate it from version vector
+    /// §flowstate vendor patch #21: `cap` bounds the iteration to `lca..cap`
+    /// instead of `lca..(from ∪ to)` — the diff calculator's gap pre-feed
+    /// walks only the common prefix up to the meet (`cap ⊇ lca` is the
+    /// caller's obligation; the meet always dominates the common ancestor).
     #[allow(clippy::type_complexity)]
     pub(crate) fn iter_from_lca_causally(
         &self,
@@ -577,6 +581,40 @@ impl OpLog {
         from_frontiers: &Frontiers,
         to: &VersionVector,
         to_frontiers: &Frontiers,
+        cap: Option<&VersionVector>,
+    ) -> (
+        VersionVector,
+        DiffMode,
+        impl Iterator<
+                Item = (
+                    BlockChangeRef,
+                    (Counter, Counter),
+                    Rc<RefCell<VersionVector>>,
+                ),
+            > + '_,
+    ) {
+        self.iter_from_lca_causally_floored(from, from_frontiers, to, to_frontiers, cap, None)
+    }
+
+    /// §flowstate vendor patch #24b (act-twelve A12.2.1): like
+    /// [`Self::iter_from_lca_causally`], but when `floor` is given the
+    /// ENUMERATION starts at that causally-closed cut instead of the
+    /// dominator LCA — the returned lca/mode are still computed from the true
+    /// common ancestor. Sound whenever the caller would SKIP every change at
+    /// or below the floor anyway (the #21 meet clamp): the yielded set of
+    /// above-floor changes is identical, calculators that turn out to need
+    /// deeper history still declare `needs_full` and get the unclamped
+    /// phase-2 walk, and nothing else observes the enumeration. On a
+    /// dirty-history undo checkout the dominator walk enumerated 64.5M
+    /// op-units to skip nearly all of them (~0.5s per checkout, ×2 per undo).
+    pub(crate) fn iter_from_lca_causally_floored(
+        &self,
+        from: &VersionVector,
+        from_frontiers: &Frontiers,
+        to: &VersionVector,
+        to_frontiers: &Frontiers,
+        cap: Option<&VersionVector>,
+        floor: Option<&VersionVector>,
     ) -> (
         VersionVector,
         DiffMode,
@@ -590,6 +628,9 @@ impl OpLog {
     ) {
         let mut merged_vv = from.clone();
         merged_vv.merge(to);
+        if let Some(cap) = cap {
+            merged_vv = cap.clone();
+        }
         loro_common::debug!("to_frontiers={:?} vv={:?}", &to_frontiers, to);
         let (common_ancestors, mut diff_mode) =
             self.dag.find_common_ancestor(from_frontiers, to_frontiers);
@@ -598,9 +639,15 @@ impl OpLog {
         }
 
         let common_ancestors_vv = self.dag.frontiers_to_vv(&common_ancestors).unwrap();
-        // go from lca to merged_vv
-        let diff = common_ancestors_vv.diff(&merged_vv).forward;
-        let mut iter = self.dag.iter_causal(common_ancestors, diff);
+        let (walk_start, walk_start_vv) = match floor {
+            Some(floor) if floor.includes_vv(&common_ancestors_vv) => {
+                (self.dag.vv_to_frontiers(floor), floor.clone())
+            }
+            _ => (common_ancestors.clone(), common_ancestors_vv.clone()),
+        };
+        // go from the walk start (lca, or the higher floor) to merged_vv
+        let diff = walk_start_vv.diff(&merged_vv).forward;
+        let mut iter = self.dag.iter_causal(walk_start, diff);
         let mut node = iter.next();
         let mut cur_cnt = 0;
         let vv = Rc::new(RefCell::new(VersionVector::default()));

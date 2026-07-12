@@ -232,7 +232,7 @@ impl LocalDocHandle {
         // undo — pure waste, the editor never read it.
         RuntimeEvent::ProjectionUpdated { .. } | RuntimeEvent::ProjectionPatched { .. } => applied = true,
         RuntimeEvent::SelectionRestored { selection: restored } => selection = Some(restored),
-        RuntimeEvent::RevisionOpened { .. } | RuntimeEvent::RevisionForked { .. } => {},
+        RuntimeEvent::RevisionOpened { .. } | RuntimeEvent::RevisionForked { .. } | RuntimeEvent::HistoryRebaseRequired { .. } => {},
         publishable @ (RuntimeEvent::LocalUpdate { .. } | RuntimeEvent::RemoteUpdateApplied { .. }) => publish.push(publishable),
       }
     }
@@ -297,5 +297,31 @@ impl LocalWriteAuthority for LocalDocHandle {
 
   fn canonical_projection(&self) -> Result<DocumentProjection, WriteRejected> {
     self.projection()
+  }
+
+  fn rebase_selection(
+    &self,
+    selection: &gpui_flowtext::EditorSelection,
+    before: &DocumentProjection,
+    base_frontier: &[u8],
+  ) -> Option<gpui_flowtext::EditorSelection> {
+    let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
+    let rebased = guard.rebase_selection_across_import(selection, before, base_frontier);
+    drop(guard);
+    rebased
+  }
+
+  fn encode_selection_anchor(&self, selection: &gpui_flowtext::EditorSelection) -> Option<(Vec<u8>, Vec<u8>)> {
+    let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
+    let encoded = guard.encode_selection_anchor(selection);
+    drop(guard);
+    encoded
+  }
+
+  fn resolve_selection_anchor(&self, head_cursor: &[u8], anchor_cursor: &[u8]) -> Option<(flowstate_document::DocumentOffset, flowstate_document::DocumentOffset)> {
+    let guard = self.core.lock(GateHolder::LocalIntent).ok()?;
+    let resolved = guard.resolve_selection_anchor(head_cursor, anchor_cursor);
+    drop(guard);
+    resolved
   }
 }

@@ -113,9 +113,7 @@ pub fn apply_document_span_replacement(document: &mut DocumentProjection, curren
   // merge (e.g. a join dropping a middle boundary) — a disagreement that would
   // strand later pending edits referencing the dropped id and lose text.
   let paragraph_id_end = paragraph_end.min(document.ids.paragraph_ids.len());
-  document
-    .ids
-    .paragraph_ids
+  std::sync::Arc::make_mut(&mut document.ids.paragraph_ids)
     .splice(current.start_paragraph.min(paragraph_id_end)..paragraph_id_end, replacement.paragraph_ids.iter().copied());
   paragraphs_mut(document).splice(current.start_paragraph..paragraph_end, replacement.paragraphs.clone());
   replace_paragraph_blocks(document, current.start_paragraph, before_count, &replacement.paragraphs);
@@ -126,14 +124,11 @@ pub fn apply_document_span_replacement(document: &mut DocumentProjection, curren
     let block_end = block_start
       .saturating_add(replacement.block_ids.len())
       .min(document.ids.block_ids.len());
-    document
-      .ids
-      .block_ids
+    std::sync::Arc::make_mut(&mut document.ids.block_ids)
       .splice(block_start.min(block_end)..block_end, replacement.block_ids.iter().copied());
   }
   // `replace_paragraph_blocks` already rebuilt the section outline; only the
   // byte-offset index still needs refreshing after the splice.
-  rebuild_document_offset_index(document);
 }
 
 #[hotpath::measure]

@@ -256,6 +256,7 @@ impl RichTextEditor {
         caption: None,
         sizing: ImageSizing::FitWidth,
         alignment: BlockAlignment::Center,
+        external_url: None,
         version: 0,
       }));
     }

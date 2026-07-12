@@ -71,23 +71,20 @@ impl RichTextEditor {
     self
       .paragraph_chunk_layout_cache
       .resize(paragraph_count, None);
-    self
-      .paragraph_shaping_cache
-      .resize_with(paragraph_count, || None);
-    self.paragraph_prep_cache.resize_with(paragraph_count, ParagraphPrepSlot::default);
 
+    // §perf-heaven T8.12: prep/shaping caches are id-keyed maps; evict the
+    // offscreen paragraphs by removing their id entries (no positional resize).
     for paragraph_ix in 0..paragraph_count {
       if !layout_keep_ranges.contains(paragraph_ix) {
-        let entry = &mut self.paragraph_chunk_layout_cache[paragraph_ix];
-        *entry = None;
-        if let Some(shape_cache) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
-          *shape_cache = None;
+        self.paragraph_chunk_layout_cache[paragraph_ix] = None;
+        if let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix) {
+          self.paragraph_shaping_cache.remove(&paragraph_id);
         }
       }
       if !prep_keep_ranges.contains(paragraph_ix)
-        && let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix)
+        && let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix)
       {
-        slot.clear();
+        self.paragraph_prep_cache.remove(&paragraph_id);
       }
     }
     self

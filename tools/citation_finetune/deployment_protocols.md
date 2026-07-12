@@ -33,29 +33,35 @@ Door left open: CT2 **int8** typically ~300–400 ms if the no-quant rule is eve
 
 ## Accuracy pipeline: precision cascade + deterministic repair + QA gate
 
-Base model, **int8 by default** (int8 ≈ int16 ≈ f32 on quality — precision escalation
-recovers almost nothing; measured 0 recoveries at f32, 2 at int16 over 250 gold cites).
-Every model output is validated by deterministic **failure-mode checks**; a failing output
-is first sent through model-free **deterministic repairs**, and only if those don't clear it
-do we escalate (which costs a re-decode) or, as a last resort, hand off to a human.
+Base model, int8 for the first candidate and float32 for mandatory verification. Every output is
+run through deterministic repairs, strict schema validation, and failure-mode checks. Success
+requires two valid candidates to agree on status and author identities; disagreement is evidence
+of exactly the omission/attribution uncertainty that grounding alone cannot observe.
 
-### The ladder (each stage: decode → parse+repair → checks; snap runs after *every* decode)
+### The ladder (each stage: decode → parse+repair → schema/checks; snap runs after every decode)
 
-    int8 greedy ─┐
-    int16 greedy ─┤  after each decode: to_json (+quote/bracket repair) → checks;
-    f32 greedy   ─┤  if checks fail, snap-to-source → re-check.  Pass ⇒ stop.
-    beam k=8     ─┘  Order is cheapest-first: int16 = 1 decode (~1.5 s) is cheaper than
-    best-of-N (5×int8 sampling, ~4.6 s) ── the only stochastic tier; reruns genuinely help.
-    └─ still failing ⇒ HUMAN REVIEW (retain the *best-grounded* candidate seen, not the last)
+    int8 greedy + f32 greedy
+      ├─ both valid and status/author identities agree ⇒ accept the earlier int8 candidate
+      ├─ both valid but disagree ⇒ HUMAN REVIEW (`decode_*_disagreement`)
+      └─ either invalid ⇒ beam k=8, then up to 5 int8 samples, seeking a second agreeing decode
+
+    any input/output length ceiling ⇒ HUMAN REVIEW (`decode_*_length_limit`)
+    no two valid agreeing decodes ⇒ HUMAN REVIEW (`decode_no_consensus`)
+    └─ retain the best-grounded candidate seen, not the last
+
+The deployed checkpoint and tokenizer use 3072-token input/output ceilings. A normal citation
+still stops at EOS; the larger output bound does not force padding or extra decode steps. Returning
+EOS lets the backend distinguish normal completion from a capped prefix before JSON repair.
 
 ### Failure-mode checks (deterministic, no reference) — what triggers repair/escalation
 
 - `invalid_json` — output won't parse even after the repairs below.
-- `family_eq_given` — an author's family == given (fabrication signal; auto-resolved by the
-  `normalize_authors` dedup below before it ever reaches a human).
-- `name_ungrounded` / `given_ungrounded` — a family/given word is not grounded in the source
-  (fuzzy: difflib ratio ≥ 0.85 or containment, diacritic-folded). Given is lenient (initials
-  skipped); family is strict.
+- `surname_ungrounded` / `name_ungrounded` — author identity words are not grounded in the source
+  (fuzzy: difflib ratio ≥ 0.85 or containment, diacritic-folded; initials are skipped).
+- `schema_*` — syntactic JSON that violates the sparse object contract, including incomplete
+  author objects, wrong field types/enums, or unknown fields.
+- `decode_*_length_limit`, `decode_*_disagreement`, `decode_no_consensus` — model-completeness
+  and uncertainty failures owned by the controller rather than the deterministic checker.
 - **DROPPED** `under_enumeration` and `title_ungrounded`: measured 1/7 and 0/1 precision with
   zero successful recoveries — they only manufactured false human-review by counting
   capitalized words in quals/institutions as phantom authors. Re-add only with a precise impl.
@@ -70,8 +76,8 @@ do we escalate (which costs a re-decode) or, as a last resort, hand off to a hum
    string state (fixes `…School"]]` — one `]` too many).
 3. **Snap-to-source** — the model's job is extraction, so a mangled name is a corruption of a
    token present *verbatim* in the source. Snap each flagged name field to the nearest source
-   span, **positionally anchored** on the author's sibling field: fuzzy-locate the `given` in
-   the source, then the family is the adjacent token (the anchor lookup is itself fuzzy, so a
+   span, **positionally anchored** on the author's sibling field: fuzzy-locate the `name` in
+   the source, then the surname is the adjacent token (the anchor lookup is itself fuzzy, so a
    corrupted anchor like `Toto` still finds `Tomo`). Similarity is **Jaro-Winkler** (Rust:
    `strsim`/`rapidfuzz`) — purpose-built for name typos (`Javad`/`Jaded`≈0.86, `Tomo`/`Toto`≈
    0.93 where difflib scored only ~0.6). Adjacency candidates use a looser 0.72 gate (position
@@ -79,10 +85,9 @@ do we escalate (which costs a re-decode) or, as a last resort, hand off to a hum
    (`Wink`→`Wick`, `Solee`→`Soule`) and — critically — restores characters T5's vocab **cannot
    emit** (`ari`→`Šarić`). Applied only to flagged outputs (zero blast radius on the ~96% that
    pass; **verified 0 regressions / 5 recoveries** over the 250 gold set). Reference: `snap.py`.
-4. **normalize_authors** — deterministic author cleanups: (a) `family == given` is pure
-   duplication (a mononym the model couldn't split) → drop `given`; (b) strip a trailing
-   generational suffix from family (`Moore IV`→`Moore`) to match canonical segmentation.
-   Applied to every parsed output. Reference: `snap.py:normalize_authors`.
+4. **normalize_authors** — deterministic author cleanups: strip credentials/year fragments and
+   generational suffixes, reconcile `surname` with the full `name`, and deduplicate decode
+   repetitions without collapsing real same-surname coauthors. Applied to every parsed output.
 
 ### Best-grounded handoff (spec — implement in the Rust port)
 
@@ -94,15 +99,14 @@ maximize grounded-author count (equivalently, minimize ungrounded name-token cou
 same fuzzy/diacritic rules the checks use); tie-break to the earliest (cheapest) tier. Track a
 running best as each tier's post-snap candidate is produced; emit it if the ladder exhausts.
 
-### Known residual (not human-review; documented, low priority)
+### Known residual
 
-Two-word surnames vs given+family is an inherent ambiguity. `Scheffler Blaeser` (a two-word
-surname in a comma-delimited surname list) is captured as `family:"Blaeser"` + `given:
-"Scheffler"` — all text preserved, checks pass, no human needed, but not gold-segmentation.
-A *possible* future fix: sibling-consistency — if the other authors in the same list are
-given-less (bare surnames), treat a lone `given` as part of a two-word family. Fragile; deferred.
+Agreement between decodes is an uncertainty detector, not a mathematical proof: correlated tiers
+can still omit the same author. Inputs beyond 3072 tokens fail loudly. Within the window, the
+remaining correlated-omission rate must be measured against held-out labels and retained as an
+explicit quality metric; no capitalization-based name counter is treated as a correctness oracle.
 
-### Results (250-cite gold, base-int8 default)
+### Historical repair results (250-cite gold, before mandatory decode consensus)
 
 | stage | human review |
 |---|---|
@@ -113,16 +117,11 @@ given-less (bare surnames), treat a lone `given` as part of a two-word family. F
 | + snap-to-source (after every decode) | ~1.2% |
 | + Jaro-Winkler snap + fuzzy anchor + normalize_authors | **0.0%** |
 
-Tier reached at the end: **int8 96%, int8+snap 3%, int16 <1%, human 0%** — best-of-N was never
-triggered on gold. The deterministic layer resolves the entire 250-cite gold set with no human
-handoff, including the cases previously called "structural": the 8-author foreign cite (fuzzy
-+ diacritic snap), the two-word-surname judges cite (dedup + snap), and the fabricated mononym
-(dedup). **Caveats:** (1) 0% is on the held-out gold set — production will still hit genuinely
-garbled cites the checks can't clear, so real-world > 0; the *deterministic floor* is what
-moved to 0. (2) "Passes checks" ≠ "gold-perfect" for ~2 cases (a two-word surname split, a
-mononym field placement) — captured well enough not to warrant a human. (3) Keep **best-of-N
-as insurance** for degraded production inputs even though gold never needs it; pin a sampling
-seed for a deterministic build.
+The old controller stopped after the first valid int8 result (96% of this set), which made these
+numbers useful for measuring deterministic repair but did not protect against a clean-looking
+author subset. Production now always obtains a second valid decode and requires status/author
+agreement. Beam and best-of-N remain insurance for cases where one of the first two candidates is
+invalid; they never overrule a valid disagreement.
 
 ## Adopted (all of these — this is the standing plan)
 

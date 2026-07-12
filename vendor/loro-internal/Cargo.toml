@@ -183,6 +183,9 @@ name = "tree"
 path = "benches/tree.rs"
 harness = false
 
+[dependencies.hotpath]
+version = "0.16.1"
+
 [dependencies.append-only-bytes]
 version = "0.1.12"
 features = ["u32_range"]

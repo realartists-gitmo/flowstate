@@ -65,12 +65,11 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
-            "required": ["index", "family", "given", "literal", "qualifications"],
+            "required": ["index", "surname", "name", "qualifications"],
             "properties": {
               "index": {"type": "integer", "minimum": 0},
-              "family": {"type": ["string", "null"]},
-              "given": {"type": ["string", "null"]},
-              "literal": {"type": ["string", "null"]},
+              "surname": {"type": ["string", "null"]},
+              "name": {"type": ["string", "null"]},
               "qualifications": {
                 "type": "array",
                 "items": {"type": "string"}

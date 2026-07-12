@@ -1,6 +1,7 @@
 //! Minimal probe: time a few int8 decodes and dump the raw model output.
 use ct2rs::tokenizers::auto::Tokenizer;
 use ct2rs::{ComputeType, Config, Device, TranslationOptions, Translator};
+use flowstate_citation::limits::MODEL_TOKEN_LIMIT;
 use serde_json::Value;
 use std::time::Instant;
 
@@ -13,7 +14,12 @@ fn main() -> anyhow::Result<()> {
     )?;
     eprintln!("model loaded in {:?}", t0.elapsed());
 
-    let opts = TranslationOptions::<String, String> { beam_size: 1, max_decoding_length: 640, ..Default::default() };
+    let opts = TranslationOptions::<String, String> {
+        beam_size: 1,
+        max_input_length: MODEL_TOKEN_LIMIT,
+        max_decoding_length: MODEL_TOKEN_LIMIT,
+        ..Default::default()
+    };
     let rows: Vec<Value> = std::fs::read_to_string("datasets/citation_finetune/haiku/gold_eval.jsonl")?
         .lines().take(3).map(|l| serde_json::from_str(l).unwrap()).collect();
     for r in &rows {

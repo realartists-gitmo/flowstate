@@ -125,7 +125,7 @@ mod tests {
     let paragraph = projection.ids.paragraph_ids[paragraph_ix];
     let text_len = flowstate_document::paragraph_text_len(&projection.paragraphs[paragraph_ix]);
     let byte = rng.below(text_len + 1);
-    let arm = rng.below(17);
+    let arm = rng.below(18);
     if std::env::var("FUZZ_PER_OP_CHECK").is_ok() {
       eprintln!("step {step}: arm {arm} paragraph_ix {paragraph_ix} byte {byte}");
     }
@@ -328,6 +328,22 @@ mod tests {
           })
           .map(|_| ())
       },
+      // §act-eleven C1: AUTOSAVE CHECKPOINT interleaved with everything else.
+      // The in-place checkpoint path commits undo-inert "meta" metadata +
+      // revision ops (vendor patch #14), creates/compacts the package, and
+      // re-arms the recorded-inverse stacks — the exact autosave x undo x
+      // import interleaving class that killed field undo (act-ten A10.2),
+      // previously covered only by two targeted unit tests. A checkpoint must
+      // never fail; convergence of the meta ops rides the normal sync rounds.
+      15 => {
+        let dir = std::env::temp_dir().join(format!("flowstate-fuzz-ckpt-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fuzz checkpoint dir");
+        let path = dir.join(format!("peer-{:p}.db8", std::sync::Arc::as_ptr(&peer.gate)));
+        let mut guard = peer.gate.lock(GateHolder::DocumentService).expect("gate healthy");
+        guard.checkpoint_package("Fuzz autosave", Some(path)).expect("fuzz checkpoint must succeed");
+        drop(guard);
+        Ok(())
+      },
       // Replace-all (find & replace): every occurrence of a random pattern in
       // up to three random paragraphs, one compound intent. Exercises the
       // multi-range back-to-front application, the per-paragraph readback
@@ -496,6 +512,31 @@ mod tests {
   fn three_peer_intent_fuzz_converges() {
     for seed in [3, 99, 4242, 20260707] {
       run_fuzz(seed, 3, 5, 10);
+    }
+  }
+
+  /// §act-eleven C10: the long-horizon randomized soak — a wide seed sweep at
+  /// larger op counts, ignored by default (fixed CI seeds stay deterministic).
+  /// Run via `heaven.sh soak`; tune with `FUZZ_SOAK_SEEDS` / `FUZZ_SOAK_ROUNDS` /
+  /// `FUZZ_SOAK_OPS`, and set `FUZZ_PER_OP_CHECK=1` for per-op tracing.
+  #[test]
+  #[ignore = "long-horizon soak — run via `heaven.sh soak`"]
+  fn intent_fuzz_soak() {
+    let seeds: u64 = std::env::var("FUZZ_SOAK_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(500);
+    let rounds: usize = std::env::var("FUZZ_SOAK_ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(8);
+    let ops: usize = std::env::var("FUZZ_SOAK_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(16);
+    for seed in 1..=seeds {
+      let peers = 2 + (seed % 3) as usize; // 2–4 peers
+      run_fuzz(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15), peers, rounds, ops);
+      // The checkpoint op (variant 15) writes one `.db8` per peer-Arc per seed
+      // into the tmpfs checkpoint dir and nothing else deletes them — a long
+      // soak exhausts the /tmp user QUOTA and the checkpoint `.expect()` then
+      // fails looking exactly like a fuzz failure (it did, twice, 2026-07-10).
+      // Reclaim between seeds; recreation is one mkdir.
+      let _ = std::fs::remove_dir_all(std::env::temp_dir().join(format!("flowstate-fuzz-ckpt-{}", std::process::id())));
+      if seed % 25 == 0 {
+        eprintln!("[soak] intent_fuzz {seed}/{seeds}");
+      }
     }
   }
 

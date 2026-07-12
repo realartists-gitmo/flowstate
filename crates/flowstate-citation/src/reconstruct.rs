@@ -15,17 +15,25 @@ use serde_json::Value;
 pub const KEYS: &[&str] = &[
     "accessed_date", "authors", "card_signatures", "container_title", "database",
     "debate_annotations", "doi", "evidence", "issue", "no_date", "pages", "publication",
-    "published_date", "publisher", "raw_tail", "reject_reason", "source_type",
+    "published_date", "publisher", "raw_tail", "reject_reason", "retrieved_date", "source_type",
     "spillover_start_index", "spillover_start_text", "status", "title", "url", "volume",
-    "warnings", "year", "family", "given", "literal", "qualifications",
+    "warnings", "year", "surname", "name", "qualifications",
 ];
 
-/// Does `c[pos..]` match `,"<KEY>"\s*:` — i.e. a value-closing quote followed by the next key?
+/// Does `c[pos..]` match `,\s*"<KEY>"\s*:` — i.e. a value-closing quote followed by the next
+/// key. Whitespace after the comma is tolerated (the model emits `json.dumps`-style `, "key":`).
 fn keycolon_at(c: &[char], pos: usize) -> bool {
-    if pos + 1 >= c.len() || c[pos] != ',' || c[pos + 1] != '"' {
+    if pos >= c.len() || c[pos] != ',' {
         return false;
     }
-    let rest: String = c[pos + 2..].iter().collect();
+    let mut p = pos + 1;
+    while p < c.len() && c[p].is_whitespace() {
+        p += 1;
+    }
+    if p >= c.len() || c[p] != '"' {
+        return false;
+    }
+    let rest: String = c[p + 1..].iter().collect();
     for &k in KEYS {
         if let Some(after) = rest.strip_prefix(k) {
             let ab: Vec<char> = after.chars().collect();
@@ -43,22 +51,35 @@ fn keycolon_at(c: &[char], pos: usize) -> bool {
     false
 }
 
-/// Is the quote at index `j` a *structural* close for the current string?
+/// Is the quote at index `j` a *structural* close for the current string? Whitespace after the
+/// structural quote is tolerated (the model emits `json.dumps`-style `": "` / `", "` spacing).
+#[allow(clippy::many_single_char_names, reason = "JSON character-scanning helper")]
 fn closes(c: &[char], j: usize, expect_key: bool, in_str_array: bool) -> bool {
     let n = c.len();
+    let mut p = j + 1;
+    while p < n && c[p].is_whitespace() {
+        p += 1;
+    }
     if expect_key {
-        return j + 1 < n && c[j + 1] == ':';
+        return p < n && c[p] == ':';
     }
     if in_str_array {
-        if j + 1 >= n || c[j + 1] == ']' {
+        if p >= n || c[p] == ']' {
             return true;
         }
-        return j + 2 < n && c[j + 1] == ',' && c[j + 2] == '"';
+        if c[p] == ',' {
+            let mut q = p + 1;
+            while q < n && c[q].is_whitespace() {
+                q += 1;
+            }
+            return q < n && c[q] == '"';
+        }
+        return false;
     }
-    if j + 1 >= n || c[j + 1] == ']' {
+    if p >= n || c[p] == ']' {
         return true;
     }
-    keycolon_at(c, j + 1)
+    keycolon_at(c, p)
 }
 
 /// Re-escape every non-structural `"` so an inner title quote can't terminate the string.
@@ -108,11 +129,17 @@ pub fn escape_content(s: &str) -> String {
                 expect_key = false;
                 out.push(ch);
                 i += 1;
+                while i < n && c[i].is_whitespace() {
+                    i += 1; // drop structural ws after a colon (compact the value separator)
+                }
             }
             ',' => {
                 expect_key = arr.last() != Some(&true);
                 out.push(ch);
                 i += 1;
+                while i < n && c[i].is_whitespace() {
+                    i += 1; // drop structural ws after a comma
+                }
             }
             '[' => {
                 let is_str = last_key != "authors";
@@ -120,6 +147,9 @@ pub fn escape_content(s: &str) -> String {
                 expect_key = !is_str;
                 out.push(ch);
                 i += 1;
+                while i < n && c[i].is_whitespace() {
+                    i += 1; // drop structural ws after an array open
+                }
             }
             ']' => {
                 arr.pop();
@@ -208,12 +238,12 @@ fn array_end(c: &[char], o: usize) -> isize {
     -1
 }
 
-fn starts_with_family(c: &[char], pos: usize) -> bool {
-    let pat: Vec<char> = "\"family\":".chars().collect();
+fn starts_with_surname(c: &[char], pos: usize) -> bool {
+    let pat: Vec<char> = "\"surname\":".chars().collect();
     pos + pat.len() <= c.len() && c[pos..pos + pat.len()] == pat[..]
 }
 
-/// Split the authors-array inner text into per-author fragments at `,"family":` (depth 0).
+/// Split the authors-array inner text into per-author fragments at `,"surname":` (depth 0).
 fn split_authors(inner: &[char]) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     let (mut st, mut d, mut q, mut e, mut k) = (0usize, 0i32, false, false, 0usize);
@@ -230,7 +260,7 @@ fn split_authors(inner: &[char]) -> Vec<String> {
                 d += 1;
             } else if ch == ']' {
                 d -= 1;
-            } else if ch == ',' && d == 0 && starts_with_family(inner, k + 1) {
+            } else if ch == ',' && d == 0 && starts_with_surname(inner, k + 1) {
                 parts.push(inner[st..k].iter().collect());
                 st = k + 1;
             }
@@ -283,7 +313,18 @@ pub fn reconstruct(s: &str) -> String {
 /// `skip_special_tokens` dropped these; native decoders render them literally). Strip them to
 /// recover the brace-free form the reconstructor expects.
 pub fn to_json(raw: &str) -> Option<Value> {
-    let cleaned = raw.replace("<unk>", "");
+    // The model emits CSL-JSON author vocabulary for a large minority of cites (`"family"`/`"given"`/
+    // `"literal"` instead of `"surname"`/`"name"`) — never mixed with the schema vocabulary within an
+    // author. Alias it to the canonical keys before the grammar runs, so the surname is not silently
+    // dropped (the field the harness scores) and the char-scanning reconstructor only ever sees keys
+    // in `KEYS`. `family` leads the author object, preserving the surname-first split. Both `given`
+    // and `literal` map to `name`; when both are present `literal` (the full name) follows `given`
+    // and wins the duplicate key.
+    let cleaned = raw
+        .replace("<unk>", "")
+        .replace("\"family\":", "\"surname\":")
+        .replace("\"literal\":", "\"name\":")
+        .replace("\"given\":", "\"name\":");
     let raw = cleaned.as_str();
     let esc = escape_content(raw);
     let candidates = [
@@ -310,17 +351,17 @@ mod tests {
 
     #[test]
     fn recovers_inner_quotes() {
-        let raw = r#""status":"parsed","authors":["family":"Whitehouse","given":"Tom"],"title":"Critical "Metals" and Cleantech","source_type":"web_page""#;
+        let raw = r#""status":"parsed","authors":["surname":"Whitehouse","name":"Tom Whitehouse"],"title":"Critical "Metals" and Cleantech","source_type":"web_page""#;
         let v = to_json(raw).expect("should parse");
         assert_eq!(v["title"], "Critical \"Metals\" and Cleantech");
-        assert_eq!(v["authors"][0]["family"], "Whitehouse");
+        assert_eq!(v["authors"][0]["surname"], "Whitehouse");
     }
 
     #[test]
     fn drops_spurious_bracket() {
-        let raw = r#""status":"parsed","authors":["family":"Booth","given":"Ken"]],"year":2007"#;
+        let raw = r#""status":"parsed","authors":["surname":"Booth","name":"Ken Booth"]],"year":2007"#;
         let v = to_json(raw).expect("should parse after bracket balance");
-        assert_eq!(v["authors"][0]["family"], "Booth");
+        assert_eq!(v["authors"][0]["surname"], "Booth");
         assert_eq!(v["year"], 2007);
     }
 }

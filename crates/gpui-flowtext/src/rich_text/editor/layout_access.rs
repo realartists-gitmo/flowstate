@@ -190,31 +190,18 @@ impl RichTextEditor {
   }
 
   fn paragraph_before_block(&self, target_block_ix: usize) -> Option<usize> {
-    let mut paragraph_ix = 0;
-    let mut last = None;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if block_ix >= target_block_ix {
-        return last;
-      }
-      if matches!(block, Block::Paragraph(_)) {
-        last = Some(paragraph_ix);
-        paragraph_ix += 1;
-      }
-    }
-    last
+    // §act-ten A10.8: O(log N) tree rank instead of the per-call block walk.
+    self
+      .document
+      .blocks
+      .paragraphs_before_row(target_block_ix)
+      .checked_sub(1)
   }
 
   fn paragraph_after_block(&self, target_block_ix: usize) -> Option<usize> {
-    let mut paragraph_ix = 0;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if matches!(block, Block::Paragraph(_)) {
-        if block_ix > target_block_ix {
-          return Some(paragraph_ix);
-        }
-        paragraph_ix += 1;
-      }
-    }
-    None
+    // §act-ten A10.8: rank of the first paragraph past `target_block_ix`.
+    let rank = self.document.blocks.paragraphs_before_row(target_block_ix.saturating_add(1));
+    (rank < self.document.paragraphs.len()).then_some(rank)
   }
 
   fn collapse_object_selection(&mut self, dir: HDir, cx: &mut Context<Self>) -> bool {
@@ -258,26 +245,11 @@ impl RichTextEditor {
   }
 
   fn paragraph_ix_for_block(&self, target_block_ix: usize) -> Option<usize> {
-    if self.document.blocks.len() == self.document.paragraphs.len()
-      && self
-        .document
-        .blocks
-        .get(target_block_ix)
-        .is_some_and(|block| matches!(block, Block::Paragraph(_)))
-    {
-      return Some(target_block_ix);
-    }
-
-    let mut paragraph_ix = 0;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if matches!(block, Block::Paragraph(_)) {
-        if block_ix == target_block_ix {
-          return Some(paragraph_ix);
-        }
-        paragraph_ix += 1;
-      }
-    }
-    None
+    // §act-ten A10.8: O(log N) tree rank (was a per-call full block walk —
+    // O(visible items x blocks) per layout pass on object docs via
+    // `paragraph_range_for_item_range`). Same semantics: `Some` iff the row is
+    // a paragraph block.
+    self.document.blocks.paragraph_ix_for_block_row(target_block_ix)
   }
 
   fn document_has_object_blocks(&self) -> bool {
@@ -338,26 +310,16 @@ impl RichTextEditor {
     let mut found_start = false;
 
     for paragraph_ix in 0..paragraph_count {
-      let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      if self.document.paragraphs.get(paragraph_ix).is_none() {
         break;
-      };
-      let key = paragraph_cache_key(&self.document, paragraph);
+      }
       let height = self
-        .paragraph_height_cache
-        .get(paragraph_ix)
-        .and_then(|entry| *entry)
-        .filter(|entry| {
-          entry.key == key
-            && entry.width == width
-            && entry.invisibility_mode == self.invisibility_mode
-            && entry.edit_generation == self.edit_generation
-        })
-        .map(|entry| entry.height)
+        .valid_paragraph_height(paragraph_ix, width)
         .unwrap_or_else(|| {
           self
             .valid_paragraph_prep(paragraph_ix)
             .as_deref()
-            .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, width))
+            .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, paragraph_ix, width))
             .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode))
         });
       let next_y = y + height;

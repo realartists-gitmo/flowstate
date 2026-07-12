@@ -182,7 +182,7 @@ fn compound_intent_failure_compensates_atomically() {
   let text_before = body_string(&gate);
   let paragraphs_before = handle.projection().expect("projection").paragraphs.len();
 
-  INJECT_FRAGMENT_FAULT.store(true, std::sync::atomic::Ordering::SeqCst);
+  INJECT_FRAGMENT_FAULT.with(|fault| fault.set(true));
   let result = handle.insert_rich_fragment(InsertRichFragmentIntent {
     at: TextAnchor::new(paragraph, 4),
     blocks: vec![
@@ -202,7 +202,7 @@ fn compound_intent_failure_compensates_atomically() {
       }),
     ],
   });
-  INJECT_FRAGMENT_FAULT.store(false, std::sync::atomic::Ordering::SeqCst);
+  INJECT_FRAGMENT_FAULT.with(|fault| fault.set(false));
 
   // (a) rejected as compensated; doc state export-equivalent to pre-intent.
   assert!(matches!(result, Err(WriteRejected::CompensatedFailure { .. })), "fault must surface as compensated failure: {result:?}");
@@ -643,7 +643,7 @@ fn stack_depths(gate: &Arc<WriteGate<CrdtRuntime>>) -> (usize, usize) {
 
 /// §act-five P3-deep (fail-loud): a RUN of consecutive local undos must EACH
 /// replay via the fast path — not just the first. On the old single-slot design
-/// undo #2+ fell to the O(doc/history) Loro UndoManager; the stack keeps them
+/// undo #2+ fell to the O(doc/history) Loro `UndoManager`; the stack keeps them
 /// all O(change). `stack_depths` is the proof: three undos move all three
 /// inverses undo→redo, which the single slot could not do.
 #[test]
@@ -696,6 +696,800 @@ fn recorded_inverse_stack_chains_consecutive_fast_undos() {
   assert_eq!(styles_of(&handle), local_canonical, "the fast-path chain leaves live == canonical");
 }
 
+/// §act-ten A10.2 (the field killer): the 900ms autosave commits metadata +
+/// revision ops, advancing the frontier — on the old strict `expected_frontier`
+/// equality this cleared the recorded stacks, so anyone pausing before Ctrl-Z
+/// fell to the O(doc) slow path. The "meta"-origin commit is undo-INERT (it
+/// never touches the body), so the stacks must survive it. `stack_depths` is
+/// the proof the step stayed fast (a slow-path step clears both stacks).
+#[test]
+fn recorded_inverse_survives_inert_checkpoint_commits() {
+  let (handle, gate) = new_handle("checkpoint-inert");
+  seed_mass_fragment(&handle, 12, None);
+  let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
+  let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
+    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  let original = styles_of(&handle);
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: ids,
+      style: ParagraphStyle::Custom(4),
+    })
+    .expect("restyle commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "forward edit arms one recorded inverse");
+
+  // The autosave: metadata + revision commits (the in-place checkpoint path).
+  let dir = std::env::temp_dir().join(format!("flowstate-checkpoint-inert-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).expect("temp dir");
+  let path = dir.join("autosave.db8");
+  {
+    let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard.checkpoint_package("Autosave", Some(path.clone())).expect("checkpoint runs")
+  };
+
+  // Undo AFTER the autosave must still take the fast path.
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST across the inert autosave commit");
+  assert_eq!(styles_of(&handle), original, "undo restored the pre-restyle styles");
+
+  // And redo across ANOTHER autosave.
+  {
+    let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    guard.checkpoint_package("Autosave", Some(path)).expect("second checkpoint runs")
+  };
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST across the inert autosave commit");
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// §act-ten A10.2: a fully-pending (out-of-order) remote import applies NOTHING
+/// — the frontier is unchanged, so the recorded fast-undo timelines are exactly
+/// as valid as before. The old eager clear-at-entry destroyed them on every
+/// drip, which under live collab meant fast undo almost never survived.
+#[test]
+fn recorded_inverse_survives_noop_pending_import() {
+  let (handle, gate) = new_handle("noop-import");
+  seed_mass_fragment(&handle, 12, None);
+  let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(1).collect();
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: ids,
+      style: ParagraphStyle::Custom(4),
+    })
+    .expect("restyle commits");
+  assert_eq!(stack_depths(&gate), (1, 0));
+
+  // Build an out-of-order update on a peer: two edits, export ONLY the second
+  // (its dependency is missing on the receiver ⇒ fully pending, applies nothing).
+  let (peer, peer_gate) = new_handle("noop-import-peer");
+  let peer_paragraph = first_paragraph(&peer.projection().expect("projection"));
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraph, 0),
+      text: "first".into(),
+      style_override: None,
+    })
+    .expect("peer edit 1");
+  let vv_after_first = {
+    let guard = peer_gate.lock(GateHolder::Test).expect("gate healthy");
+    guard.doc().state_vv()
+  };
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraph, 0),
+      text: "second".into(),
+      style_override: None,
+    })
+    .expect("peer edit 2");
+  let second_only = {
+    let guard = peer_gate.lock(GateHolder::Test).expect("gate healthy");
+    let export = guard.export_updates_for(&vv_after_first).expect("delta export");
+    drop(guard);
+    export
+  };
+
+  // Import the dependency-less blob: fully pending, frontier unchanged.
+  let mut guard = gate.lock(GateHolder::Test).expect("gate healthy");
+  let frontier_before = guard.doc().state_frontiers();
+  guard.import_remote_update(&second_only).expect("pending import is accepted");
+  let frontier_after = guard.doc().state_frontiers();
+  drop(guard);
+  assert_eq!(frontier_after, frontier_before, "fully-pending import applied nothing");
+  assert_eq!(stack_depths(&gate), (1, 0), "no-op import kept the recorded timeline");
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST after the no-op import");
+}
+
+/// §oom-leads #9 (mass-op collab): a remote import whose changes land strictly
+/// BEFORE every recorded coordinate must REBASE the fast-path stacks — shift
+/// the recorded coordinates through the import's net delta and keep the fast
+/// step armed — instead of the old unconditional clear (which made fast undo
+/// effectively dead under live collab: any partner keystroke between an edit
+/// and Ctrl-Z forced the O(doc/history) slow path). A remote change AT/INSIDE
+/// the recorded hull must still clear: the recorded replay content would
+/// clobber it, and mixed-space coordinate math is unsound there.
+#[test]
+fn recorded_inverse_rebases_across_hull_disjoint_remote_import() {
+  let (handle, gate) = new_handle("rebase-disjoint");
+  seed_mass_fragment(&handle, 24, None);
+  // Bidirectional seed exchange so later peer deltas import cleanly (both
+  // sides hold both `new_empty` sentinels).
+  let (peer, peer_gate) = new_handle("rebase-disjoint-peer");
+  let local_history = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  {
+    let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
+    g.import_remote_update(&local_history).expect("peer imports local history")
+  };
+  let peer_history = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&peer_history).expect("local imports peer seed")
+  };
+  let styles_of = |handle: &LocalDocHandle| -> Vec<ParagraphStyle> {
+    handle.projection().expect("projection").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  let original = styles_of(&handle);
+
+  // A restyles the BOTTOM half — the recorded hull sits far above position 0.
+  let ids: Vec<ParagraphId> = paragraph_ids(&handle).into_iter().skip(12).collect();
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: ids,
+      style: ParagraphStyle::Custom(5),
+    })
+    .expect("restyle commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "forward edit arms one recorded inverse");
+
+  // B types near the TOP of the document — strictly before the hull.
+  let peer_paragraphs = paragraph_ids(&peer);
+  let vv_before_chatter = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().state_vv()
+  };
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraphs[1], 0),
+      text: "typed above the restyled region ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter above the hull");
+  let chatter = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.export_updates_for(&vv_before_chatter).expect("delta export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&chatter).expect("chatter imports")
+  };
+  assert_eq!(stack_depths(&gate), (1, 0), "hull-disjoint remote import REBASED the recorded inverse instead of clearing it");
+
+  // Undo/redo AFTER the remote chatter must both stay on the fast path AND be
+  // content-correct (the coordinates were shifted through the net delta).
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST across the rebased remote import");
+  assert_eq!(styles_of(&handle), original, "undo restored the pre-restyle styles at the shifted positions");
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST across the rebased remote import");
+
+  // The fast-path replay must leave live == canonical (same bar as P3-deep).
+  let canonical: Vec<ParagraphStyle> = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  assert_eq!(styles_of(&handle), canonical, "rebased fast-path replay leaves live == canonical");
+
+  // §v2: chatter INSIDE the hull used to clear (v1's global-hull law) — a
+  // MARK-ONLY entry now rebases per-coordinate instead (its replay is
+  // position-neutral, so in-hull chatter is sound). The residual clear cases
+  // live in `remote_insert_at_recorded_coordinate_clears_instead_of_rebasing`
+  // (content entry, at-coordinate) and the truncation half of
+  // `mark_top_survives_while_deeper_keystroke_truncates_then_slow_path_converges`.
+  let vv_before_inside = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().state_vv()
+  };
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraphs[20], 0),
+      text: "typed inside the restyled region ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter inside the hull");
+  let inside = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.export_updates_for(&vv_before_inside).expect("delta export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&inside).expect("in-hull chatter imports")
+  };
+  assert_eq!(stack_depths(&gate), (1, 0), "in-hull chatter REBASES a mark-only entry per-coordinate (v2)");
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST across the in-hull rebase");
+  assert_eq!(styles_of(&handle), original, "fast undo after the in-hull rebase still restores the styles");
+  let canonical_after: Vec<ParagraphStyle> = {
+    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+    flowstate_document::document_from_loro(guard.doc()).expect("materializes").paragraphs.iter().map(|paragraph| paragraph.style).collect()
+  };
+  assert_eq!(styles_of(&handle), canonical_after, "in-hull rebased replay leaves live == canonical");
+}
+
+/// §oom-leads #9 (keystroke undo): EVERY `InsertText` and intra-paragraph
+/// `DeleteRange` records its inverse, so the most common ops — typing and
+/// backspace — undo/redo O(change) with no checkout, AND no longer clear a
+/// deeper captured fast path (a single typed char used to kill a recorded
+/// mass-op inverse behind it). `stack_depths` is the fast-path proof: the slow
+/// path clears both stacks; every fast step moves one entry.
+#[test]
+fn recorded_inverse_captures_keystrokes_and_backspace() {
+  let (handle, gate) = new_handle("keystroke-capture");
+  seed_mass_fragment(&handle, 12, None);
+  let target = paragraph_ids(&handle)[3];
+  let original = body_string(&gate);
+
+  // Three keystrokes, one styled — three armed inverses.
+  for (ch, style) in [("a", None), ("b", None), ("c", Some(flowstate_document::RunStyles { direct_underline: true, ..Default::default() }))] {
+    handle
+      .insert_text(InsertTextIntent {
+        at: TextAnchor::new(target, 0),
+        text: ch.to_string(),
+        style_override: style,
+      })
+      .expect("keystroke commits");
+  }
+  assert_eq!(stack_depths(&gate), (3, 0), "every keystroke arms a recorded inverse");
+
+  // Backspace: a 1-char intra-paragraph delete — captured too.
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(target, 0),
+      end: TextAnchor::new(target, 1),
+    })
+    .expect("backspace commits");
+  assert_eq!(stack_depths(&gate), (4, 0), "an intra-paragraph delete arms a recorded inverse");
+  let after_edits = body_string(&gate);
+
+  // Four undos — ALL fast (undo→redo moves, no clear), back to the original.
+  for _ in 0..4 {
+    assert!(handle.apply_undo().expect("undo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (0, 4), "all four keystroke undos replayed via the fast path");
+  assert_eq!(body_string(&gate), original, "chained keystroke undo restores the original body");
+
+  // Four redos — all fast, back to the edited body (styled char included).
+  for _ in 0..4 {
+    assert!(handle.apply_redo().expect("redo runs").applied);
+  }
+  assert_eq!(stack_depths(&gate), (4, 0), "all four keystroke redos replayed via the fast path");
+  assert_eq!(body_string(&gate), after_edits, "chained keystroke redo re-applies every edit");
+
+  // Live projection == canonical materialization (the same bar as P3-deep).
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  let canonical = {
+    let document = {
+      let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materializes")
+    };
+    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+  };
+  assert_eq!(live, canonical, "keystroke fast-path replay leaves live == canonical");
+}
+
+/// §oom-leads #9 (keystroke undo × rebase): the field's most common freeze —
+/// type, partner types ABOVE you, Ctrl-Z — must stay on the fast path: the
+/// keystroke's recorded inverse rebases through the hull-disjoint remote import
+/// (coordinates shift by the net delta) instead of clearing.
+#[test]
+fn recorded_inverse_keystroke_survives_hull_disjoint_chatter() {
+  let (handle, gate) = new_handle("keystroke-rebase");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("keystroke-rebase-peer");
+  let local_history = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  {
+    let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
+    g.import_remote_update(&local_history).expect("peer imports local history")
+  };
+  let peer_history = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&peer_history).expect("local imports peer seed")
+  };
+
+  // A types DEEP in the document — the recorded hull sits far above position 0.
+  let deep = paragraph_ids(&handle)[16];
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(deep, 4),
+      text: "X".into(),
+      style_override: None,
+    })
+    .expect("local keystroke commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "the keystroke armed a recorded inverse");
+  let after_keystroke_projection = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+
+  // B types near the TOP — strictly before the hull.
+  let peer_paragraphs = paragraph_ids(&peer);
+  let vv_before_chatter = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().state_vv()
+  };
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraphs[1], 0),
+      text: "partner typed above ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter above the hull");
+  let chatter = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.export_updates_for(&vv_before_chatter).expect("delta export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&chatter).expect("chatter imports")
+  };
+  assert_eq!(stack_depths(&gate), (1, 0), "hull-disjoint chatter REBASED the keystroke inverse instead of clearing it");
+
+  // Ctrl-Z after the partner's edit: fast, and the deep 'X' is gone while the
+  // partner's text survives.
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "keystroke undo stayed FAST across the rebased remote import");
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  assert!(live.iter().any(|text| text.contains("partner typed above ")), "the partner's chatter survives the undo");
+  assert!(!live.iter().any(|text| text.contains('X')), "the undone keystroke is gone");
+  let canonical = {
+    let document = {
+      let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materializes")
+    };
+    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+  };
+  assert_eq!(live, canonical, "rebased keystroke undo leaves live == canonical");
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "keystroke redo stayed FAST too");
+  let live_after_redo = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  assert!(live_after_redo.iter().any(|text| text.contains('X')), "redo re-applied the keystroke at the shifted position");
+  // The projection must equal the pre-chatter shape plus the chatter.
+  assert_ne!(live_after_redo, after_keystroke_projection, "the chatter is part of the final projection");
+}
+
+/// §oom-leads #9 (rebase soundness, v1 gap): a mass delete's pre-recorded UNDO
+/// PATCHES snapshot the WHOLE first paragraph — including its prefix BEFORE the
+/// delete start, which is OUTSIDE the coordinate hull. A hull-disjoint remote
+/// edit landing in that prefix passes the rebase, and replaying the stale
+/// snapshot would silently clobber it in the projection (the doc-side mutation
+/// is shifted and stays correct — live and canonical diverge). The rebase must
+/// downgrade content-carrying patches to the derive ladder.
+#[test]
+fn rebase_downgrades_content_patches_when_remote_edits_first_patched_paragraph() {
+  let (handle, gate) = new_handle("rebase-patch-content");
+  seed_mass_fragment(&handle, 40, None);
+  let (peer, peer_gate) = new_handle("rebase-patch-content-peer");
+  let local_history = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  {
+    let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
+    g.import_remote_update(&local_history).expect("peer imports local history")
+  };
+  let peer_history = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&peer_history).expect("local imports peer seed")
+  };
+
+  // A mass-deletes paragraphs 12..38 starting MID-paragraph-12: the first
+  // patched paragraph keeps a prefix BEFORE the recorded hull.
+  let ids = paragraph_ids(&handle);
+  handle
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(ids[12], 9),
+      end: TextAnchor::new(ids[38], 12),
+    })
+    .expect("mass delete commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "the mass delete armed a recorded inverse");
+
+  // B types INSIDE paragraph 12's surviving prefix — before the hull, but
+  // inside the first patched paragraph's snapshot.
+  let peer_paragraphs = paragraph_ids(&peer);
+  let vv_before = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().state_vv()
+  };
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(peer_paragraphs[12], 2),
+      text: "REMOTE".into(),
+      style_override: None,
+    })
+    .expect("peer edits the first patched paragraph's prefix");
+  let chatter = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.export_updates_for(&vv_before).expect("delta export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&chatter).expect("chatter imports")
+  };
+  assert_eq!(stack_depths(&gate), (1, 0), "the prefix edit is hull-disjoint — the inverse rebased");
+
+  // Undo: the restore must NOT clobber B's prefix edit in the projection.
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  let canonical = {
+    let document = {
+      let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materializes")
+    };
+    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+  };
+  assert_eq!(live, canonical, "post-rebase undo leaves live == canonical (stale content patches must downgrade to derive)");
+  assert!(live.iter().any(|text| text.contains("REMOTE")), "the remote prefix edit survives the undo replay");
+}
+
+/// Bidirectionally seed `peer_gate` with `gate`'s history (both end holding
+/// both sentinels) — the standard two-peer test opening.
+fn exchange_full_histories(gate: &Arc<WriteGate<CrdtRuntime>>, peer_gate: &Arc<WriteGate<CrdtRuntime>>) {
+  let local_history = {
+    let g = gate.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export")
+  };
+  {
+    let mut g = peer_gate.lock(GateHolder::ImportChunk).expect("peer gate");
+    g.import_remote_update(&local_history).expect("peer imports local history")
+  };
+  let peer_history = {
+    let g = peer_gate.lock(GateHolder::Test).expect("peer gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export")
+  };
+  {
+    let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&peer_history).expect("local imports peer seed")
+  };
+}
+
+fn gate_state_vv(gate: &Arc<WriteGate<CrdtRuntime>>) -> loro::VersionVector {
+  let g = gate.lock(GateHolder::Test).expect("gate");
+  g.doc().state_vv()
+}
+
+/// Export `from`'s ops since `vv` and import them into `to`.
+fn sync_delta(from: &Arc<WriteGate<CrdtRuntime>>, to: &Arc<WriteGate<CrdtRuntime>>, vv: &loro::VersionVector) {
+  let delta = {
+    let g = from.lock(GateHolder::Test).expect("gate");
+    g.export_updates_for(vv).expect("delta export")
+  };
+  let mut g = to.lock(GateHolder::ImportChunk).expect("gate");
+  g.import_remote_update(&delta).expect("delta imports");
+}
+
+/// The live-projection audit: text AND styles must equal an independent full
+/// materialization (the styles half is what makes the mark-rebase tests bite).
+fn assert_live_equals_canonical(handle: &LocalDocHandle, gate: &Arc<WriteGate<CrdtRuntime>>, context: &str) {
+  let (live_text, live_styles) = {
+    let projection = handle.projection().expect("projection");
+    (
+      (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>(),
+      projection.paragraphs.iter().map(|p| p.style).collect::<Vec<_>>(),
+    )
+  };
+  let (canonical_text, canonical_styles) = {
+    let document = {
+      let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materializes")
+    };
+    (
+      (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>(),
+      document.paragraphs.iter().map(|p| p.style).collect::<Vec<_>>(),
+    )
+  };
+  assert_eq!(live_text, canonical_text, "{context}: live text == canonical");
+  assert_eq!(live_styles, canonical_styles, "{context}: live styles == canonical");
+}
+
+/// §oom-leads #9 v2 (select-all rebase): a mass restyle's recorded inverse is
+/// MARK-ONLY — its replay is position-neutral — so remote chatter INSIDE the
+/// restyled span rebases per-coordinate instead of clearing. (v1 demanded the
+/// chatter sit strictly before the recorded hull, which a select-all pins to
+/// the doc start: any chatter anywhere killed the fast path — the bench's
+/// UNDO-AFTER-REMOTE slow-path cliff.) Covers both stacks: a second chatter
+/// burst lands while the entry sits on the REDO side.
+#[test]
+fn select_all_restyle_rebases_per_coordinate_through_remote_chatter() {
+  let (handle, gate) = new_handle("select-all-rebase");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("select-all-rebase-peer");
+  exchange_full_histories(&gate, &peer_gate);
+
+  let styles_before: Vec<ParagraphStyle> = handle.projection().expect("projection").paragraphs.iter().map(|p| p.style).collect();
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: paragraph_ids(&handle),
+      style: ParagraphStyle::Custom(4),
+    })
+    .expect("select-all restyle");
+  assert_eq!(stack_depths(&gate), (1, 0), "the restyle armed a recorded inverse");
+
+  // B types in the MIDDLE of the restyled span — inside the v1 hull.
+  let vv = gate_state_vv(&peer_gate);
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&peer)[12], 0),
+      text: "partner typed inside ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter inside the span");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(stack_depths(&gate), (1, 0), "chatter inside the restyled span REBASED the mark entry per-coordinate");
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "select-all undo stayed FAST across the rebased import");
+  let after_undo = handle.projection().expect("projection");
+  let styles: Vec<ParagraphStyle> = after_undo.paragraphs.iter().map(|p| p.style).collect();
+  assert_eq!(styles, styles_before, "undo restored every paragraph's prior style");
+  let text = (0..after_undo.paragraphs.len()).map(|ix| paragraph_text(&after_undo, ix)).collect::<Vec<_>>();
+  assert!(text.iter().any(|t| t.contains("partner typed inside ")), "the partner's chatter survives the undo");
+  assert_live_equals_canonical(&handle, &gate, "select-all undo after mid-span chatter");
+
+  // Another chatter burst while the entry sits on the REDO stack.
+  let vv = gate_state_vv(&peer_gate);
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&peer)[3], 2),
+      text: "more partner text ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter while entry is on the redo stack");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(stack_depths(&gate), (0, 1), "redo-stack mark entries rebase per-coordinate too");
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "select-all redo stayed FAST");
+  let after_redo = handle.projection().expect("projection");
+  assert!(
+    after_redo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Custom(4)),
+    "redo re-applied the restyle to every paragraph"
+  );
+  assert_live_equals_canonical(&handle, &gate, "select-all redo after second chatter");
+}
+
+/// §oom-leads #9 v2: a remote delete that REMOVES a targeted boundary (merges
+/// two paragraphs) drops that TARGET, not the whole entry — the native slow
+/// path's remote-diff transform would exclude the dead boundary the same way.
+#[test]
+fn select_all_rebase_drops_targets_whose_boundary_the_remote_deleted() {
+  let (handle, gate) = new_handle("select-all-drop-target");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("select-all-drop-target-peer");
+  exchange_full_histories(&gate, &peer_gate);
+
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: paragraph_ids(&handle),
+      style: ParagraphStyle::Custom(4),
+    })
+    .expect("select-all restyle");
+  assert_eq!(stack_depths(&gate), (1, 0), "the restyle armed a recorded inverse");
+
+  // B deletes across the paragraph 9/10 boundary — that boundary char dies.
+  let vv = gate_state_vv(&peer_gate);
+  let peer_ids = paragraph_ids(&peer);
+  peer
+    .delete_range(DeleteRangeIntent {
+      start: TextAnchor::new(peer_ids[9], 4),
+      end: TextAnchor::new(peer_ids[10], 2),
+    })
+    .expect("peer merges two paragraphs");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(stack_depths(&gate), (1, 0), "the mark entry survived with the dead boundary's target dropped");
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "undo stayed FAST despite the dropped target");
+  let after_undo = handle.projection().expect("projection");
+  assert!(
+    after_undo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Normal),
+    "undo reverted every surviving paragraph (the merged one rides its surviving boundary)"
+  );
+  assert_live_equals_canonical(&handle, &gate, "select-all undo after remote boundary delete");
+
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "redo stayed FAST");
+  let after_redo = handle.projection().expect("projection");
+  assert!(
+    after_redo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Custom(4)),
+    "redo re-restyled every surviving paragraph"
+  );
+  assert_live_equals_canonical(&handle, &gate, "select-all redo after remote boundary delete");
+}
+
+/// §oom-leads #9 v2 (suffix truncation + the slow-path handoff): remote chatter
+/// AFTER a deep keystroke's hull truncates the keystroke entry, but the
+/// mark-only select-all entry ABOVE it survives per-coordinate. Undo #1 replays
+/// fast; undo #2 finds the recorded stack dry and takes the native slow path,
+/// which must transform through the buffered remote diff correctly (the vendor
+/// patch #22 window: the fast step's inverse commit already transformed the
+/// buffers, native-style).
+#[test]
+fn mark_top_survives_while_deeper_keystroke_truncates_then_slow_path_converges() {
+  let (handle, gate) = new_handle("mark-top-truncate");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("mark-top-truncate-peer");
+  exchange_full_histories(&gate, &peer_gate);
+
+  // A types at paragraph 8 (captured content entry, hull deep in the doc)...
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&handle)[8], 4),
+      text: "X".into(),
+      style_override: None,
+    })
+    .expect("local keystroke commits");
+  // ...then select-all restyles (mark entry on top).
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: paragraph_ids(&handle),
+      style: ParagraphStyle::Custom(6),
+    })
+    .expect("select-all restyle");
+  assert_eq!(stack_depths(&gate), (2, 0), "keystroke + restyle both recorded");
+
+  // B types at paragraph 20 — AFTER the keystroke's hull, inside the mark span.
+  let vv = gate_state_vv(&peer_gate);
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&peer)[20], 0),
+      text: "partner deep chatter ".into(),
+      style_override: None,
+    })
+    .expect("peer chatter after the keystroke hull");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(
+    stack_depths(&gate),
+    (1, 0),
+    "the mark top survived per-coordinate; the keystroke entry (chatter after its hull) truncated"
+  );
+
+  // Undo #1: the mark entry, fast.
+  assert!(handle.apply_undo().expect("undo #1 runs").applied);
+  let after_first_undo = handle.projection().expect("projection");
+  assert!(after_first_undo.paragraphs.iter().all(|p| p.style == ParagraphStyle::Normal), "undo #1 reverted the restyle");
+  // Undo #2: recorded stack dry — the native slow path pops the keystroke item
+  // and must land exactly on the keystroke (partner text intact).
+  assert!(handle.apply_undo().expect("undo #2 runs").applied);
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  assert!(!live.iter().any(|text| text.contains('X')), "the slow-path undo removed the keystroke");
+  assert!(live.iter().any(|text| text.contains("partner deep chatter ")), "the partner's chatter survives both undos");
+  assert_live_equals_canonical(&handle, &gate, "fast mark undo then slow keystroke undo");
+}
+
+/// §oom-leads #9 v2 (structural rebase): a remote paragraph SPLIT strictly
+/// before a captured keystroke's hull shifts the recorded coordinates like any
+/// other insert — the entry survives (patches downgrade to the derive ladder;
+/// the projection row set changed) instead of clearing.
+#[test]
+fn keystroke_rebase_survives_remote_structural_insert_before_hull() {
+  let (handle, gate) = new_handle("keystroke-structural-rebase");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("keystroke-structural-rebase-peer");
+  exchange_full_histories(&gate, &peer_gate);
+
+  let paragraph_count_before = handle.projection().expect("projection").paragraphs.len();
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&handle)[16], 4),
+      text: "X".into(),
+      style_override: None,
+    })
+    .expect("local keystroke commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "the keystroke armed a recorded inverse");
+
+  // B splits paragraph 2 — a structural `\n` insert strictly before the hull.
+  let vv = gate_state_vv(&peer_gate);
+  peer
+    .split_paragraph(SplitParagraphIntent {
+      at: TextAnchor::new(paragraph_ids(&peer)[2], 3),
+      inherited_style: ParagraphStyle::Normal,
+    })
+    .expect("peer splits a paragraph above the hull");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(stack_depths(&gate), (1, 0), "structural chatter above the hull REBASED the keystroke entry (derive), not cleared");
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "keystroke undo stayed FAST across the structural rebase");
+  let after_undo = handle.projection().expect("projection");
+  assert_eq!(after_undo.paragraphs.len(), paragraph_count_before + 1, "the remote split survives the undo");
+  let undo_text = (0..after_undo.paragraphs.len()).map(|ix| paragraph_text(&after_undo, ix)).collect::<Vec<_>>();
+  assert!(!undo_text.iter().any(|t| t.contains('X')), "the undone keystroke is gone");
+  assert_live_equals_canonical(&handle, &gate, "keystroke undo after remote structural insert");
+
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "keystroke redo stayed FAST");
+  let after_redo = handle.projection().expect("projection");
+  let redo_text = (0..after_redo.paragraphs.len()).map(|ix| paragraph_text(&after_redo, ix)).collect::<Vec<_>>();
+  assert!(redo_text.iter().any(|t| t.contains('X')), "redo re-applied the keystroke at the shifted position");
+  assert_live_equals_canonical(&handle, &gate, "keystroke redo after remote structural insert");
+}
+
+/// §oom-leads #9 v2 (the at-coordinate trap stays closed): a remote insert
+/// EXACTLY AT a recorded coordinate is ambiguous — the CRDT parks remote edits
+/// whose neighbors were locally touched at that spot — so the entry must CLEAR
+/// (slow path), never shift-and-replay (which would delete the partner's char).
+#[test]
+fn remote_insert_at_recorded_coordinate_clears_instead_of_rebasing() {
+  let (handle, gate) = new_handle("keystroke-at-coordinate");
+  seed_mass_fragment(&handle, 24, None);
+  let (peer, peer_gate) = new_handle("keystroke-at-coordinate-peer");
+  exchange_full_histories(&gate, &peer_gate);
+
+  let vv_peer_baseline = gate_state_vv(&gate);
+  handle
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&handle)[16], 4),
+      text: "X".into(),
+      style_override: None,
+    })
+    .expect("local keystroke commits");
+  assert_eq!(stack_depths(&gate), (1, 0), "the keystroke armed a recorded inverse");
+
+  // B sees the keystroke, then types at the SAME anchor — its char lands
+  // exactly at the recorded delete coordinate.
+  sync_delta(&gate, &peer_gate, &vv_peer_baseline);
+  let vv = gate_state_vv(&peer_gate);
+  peer
+    .insert_text(InsertTextIntent {
+      at: TextAnchor::new(paragraph_ids(&peer)[16], 4),
+      text: "Y".into(),
+      style_override: None,
+    })
+    .expect("peer types at the recorded coordinate");
+  sync_delta(&peer_gate, &gate, &vv);
+  assert_eq!(stack_depths(&gate), (0, 0), "an insert AT the recorded coordinate cleared the entry (ambiguous parking spot)");
+
+  // The slow path still serves the undo, removing exactly the local 'X'.
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  assert!(!live.iter().any(|text| text.contains('X')), "the undone keystroke is gone");
+  assert!(live.iter().any(|text| text.contains('Y')), "the partner's at-coordinate char survives");
+  assert_live_equals_canonical(&handle, &gate, "slow-path undo after at-coordinate chatter");
+}
+
 /// §act-five P3-deep convergence: a restyle→undo→redo run must converge with a
 /// peer after a BIDIRECTIONAL exchange. (An earlier one-way variant "diverged"
 /// only because the fresh peer seeds its OWN sentinel paragraph — `new_empty`
@@ -730,8 +1524,8 @@ fn recorded_inverse_stack_restyle_undo_redo_converges_bidirectionally() {
   let peer_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("peer export");
   {
     let mut g = gate.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&peer_seed).expect("local imports peer seed");
-  }
+    g.import_remote_update(&peer_seed).expect("local imports peer seed")
+  };
   let local_after = {
     let g = gate.lock(GateHolder::Test).expect("gate");
     styles(g.doc())
@@ -772,14 +1566,104 @@ fn retained_import_calculator_converges_over_many_sequential_imports() {
   let b_seed = peer.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B");
   {
     let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
-    g.import_remote_update(&b_seed).expect("A imports B seed");
-  }
+    g.import_remote_update(&b_seed).expect("A imports B seed")
+  };
   let a_body = {
     let g = gate_a.lock(GateHolder::Test).expect("gate");
     flowstate_document::loro_schema::body_text(g.doc()).to_string()
   };
   let b_body = flowstate_document::loro_schema::body_text(peer.doc()).to_string();
   assert_eq!(b_body, a_body, "peer converges after 24 sequential retained-calculator imports");
+}
+
+/// §oom-leads #9 P1.C (vendor patch #21, meet-clamped diff feed): the RECEIVER
+/// keeps making local edits between sequential imports from a peer that never
+/// syncs back — the bench's REMOTE-STRUCT-BARE shape and the deep-LCA
+/// pathology's trigger. The retained import calculator is never fed local
+/// commits, so its tracker has a coverage GAP each round; the clamp must
+/// re-feed exactly that gap (a clamped-away hole corrupts the import diff's
+/// retain offsets and diverges the body).
+#[test]
+fn meet_clamped_import_feed_converges_with_interleaved_local_edits() {
+  let (handle_a, gate_a) = new_handle("p21-clamp-a");
+  seed_mass_fragment(&handle_a, 8, None);
+  let (handle_b, gate_b) = new_handle("p21-clamp-b");
+  let a_init = {
+    let g = gate_a.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A init")
+  };
+  {
+    let mut g = gate_b.lock(GateHolder::ImportChunk).expect("B gate");
+    g.import_remote_update(&a_init).expect("B imports A init")
+  };
+  let b_init = {
+    let g = gate_b.lock(GateHolder::Test).expect("B gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export B init")
+  };
+  {
+    let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&b_init).expect("A imports B init")
+  };
+
+  let mut b_exported_vv = {
+    let g = gate_b.lock(GateHolder::Test).expect("B gate");
+    g.doc().state_vv()
+  };
+  for i in 0..16 {
+    // B edits its own copy — a growing chain A must import; B NEVER imports
+    // A's edits, so every delta is maximally concurrent with A's local work
+    // (the deep-dominator shape).
+    let b_target = paragraph_ids(&handle_b)[1];
+    handle_b
+      .insert_text(InsertTextIntent { at: TextAnchor::new(b_target, 0), text: format!("b{i} "), style_override: None })
+      .expect("B edit commits");
+    // A makes a LOCAL edit — the retained import calculator's coverage gap.
+    let a_target = paragraph_ids(&handle_a)[3];
+    handle_a
+      .insert_text(InsertTextIntent { at: TextAnchor::new(a_target, 0), text: format!("a{i} "), style_override: None })
+      .expect("A edit commits");
+    let delta = {
+      let g = gate_b.lock(GateHolder::Test).expect("B gate");
+      let delta = g.export_updates_for(&b_exported_vv).expect("B delta export");
+      b_exported_vv = g.doc().state_vv();
+      delta
+    };
+    let mut g = gate_a.lock(GateHolder::ImportChunk).expect("gate");
+    g.import_remote_update(&delta).expect("A imports B delta");
+  }
+
+  // Close the loop: B takes A's full history; both canonical bodies must match.
+  let a_full = {
+    let g = gate_a.lock(GateHolder::Test).expect("gate");
+    g.doc().export(loro::ExportMode::updates(&loro::VersionVector::default())).expect("export A full")
+  };
+  {
+    let mut g = gate_b.lock(GateHolder::ImportChunk).expect("B gate");
+    g.import_remote_update(&a_full).expect("B imports A full")
+  };
+  let a_body = {
+    let g = gate_a.lock(GateHolder::Test).expect("gate");
+    flowstate_document::loro_schema::body_text(g.doc()).to_string()
+  };
+  let b_body = {
+    let g = gate_b.lock(GateHolder::Test).expect("B gate");
+    flowstate_document::loro_schema::body_text(g.doc()).to_string()
+  };
+  assert_eq!(b_body, a_body, "interleaved local edits + one-way sequential imports converge (gap re-feed is complete)");
+  // And A's LIVE projection must equal its canonical materialization — a
+  // clamped-away tracker hole shows up as a projection/doc offset mismatch.
+  let live = {
+    let projection = handle_a.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  let canonical = {
+    let document = {
+      let guard = gate_a.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materializes")
+    };
+    (0..document.paragraphs.len()).map(|ix| paragraph_text(&document, ix)).collect::<Vec<_>>()
+  };
+  assert_eq!(live, canonical, "A's live projection == canonical after clamped imports");
 }
 
 fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo> {
@@ -796,11 +1680,11 @@ fn slot_direction(gate: &Arc<WriteGate<CrdtRuntime>>) -> Option<loro::UndoOrRedo
 }
 
 fn paragraph_ids(handle: &LocalDocHandle) -> Vec<ParagraphId> {
-  handle.projection().expect("projection").ids.paragraph_ids.clone()
+  handle.projection().expect("projection").ids.paragraph_ids.to_vec()
 }
 
 fn block_ids(handle: &LocalDocHandle) -> Vec<flowstate_document::BlockId> {
-  handle.projection().expect("projection").ids.block_ids.clone()
+  handle.projection().expect("projection").ids.block_ids.to_vec()
 }
 
 /// The core round trip: a qualifying mass delete arms the slot; undo replays
@@ -907,9 +1791,11 @@ fn recorded_inverse_restores_object_blocks_with_original_ids() {
   assert_eq!(equation, "e = mc^2");
 }
 
-/// A remote import between the delete and the undo kills the fast path (slot
-/// cleared) — undo still works through the checkout-based slow path and keeps
-/// BOTH the restored content and the remote edit.
+/// A remote import whose change lands INSIDE the recorded hull kills the fast
+/// path (stacks cleared) — undo still works through the checkout-based slow
+/// path and keeps BOTH the restored content and the remote edit. (§oom-leads
+/// #9: a hull-DISJOINT import now rebases instead — see
+/// `recorded_inverse_rebases_across_hull_disjoint_remote_import`.)
 #[test]
 fn recorded_inverse_declines_after_remote_import() {
   let (handle, gate) = new_handle("recorded-inverse-import");
@@ -943,15 +1829,17 @@ fn recorded_inverse_declines_after_remote_import() {
     .expect("mass delete commits");
   assert_eq!(slot_direction(&gate), Some(loro::UndoOrRedo::Undo));
 
-  // Remote edit lands between delete and undo.
+  // Remote edit lands between delete and undo, INSIDE the deleted range's
+  // hull (the delete spans paragraphs 2..38 — body position 500 is well
+  // within it), so the rebase is unsound and the stacks must clear.
   let peer_body = flowstate_document::loro_schema::body_text(peer.doc());
-  peer_body.insert(1, "REMOTE").expect("peer insert");
+  peer_body.insert(500, "REMOTE").expect("peer insert");
   peer.doc().commit();
   let update = peer.doc().export(loro::ExportMode::updates(&peer_vv)).expect("export");
   let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
   guard.import_remote_update(&update).expect("import applies");
   drop(guard);
-  assert_eq!(slot_direction(&gate), None, "an import must clear the recorded inverse");
+  assert_eq!(slot_direction(&gate), None, "an in-hull import must clear the recorded inverse");
 
   let outcome = handle.apply_undo().expect("undo still runs via the slow path");
   assert!(outcome.applied);
@@ -1187,8 +2075,8 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   };
   {
     let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
-    guard.import_remote_updates(&[&b_update]).expect("A imports B's tag");
-  }
+    guard.import_remote_updates(&[&b_update]).expect("A imports B's tag")
+  };
 
   // Read (styles, any-highlight) from the LIVE projection and from a fresh
   // canonical materialization — divergence between them localizes the fault.
@@ -1199,8 +2087,10 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
     (styles, any_highlight)
   };
   let canonical = |gate: &Arc<WriteGate<CrdtRuntime>>| {
-    let guard = gate.lock(GateHolder::Test).expect("gate healthy");
-    let doc = flowstate_document::document_from_loro(guard.doc()).expect("materialize canonical");
+    let doc = {
+      let guard = gate.lock(GateHolder::Test).expect("gate healthy");
+      flowstate_document::document_from_loro(guard.doc()).expect("materialize canonical")
+    };
     let styles: Vec<ParagraphStyle> = doc.paragraphs.iter().map(|paragraph| paragraph.style).collect();
     let any_highlight = doc.paragraphs.iter().any(|paragraph| paragraph.runs.iter().any(|run| run.styles.highlight.is_some()));
     (styles, any_highlight)
@@ -1210,7 +2100,7 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   // touches only its run-style highlight, so paragraph styles must be identical
   // to B's tag result before undo, after undo, and after convergence.
   let expected_styles = canonical(&gate_b).0;
-  assert!(expected_styles.iter().any(|style| *style == tag), "B's tag must land on the durable paragraphs: {expected_styles:?}");
+  assert!(expected_styles.contains(&tag), "B's tag must land on the durable paragraphs: {expected_styles:?}");
 
   // Before undo A already reflects BOTH edits.
   let (styles_before, hl_before) = live(&handle_a);
@@ -1241,8 +2131,8 @@ fn local_undo_of_highlight_preserves_concurrent_remote_paragraph_style() {
   };
   {
     let mut guard = gate_b.lock(GateHolder::ImportChunk).expect("gate healthy");
-    guard.import_remote_updates(&[&a_after]).expect("B imports A's post-undo history");
-  }
+    guard.import_remote_updates(&[&a_after]).expect("B imports A's post-undo history")
+  };
   let (styles_b, hl_b) = canonical(&gate_b);
   assert!(!hl_b, "peer B converges on highlight-removed");
   assert_eq!(styles_b, expected_styles, "peer B keeps the remote tag after convergence");
@@ -1312,3 +2202,175 @@ fn recorded_inverse_fast_undo_round_trips_mass_replace() {
   assert_eq!(local_text, peer_text, "replicas converge on the replace-all fast-path history");
   assert!(!peer_text.contains("COLUMN"), "converged on the undone (original) content");
 }
+
+/// §act-twelve A12.2.2: Enter (`SplitParagraph`) is captured — undo merges the
+/// split back (retiring the new records), redo re-splits with the SAME
+/// paragraph id (identity preservation), and none of it clears deeper
+/// captured entries.
+#[test]
+fn recorded_inverse_captures_split_paragraph() {
+  let (handle, gate) = new_handle("split-capture");
+  seed_mass_fragment(&handle, 8, None);
+  let target = paragraph_ids(&handle)[3];
+  let count_before = handle.projection().expect("projection").paragraphs.len();
+
+  let outcome = handle
+    .split_paragraph(SplitParagraphIntent {
+      at: TextAnchor::new(target, 5),
+      inherited_style: ParagraphStyle::Normal,
+    })
+    .expect("split commits");
+  let _ = outcome;
+  assert_eq!(stack_depths(&gate), (1, 0), "the split armed a recorded inverse");
+  let split_ids: Vec<ParagraphId> = handle.projection().expect("projection").ids.paragraph_ids.to_vec();
+  assert_eq!(split_ids.len(), count_before + 1);
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "split undo stayed FAST");
+  let after_undo = handle.projection().expect("projection");
+  assert_eq!(after_undo.paragraphs.len(), count_before, "undo merged the split back");
+  assert_live_equals_canonical(&handle, &gate, "split undo");
+
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "split redo stayed FAST");
+  let after_redo = handle.projection().expect("projection");
+  assert_eq!(
+    after_redo.ids.paragraph_ids.to_vec(),
+    split_ids,
+    "redo re-created the boundary with the SAME paragraph identity"
+  );
+  assert_live_equals_canonical(&handle, &gate, "split redo");
+}
+
+/// §act-twelve A12.2.2: Backspace at paragraph start (`JoinParagraphs`) is
+/// captured — undo re-creates the boundary with the second paragraph's
+/// ORIGINAL id and prior style; redo re-joins.
+#[test]
+fn recorded_inverse_captures_join_paragraphs() {
+  let (handle, gate) = new_handle("join-capture");
+  seed_mass_fragment(&handle, 8, None);
+  let ids_before: Vec<ParagraphId> = handle.projection().expect("projection").ids.paragraph_ids.to_vec();
+  let (first, second) = (ids_before[3], ids_before[4]);
+  // Give the second paragraph a distinct style so undo must restore it.
+  handle
+    .set_paragraph_styles(SetParagraphStylesIntent {
+      paragraphs: handle.projection().expect("projection").ids.paragraph_ids.to_vec(),
+      style: ParagraphStyle::Custom(2),
+    })
+    .expect("restyle commits");
+
+  handle
+    .join_paragraphs(crate::local_write::JoinParagraphsIntent { first, second })
+    .expect("join commits");
+  assert_eq!(stack_depths(&gate), (2, 0), "restyle + join both recorded");
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 1), "join undo stayed FAST");
+  let after_undo = handle.projection().expect("projection");
+  assert_eq!(after_undo.ids.paragraph_ids.to_vec(), ids_before, "undo restored the second paragraph's ORIGINAL id");
+  let second_ix = after_undo.ids.paragraph_ids.iter().position(|id| *id == second).expect("second restored");
+  assert_eq!(after_undo.paragraphs[second_ix].style, ParagraphStyle::Custom(2), "undo restored the second paragraph's prior style");
+  assert_live_equals_canonical(&handle, &gate, "join undo");
+
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (2, 0), "join redo stayed FAST");
+  assert_eq!(
+    handle.projection().expect("projection").paragraphs.len(),
+    ids_before.len() - 1,
+    "redo re-joined the paragraphs"
+  );
+  assert_live_equals_canonical(&handle, &gate, "join redo");
+}
+
+/// §act-twelve A12.2.2: `SetMarks` (bold/italic class) is captured — undo
+/// restores the EXACT prior per-span run styles (the seeded content mixes
+/// underline/strikethrough runs), redo re-applies the uniform mark.
+#[test]
+fn recorded_inverse_captures_set_marks() {
+  let (handle, gate) = new_handle("marks-capture");
+  seed_mass_fragment(&handle, 8, None);
+  let target = paragraph_ids(&handle)[3];
+  let runs_before = format!("{:?}", handle.projection().expect("projection").paragraphs[3].runs);
+
+  handle
+    .set_marks(SetMarksIntent {
+      start: TextAnchor::new(target, 2),
+      end: TextAnchor::new(target, 40),
+      styles: flowstate_document::RunStyles {
+        strikethrough: true,
+        ..Default::default()
+      },
+    })
+    .expect("marks commit");
+  assert_eq!(stack_depths(&gate), (1, 0), "the mark op armed a recorded inverse");
+  let runs_marked = format!("{:?}", handle.projection().expect("projection").paragraphs[3].runs);
+  assert_ne!(runs_before, runs_marked, "the mark changed the runs");
+
+  assert!(handle.apply_undo().expect("undo runs").applied);
+  assert_eq!(stack_depths(&gate), (0, 1), "marks undo stayed FAST");
+  assert_eq!(
+    format!("{:?}", handle.projection().expect("projection").paragraphs[3].runs),
+    runs_before,
+    "undo restored the exact prior run styles"
+  );
+  assert_live_equals_canonical(&handle, &gate, "marks undo");
+
+  assert!(handle.apply_redo().expect("redo runs").applied);
+  assert_eq!(stack_depths(&gate), (1, 0), "marks redo stayed FAST");
+  assert_eq!(
+    format!("{:?}", handle.projection().expect("projection").paragraphs[3].runs),
+    runs_marked,
+    "redo re-applied the mark"
+  );
+  assert_live_equals_canonical(&handle, &gate, "marks redo");
+}
+
+/// §act-twelve A12.2.2: the typing-session shape — keystrokes, Enter, marks,
+/// restyle, backspace-join chained; EVERY undo and redo must stay on the
+/// fast path (the stacks prove it: each fast step moves one entry).
+#[test]
+fn recorded_inverse_chains_full_typing_session() {
+  let (handle, gate) = new_handle("session-capture");
+  seed_mass_fragment(&handle, 8, None);
+  let target = paragraph_ids(&handle)[2];
+  let original_text = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+
+  handle
+    .insert_text(InsertTextIntent { at: TextAnchor::new(target, 0), text: "abc".into(), style_override: None })
+    .expect("keystrokes");
+  handle
+    .split_paragraph(SplitParagraphIntent { at: TextAnchor::new(target, 3), inherited_style: ParagraphStyle::Normal })
+    .expect("enter");
+  handle
+    .set_marks(SetMarksIntent {
+      start: TextAnchor::new(target, 0),
+      end: TextAnchor::new(target, 3),
+      styles: flowstate_document::RunStyles { direct_underline: true, ..Default::default() },
+    })
+    .expect("bold-ish");
+  handle
+    .set_paragraph_style(crate::local_write::SetParagraphStyleIntent { paragraph: target, style: ParagraphStyle::Custom(3) })
+    .expect("restyle one");
+  assert_eq!(stack_depths(&gate), (4, 0), "all four ops recorded");
+
+  for step in 0..4 {
+    assert!(handle.apply_undo().expect("undo runs").applied, "undo {step} applied");
+  }
+  assert_eq!(stack_depths(&gate), (0, 4), "ALL undos stayed on the fast path");
+  let live = {
+    let projection = handle.projection().expect("projection");
+    (0..projection.paragraphs.len()).map(|ix| paragraph_text(&projection, ix)).collect::<Vec<_>>()
+  };
+  assert_eq!(live, original_text, "the session fully unwound");
+  assert_live_equals_canonical(&handle, &gate, "session unwind");
+
+  for step in 0..4 {
+    assert!(handle.apply_redo().expect("redo runs").applied, "redo {step} applied");
+  }
+  assert_eq!(stack_depths(&gate), (4, 0), "ALL redos stayed on the fast path");
+  assert_live_equals_canonical(&handle, &gate, "session replay");
+}
+

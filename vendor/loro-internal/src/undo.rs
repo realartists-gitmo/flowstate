@@ -207,6 +207,15 @@ struct UndoManagerInner {
     merge_interval_in_ms: i64,
     max_stack_size: usize,
     exclude_origin_prefixes: Vec<Box<str>>,
+    // §flowstate vendor patch #14 (act-ten A10.2): origins whose local commits
+    // are IGNORED by the undo stacks entirely — not recorded AND not composed
+    // as remote-like pending diffs. Sound only for commits that can never touch
+    // content an undo item references (flowstate's "meta" metadata/revision
+    // commits, which write disjoint meta containers). The plain excluded-origin
+    // path marks the stacks dirty (`compose_remote_event`), which flips
+    // `peek_top_span`'s `clean` flag and forces the external fast path to bail
+    // after every autosave.
+    inert_origin_prefixes: Vec<Box<str>>,
     last_popped_selection: Option<Vec<CursorWithPos>>,
     on_push: Option<OnPush>,
     on_pop: Option<OnPop>,
@@ -529,6 +538,7 @@ impl UndoManagerInner {
             last_undo_time: 0,
             max_stack_size: usize::MAX,
             exclude_origin_prefixes: vec![],
+            inert_origin_prefixes: vec![],
             last_popped_selection: None,
             on_pop: None,
             on_push: None,
@@ -633,6 +643,31 @@ impl UndoManager {
                 // the DiffBatch for undo here
                 let lock = inner_clone.lock();
                 if lock.borrow().processing_undo {
+                    // §flowstate vendor patch #22: during an EXTERNAL fast step
+                    // (external_step_begin..finish), the application's inverse
+                    // commit lands here muted — but the native path transforms
+                    // the popped-from stack's buffered remote diffs through the
+                    // undo commit's diff (undo_internal's <transform_delta>
+                    // callback). Mirror that exactly, else a later slow-path pop
+                    // of a deeper item transforms through stale coordinates.
+                    let external_kind = lock
+                        .borrow()
+                        .external_popped
+                        .as_ref()
+                        .map(|(kind, _)| *kind);
+                    if let Some(kind) = external_kind {
+                        let mut batch = DiffBatch::default();
+                        for e in event.events {
+                            batch.cid_to_events.insert(e.id.clone(), e.diff.clone());
+                            batch.order.push(e.id.clone());
+                        }
+                        let mut inner = lock.borrow_mut();
+                        let stack = match kind {
+                            UndoOrRedo::Undo => &mut inner.undo_stack,
+                            UndoOrRedo::Redo => &mut inner.redo_stack,
+                        };
+                        stack.transform_based_on_this_delta(&batch);
+                    }
                     return;
                 }
                 if let Some(id) = event
@@ -641,6 +676,20 @@ impl UndoManager {
                     .iter()
                     .find(|x| x.peer == peer_clone.load(std::sync::atomic::Ordering::Relaxed))
                 {
+                    let should_ignore = lock
+                        .borrow()
+                        .inert_origin_prefixes
+                        .iter()
+                        .any(|x| event.event_meta.origin.starts_with(&**x));
+                    if should_ignore {
+                        // §flowstate vendor patch #14: inert origin — advance the
+                        // counter bookkeeping so the next real op's span starts
+                        // after these ops, but leave both stacks untouched (no
+                        // record, no remote-compose ⇒ `clean` stays true).
+                        let mut inner = lock.borrow_mut();
+                        inner.next_counter = Some(id.counter + 1);
+                        return;
+                    }
                     let should_exclude = lock
                         .borrow()
                         .exclude_origin_prefixes
@@ -748,6 +797,18 @@ impl UndoManager {
 
     pub fn set_max_undo_steps(&self, size: usize) {
         self.inner.lock().borrow_mut().max_stack_size = size;
+    }
+
+    /// §flowstate vendor patch #14: register an origin prefix whose local
+    /// commits the undo stacks IGNORE entirely (no record, no remote-compose).
+    /// Use only for commits that provably never touch content any undo item
+    /// references — otherwise stored cursors would go stale un-rebased.
+    pub fn add_inert_origin_prefix(&self, prefix: &str) {
+        self.inner
+            .lock()
+            .borrow_mut()
+            .inert_origin_prefixes
+            .push(prefix.into());
     }
 
     pub fn add_exclude_origin_prefix(&self, prefix: &str) {

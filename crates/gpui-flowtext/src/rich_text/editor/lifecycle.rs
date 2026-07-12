@@ -4,6 +4,41 @@ fn projection_with_local_theme(mut document: DocumentProjection, theme: &Documen
   document
 }
 
+// §act-nine A9.3 version discipline (prerequisite for content-keyed layout
+// caches): a canonical install replaces THE projection with materializer
+// output whose paragraph versions all restart at 0. The layout caches key on
+// (style, version), so a surviving paragraph id whose content changed would
+// collide with its cached entries and serve stale layout. Carry every
+// surviving id's version FORWARD — always advanced by one, so a
+// (style, version) pair is never reused for possibly-different content.
+// Conservative by design: surviving-but-unchanged paragraphs re-prep once per
+// canonical install (a rare whole-document event). Genuinely new ids keep 0.
+fn carry_forward_paragraph_versions(previous: &DocumentProjection, incoming: &mut DocumentProjection) {
+  if previous.paragraphs.is_empty() || incoming.paragraphs.is_empty() {
+    return;
+  }
+  let mut previous_versions: FxHashMap<ParagraphId, u64> = FxHashMap::default();
+  for (ix, id) in previous.ids.paragraph_ids.iter().enumerate() {
+    if let Some(paragraph) = previous.paragraphs.get(ix) {
+      previous_versions.insert(*id, paragraph.version);
+    }
+  }
+  let ids = incoming.ids.paragraph_ids.clone();
+  for (ix, id) in ids.iter().enumerate() {
+    let Some(previous_version) = previous_versions.get(id) else {
+      continue;
+    };
+    if let Some(paragraph) = paragraphs_mut(incoming).get_mut(ix) {
+      paragraph.version = previous_version.wrapping_add(1);
+    }
+    // Mirror into the block copy — the projection invariant every other
+    // paragraph mutation site maintains.
+    if let Some(row) = incoming.blocks.block_row_for_paragraph_ix(ix) {
+      update_paragraph_block_at(incoming, ix, row);
+    }
+  }
+}
+
 #[hotpath::measure_all]
 impl RichTextEditor {
   pub fn clear_document_equation_caches(&self) {
@@ -33,6 +68,7 @@ impl RichTextEditor {
       write_authority: None,
       document,
       selection: EditorSelection::caret(),
+      caret_anchor: None,
       selection_movement_epoch: 0,
       config: RichTextEditorConfig::default(),
       edit_generation: 0,
@@ -85,9 +121,9 @@ impl RichTextEditor {
       pending_typing_prefetch_resume: false,
       resume_chunk_prefetch_after_typing: false,
       paragraph_chunk_layout_cache: vec![None; paragraph_count],
-      paragraph_prep_cache: vec![ParagraphPrepSlot::default(); paragraph_count],
-      paragraph_shaping_cache: (0..paragraph_count).map(|_| None).collect(),
-      paragraph_estimate_height_cache: vec![None; paragraph_count],
+      paragraph_prep_cache: FxHashMap::default(),
+      paragraph_shaping_cache: FxHashMap::default(),
+      paragraph_estimate_height_cache: FxHashMap::default(),
       pending_layout_prep_task: None,
       pending_layout_prep_request: None,
       layout_generation: 0,
@@ -101,7 +137,6 @@ impl RichTextEditor {
       scroll_materialize_stall_frames: 0,
       item_sizes_cache: None,
       pending_item_sizes_patch_range: None,
-      layout_invalidation_hint: None,
       suppress_mutation_notify: 0,
       last_scroll_anchor: None,
       scroll_anchor_lock: None,
@@ -203,9 +238,9 @@ impl RichTextEditor {
     self.pending_typing_prefetch_resume = false;
     self.resume_chunk_prefetch_after_typing = false;
     self.paragraph_chunk_layout_cache = Vec::new();
-    self.paragraph_prep_cache = Vec::new();
-    self.paragraph_shaping_cache = Vec::new();
-    self.paragraph_estimate_height_cache = Vec::new();
+    self.paragraph_prep_cache = FxHashMap::default();
+    self.paragraph_shaping_cache = FxHashMap::default();
+    self.paragraph_estimate_height_cache = FxHashMap::default();
     self.pending_layout_prep_task = None;
     self.pending_layout_prep_request = None;
     self.layout_generation = self.layout_generation.wrapping_add(1);
@@ -217,7 +252,6 @@ impl RichTextEditor {
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
     self.item_sizes_cache = None;
     self.pending_item_sizes_patch_range = None;
-    self.layout_invalidation_hint = None;
     self.suppress_mutation_notify = 0;
     self.last_scroll_anchor = None;
     self.scroll_anchor_lock = None;
@@ -315,6 +349,10 @@ impl RichTextEditor {
 
   pub fn replace_document_projection(&mut self, document: DocumentProjection, cx: &mut Context<Self>) {
     self.install_canonical_projection(document, cx);
+    // Whole-document replacement: the stale-scan (content-key revalidation of
+    // every slot) is warranted HERE — the shared mutation hook no longer
+    // invalidates anything (§act-ten A10.12).
+    self.invalidate_stale_paragraph_layout_caches();
     self.after_text_mutation(cx);
   }
 

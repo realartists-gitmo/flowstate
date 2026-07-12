@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use super::{
   AssetId, AssetRecord, BlockId, DocumentProjection, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, TextRun,
 };
@@ -73,7 +75,12 @@ pub struct ProjectionPatchBatch {
   pub base_frontier: Vec<u8>,
   /// Frontier represented after every patch has been applied successfully.
   pub new_frontier: Vec<u8>,
-  pub patches: Vec<ProjectionPatch>,
+  // §perf-heaven T8.19: `Arc<[…]>` so the recorded-inverse undo/redo can SHARE
+  // its (possibly huge, mass-op) patch set with the emitted event instead of
+  // cloning it — the `patches.clone()` in `try_fast_step` becomes an O(1) refcount
+  // bump. Not serialized (`ProjectionPatchBatch` is `Clone, Debug` only), so this
+  // is purely an in-process representation change; every consumer reads by `&`.
+  pub patches: Arc<[ProjectionPatch]>,
 }
 
 impl ProjectionPatchBatch {

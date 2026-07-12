@@ -1,5 +1,6 @@
 mod cleaner;
 mod exporter;
+mod fragment_parse;
 #[cfg(test)]
 mod import_roundtrip_tests;
 mod interpreter;

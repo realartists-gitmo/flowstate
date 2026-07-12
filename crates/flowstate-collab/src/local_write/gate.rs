@@ -124,6 +124,13 @@ pub struct WriteGate<T> {
   /// release time, that somebody was waiting on it (the `contended` flag on its
   /// hold record).
   waiters: AtomicU64,
+  /// §A13.2: number of PRIORITY holders (local intents / undo) currently
+  /// blocked. Background holders defer briefly while this is non-zero —
+  /// `std::sync::Mutex` is unfair, so a hot background loop (import pump
+  /// under remote traffic) otherwise re-wins the gate release race for tens
+  /// of consecutive holds while a keystroke starves (measured: 2ms max hold
+  /// convoying into 37ms local waits).
+  priority_waiters: AtomicU64,
   /// Set while any hold is active with waiters observed; cleared on release.
   contention_seen: AtomicBool,
 }
@@ -159,6 +166,7 @@ impl<T> WriteGate<T> {
       inner: Mutex::new(inner),
       metrics: Arc::new(GateMetrics::default()),
       waiters: AtomicU64::new(0),
+      priority_waiters: AtomicU64::new(0),
       contention_seen: AtomicBool::new(false),
     }
   }
@@ -172,14 +180,35 @@ impl<T> WriteGate<T> {
   /// measures the hold and emits a structured record on release.
   pub fn lock(&self, holder: GateHolder) -> Result<GateGuard<'_, T>, GatePoisonedError> {
     let requested_at = Instant::now();
+    let priority = matches!(holder, GateHolder::LocalIntent | GateHolder::UndoRedo);
+    if !priority {
+      // §A13.2 priority lane: while a local edit is waiting, background
+      // holders step aside instead of racing it for the just-released gate.
+      // Bounded defer so a sustained typing burst can only delay (never
+      // starve) background progress; each deferral is at most one local
+      // hold's worth of time anyway (~0.1-0.4ms).
+      const MAX_PRIORITY_DEFER: std::time::Duration = std::time::Duration::from_millis(2);
+      if self.priority_waiters.load(Ordering::SeqCst) > 0 {
+        let defer_start = Instant::now();
+        while self.priority_waiters.load(Ordering::SeqCst) > 0 && defer_start.elapsed() < MAX_PRIORITY_DEFER {
+          std::thread::yield_now();
+        }
+      }
+    }
     let (guard, waited) = match self.inner.try_lock() {
       Ok(guard) => (guard, false),
       Err(std::sync::TryLockError::Poisoned(_)) => return Err(GatePoisonedError),
       Err(std::sync::TryLockError::WouldBlock) => {
         self.waiters.fetch_add(1, Ordering::SeqCst);
+        if priority {
+          self.priority_waiters.fetch_add(1, Ordering::SeqCst);
+        }
         self.contention_seen.store(true, Ordering::SeqCst);
         let result = self.inner.lock();
         self.waiters.fetch_sub(1, Ordering::SeqCst);
+        if priority {
+          self.priority_waiters.fetch_sub(1, Ordering::SeqCst);
+        }
         match result {
           Ok(guard) => (guard, true),
           Err(_) => return Err(GatePoisonedError),
@@ -264,6 +293,48 @@ mod tests {
     drop(held);
     waiter.join().expect("waiter completes");
     assert!(gate.metrics().contended_acquisitions.load(Ordering::Relaxed) >= 1, "waiting acquisition must be recorded as contended");
+  }
+
+  #[test]
+  fn priority_waiter_beats_a_hot_background_loop() {
+    // §A13.2: a background thread re-acquiring in a hot loop must not convoy
+    // out a waiting local intent (std Mutex is unfair without the lane).
+    let gate = Arc::new(WriteGate::new(0_u64));
+    let stop = Arc::new(AtomicBool::new(false));
+    let background = {
+      let gate = Arc::clone(&gate);
+      let stop = Arc::clone(&stop);
+      std::thread::spawn(move || {
+        let mut holds = 0u64;
+        while !stop.load(Ordering::Relaxed) {
+          let mut guard = gate.lock(GateHolder::ImportChunk).expect("gate healthy");
+          *guard += 1;
+          std::thread::sleep(std::time::Duration::from_micros(200));
+          drop(guard);
+          holds += 1;
+        }
+        holds
+      })
+    };
+    // Let the loop get hot, then time priority acquisitions from this thread.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    let mut worst = std::time::Duration::ZERO;
+    for _ in 0..50 {
+      let t = Instant::now();
+      let guard = gate.lock(GateHolder::LocalIntent).expect("gate healthy");
+      worst = worst.max(t.elapsed());
+      drop(guard);
+      std::thread::sleep(std::time::Duration::from_micros(300));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let holds = background.join().expect("background thread");
+    assert!(holds > 0, "background loop must make progress (no starvation)");
+    // Without the lane this convoys to many consecutive 200us holds; with it
+    // the worst wait is bounded by ~one hold plus scheduling noise.
+    assert!(
+      worst < std::time::Duration::from_millis(5),
+      "priority acquisition waited {worst:?} behind a hot background loop"
+    );
   }
 
   #[test]

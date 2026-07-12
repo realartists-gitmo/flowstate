@@ -51,6 +51,12 @@ pub struct ImageBlock {
   pub caption: Option<Paragraph>,
   pub sizing: ImageSizing,
   pub alignment: BlockAlignment,
+  /// §A11.9: a genuinely-LINKED image's external target URL (`a:blip r:link` /
+  /// VML `r:href` resolving to a `TargetMode="External"` relationship). Such an
+  /// image has no embedded media part — `asset_id` is derived from the URL
+  /// bytes and no [`AssetRecord`] carries bytes for it. `None` for embedded
+  /// images (the overwhelmingly common case).
+  pub external_url: Option<SharedString>,
   pub version: u64,
 }
 

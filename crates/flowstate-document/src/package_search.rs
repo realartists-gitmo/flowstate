@@ -22,21 +22,56 @@ pub(crate) fn search_units_from_input_blocks(
   document_id: u128,
   frontier: &[u8],
 ) -> io::Result<Vec<SearchUnitChunk>> {
+  let probe0 = std::time::Instant::now();
   let body = crate::loro_schema::body_text(doc);
+  let body_paragraph_ranges = body_paragraph_cursor_ranges(&body);
+  let probe_ranges = probe0.elapsed();
+  // §A13.4.2 (vendor patch #26): resolve EVERY paragraph range's cursors in
+  // one batched state acquisition — per-call `get_cursor` overhead dominated
+  // the search reindex (~21k calls on a 5k-paragraph doc).
+  let cursor_queries: Vec<(usize, loro::cursor::Side)> = body_paragraph_ranges
+    .iter()
+    .flat_map(|range| [(range.start, loro::cursor::Side::Left), (range.end, loro::cursor::Side::Right)])
+    .collect();
+  let probe = std::env::var_os("FLOWSTATE_OPEN_PROBE").is_some();
+  let probe_t = std::time::Instant::now();
+  let resolved = {
+    use loro::ContainerTrait as _;
+    body.to_handler().get_cursors_batch(&cursor_queries)
+  };
+  let probe_cursors = probe_t.elapsed();
+  let body_paragraph_cursors: Vec<(Vec<u8>, Vec<u8>)> = resolved
+    .chunks(2)
+    .map(|pair| {
+      let start = pair[0].as_ref().map(loro::cursor::Cursor::encode).unwrap_or_default();
+      let end = pair.get(1).and_then(|c| c.as_ref()).map(loro::cursor::Cursor::encode).unwrap_or_default();
+      (start, end)
+    })
+    .collect();
   let mut builder = SearchUnitBuilder {
     document_id,
     frontier,
     units: Vec::new(),
     next_unit_ix: 0,
     heading_path: Vec::new(),
-    body_paragraph_ranges: body_paragraph_cursor_ranges(&body),
+    body_paragraph_cursors,
     body_paragraph_ix: 0,
     theme: flowstate_document_theme(),
   };
+  let probe_t = std::time::Instant::now();
   for block in input_blocks {
     builder.push_block(block, &body);
   }
+  let probe_blocks = probe_t.elapsed();
+  let probe_t = std::time::Instant::now();
   builder.push_loro_object_units(doc)?;
+  if probe {
+    eprintln!(
+      "[flowstate-search-probe] ranges={probe_ranges:?} batch={probe_cursors:?} blocks={probe_blocks:?} objects={:?} units={}",
+      probe_t.elapsed(),
+      builder.units.len()
+    );
+  }
   Ok(builder.units)
 }
 
@@ -52,7 +87,9 @@ struct SearchUnitBuilder<'a> {
   units: Vec<SearchUnitChunk>,
   next_unit_ix: usize,
   heading_path: Vec<String>,
-  body_paragraph_ranges: Vec<BodyParagraphRange>,
+  /// §A13.4.2: pre-resolved (start, end) cursor encodings per body
+  /// paragraph, from ONE batched resolution.
+  body_paragraph_cursors: Vec<(Vec<u8>, Vec<u8>)>,
   body_paragraph_ix: usize,
   theme: DocumentTheme,
 }
@@ -65,7 +102,7 @@ impl SearchUnitBuilder<'_> {
     }
   }
 
-  fn push_body_paragraph(&mut self, paragraph: &InputParagraph, body: &LoroText) {
+  fn push_body_paragraph(&mut self, paragraph: &InputParagraph, _body: &LoroText) {
     let text = input_paragraph_text(paragraph);
     let normalized = normalized_search_text(&text);
     if !normalized.is_empty()
@@ -73,18 +110,18 @@ impl SearchUnitBuilder<'_> {
     {
       self.update_heading_path(level, normalized.clone());
     }
-    let cursor_range = self
-      .body_paragraph_ranges
+    let cursors = self
+      .body_paragraph_cursors
       .get(self.body_paragraph_ix)
-      .copied();
+      .cloned();
     self.body_paragraph_ix += 1;
     self.push_text_unit(
       paragraph_unit_kind(paragraph),
       &text,
       SearchUnitRefs {
         flow_id: Some(ROOT_BODY_FLOW_ID.to_string()),
-        cursors: cursor_range.map(|range| cursor_fields(body, range)),
-        paragraph_cursors: cursor_range.map(|range| cursor_fields(body, range)),
+        cursors: cursors.clone(),
+        paragraph_cursors: cursors,
         ..SearchUnitRefs::default()
       },
     );
@@ -245,10 +282,9 @@ fn body_paragraph_cursor_ranges(text: &LoroText) -> Vec<BodyParagraphRange> {
   let mut seen_sentinel = false;
   let mut unicode_pos = 0_usize;
 
-  for item in text.to_delta() {
-    let loro::TextDelta::Insert { insert, .. } = item else {
-      continue;
-    };
+  // §A13.4.2: raw chunk iteration — the former `streaming_to_delta` walk
+  // paid rich-text mark segmentation for a pass that only reads TEXT.
+  let mut walk = |insert: &str| {
     for ch in insert.chars() {
       match ch {
         '\n' => {
@@ -274,7 +310,11 @@ fn body_paragraph_cursor_ranges(text: &LoroText) -> Vec<BodyParagraphRange> {
       }
       unicode_pos += 1;
     }
-  }
+  };
+  text.iter(|chunk| {
+    walk(chunk);
+    true
+  });
 
   if has_text || rendered_blocks == 0 && seen_sentinel {
     ranges.push(BodyParagraphRange {

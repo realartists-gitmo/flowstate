@@ -12,9 +12,28 @@ use crate::{
 
 use super::utf16::{count_unicode_chars, count_utf16_len};
 
-#[derive(Clone)]
 pub struct StringSlice {
     bytes: Variant,
+    /// §flowstate vendor patch (oom-leads #4): cached unicode char count.
+    /// `rle_len`/`length`/`len_unicode` each ran a FULL utf8 validation +
+    /// char-count scan per call, and `generic_btree` recomputes node caches
+    /// through `rle_len` on every delta-rope edit — the dominant cost of
+    /// remote-import event assembly on large documents. `usize::MAX` means
+    /// uncomputed; mutators reset it.
+    unicode_len_cache: std::sync::atomic::AtomicUsize,
+}
+
+const UNICODE_LEN_UNSET: usize = usize::MAX;
+
+impl Clone for StringSlice {
+    fn clone(&self) -> Self {
+        Self {
+            bytes: self.bytes.clone(),
+            unicode_len_cache: std::sync::atomic::AtomicUsize::new(
+                self.unicode_len_cache.load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
 }
 
 impl PartialEq for StringSlice {
@@ -33,9 +52,7 @@ enum Variant {
 
 impl From<String> for StringSlice {
     fn from(s: String) -> Self {
-        Self {
-            bytes: Variant::Owned(s),
-        }
+        Self::with_bytes(Variant::Owned(s))
     }
 }
 
@@ -47,9 +64,7 @@ impl From<BytesSlice> for StringSlice {
 
 impl From<&str> for StringSlice {
     fn from(s: &str) -> Self {
-        Self {
-            bytes: Variant::Owned(s.to_string()),
-        }
+        Self::with_bytes(Variant::Owned(s.to_string()))
     }
 }
 
@@ -62,11 +77,36 @@ impl Debug for StringSlice {
 }
 
 impl StringSlice {
+    fn with_bytes(bytes: Variant) -> Self {
+        Self {
+            bytes,
+            unicode_len_cache: std::sync::atomic::AtomicUsize::new(UNICODE_LEN_UNSET),
+        }
+    }
+
+    fn invalidate_unicode_len(&self) {
+        self.unicode_len_cache
+            .store(UNICODE_LEN_UNSET, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// Cached unicode char count (validated + counted at most once per
+    /// content; clones carry the cache).
+    fn cached_unicode_len(&self) -> usize {
+        let cached = self
+            .unicode_len_cache
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if cached != UNICODE_LEN_UNSET {
+            return cached;
+        }
+        let len = count_unicode_chars(self.bytes());
+        self.unicode_len_cache
+            .store(len, std::sync::atomic::Ordering::Relaxed);
+        len
+    }
+
     pub fn new(s: BytesSlice) -> Self {
         std::str::from_utf8(&s).unwrap();
-        Self {
-            bytes: Variant::BytesSlice(s),
-        }
+        Self::with_bytes(Variant::BytesSlice(s))
     }
 
     pub fn as_str(&self) -> &str {
@@ -92,7 +132,7 @@ impl StringSlice {
     }
 
     pub fn len_unicode(&self) -> usize {
-        count_unicode_chars(self.bytes())
+        self.cached_unicode_len()
     }
 
     pub fn len_utf16(&self) -> usize {
@@ -104,11 +144,10 @@ impl StringSlice {
     }
 
     pub fn extend(&mut self, s: &str) {
+        self.invalidate_unicode_len();
         match &mut self.bytes {
             Variant::BytesSlice(_) => {
-                *self = Self {
-                    bytes: Variant::Owned(format!("{}{}", self.as_str(), s)),
-                }
+                *self = Self::with_bytes(Variant::Owned(format!("{}{}", self.as_str(), s)));
             }
             Variant::Owned(v) => {
                 v.push_str(s);
@@ -144,6 +183,7 @@ impl Serialize for StringSlice {
 
 impl DeltaValue for StringSlice {
     fn value_extend(&mut self, other: Self) -> Result<(), Self> {
+        self.invalidate_unicode_len();
         match (&mut self.bytes, &other.bytes) {
             (Variant::BytesSlice(s), Variant::BytesSlice(o)) => match s.try_merge(o) {
                 Ok(_) => Ok(()),
@@ -158,6 +198,7 @@ impl DeltaValue for StringSlice {
     }
 
     fn take(&mut self, length: usize) -> Self {
+        self.invalidate_unicode_len();
         let length = if cfg!(feature = "wasm") {
             utf16_to_utf8_index(self.as_str(), length).unwrap()
         } else {
@@ -169,16 +210,12 @@ impl DeltaValue for StringSlice {
                 let mut other = s.slice_clone(length..);
                 s.slice_(..length);
                 std::mem::swap(s, &mut other);
-                Self {
-                    bytes: Variant::BytesSlice(other),
-                }
+                Self::with_bytes(Variant::BytesSlice(other))
             }
             Variant::Owned(s) => {
                 let mut other = s.split_off(length);
                 std::mem::swap(s, &mut other);
-                Self {
-                    bytes: Variant::Owned(other),
-                }
+                Self::with_bytes(Variant::Owned(other))
             }
         }
     }
@@ -189,7 +226,7 @@ impl DeltaValue for StringSlice {
         if cfg!(feature = "wasm") {
             count_utf16_len(self.bytes())
         } else {
-            count_unicode_chars(self.bytes())
+            self.cached_unicode_len()
         }
     }
 }
@@ -199,7 +236,7 @@ impl HasLength for StringSlice {
         if cfg!(feature = "wasm") {
             count_utf16_len(self.bytes())
         } else {
-            count_unicode_chars(self.bytes())
+            self.cached_unicode_len()
         }
     }
 }
@@ -209,6 +246,7 @@ impl TryInsert for StringSlice {
     where
         Self: Sized,
     {
+        self.invalidate_unicode_len();
         match &mut self.bytes {
             Variant::BytesSlice(_) => Err(elem),
             Variant::Owned(s) => {
@@ -249,6 +287,7 @@ impl Mergeable for StringSlice {
     }
 
     fn merge_right(&mut self, rhs: &Self) {
+        self.invalidate_unicode_len();
         match (&mut self.bytes, &rhs.bytes) {
             (Variant::BytesSlice(a), Variant::BytesSlice(b)) => a.merge(b, &()),
             (Variant::Owned(a), Variant::Owned(b)) => a.push_str(b.as_str()),
@@ -257,6 +296,7 @@ impl Mergeable for StringSlice {
     }
 
     fn merge_left(&mut self, left: &Self) {
+        self.invalidate_unicode_len();
         match (&mut self.bytes, &left.bytes) {
             (Variant::BytesSlice(a), Variant::BytesSlice(b)) => {
                 let mut new = b.clone();
@@ -288,10 +328,14 @@ impl Sliceable for StringSlice {
             Variant::Owned(s) => Variant::Owned(s[range].to_string()),
         };
 
-        Self { bytes }
+        Self::with_bytes(bytes)
     }
 
     fn split(&mut self, pos: usize) -> Self {
+        // The returned half gets a fresh cache via `with_bytes`; SELF shrinks in
+        // place below, so its cache must be dropped too (a stale full-length
+        // cache feeds `rle_len()` and corrupts later split positions).
+        self.invalidate_unicode_len();
         let pos = if cfg!(feature = "wasm") {
             utf16_to_utf8_index(self.as_str(), pos).unwrap()
         } else {
@@ -310,15 +354,13 @@ impl Sliceable for StringSlice {
             }
         };
 
-        Self { bytes }
+        Self::with_bytes(bytes)
     }
 }
 
 impl Default for StringSlice {
     fn default() -> Self {
-        StringSlice {
-            bytes: Variant::Owned(String::with_capacity(32)),
-        }
+        StringSlice::with_bytes(Variant::Owned(String::with_capacity(32)))
     }
 }
 

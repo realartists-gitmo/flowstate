@@ -48,6 +48,13 @@ impl DiffCalculatorTrait for TreeDiffCalculator {
         }
     }
 
+    fn meet_clamp_floor(&self, _meet: &crate::VersionVector) -> Option<crate::VersionVector> {
+        // §flowstate vendor patch #21: the IGU/Linear modes accumulate a
+        // TreeDelta from the fed ops; a clamp would starve it. Trees are not
+        // on flowstate's hot path — never clamp.
+        Some(crate::VersionVector::new())
+    }
+
     fn apply_change(
         &mut self,
         _oplog: &OpLog,

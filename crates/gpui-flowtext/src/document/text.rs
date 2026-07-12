@@ -1,10 +1,16 @@
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Paragraph {
   pub style: ParagraphStyle,
-  pub byte_range: Range<usize>,
   pub runs: Vec<TextRun>,
   pub version: u64,
 }
+// §perf-heaven T8.6: `byte_range` was a per-paragraph ABSOLUTE-offset cache that
+// `update_paragraph_offsets_after_len_change` shifted across the whole tail on
+// EVERY content edit (im::Vector + block-tree tail COW = ~3.8 MB/keystroke on a
+// 6k-para doc, O(tail)). It is redundant: the block tree's `paragraph_start`
+// already derives the offset from run lengths (O(log N), maintained), and the
+// length is `paragraph_text_len`. Removed the field; read sites derive via
+// `paragraph_byte_range(document, ix)`. The per-edit tail shift is gone.
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct ParagraphId(pub u128);
@@ -67,11 +73,16 @@ impl CellId {
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
 pub struct SectionId(pub u128);
 
+/// §act-ten A10.1: the id vectors are `Arc`-COW. A projection clone is taken on
+/// every publish/event; with plain `Vec`s each clone memcpy'd O(paragraphs)
+/// (~200 KB/keystroke on a 6k-para doc) even though ids only change on
+/// STRUCTURAL ops. `Arc` makes the per-keystroke clone a refcount bump; the
+/// rare structural edit pays one copy-on-write via [`std::sync::Arc::make_mut`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DocumentIds {
   pub document_id: u128,
-  pub paragraph_ids: Vec<ParagraphId>,
-  pub block_ids: Vec<BlockId>,
+  pub paragraph_ids: std::sync::Arc<Vec<ParagraphId>>,
+  pub block_ids: std::sync::Arc<Vec<BlockId>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
@@ -318,6 +329,11 @@ pub struct InputImageBlock {
   pub caption: Option<InputParagraph>,
   pub sizing: InputImageSizing,
   pub alignment: InputBlockAlignment,
+  /// §A11.9: external target URL for a genuinely-LINKED image (no embedded
+  /// media part). See [`ImageBlock::external_url`]. `serde(default)` keeps
+  /// pre-existing serialized payloads (clipboard fragments) decodable.
+  #[serde(default)]
+  pub external_url: Option<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -408,4 +424,7 @@ pub struct RunStyles {
   pub direct_underline: bool,
   pub strikethrough: bool,
   pub highlight: Option<HighlightStyle>,
+  /// Superscript/subscript. Orthogonal to `semantic`; imported/exported and
+  /// persisted, but not yet rendered or user-toggleable — see [`VertAlign`].
+  pub vert_align: VertAlign,
 }

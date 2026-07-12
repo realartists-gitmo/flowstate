@@ -189,8 +189,20 @@ pub(crate) fn decode_snapshot_inner(
     let need_calc = state_bytes.is_none();
 
     let arena_checkpoint = oplog.arena.checkpoint_for_rollback();
+    // FLOWSTATE §A14.4.0: env-gated decode stage probe.
+    static DECODE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let decode_probe =
+        *DECODE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_DECODE_PROBE").is_some());
     let decode_result = (|| -> LoroResult<()> {
+        let probe_t = std::time::Instant::now();
         oplog.decode_change_store(oplog_bytes)?;
+        if decode_probe {
+            eprintln!(
+                "[flowstate-decode-probe] change_store={:?}",
+                probe_t.elapsed()
+            );
+        }
+        let probe_t = std::time::Instant::now();
         let state_frontiers;
         if shallow_root_state_bytes.is_empty() {
             ensure_cov::notify_cov("loro_internal::import::snapshot::normal");
@@ -205,6 +217,12 @@ pub(crate) fn decode_snapshot_inner(
                 oplog.dag().shallow_since_frontiers().clone(),
                 doc.config.clone(),
             )?;
+            if decode_probe {
+                eprintln!(
+                    "[flowstate-decode-probe] gc_store={:?}",
+                    probe_t.elapsed()
+                );
+            }
             state.store.decode_state_by_two_bytes(
                 shallow_root_state_bytes,
                 state_bytes.unwrap_or_default(),
@@ -230,7 +248,20 @@ pub(crate) fn decode_snapshot_inner(
             }
         }
 
+        if decode_probe {
+            eprintln!(
+                "[flowstate-decode-probe] state_store={:?}",
+                probe_t.elapsed()
+            );
+        }
+        let probe_t = std::time::Instant::now();
         state.init_with_states_and_version(state_frontiers, &oplog, vec![], false, origin)?;
+        if decode_probe {
+            eprintln!(
+                "[flowstate-decode-probe] init_states={:?}",
+                probe_t.elapsed()
+            );
+        }
         Ok(())
     })();
 

@@ -70,9 +70,16 @@ pub fn write_docx_with_report(path: impl AsRef<Path>, document: &DocumentProject
   docx = context.apply_document_section(docx);
 
   let mut side = SideChannel::default();
+  // §perf-heaven T8.6: paragraph byte ranges are derived from the block tree by
+  // paragraph RANK (`paragraph_byte_range`, which accounts for the `\n` block
+  // separators), so track the running paragraph index alongside the block index.
+  let mut paragraph_ix = 0usize;
   for (block_ix, block) in document.blocks.iter().enumerate() {
     let boundary = context.boundary_section_property(block_ix);
-    docx = add_block(docx, document, block, &document.theme, &context, &mut side, boundary);
+    docx = add_block(docx, document, paragraph_ix, block, &document.theme, &context, &mut side, boundary);
+    if matches!(block, Block::Paragraph(_)) {
+      paragraph_ix += 1;
+    }
   }
 
   let mut uncompressed_package = Cursor::new(Vec::new());

@@ -28,17 +28,14 @@ pub fn document_from_input(theme: DocumentTheme, paragraphs: Vec<InputParagraph>
     if ix > 0 {
       text.push('\n');
     }
-    let start = text.len();
     let mut runs = Vec::with_capacity(paragraph.runs.len());
     for run in paragraph.runs {
       let len = run.text.len();
       text.push_str(&run.text);
       runs.push(TextRun { len, styles: run.styles });
     }
-    let end = text.len();
     stored_paragraphs.push(Paragraph {
       style: paragraph.style,
-      byte_range: start..end,
       runs: merge_adjacent_runs(runs),
       version: 0,
     });
@@ -66,17 +63,14 @@ pub fn document_from_paragraphs(theme: DocumentTheme, paragraphs: Vec<DocumentPa
     if ix > 0 {
       text.push('\n');
     }
-    let start = text.len();
     let mut runs = Vec::with_capacity(paragraph.runs.len());
     for run in paragraph.runs {
       let len = run.text.len();
       text.push_str(&run.text);
       runs.push(TextRun { len, styles: run.styles });
     }
-    let end = text.len();
     stored_paragraphs.push(Paragraph {
       style: paragraph.style,
-      byte_range: start..end,
       runs: merge_adjacent_runs(runs),
       version: 0,
     });
@@ -89,7 +83,6 @@ fn document_from_stored_paragraphs(theme: DocumentTheme, text: String, mut store
   if stored_paragraphs.is_empty() {
     stored_paragraphs.push(Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..0,
       runs: Vec::new(),
       version: 0,
     });

@@ -135,9 +135,12 @@ pub(super) struct ParagraphCacheKey {
 #[derive(Clone, Copy, PartialEq)]
 pub(super) struct ParagraphHeightCacheEntry {
   pub(super) key: ParagraphCacheKey,
+  /// §act-nine A9.3: stable identity replaces the global `edit_generation` —
+  /// the cache is positional, and (style, version) alone can collide across
+  /// different paragraphs after a row shift.
+  pub(super) paragraph_id: ParagraphId,
   pub(super) width: Pixels,
   pub(super) invisibility_mode: bool,
-  pub(super) edit_generation: u64,
   pub(super) height: Pixels,
 }
 
@@ -146,6 +149,11 @@ pub(super) fn paragraph_cache_key(_document: &DocumentProjection, paragraph: &Pa
   paragraph_cache_key_for_paragraph(paragraph)
 }
 
+// NOT a content hash: hashes (style, version) only. Its correctness as a
+// layout-cache validity key rests entirely on version discipline (§act-nine
+// A9.3) — every content mutation bumps `paragraph.version`, and structural
+// rebuilds / canonical installs carry surviving versions forward (never back
+// to 0), so a (style, version) pair is never reused for different content.
 #[hotpath::measure]
 pub(super) fn paragraph_cache_key_for_paragraph(paragraph: &Paragraph) -> ParagraphCacheKey {
   let mut hasher = FxHasher::default();

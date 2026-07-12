@@ -64,9 +64,10 @@ pub(super) fn layout_paragraph_at(
   (
     LaidOutParagraph {
       index: paragraph_ix,
+      // §perf-heaven T8.6: derived (was `Paragraph::byte_range`).
+      byte_range: crate::edit_ops::paragraph_byte_range(document, paragraph_ix),
       cache_key,
       len: paragraph_text.len(),
-      byte_range: 0..paragraph_text.len(),
       top: y,
       bottom,
       lines: laid_out_lines,
@@ -110,7 +111,6 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
     }
     let paragraph = Paragraph {
       style: prep.layout_style,
-      byte_range: 0..prep.paragraph_text.len(),
       runs: prep.layout_runs.as_ref().to_vec(),
       version: prep.layout_version,
     };
@@ -301,9 +301,10 @@ fn layout_prepared_paragraph_chunk_at(
 
   let paragraph = LaidOutParagraph {
     index: display_paragraph_ix,
+    // §perf-heaven T8.6: derived (was `Paragraph::byte_range`).
+    byte_range: crate::edit_ops::paragraph_byte_range(document, display_paragraph_ix),
     cache_key,
     len,
-    byte_range: start_byte..byte_range_end,
     top: paragraph_top,
     bottom: row_bottom,
     lines: laid_out_lines,

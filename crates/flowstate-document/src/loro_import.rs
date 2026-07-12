@@ -12,8 +12,8 @@ use uuid::Uuid;
 
 use crate::{
   AssetChunk, BLOCKS_BY_ID, BODY_FLOW_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MARK_DIRECT_UNDERLINE,
-  MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT,
-  ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
+  MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT,
+  PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, SECTIONS_BY_ID,
   loro_schema::{
     ASSETS_BY_ID, REVISIONS, SectionPageAttrs, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
     TABLE_ROWS_BY_ID, cell_flow_loro_id, cell_loro_id, column_loro_id, row_loro_id, write_section_page_attrs,
@@ -131,7 +131,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
   clear_map(&sections)?;
 
   let plan = hotpath::measure_block!("import_plan_build", FlowTextImportPlan::for_document(document));
-  hotpath::measure_block!("import_plan_write_body", plan.write_to(Some(doc), &body_text)?);
+  let body_text_op_base = hotpath::measure_block!("import_plan_write_body", plan.write_to(Some(doc), &body_text)?);
 
   let mut paragraph_ix = 0_usize;
   for (block_ix, (block, position)) in document
@@ -147,6 +147,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           &blocks,
           BODY_FLOW_ID,
           &body_text,
+          body_text_op_base,
           *boundary_pos,
           projection_block_id(document, block_ix, "paragraph_block"),
           projection_paragraph_id(document, paragraph_ix),
@@ -161,12 +162,13 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
           image,
           projection_block_id(document, block_ix, "image"),
           &body_text,
+          body_text_op_base,
           *anchor_pos,
         )?;
       },
       (Block::Equation(equation), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "equation");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, *anchor_pos)?;
+        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, body_text_op_base, *anchor_pos)?;
         let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
         block.insert("source_flow_id", source_flow_id.as_str())?;
         let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
@@ -177,7 +179,7 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       },
       (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, *anchor_pos)?;
+        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, body_text_op_base, *anchor_pos)?;
         import_table(&flows, &block, table)?;
       },
       _ => unreachable!("flow import plan must preserve document block shape"),
@@ -203,10 +205,23 @@ fn import_image_block(
   image: &ImageBlock,
   durable_block_id: String,
   body_text: &LoroText,
+  text_op_base: Option<(u64, i32)>,
   anchor_pos: usize,
 ) -> LoroResult<()> {
-  let block = ensure_block(blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, body_text, anchor_pos)?;
+  let block = ensure_block(blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, body_text, text_op_base, anchor_pos)?;
   block.insert("asset_id", image.asset_id.0.to_string())?;
+  // §A11.9: a genuinely-LINKED image persists its external URL; the key is only
+  // written when a non-empty URL exists (embedded images carry no key at all —
+  // the presence-guarded delete keeps a re-imported block from resurrecting a
+  // stale URL without minting tombstone ops on the common embedded path).
+  match image.external_url.as_ref().map(|url| -> &str { url.as_ref() }).filter(|url| !url.is_empty()) {
+    Some(url) => block.insert("external_url", url)?,
+    None => {
+      if block.get("external_url").is_some() {
+        block.delete("external_url")?;
+      }
+    },
+  }
   if let Some(asset) = document.assets.assets.get(&image.asset_id) {
     block.insert("content_hash", blake3::hash(&asset.bytes).to_hex().as_str())?;
     block.insert("mime_type", asset.mime_type.as_ref())?;
@@ -259,7 +274,6 @@ fn import_sections(
     let section_id = section.id.0.to_string();
     let section_map = sections.ensure_mergeable_map(&section_id)?;
     section_map.insert("id", section_id.as_str())?;
-    section_map.insert("container_id", section_map.id().to_string())?;
     section_map.insert("start_paragraph_id", section.start_paragraph.0.to_string())?;
     if let Some(parent_id) = section.parent_id {
       section_map.insert("parent_section_id", parent_id.0.to_string())?;
@@ -281,7 +295,6 @@ fn import_sections(
       section_map.insert("start_cursor", cursor.encode())?;
     }
     let attrs = section_map.ensure_mergeable_map("attrs")?;
-    section_map.insert("attrs_container_id", attrs.id().to_string())?;
     attrs.insert("source", "paragraph_style_outline")?;
     // §11/§31: persist this section's page-structure attrs so they round-trip
     // losslessly through Loro. When the projection carries them on
@@ -341,28 +354,73 @@ fn section_page_attrs_to_loro(page: &gpui_flowtext::SectionPageAttrs) -> Section
 }
 
 #[hotpath::measure]
+/// §act-twelve A12.3.2b: a body-text cursor by ARITHMETIC. The whole body is
+/// ONE contiguous insert op, so the char at unicode `pos` has id
+/// `(peer, base_counter + pos)` — no per-boundary chunk walk (`get_cursor`
+/// was 2-3 walks per paragraph over a growing tree, the dominant CRDT-import
+/// cost after the batched body write). `origin_pos` is not part of the
+/// encoded form. Oracle: `FLOWSTATE_IMPORT_CURSOR_VERIFY=1` cross-checks
+/// every constructed cursor against `get_cursor` (armed in the corpus
+/// sweep).
+fn body_cursor_at(text: &LoroText, base: Option<(u64, i32)>, pos: usize, side: Side) -> Option<loro::cursor::Cursor> {
+  let constructed = base.map(|(peer, counter)| {
+    loro::cursor::Cursor::new(
+      Some(loro::ID::new(peer, counter + pos as i32)),
+      text.id(),
+      side,
+      pos,
+    )
+  });
+  static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  let verify = *VERIFY.get_or_init(|| std::env::var_os("FLOWSTATE_IMPORT_CURSOR_VERIFY").is_some());
+  if constructed.is_none() || verify {
+    let walked = text.get_cursor(pos, side);
+    if let (Some(constructed), Some(walked)) = (constructed.as_ref(), walked.as_ref()) {
+      assert_eq!(
+        constructed.encode(),
+        walked.encode(),
+        "import cursor arithmetic diverged from get_cursor at pos {pos} (side {side:?}): constructed={constructed:?} walked={walked:?}"
+      );
+    }
+    if constructed.is_none() {
+      return walked;
+    }
+  }
+  constructed
+}
+
 fn import_paragraph_record(
   paragraphs: &LoroMap,
   blocks: &LoroMap,
   flow_id: &str,
   body_text: &LoroText,
+  text_op_base: Option<(u64, i32)>,
   boundary_pos: usize,
   block_id: String,
   paragraph_id: String,
 ) -> LoroResult<()> {
-  let paragraph_map = paragraphs.ensure_mergeable_map(&paragraph_id)?;
-  paragraph_map.insert("id", paragraph_id.as_str())?;
-  paragraph_map.insert("container_id", paragraph_map.id().to_string())?;
-  paragraph_map.insert("flow_id", flow_id)?;
-  if let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Left) {
-    paragraph_map.insert("start_cursor", cursor.encode())?;
-  }
-  if let Some(cursor) = body_text.get_cursor(boundary_pos, Side::Right) {
-    paragraph_map.insert("boundary_cursor", cursor.encode())?;
-  }
-  let attrs = paragraph_map.ensure_mergeable_map("attrs")?;
-  paragraph_map.insert("attrs_container_id", attrs.id().to_string())?;
-  ensure_block(blocks, block_id, "paragraph", flow_id, body_text, boundary_pos)?;
+  let paragraph_map = hotpath::measure_block!("import_record_maps", {
+    let paragraph_map = paragraphs.ensure_mergeable_map(&paragraph_id)?;
+    paragraph_map.insert("id", paragraph_id.as_str())?;
+    paragraph_map.insert("flow_id", flow_id)?;
+    paragraph_map
+  });
+  hotpath::measure_block!("import_record_cursors", {
+    if let Some(cursor) = body_cursor_at(body_text, text_op_base, boundary_pos, Side::Left) {
+      paragraph_map.insert("start_cursor", cursor.encode())?;
+    }
+    if let Some(cursor) = body_cursor_at(body_text, text_op_base, boundary_pos, Side::Right) {
+      paragraph_map.insert("boundary_cursor", cursor.encode())?;
+    }
+  });
+  // §perf-heaven T8.2: the `attrs` container is kept (the projection reads it and
+  // the invalidation whitelist expects it), but the `*_container_id` MIRROR
+  // values are dropped. They duplicated `map.id()` — write-only (no reader in the
+  // projection or collab), yet each was a long flattened-cid `String` stored as a
+  // map value AND minted as an op, ×5 per paragraph ×N paragraphs (a large slice
+  // of the 38.7 KB/record). Derivable from the container itself if ever needed.
+  paragraph_map.ensure_mergeable_map("attrs")?;
+  ensure_block(blocks, block_id, "paragraph", flow_id, body_text, text_op_base, boundary_pos)?;
   Ok(())
 }
 
@@ -482,7 +540,10 @@ impl FlowTextImportPlan {
 
   /// `doc` enables the batched mark path (needs the inner-doc handle); the
   /// tiny nested flows (captions, table cells) pass `None` and mark per run.
-  fn write_to(&self, doc: Option<&LoroDoc>, text: &LoroText) -> LoroResult<()> {
+  /// Returns the `(peer, start_counter)` of the single contiguous body text
+  /// op when a doc handle is supplied — every in-body position's cursor is
+  /// then pure arithmetic off it (§act-twelve A12.3.2b).
+  fn write_to(&self, doc: Option<&LoroDoc>, text: &LoroText) -> LoroResult<Option<(u64, i32)>> {
     let len = text.len_unicode();
     if len > 0 {
       text.delete(0, len)?;
@@ -502,7 +563,23 @@ impl FlowTextImportPlan {
         full_text.push_str(insert);
       }
     }
+    // §act-twelve A12.3.2b: capture the (peer, counter) the contiguous insert
+    // starts at — pending-txn ops extend the peer's oplog counter linearly.
+    let text_op_base = doc.map(|doc| {
+      let peer = doc.peer_id();
+      // `oplog_vv` already reflects ops applied inside the open transaction,
+      // so the next op's counter is exactly the vv entry (verified against
+      // `get_cursor` by the FLOWSTATE_IMPORT_CURSOR_VERIFY oracle).
+      (peer, doc.oplog_vv().get(&peer).copied().unwrap_or(0))
+    });
+    static POP_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let pop_probe = *POP_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_POPULATE_PROBE").is_some());
+    let probe_t = std::time::Instant::now();
     hotpath::measure_block!("import_body_single_insert", text.insert(0, &full_text)?);
+    if pop_probe {
+      eprintln!("[flowstate-populate-probe] insert={:?} chars={} spans={}", probe_t.elapsed(), full_text.chars().count(), self.delta.len());
+    }
+    let probe_t = std::time::Instant::now();
 
     // Per-key run merging: adjacent spans that share one (key, value) pair
     // become a single mark op even when their full attribute maps differ.
@@ -541,6 +618,9 @@ impl FlowTextImportPlan {
               marks.push((run.start, run.end, key.into(), run.value));
             }
           }
+          if pop_probe {
+            eprintln!("[flowstate-populate-probe] mark_count={}", marks.len());
+          }
           doc
             .inner()
             .get_text(text.id())
@@ -555,7 +635,10 @@ impl FlowTextImportPlan {
         },
       }
     });
-    Ok(())
+    if pop_probe {
+      eprintln!("[flowstate-populate-probe] marks={:?}", probe_t.elapsed());
+    }
+    Ok(text_op_base)
   }
 }
 
@@ -592,6 +675,9 @@ fn run_style_attributes(styles: RunStyles) -> Option<FxHashMap<String, LoroValue
   if styles.strikethrough {
     attributes.insert(MARK_STRIKETHROUGH.to_string(), true.into());
   }
+  if let Some(value) = styles.vert_align.mark_value() {
+    attributes.insert(MARK_VERT_ALIGN.to_string(), value.into());
+  }
   (!attributes.is_empty()).then_some(attributes)
 }
 
@@ -621,10 +707,6 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
   let rows_by_id = table_map.ensure_mergeable_map(TABLE_ROWS_BY_ID)?;
   let columns_by_id = table_map.ensure_mergeable_map(TABLE_COLUMNS_BY_ID)?;
   let cells_by_id = table_map.ensure_mergeable_map(TABLE_CELLS_BY_ID)?;
-  table_map.insert("container_id", table_map.id().to_string())?;
-  table_map.insert("row_order_container_id", row_order.id().to_string())?;
-  table_map.insert("column_order_container_id", column_order.id().to_string())?;
-  table_map.insert("rows_container_id", rows_by_id.id().to_string())?;
   table_map.insert("columns_container_id", columns_by_id.id().to_string())?;
   table_map.insert("cells_container_id", cells_by_id.id().to_string())?;
   table_map.insert("header_row", table.style.header_row)?;
@@ -638,9 +720,7 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
     column_order.push(column_id.as_str())?;
     let column_map = columns_by_id.ensure_mergeable_map(&column_id)?;
     column_map.insert("id", column_id.as_str())?;
-    column_map.insert("container_id", column_map.id().to_string())?;
-    let attrs = column_map.ensure_mergeable_map("attrs")?;
-    column_map.insert("attrs_container_id", attrs.id().to_string())?;
+    let _attrs = column_map.ensure_mergeable_map("attrs")?;
     match column.width {
       TableColumnWidth::Auto => column_map.insert("width_kind", "auto")?,
       TableColumnWidth::FixedPx(px) => {
@@ -659,33 +739,26 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
     row_order.push(row_id.as_str())?;
     let row_map = rows_by_id.ensure_mergeable_map(&row_id)?;
     row_map.insert("id", row_id.as_str())?;
-    row_map.insert("container_id", row_map.id().to_string())?;
-    let attrs = row_map.ensure_mergeable_map("attrs")?;
-    row_map.insert("attrs_container_id", attrs.id().to_string())?;
+    let _attrs = row_map.ensure_mergeable_map("attrs")?;
     for cell in &row.cells {
       let cell_id = cell_loro_id(cell.id);
       let column_id = column_loro_id(cell.column_id);
       let cell_row_id = row_loro_id(cell.row_id);
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id)?;
       cell_map.insert("id", cell_id.as_str())?;
-      cell_map.insert("container_id", cell_map.id().to_string())?;
       cell_map.insert("row_id", cell_row_id.as_str())?;
       cell_map.insert("column_id", column_id.as_str())?;
       cell_map.insert("row_span", i64::from(cell.row_span))?;
       cell_map.insert("column_span", i64::from(cell.col_span))?;
-      let attrs = cell_map.ensure_mergeable_map("attrs")?;
-      cell_map.insert("attrs_container_id", attrs.id().to_string())?;
+      let _attrs = cell_map.ensure_mergeable_map("attrs")?;
       let flow_id = cell_flow_loro_id(&cell_id);
       cell_map.insert("flow_id", flow_id.as_str())?;
       let nested_table_ids = cell_map.ensure_mergeable_movable_list("nested_table_ids")?;
       let nested_tables_by_id = cell_map.ensure_mergeable_map("nested_tables_by_id")?;
-      cell_map.insert("nested_table_order_container_id", nested_table_ids.id().to_string())?;
-      cell_map.insert("nested_tables_container_id", nested_tables_by_id.id().to_string())?;
       clear_movable_list(&nested_table_ids)?;
       clear_map(&nested_tables_by_id)?;
       let flow = ensure_flow(flows, &flow_id, "table_cell")?;
       let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-      cell_map.insert("flow_container_id", flow.id().to_string())?;
       cell_map.insert("text_container_id", text.id().to_string())?;
       let cell_delta_capacity = cell
         .blocks
@@ -716,7 +789,6 @@ fn import_table(flows: &LoroMap, block: &LoroMap, table: &TableBlock) -> LoroRes
         nested_table_ids.push(nested_table_id.as_str())?;
         let nested_map = nested_tables_by_id.ensure_mergeable_map(&nested_table_id)?;
         nested_map.insert("id", nested_table_id.as_str())?;
-        nested_map.insert("container_id", nested_map.id().to_string())?;
         nested_map.insert("kind", "table")?;
         if let Some(cursor) = text.get_cursor(*anchor_pos, Side::Left) {
           nested_map.insert("anchor_cursor", cursor.encode())?;
@@ -738,7 +810,6 @@ pub fn import_assets(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult
     let asset_map = assets.ensure_mergeable_map(&asset_id)?;
     let hash = blake3::hash(&asset.bytes);
     asset_map.insert("asset_id", asset_id.as_str())?;
-    asset_map.insert("container_id", asset_map.id().to_string())?;
     asset_map.insert("content_hash", hash.to_hex().as_str())?;
     asset_map.insert("mime_type", asset.mime_type.as_ref())?;
     asset_map.insert("byte_length", i64::try_from(asset.bytes.len()).unwrap_or(i64::MAX))?;
@@ -797,26 +868,31 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
   let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
-  let attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
-  flow.insert("container_id", flow.id().to_string())?;
+  let _attrs = flow.ensure_mergeable_map(FLOW_ATTRS_KEY)?;
   flow.insert("text_container_id", text.id().to_string())?;
-  flow.insert("attrs_container_id", attrs.id().to_string())?;
   Ok(flow)
 }
 
-fn ensure_block(blocks: &LoroMap, block_id: String, kind: &str, flow_id: &str, text: &LoroText, pos: usize) -> LoroResult<LoroMap> {
+fn ensure_block(
+  blocks: &LoroMap,
+  block_id: String,
+  kind: &str,
+  flow_id: &str,
+  text: &LoroText,
+  text_op_base: Option<(u64, i32)>,
+  pos: usize,
+) -> LoroResult<LoroMap> {
   let block = blocks.ensure_mergeable_map(&block_id)?;
   block.insert("id", block_id.as_str())?;
-  block.insert("container_id", block.id().to_string())?;
   block.insert("kind", kind)?;
   block.insert("flow_id", flow_id)?;
-  if let Some(cursor) = text.get_cursor(pos, Side::Left) {
+  if let Some(cursor) = body_cursor_at(text, text_op_base, pos, Side::Left) {
     block.insert("anchor_cursor", cursor.encode())?;
   }
-  let attrs = block.ensure_mergeable_map("attrs")?;
-  let nested_refs = block.ensure_mergeable_map("nested_refs")?;
-  block.insert("attrs_container_id", attrs.id().to_string())?;
-  block.insert("nested_refs_container_id", nested_refs.id().to_string())?;
+  // §perf-heaven T8.2: keep the `attrs`/`nested_refs` containers (read + whitelisted),
+  // drop the write-only `*_container_id` mirror strings (duplicated `map.id()`).
+  block.ensure_mergeable_map("attrs")?;
+  block.ensure_mergeable_map("nested_refs")?;
   Ok(block)
 }
 
@@ -916,8 +992,8 @@ mod tests {
       })],
     );
     source.ids.document_id = 0x0123;
-    source.ids.paragraph_ids[0] = gpui_flowtext::ParagraphId(0x0456);
-    source.ids.block_ids[0] = gpui_flowtext::BlockId(0x0789);
+    std::sync::Arc::make_mut(&mut source.ids.paragraph_ids)[0] = gpui_flowtext::ParagraphId(0x0456);
+    std::sync::Arc::make_mut(&mut source.ids.block_ids)[0] = gpui_flowtext::BlockId(0x0789);
 
     let doc = document_to_loro(&source, "Identity")?;
     let projected = crate::document_from_loro(&doc)?;
@@ -994,6 +1070,9 @@ mod tests {
       direct_underline: true,
       strikethrough: true,
       highlight: Some(HighlightStyle::Custom(4)),
+      // Superscript rides the same import→mark→projection round-trip as the other
+      // orthogonal run attributes; the `== expected` assertion below verifies it.
+      vert_align: gpui_flowtext::VertAlign::Superscript,
     };
     let imported = import_paragraphs_as_loro(
       crate::flowstate_document_theme(),

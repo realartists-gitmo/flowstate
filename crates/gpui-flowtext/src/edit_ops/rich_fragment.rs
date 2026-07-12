@@ -69,7 +69,6 @@ fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset:
     }
     replacements.push(Paragraph {
       style: if ix == 0 && !left_runs.is_empty() { target.style } else { paragraph.style },
-      byte_range: 0..0,
       runs: merge_adjacent_runs(runs),
       version: target.version.wrapping_add(1),
     });
@@ -80,7 +79,6 @@ fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset:
   for insert_ix in 1..replacement_count {
     insert_paragraph_id(document, offset.paragraph + insert_ix);
   }
-  rebuild_document_offset_index(document);
   let block_replacements = document.paragraphs.range_to_vec(offset.paragraph..offset.paragraph + replacement_count);
   replace_paragraph_blocks(document, offset.paragraph, 1, &block_replacements);
   rebuild_document_sections(document);

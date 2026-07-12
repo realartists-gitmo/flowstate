@@ -198,6 +198,16 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
   // ---- Phase 1: resolve (no mutation on any failure path) -----------------
   let plan = resolve_intent(core, intent)?;
 
+  // Deferred identity/replica registration (spec §16, §act-twelve A12.1.1):
+  // AFTER resolution (a rejected intent must leave the doc untouched — the
+  // I-15 zero-mutation law) but BEFORE the edit's frontier/counter captures.
+  // The meta commit persists its own update segment, so it must wholly
+  // precede the edit's span: running it mid-commit appended segments out of
+  // causal order (the edit's segment was dropped), and running it between
+  // grouped edits split their counter contiguity (group undo stopped
+  // merging).
+  core.register_pending_author_identity();
+
   let frontier_before = core.doc().state_frontiers();
   let vv_before = core.doc().state_vv();
   let base_frontier = frontier_before.encode();
@@ -233,10 +243,6 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
     tracing::error!(%error, class = intent.class(), "recording undo checkpoint after local intent failed");
   }
 
-  // Spec §16 lazy identity: this replica now demonstrably edits — register
-  // the deferred author identity (no-op after the first time).
-  core.register_pending_author_identity();
-
   let new_frontier = core.doc().state_frontiers().encode();
 
   // ---- Phase 4: patches + publish -------------------------------------------
@@ -260,14 +266,13 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
       core.merge_subscription_invalidation(&mut invalidation);
       core.apply_projection_patch_set(&patches);
       core.set_projection_frontier(new_frontier.clone());
-      core.record_projection_version();
       queue_publish_events(core, frontier_before, vv_before, invalidation);
       audit_patched_projection(core, intent.class());
       let batch = ProjectionPatchBatch {
         transaction_id,
         base_frontier,
         new_frontier: new_frontier.clone(),
-        patches,
+        patches: patches.into(),
       };
       // Ordered stream (field fix): the editor drains this batch in commit
       // order together with any remote batches that preceded it.
@@ -290,7 +295,6 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
       if let Err(error) = core.refresh_projection() {
         return Err(compensate_failed_intent(core, &frontier_before, &vv_before, intent.class(), &error));
       }
-      core.record_projection_version();
       queue_publish_events(core, frontier_before, vv_before, invalidation);
       let replace = ProjectionReplace {
         document: core.projection_ref().clone(),
@@ -304,7 +308,7 @@ pub(crate) fn apply_local_intent(core: &mut CrdtRuntime, intent: &LocalIntent) -
             transaction_id,
             base_frontier,
             new_frontier: new_frontier.clone(),
-            patches: Vec::new(),
+            patches: std::sync::Arc::from(Vec::new()),
           },
           frontier: new_frontier,
           version_vector: core.doc().state_vv().encode(),
@@ -980,10 +984,13 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
           });
         }
         hotpath::measure_block!("delete_range_retire_records", {
+          // Rows in one O(blocks) pass instead of an O(blocks) scan per retired
+          // paragraph (§perf-heaven T2 quadratic on object docs).
+          let rows = flowstate_document::paragraph_block_rows(&projection);
           for paragraph_ix in (start.paragraph_ix + 1)..=end.paragraph_ix {
             let (Some(paragraph_id), Some(block_id)) = (
               projection.ids.paragraph_ids.get(paragraph_ix).copied(),
-              flowstate_document::block_ix_for_paragraph(&projection, paragraph_ix).and_then(|ix| projection.ids.block_ids.get(ix).copied()),
+              rows.get(paragraph_ix).and_then(|&ix| projection.ids.block_ids.get(ix).copied()),
             ) else {
               continue;
             };
@@ -1155,10 +1162,16 @@ fn execute_plan(core: &mut CrdtRuntime, plan: &ResolvedPlan) -> Result<MutationS
   Ok(summary)
 }
 
-/// Test-only deterministic fault: when set, `execute_rich_fragment` fails
-/// after its first block — the §13.6 compound-intent atomicity proof.
+// Test-only deterministic fault: when set, `execute_rich_fragment` fails
+// after its first block — the §13.6 compound-intent atomicity proof.
+// THREAD-LOCAL: the local write path runs synchronously on the calling
+// thread, and a process-global flag leaked the injected fault into every
+// concurrently-running test that seeds a multi-block fragment (a ~1-in-5
+// suite flake once more fragment-seeding tests existed).
 #[cfg(test)]
-pub(crate) static INJECT_FRAGMENT_FAULT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+thread_local! {
+  pub(crate) static INJECT_FRAGMENT_FAULT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
 
 /// Compound fragment insertion: paragraphs splice into body text (with
 /// boundaries + styles + marks), objects insert at their positions. One gate
@@ -1175,7 +1188,7 @@ fn execute_rich_fragment(
   let mut first = true;
   for (fragment_block_ix, block) in blocks.iter().enumerate() {
     #[cfg(test)]
-    if fragment_block_ix > 0 && INJECT_FRAGMENT_FAULT.load(std::sync::atomic::Ordering::SeqCst) {
+    if fragment_block_ix > 0 && INJECT_FRAGMENT_FAULT.with(std::cell::Cell::get) {
       anyhow::bail!("injected fragment fault (test)");
     }
     #[cfg(not(test))]

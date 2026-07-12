@@ -115,10 +115,18 @@ fn repair_missing_paragraph_metadata(doc: &LoroDoc, flow_id: &str, boundary_unic
       // boundaries, and the walk-time keys then disagree with this LIVE
       // re-derivation — redo after a mass-undo produced DuplicateBlockId
       // patches. Re-deriving per repair self-corrects; keep it.
+      static REPAIR_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      let repair_debug = *REPAIR_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some());
       let Some((paragraph_key, block_key)) = flowstate_document::loro_projection::stable_boundary_metadata_keys(&body, boundary) else {
         // No live anchor for this boundary yet; leave it for a later pass.
+        if repair_debug {
+          eprintln!("repair[missing-paragraph]: boundary {boundary} has no live anchor; deferred");
+        }
         return Ok(false);
       };
+      if repair_debug {
+        eprintln!("repair[missing-paragraph]: boundary {boundary} → keys {paragraph_key} / {block_key}");
+      }
       ensure_paragraph_metadata_at_boundary_with_keys(doc, &body, boundary, Some(paragraph_key), Some(block_key))
         .context("writing durable paragraph metadata for MissingParagraph* defect")?;
       Ok(true)

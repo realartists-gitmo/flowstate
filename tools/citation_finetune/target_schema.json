@@ -29,10 +29,10 @@
           "items": {
             "type": "object",
             "additionalProperties": false,
+            "required": ["surname", "name"],
             "properties": {
-              "family": {"type": "string"},
-              "given": {"type": "string"},
-              "literal": {"type": "string"},
+              "surname": {"type": "string", "description": "Short cite-reference surname (e.g. \"Mathes\")."},
+              "name": {"type": "string", "description": "Full in-text name; MUST contain surname (e.g. \"Michael Mathes\"). A mononym where name==surname is valid."},
               "qualifications": {
                 "type": "array",
                 "maxItems": 1,

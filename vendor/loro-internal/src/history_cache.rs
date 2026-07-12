@@ -527,6 +527,67 @@ impl MapHistoryCache {
         });
     }
 
+    /// §flowstate vendor patch (oom-leads #4): the per-KEY sibling of
+    /// [`Self::get_container_latest_op_at_vv`] — resolve one key's winner at
+    /// `vv` via a `(container, key)` prefix range instead of walking every key
+    /// the container ever had. `Import`-mode map diffs only need the keys the
+    /// span actually touched (`from ⊆ to` ⇒ an untouched key cannot change
+    /// winners), and registry maps on large documents hold thousands of keys.
+    pub fn get_container_key_latest_op_at_vv(
+        &self,
+        container: ContainerIdx,
+        key: &InternalString,
+        vv: &VersionVector,
+        oplog: &OpLog,
+    ) -> Option<GroupedMapOpInfo> {
+        let key_ix = self.keys.get(key)? as u32;
+        let range = (
+            Bound::Included(MapHistoryCacheEntry {
+                container,
+                key: key_ix,
+                lamport: 0,
+                peer: 0,
+                counter_or_value: Either::Left(0),
+            }),
+            Bound::Excluded(MapHistoryCacheEntry {
+                container,
+                key: key_ix.checked_add(1)?,
+                lamport: 0,
+                peer: 0,
+                counter_or_value: Either::Left(0),
+            }),
+        );
+        for entry in self.map.range(range).rev() {
+            match &entry.counter_or_value {
+                Either::Left(cnt) => {
+                    if vv.get(&entry.peer).copied().unwrap_or(0) > *cnt {
+                        let id = ID::new(entry.peer, *cnt);
+                        let op = oplog.get_op_that_includes(id).unwrap();
+                        debug_assert_eq!(op.atom_len(), 1);
+                        match &op.content {
+                            InnerContent::Map(map) => {
+                                return Some(GroupedMapOpInfo {
+                                    value: map.value.clone(),
+                                    lamport: entry.lamport,
+                                    peer: entry.peer,
+                                });
+                            }
+                            _ => unreachable!(),
+                        }
+                    }
+                }
+                Either::Right(v) => {
+                    return Some(GroupedMapOpInfo {
+                        value: (**v).clone(),
+                        lamport: entry.lamport,
+                        peer: entry.peer,
+                    });
+                }
+            }
+        }
+        None
+    }
+
     pub fn get_container_latest_op_at_vv(
         &self,
         container: ContainerIdx,

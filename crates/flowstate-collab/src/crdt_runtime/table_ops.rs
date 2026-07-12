@@ -81,9 +81,7 @@ pub(crate) fn insert_table_row(
   }
   let row_map = rows_by_id.ensure_mergeable_map(&row_id_str)?;
   row_map.insert("id", row_id_str.as_str())?;
-  row_map.insert("container_id", row_map.id().to_string())?;
-  let attrs = row_map.ensure_mergeable_map("attrs")?;
-  row_map.insert("attrs_container_id", attrs.id().to_string())?;
+  let _attrs = row_map.ensure_mergeable_map("attrs")?;
 
   for (column_ix, column_id_str) in column_ids.iter().enumerate() {
     let Some(column_id) = parse_column_loro_id(column_id_str) else {
@@ -217,13 +215,9 @@ pub(crate) fn insert_table_column(
   };
   let row_order = table.ensure_mergeable_movable_list(TABLE_ROW_ORDER)?;
   let column_order = table.ensure_mergeable_movable_list(TABLE_COLUMN_ORDER)?;
-  let rows_by_id = table.ensure_mergeable_map(TABLE_ROWS_BY_ID)?;
+  let _rows_by_id = table.ensure_mergeable_map(TABLE_ROWS_BY_ID)?;
   let columns_by_id = table.ensure_mergeable_map(TABLE_COLUMNS_BY_ID)?;
   let cells_by_id = table.ensure_mergeable_map(TABLE_CELLS_BY_ID)?;
-  table.insert("container_id", table.id().to_string())?;
-  table.insert("row_order_container_id", row_order.id().to_string())?;
-  table.insert("column_order_container_id", column_order.id().to_string())?;
-  table.insert("rows_container_id", rows_by_id.id().to_string())?;
   table.insert("columns_container_id", columns_by_id.id().to_string())?;
   table.insert("cells_container_id", cells_by_id.id().to_string())?;
   let row_ids = movable_list_strings(&row_order);
@@ -240,9 +234,7 @@ pub(crate) fn insert_table_column(
   }
   let column_map = columns_by_id.ensure_mergeable_map(&column_id_str)?;
   column_map.insert("id", column_id_str.as_str())?;
-  column_map.insert("container_id", column_map.id().to_string())?;
-  let attrs = column_map.ensure_mergeable_map("attrs")?;
-  column_map.insert("attrs_container_id", attrs.id().to_string())?;
+  let _attrs = column_map.ensure_mergeable_map("attrs")?;
   write_table_column_width(&column_map, width)?;
 
   for (row_ix, row_id_str) in row_ids.iter().enumerate() {

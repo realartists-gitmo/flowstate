@@ -1,7 +1,5 @@
 mod api;
 pub mod block_tree;
-pub mod lazy_leaf;
-pub mod version_graph;
 pub mod local_intents;
 mod collaboration;
 mod demo;
@@ -12,8 +10,6 @@ mod rich_text;
 
 pub use api::*;
 pub use block_tree::{BlockTree, Summary};
-pub use lazy_leaf::{BlockVersion, LazyLeaf, LeafCache, LeafKey};
-pub use version_graph::{VersionGraph, VersionId};
 pub use collaboration::*;
 pub use local_intents::*;
 pub use demo::*;
@@ -25,7 +21,7 @@ pub use rich_text::*;
 pub mod prelude {
   pub use crate::{
     DocumentProjection, DocumentTheme, EditorSelection, HighlightStyle, Paragraph, ParagraphStyle, RichTextDocumentElement, RichTextEditor,
-    RichTextEditorCommand, RunSemanticStyle, RunStyle, RunStyles, TextRun,
+    RichTextEditorCommand, RunSemanticStyle, RunStyle, RunStyles, TextRun, VertAlign,
   };
 }
 

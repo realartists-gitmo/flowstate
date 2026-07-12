@@ -1,6 +1,8 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn hit_test_document_position(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> DocumentOffset {
+  // §act-eleven C9: `pub(super)` so the in-crate geometry property test can
+  // drive it directly (it was reachable only through mouse handlers).
+  pub(super) fn hit_test_document_position(&mut self, position: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> DocumentOffset {
     let paragraph_count = self.document.paragraphs.len();
     if paragraph_count == 0 {
       return DocumentOffset::default();

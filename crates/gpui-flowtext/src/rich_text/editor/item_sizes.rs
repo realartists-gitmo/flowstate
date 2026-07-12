@@ -376,6 +376,39 @@ impl RichTextEditor {
     }
   }
 
+  /// §perf-heaven T5 net: force an exact layout pass, then for every paragraph
+  /// with a COMPLETE exact layout compare its estimate to its exact height.
+  /// Returns the worst over/under ratios — the layout-fidelity oracle for the
+  /// estimate heuristic and the guard any persisted-estimate work must pass.
+  pub fn benchmark_estimate_accuracy(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> EstimateAccuracy {
+    self.measured_item_width = Some(width);
+    let _ = self.paragraph_item_sizes(window, cx);
+    let mut acc = EstimateAccuracy::default();
+    for paragraph_ix in 0..self.document.paragraphs.len() {
+      let Some(entry) = self.valid_chunk_cache_entry(paragraph_ix, width) else {
+        continue;
+      };
+      if !entry.complete {
+        continue;
+      }
+      let exact: f32 = entry.exact_height.into();
+      if exact <= 1.0 {
+        continue;
+      }
+      let estimate: f32 = self
+        .paragraph_estimated_total_height(paragraph_ix, width)
+        .map_or(0.0, |(height, _)| height.into());
+      let ratio = estimate / exact;
+      acc.compared += 1;
+      if ratio >= 1.0 {
+        acc.max_over_ratio = acc.max_over_ratio.max(ratio - 1.0);
+      } else {
+        acc.max_under_ratio = acc.max_under_ratio.max(1.0 - ratio);
+      }
+    }
+    acc
+  }
+
   pub fn benchmark_invalidate_document_layout_caches(&mut self) {
     self.invalidate_document_layout_caches();
   }

@@ -1850,12 +1850,12 @@ fn recent_document_preview_document(document: &DocumentProjection) -> DocumentPr
   let mut remaining_chars = MAX_CHARS;
   let mut paragraphs = Vec::new();
 
-  for paragraph in document.paragraphs.iter().take(MAX_PARAGRAPHS) {
+  for (paragraph_ix, paragraph) in document.paragraphs.iter().take(MAX_PARAGRAPHS).enumerate() {
     if remaining_chars == 0 {
       break;
     }
 
-    let mut run_start = paragraph.byte_range.start;
+    let mut run_start = flowstate_document::paragraph_byte_range(document, paragraph_ix).start;
     let mut runs = Vec::new();
     for run in &paragraph.runs {
       if remaining_chars == 0 {

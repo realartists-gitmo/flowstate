@@ -986,17 +986,17 @@ impl Transaction {
                     let skip = styles
                         .map(|styles| styles.has_key_value(&key, &value))
                         .unwrap_or(false);
-                    let has_target_style = richtext.has_style_key_in_entity_range(
-                        entity_range.clone(),
-                        &crate::container::richtext::StyleKey::Key(key.clone()),
-                    );
-                    (
-                        event_start,
-                        event_end,
-                        entity_range,
-                        skip,
-                        is_delete && !has_target_style,
-                    )
+                    // §perf-heaven T8.3: `has_target_style` is ONLY consumed by the
+                    // `is_delete` branch below, but the range scan + key clone ran
+                    // for every mark — including all the non-delete import marks.
+                    // The `&&` short-circuits, so the O(range) scan and the clone
+                    // now happen only when this is actually a delete.
+                    let missing_style_key = is_delete
+                        && !richtext.has_style_key_in_entity_range(
+                            entity_range.clone(),
+                            &crate::container::richtext::StyleKey::Key(key.clone()),
+                        );
+                    (event_start, event_end, entity_range, skip, missing_style_key)
                 });
             if skip || missing_style_key {
                 continue;

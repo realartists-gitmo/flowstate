@@ -10,8 +10,11 @@ impl RichTextEditor {
       self.document.assets.assets.insert(*id, record.clone());
     }
     // Asset availability is out-of-band cache state: repaint, but never dirty
-    // the document or advance the edit generation.
-    self.after_formatting_mutation(cx);
+    // the document or advance the edit generation. (§act-ten A10.12: this used
+    // to route through `after_formatting_mutation`, whose fallback nuked EVERY
+    // layout cache per asset batch — image blocks re-estimate via their own
+    // versioned entries when the asset actually renders.)
+    cx.notify();
   }
 
   /// Apply a REMOTE projection patch batch to THE document (Loro-first spec
@@ -22,14 +25,29 @@ impl RichTextEditor {
     // In-place apply (see `sync_projection_from_authority`): the batch apply
     // is internally transactional and never touches the local theme, so the
     // per-batch whole-projection clone + re-theme were pure churn.
+    // §caret-anchor: reposition the caret across the remote batch — fast path
+    // (stored cursors, O(log n)) with the fork rebase as fallback — captured
+    // against the PRE-patch state (see sync_projection_from_authority).
+    let authority = self.write_authority.clone();
+    let reanchored = authority.as_ref().and_then(|authority| {
+      self
+        .caret_anchor
+        .as_ref()
+        .filter(|anchor| anchor.selection == self.selection)
+        .and_then(|anchor| authority.resolve_selection_anchor(&anchor.head_cursor, &anchor.anchor_cursor))
+        .map(|(head, anchor)| EditorSelection { anchor, head, ..self.selection.clone() })
+        .or_else(|| authority.rebase_selection(&self.selection, &self.document, &self.document.frontier))
+    });
     apply_projection_patch_batch(&mut self.document, batch)?;
     self.identity_map.reconcile(&self.document);
-    let head = self.clamp_offset_to_document(self.selection.head);
-    let anchor = self.clamp_offset_to_document(self.selection.anchor);
+    let next = reanchored.unwrap_or_else(|| self.selection.clone());
+    let head = self.clamp_offset_to_document(next.head);
+    let anchor = self.clamp_offset_to_document(next.anchor);
     if head != self.selection.head || anchor != self.selection.anchor {
-      self.selection = EditorSelection::range(anchor, head);
+      self.selection = EditorSelection { anchor, head, ..next };
       self.emit_selection_changed(cx);
     }
+    self.capture_caret_anchor();
     let generation = self.next_edit_generation;
     self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
     self.mark_document_changed(generation, false, cx);
@@ -236,13 +254,10 @@ impl ContentRollbackJournal {
             document.text.delete(current_range.clone());
             document.text.insert(current_range.start, &old_text);
           }
-          let mut restored = old_paragraph;
-          // Seed the stored range with the CURRENT (failed) length so the
-          // offset updater below computes the delta back to the restored
-          // runs' length and fixes the Fenwick index, trailing ranges, and
-          // the block mirror.
-          restored.byte_range = current_range;
-          paragraphs_mut(document).set(paragraph_ix, restored);
+          paragraphs_mut(document).set(paragraph_ix, old_paragraph);
+          // Refresh the Fenwick index and mirror the restored runs into the
+          // block copy (byte ranges are derived on demand from the tree, so no
+          // stored range needs seeding).
           update_paragraph_offsets_after_len_change(document, paragraph_ix);
         },
         JournalEntry::InsertedRow { row, paragraph_at } => {
@@ -273,25 +288,24 @@ fn insert_paragraph_row_in_place(
   paragraph_at: usize,
   block_id: BlockId,
   paragraph_id: ParagraphId,
-  mut paragraph: Paragraph,
+  paragraph: Paragraph,
   text: &str,
 ) {
   if paragraph_at < document.paragraphs.len() {
     let start = document.blocks.paragraph_start(paragraph_at);
     document.text.insert(start, text);
     document.text.insert(start + text.len(), "\n");
-    paragraph.byte_range = start..start + text.len();
   } else {
     let end = document.text.byte_len();
     document.text.insert(end, "\n");
     document.text.insert(end + 1, text);
-    paragraph.byte_range = end + 1..end + 1 + text.len();
   }
   paragraphs_mut(document).insert(paragraph_at, paragraph.clone());
-  document.ids.paragraph_ids.insert(paragraph_at.min(document.ids.paragraph_ids.len()), paragraph_id);
+  let paragraph_id_at = paragraph_at.min(document.ids.paragraph_ids.len());
+  std::sync::Arc::make_mut(&mut document.ids.paragraph_ids).insert(paragraph_id_at, paragraph_id);
   document.blocks.insert(row, Block::Paragraph(paragraph));
-  document.ids.block_ids.insert(row.min(document.ids.block_ids.len()), block_id);
-  refresh_offsets_after_row_splice(document);
+  let block_id_at = row.min(document.ids.block_ids.len());
+  std::sync::Arc::make_mut(&mut document.ids.block_ids).insert(block_id_at, block_id);
 }
 
 /// Splice ONE paragraph row out of the projection in place (inverse of
@@ -311,32 +325,14 @@ fn delete_paragraph_row_in_place(document: &mut DocumentProjection, row: usize, 
   }
   paragraphs_mut(document).remove(paragraph_at);
   if paragraph_at < document.ids.paragraph_ids.len() {
-    document.ids.paragraph_ids.remove(paragraph_at);
+    std::sync::Arc::make_mut(&mut document.ids.paragraph_ids).remove(paragraph_at);
   }
   if row < document.blocks.len() {
     document.blocks.remove(row);
   }
   if row < document.ids.block_ids.len() {
-    document.ids.block_ids.remove(row);
+    std::sync::Arc::make_mut(&mut document.ids.block_ids).remove(row);
   }
-  refresh_offsets_after_row_splice(document);
-}
-
-/// After a row splice: rebuild the Fenwick offset index + every paragraph's
-/// cached byte range, and mirror the ranges into the parallel block copies
-/// (range-only writes — never a runs deep copy).
-fn refresh_offsets_after_row_splice(document: &mut DocumentProjection) {
-  crate::edit_ops::rebuild_document_offset_index(document);
-  let ranges: Vec<std::ops::Range<usize>> = document.paragraphs.iter().map(|paragraph| paragraph.byte_range.clone()).collect();
-  let mut paragraph_ord = 0usize;
-  document.blocks.map_from_mut(0, |block| {
-    if let Block::Paragraph(paragraph) = block {
-      if let Some(range) = ranges.get(paragraph_ord) {
-        paragraph.byte_range = range.clone();
-      }
-      paragraph_ord += 1;
-    }
-  });
 }
 
 /// The content-only arms of [`apply_projection_patches_to_document`], applied
@@ -368,7 +364,7 @@ fn apply_content_patches_in_place(
         row_hint,
         runs,
       } => {
-        let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+        let (row, paragraph_ix) = patch_row_and_paragraph_ix(document, *block_id, *paragraph_id, *row_hint)?;
         let text = paragraph_text(document, paragraph_ix);
         validate_text_runs(&text, runs)?;
         journal.record_paragraph(document, paragraph_ix, false);
@@ -380,7 +376,7 @@ fn apply_content_patches_in_place(
           })?;
         paragraph.runs.clone_from(runs);
         bump_paragraph_version(paragraph);
-        update_paragraph_block(document, paragraph_ix);
+        update_paragraph_block_at(document, paragraph_ix, row);
       },
       ProjectionPatch::ParagraphStyle {
         block_id,
@@ -388,7 +384,7 @@ fn apply_content_patches_in_place(
         row_hint,
         style,
       } => {
-        let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+        let (row, paragraph_ix) = patch_row_and_paragraph_ix(document, *block_id, *paragraph_id, *row_hint)?;
         journal.record_paragraph(document, paragraph_ix, false);
         let paragraph = paragraphs_mut(document)
           .get_mut(paragraph_ix)
@@ -399,7 +395,7 @@ fn apply_content_patches_in_place(
         outline_dirty |= paragraph.style != *style;
         paragraph.style = *style;
         bump_paragraph_version(paragraph);
-        update_paragraph_block(document, paragraph_ix);
+        update_paragraph_block_at(document, paragraph_ix, row);
       },
       ProjectionPatch::AssetArrived { id, record } => {
         journal.entries.push(JournalEntry::Asset {
@@ -425,7 +421,22 @@ fn apply_content_patches_in_place(
           let row = row + offset;
           let paragraph_at = paragraph_rows_before(document, row);
           let text = input_paragraph_text(input);
-          let paragraph = paragraph_from_input_paragraph(input);
+          let mut paragraph = paragraph_from_input_paragraph(input);
+          // §act-nine A9.3 version discipline: `paragraph_from_input_paragraph`
+          // resets `version` to 0. If this paragraph id ALREADY exists in the
+          // projection, advance its old version instead — the layout caches
+          // key on (style, version), and reusing an old pair for
+          // possibly-different content would serve stale layout. Genuinely new
+          // ids keep 0.
+          if let Some(previous) = document
+            .ids
+            .paragraph_ids
+            .iter()
+            .position(|id| *id == paragraph_id)
+            .and_then(|old_ix| document.paragraphs.get(old_ix))
+          {
+            paragraph.version = previous.version.wrapping_add(1);
+          }
           insert_paragraph_row_in_place(document, row, paragraph_at, structural.block_id, paragraph_id, paragraph, &text);
           journal.entries.push(JournalEntry::InsertedRow { row, paragraph_at });
         }
@@ -553,7 +564,7 @@ fn apply_projection_patches_to_document(
           paragraph.style = *style;
           paragraph_ix
         } else {
-          let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+          let (row, paragraph_ix) = patch_row_and_paragraph_ix(document, *block_id, *paragraph_id, *row_hint)?;
           let paragraph = paragraphs_mut(document)
             .get_mut(paragraph_ix)
             .ok_or(ProjectionApplyError::MissingParagraph {
@@ -563,7 +574,7 @@ fn apply_projection_patches_to_document(
           outline_dirty |= paragraph.style != *style;
           paragraph.style = *style;
           bump_paragraph_version(paragraph);
-          update_paragraph_block(document, paragraph_ix);
+          update_paragraph_block_at(document, paragraph_ix, row);
           paragraph_ix
         };
         extend_invalidation(&mut paragraph_invalidation, paragraph_ix..paragraph_ix + 1);
@@ -592,7 +603,7 @@ fn apply_projection_patches_to_document(
           paragraph.runs = input_runs_from_text_runs(&text, runs)?;
           paragraph_ix
         } else {
-          let paragraph_ix = paragraph_ix_for_patch(document, *block_id, *paragraph_id, *row_hint)?;
+          let (row, paragraph_ix) = patch_row_and_paragraph_ix(document, *block_id, *paragraph_id, *row_hint)?;
           let text = paragraph_text(document, paragraph_ix);
           validate_text_runs(&text, runs)?;
           let paragraph = paragraphs_mut(document)
@@ -603,7 +614,7 @@ fn apply_projection_patches_to_document(
             })?;
           paragraph.runs.clone_from(runs);
           bump_paragraph_version(paragraph);
-          update_paragraph_block(document, paragraph_ix);
+          update_paragraph_block_at(document, paragraph_ix, row);
           paragraph_ix
         };
         extend_invalidation(&mut paragraph_invalidation, paragraph_ix..paragraph_ix + 1);
@@ -844,22 +855,25 @@ fn paragraph_ix_for_structural_row(blocks: &[ProjectionPatchBlock], row: usize) 
 }
 
 fn paragraph_ix_for_block_row(document: &DocumentProjection, row: usize) -> Option<usize> {
-  matches!(document.blocks.get(row), Some(Block::Paragraph(_))).then(|| {
-    document
-      .blocks
-      .iter()
-      .take(row)
-      .filter(|block| matches!(block, Block::Paragraph(_)))
-      .count()
-  })
+  // Aligned fast path: with no object rows, block row == paragraph index.
+  if document.blocks.len() == document.paragraphs.len() {
+    return matches!(document.blocks.get(row), Some(Block::Paragraph(_))).then_some(row);
+  }
+  // §perf-heaven T7.13: O(log N) tree rank replaces the object-doc O(row) count.
+  document.blocks.paragraph_ix_for_block_row(row)
 }
 
-fn paragraph_ix_for_patch(
+/// Resolve a paragraph patch to `(block_row, paragraph_ix)` in one shot — the
+/// block row (used to write the mirrored block copy without a re-scan) is
+/// computed anyway while deriving `paragraph_ix`, so callers that need both
+/// take it from here instead of re-scanning via `block_ix_for_paragraph`
+/// (§perf-heaven T2).
+fn patch_row_and_paragraph_ix(
   document: &DocumentProjection,
   block_id: BlockId,
   paragraph_id: ParagraphId,
   row_hint: usize,
-) -> Result<usize, ProjectionApplyError> {
+) -> Result<(usize, usize), ProjectionApplyError> {
   let row = block_ix_for_patch(document, block_id, row_hint)?;
   let paragraph_ix = paragraph_ix_for_block_row(document, row).ok_or(ProjectionApplyError::WrongBlockKind {
     block_id,
@@ -868,7 +882,16 @@ fn paragraph_ix_for_patch(
   if document.ids.paragraph_ids.get(paragraph_ix).copied() != Some(paragraph_id) {
     return Err(ProjectionApplyError::MissingParagraph { paragraph_id, block_id });
   }
-  Ok(paragraph_ix)
+  Ok((row, paragraph_ix))
+}
+
+fn paragraph_ix_for_patch(
+  document: &DocumentProjection,
+  block_id: BlockId,
+  paragraph_id: ParagraphId,
+  row_hint: usize,
+) -> Result<usize, ProjectionApplyError> {
+  patch_row_and_paragraph_ix(document, block_id, paragraph_id, row_hint).map(|(_, paragraph_ix)| paragraph_ix)
 }
 
 fn block_ix_for_patch(document: &DocumentProjection, block_id: BlockId, row_hint: usize) -> Result<usize, ProjectionApplyError> {
@@ -1054,7 +1077,6 @@ fn replace_paragraph_content(document: &mut DocumentProjection, paragraph_ix: us
   document.text.insert(byte_range.start, &text);
   let mut replacement = paragraph_from_input_paragraph(paragraph);
   replacement.version = document.paragraphs[paragraph_ix].version.wrapping_add(1);
-  replacement.byte_range = byte_range.clone();
   paragraphs_mut(document).set(paragraph_ix, replacement);
   update_paragraph_offsets_after_len_change(document, paragraph_ix);
 }
@@ -1150,6 +1172,18 @@ fn rebuild_document_from_projection_patch_blocks(
   let mut blocks = Vec::with_capacity(patch_blocks.len().max(1));
   let mut block_ids = Vec::with_capacity(patch_blocks.len().max(1));
   let mut paragraph_ids = Vec::new();
+  // §act-nine A9.3 version discipline: rebuilt `Paragraph` payloads come from
+  // `paragraph_from_input_paragraph` (version 0). A paragraph id that SURVIVES
+  // the rebuild must ADVANCE its old version — the layout caches key on
+  // (style, version), so resetting to 0 could reuse a key for different
+  // content (stale render). Conservative: always advance for surviving ids,
+  // even if the content happens to be unchanged. Genuinely new ids keep 0.
+  let mut previous_versions: rustc_hash::FxHashMap<ParagraphId, u64> = rustc_hash::FxHashMap::default();
+  for (old_ix, id) in document.ids.paragraph_ids.iter().enumerate() {
+    if let Some(paragraph) = document.paragraphs.get(old_ix) {
+      previous_versions.insert(*id, paragraph.version);
+    }
+  }
 
   for patch_block in patch_blocks {
     block_ids.push(patch_block.block_id);
@@ -1184,7 +1218,10 @@ fn rebuild_document_from_projection_patch_blocks(
           ));
         };
         let paragraph_text = input_paragraph_text(&input);
-        let paragraph = paragraph_from_input_paragraph(&input);
+        let mut paragraph = paragraph_from_input_paragraph(&input);
+        if let Some(previous_version) = previous_versions.get(&paragraph_id) {
+          paragraph.version = previous_version.wrapping_add(1);
+        }
         push_rebuilt_paragraph(
           &mut text,
           &mut paragraphs,
@@ -1225,7 +1262,6 @@ fn rebuild_document_from_projection_patch_blocks(
   if paragraphs.is_empty() {
     let paragraph = Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..0,
       runs: Vec::new(),
       version: 0,
     };
@@ -1246,8 +1282,8 @@ fn rebuild_document_from_projection_patch_blocks(
   document.text = Rope::from(text);
   document.paragraphs = ParagraphSeq::from_vec(paragraphs);
   document.blocks = BlockSeq::from_vec(blocks);
-  document.ids.block_ids = block_ids;
-  document.ids.paragraph_ids = paragraph_ids;
+  document.ids.block_ids = std::sync::Arc::new(block_ids);
+  document.ids.paragraph_ids = std::sync::Arc::new(paragraph_ids);
   reconcile_document_ids(document);
   Ok(())
 }
@@ -1258,16 +1294,14 @@ fn push_rebuilt_paragraph(
   paragraphs: &mut Vec<Paragraph>,
   blocks: &mut Vec<Block>,
   paragraph_ids: &mut Vec<ParagraphId>,
-  mut paragraph: Paragraph,
+  paragraph: Paragraph,
   paragraph_id: ParagraphId,
   paragraph_text: &str,
 ) {
   if !paragraphs.is_empty() {
     text.push('\n');
   }
-  let start = text.len();
   text.push_str(paragraph_text);
-  paragraph.byte_range = start..text.len();
   paragraph_ids.push(paragraph_id);
   paragraphs.push(paragraph.clone());
   blocks.push(Block::Paragraph(paragraph));
@@ -1289,10 +1323,8 @@ fn insert_projection_structural_block(
     }
     let row = row.min(document.blocks.len());
     document.blocks.insert(row, block_from_input_block(&block.block));
-    document
-      .ids
-      .block_ids
-      .insert(row.min(document.ids.block_ids.len()), block.block_id);
+    let insert_at = row.min(document.ids.block_ids.len());
+    std::sync::Arc::make_mut(&mut document.ids.block_ids).insert(insert_at, block.block_id);
     reconcile_document_ids(document);
     return Ok(());
   }
@@ -1350,11 +1382,9 @@ fn move_projection_block(document: &mut DocumentProjection, from: usize, to: usi
     blocks.insert(to, block);
     drop(blocks);
     if from < document.ids.block_ids.len() {
-      let block_id = document.ids.block_ids.remove(from);
-      document
-        .ids
-        .block_ids
-        .insert(to.min(document.ids.block_ids.len()), block_id);
+      let ids = std::sync::Arc::make_mut(&mut document.ids.block_ids);
+      let block_id = ids.remove(from);
+      ids.insert(to.min(ids.len()), block_id);
     }
     reconcile_document_ids(document);
     return Ok(());
@@ -1396,7 +1426,7 @@ fn replace_projection_block(
     }
     document.blocks.set(row, block_from_input_block(&after));
     if row < document.ids.block_ids.len() {
-      document.ids.block_ids[row] = block_id;
+      std::sync::Arc::make_mut(&mut document.ids.block_ids)[row] = block_id;
     }
     reconcile_document_ids(document);
     return Ok(());

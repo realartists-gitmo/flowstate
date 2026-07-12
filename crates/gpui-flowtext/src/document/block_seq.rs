@@ -92,17 +92,7 @@ impl BlockSeq {
     self.tree.to_vec()
   }
 
-  /// Cumulative document-text byte offset BEFORE block `index`. `O(log N)`.
-  #[must_use]
-  pub fn byte_offset(&self, index: usize) -> usize {
-    self.tree.byte_offset(index)
-  }
 
-  /// `(block_index, byte_within_block)` for document byte `byte`. `O(log N)`.
-  #[must_use]
-  pub fn block_at_byte(&self, byte: usize) -> Option<(usize, usize)> {
-    self.tree.block_at_byte(byte)
-  }
 
   /// The number of paragraph blocks. `O(1)`.
   #[must_use]
@@ -129,6 +119,30 @@ impl BlockSeq {
   #[must_use]
   pub fn paragraph_start(&self, paragraph_ix: usize) -> usize {
     self.tree.paragraph_start(paragraph_ix)
+  }
+
+  /// The block-row index of the `paragraph_ix`-th paragraph (objects included in
+  /// row space). `O(log N)` — the tree-native replacement for the O(blocks)
+  /// `block_ix_for_paragraph` scan. §perf-heaven T7.11.
+  #[must_use]
+  pub fn block_row_for_paragraph_ix(&self, paragraph_ix: usize) -> Option<usize> {
+    self.tree.block_row_for_paragraph_ix(paragraph_ix)
+  }
+
+  /// The paragraph-rank of the paragraph at block row `row` (count of paragraphs
+  /// before it); `None` if `row` is an object row or out of range. `O(log N)` —
+  /// the tree-native replacement for the object-doc paragraph-count scans.
+  /// §perf-heaven T7.12/T7.13.
+  #[must_use]
+  pub fn paragraph_ix_for_block_row(&self, row: usize) -> Option<usize> {
+    self.tree.paragraph_ix_for_block_row(row)
+  }
+
+  /// The count of paragraphs at rows strictly before `row` (any block kind at
+  /// `row`). `O(log N)`. §act-ten A10.8.
+  #[must_use]
+  pub fn paragraphs_before_row(&self, row: usize) -> usize {
+    self.tree.paragraphs_before_row(row)
   }
 
   // -- `O(log N)` fast-path mutations (path-copy, share the rest) -----------
@@ -170,12 +184,6 @@ impl BlockSeq {
     self.tree.update_at(index, edit);
   }
 
-  /// Apply `edit` to every block from `start` onward, in place (copy-on-write)
-  /// — the per-keystroke byte-range mirror's O(N)-in-place path (matches the
-  /// old `Arc<Vec<Block>>` shift; no deep clone when owned).
-  pub fn map_from_mut(&mut self, start: usize, edit: impl FnMut(&mut Block)) {
-    self.tree.map_from_mut(start, edit);
-  }
 
   /// Mutable access as a `Vec` for the complex sites that run several ops at
   /// once: materialize now, rebuild the tree on the guard's `Drop`. `O(N)` —
@@ -241,7 +249,6 @@ mod block_seq_tests {
   fn para(byte_len: usize) -> Block {
     Block::Paragraph(Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..byte_len,
       runs: if byte_len == 0 {
         Vec::new()
       } else {
@@ -308,6 +315,63 @@ mod block_seq_tests {
     reference[0] = para(4);
     reference.remove(3);
     assert_eq!(seq.to_vec(), reference);
+  }
+
+  fn image() -> Block {
+    Block::Image(crate::ImageBlock {
+      asset_id: crate::AssetId(1),
+      alt_text: "x".into(),
+      caption: None,
+      sizing: crate::ImageSizing::Intrinsic,
+      alignment: crate::BlockAlignment::Left,
+      external_url: None,
+      version: 0,
+    })
+  }
+
+  /// §perf-heaven T7.11-T7.13 NET: the O(log N) tree queries must equal the
+  /// O(blocks) linear scans they replace, for EVERY paragraph rank and EVERY
+  /// block row, on an object-bearing sequence (where the aligned fast path
+  /// misses). If a tree walk ever disagrees with the scan, this trips.
+  #[test]
+  fn paragraph_row_queries_match_linear_scan() {
+    // Interleave paragraphs and objects so blocks.len() != paragraph_count.
+    let blocks = vec![image(), para(1), para(2), image(), image(), para(3), para(4), image()];
+    let seq = BlockSeq::from_vec(blocks.clone());
+
+    // Reference: block row of the k-th paragraph, by linear scan.
+    let scan_block_row = |k: usize| -> Option<usize> {
+      let mut seen = 0;
+      for (row, b) in blocks.iter().enumerate() {
+        if matches!(b, Block::Paragraph(_)) {
+          if seen == k {
+            return Some(row);
+          }
+          seen += 1;
+        }
+      }
+      None
+    };
+    // Reference: paragraph rank at block row, by linear scan (None for objects).
+    let scan_para_ix = |row: usize| -> Option<usize> {
+      matches!(blocks.get(row), Some(Block::Paragraph(_)))
+        .then(|| blocks.iter().take(row).filter(|b| matches!(b, Block::Paragraph(_))).count())
+    };
+
+    let paragraph_count = blocks.iter().filter(|b| matches!(b, Block::Paragraph(_))).count();
+    assert_eq!(seq.paragraph_count(), paragraph_count);
+    for k in 0..=paragraph_count + 1 {
+      assert_eq!(seq.block_row_for_paragraph_ix(k), scan_block_row(k), "block_row_for_paragraph_ix({k})");
+    }
+    for row in 0..=blocks.len() + 1 {
+      assert_eq!(seq.paragraph_ix_for_block_row(row), scan_para_ix(row), "paragraph_ix_for_block_row({row})");
+    }
+
+    // The queries are also consistent inverses on paragraph rows.
+    for k in 0..paragraph_count {
+      let row = seq.block_row_for_paragraph_ix(k).unwrap();
+      assert_eq!(seq.paragraph_ix_for_block_row(row), Some(k));
+    }
   }
 
   #[test]

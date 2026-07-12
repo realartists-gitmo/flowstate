@@ -431,11 +431,16 @@ pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRe
 pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
 
 #[derive(Clone)]
-struct ParagraphChunkLayoutCacheEntry {
+pub(super) struct ParagraphChunkLayoutCacheEntry {
   key: ParagraphCacheKey,
+  // §act-nine A9.3: the chunk cache is POSITIONAL (indexed by paragraph_ix),
+  // and the (style, version) `key` alone can collide across DIFFERENT
+  // paragraphs after a row shift. The stable id pins the slot to the paragraph
+  // the chunks were built for — replacing the old global `edit_generation`
+  // check, which nuked every paragraph's chunks on any edit.
+  paragraph_id: ParagraphId,
   width: Pixels,
   invisibility_mode: bool,
-  edit_generation: u64,
   layout_generation: u64,
   prep: Arc<ParagraphPrep>,
   chunks: Vec<ParagraphChunkLayout>,
@@ -473,11 +478,6 @@ impl ParagraphPrepSlot {
     } else {
       self.normal = Some(prep);
     }
-  }
-
-  fn clear(&mut self) {
-    self.normal = None;
-    self.invisible = None;
   }
 }
 
@@ -519,9 +519,17 @@ fn range_within(outer: &Range<usize>, inner: &Range<usize>) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 struct ParagraphEstimateHeightCacheEntry {
   key: ParagraphCacheKey,
+  // §perf-heaven T5: the STABLE paragraph identity for this slot. The estimate
+  // cache is indexed by paragraph_ix, and `key` hashes only (style, version) —
+  // so after an insert/delete a slot can be reused by a different paragraph
+  // that coincidentally shares (style, version). Storing the paragraph id makes
+  // slot reuse a cache MISS instead of a stale-height hit, which lets validity
+  // drop the global `edit_generation` (that over-invalidated EVERY paragraph's
+  // estimate on any edit — the O(document) cold estimate cost). `layout_generation`
+  // still catches theme/zoom changes the per-paragraph key cannot see.
+  paragraph_id: ParagraphId,
   width: Pixels,
   invisibility_mode: bool,
-  edit_generation: u64,
   layout_generation: u64,
   height: Pixels,
   source_len: usize,
@@ -530,7 +538,6 @@ struct ParagraphEstimateHeightCacheEntry {
 #[derive(Clone)]
 struct LayoutPrepRequest {
   width: Pixels,
-  edit_generation: u64,
   invisibility_mode: bool,
   paragraphs: Vec<usize>,
 }
@@ -570,6 +577,25 @@ pub struct ItemSizeBenchmarkResult {
   pub ui_chunk_build_time: Duration,
   pub prefetch_budget_overruns: usize,
   pub scroll_budget_overruns: usize,
+}
+
+/// §perf-heaven T5 net: the layout-fidelity oracle for the per-paragraph height
+/// ESTIMATE — the heuristic scroll uses for not-yet-laid-out paragraphs, and the
+/// value a persisted read model would serialize/reload. Layout heights are NOT
+/// covered by the CRDT convergence fuzz or the corpus sweep, so this IS the net:
+/// for every paragraph that has a COMPLETE exact layout, it compares the estimate
+/// to the exact height. A test asserts the estimate never wildly UNDER-shoots
+/// (the dangerous case — scroll jumps up as the real height lands) and stays in a
+/// bounded band, so any change to the estimate (or a persisted estimate that
+/// diverges from a fresh one) trips loudly.
+#[derive(Clone, Debug, Default)]
+pub struct EstimateAccuracy {
+  /// Paragraphs with a complete exact layout that were compared.
+  pub compared: usize,
+  /// Worst estimate/exact - 1 over the compared set (estimate too TALL).
+  pub max_over_ratio: f32,
+  /// Worst 1 - estimate/exact over the compared set (estimate too SHORT).
+  pub max_under_ratio: f32,
 }
 
 #[derive(Clone)]
@@ -836,6 +862,15 @@ use crate::local_intents::{
   SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor, UndoOutcome as LocalUndoOutcome, WriteRejected,
 };
 
+/// §caret-anchor: the local caret encoded as CRDT cursors, captured while the
+/// editor and canonical core are in sync. `selection` is the caret it was
+/// captured for — the fast path is used only while the live caret still equals it.
+struct CaretAnchor {
+  selection: EditorSelection,
+  head_cursor: Vec<u8>,
+  anchor_cursor: Vec<u8>,
+}
+
 pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
@@ -849,6 +884,11 @@ pub struct RichTextEditor {
   /// (spec invariant 5). `None` = read-only display surface.
   write_authority: Option<std::sync::Arc<dyn LocalWriteAuthority>>,
   pub(super) selection: EditorSelection,
+  /// §caret-anchor FAST path: the selection's CRDT cursors, captured at synced
+  /// moments. When a remote patch arrives while `selection` still equals
+  /// `anchor.selection`, the caret is repositioned by resolving these cursors
+  /// (O(log n)) instead of the O(doc) `fork_at` rebase. `None`/stale ⇒ fallback.
+  caret_anchor: Option<CaretAnchor>,
   selection_movement_epoch: u64,
   config: RichTextEditorConfig,
   edit_generation: u64,
@@ -901,9 +941,24 @@ pub struct RichTextEditor {
   pending_typing_prefetch_resume: bool,
   resume_chunk_prefetch_after_typing: bool,
   paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
-  paragraph_prep_cache: Vec<ParagraphPrepSlot>,
-  paragraph_shaping_cache: Vec<Option<ParagraphShapingCacheEntry>>,
-  paragraph_estimate_height_cache: Vec<Option<ParagraphEstimateHeightCacheEntry>>,
+  // §perf-heaven T8.12: keyed by STABLE `ParagraphId`, not by `paragraph_ix`.
+  // A positional `Vec` had to `resize_with` on every structural edit and left
+  // trailing slots misaligned with the shifted paragraphs; the id-keyed map lets
+  // an unchanged paragraph keep its slot regardless of position. Validity is
+  // gated by the content key (style, version) + id + position inside the slot
+  // (§act-nine A9.3 — no global `edit_generation`), so this is
+  // correctness-neutral. Bounded in `resize_layout_aux_caches` against leaking
+  // entries for deleted paragraphs (same policy as the estimate cache below).
+  paragraph_prep_cache: FxHashMap<ParagraphId, ParagraphPrepSlot>,
+  paragraph_shaping_cache: FxHashMap<ParagraphId, ParagraphShapingCacheEntry>,
+  // §perf-heaven T7.14: keyed by STABLE `ParagraphId`, not by `paragraph_ix`.
+  // A positional `Vec` shifted on any mid-document insert/delete, turning every
+  // trailing paragraph's estimate into a stale-slot MISS → an O(document) tail
+  // recompute on the total-height pass. An id-keyed map lets a shifted paragraph
+  // keep its cached estimate, so a structural edit recomputes only the touched
+  // paragraphs. Bounded against unbounded growth from deletions in
+  // `resize_layout_aux_caches`.
+  paragraph_estimate_height_cache: FxHashMap<ParagraphId, ParagraphEstimateHeightCacheEntry>,
   pending_layout_prep_task: Option<Task<()>>,
   pending_layout_prep_request: Option<LayoutPrepRequest>,
   layout_generation: u64,
@@ -925,7 +980,6 @@ pub struct RichTextEditor {
   scroll_materialize_stall_frames: u32,
   item_sizes_cache: Option<ItemSizesCache>,
   pending_item_sizes_patch_range: Option<Range<usize>>,
-  layout_invalidation_hint: Option<Range<usize>>,
   suppress_mutation_notify: usize,
   last_scroll_anchor: Option<ScrollAnchorSnapshot>,
   scroll_anchor_lock: Option<ScrollAnchorLock>,

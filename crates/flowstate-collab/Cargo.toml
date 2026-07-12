@@ -37,6 +37,7 @@ gpui = { workspace = true, features = ["test-support"] }
 pollster = "0.4.0"
 proptest = { workspace = true }
 tempfile.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
 
 [lints]
 workspace = true

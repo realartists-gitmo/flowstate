@@ -23,14 +23,12 @@
 
 use std::sync::Arc;
 
-use crate::{Block, Paragraph, block_text_byte_len, paragraph_runs_len};
+use crate::{Block, Paragraph, paragraph_runs_len};
 
 /// The monoid carried by every node. All four components add componentwise
 /// (identity `{0,0,0,0}`, associative), so subtree summaries compose bottom-up:
 ///
 /// - `blocks` — block count (positional split space);
-/// - `bytes` — block-space text bytes (paragraph runs, or an object's U+FFFC
-///   placeholder) — the CRDT `body_text` coordinate;
 /// - `paragraphs` — paragraph-block count (paragraph-rank space);
 /// - `para_text_bytes` — `Σ runs_len` over paragraph blocks only (objects
 ///   contribute 0) — the `document.text` paragraph-rope coordinate, from which
@@ -38,7 +36,6 @@ use crate::{Block, Paragraph, block_text_byte_len, paragraph_runs_len};
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Summary {
   pub blocks: usize,
-  pub bytes: usize,
   pub paragraphs: usize,
   pub para_text_bytes: usize,
 }
@@ -52,7 +49,6 @@ impl Summary {
     };
     Self {
       blocks: 1,
-      bytes: block_text_byte_len(block),
       paragraphs,
       para_text_bytes,
     }
@@ -62,7 +58,6 @@ impl Summary {
   fn combine(self, other: Self) -> Self {
     Self {
       blocks: self.blocks + other.blocks,
-      bytes: self.bytes + other.bytes,
       paragraphs: self.paragraphs + other.paragraphs,
       para_text_bytes: self.para_text_bytes + other.para_text_bytes,
     }
@@ -71,7 +66,7 @@ impl Summary {
 
 /// A persistent treap node. Caches subtree size (positional split) and
 /// [`Summary`] (offset queries); `priority` heap-orders the treap (balance).
-/// `Clone` backs the copy-on-write in-place maps (`update_at`/`map_from_mut`):
+/// `Clone` backs the copy-on-write in-place maps (`update_at`):
 /// `Arc::make_mut` clones a node only when a retained version still shares it,
 /// so an owned tree mutates in place.
 #[derive(Clone, Debug)]
@@ -211,26 +206,6 @@ fn update_node_at(node: &mut Option<Arc<Node>>, index: usize, edit: impl FnOnce(
   refresh_summary(current);
 }
 
-/// COW in-order visit of every block at position `>= start`, applying `edit`.
-fn map_node_from(node: &mut Option<Arc<Node>>, start: usize, edit: &mut impl FnMut(&mut Block)) {
-  let Some(arc) = node else {
-    return;
-  };
-  if start >= arc.size {
-    return; // whole subtree precedes `start` — untouched, no clone.
-  }
-  let current = Arc::make_mut(arc);
-  let left_size = size(&current.left);
-  if start < left_size {
-    map_node_from(&mut current.left, start, edit);
-  }
-  if start <= left_size {
-    edit(Arc::make_mut(&mut current.value));
-  }
-  map_node_from(&mut current.right, start.saturating_sub(left_size + 1), edit);
-  refresh_summary(current);
-}
-
 /// Build a valid treap from a slice of blocks. `O(n log n)` via repeated merge
 /// (bulk build is not on any hot path).
 fn build(blocks: &[Arc<Block>]) -> Option<Arc<Node>> {
@@ -270,10 +245,6 @@ impl BlockTree {
     self.root.is_none()
   }
 
-  #[must_use]
-  pub fn byte_len(&self) -> usize {
-    summary(&self.root).bytes
-  }
 
   /// The block at `index`, or `None` if out of range. `O(log N)`.
   #[must_use]
@@ -321,55 +292,7 @@ impl BlockTree {
     }
   }
 
-  /// The cumulative document-text byte offset BEFORE block `index`. `O(log N)`.
-  /// `byte_offset(len())` equals `byte_len()`.
-  #[must_use]
-  pub fn byte_offset(&self, index: usize) -> usize {
-    let mut node = &self.root;
-    let mut index = index;
-    let mut acc = 0usize;
-    while let Some(current) = node {
-      let left_size = size(&current.left);
-      match index.cmp(&left_size) {
-        std::cmp::Ordering::Less => node = &current.left,
-        std::cmp::Ordering::Equal => {
-          acc += summary(&current.left).bytes;
-          return acc;
-        },
-        std::cmp::Ordering::Greater => {
-          acc += summary(&current.left).bytes + block_text_byte_len(&current.value);
-          index -= left_size + 1;
-          node = &current.right;
-        },
-      }
-    }
-    acc
-  }
 
-  /// The block index containing byte `byte`, plus the byte offset WITHIN that
-  /// block. Returns `None` if `byte >= byte_len()`. `O(log N)`.
-  #[must_use]
-  pub fn block_at_byte(&self, byte: usize) -> Option<(usize, usize)> {
-    let mut node = self.root.as_ref()?;
-    let mut byte = byte;
-    let mut index_base = 0usize;
-    loop {
-      let left_bytes = summary(&node.left).bytes;
-      if byte < left_bytes {
-        node = node.left.as_ref()?;
-        continue;
-      }
-      byte -= left_bytes;
-      let value_bytes = block_text_byte_len(&node.value);
-      let left_size = size(&node.left);
-      if byte < value_bytes {
-        return Some((index_base + left_size, byte));
-      }
-      byte -= value_bytes;
-      index_base += left_size + 1;
-      node = node.right.as_ref()?;
-    }
-  }
 
   /// The number of paragraph blocks in the tree. `O(1)`.
   #[must_use]
@@ -398,6 +321,112 @@ impl BlockTree {
         rank -= 1;
       }
       node = node.right.as_ref()?;
+    }
+  }
+
+  /// The block-row index (objects INCLUDED) of the `paragraph_ix`-th paragraph
+  /// block — the inverse of `paragraph_ref` in row space. `O(log N)`.
+  ///
+  /// §perf-heaven T7.11: the tree-native replacement for the O(blocks)
+  /// `block_ix_for_paragraph` linear scan. It walks the same
+  /// `summary().paragraphs` rank the read model already maintains (updated
+  /// `O(change)` by `splice`/`update_at`), accumulating the total block count of
+  /// fully-passed subtrees to land on the row. Returns `None` if `paragraph_ix`
+  /// is past the last paragraph.
+  #[must_use]
+  pub fn block_row_for_paragraph_ix(&self, paragraph_ix: usize) -> Option<usize> {
+    let mut node = self.root.as_ref()?;
+    let mut rank = paragraph_ix;
+    let mut row_base = 0usize;
+    loop {
+      let left_paragraphs = summary(&node.left).paragraphs;
+      if rank < left_paragraphs {
+        node = node.left.as_ref()?;
+        continue;
+      }
+      rank -= left_paragraphs;
+      row_base += size(&node.left);
+      if let Block::Paragraph(_) = &*node.value {
+        if rank == 0 {
+          return Some(row_base);
+        }
+        rank -= 1;
+      }
+      row_base += 1;
+      node = node.right.as_ref()?;
+    }
+  }
+
+  /// The paragraph-rank of the paragraph block at block row `row`, i.e. the count
+  /// of paragraph blocks strictly before `row`. `Some(rank)` iff the block at
+  /// `row` is itself a paragraph; `None` for an object row or out of range.
+  /// `O(log N)`.
+  ///
+  /// §perf-heaven T7.12/T7.13: the tree-native replacement for the object-doc
+  /// scans in `document_offset_for_position` and `paragraph_ix_for_block_row`
+  /// (both formerly counted `Block::Paragraph` before `row`).
+  #[must_use]
+  pub fn paragraph_ix_for_block_row(&self, row: usize) -> Option<usize> {
+    let mut node = self.root.as_ref()?;
+    let mut index = row;
+    let mut paragraphs_before = 0usize;
+    loop {
+      let left_size = size(&node.left);
+      if index < left_size {
+        node = node.left.as_ref()?;
+        continue;
+      }
+      paragraphs_before += summary(&node.left).paragraphs;
+      index -= left_size;
+      if index == 0 {
+        return matches!(&*node.value, Block::Paragraph(_)).then_some(paragraphs_before);
+      }
+      if let Block::Paragraph(_) = &*node.value {
+        paragraphs_before += 1;
+      }
+      index -= 1;
+      node = node.right.as_ref()?;
+    }
+  }
+
+  /// The count of paragraph blocks at rows strictly before `row` (any block
+  /// kind at `row`; `row >= len` returns the total paragraph count). `O(log N)`.
+  ///
+  /// §act-ten A10.8: backs the editor's object-selection collapse queries
+  /// (`paragraph_before_block`/`paragraph_after_block`), which formerly walked
+  /// every block per call — O(visible items x blocks) per layout pass on
+  /// object-heavy docs via `paragraph_range_for_item_range`.
+  #[must_use]
+  pub fn paragraphs_before_row(&self, row: usize) -> usize {
+    let Some(mut node) = self.root.as_ref() else {
+      return 0;
+    };
+    let mut index = row;
+    let mut paragraphs_before = 0usize;
+    loop {
+      let left_size = size(&node.left);
+      if index < left_size {
+        match node.left.as_ref() {
+          Some(left) => {
+            node = left;
+            continue;
+          },
+          None => return paragraphs_before,
+        }
+      }
+      paragraphs_before += summary(&node.left).paragraphs;
+      index -= left_size;
+      if index == 0 {
+        return paragraphs_before;
+      }
+      if let Block::Paragraph(_) = &*node.value {
+        paragraphs_before += 1;
+      }
+      index -= 1;
+      match node.right.as_ref() {
+        Some(right) => node = right,
+        None => return paragraphs_before,
+      }
     }
   }
 
@@ -433,16 +462,6 @@ impl BlockTree {
     }
   }
 
-  /// Apply `edit` to every block from `start` onward, in order — the in-place
-  /// COW sibling of a suffix `splice`. Used by the per-keystroke byte-range
-  /// mirror: it touches only `byte_range` (which does NOT enter [`Summary`]),
-  /// so on an owned tree it matches the old `Arc<Vec<Block>>` in-place shift
-  /// (no per-block deep clone). Recomputes path summaries defensively so it is
-  /// still correct if `edit` changes run lengths. `O(N - start)` visits,
-  /// in-place when owned.
-  pub fn map_from_mut(&mut self, start: usize, mut edit: impl FnMut(&mut Block)) {
-    map_node_from(&mut self.root, start, &mut edit);
-  }
 
   /// Replace blocks `range` with `replacement`, returning a NEW tree that
   /// shares every node outside the cut. `O((log N) + |replacement|)`.
@@ -514,7 +533,6 @@ mod tests {
   fn paragraph(byte_len: usize) -> Block {
     Block::Paragraph(Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..byte_len,
       runs: if byte_len == 0 {
         Vec::new()
       } else {
@@ -554,17 +572,6 @@ mod tests {
   fn build_and_accessors() {
     let tree = BlockTree::from_blocks(blocks(&[3, 5, 2, 8]));
     assert_eq!(tree.len(), 4);
-    assert_eq!(tree.byte_len(), 18);
-    assert_eq!(tree.byte_offset(0), 0);
-    assert_eq!(tree.byte_offset(1), 3);
-    assert_eq!(tree.byte_offset(2), 8);
-    assert_eq!(tree.byte_offset(3), 10);
-    assert_eq!(tree.byte_offset(4), 18);
-    assert_eq!(tree.block_at_byte(0), Some((0, 0)));
-    assert_eq!(tree.block_at_byte(2), Some((0, 2)));
-    assert_eq!(tree.block_at_byte(3), Some((1, 0)));
-    assert_eq!(tree.block_at_byte(9), Some((2, 1)));
-    assert_eq!(tree.block_at_byte(18), None);
     assert_invariants(&tree.root);
   }
 
@@ -617,6 +624,7 @@ mod tests {
       caption: None,
       sizing: crate::ImageSizing::Intrinsic,
       alignment: crate::BlockAlignment::Center,
+      external_url: None,
       version: 0,
     })
   }
@@ -718,30 +726,8 @@ mod tests {
     assert_eq!(tree.to_vec(), reference);
     assert_invariants(&tree.root);
 
-    // map_from_mut: shift byte_range on the [3..] suffix; byte_range is NOT in
-    // Summary, but summaries must still be consistent afterward.
-    tree.map_from_mut(3, |block| {
-      if let Block::Paragraph(paragraph) = block {
-        paragraph.byte_range = 100..100;
-      }
-    });
-    for (ix, block) in tree.to_vec().iter().enumerate() {
-      if ix >= 3
-        && let Block::Paragraph(paragraph) = block
-      {
-        assert_eq!(paragraph.byte_range, 100..100, "suffix[{ix}] not shifted");
-      }
-    }
-    assert_invariants(&tree.root);
     // The retained version is byte-for-byte unchanged (persistence held).
     assert_eq!(retained.to_vec(), blocks(&[1, 2, 3, 4, 5]));
-
-    // map_from_mut that changes run lengths must refresh the byte monoid.
-    let mut grow = BlockTree::from_blocks(blocks(&[1, 1, 1]));
-    grow.map_from_mut(1, |block| *block = paragraph(10));
-    assert_eq!(grow.byte_len(), 1 + 10 + 10);
-    assert_eq!(grow.byte_offset(2), 11);
-    assert_invariants(&grow.root);
   }
 
   #[test]
@@ -754,7 +740,6 @@ mod tests {
     tree = tree.splice(1..3, repl);
     assert_eq!(tree.to_vec(), reference);
     assert_invariants(&tree.root);
-    assert_eq!(tree.byte_len(), reference.iter().map(block_text_byte_len).sum::<usize>());
   }
 
   #[test]
@@ -812,17 +797,21 @@ mod tests {
         assert_eq!(tree.to_vec(), reference, "seed {seed} step {step}: content diverged");
         // (I2) balance + annotation invariants hold.
         assert_invariants(&tree.root);
-        // (I3) byte monoid queries agree with a cumulative scan.
+        // (I3) the paragraph-rope monoid agrees with a cumulative scan
+        // (§act-ten A9.5: the block-space `bytes` monoid was removed — dead
+        // outside the tree, maintained on every splice; `paragraph_start` is
+        // the surviving load-bearing offset space).
+        let paragraph_count = reference.iter().filter(|block| matches!(block, Block::Paragraph(_))).count();
         let mut cum = 0usize;
-        for (ix, block) in reference.iter().enumerate() {
-          assert_eq!(tree.byte_offset(ix), cum, "seed {seed} step {step}: byte_offset[{ix}]");
-          if block_text_byte_len(block) > 0 {
-            assert_eq!(tree.block_at_byte(cum), Some((ix, 0)), "seed {seed} step {step}: block_at_byte");
+        let mut paragraph_rank = 0usize;
+        for block in &reference {
+          if let Block::Paragraph(paragraph) = block {
+            let expected = cum + paragraph_rank.min(paragraph_count.saturating_sub(1));
+            assert_eq!(tree.paragraph_start(paragraph_rank), expected, "seed {seed} step {step}: paragraph_start[{paragraph_rank}]");
+            cum += paragraph_runs_len(paragraph);
+            paragraph_rank += 1;
           }
-          cum += block_text_byte_len(block);
         }
-        assert_eq!(tree.byte_len(), cum);
-        assert_eq!(tree.byte_offset(reference.len()), cum);
 
         // (I4) persistence: a snapshot taken earlier is byte-for-byte unchanged.
         if let Some((snap_vec, snap_tree)) = &snapshot {

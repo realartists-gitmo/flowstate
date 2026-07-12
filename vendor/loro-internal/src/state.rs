@@ -1010,13 +1010,14 @@ impl DocState {
                 stack_vv.as_ref().unwrap()
             };
 
-            let (unknown_diffs, _diff_mode) = diff_calc.calc_diff_internal(
+            let (unknown_diffs, _diff_mode) = diff_calc.calc_diff_internal_tagged(
                 oplog,
                 &Default::default(),
                 &Default::default(),
                 vv,
                 &frontiers,
                 Some(&|idx| !idx.is_unknown() && unknown_containers.contains(&idx)),
+                "unknown-containers",
             );
             self.apply_diff(
                 InternalDocDiff {

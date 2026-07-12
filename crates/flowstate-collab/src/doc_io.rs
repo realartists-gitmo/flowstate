@@ -159,7 +159,20 @@ impl DocIoHandle {
     let (sender, receiver) = async_channel::bounded(IO_REQUEST_CHANNEL_CAPACITY);
     std::thread::Builder::new()
       .name("flowstate-doc-io".to_string())
-      .spawn(move || io_loop(&core, &receiver))?;
+      .spawn(move || {
+        // §A13.1 (Act 13): Loro's state store decodes LAZILY — a
+        // shallow-opened doc pays ~65ms of rich-text tree materialization on
+        // its FIRST body-text access, which would otherwise land on the
+        // user's first keystroke. Warm it here, off the interactive path,
+        // right as the pump starts (the A13.2 priority lane lets a racing
+        // local intent preempt the acquisition; the hold itself is the
+        // one-time materialization we are choosing to pay early).
+        if let Ok(guard) = core.lock(GateHolder::DocumentService) {
+          let body = flowstate_document::loro_schema::body_text(guard.doc());
+          body.iter(|_| true);
+        }
+        io_loop(&core, &receiver);
+      })?;
     Ok(Self { requests: sender })
   }
 
@@ -282,6 +295,12 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
   // session — part of the receiving peer's 13.1 GB/run import churn.
   let mut unfreed_import_bytes: usize = 0;
   const IMPORT_CACHE_FREE_BYTES: usize = 4 * 1024 * 1024;
+  // §perf-heaven T8.18 (first cold import): warm the retained import calculator's
+  // trackers ONCE when this doc first shows collaboration activity, so the first
+  // remote import reuses the built index rather than paying the cold tracker
+  // build synchronously on the receive path. Gated so a single-user doc never
+  // pays for it.
+  let mut import_calc_warmed = false;
   loop {
     let request = if let Some(request) = deferred.pop() {
       request
@@ -298,10 +317,19 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         // Spec §6.4: coalesce immediately-available import blobs into ONE gate
         // acquisition. Non-import requests popped while draining are deferred
         // (processed right after, order preserved among themselves).
+        // §A14.1.1: the coalescer respects the sender's mass-op slicing — a
+        // BYTE budget stops it from gluing chunked slices back into one
+        // mass hold (which would resurrect the ~240ms typing stall the
+        // chunking exists to kill). Small drips still coalesce as before.
+        const IMPORT_COALESCE_BYTE_BUDGET: usize = 64 * 1024;
+        let mut coalesced_bytes = bytes.len();
         let mut chunk: Vec<(Vec<u8>, ReplySender<Vec<RuntimeEvent>>)> = vec![(bytes, reply)];
-        while chunk.len() < IMPORT_COALESCE_MAX {
+        while chunk.len() < IMPORT_COALESCE_MAX && coalesced_bytes < IMPORT_COALESCE_BYTE_BUDGET {
           match receiver.try_recv() {
-            Ok(IoRequest::ImportRemoteUpdate { bytes, reply }) => chunk.push((bytes, reply)),
+            Ok(IoRequest::ImportRemoteUpdate { bytes, reply }) => {
+              coalesced_bytes += bytes.len();
+              chunk.push((bytes, reply));
+            },
             Ok(other) => {
               deferred.push(other);
               break;
@@ -318,9 +346,12 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             // derive (each import pays a fixed per-call rich-text tracker rebuild,
             // so fewer imports is a direct win) — with NO added latency, since we
             // were already blocked on the gate.
-            while chunk.len() < IMPORT_COALESCE_MAX {
+            while chunk.len() < IMPORT_COALESCE_MAX && coalesced_bytes < IMPORT_COALESCE_BYTE_BUDGET {
               match receiver.try_recv() {
-                Ok(IoRequest::ImportRemoteUpdate { bytes, reply }) => chunk.push((bytes, reply)),
+                Ok(IoRequest::ImportRemoteUpdate { bytes, reply }) => {
+                  coalesced_bytes += bytes.len();
+                  chunk.push((bytes, reply));
+                },
                 Ok(other) => {
                   deferred.push(other);
                   break;
@@ -371,7 +402,19 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
       IoRequest::PumpPublish { reply } => {
         let result = core
           .lock(GateHolder::ExportUpdates)
-          .map(|mut guard| guard.take_pending_publish())
+          .map(|mut guard| {
+            // §perf-heaven T8.18: the first publish marks this doc as an ACTIVE
+            // collaboration participant. Warm the retained import calculator now
+            // (off the receive path) so the FIRST remote import reuses the
+            // id_to_cursor index instead of building it cold. Safe: a stale warmed
+            // tracker is rebuilt by `start_tracking`'s validity guard, so warming
+            // can only save work, never change a computed diff.
+            if !import_calc_warmed {
+              guard.doc().inner().warm_import_diff_calculator();
+              import_calc_warmed = true;
+            }
+            guard.take_pending_publish()
+          })
           .map_err(|poisoned| anyhow::anyhow!(poisoned));
         send_reply(&reply, result);
       },
@@ -390,8 +433,25 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
       IoRequest::SnapshotBytes { reply } => {
         // I-9a long-export rule: fork under the gate (brief), export the fork
         // off-gate so a large snapshot never stalls typing.
-        let forked = gate_call(core, GateHolder::ExportFork, |runtime| Ok(runtime.doc().fork()));
-        let result = forked.and_then(|fork| fork.export(ExportMode::Snapshot).context("exporting Loro snapshot from fork"));
+        //
+        // §A12.1.3: a SHALLOW session's fork exports a silently shallow
+        // snapshot — a joiner bootstrapped from it would be shallow AND
+        // package-less, unable to absorb below-root history later. Clone the
+        // package under the gate too (memcpy-scale, rare — joins only) and
+        // reconstruct the FULL doc off-gate so joiners keep full history.
+        let forked = gate_call(core, GateHolder::ExportFork, |runtime| {
+          let package = runtime.doc().is_shallow().then(|| runtime.package().cloned()).flatten();
+          Ok((runtime.doc().fork(), package))
+        });
+        let result = forked.and_then(|(fork, package)| {
+          let source = match package {
+            Some(package) => package
+              .reconstruct_full_doc(&fork)
+              .context("reconstructing full history for a join snapshot")?,
+            None => fork,
+          };
+          source.export(ExportMode::Snapshot).context("exporting Loro snapshot from fork")
+        });
         send_reply(&reply, result);
       },
       IoRequest::CheckpointPackage { title, path, reply } => {

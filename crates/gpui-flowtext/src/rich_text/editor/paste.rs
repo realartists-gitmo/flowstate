@@ -275,7 +275,6 @@ impl RichTextEditor {
     };
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       paragraph.text.clear();
-      paragraph.paragraph.byte_range = 0..0;
       paragraph.paragraph.runs.clear();
       paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
     });

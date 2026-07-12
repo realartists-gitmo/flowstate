@@ -205,7 +205,6 @@ mod paragraph_seq_tests {
   fn para(byte_len: usize) -> Paragraph {
     Paragraph {
       style: ParagraphStyle::Normal,
-      byte_range: 0..byte_len,
       runs: if byte_len == 0 {
         Vec::new()
       } else {

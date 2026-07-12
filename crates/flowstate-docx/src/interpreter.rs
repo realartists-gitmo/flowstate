@@ -17,8 +17,18 @@ use rustc_hash::{FxHashMap, FxHashSet};
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
   DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
-  SOFT_LINE_BREAK_STR, document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
+  SOFT_LINE_BREAK_STR, VertAlign, document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
 };
+
+/// Map an OOXML `w:vertAlign` value (`superscript` / `subscript` / `baseline`)
+/// to the model's [`VertAlign`]. Unknown/absent ⇒ `Baseline`.
+fn vert_align_from_ooxml(value: Option<&str>) -> VertAlign {
+  match value {
+    Some("superscript") => VertAlign::Superscript,
+    Some("subscript") => VertAlign::Subscript,
+    _ => VertAlign::Baseline,
+  }
+}
 use flowstate_fidelity::FidelityClass;
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
@@ -137,6 +147,10 @@ fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx
     memchr::memmem::find(xml, b"tbl").is_none()
       && memchr::memmem::find(xml, b"drawing").is_none()
       && memchr::memmem::find(xml, b"oMath").is_none()
+      // §act-eleven C7 (fixture-caught): legacy VML images (`w:pict`) are
+      // objects too — without this probe a VML-ONLY document took the
+      // object-free fast path and its images were never scanned at all.
+      && memchr::memmem::find(xml, b"imagedata").is_none()
   });
 
   let (document, report) = if object_free {
@@ -148,7 +162,10 @@ fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx
     let document = document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs);
     (document, report)
   } else {
-    let structured = structured::interpret_structured(cleaned, &interpreted.paragraphs)?;
+    // §act-nine A9.2: the structured walk consumes the CT_Document the
+    // direct-properties pass already parsed instead of building its own owned
+    // XmlNode tree (collapses the third heavy document.xml parse).
+    let structured = structured::interpret_structured(cleaned, &interpreted.document, &interpreted.paragraphs)?;
     let mut report = interpreted.report;
     report.tables_imported = structured.tables_imported;
     report.images_imported = structured.images_imported;
@@ -207,6 +224,9 @@ pub fn import_cleaned_docx_to_loro(cleaned: CleanedDocx, title: &str) -> io::Res
 
 struct InterpretedDocx {
   paragraphs: Vec<DocumentParagraphInput>,
+  /// The typed main-document parse harvested for `DirectParagraphFacts`, kept
+  /// alive so the structured object walk can consume it too (§act-nine A9.2).
+  document: CT_Document,
   report: DocxConversionReport,
 }
 
@@ -221,24 +241,93 @@ struct InterpretedDocx {
 /// and is provisional pending a product decision on their semantics. `<w:cr>`
 /// is dropped inside rdocx itself and never reaches this text.
 fn soften_rdocx_breaks(text: String) -> String {
-  if text.contains('\n') { text.replace('\n', SOFT_LINE_BREAK_STR) } else { text }
+  // U+FFFC (OBJECT_REPLACEMENT) is a RESERVED body-flow encoding sentinel: the
+  // projector treats every U+FFFC as an object placeholder. A literal one sitting
+  // in source run text (seen in real docx) reads back as an OrphanObjectPlaceholder
+  // defect, so strip it at ingestion. Rare, so the contains-checks keep the common
+  // path allocation-free.
+  let strip_object = text.contains('\u{FFFC}');
+  // §act-ten A9.6: normalize CR too. quick-xml does not perform XML line-ending
+  // normalization, so a literal `\r\n` (or bare `\r`) inside `w:t` survives into
+  // run text; the un-normalized `\r` then rides the body flow as a phantom char
+  // the exporter cannot represent — the corpus caught a 52-CRLF doc losing one
+  // char per CRLF on roundtrip. Map CRLF/CR/LF each to ONE soft line break, the
+  // same visual Word gives them.
+  let soften = text.contains('\n') || text.contains('\r');
+  match (strip_object, soften) {
+    (false, false) => text,
+    (true, false) => text.replace('\u{FFFC}', ""),
+    (false, true) => soften_line_endings(&text),
+    (true, true) => soften_line_endings(&text.replace('\u{FFFC}', "")),
+  }
+}
+
+fn soften_line_endings(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut chars = text.chars().peekable();
+  while let Some(ch) = chars.next() {
+    match ch {
+      '\r' => {
+        if chars.peek() == Some(&'\n') {
+          chars.next();
+        }
+        out.push_str(SOFT_LINE_BREAK_STR);
+      },
+      '\n' => out.push_str(SOFT_LINE_BREAK_STR),
+      other => out.push(other),
+    }
+  }
+  out
 }
 
 #[hotpath::measure]
 fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> {
-  // §perf: the rdocx package parse and the direct-properties XML pass are
-  // independent reads of the same cleaned bytes — run them in parallel
-  // (≈200 ms off a large-doc import; both are full document.xml parses).
-  let (docx, direct_properties) = std::thread::scope(|scope| {
-    let direct_properties = scope.spawn(|| match cleaned.main_document_xml.as_deref() {
-      Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml),
-      None => direct_properties_by_paragraph_package(&cleaned.bytes),
-    });
-    let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error);
-    (docx, direct_properties.join().expect("direct-properties parse thread panicked"))
-  });
-  let docx = docx?;
-  let direct_properties = direct_properties?;
+  // §act-eleven A11.2: ONE typed parse + ONE unzip feed rdocx, the facts
+  // harvest, AND (via `InterpretedDocx.document`) the structured walk. The
+  // cleaner's already-open package supplies styles.xml; the vendored
+  // `from_parsed_parts` skips rdocx's own document/numbering/core parses and
+  // the `cleaned.bytes` re-inflate. Files whose package or captured
+  // document.xml is unavailable fall back to the previous overlapped
+  // two-parse path — output is byte-identical either way (corpus-netted).
+  let (docx, mut parsed_document, direct_properties) = match (cleaned.package.as_deref(), cleaned.main_document_xml.as_deref()) {
+    (Some(package), Some(doc_xml)) => {
+      // §act-five P6 carried over: the light streaming run-border pass hides
+      // under the one heavy typed parse.
+      let probe_t0 = std::time::Instant::now();
+      let (document, run_borders) = std::thread::scope(|scope| {
+        let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
+        // §act-twelve A12.3.1-full: fragment-parallel typed parse (equal tree,
+        // corpus-netted; falls back to the sequential parse on any anomaly).
+        let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
+        let borders = borders.join().unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+        (document, borders)
+      });
+      let probe_parse = probe_t0.elapsed();
+      let document = document?;
+      let probe_t1 = std::time::Instant::now();
+      let facts = direct_paragraph_facts(&document, &run_borders?);
+      let docx = RDocxDocument::from_parsed_parts(package, document).map_err(rdocx_error)?;
+      static PARSE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *PARSE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_PARSE_PROBE").is_some()) {
+        eprintln!("[flowstate-parse-probe] typed_parse={probe_parse:?} facts+parts={:?}", probe_t1.elapsed());
+      }
+      (docx, None, facts)
+    },
+    _ => {
+      let (docx, direct_properties) = std::thread::scope(|scope| {
+        let direct_properties = scope.spawn(|| match cleaned.main_document_xml.as_deref() {
+          Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml),
+          None => direct_properties_by_paragraph_package(&cleaned.bytes),
+        });
+        let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error);
+        (docx, direct_properties.join().expect("direct-properties parse thread panicked"))
+      });
+      let docx = docx?;
+      let (document, direct_properties) = direct_properties?;
+      (docx, Some(document), direct_properties)
+    },
+  };
+  let probe_walk_t0 = std::time::Instant::now();
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
@@ -293,6 +382,11 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
           source_size_pt,
           size_pt: source_size_pt.or_else(|| effective.sz.map(rdocx_oxml::HalfPoint::to_pt)),
           color: run.color().is_some() || direct.color || effective.color.is_some() || effective.color_theme.is_some(),
+          vert_align: if direct.vert_align == VertAlign::Baseline {
+            vert_align_from_ooxml(effective.vert_align.as_deref())
+          } else {
+            direct.vert_align
+          },
         }
       })
       .collect::<Vec<_>>();
@@ -410,7 +504,14 @@ fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> 
     unknown_paragraph_styles,
     unknown_run_styles,
   };
-  Ok(InterpretedDocx { paragraphs, report })
+  let document = parsed_document
+    .take()
+    .unwrap_or_else(|| docx.into_typed_document());
+  static PARSE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  if *PARSE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_PARSE_PROBE").is_some()) {
+    eprintln!("[flowstate-parse-probe] conversion_walk={:?} paragraphs={}", probe_walk_t0.elapsed(), paragraphs.len());
+  }
+  Ok(InterpretedDocx { paragraphs, document, report })
 }
 #[derive(Clone, Debug)]
 struct RunFact {
@@ -425,6 +526,7 @@ struct RunFact {
   source_size_pt: Option<f64>,
   size_pt: Option<f64>,
   color: bool,
+  vert_align: VertAlign,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -443,6 +545,7 @@ struct DirectRunProperties {
   border: bool,
   size_pt: Option<f64>,
   color: bool,
+  vert_align: VertAlign,
 }
 
 struct EffectiveParagraphProperties<'properties> {
@@ -458,7 +561,7 @@ impl ParagraphProperties for EffectiveParagraphProperties<'_> {
 }
 
 #[hotpath::measure]
-fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
+fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<(CT_Document, Vec<DirectParagraphFacts>)> {
   let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).map_err(rdocx_opc_error)?;
   let doc_part_name = package
     .main_document_part()
@@ -469,76 +572,85 @@ fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<Direct
   direct_properties_by_paragraph_xml(doc_xml)
 }
 
+/// Returns the typed `CT_Document` ALONGSIDE the harvested facts (§act-nine
+/// A9.2): the same parse also feeds the structured object walk, which used to
+/// re-derive an owned `XmlNode` tree from the same bytes.
 #[hotpath::measure]
-fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
+fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<(CT_Document, Vec<DirectParagraphFacts>)> {
   // §act-five P6: the two INDEPENDENT parses of the same bytes — the heavy
   // structured `CT_Document::from_xml` and the light streaming run-border pass —
   // overlap on a scoped thread so the border parse hides under the structured
   // one (both borrow `doc_xml` immutably; the scope guarantees it outlives them).
   let (document, run_borders_by_paragraph) = std::thread::scope(|scope| {
     let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
-    let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error);
+    let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
     let borders = borders.join().unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
     (document, borders)
   });
   let document = document?;
-  let run_borders_by_paragraph = run_borders_by_paragraph?;
-  Ok(
-    document
-      .body
-      .paragraphs()
-      .enumerate()
-      .map(|(paragraph_ix, paragraph)| {
-        let paragraph_run_borders = run_borders_by_paragraph
-          .get(paragraph_ix)
-          .map(Vec::as_slice)
-          .unwrap_or_default();
-        let runs = paragraph
-          .runs
-          .iter()
-          .enumerate()
-          .map(|(run_ix, run)| {
-            let Some(properties) = run.properties.as_ref() else {
-              return DirectRunProperties {
-                border: paragraph_run_borders
-                  .get(run_ix)
-                  .copied()
-                  .unwrap_or_default(),
-                ..DirectRunProperties::default()
-              };
-            };
-            DirectRunProperties {
-              bold: properties.bold == Some(true) || properties.bold_cs == Some(true),
-              bold_off: properties.bold == Some(false) && properties.bold_cs != Some(true),
-              underline: underline_is_on(properties.underline.as_ref()),
-              strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
-              highlight: properties.highlight.is_some() || properties.shading.is_some(),
+  let facts = direct_paragraph_facts(&document, &run_borders_by_paragraph?);
+  Ok((document, facts))
+}
+
+/// §act-eleven A11.2: the facts harvest over an already-parsed typed tree —
+/// shared by the single-parse fast path (which hands the tree straight to
+/// rdocx afterward) and the legacy overlapped path above.
+#[hotpath::measure]
+fn direct_paragraph_facts(document: &CT_Document, run_borders_by_paragraph: &[Vec<bool>]) -> Vec<DirectParagraphFacts> {
+  document
+    .body
+    .paragraphs()
+    .enumerate()
+    .map(|(paragraph_ix, paragraph)| {
+      let paragraph_run_borders = run_borders_by_paragraph
+        .get(paragraph_ix)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+      let runs = paragraph
+        .runs
+        .iter()
+        .enumerate()
+        .map(|(run_ix, run)| {
+          let Some(properties) = run.properties.as_ref() else {
+            return DirectRunProperties {
               border: paragraph_run_borders
                 .get(run_ix)
                 .copied()
                 .unwrap_or_default(),
-              size_pt: properties.sz.map(|size| size.to_pt()),
-              color: properties.color.is_some() || properties.color_theme.is_some(),
-            }
-          })
-          .collect();
-        DirectParagraphFacts {
-          outline_lvl: paragraph
-            .properties
-            .as_ref()
-            .and_then(|properties| properties.outline_lvl),
-          runs,
-        }
-      })
-      .collect(),
-  )
+              ..DirectRunProperties::default()
+            };
+          };
+          DirectRunProperties {
+            bold: properties.bold == Some(true) || properties.bold_cs == Some(true),
+            bold_off: properties.bold == Some(false) && properties.bold_cs != Some(true),
+            underline: underline_is_on(properties.underline.as_ref()),
+            strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
+            highlight: properties.highlight.is_some() || properties.shading.is_some(),
+            border: paragraph_run_borders
+              .get(run_ix)
+              .copied()
+              .unwrap_or_default(),
+            size_pt: properties.sz.map(|size| size.to_pt()),
+            color: properties.color.is_some() || properties.color_theme.is_some(),
+            vert_align: vert_align_from_ooxml(properties.vert_align.as_deref()),
+          }
+        })
+        .collect();
+      DirectParagraphFacts {
+        outline_lvl: paragraph
+          .properties
+          .as_ref()
+          .and_then(|properties| properties.outline_lvl),
+        runs,
+      }
+    })
+    .collect()
 }
 
 #[hotpath::measure]
 fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<bool>>> {
   let mut reader = XmlReader::from_reader(doc_xml);
   reader.config_mut().trim_text(false);
-  let mut buf = Vec::new();
   let mut paragraphs = Vec::new();
   let mut current_paragraph: Option<Vec<bool>> = None;
   let mut in_run = false;
@@ -546,7 +658,9 @@ fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<boo
   let mut current_run_border = false;
 
   loop {
-    match reader.read_event_into(&mut buf) {
+    // §A14.5.1: borrowed events — `read_event_into` copies every event into
+    // the buffer, and this pass only inspects names/attrs.
+    match reader.read_event() {
       Ok(Event::Start(event)) if local_name_is(event.name().as_ref(), b"p") => {
         current_paragraph = Some(Vec::new());
       },
@@ -580,7 +694,6 @@ fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<boo
       Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
       _ => {},
     }
-    buf.clear();
   }
 
   Ok(paragraphs)
@@ -779,6 +892,10 @@ fn recognize_run_styles_for_context(
     direct_underline: structural_run_formatting_allowed && run.underline,
     strikethrough: !suppress_semantic_styles && run.strikethrough,
     highlight: (direct_highlight_allowed && run.highlight).then_some(flowstate_document::HIGHLIGHT_SPOKEN),
+    // Vertical alignment is orthogonal to the debate semantics and is preserved
+    // as-is (a `CO₂` subscript in a Tag keeps its subscript) — losslessly carried
+    // even where the semantic slot is suppressed for headings.
+    vert_align: run.vert_align,
   }
 }
 
@@ -1112,6 +1229,7 @@ mod tests {
       source_size_pt: None,
       size_pt: None,
       color: false,
+      vert_align: VertAlign::Baseline,
     }
   }
 

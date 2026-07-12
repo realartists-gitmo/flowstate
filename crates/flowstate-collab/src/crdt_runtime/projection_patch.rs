@@ -438,7 +438,9 @@ pub(crate) fn splice_region_patches(
           if new_paragraph_id != projection.ids.paragraph_ids.get(paragraph_ix).copied() {
             return None;
           }
-          paragraph_patches_from_readback(projection, paragraph_ix, new_input.clone(), &mut patches)?;
+          // `old_ix` is this paragraph's block row (from `old_rows`); pass it
+          // directly — no per-paragraph O(blocks) scan.
+          paragraph_patches_from_readback(projection, paragraph_ix, old_ix, new_input.clone(), &mut patches)?;
         },
         (new_input, None) => {
           let old_input = input_block_from_block(projection.blocks.get(old_ix)?);
@@ -504,7 +506,140 @@ pub(crate) fn remote_nonstructural_projection_patches(
       .iter()
       .any(|flow| flow != flowstate_document::ROOT_BODY_FLOW_ID)
   {
-    patches.extend(remote_object_projection_patches(projection, doc)?);
+    // §act-ten A10.4: try the SCOPED object readback first — a remote table-cell
+    // keystroke re-projects one table, not every object block in the document.
+    // Any unattributable change falls back to the full readback (the previous
+    // behavior), which itself returns None on structural surprises.
+    match remote_object_projection_patches_scoped(projection, doc, invalidation) {
+      Some(scoped) => patches.extend(scoped),
+      None => patches.extend(remote_object_projection_patches(projection, doc)?),
+    }
+  }
+  Some(patches)
+}
+
+/// §oom-leads #4: the scoped-else-full composition as a callable — the remote
+/// STRUCTURAL path was calling the full registry readback directly, so every
+/// peer split (whose delta carries its own `paragraph_block.*` record write)
+/// paid an O(objects) readback for zero object changes. Scoped attribution
+/// already classifies paragraph-registry keys as ignorable; anything it cannot
+/// attribute falls back to the full readback exactly as before.
+pub(crate) fn remote_object_projection_patches_scoped_or_full(
+  projection: &DocumentProjection,
+  doc: &LoroDoc,
+  invalidation: &ProjectionInvalidation,
+) -> Option<Vec<ProjectionPatch>> {
+  match remote_object_projection_patches_scoped(projection, doc, invalidation) {
+    Some(scoped) => Some(scoped),
+    None => {
+      static DERIVE_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
+        eprintln!(
+          "  scoped-object-readback BAILED to full: changed_blocks={:?} changed_tables={:?} nonbody_flows={:?}",
+          invalidation.changed_blocks,
+          invalidation.changed_tables,
+          invalidation.changed_flows.iter().filter(|flow| *flow != flowstate_document::ROOT_BODY_FLOW_ID).collect::<Vec<_>>()
+        );
+      }
+      remote_object_projection_patches(projection, doc)
+    },
+  }
+}
+
+/// §act-ten A10.4: the object readback scoped to the blocks that actually
+/// changed. Attribution sources, in order:
+/// - non-body `changed_flows` keys: the flow-id naming scheme encodes the
+///   owner (`<block>.<kind>` nested flows, `<cell>.flow` cell flows — cell ids
+///   map to their table via the projection's own rows);
+/// - `changed_blocks`/`changed_tables` container targets: the container's
+///   path to the root names the owning registry entry.
+///
+/// Returns `None` when ANY change cannot be attributed (callers run the full
+/// readback), or when a scoped readback disagrees structurally with the
+/// projection (new/absent block — the rebuild paths own those).
+fn remote_object_projection_patches_scoped(
+  projection: &DocumentProjection,
+  doc: &LoroDoc,
+  invalidation: &ProjectionInvalidation,
+) -> Option<Vec<ProjectionPatch>> {
+  use flowstate_document::ChangedContainerOwner;
+  // The projection's object rows by id — also the cell → table reverse map
+  // (built from already-materialized rows; no Loro reads).
+  let mut object_rows: FxHashMap<u128, (usize, &Block)> = FxHashMap::default();
+  let mut cell_to_block: FxHashMap<u128, u128> = FxHashMap::default();
+  for (row, block) in projection.blocks.iter().enumerate() {
+    if matches!(block, Block::Paragraph(_)) {
+      continue;
+    }
+    let block_id = projection.ids.block_ids.get(row)?;
+    object_rows.insert(block_id.0, (row, block));
+    if let Block::Table(table) = block {
+      for table_row in &table.rows {
+        for cell in &table_row.cells {
+          cell_to_block.insert(cell.id.0, block_id.0);
+        }
+      }
+    }
+  }
+  let owner_block_of_key = |key: &str| -> Option<u128> {
+    // Flow keys encode their owner: `<owner-loro-id>.<kind>`. The owner is a
+    // block id (caption/alt/source flows) or a cell id (cell flows).
+    let owner = key.rsplit_once('.').map(|(owner, _)| owner).unwrap_or(key);
+    let owner_id = flowstate_document::loro_schema::loro_id_trailing_u128(owner)?;
+    if object_rows.contains_key(&owner_id) {
+      return Some(owner_id);
+    }
+    cell_to_block.get(&owner_id).copied()
+  };
+  let mut touched: Vec<u128> = Vec::new();
+  for flow in &invalidation.changed_flows {
+    if flow == flowstate_document::ROOT_BODY_FLOW_ID {
+      continue;
+    }
+    touched.push(owner_block_of_key(flow)?);
+  }
+  for target in invalidation.changed_blocks.iter().chain(&invalidation.changed_tables) {
+    match flowstate_document::owner_of_changed_container(doc, target)? {
+      ChangedContainerOwner::Block(key) => {
+        let id = flowstate_document::loro_schema::loro_id_trailing_u128(&key)?;
+        if !object_rows.contains_key(&id) {
+          // A paragraph record (or an id the projection does not know): the
+          // ranged paragraph readback owns paragraph records; unknown ids are
+          // structural — either way this scoped pass has nothing to patch.
+          continue;
+        }
+        touched.push(id);
+      },
+      ChangedContainerOwner::Flow(key) => touched.push(owner_block_of_key(&key)?),
+      ChangedContainerOwner::ObjectReadbackInert => {},
+    }
+  }
+  touched.sort_unstable();
+  touched.dedup();
+  if touched.is_empty() {
+    return Some(Vec::new());
+  }
+  let projected = flowstate_document::object_input_blocks_for_ids(doc, &touched).ok()?;
+  if projected.len() != touched.len() {
+    // A touched id the registry no longer has (or a duplicate collapse):
+    // structural — the rebuild paths own it.
+    return None;
+  }
+  let mut patches = Vec::new();
+  for (block_id, after) in projected {
+    let (row, block) = object_rows.get(&block_id.0)?;
+    let before = input_block_from_block(block);
+    if before != after {
+      patches.push(ProjectionPatch::ReplaceObjectBlock {
+        block_id: flowstate_document::BlockId(block_id.0),
+        row_hint: *row,
+        block: ProjectionStructuralBlock {
+          block_id: flowstate_document::BlockId(block_id.0),
+          paragraph_id: None,
+          block: after,
+        },
+      });
+    }
   }
   Some(patches)
 }
@@ -559,9 +694,13 @@ pub(crate) fn paragraph_projection_patches_ranged(
     })
     .collect();
   let body_len = body_text(doc).len_unicode();
+  // One O(blocks) pass for every paragraph's row instead of an O(blocks) scan
+  // per touched paragraph (the §perf-heaven T2 quadratic on object docs).
+  let rows = flowstate_document::paragraph_block_rows(projection);
   let mut patches = Vec::new();
   for paragraph_ix in touched {
     let old = projection.paragraphs.get(paragraph_ix)?;
+    let &row = rows.get(paragraph_ix)?;
     let sentinel = start_by_ix.get(&paragraph_ix)?.checked_sub(1)?;
     let end = if paragraph_ix + 1 < paragraph_count {
       start_by_ix.get(&(paragraph_ix + 1))?.checked_sub(1)?
@@ -572,7 +711,7 @@ pub(crate) fn paragraph_projection_patches_ranged(
       return None;
     }
     let new_input = body_input_paragraph_at(doc, sentinel, end, input_paragraph(projection, paragraph_ix, old).style)?;
-    paragraph_patches_from_readback(projection, paragraph_ix, new_input, &mut patches)?;
+    paragraph_patches_from_readback(projection, paragraph_ix, row, new_input, &mut patches)?;
   }
   Some(patches)
 }
@@ -580,12 +719,12 @@ pub(crate) fn paragraph_projection_patches_ranged(
 fn paragraph_patches_from_readback(
   projection: &DocumentProjection,
   paragraph_ix: usize,
+  row: usize,
   new_input: InputParagraph,
   patches: &mut Vec<ProjectionPatch>,
 ) -> Option<()> {
   let old = projection.paragraphs.get(paragraph_ix)?;
   let old_input = input_paragraph(projection, paragraph_ix, old);
-  let row = flowstate_document::block_ix_for_paragraph(projection, paragraph_ix)?;
   let old_text = old_input
     .runs
     .iter()
@@ -614,11 +753,21 @@ fn paragraph_patches_from_readback(
       style: new_input.style,
     });
   }
-  let new_runs = flowstate_document::document_from_input_blocks(projection.theme.clone(), vec![InputBlock::Paragraph(new_input)])
-    .paragraphs
-    .first()?
-    .runs
-    .clone();
+  // §act-ten A10.7: convert the runs DIRECTLY (`merge_adjacent_runs` over
+  // byte-length TextRuns is exactly what `document_from_input_blocks` does per
+  // paragraph) instead of assembling a whole throwaway DocumentProjection —
+  // Rope, trees and sections included — per readback paragraph (12,404 calls /
+  // 116 MB on a mass-op undo in the peer profiles).
+  let new_runs = flowstate_document::merge_adjacent_runs(
+    new_input
+      .runs
+      .iter()
+      .map(|run| flowstate_document::TextRun {
+        len: run.text.len(),
+        styles: run.styles,
+      })
+      .collect(),
+  );
   if old.runs != new_runs {
     patches.push(ProjectionPatch::ParagraphRuns {
       block_id: projection.ids.block_ids[row],

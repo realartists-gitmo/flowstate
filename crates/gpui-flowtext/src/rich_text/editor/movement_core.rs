@@ -56,19 +56,19 @@ impl RichTextEditor {
     self.move_to_offset(target, SelectionAffinity::Neutral, VisualGravity::Neutral, extend, cx);
   }
 
+  // §act-ten A10.12: neither hook invalidates layout caches anymore. The
+  // caches are CONTENT-keyed (§act-nine A9.3 — style+version keys at all four
+  // sites), so a mutation's own version bumps invalidate exactly the touched
+  // paragraphs; the unconditional whole-cache nuke these hooks used to run
+  // (via the dead `layout_invalidation_hint` fallback — its setters were
+  // deleted in the loro-first cutover) cost delete-word, toolbar formatting
+  // and collab asset arrival a full O(doc) re-prep each. The one caller that
+  // genuinely replaces the whole document (`replace_document_projection`)
+  // performs its own explicit invalidation.
   pub(super) fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
     self.mark_text_input_interaction();
     self.pending_styles = None;
     self.goal_x = None;
-    if let Some(range) = self.layout_invalidation_hint.take() {
-      let end = range
-        .end
-        .max(self.selection.head.paragraph.saturating_add(2))
-        .min(self.document.paragraphs.len());
-      self.invalidate_paragraph_layout_cache_range(range.start..end.max(range.start));
-    } else {
-      self.invalidate_stale_paragraph_layout_caches();
-    }
     self.pending_scroll_head_after_layout = true;
     self.reset_caret_blink(cx);
     self.notify_after_mutation(cx);
@@ -77,11 +77,6 @@ impl RichTextEditor {
   pub(super) fn after_formatting_mutation(&mut self, cx: &mut Context<Self>) {
     self.pending_styles = None;
     self.goal_x = None;
-    if let Some(range) = self.layout_invalidation_hint.take() {
-      self.invalidate_paragraph_layout_cache_range(range);
-    } else {
-      self.invalidate_stale_paragraph_layout_caches();
-    }
     self.reset_caret_blink(cx);
     self.notify_after_mutation(cx);
   }

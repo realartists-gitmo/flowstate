@@ -2,7 +2,6 @@
 //!
 
 use std::{
-    collections::BTreeSet,
     ops::{ControlFlow, Deref, DerefMut, Range, RangeBounds},
     sync::Arc,
 };
@@ -26,6 +25,12 @@ use super::{AnchorType, StyleKey, StyleOp};
 pub(super) struct StyleRangeMap {
     pub(super) tree: BTree<RangeNumMapTrait>,
     has_style: bool,
+    /// §flowstate stylemap patch: newest `(lamport, peer)` op ever inserted
+    /// into this map. An annotate whose op is newer than EVERYTHING ever
+    /// inserted cannot be a duplicate anywhere — the whole covered-elem walk
+    /// skips per-elem membership checks on one O(1) compare. (The duplicate
+    /// case is real: styled-RETAIN diffs re-assert ops already present.)
+    max_op_ever: Option<Arc<StyleOp>>,
 }
 
 #[derive(Debug, Clone)]
@@ -52,18 +57,23 @@ impl Styles {
     fn infer_anchors(&self, next: &Self) -> (Option<Arc<StyleOp>>, Option<Arc<StyleOp>>) {
         let mut left_anchor = None;
         let mut right_anchor = None;
-        let empty_set: BTreeSet<_> = Default::default();
         for (key, set) in self.styles.iter() {
-            let right_set = next.styles.get(key).map(|x| &x.set).unwrap_or(&empty_set);
-            for diff in set.set.difference(right_set) {
+            let right_value = next.styles.get(key);
+            for diff in set
+                .iter_ascending()
+                .filter(|x| !right_value.is_some_and(|right| right.contains(x)))
+            {
                 assert!(left_anchor.is_none(), "left anchor should be unique");
                 left_anchor = Some(diff.clone());
             }
         }
 
         for (key, set) in next.styles.iter() {
-            let left_set = self.styles.get(key).map(|x| &x.set).unwrap_or(&empty_set);
-            for diff in set.set.difference(left_set) {
+            let left_value = self.styles.get(key);
+            for diff in set
+                .iter_ascending()
+                .filter(|x| !left_value.is_some_and(|left| left.contains(x)))
+            {
                 assert!(right_anchor.is_none(), "right anchor should be unique");
                 right_anchor = Some(diff.clone());
             }
@@ -95,20 +105,321 @@ pub(crate) struct Elem {
     pub(crate) len: usize,
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq)]
+/// §flowstate stylemap patch (A11.5 follow-on pass): a LAYERED op set —
+/// a persistent shared `base` (`im::OrdSet`, O(1) clone, structural sharing)
+/// plus a tiny owned `overlay` absorbing writes. The two failure modes this
+/// reconciles, both measured on the styled-divergence repro:
+/// * plain `BTreeSet` deep-copied the whole set on every boundary insert and
+///   split (the edit-side quadratic constant, 5.2s);
+/// * pure sharing (`Arc<BTreeSet>`, then `im::OrdSet`) made `annotate`'s
+///   per-covered-elem insert pay COW/path-copy costs — import degraded 85×/12×
+///   (an annotate legitimately walks EVERY covered elem; membership is
+///   load-bearing per elem, so that walk only gets cheap per-visit work, and
+///   `overlay.push` is O(1) where persistent insert was not).
+/// The set semantics are exactly `base ∪ overlay` with `overlay ∩ base = ∅`
+/// (enforced on insert); the overlay folds into the base past a small bound so
+/// clones stay O(1)+ε. Pruning is NOT sound (`infer_anchors` set-differences
+/// and `remove_style_scanning_backward`'s early-break walk need exact
+/// membership), so this changes representation only, never the logical set.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct StyleValue {
     // we need a set here because we need to calculate the intersection of styles when
     // users insert new text between two style sets
-    set: BTreeSet<Arc<StyleOp>>,
+    /// `None` until the overlay first overflows: real-world sets (a few
+    /// overlapping ops) live ENTIRELY in the inline overlay and never touch
+    /// `im` — an empty `im::OrdSet` allocates a ~1KB root chunk, which showed
+    /// up as +44% alloc on the whole-paragraph mark-application path.
+    base: Option<StyleOpSet>,
+    overlay: smallvec::SmallVec<[Arc<StyleOp>; 8]>,
+    /// Cached `base.get_max()` — `im`'s spine walk is too hot for the
+    /// per-covered-elem dedup gate in [`Self::insert`]. Invariant:
+    /// `base_max == base.get_max().cloned()`.
+    base_max: Option<Arc<StyleOp>>,
 }
+
+/// Shared empty set for the `base: None` read paths (never mutated).
+static EMPTY_OP_SET: Lazy<StyleOpSet> = Lazy::new(StyleOpSet::new);
+
+type StyleOpSet = im::OrdSet<Arc<StyleOp>>;
+
+/// Overlay entries beyond this fold into the shared base (amortized O(log)).
+const OVERLAY_BOUND: usize = 8;
+
+impl PartialEq for StyleValue {
+    fn eq(&self, other: &Self) -> bool {
+        if self.len() != other.len() {
+            return false;
+        }
+        // Pointer fast path: same-provenance shares compare O(overlay), which
+        // also lets `Elem::can_merge` re-merge split fragments cheaply.
+        if self.base_ref().ptr_eq(other.base_ref()) {
+            return match (self.overlay.len(), other.overlay.len()) {
+                (0, 0) => true,
+                _ => {
+                    self.overlay.iter().all(|op| other.overlay.contains(op))
+                        && other.overlay.iter().all(|op| self.overlay.contains(op))
+                }
+            };
+        }
+        self.iter_ascending()
+            .zip(other.iter_ascending())
+            .all(|(a, b)| a == b)
+    }
+}
+
+impl Eq for StyleValue {}
 
 impl StyleValue {
     pub fn insert(&mut self, value: Arc<StyleOp>) {
-        self.set.insert(value);
+        if self.overlay.contains(&value) {
+            return;
+        }
+        // Dedup against the base only when the op COULD be there: anything
+        // newer than the base's cached max cannot be a duplicate.
+        if self.base_max.as_ref().is_some_and(|max| value <= *max)
+            && self.base_ref().contains(&value)
+        {
+            return;
+        }
+        self.insert_unchecked(value);
+    }
+
+    /// Insert an op PROVEN absent from the logical set (the caller holds a
+    /// freshness proof — see `StyleRangeMap::annotate`'s map-level gate).
+    fn insert_unchecked(&mut self, value: Arc<StyleOp>) {
+        self.overlay.push(value);
+        if self.overlay.len() > OVERLAY_BOUND {
+            self.normalize();
+        }
+    }
+
+    /// Fold the overlay into the base. After this the overlay is empty and
+    /// the base owns the full logical set.
+    fn normalize(&mut self) {
+        let base = self.base.get_or_insert_with(StyleOpSet::new);
+        for op in self.overlay.drain(..) {
+            if self.base_max.as_ref().is_none_or(|max| op > *max) {
+                self.base_max = Some(op.clone());
+            }
+            base.insert(op);
+        }
+    }
+
+    /// The base set for read paths (`None` reads as the shared empty set).
+    fn base_ref(&self) -> &StyleOpSet {
+        self.base.as_ref().unwrap_or(&EMPTY_OP_SET)
+    }
+
+    fn len(&self) -> usize {
+        self.base_ref().len() + self.overlay.len()
     }
 
     pub fn get(&self) -> Option<&Arc<StyleOp>> {
-        self.set.last()
+        let base_max = self.base_max.as_ref();
+        let overlay_max = self.overlay.iter().max();
+        match (base_max, overlay_max) {
+            (Some(a), Some(b)) => Some(if a >= b { a } else { b }),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        }
+    }
+
+    /// Ascending iteration over the LOGICAL set (base ∪ overlay).
+    fn iter_ascending(&self) -> impl Iterator<Item = &Arc<StyleOp>> {
+        let mut overlay: smallvec::SmallVec<[&Arc<StyleOp>; 8]> =
+            self.overlay.iter().collect();
+        overlay.sort_unstable();
+        MergeAscending {
+            base: self.base_ref().iter().peekable(),
+            overlay,
+            overlay_ix: 0,
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.overlay.is_empty() && self.base.as_ref().is_none_or(|base| base.is_empty())
+    }
+
+    fn contains(&self, op: &Arc<StyleOp>) -> bool {
+        self.overlay.contains(op) || self.base_ref().contains(op)
+    }
+
+    fn remove_op(&mut self, op: &Arc<StyleOp>) -> bool {
+        if let Some(ix) = self.overlay.iter().position(|x| x == op) {
+            self.overlay.swap_remove(ix);
+            return true;
+        }
+        if let Some(base) = self.base.as_mut() {
+            if base.remove(op).is_some() {
+                if self.base_max.as_ref().is_some_and(|max| max == op) {
+                    self.base_max = base.get_max().cloned();
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Newest `(lamport, peer)` op present in BOTH logical sets — the visible
+    /// value of the intersection, found WITHOUT materializing it. This is what
+    /// the per-keystroke `get_styles_for_insert` actually needs (its result
+    /// only ever feeds `StyleMeta`, which reads each key's max op).
+    fn max_common(&self, other: &Self) -> Option<Arc<StyleOp>> {
+        let mut best: Option<&Arc<StyleOp>> = None;
+        for op in self.overlay.iter() {
+            if best.is_none_or(|b| op > b) && other.contains(op) {
+                best = Some(op);
+            }
+        }
+        for op in other.overlay.iter() {
+            if best.is_none_or(|b| op > b) && self.contains(op) {
+                best = Some(op);
+            }
+        }
+        if self.base_ref().ptr_eq(other.base_ref()) {
+            if let Some(max) = self.base_max.as_ref() {
+                if best.is_none_or(|b| max > b) {
+                    best = Some(max);
+                }
+            }
+        } else {
+            // Descending double-walk to the first common base op.
+            let mut left = self.base_ref().iter().rev().peekable();
+            let mut right = other.base_ref().iter().rev().peekable();
+            while let (Some(a), Some(b)) = (left.peek(), right.peek()) {
+                if best.is_some_and(|best_op| best_op >= a) || best.is_some_and(|best_op| best_op >= b) {
+                    break;
+                }
+                match a.cmp(b) {
+                    std::cmp::Ordering::Equal => {
+                        if best.is_none_or(|best_op| *a > best_op) {
+                            best = Some(*a);
+                        }
+                        break;
+                    }
+                    std::cmp::Ordering::Greater => {
+                        left.next();
+                    }
+                    std::cmp::Ordering::Less => {
+                        right.next();
+                    }
+                }
+            }
+        }
+        best.cloned()
+    }
+
+    /// `self ∩= right`, returning whether the result is non-empty. A mark's
+    /// start/end boundary intersection equals one SIDE (the doc-comment proof
+    /// on [`StyleRangeMap::insert`]: the differing ops are exactly the anchors
+    /// at the boundary), so the subset fast paths reuse that side's storage
+    /// (O(compare), zero copies) and the allocating rebuild only runs for
+    /// boundaries where ops both start AND end.
+    fn intersect_with(&mut self, right: &Self) -> bool {
+        if self.base_ref().ptr_eq(right.base_ref())
+            && self.overlay.is_empty()
+            && right.overlay.is_empty()
+        {
+            return !self.is_empty();
+        }
+        // One O(n+m) ordered double-walk over the LOGICAL sets decides both
+        // subset relations.
+        let mut left_only = false;
+        let mut right_only = false;
+        {
+            let mut left = self.iter_ascending().peekable();
+            let mut right_iter = right.iter_ascending().peekable();
+            loop {
+                match (left.peek(), right_iter.peek()) {
+                    (Some(a), Some(b)) => match a.cmp(b) {
+                        std::cmp::Ordering::Equal => {
+                            left.next();
+                            right_iter.next();
+                        }
+                        std::cmp::Ordering::Less => {
+                            left_only = true;
+                            left.next();
+                        }
+                        std::cmp::Ordering::Greater => {
+                            right_only = true;
+                            right_iter.next();
+                        }
+                    },
+                    (Some(_), None) => {
+                        left_only = true;
+                        break;
+                    }
+                    (None, Some(_)) => {
+                        right_only = true;
+                        break;
+                    }
+                    (None, None) => break,
+                }
+            }
+        }
+        if !right_only {
+            // right ⊆ self: intersection IS right — O(1) persistent clone.
+            *self = right.clone();
+        } else if left_only {
+            // Neither side contains the other — materialize the intersection.
+            let mut result = StyleOpSet::new();
+            {
+                let mut left = self.iter_ascending().peekable();
+                let mut right_iter = right.iter_ascending().peekable();
+                while let (Some(a), Some(b)) = (left.peek(), right_iter.peek()) {
+                    match a.cmp(b) {
+                        std::cmp::Ordering::Equal => {
+                            result.insert((*a).clone());
+                            left.next();
+                            right_iter.next();
+                        }
+                        std::cmp::Ordering::Less => {
+                            left.next();
+                        }
+                        std::cmp::Ordering::Greater => {
+                            right_iter.next();
+                        }
+                    }
+                }
+            }
+            self.base_max = result.get_max().cloned();
+            self.base = Some(result);
+            self.overlay.clear();
+        }
+        // else: self ⊆ right — intersection is self, keep as-is.
+        !self.is_empty()
+    }
+}
+
+/// Ascending merge of a sorted persistent base and a small sorted overlay.
+struct MergeAscending<'value> {
+    base: std::iter::Peekable<im::ordset::Iter<'value, Arc<StyleOp>>>,
+    overlay: smallvec::SmallVec<[&'value Arc<StyleOp>; 8]>,
+    overlay_ix: usize,
+}
+
+impl<'value> Iterator for MergeAscending<'value> {
+    type Item = &'value Arc<StyleOp>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let overlay_next = self.overlay.get(self.overlay_ix).copied();
+        match (self.base.peek(), overlay_next) {
+            (Some(b), Some(o)) => {
+                if *b <= o {
+                    self.base.next()
+                } else {
+                    self.overlay_ix += 1;
+                    Some(o)
+                }
+            }
+            (Some(_), None) => self.base.next(),
+            (None, Some(o)) => {
+                self.overlay_ix += 1;
+                Some(o)
+            }
+            (None, None) => None,
+        }
     }
 }
 
@@ -121,6 +432,46 @@ impl Default for StyleRangeMap {
 type YieldStyle<'a> = Option<&'a mut dyn FnMut(&Styles, usize)>;
 
 impl StyleRangeMap {
+    /// §flowstate style-map probe (diagnostic, env-gated `FLOWSTATE_STYLE_MAP_PROBE`):
+    /// sampled census of the range map — element (boundary-fragment) count, total
+    /// `StyleOp` set entries, and the largest single set. Distinguishes the two
+    /// candidate blowups behind the styled-divergence quadratic: FRAGMENTATION
+    /// (elems explode because adjacent same-visible-style elems differ by dead
+    /// ops and `can_merge`'s deep set equality never fires) vs ACCUMULATION
+    /// (individual sets explode). Sampled every 8192 calls; the O(elems) walk is
+    /// paid only on samples, and never when the env flag is absent.
+    fn probe_sample(&self, op: &'static str) {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ENABLED.get_or_init(|| std::env::var_os("FLOWSTATE_STYLE_MAP_PROBE").is_some()) {
+            return;
+        }
+        static CALLS: AtomicU64 = AtomicU64::new(0);
+        let call = CALLS.fetch_add(1, Ordering::Relaxed);
+        if call % 8192 != 0 {
+            return;
+        }
+        let mut elems = 0usize;
+        let mut set_entries = 0usize;
+        let mut max_set = 0usize;
+        let mut styled_elems = 0usize;
+        for elem in self.tree.iter() {
+            elems += 1;
+            let mut elem_entries = 0usize;
+            for value in elem.styles.values() {
+                elem_entries += value.len();
+                max_set = max_set.max(value.len());
+            }
+            if elem_entries > 0 {
+                styled_elems += 1;
+            }
+            set_entries += elem_entries;
+        }
+        eprintln!(
+            "[flowstate-style-map] op={op} calls={call} elems={elems} styled_elems={styled_elems} set_entries={set_entries} max_set={max_set}"
+        );
+    }
+
     pub fn new() -> Self {
         let mut tree = BTree::new();
         tree.push(Elem {
@@ -131,6 +482,7 @@ impl StyleRangeMap {
         Self {
             tree,
             has_style: false,
+            max_op_ever: None,
         }
     }
 
@@ -140,6 +492,7 @@ impl StyleRangeMap {
         style: Arc<StyleOp>,
         mut yield_style: YieldStyle,
     ) {
+        self.probe_sample("annotate");
         let range = self.tree.range::<LengthFinder>(range);
         if range.is_none() {
             unreachable!();
@@ -147,15 +500,27 @@ impl StyleRangeMap {
 
         self.has_style = true;
         let range = range.unwrap();
+        // §flowstate stylemap patch: an annotate legitimately visits every
+        // covered elem (per-elem membership is load-bearing), so per-visit
+        // work must stay O(1) — `StyleValue::insert` lands in the small owned
+        // overlay, never copy-on-writing the shared base.
+        let style_key = style.get_style_key();
+        let fresh = self.max_op_ever.as_ref().is_none_or(|max| style > *max);
+        if fresh {
+            self.max_op_ever = Some(style.clone());
+        }
         self.tree
             .update(range.start.cursor..range.end.cursor, &mut |x| {
-                if let Some(set) = x.styles.get_mut(&style.get_style_key()) {
-                    set.set.insert(style.clone());
+                if let Some(value) = x.styles.get_mut(&style_key) {
+                    if fresh {
+                        value.insert_unchecked(style.clone());
+                    } else {
+                        value.insert(style.clone());
+                    }
                 } else {
-                    let key = style.get_style_key();
                     let mut value = StyleValue::default();
-                    value.insert(style.clone());
-                    x.styles.insert(key, value);
+                    value.insert_unchecked(style.clone());
+                    x.styles.insert(style_key.clone(), value);
                 }
 
                 if let Some(y) = yield_style.as_mut() {
@@ -237,6 +602,7 @@ impl StyleRangeMap {
         if !self.has_style {
             return &EMPTY_STYLES;
         }
+        self.probe_sample("insert");
 
         if pos == 0 {
             self.tree.prepend(Elem {
@@ -266,12 +632,14 @@ impl StyleRangeMap {
         }
 
         // insert by the intersection of left styles and right styles
+        // (§flowstate stylemap patch: the map clone is Arc bumps per key, and
+        // `intersect_with` reuses one side's storage on the common
+        // pure-start/pure-end boundary — see its doc comment.)
         let mut styles = self.tree.get_elem(left.leaf).unwrap().styles.clone();
         let right_styles = &self.tree.get_elem(right.leaf).unwrap().styles;
         styles.retain(|key, value| {
             if let Some(right_value) = right_styles.get(key) {
-                value.set.retain(|x| right_value.set.contains(x));
-                return !value.set.is_empty();
+                return value.intersect_with(right_value);
             }
 
             false
@@ -297,18 +665,29 @@ impl StyleRangeMap {
             let styles = &self.tree.get_elem(left.leaf).unwrap().styles;
             styles.into()
         } else {
-            let mut styles = self.tree.get_elem(left.leaf).unwrap().styles.clone();
+            // §flowstate stylemap patch: this result only ever feeds
+            // `StyleMeta` (per-key max op), so build it via `max_common` — a
+            // descending double-walk per key, ZERO set materialization. This
+            // is the per-keystroke path (`get_styles_at_entity_index_for_insert`).
+            let left_styles = &self.tree.get_elem(left.leaf).unwrap().styles;
             let right_styles = &self.tree.get_elem(right.leaf).unwrap().styles;
-            styles.retain(|key, value| {
+            let mut meta = StyleMeta::default();
+            for (key, left_value) in left_styles.iter() {
                 if let Some(right_value) = right_styles.get(key) {
-                    value.set.retain(|x| right_value.set.contains(x));
-                    return !value.set.is_empty();
+                    if let Some(op) = left_value.max_common(right_value) {
+                        meta.insert(
+                            key.key().clone(),
+                            crate::delta::StyleMetaItem {
+                                value: op.to_value(),
+                                lamport: op.lamport,
+                                peer: op.peer,
+                            },
+                        );
+                    }
                 }
+            }
 
-                false
-            });
-
-            styles.into()
+            meta
         }
     }
 
@@ -422,14 +801,14 @@ impl StyleRangeMap {
         last_index: usize,
     ) -> usize {
         let mut removed_len = 0;
+        let key = to_remove.get_style_key();
         self.update_styles_scanning_backward(last_index, |elem| {
             removed_len += elem.len;
             let styles = &mut elem.styles;
-            let key = to_remove.get_style_key();
             let mut has_removed = false;
             if let Some(value) = styles.get_mut(&key) {
-                has_removed = value.set.remove(to_remove);
-                if value.set.is_empty() {
+                has_removed = value.remove_op(to_remove);
+                if value.is_empty() {
                     styles.remove(&key);
                 }
             }

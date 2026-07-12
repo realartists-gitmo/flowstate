@@ -298,24 +298,54 @@ impl InnerStore {
             .import(bytes_b)
             .map_err(|e| loro_common::LoroError::DecodeError(e.into_boxed_str()))?;
         self.kv.remove(FRONTIERS_KEY);
-        let store = &mut self.store;
-        let arena = &self.arena;
-        self.kv.with_kv(|kv| {
-            arena.with_guards(|guards| {
-                let iter = kv.scan(Bound::Unbounded, Bound::Unbounded);
-                for (k, v) in iter {
-                    let cid = ContainerID::from_bytes(&k);
-                    let c = ContainerWrapper::new_from_bytes(v);
-                    let parent = c.parent();
-                    let idx = guards.register_container(&cid);
-                    let p = parent.as_ref().map(|p| guards.register_container(p));
-                    guards.set_parent(idx, p);
-                    if Self::insert_entry(store, idx, c).is_some() {}
-                }
-            });
-        });
 
-        self.load_state = LoadState::AllLoaded;
+        // FLOWSTATE vendor patch #27 (§A14.4): the shallow-snapshot two-byte
+        // decode used to EAGERLY register every container (header parse +
+        // arena registration + store insert for all N containers) — ~48ms on
+        // the impact doc, on the open critical path now that shallow-open is
+        // the default. The single-blob `decode()` path instead goes LAZY: a
+        // parent-resolver closure reads containers from the merged kv on
+        // demand. The two byte layers are already merged into ONE kv above
+        // (bytes_b overwrites bytes_a per key, same as the eager scan saw),
+        // so the identical lazy resolver is correct here. `load_all()`
+        // materializes on first whole-doc need exactly as it does after
+        // `decode()`. `FLOWSTATE_EAGER_STATE_DECODE=1` restores the eager
+        // scan.
+        static EAGER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let eager = *EAGER
+            .get_or_init(|| std::env::var_os("FLOWSTATE_EAGER_STATE_DECODE").is_some());
+        if eager {
+            let store = &mut self.store;
+            let arena = &self.arena;
+            self.kv.with_kv(|kv| {
+                arena.with_guards(|guards| {
+                    let iter = kv.scan(Bound::Unbounded, Bound::Unbounded);
+                    for (k, v) in iter {
+                        let cid = ContainerID::from_bytes(&k);
+                        let c = ContainerWrapper::new_from_bytes(v);
+                        let parent = c.parent();
+                        let idx = guards.register_container(&cid);
+                        let p = parent.as_ref().map(|p| guards.register_container(p));
+                        guards.set_parent(idx, p);
+                        if Self::insert_entry(store, idx, c).is_some() {}
+                    }
+                });
+            });
+            self.load_state = LoadState::AllLoaded;
+            return Ok(());
+        }
+
+        let kv = self.kv.arc_clone();
+        self.arena
+            .set_parent_resolver(Some(move |child_id: ContainerID| {
+                let k = child_id.to_bytes();
+                let v = kv.get(&k)?;
+                let c = ContainerWrapper::new_from_bytes(v);
+                c.parent().cloned()
+            }));
+
+        self.store.clear();
+        self.load_state = LoadState::Lazy;
         Ok(())
     }
 

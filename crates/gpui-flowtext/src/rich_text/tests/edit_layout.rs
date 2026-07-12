@@ -9,7 +9,6 @@ fn layout_fragments_preserve_text_when_run_boundary_splits_utf8_character() {
   let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
   let paragraph = Paragraph {
     style: ParagraphStyle::Normal,
-    byte_range: 0..text.len(),
     runs: vec![
       TextRun {
         len: split_inside_apostrophe,

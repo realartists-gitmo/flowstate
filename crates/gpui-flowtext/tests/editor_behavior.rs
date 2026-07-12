@@ -48,6 +48,121 @@ mod tests {
     editor
   }
 
+  /// §act-eleven C9: the editor interaction smoke-fuzz — a seeded random mix
+  /// over the PUBLIC command surface (typing, backspace/delete, word deletes,
+  /// paragraph breaks, selection moves, undo/redo) through the REAL write
+  /// authority. Invariants after EVERY op: id vectors parallel to their
+  /// sequences, selection within bounds on a char boundary, the rope's byte
+  /// length consistent with the paragraph lengths, and the editor's document
+  /// text equal to the authority's canonical projection text (no silent
+  /// editor/authority drift). The command layer had NO randomized coverage —
+  /// the collab fuzzes drive the model beneath it, not these entry points.
+  #[gpui::test]
+  fn interaction_smoke_fuzz_preserves_editor_invariants(cx: &mut gpui::TestAppContext) {
+    struct Rng(u64);
+    impl Rng {
+      fn next(&mut self) -> u64 {
+        let mut x = self.0;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        self.0 = x;
+        x
+      }
+      fn below(&mut self, bound: usize) -> usize {
+        if bound == 0 { 0 } else { (self.next() % bound as u64) as usize }
+      }
+    }
+
+    for seed in [11u64, 2026, 424242] {
+      let mut rng = Rng(seed);
+      // Attach the authority by hand so the test keeps the handle for the
+      // editor-vs-canonical drift assertion.
+      let editor = cx.new(|cx| RichTextEditor::new_with_path(big_document(12), None, cx));
+      let fixture = editor.read_with(cx, |editor, _| editor.document().clone());
+      let core = CrdtRuntime::from_document_projection(&fixture, "Smoke Fuzz").expect("canonical core");
+      let (handle, _gate) = LocalDocHandle::new(core, LocalWriteConfig::default());
+      let authority = std::sync::Arc::new(handle);
+      let projection = authority.projection().expect("authority projection");
+      editor.update(cx, |editor, cx| {
+        #[allow(clippy::clone_on_ref_ptr, reason = "method-syntax clone so the unsized coercion applies to the annotated binding")]
+        let authority_dyn: std::sync::Arc<dyn LocalWriteAuthority> = authority.clone();
+        editor.set_write_authority(authority_dyn, projection, cx);
+      });
+      editor.update(cx, |editor, cx| {
+        for step in 0..160 {
+          let paragraph_count = editor.document().paragraphs.len();
+          let paragraph_ix = rng.below(paragraph_count.max(1));
+          let paragraph_len = flowstate_document::paragraph_text_len(&editor.document().paragraphs[paragraph_ix]);
+          let byte = clamp_paragraph_byte_to_char_boundary(editor.document(), paragraph_ix, rng.below(paragraph_len + 1));
+          let offset = DocumentOffset {
+            paragraph: paragraph_ix,
+            byte,
+          };
+          match rng.below(10) {
+            0..=2 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.insert_text_command(&format!("s{step} "), cx);
+            },
+            3 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.backspace_command(cx);
+            },
+            4 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.delete_forward_command(cx);
+            },
+            5 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.delete_word_backward_command(cx);
+            },
+            6 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.delete_word_forward_command(cx);
+            },
+            7 => {
+              editor.set_selection(EditorSelection::collapsed(offset), cx);
+              editor.insert_paragraph_break_command(cx);
+            },
+            8 => editor.undo(cx),
+            _ => editor.redo(cx),
+          }
+
+          // ---- invariants, every step ----
+          let document = editor.document();
+          assert!(!document.paragraphs.is_empty(), "seed {seed} step {step}: document emptied");
+          assert_eq!(
+            document.ids.paragraph_ids.len(),
+            document.paragraphs.len(),
+            "seed {seed} step {step}: paragraph id vector desynced"
+          );
+          assert_eq!(document.ids.block_ids.len(), document.blocks.len(), "seed {seed} step {step}: block id vector desynced");
+          let expected_rope_len: usize = document
+            .paragraphs
+            .iter()
+            .map(flowstate_document::paragraph_text_len)
+            .sum::<usize>()
+            + document.paragraphs.len().saturating_sub(1);
+          assert_eq!(
+            document.text.byte_len(),
+            expected_rope_len,
+            "seed {seed} step {step}: rope length inconsistent with paragraph lengths"
+          );
+          let head = editor.selection().head;
+          assert!(head.paragraph < document.paragraphs.len(), "seed {seed} step {step}: selection paragraph out of bounds");
+          let head_paragraph_len = flowstate_document::paragraph_text_len(&document.paragraphs[head.paragraph]);
+          assert!(head.byte <= head_paragraph_len, "seed {seed} step {step}: selection byte out of bounds");
+          let canonical = authority.projection().expect("authority projection");
+          assert_eq!(
+            document.text.to_string(),
+            canonical.text.to_string(),
+            "seed {seed} step {step}: editor text drifted from the authority's canonical projection"
+          );
+        }
+      });
+    }
+  }
+
   /// Text edits through the REAL write path (editor command → typed intent →
   /// write authority → canonical Loro commit → exact projection patches):
   /// inserts, minimal marks over the changed range, and range deletes preserve
@@ -516,5 +631,141 @@ mod tests {
     let canonical = handle.projection().expect("canonical after undo");
     assert_eq!(paragraph_text(&canonical, 0), "alpha foo beta foo");
     assert_eq!(paragraph_text(&canonical, 1), "foo gamma");
+  }
+
+  /// FAIL-LOUD (concurrent-typing interleave): when a remote peer inserts text
+  /// BEFORE the local caret, the caret must stay pinned to its own content — not
+  /// merely clamp to document bounds. Today `apply_remote_patch_batch` /
+  /// `sync_projection_from_authority` only clamp `self.selection.head`, never
+  /// shifting it by the inserted length, so the local user's next keystroke
+  /// resolves to a stale projection offset and interleaves into the remote run.
+  ///
+  /// Deterministic (no Fugue tie-break dependence): peer B prepends before the
+  /// SHARED base character "X", so B's run is unambiguously ordered before A's
+  /// caret. The edit reaches A through the REAL authority + projection stream.
+  #[gpui::test]
+  fn remote_insert_before_caret_must_shift_not_interleave(cx: &mut gpui::TestAppContext) {
+    use flowstate_collab::crdt_runtime::CrdtRuntime;
+    use flowstate_collab::local_write::GateHolder;
+
+    // Shared base: one paragraph "XY". Build A's canonical core, snapshot it so
+    // peer B can share A's exact history, then install the real authority.
+    let fixture = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XY")] }],
+    );
+    let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
+    // Peer B is a fork of A's doc: it shares A's exact history but has a distinct
+    // peer id, so its edits are genuinely concurrent and merge cleanly.
+    let doc_b = core_a.doc().fork();
+    doc_b.set_peer_id(0x00B0_B0B0).expect("B gets a distinct peer id"); // fork keeps A's id
+    let base_vv = doc_b.state_vv();
+    let body_b = flowstate_document::loro_schema::body_text(&doc_b);
+
+    let (handle_a, gate_a) = LocalDocHandle::new(core_a, LocalWriteConfig::default());
+    let projection_a = handle_a.projection().expect("A projection");
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(projection_a.clone(), None, cx));
+    editor.update(cx, |editor, cx| {
+      editor.set_write_authority(std::sync::Arc::new(handle_a), projection_a, cx);
+    });
+
+    // B inserts "ABC" at the START of paragraph 0 (body position 1, just after the
+    // leading boundary "\n"), then exports ONLY its new ops (delta from the shared
+    // base version vector).
+    body_b.insert(1, "ABC").expect("B inserts");
+    doc_b.commit();
+    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B exports its delta");
+
+    // A parks its caret between the shared X and Y ("X|Y" → byte 1).
+    editor.update(cx, |editor, cx| {
+      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: 1 }), cx);
+    });
+
+    // B's edit arrives at A through the production path: gate import → ordered
+    // projection stream → editor drain. Release the gate before the editor drains
+    // (its sync re-locks the same gate).
+    let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
+    guard.import_remote_update(&update_b).expect("A imports B");
+    drop(guard);
+    editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
+
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "ABCXY", "B's prepend must merge before the shared text");
+      // Caret was at "X|Y" (byte 1). Three bytes inserted BEFORE it ⇒ the same
+      // logical spot is byte 4 ("ABCX|Y"). A bare clamp leaves it at byte 1
+      // ("A|BCXY"), which is the interleave bug.
+      assert_eq!(
+        editor.selection().head,
+        DocumentOffset { paragraph: 0, byte: 4 },
+        "caret must SHIFT past a remote insert-before-caret, not merely clamp"
+      );
+    });
+
+    // The symptom itself: A types 'H'. It must land after its own X → "ABCXHY",
+    // never interleaved into B's run ("ABHCXY").
+    editor.update(cx, |editor, cx| editor.insert_text_command("H", cx));
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "ABCXHY", "A's keystroke must not interleave into the remote run");
+    });
+  }
+
+  /// FAST-path guard: once the caret has been captured at a synced moment (here by
+  /// a local edit), a remote insert-before-caret repositions it by RESOLVING the
+  /// stored CRDT cursors — it must NOT fall back to the O(doc) `fork_at` rebase.
+  /// Asserts both correctness (caret + no interleave) and that ZERO forks happened,
+  /// so a regression to always-fork on every remote batch fails loudly.
+  #[gpui::test]
+  fn armed_caret_uses_fast_cursor_path_not_fork(cx: &mut gpui::TestAppContext) {
+    use flowstate_collab::crdt_runtime::{caret_rebase_fork_count, CrdtRuntime};
+    use flowstate_collab::local_write::GateHolder;
+
+    let fixture = document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph { style: ParagraphStyle::Normal, runs: vec![plain("XY")] }],
+    );
+    let core_a = CrdtRuntime::from_document_projection(&fixture, "peer-A").expect("core A");
+    // B forks the ORIGINAL base (before A's local edit), so B's insert is concurrent.
+    let doc_b = core_a.doc().fork();
+    doc_b.set_peer_id(0x00B0_B0B0).expect("distinct peer id");
+    let base_vv = doc_b.state_vv();
+    let body_b = flowstate_document::loro_schema::body_text(&doc_b);
+
+    let (handle_a, gate_a) = LocalDocHandle::new(core_a, LocalWriteConfig::default());
+    let projection_a = handle_a.projection().expect("A projection");
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(projection_a.clone(), None, cx));
+    editor.update(cx, |editor, cx| {
+      editor.set_write_authority(std::sync::Arc::new(handle_a), projection_a, cx);
+    });
+
+    // A performs a LOCAL edit ("Z" between X and Y): "XY" → "XZY", caret after Z
+    // (byte 2). This ARMS the fast-path anchor for the post-write caret.
+    editor.update(cx, |editor, cx| {
+      editor.set_selection(EditorSelection::collapsed(DocumentOffset { paragraph: 0, byte: 1 }), cx);
+      editor.insert_text_command("Z", cx);
+    });
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "XZY");
+      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 0, byte: 2 });
+    });
+
+    // B (concurrent) prepends "ABC" before the shared X.
+    body_b.insert(1, "ABC").expect("B inserts");
+    doc_b.commit();
+    let update_b = doc_b.export(loro::ExportMode::updates(&base_vv)).expect("B delta");
+
+    let forks_before = caret_rebase_fork_count();
+    let mut guard = gate_a.lock(GateHolder::ImportChunk).expect("gate healthy");
+    guard.import_remote_update(&update_b).expect("A imports B");
+    drop(guard);
+    editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
+    let forks_after = caret_rebase_fork_count();
+
+    editor.read_with(cx, |editor, _| {
+      assert_eq!(paragraph_text(editor.document(), 0), "ABCXZY", "B's prepend merges before A's local edit");
+      // Caret was after Z (byte 2 in "XZY"); after "ABC" prepended it is byte 5 in
+      // "ABCXZY" ("ABCXZ|Y").
+      assert_eq!(editor.selection().head, DocumentOffset { paragraph: 0, byte: 5 }, "armed caret repositions across the remote insert");
+    });
+    assert_eq!(forks_after - forks_before, 0, "an armed caret must use the fast cursor path, not fork_at");
   }
 }
