@@ -30,6 +30,11 @@ rustc-ice-*.txt
 /crates/flowstate-autoflow/rounds.sqlite
 /crates/flowstate-autoflow/rounds.jsonl
 
+# Real .docx test corpus (3.3 GB, local fixture from Dropbox; gated by
+# FLOWSTATE_CORPUS_DIR). NEVER track this — it bloated .git to 19 GB and was
+# purged from history 2026-07-12. Regenerable from Dropbox if lost.
+/helpers/corpus/
+
 # Local design/spec scratch docs (kept on disk, deliberately out of git)
 /flowstate_*.md
 /debate-asr-production-plan.md
