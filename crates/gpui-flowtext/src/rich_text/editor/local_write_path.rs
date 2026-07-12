@@ -77,7 +77,10 @@ impl RichTextEditor {
     // the drain, AFTER any remote batches that committed before it. Applying
     // the returned batch directly (the old shape) raced async remote delivery
     // and produced the base-frontier mismatch cascade in the field logs.
-    self.sync_projection_from_authority(cx);
+    // Local variant: the caret is set from `commit.selection_after` below, so
+    // the O(doc) caret rebase is skipped (it froze typing after every caret
+    // move on large docs).
+    self.sync_projection_local(cx);
     let commit = match outcome {
       LocalWriteOutcome::Committed(commit) => commit,
       LocalWriteOutcome::CommittedWithRebuild { commit, .. } => commit,
@@ -97,7 +100,25 @@ impl RichTextEditor {
   /// commit order. The ONE way this editor's projection advances (local
   /// intents call it synchronously; the collaboration session calls it as a
   /// pump when remote batches land; solo documents need no pump).
+  ///
+  /// The remote pump passes `rebase_caret = true` so a remote insert/delete
+  /// before the caret repositions it (the interleave fix). LOCAL callers pass
+  /// `false`: they set the caret explicitly from their own commit right after
+  /// this returns, so the caret-rebase here is not only wasted — its O(doc)
+  /// `fork_at` fallback (taken whenever the caret moved since the last synced
+  /// capture, i.e. the first edit after every click/arrow) froze typing on
+  /// large docs for the whole fork (~350ms on a 2.3M-char doc).
   pub fn sync_projection_from_authority(&mut self, cx: &mut Context<Self>) {
+    self.sync_projection_stream(cx, true);
+  }
+
+  /// Local-write variant: drain + apply patches WITHOUT the remote caret
+  /// rebase (the caller overrides the caret from its own commit).
+  pub(super) fn sync_projection_local(&mut self, cx: &mut Context<Self>) {
+    self.sync_projection_stream(cx, false);
+  }
+
+  fn sync_projection_stream(&mut self, cx: &mut Context<Self>, rebase_caret: bool) {
     let Some(authority) = self.write_authority.clone() else {
       return;
     };
@@ -117,13 +138,17 @@ impl RichTextEditor {
     // (O(doc) `fork_at`). Either way a remote insert/delete before the caret shifts
     // it instead of stranding it at a stale offset (the interleave bug). Captured
     // BEFORE the patches mutate `self.document`. `None` ⇒ clamp fallback.
-    let reanchored_selection = self
-      .caret_anchor
-      .as_ref()
-      .filter(|anchor| anchor.selection == self.selection)
-      .and_then(|anchor| authority.resolve_selection_anchor(&anchor.head_cursor, &anchor.anchor_cursor))
-      .map(|(head, anchor)| EditorSelection { anchor, head, ..self.selection.clone() })
-      .or_else(|| authority.rebase_selection(&self.selection, &self.document, &self.document.frontier));
+    let reanchored_selection = rebase_caret
+      .then(|| {
+        self
+          .caret_anchor
+          .as_ref()
+          .filter(|anchor| anchor.selection == self.selection)
+          .and_then(|anchor| authority.resolve_selection_anchor(&anchor.head_cursor, &anchor.anchor_cursor))
+          .map(|(head, anchor)| EditorSelection { anchor, head, ..self.selection.clone() })
+          .or_else(|| authority.rebase_selection(&self.selection, &self.document, &self.document.frontier))
+      })
+      .flatten();
     let mut needs_self_heal = false;
     for item in items {
       match item {
@@ -516,7 +541,8 @@ impl RichTextEditor {
     }
     // Field fix: the undo's projection change rides the ordered stream like
     // every other change; the outcome's payload is only the applied signal.
-    self.sync_projection_from_authority(cx);
+    // Local variant: the caret is set from `outcome.selection` below.
+    self.sync_projection_local(cx);
     if let Some(selection) = outcome.selection {
       let head = self.clamp_offset_to_document(selection.head);
       let anchor = self.clamp_offset_to_document(selection.anchor);
