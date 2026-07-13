@@ -190,7 +190,9 @@ fn build_wasi(
         };
         builder.preopened_dir(&grant.host_path, guest_path, dir_perms, file_perms)?;
     }
-    if config.allow_network { builder.inherit_network(); }
+    if config.allow_network {
+        builder.inherit_network().allow_ip_name_lookup(true);
+    }
     Ok(builder.build())
 }
 
