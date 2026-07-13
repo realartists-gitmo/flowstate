@@ -1,0 +1,20 @@
+package flowstate:extension@1.0.0;
+
+interface host {
+  record host-error {
+    code: string,
+    message: string,
+  }
+
+  snapshot: func() -> result<string, host-error>;
+  selection: func() -> result<string, host-error>;
+  apply-edits: func(edits-json: string) -> result<string, host-error>;
+  refresh-from-disk: func() -> result<string, host-error>;
+  set-action-label: func(action-id: string, label: string) -> result<_, host-error>;
+  set-status: func(message: string);
+}
+
+world extension {
+  import host;
+  export run: func(action-id: string) -> result<_, string>;
+}
