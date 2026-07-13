@@ -1,11 +1,13 @@
 use wasmtime::StoreLimits;
 use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
+use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
 use super::{ExtensionHost, HostError, flowstate};
 
 pub(super) struct State<H> {
     wasi: WasiCtx,
+    http: WasiHttpCtx,
     table: ResourceTable,
     pub(super) limits: StoreLimits,
     host: H,
@@ -13,8 +15,13 @@ pub(super) struct State<H> {
 
 impl<H> State<H> {
     pub(super) fn new(wasi: WasiCtx, limits: StoreLimits, host: H) -> Self {
-        Self { wasi, table: ResourceTable::new(), limits, host }
+        Self { wasi, http: WasiHttpCtx::new(), table: ResourceTable::new(), limits, host }
     }
+}
+
+impl<H: Send> WasiHttpView for State<H> {
+    fn ctx(&mut self) -> &mut WasiHttpCtx { &mut self.http }
+    fn table(&mut self) -> &mut ResourceTable { &mut self.table }
 }
 
 impl<H: Send> WasiView for State<H> {
