@@ -121,6 +121,7 @@ impl Workspace {
     };
 
     this.refresh_recent_document_previews(cx);
+    this.extensions.reload();
 
     if let Some(root) = load_tub_root() {
       this.load_tub_root(root, cx);
