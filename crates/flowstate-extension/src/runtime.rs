@@ -143,7 +143,11 @@ impl Runtime {
         }
         flowstate::extension::host::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |state| state)?;
         let instance = Extension::instantiate(&mut store, &component, &linker)?;
-        let result = instance.call_run(&mut store, &invocation.action_id)?;
+        let result = match instance.call_run(&mut store, &invocation.action_id) {
+            Ok(result) => result,
+            Err(_) if cancellation.cancelled.load(Ordering::Acquire) => return Err(RuntimeError::Cancelled),
+            Err(error) => return Err(RuntimeError::Wasmtime(error)),
+        };
         if cancellation.cancelled.load(Ordering::Acquire) { return Err(RuntimeError::Cancelled); }
         result.map_err(|message| RuntimeError::Wasmtime(anyhow::anyhow!(message)))?;
         Ok(InvocationOutput { stdout: stdout.contents().to_vec(), stderr: stderr.contents().to_vec() })
