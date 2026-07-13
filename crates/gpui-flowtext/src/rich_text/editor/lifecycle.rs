@@ -278,6 +278,36 @@ impl RichTextEditor {
     self.after_text_mutation(cx);
   }
 
+  /// Installs a freshly read on-disk document as the new saved baseline.
+  ///
+  /// Unlike an edit, this intentionally discards history and does not create a
+  /// recovery write. The caller remains responsible for dirty-document
+  /// confirmation before invoking this method.
+  pub fn replace_document_from_disk(&mut self, mut document: Document, cx: &mut Context<Self>) {
+    self.clear_document_equation_caches();
+    rebuild_document_sections(&mut document);
+    reconcile_document_ids(&mut document);
+    self.document = document;
+    self.identity_map = DocumentIdentityMap::new(&self.document);
+    self.selection.anchor = clamped_extension_offset(&self.document, self.selection.anchor);
+    self.selection.head = clamped_extension_offset(&self.document, self.selection.head);
+    self.selected_block = None;
+    self.pending_styles = None;
+    self.undo_stack.clear();
+    self.redo_stack.clear();
+    self.last_collaboration_edit = None;
+    self.edit_generation = 0;
+    self.saved_generation = 0;
+    self.next_edit_generation = 1;
+    self.last_recovery_generation = 0;
+    self.recovery_write_pending = false;
+    self.save_status = SaveStatus::Saved;
+    self.invalidate_document_layout_caches();
+    self.pending_scroll_head_after_layout = true;
+    self.reset_caret_blink(cx);
+    cx.notify();
+  }
+
   fn apply_canonical_operation(&mut self, operation: &CanonicalOperation) {
     match operation {
       CanonicalOperation::InsertText {

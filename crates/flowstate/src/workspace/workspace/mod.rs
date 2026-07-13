@@ -53,6 +53,7 @@ use crate::workspace::file_management::{
   UNTITLED_DOCUMENT_NAME, UNTITLED_FLOW_NAME, default_save_directory, new_blank_document, normalize_db8_path, normalize_fl0_path,
 };
 use crate::workspace::file_search_overlay::FileSearchOverlay;
+use crate::workspace::extensions_panel::{ExtensionPanelController, ExtensionService};
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
@@ -61,6 +62,10 @@ const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
+#[path = "../extensions_tool.rs"]
+mod extensions_tool;
+#[path = "../extension_host_loop.rs"]
+mod extension_host_loop;
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
@@ -72,6 +77,9 @@ pub struct Workspace {
   outline_collapsed: bool,
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
+  extensions: ExtensionPanelController,
+  extension_service: Option<Arc<ExtensionService>>,
+  expanded_extensions: HashSet<SharedString>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, Document>,
   recent_document_preview_generation: u64,
@@ -183,6 +191,7 @@ enum LeftNavMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolkitTool {
   Tub,
+  Extensions,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

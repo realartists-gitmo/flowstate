@@ -1,6 +1,11 @@
 #[hotpath::measure_all]
 impl Workspace {
   pub fn new(initial_path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let extension_service = crate::workspace::extensions_panel::ExtensionService::new(crate::app_settings::flowstate_data_dir()).ok();
+    let extension_controller = extension_service
+      .as_ref()
+      .map(|service| ExtensionPanelController::new(service.clone()))
+      .unwrap_or_else(crate::workspace::extensions_panel::disconnected_controller);
     let zoom_slider = cx.new(|_| {
       SliderState::new()
         .min(25.0)
@@ -57,6 +62,9 @@ impl Workspace {
       outline_collapsed: false,
       toolkit_collapsed: false,
       active_toolkit_tool: None,
+      extensions: extension_controller,
+      extension_service,
+      expanded_extensions: HashSet::new(),
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
       recent_document_preview_generation: 0,
@@ -119,6 +127,7 @@ impl Workspace {
     };
 
     this.refresh_recent_document_previews(cx);
+    this.extensions.reload();
 
     if let Some(root) = load_tub_root() {
       this.load_tub_root(root, cx);
