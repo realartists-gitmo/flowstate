@@ -28,5 +28,13 @@ next invocation. The filesystem action records its observations in
 `/data/capabilities.log`; `/extension` is read-only and `/document` is available
 only for document actions.
 
+After approving a directory, run **Write to last directory grant** in a later
+invocation. The request action saves the returned mount path in `/data`, and the
+follow-up action writes `flowstate-extension-example.txt` through that preopen.
+
+**Run until cancelled** intentionally spins forever to demonstrate Flowstate's
+Cancel control and Wasmtime epoch interruption. The selection, table-cell,
+refresh, and block insertion actions mutate the open document.
+
 The network action sends a plain HTTP request to `example.com:80` to demonstrate
 WASI sockets without requiring TLS support in this small example.
