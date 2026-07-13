@@ -1,4 +1,4 @@
-use gpui::{AnyElement, Context, IntoElement, PromptButton, PromptLevel, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, AnyWindowHandle, Context, IntoElement, PromptButton, PromptLevel, SharedString, Window, div, prelude::*, px};
 use gpui_component::{
   ActiveTheme as _, Disableable, Icon, IconName, Selectable, Sizable,
   button::{Button, ButtonVariants},
@@ -194,7 +194,7 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) {
     if !self.extensions.requires_trust(extension_id.as_ref()) {
-      self.extensions.invoke(extension_id.as_ref(), action_id.as_ref());
+      self.start_extension_action(extension_id, action_id, window.window_handle(), cx);
       cx.notify();
       return;
     }
@@ -206,6 +206,7 @@ impl Workspace {
       &[PromptButton::ok("Trust and Run"), PromptButton::cancel("Cancel")],
       cx,
     );
+    let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
       if !matches!(answer.await, Ok(0)) {
         return;
@@ -217,12 +218,36 @@ impl Workspace {
             message: error,
           });
         } else {
-          workspace.extensions.invoke(extension_id.as_ref(), action_id.as_ref());
+          workspace.start_extension_action(extension_id, action_id, window_handle, cx);
         }
         cx.notify();
       });
     })
     .detach();
+  }
+
+  fn start_extension_action(
+    &mut self,
+    extension_id: SharedString,
+    action_id: SharedString,
+    window: AnyWindowHandle,
+    cx: &mut Context<Self>,
+  ) {
+    let Some(service) = self.extension_service.clone() else {
+      self.extensions.apply(super::super::extensions_panel::ExtensionPanelEvent::Failed {
+        extension_id,
+        message: "Extension runtime is unavailable".into(),
+      });
+      return;
+    };
+    let editor = self.active_editor.clone();
+    let document_root = editor.as_ref().and_then(|editor| editor.read(cx).document_path().and_then(|path| path.parent().map(ToOwned::to_owned)));
+    let (host, requests) = super::super::extensions_panel::EditorHostBridge::bounded(32);
+    self.spawn_extension_host_loop(extension_id.clone(), editor, requests, window, cx);
+    self.extensions.invoke(extension_id.as_ref(), action_id.as_ref());
+    if let Err(message) = service.invoke_with_host(extension_id.as_ref(), action_id.as_ref(), document_root, Box::new(host)) {
+      self.extensions.apply(super::super::extensions_panel::ExtensionPanelEvent::Failed { extension_id, message });
+    }
   }
 
   fn cancel_extension(&mut self, extension_id: SharedString, cx: &mut Context<Self>) {
