@@ -193,13 +193,15 @@ fn clamped_extension_offset(document: &Document, offset: DocumentOffset) -> Docu
 
 fn insert_extension_assets(store: &mut AssetStore, assets: &[InputAsset]) {
   for asset in assets {
+    let mut hasher = DefaultHasher::new();
+    asset.bytes.hash(&mut hasher);
     store.assets.insert(
       asset.id,
       AssetRecord {
         id: asset.id,
         mime_type: asset.mime_type.clone().into(),
         original_name: asset.original_name.clone().map(Into::into),
-        content_hash: asset.content_hash,
+        content_hash: hasher.finish(),
         bytes: Arc::new(asset.bytes.clone()),
       },
     );
@@ -347,6 +349,37 @@ mod extension_api_tests {
     assert!(matches!(&document.blocks[0], Block::Equation(equation) if equation.source.as_ref() == "x^2"));
     assert!(matches!(&document.blocks[1], Block::Paragraph(_)));
     assert_eq!(paragraph_text(&document, 0), "after");
+    assert!(document_bytes(&document).is_ok());
+  }
+
+  #[test]
+  fn block_splice_normalizes_untrusted_asset_hash() {
+    let mut document = text_document("before");
+    let asset_id = AssetId(42);
+    let bytes = b"<svg/>".to_vec();
+    let edit = ExtensionDocumentEdit::SpliceBlocks {
+      range: 1..1,
+      blocks: vec![InputBlock::Image(InputImageBlock {
+        asset_id,
+        alt_text: "extension image".to_owned(),
+        caption: None,
+        sizing: InputImageSizing::Intrinsic,
+        alignment: InputBlockAlignment::Center,
+      })],
+      assets: vec![InputAsset {
+        id: asset_id,
+        mime_type: "image/svg+xml".to_owned(),
+        original_name: Some("extension.svg".to_owned()),
+        content_hash: 42,
+        bytes: bytes.clone(),
+      }],
+    };
+
+    apply_extension_edit(&mut document, &edit).unwrap();
+
+    let mut hasher = DefaultHasher::new();
+    bytes.hash(&mut hasher);
+    assert_eq!(document.assets.assets[&asset_id].content_hash, hasher.finish());
     assert!(document_bytes(&document).is_ok());
   }
 

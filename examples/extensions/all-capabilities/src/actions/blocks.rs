@@ -41,7 +41,7 @@ pub fn insert() -> Result<(), String> {
     "kind": "splice_blocks", "start": end, "end": end,
     "blocks": [paragraph, equation, table, image], "assets": [{
       "id": asset_wire_id, "mime_type": "image/svg+xml", "original_name": "wasm.svg",
-      "content_hash": asset_id, "bytes": svg
+      "content_hash": 0, "bytes": svg
     }]
   }]});
   host::apply_edits(&request.to_string()).map_err(host_error)?;
