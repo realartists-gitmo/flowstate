@@ -3,7 +3,7 @@ use wasmtime::component::ResourceTable;
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use wasmtime_wasi_http::{WasiHttpCtx, WasiHttpView};
 
-use super::{ExtensionHost, HostError, flowstate};
+use super::{DirectoryAccess, DirectoryGrantResponse, ExtensionHost, HostError, flowstate};
 
 pub(super) struct State<H> {
     wasi: WasiCtx,
@@ -35,6 +35,23 @@ impl<H: ExtensionHost> flowstate::extension::host::Host for State<H> {
     fn refresh_from_disk(&mut self) -> Result<String, flowstate::extension::host::HostError> { self.host.refresh_from_disk().map_err(Into::into) }
     fn set_action_label(&mut self, action_id: String, label: String) -> Result<(), flowstate::extension::host::HostError> { self.host.set_action_label(&action_id, &label).map_err(Into::into) }
     fn set_status(&mut self, message: String) { self.host.set_status(&message); }
+    fn request_directory_access(
+        &mut self,
+        mode: flowstate::extension::host::DirectoryAccess,
+        suggested_path: Option<String>,
+    ) -> Result<flowstate::extension::host::DirectoryGrant, flowstate::extension::host::HostError> {
+        let mode = match mode {
+            flowstate::extension::host::DirectoryAccess::Read => DirectoryAccess::Read,
+            flowstate::extension::host::DirectoryAccess::ReadWrite => DirectoryAccess::ReadWrite,
+        };
+        self.host.request_directory_access(mode, suggested_path.as_deref()).map(Into::into).map_err(Into::into)
+    }
+}
+
+impl From<DirectoryGrantResponse> for flowstate::extension::host::DirectoryGrant {
+    fn from(grant: DirectoryGrantResponse) -> Self {
+        Self { grant_id: grant.grant_id, mount_path: grant.mount_path, available_next_invocation: grant.available_next_invocation }
+    }
 }
 
 impl From<HostError> for flowstate::extension::host::HostError {

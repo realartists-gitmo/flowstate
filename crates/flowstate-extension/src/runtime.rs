@@ -36,6 +36,24 @@ pub struct Invocation {
     pub data_root: PathBuf,
     pub document_root: Option<PathBuf>,
     pub action_id: String,
+    pub directory_grants: Vec<DirectoryGrant>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DirectoryAccess { Read, ReadWrite }
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryGrant {
+    pub grant_id: String,
+    pub host_path: PathBuf,
+    pub access: DirectoryAccess,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DirectoryGrantResponse {
+    pub grant_id: String,
+    pub mount_path: String,
+    pub available_next_invocation: bool,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -55,6 +73,7 @@ pub trait ExtensionHost: Send + 'static {
     fn refresh_from_disk(&mut self) -> Result<String, HostError>;
     fn set_action_label(&mut self, action_id: &str, label: &str) -> Result<(), HostError>;
     fn set_status(&mut self, message: &str);
+    fn request_directory_access(&mut self, mode: DirectoryAccess, suggested_path: Option<&str>) -> Result<DirectoryGrantResponse, HostError>;
 }
 
 #[derive(Debug, Error)]
@@ -156,8 +175,21 @@ fn build_wasi(
     if let Some(document_root) = &invocation.document_root {
         builder.preopened_dir(document_root, "/document", DirPerms::all(), FilePerms::all())?;
     }
+    for grant in &invocation.directory_grants {
+        if !valid_grant_id(&grant.grant_id) { anyhow::bail!("invalid directory grant id: {}", grant.grant_id); }
+        let guest_path = format!("/grants/{}", grant.grant_id);
+        let (dir_perms, file_perms) = match grant.access {
+            DirectoryAccess::Read => (DirPerms::READ, FilePerms::READ),
+            DirectoryAccess::ReadWrite => (DirPerms::all(), FilePerms::all()),
+        };
+        builder.preopened_dir(&grant.host_path, guest_path, dir_perms, file_perms)?;
+    }
     if config.allow_network { builder.inherit_network(); }
     Ok(builder.build())
+}
+
+fn valid_grant_id(id: &str) -> bool {
+    !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
 struct RunningGuard<'a> {
@@ -212,5 +244,11 @@ mod tests {
         std::fs::write(&path, "(component (type (func)))").unwrap();
         runtime.load_component(&path).unwrap();
         assert_eq!(runtime.components.lock().len(), 1);
+    }
+
+    #[test]
+    fn grant_mount_ids_cannot_escape_namespace() {
+        for valid in ["documents", "grant-1", "grant_2"] { assert!(valid_grant_id(valid)); }
+        for invalid in ["", "../home", "a/b", "with space"] { assert!(!valid_grant_id(invalid)); }
     }
 }
