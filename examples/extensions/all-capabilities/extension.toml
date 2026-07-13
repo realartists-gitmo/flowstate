@@ -20,6 +20,16 @@ label = "Insert styled blocks (destructive)"
 requires_document = true
 
 [[actions]]
+id = "delete-selection"
+label = "Delete selection (destructive)"
+requires_document = true
+
+[[actions]]
+id = "replace-table-cell"
+label = "Replace selected table cell (destructive)"
+requires_document = true
+
+[[actions]]
 id = "refresh"
 label = "Refresh from disk (destructive)"
 requires_document = true
@@ -42,4 +52,14 @@ requires_document = false
 [[actions]]
 id = "runtime"
 label = "Exercise clock, random, and output"
+requires_document = false
+
+[[actions]]
+id = "access-last-grant"
+label = "Write to last directory grant"
+requires_document = false
+
+[[actions]]
+id = "cancellable-loop"
+label = "Run until cancelled"
 requires_document = false
