@@ -1,5 +1,5 @@
 use std::{
-  collections::HashMap,
+  collections::{HashMap, VecDeque},
   hash::{DefaultHasher, Hash, Hasher},
   fs,
   path::PathBuf,
@@ -28,6 +28,7 @@ pub struct ExtensionService {
   running: Arc<Mutex<HashMap<String, CancellationHandle>>>,
   events_tx: mpsc::SyncSender<ExtensionPanelEvent>,
   events_rx: Mutex<mpsc::Receiver<ExtensionPanelEvent>>,
+  pending_events: Mutex<VecDeque<ExtensionPanelEvent>>,
 }
 
 impl ExtensionService {
@@ -57,6 +58,7 @@ impl ExtensionService {
       running: Arc::new(Mutex::new(HashMap::new())),
       events_tx,
       events_rx: Mutex::new(events_rx),
+      pending_events: Mutex::new(VecDeque::new()),
     }))
   }
 
@@ -118,9 +120,19 @@ impl ExtensionService {
     Ok(())
   }
 
-  pub fn drain_events(&self) -> Vec<ExtensionPanelEvent> {
-    let Ok(receiver) = self.events_rx.lock() else { return Vec::new() };
-    std::iter::from_fn(|| receiver.try_recv().ok()).collect()
+  pub fn drain_events_for(&self, extension_id: &str) -> Vec<ExtensionPanelEvent> {
+    let Ok(mut pending) = self.pending_events.lock() else { return Vec::new() };
+    let mut matched = Vec::new();
+    let mut retained = VecDeque::new();
+    while let Some(event) = pending.pop_front() {
+      if event_extension_id(&event) == extension_id { matched.push(event); } else { retained.push_back(event); }
+    }
+    *pending = retained;
+    let Ok(receiver) = self.events_rx.lock() else { return matched };
+    while let Ok(event) = receiver.try_recv() {
+      if event_extension_id(&event) == extension_id { matched.push(event); } else { pending.push_back(event); }
+    }
+    matched
   }
 
   pub fn grant_directory(
@@ -164,6 +176,17 @@ impl ExtensionService {
     }).collect();
     drop(grants);
     Ok(result)
+  }
+}
+
+fn event_extension_id(event: &ExtensionPanelEvent) -> &str {
+  match event {
+    ExtensionPanelEvent::Started { extension_id, .. }
+    | ExtensionPanelEvent::ActionLabel { extension_id, .. }
+    | ExtensionPanelEvent::Output { extension_id, .. }
+    | ExtensionPanelEvent::Failed { extension_id, .. }
+    | ExtensionPanelEvent::Finished { extension_id }
+    | ExtensionPanelEvent::Cancelled { extension_id } => extension_id.as_ref(),
   }
 }
 
@@ -273,5 +296,21 @@ impl ExtensionPanelAdapter for ExtensionService {
     drop(running);
     handle.cancel();
     Ok(())
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn event_draining_preserves_other_extensions() {
+    let root = tempfile::tempdir().unwrap();
+    let service = ExtensionService::new(root.path().to_path_buf()).unwrap();
+    service.events_tx.send(ExtensionPanelEvent::Finished { extension_id: "one".into() }).unwrap();
+    service.events_tx.send(ExtensionPanelEvent::Cancelled { extension_id: "two".into() }).unwrap();
+
+    assert!(matches!(service.drain_events_for("one").as_slice(), [ExtensionPanelEvent::Finished { .. }]));
+    assert!(matches!(service.drain_events_for("two").as_slice(), [ExtensionPanelEvent::Cancelled { .. }]));
   }
 }

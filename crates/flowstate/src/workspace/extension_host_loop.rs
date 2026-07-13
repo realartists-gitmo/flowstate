@@ -3,8 +3,8 @@ use std::{sync::mpsc::Receiver, time::Duration};
 use flowstate_extension::HostError;
 use gpui::{AnyWindowHandle, Context, Entity, PathPromptOptions, PromptButton, PromptLevel, SharedString, Timer};
 
-use crate::rich_text_element::{RichTextEditor, load_or_create_document};
-use super::super::extensions_panel::{EditorHostRequest, ExtensionPanelEvent};
+use crate::rich_text_element::{RichTextEditor, read_document};
+use super::super::extensions_panel::{EditorHostRequest, ExtensionPanelEvent, ExtensionRunState};
 use super::Workspace;
 
 impl Workspace {
@@ -17,7 +17,6 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) {
     cx.spawn(async move |workspace, cx| {
-      let mut host_disconnected = false;
       loop {
         while let Ok(request) = requests.try_recv() {
           match request {
@@ -66,7 +65,34 @@ impl Workspace {
                 cx.notify();
               });
             },
-            EditorHostRequest::DirectoryAccess(mode, _suggested_path, reply) => {
+            EditorHostRequest::DirectoryAccess(mode, suggested_path, reply) => {
+              let access = match mode {
+                flowstate_extension::DirectoryAccess::Read => "read-only",
+                flowstate_extension::DirectoryAccess::ReadWrite => "read and write",
+              };
+              let detail = format!(
+                "This extension is requesting {access} access to a directory. Suggested path: {}. The grant takes effect on its next invocation.",
+                suggested_path.as_deref().unwrap_or("none"),
+              );
+              let approval = window
+                .update(cx, |_, window, cx| {
+                  window.prompt(
+                    PromptLevel::Warning,
+                    "Grant directory access?",
+                    Some(&detail),
+                    &[PromptButton::ok("Choose Directory"), PromptButton::cancel("Cancel")],
+                    cx,
+                  )
+                })
+                .map_err(host_access);
+              let approved = match approval {
+                Ok(answer) => matches!(answer.await, Ok(0)),
+                Err(_) => false,
+              };
+              if !approved {
+                let _ = reply.send(Err(host_error("directory-access-cancelled", "Directory access was not granted")));
+                continue;
+              }
               let selection = window
                 .update(cx, |_, _, cx| {
                   cx.prompt_for_paths(PathPromptOptions {
@@ -100,17 +126,16 @@ impl Workspace {
             },
           }
         }
-        if matches!(requests.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) { host_disconnected = true; }
         let terminal = workspace
           .update(cx, |workspace, cx| {
-            let events = workspace.extension_service.as_ref().map_or_else(Vec::new, |service| service.drain_events());
-            let terminal = events.iter().any(|event| matches!(event, ExtensionPanelEvent::Finished { .. } | ExtensionPanelEvent::Failed { .. } | ExtensionPanelEvent::Cancelled { .. }));
+            let events = workspace.extension_service.as_ref().map_or_else(Vec::new, |service| service.drain_events_for(extension_id.as_ref()));
             for event in events { workspace.extensions.apply(event); }
+            let terminal = !matches!(workspace.extensions.state(extension_id.as_ref()), ExtensionRunState::Running { .. });
             if terminal { cx.notify(); }
             terminal
           })
           .unwrap_or(false);
-        if host_disconnected && terminal { break }
+        if terminal { break }
         Timer::after(Duration::from_millis(16)).await;
       }
     })
@@ -148,7 +173,7 @@ async fn refresh_editor_from_disk(
       return Err(host_error("refresh-cancelled", "Document refresh was cancelled"));
     }
   }
-  let document = load_or_create_document(&path).map_err(|error| host_error("refresh-failed", error))?;
+  let document = read_document(&path).map_err(|error| host_error("refresh-failed", error))?;
   editor
     .update(cx, |editor, cx| {
       editor.replace_document_from_disk(document, cx);
