@@ -1,6 +1,4 @@
-use std::{fmt, ops::Range, sync::Arc};
-
-use super::*;
+use std::fmt;
 
 #[derive(Clone, Debug)]
 pub struct ExtensionDocumentSnapshot {
