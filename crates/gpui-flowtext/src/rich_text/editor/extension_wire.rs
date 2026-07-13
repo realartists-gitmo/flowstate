@@ -67,7 +67,7 @@ pub struct ExtensionWireEditRequest {
   pub edits: Vec<ExtensionWireEdit>,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExtensionWireEdit {
   ReplaceText {
@@ -88,6 +88,97 @@ pub enum ExtensionWireEdit {
     cell_ix: usize,
     blocks: Vec<InputTableCellBlock>,
   },
+}
+
+impl<'de> serde::Deserialize<'de> for ExtensionWireEdit {
+  fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+  where
+    D: serde::Deserializer<'de>,
+  {
+    use serde::de::Error as _;
+
+    #[derive(serde::Deserialize)]
+    struct ReplaceText {
+      start: ExtensionWireOffset,
+      end: ExtensionWireOffset,
+      fragment: RichClipboardFragment,
+    }
+    #[derive(serde::Deserialize)]
+    struct SpliceBlocks {
+      start: usize,
+      end: usize,
+      blocks: Vec<InputBlock>,
+      #[serde(default)]
+      assets: Vec<InputAsset>,
+    }
+    #[derive(serde::Deserialize)]
+    struct ReplaceTableCell {
+      block_ix: usize,
+      row_ix: usize,
+      cell_ix: usize,
+      blocks: Vec<InputTableCellBlock>,
+    }
+
+    let mut value = serde_json::Value::deserialize(deserializer)?;
+    normalize_asset_ids(&mut value).map_err(D::Error::custom)?;
+    let kind = value
+      .as_object_mut()
+      .and_then(|object| object.remove("kind"))
+      .and_then(|kind| kind.as_str().map(str::to_owned))
+      .ok_or_else(|| D::Error::custom("extension edit is missing a string kind"))?;
+    match kind.as_str() {
+      "replace_text" => {
+        let edit: ReplaceText = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self::ReplaceText {
+          start: edit.start,
+          end: edit.end,
+          fragment: edit.fragment,
+        })
+      },
+      "splice_blocks" => {
+        let edit: SpliceBlocks = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self::SpliceBlocks {
+          start: edit.start,
+          end: edit.end,
+          blocks: edit.blocks,
+          assets: edit.assets,
+        })
+      },
+      "replace_table_cell" => {
+        let edit: ReplaceTableCell = serde_json::from_value(value).map_err(D::Error::custom)?;
+        Ok(Self::ReplaceTableCell {
+          block_ix: edit.block_ix,
+          row_ix: edit.row_ix,
+          cell_ix: edit.cell_ix,
+          blocks: edit.blocks,
+        })
+      },
+      _ => Err(D::Error::custom(format!("unknown extension edit kind `{kind}`"))),
+    }
+  }
+}
+
+fn normalize_asset_ids(value: &mut serde_json::Value) -> Result<(), String> {
+  match value {
+    serde_json::Value::Object(object) => {
+      let is_asset = object.contains_key("mime_type") && object.contains_key("bytes");
+      for (key, value) in object {
+        if (key == "asset_id" || (key == "id" && is_asset)) && value.is_string() {
+          let text = value.as_str().expect("checked string");
+          *value = serde_json::Value::Number(text.parse().map_err(|_| format!("invalid asset ID `{text}`"))?);
+        } else {
+          normalize_asset_ids(value)?;
+        }
+      }
+    },
+    serde_json::Value::Array(values) => {
+      for value in values {
+        normalize_asset_ids(value)?;
+      }
+    },
+    _ => {},
+  }
+  Ok(())
 }
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
@@ -247,6 +338,62 @@ mod extension_wire_tests {
       extension_edit_from_wire(&decoded.edits[0]),
       ExtensionDocumentEdit::SpliceBlocks { range, blocks, .. }
         if range == (1..3) && matches!(&blocks[0], InputBlock::Equation(equation) if equation.source == "x")
+    ));
+  }
+
+  #[test]
+  fn block_splice_request_accepts_string_u128_asset_ids() {
+    let asset_id = AssetId(u128::from(u64::MAX) + 1);
+    let request = ExtensionWireEditRequest {
+      expected_generation: 7,
+      edits: vec![ExtensionWireEdit::SpliceBlocks {
+        start: 0,
+        end: 0,
+        blocks: Vec::new(),
+        assets: vec![InputAsset {
+          id: asset_id,
+          mime_type: "image/png".to_owned(),
+          original_name: Some("pixel.png".to_owned()),
+          content_hash: 42,
+          bytes: vec![137, 80, 78, 71],
+        }],
+      }],
+    };
+
+    let json = serde_json::to_string(&request)
+      .unwrap()
+      .replace(&asset_id.0.to_string(), &format!("\"{}\"", asset_id.0));
+    let decoded: ExtensionWireEditRequest = serde_json::from_str(&json).unwrap();
+
+    assert!(matches!(
+      &decoded.edits[0],
+      ExtensionWireEdit::SpliceBlocks { assets, .. } if assets[0].id == asset_id
+    ));
+  }
+
+  #[test]
+  fn example_image_splice_accepts_legacy_numeric_asset_ids() {
+    let json = r#"{
+      "expected_generation": 7,
+      "edits": [{
+        "kind": "splice_blocks", "start": 0, "end": 0,
+        "blocks": [{"Image": {
+          "asset_id": 42, "alt_text": "example", "caption": null,
+          "sizing": "Intrinsic", "alignment": "Center"
+        }}],
+        "assets": [{
+          "id": 42, "mime_type": "image/svg+xml", "original_name": "wasm.svg",
+          "content_hash": 42, "bytes": [60, 115, 118, 103, 47, 62]
+        }]
+      }]
+    }"#;
+
+    let decoded: ExtensionWireEditRequest = serde_json::from_str(json).unwrap();
+    assert!(matches!(
+      &decoded.edits[0],
+      ExtensionWireEdit::SpliceBlocks { blocks, assets, .. }
+        if assets[0].id == AssetId(42)
+          && matches!(&blocks[0], InputBlock::Image(image) if image.asset_id == AssetId(42))
     ));
   }
 }
