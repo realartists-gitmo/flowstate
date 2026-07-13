@@ -37,6 +37,11 @@ pub enum ExtensionDocumentEdit {
     block_ix: usize,
     block: Block,
   },
+  SpliceBlocks {
+    range: Range<usize>,
+    blocks: Vec<InputBlock>,
+    assets: Vec<InputAsset>,
+  },
   ReplaceTableCell {
     block_ix: usize,
     row_ix: usize,
@@ -52,6 +57,7 @@ pub enum ExtensionEditError {
   ReadOnly,
   InvalidRange,
   InvalidBlock(usize),
+  InvalidBlockRange,
   NotATable(usize),
   InvalidTableCell { block_ix: usize, row_ix: usize, cell_ix: usize },
   InvalidDocument,
@@ -64,6 +70,7 @@ impl fmt::Display for ExtensionEditError {
       Self::ReadOnly => f.write_str("document is read-only"),
       Self::InvalidRange => f.write_str("text range is outside the document or not on UTF-8 boundaries"),
       Self::InvalidBlock(block_ix) => write!(f, "block index {block_ix} is outside the document"),
+      Self::InvalidBlockRange => f.write_str("block splice range is outside the document"),
       Self::NotATable(block_ix) => write!(f, "block {block_ix} is not a table"),
       Self::InvalidTableCell { block_ix, row_ix, cell_ix } => {
         write!(f, "table cell {block_ix}:{row_ix}:{cell_ix} does not exist")
@@ -130,18 +137,7 @@ fn apply_extension_edit(document: &mut Document, edit: &ExtensionDocumentEdit) -
         return Err(ExtensionEditError::InvalidRange);
       }
       delete_cross_paragraph_range(document, range.clone());
-      for asset in &fragment.assets {
-        document.assets.assets.insert(
-          asset.id,
-          AssetRecord {
-            id: asset.id,
-            mime_type: asset.mime_type.clone().into(),
-            original_name: asset.original_name.clone().map(Into::into),
-            content_hash: asset.content_hash,
-            bytes: Arc::new(asset.bytes.clone()),
-          },
-        );
-      }
+      insert_extension_assets(&mut document.assets, &fragment.assets);
       insert_rich_fragment_at(document, range.start, fragment);
     },
     ExtensionDocumentEdit::ReplaceBlock { block_ix, block } => {
@@ -149,6 +145,16 @@ fn apply_extension_edit(document: &mut Document, edit: &ExtensionDocumentEdit) -
         return Err(ExtensionEditError::InvalidBlock(*block_ix));
       };
       *slot = block.clone();
+    },
+    ExtensionDocumentEdit::SpliceBlocks { range, blocks, assets } => {
+      if range.start > range.end || range.end > document.blocks.len() {
+        return Err(ExtensionEditError::InvalidBlockRange);
+      }
+      let mut input_blocks = extension_input_blocks(document);
+      input_blocks.splice(range.clone(), blocks.iter().cloned());
+      let mut replacement_assets = document.assets.clone();
+      insert_extension_assets(&mut replacement_assets, assets);
+      *document = document_from_extension_blocks(document, input_blocks, replacement_assets);
     },
     ExtensionDocumentEdit::ReplaceTableCell {
       block_ix,
@@ -183,6 +189,74 @@ fn clamped_extension_offset(document: &Document, offset: DocumentOffset) -> Docu
     paragraph,
     byte: offset.byte.min(document.paragraphs.get(paragraph).map_or(0, paragraph_text_len)),
   }
+}
+
+fn insert_extension_assets(store: &mut AssetStore, assets: &[InputAsset]) {
+  for asset in assets {
+    store.assets.insert(
+      asset.id,
+      AssetRecord {
+        id: asset.id,
+        mime_type: asset.mime_type.clone().into(),
+        original_name: asset.original_name.clone().map(Into::into),
+        content_hash: asset.content_hash,
+        bytes: Arc::new(asset.bytes.clone()),
+      },
+    );
+  }
+}
+
+fn extension_input_blocks(document: &Document) -> Vec<InputBlock> {
+  let mut paragraph_ix = 0;
+  document
+    .blocks
+    .iter()
+    .map(|block| match block {
+      Block::Paragraph(_) => {
+        let paragraph = &document.paragraphs[paragraph_ix];
+        let input = input_paragraph_from_document_range(document, paragraph_ix, 0..paragraph_text_len(paragraph));
+        paragraph_ix += 1;
+        InputBlock::Paragraph(input)
+      },
+      _ => input_block_from_block(block),
+    })
+    .collect()
+}
+
+fn document_from_extension_blocks(document: &Document, mut blocks: Vec<InputBlock>, assets: AssetStore) -> Document {
+  if !blocks.iter().any(|block| matches!(block, InputBlock::Paragraph(_))) {
+    blocks.push(InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Normal,
+      runs: Vec::new(),
+    }));
+  }
+  let paragraphs = blocks
+    .iter()
+    .filter_map(|block| match block {
+      InputBlock::Paragraph(paragraph) => Some(paragraph.clone()),
+      _ => None,
+    })
+    .collect();
+  let mut replacement = document_from_input(document.theme.clone(), paragraphs);
+  let mut paragraph_ix = 0;
+  replacement.blocks = Arc::new(
+    blocks
+      .iter()
+      .map(|block| match block {
+        InputBlock::Paragraph(_) => {
+          let block = Block::Paragraph(replacement.paragraphs[paragraph_ix].clone());
+          paragraph_ix += 1;
+          block
+        },
+        _ => block_from_input_block(block),
+      })
+      .collect(),
+  );
+  replacement.assets = assets;
+  replacement.ids = document.ids.clone();
+  reconcile_document_ids(&mut replacement);
+  rebuild_document_sections(&mut replacement);
+  replacement
 }
 
 #[cfg(test)]
