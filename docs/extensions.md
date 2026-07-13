@@ -79,6 +79,12 @@ The guest receives these pre-opened directories:
 The runtime provides WASI clocks, randomness, HTTP, and sockets. It does not
 inherit Flowstate's environment or provide native process spawning.
 
+An extension can call `request-directory-access` when it needs another folder.
+Flowstate shows the requested read-only or read/write mode and lets the user
+choose the directory. Approved grants are tied to the component digest and are
+mounted on later invocations under the returned `/grants/<grant-id>` path. A
+changed component cannot reuse an earlier grant without asking again.
+
 ## Document API
 
 The imported host interface provides JSON snapshots and generation-checked edit
