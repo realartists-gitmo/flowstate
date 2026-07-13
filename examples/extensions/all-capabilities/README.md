@@ -28,6 +28,26 @@ next invocation. The filesystem action records its observations in
 `/data/capabilities.log`; `/extension` is read-only and `/document` is available
 only for document actions.
 
+## Buttons
+
+- **Inspect document and selection** reads both snapshot APIs, reports them in
+  the panel, and changes its own label for the current session.
+- **Replace selection** and **Delete selection** demonstrate normalized,
+  generation-checked rich-text edits.
+- **Insert styled blocks** appends a styled paragraph, equation, table, and SVG
+  image asset in one undoable batch.
+- **Replace selected table cell** exercises nested table editing.
+- **Refresh from disk** exercises reload and Flowstate's dirty-document prompt.
+- **Exercise scoped filesystems** reads `/extension`, writes `/data`, and probes
+  the saved document directory.
+- **Fetch example.com** performs an outbound HTTP request over WASI sockets.
+- **Request directory access** records a deferred read/write grant; **Write to
+  last directory grant** exercises it on a later invocation.
+- **Exercise clock, random, and output** uses WASI time and randomness and emits
+  captured stdout and stderr.
+- **Run until cancelled** intentionally loops so the Cancel button and Wasmtime
+  epoch interruption can be tested.
+
 After approving a directory, run **Write to last directory grant** in a later
 invocation. The request action saves the returned mount path in `/data`, and the
 follow-up action writes `flowstate-extension-example.txt` through that preopen.
