@@ -22,7 +22,19 @@ impl RichTextEditor {
           fragment,
         )
       },
-      Some(BlockSelection::Image(block_ix) | BlockSelection::Equation(block_ix) | BlockSelection::Table(block_ix)) => {
+      Some(BlockSelection::Equation(block_ix)) => {
+        let fragment = self.selected_block_fragment().unwrap_or(text_fragment);
+        (
+          ExtensionSelection::EquationSource {
+            block_ix,
+            anchor: self.equation_source_anchor,
+            head: self.equation_source_caret,
+          },
+          self.selected_equation_source_text().unwrap_or_default(),
+          fragment,
+        )
+      },
+      Some(BlockSelection::Image(block_ix) | BlockSelection::Table(block_ix)) => {
         let fragment = self.selected_block_fragment().unwrap_or(text_fragment);
         (
           ExtensionSelection::Object { block_ix },
