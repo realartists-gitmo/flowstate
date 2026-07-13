@@ -38,6 +38,8 @@ pub enum ExtensionPanelEvent {
 
 pub trait ExtensionPanelAdapter: Send + Sync {
   fn installed(&self) -> Result<Vec<ExtensionView>, SharedString>;
+  fn is_trusted(&self, extension_id: &str, component_hash: &str) -> bool;
+  fn trust(&self, extension_id: &str, component_hash: &str) -> Result<(), SharedString>;
   fn invoke(&self, extension_id: &str, action_id: &str) -> Result<(), SharedString>;
   fn cancel(&self, extension_id: &str) -> Result<(), SharedString>;
 }
@@ -95,5 +97,61 @@ impl ExtensionPanelController {
 
   pub fn error(&self) -> Option<&SharedString> {
     self.error.as_ref()
+  }
+
+  pub fn requires_trust(&self, extension_id: &str) -> bool {
+    self
+      .extensions
+      .iter()
+      .find(|extension| extension.id.as_ref() == extension_id)
+      .is_some_and(|extension| !self.adapter.is_trusted(extension_id, extension.component_hash.as_ref()))
+  }
+
+  pub fn trust(&mut self, extension_id: &str) -> Result<(), SharedString> {
+    let extension = self
+      .extensions
+      .iter()
+      .find(|extension| extension.id.as_ref() == extension_id)
+      .ok_or_else(|| SharedString::from("Extension is no longer installed"))?;
+    self.adapter.trust(extension_id, extension.component_hash.as_ref())
+  }
+
+  pub fn invoke(&mut self, extension_id: &str, action_id: &str) {
+    self
+      .states
+      .insert(extension_id.into(), ExtensionRunState::Running { action_id: action_id.into() });
+    self.outputs.remove(extension_id);
+    if let Err(error) = self.adapter.invoke(extension_id, action_id) {
+      self.states.insert(extension_id.into(), ExtensionRunState::Failed(error));
+    }
+  }
+
+  pub fn cancel(&mut self, extension_id: &str) {
+    if let Err(error) = self.adapter.cancel(extension_id) {
+      self.states.insert(extension_id.into(), ExtensionRunState::Failed(error));
+    }
+  }
+
+  pub fn apply(&mut self, event: ExtensionPanelEvent) {
+    match event {
+      ExtensionPanelEvent::Started { extension_id, action_id } => {
+        self.states.insert(extension_id, ExtensionRunState::Running { action_id });
+      },
+      ExtensionPanelEvent::ActionLabel { extension_id, action_id, label } => {
+        self.labels.insert((extension_id, action_id), label);
+      },
+      ExtensionPanelEvent::Output { extension_id, output } => {
+        self.outputs.insert(extension_id, output);
+      },
+      ExtensionPanelEvent::Failed { extension_id, message } => {
+        self.states.insert(extension_id, ExtensionRunState::Failed(message));
+      },
+      ExtensionPanelEvent::Finished { extension_id } => {
+        self.states.insert(extension_id, ExtensionRunState::Idle);
+      },
+      ExtensionPanelEvent::Cancelled { extension_id } => {
+        self.states.insert(extension_id, ExtensionRunState::Cancelled);
+      },
+    }
   }
 }

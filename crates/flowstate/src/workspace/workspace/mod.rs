@@ -53,6 +53,7 @@ use crate::workspace::file_management::{
   UNTITLED_DOCUMENT_NAME, UNTITLED_FLOW_NAME, default_save_directory, new_blank_document, normalize_db8_path, normalize_fl0_path,
 };
 use crate::workspace::file_search_overlay::FileSearchOverlay;
+use crate::workspace::extensions_panel::ExtensionPanelController;
 use crate::workspace::icons::{AppIcon, icon_button};
 use flowstate_tub::{SearchHit, SearchUnitKind, TubFile, TubIndex, TubTreeNode};
 
@@ -72,6 +73,7 @@ pub struct Workspace {
   outline_collapsed: bool,
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
+  extensions: ExtensionPanelController,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, Document>,
   recent_document_preview_generation: u64,
@@ -183,6 +185,7 @@ enum LeftNavMode {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum ToolkitTool {
   Tub,
+  Extensions,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
