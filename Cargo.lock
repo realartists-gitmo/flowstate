@@ -2809,6 +2809,7 @@ dependencies = [
  "fff-search",
  "flowstate-document",
  "flowstate-docx",
+ "flowstate-extension",
  "flowstate-flow",
  "flowstate-tub",
  "gpui",

@@ -1,12 +1,16 @@
+mod bridge;
 mod model;
+mod service;
 
 use std::sync::Arc;
 
 use gpui::SharedString;
 
 pub use model::{
-  ExtensionPanelAdapter, ExtensionPanelController, ExtensionPanelEvent, ExtensionRunState, ExtensionView,
+  ExtensionActionView, ExtensionPanelAdapter, ExtensionPanelController, ExtensionPanelEvent, ExtensionRunState, ExtensionView,
 };
+pub use service::ExtensionService;
+pub use bridge::{EditorHostBridge, EditorHostRequest};
 
 struct DisconnectedExtensionAdapter;
 
@@ -20,10 +24,6 @@ impl ExtensionPanelAdapter for DisconnectedExtensionAdapter {
   }
 
   fn trust(&self, _: &str, _: &str) -> Result<(), SharedString> {
-    Err("Extension runtime is not connected".into())
-  }
-
-  fn invoke(&self, _: &str, _: &str) -> Result<(), SharedString> {
     Err("Extension runtime is not connected".into())
   }
 

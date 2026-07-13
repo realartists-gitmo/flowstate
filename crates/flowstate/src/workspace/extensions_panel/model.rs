@@ -41,7 +41,6 @@ pub trait ExtensionPanelAdapter: Send + Sync {
   fn installed(&self) -> Result<Vec<ExtensionView>, SharedString>;
   fn is_trusted(&self, extension_id: &str, component_hash: &str) -> bool;
   fn trust(&self, extension_id: &str, component_hash: &str) -> Result<(), SharedString>;
-  fn invoke(&self, extension_id: &str, action_id: &str) -> Result<(), SharedString>;
   fn cancel(&self, extension_id: &str) -> Result<(), SharedString>;
 }
 
@@ -125,9 +124,6 @@ impl ExtensionPanelController {
         ExtensionRunState::Running { action_id: SharedString::from(action_id.to_owned()) },
       );
     self.outputs.remove(extension_id);
-    if let Err(error) = self.adapter.invoke(extension_id, action_id) {
-      self.states.insert(SharedString::from(extension_id.to_owned()), ExtensionRunState::Failed(error));
-    }
   }
 
   pub fn cancel(&mut self, extension_id: &str) {
