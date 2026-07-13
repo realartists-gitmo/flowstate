@@ -64,8 +64,12 @@ pub(super) fn layout_paragraph_at(
   (
     LaidOutParagraph {
       index: paragraph_ix,
-      // §perf-heaven T8.6: derived (was `Paragraph::byte_range`).
-      byte_range: crate::edit_ops::paragraph_byte_range(document, paragraph_ix),
+      // PARAGRAPH-LOCAL byte range (matches `offset.byte`, which is paragraph-local
+      // everywhere in the editor). A prior change set this to the ABSOLUTE document
+      // range (`paragraph_byte_range`), so `contains_byte` compared a local caret
+      // byte against an absolute range and the caret vanished for every byte below
+      // the paragraph's document offset (the "invisible caret" bug).
+      byte_range: 0..paragraph_text.len(),
       cache_key,
       len: paragraph_text.len(),
       top: y,
@@ -301,8 +305,10 @@ fn layout_prepared_paragraph_chunk_at(
 
   let paragraph = LaidOutParagraph {
     index: display_paragraph_ix,
-    // §perf-heaven T8.6: derived (was `Paragraph::byte_range`).
-    byte_range: crate::edit_ops::paragraph_byte_range(document, display_paragraph_ix),
+    // PARAGRAPH-LOCAL byte range of THIS chunk (matches the paragraph-local
+    // `offset.byte`). Was the ABSOLUTE document range, which broke `contains_byte`
+    // and hid the caret for local bytes below the paragraph's document offset.
+    byte_range: start_byte..byte_range_end,
     cache_key,
     len,
     top: paragraph_top,

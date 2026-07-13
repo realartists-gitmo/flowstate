@@ -1,6 +1,6 @@
 use std::ops::Range;
 
-use gpui::{App, Background, Bounds, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, rgb, size};
+use gpui::{App, Background, Bounds, Hsla, Pixels, Point, ScrollHandle, Window, black, fill, hsla, point, px, rgb, size};
 
 use flowstate_fidelity::{self as fidelity, FidelityClass};
 
@@ -15,7 +15,13 @@ pub(super) fn paint_layout(
   show_caret: bool,
   caret_width: Pixels,
   caret_color_rgb: Option<u32>,
+  // Caret color to use when `caret_color_rgb` is `None` (solo editing, no
+  // collaboration-caret color). MUST be the theme's default text color so the
+  // caret contrasts with the background — a hardcoded black caret is invisible
+  // on a dark theme (the "invisible caret" bug).
+  default_caret_color: Hsla,
   external_carets: &[ExternalCaret],
+  external_selections: &[ExternalSelection],
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
   window: &mut Window,
@@ -81,6 +87,19 @@ pub(super) fn paint_layout(
   }
   if let Some(selection) = drag_selection {
     paint_selection(layout, selection, bounds.origin, content_mask, visible_range.clone(), window);
+  }
+  // Remote peers' selection spans, each in that peer's presence color (the same
+  // hue as their caret, softened for a behind-the-glyphs highlight).
+  for external in external_selections {
+    paint_text_range_fill(
+      layout,
+      &external.selection,
+      bounds.origin,
+      content_mask,
+      visible_range.clone(),
+      remote_selection_color(external.color_rgb),
+      window,
+    );
   }
   for paragraph in &layout.paragraphs[visible_range.clone()] {
     if !paragraph_intersects_mask(paragraph, bounds.origin, content_mask) {
@@ -172,7 +191,7 @@ pub(super) fn paint_layout(
     && caret.intersects(&content_mask)
   {
     caret.size.width = caret_width;
-    let caret_color = caret_color_rgb.map_or_else(|| Background::from(black()), |color_rgb| Background::from(rgb(color_rgb)));
+    let caret_color = caret_color_rgb.map_or_else(|| Background::from(default_caret_color), |color_rgb| Background::from(rgb(color_rgb)));
     window.paint_quad(fill(snap_vertical_rule_to_device_pixels(caret, window), caret_color));
   }
   for external_caret in external_carets {
@@ -670,6 +689,13 @@ pub(super) fn paint_selection(
   window: &mut Window,
 ) {
   paint_text_range_fill(layout, selection, origin, content_mask, visible_range, hsla(0.0, 0.0, 0.0, 0.22), window);
+}
+
+/// A peer's presence color softened for use as a selection highlight: the caret
+/// paints at full opacity, but a span behind the glyphs must stay readable, so
+/// drop it to a translucent fill.
+fn remote_selection_color(color_rgb: u32) -> Hsla {
+  Hsla::from(rgb(color_rgb)).opacity(0.30)
 }
 
 fn paint_text_range_fill(

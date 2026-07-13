@@ -114,6 +114,7 @@ impl RichTextEditor {
       caret_visible: true,
       caret_blink_active: false,
       external_carets: Vec::new(),
+      external_selections: Vec::new(),
       search_highlights: Vec::new(),
       active_search_highlight: None,
       last_text_input_at: None,
@@ -241,6 +242,7 @@ impl RichTextEditor {
     self.caret_visible = false;
     self.caret_blink_active = false;
     self.external_carets.clear();
+    self.external_selections.clear();
     self.last_text_input_at = None;
     self.ime_marked_range = None;
     self.pending_typing_prefetch_resume = false;
@@ -471,6 +473,28 @@ impl RichTextEditor {
       .external_carets
       .iter()
       .filter(|caret| caret.offset.paragraph == paragraph_ix)
+      .cloned()
+      .collect()
+  }
+
+  pub fn set_external_selections(&mut self, external_selections: Vec<ExternalSelection>, cx: &mut Context<Self>) {
+    if self.external_selections != external_selections {
+      self.external_selections = external_selections;
+      cx.notify();
+    }
+  }
+
+  /// Peer selection spans that intersect `paragraph_ix`. A multi-paragraph
+  /// selection is returned for every paragraph it covers; the shared paint path
+  /// slices the correct byte span per paragraph, mirroring the local selection.
+  pub(super) fn external_selections_for_paragraph(&self, paragraph_ix: usize) -> Vec<ExternalSelection> {
+    self
+      .external_selections
+      .iter()
+      .filter(|external| {
+        let range = external.selection.normalized();
+        range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
+      })
       .cloned()
       .collect()
   }

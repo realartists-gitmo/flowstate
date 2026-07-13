@@ -2,7 +2,7 @@ use flowstate_document::{
   DocumentPackage, DocumentProjection, InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputTableColumnWidth, ParagraphStyle,
   ProjectionPatchBatch, ROOT_BODY_FLOW_ID, RunStyles,
 };
-use gpui_flowtext::{EditorSelection, ExternalCaret};
+use gpui_flowtext::{EditorSelection, ExternalCaret, ExternalSelection};
 use loro::VersionRange;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -180,6 +180,7 @@ pub struct RuntimePresenceCaretRequest {
 #[derive(Clone, Debug)]
 pub struct RuntimePresenceCarets {
   pub carets: Vec<ExternalCaret>,
+  pub selections: Vec<ExternalSelection>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]

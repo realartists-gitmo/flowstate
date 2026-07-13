@@ -423,6 +423,15 @@ pub struct ExternalCaret {
   pub color_rgb: u32,
 }
 
+/// A remote peer's (non-collapsed) selection range, painted behind the text in
+/// that peer's presence color. The head caret is carried separately as an
+/// [`ExternalCaret`]; this is only the highlighted span.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalSelection {
+  pub selection: EditorSelection,
+  pub color_rgb: u32,
+}
+
 // Loro-first: hooks carry NO pending edit batches (nothing is ever pending —
 // intents commit synchronously) and return no replacement projection (the
 // canonical doc is always current; there is nothing to replay).
@@ -936,6 +945,7 @@ pub struct RichTextEditor {
   last_text_input_at: Option<Instant>,
   ime_marked_range: Option<Range<usize>>,
   external_carets: Vec<ExternalCaret>,
+  external_selections: Vec<ExternalSelection>,
   pub(super) search_highlights: Vec<Range<DocumentOffset>>,
   pub(super) active_search_highlight: Option<usize>,
   pending_typing_prefetch_resume: bool,

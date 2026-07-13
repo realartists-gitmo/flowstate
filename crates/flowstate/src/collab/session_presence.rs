@@ -182,7 +182,10 @@ impl CollabSession {
     let generation = self.external_caret_refresh_generation;
     if requests.is_empty() {
       tracing::trace!(session = %self.session, "clearing collaboration external carets because no remote selections are present");
-      editor.update(cx, |editor, cx| editor.set_external_carets(Vec::new(), cx));
+      editor.update(cx, |editor, cx| {
+        editor.set_external_carets(Vec::new(), cx);
+        editor.set_external_selections(Vec::new(), cx);
+      });
       return;
     }
     cx.spawn(async move |session, cx| {
@@ -221,7 +224,10 @@ impl CollabSession {
                 format!("session={session_id} carets={} paragraphs={paragraph_count}", resolved.carets.len())
               });
             }
-            editor.update(cx, |editor, cx| editor.set_external_carets(resolved.carets, cx));
+            editor.update(cx, |editor, cx| {
+              editor.set_external_selections(resolved.selections, cx);
+              editor.set_external_carets(resolved.carets, cx);
+            });
           }
         },
         Err(error) => {

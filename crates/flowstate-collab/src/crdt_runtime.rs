@@ -57,7 +57,7 @@ pub(crate) mod table_ops;
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
 use gpui_flowtext::{
-  DocumentOffset, EditorSelection, ExternalCaret, ProjectionPatchBatch, apply_projection_patch_batch,
+  DocumentOffset, EditorSelection, ExternalCaret, ExternalSelection, ProjectionPatchBatch, apply_projection_patch_batch,
 };
 use loro::{ContainerTrait as _, cursor::PosType};
 pub(crate) use projection_patch::{
@@ -1879,25 +1879,46 @@ impl CrdtRuntime {
 
   pub fn resolve_presence_carets(&self, requests: Vec<RuntimePresenceCaretRequest>) -> RuntimePresenceCarets {
     let text = body_text(&self.doc);
-    let carets = requests
-      .into_iter()
-      .filter_map(|request| {
-        let cursor = Cursor::decode(&request.selection.head.cursor).ok()?;
-        if cursor.container != text.id() {
-          return None;
-        }
-        let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
-        let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
-        Some(ExternalCaret {
-          offset: self
-            .projection_index
-            .offset_for_body_unicode(&self.projection, unicode)?,
-          visual_gravity: gpui_gravity_from_presence(request.selection.head.visual_gravity),
+    // Resolve one presence endpoint's encoded cursor to a projection-space
+    // DocumentOffset in the CURRENT canonical state (`None` if the cursor's
+    // container is gone or no longer resolves).
+    let resolve_endpoint = |cursor_bytes: &[u8]| -> Option<DocumentOffset> {
+      let cursor = Cursor::decode(cursor_bytes).ok()?;
+      if cursor.container != text.id() {
+        return None;
+      }
+      let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
+      let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
+      self.projection_index.offset_for_body_unicode(&self.projection, unicode)
+    };
+    let mut carets = Vec::with_capacity(requests.len());
+    let mut selections = Vec::new();
+    for request in requests {
+      let Some(head_offset) = resolve_endpoint(&request.selection.head.cursor) else {
+        continue;
+      };
+      carets.push(ExternalCaret {
+        offset: head_offset,
+        visual_gravity: gpui_gravity_from_presence(request.selection.head.visual_gravity),
+        color_rgb: request.color_rgb,
+      });
+      // A non-collapsed selection also paints a highlighted span behind the
+      // text. Skip it when the anchor no longer resolves or coincides with the
+      // head (a bare caret) — the caret above already covers that case.
+      if let Some(anchor_offset) = resolve_endpoint(&request.selection.anchor.cursor)
+        && anchor_offset != head_offset
+      {
+        selections.push(ExternalSelection {
+          selection: EditorSelection {
+            anchor: anchor_offset,
+            head: head_offset,
+            ..EditorSelection::default()
+          },
           color_rgb: request.color_rgb,
-        })
-      })
-      .collect();
-    RuntimePresenceCarets { carets }
+        });
+      }
+    }
+    RuntimePresenceCarets { carets, selections }
   }
 
   fn presence_endpoint(&self, offset: DocumentOffset, affinity: SelectionAffinity, visual_gravity: VisualGravity) -> Option<SelectionEndpoint> {
@@ -8034,6 +8055,66 @@ mod tests {
     assert_eq!(carets.carets.len(), 1);
     assert_eq!(carets.carets[0].offset, offset);
     assert_eq!(carets.carets[0].visual_gravity, gpui_flowtext::VisualGravity::Upstream);
+    Ok(())
+  }
+
+  #[test]
+  fn presence_non_collapsed_selection_resolves_to_a_colored_span() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Presence")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "abcd".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let anchor = DocumentOffset { paragraph: 0, byte: 1 };
+    let head = DocumentOffset { paragraph: 0, byte: 3 };
+    let selection = EditorSelection {
+      anchor,
+      head,
+      ..EditorSelection::default()
+    };
+    let presence = runtime
+      .presence_selection(&selection)
+      .expect("presence selection should encode");
+
+    let resolved = runtime.resolve_presence_carets(vec![RuntimePresenceCaretRequest {
+      selection: presence,
+      color_rgb: 0xabcdef,
+    }]);
+
+    // The head still resolves to a caret, and the non-collapsed range resolves
+    // to a single colored selection span carrying that peer's color.
+    assert_eq!(resolved.carets.len(), 1);
+    assert_eq!(resolved.carets[0].offset, head);
+    assert_eq!(resolved.selections.len(), 1);
+    assert_eq!(resolved.selections[0].color_rgb, 0xabcdef);
+    assert_eq!(resolved.selections[0].selection.anchor, anchor);
+    assert_eq!(resolved.selections[0].selection.head, head);
+    Ok(())
+  }
+
+  #[test]
+  fn presence_collapsed_selection_yields_no_span() -> Result<()> {
+    let mut runtime = CrdtRuntime::new_empty("Presence")?;
+    runtime.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "abcd".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let offset = DocumentOffset { paragraph: 0, byte: 2 };
+    let selection = EditorSelection::collapsed(offset);
+    let presence = runtime
+      .presence_selection(&selection)
+      .expect("presence selection should encode");
+
+    let resolved = runtime.resolve_presence_carets(vec![RuntimePresenceCaretRequest {
+      selection: presence,
+      color_rgb: 0xabcdef,
+    }]);
+
+    // A bare caret paints only a caret — never a zero-width highlight span.
+    assert_eq!(resolved.carets.len(), 1);
+    assert!(resolved.selections.is_empty());
     Ok(())
   }
 

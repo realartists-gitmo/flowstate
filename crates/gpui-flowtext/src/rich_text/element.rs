@@ -161,7 +161,7 @@ impl Element for RichTextDocumentElement {
     cx: &mut App,
   ) {
     if let Some((layout, bounds)) = self.layout.positioned() {
-      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, &[], &[], None, window, cx);
+      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, gpui::black(), &[], &[], &[], None, window, cx);
     }
   }
 }
@@ -239,10 +239,11 @@ impl Element for VirtualParagraphChunkElement {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (selection, drag_selection, caret_offset, caret_width, caret_color_rgb, external_carets, search_highlights, active_search_highlight) = {
+    let (selection, drag_selection, caret_offset, caret_width, caret_color_rgb, default_caret_color, external_carets, external_selections, search_highlights, active_search_highlight) = {
       let editor = self.editor.read(cx);
       let drag_selection = editor.drag_source_selection();
       let external_carets = editor.external_carets_for_paragraph(self.paragraph_ix);
+      let external_selections = editor.external_selections_for_paragraph(self.paragraph_ix);
       (
         editor.selection.clone(),
         drag_selection,
@@ -254,7 +255,12 @@ impl Element for VirtualParagraphChunkElement {
         .then_some(editor.selection.head),
         editor.caret_paint_width(),
         editor.local_caret_color_rgb(),
+        // The caret's fallback color = the theme's default text color, so it
+        // contrasts with the background (a hardcoded black caret is invisible on a
+        // dark theme).
+        editor.document.theme.default_text_color,
         external_carets,
+        external_selections,
         editor.search_highlights.clone(),
         editor.active_search_highlight,
       )
@@ -302,7 +308,9 @@ impl Element for VirtualParagraphChunkElement {
         show_caret,
         caret_width,
         caret_color_rgb,
+        default_caret_color,
         &external_carets,
+        &external_selections,
         &search_highlights,
         active_search_highlight,
         window,

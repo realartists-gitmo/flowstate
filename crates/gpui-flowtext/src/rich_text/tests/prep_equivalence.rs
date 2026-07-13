@@ -112,6 +112,34 @@ fn a93_assert_prep_eq(served: &ParagraphPrep, fresh: &ParagraphPrep, paragraph_i
   assert_eq!(served.visible, fresh.visible, "prep visibility mismatch at paragraph {paragraph_ix}");
 }
 
+/// Regression ("invisible caret"): a paragraph below the first has a NON-ZERO
+/// document byte offset, but its laid-out `byte_range` must be PARAGRAPH-LOCAL
+/// (chunk-0 starts at 0). If it's the absolute document range, `contains_byte`
+/// compares a paragraph-local caret byte against an absolute range and the caret
+/// vanishes for every byte below the paragraph's document offset.
+#[gpui::test]
+fn later_paragraph_byte_range_is_paragraph_local(cx: &mut gpui::TestAppContext) {
+  cx.update(gpui_component::init);
+  let handle = cx.add_window(|_window, cx| RichTextEditor::new_with_path(a93_varied_document(), None, cx));
+  handle
+    .update(cx, |editor, window, cx| {
+      let width = px(760.0);
+      let count = editor.document.paragraphs.len();
+      assert!(count >= 2, "fixture must have a paragraph below the first");
+      let last = count - 1;
+      let layout = editor.layout_paragraph_chunk_for_element(last, 0, width, window, cx).expect("chunk layout");
+      let para = layout.paragraphs.iter().find(|p| p.index == last).expect("laid-out paragraph");
+      assert_eq!(
+        para.byte_range.start, 0,
+        "chunk-0 byte_range must be paragraph-local (start 0), not the absolute document offset"
+      );
+      // The caret's containment check must accept the paragraph's interior local
+      // bytes — a non-empty paragraph must contain byte 0.
+      assert!(para.contains_byte(0), "interior local byte 0 must be contained (the caret must be able to render there)");
+    })
+    .expect("window update");
+}
+
 /// §act-eleven C4 tripwire: an unrelated single-paragraph edit must rebuild a
 /// BOUNDED number of preps on the next full relayout — not the whole viewport.
 /// The equality tests prove correctness; this proves EFFECTIVENESS (the T8.12
