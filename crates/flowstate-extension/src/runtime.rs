@@ -156,11 +156,14 @@ impl Runtime {
     fn load_component(&self, path: &std::path::Path) -> Result<Component, RuntimeError> {
         let digest = ComponentDigest::from_file(path).map_err(anyhow::Error::from)?;
         let key = (path.to_path_buf(), digest);
-        if let Some(component) = self.components.lock().get(&key).cloned() { return Ok(component); }
+        let cached = { self.components.lock().get(&key).cloned() };
+        if let Some(component) = cached { return Ok(component); }
         let component = Component::from_file(&self.engine, path)?;
-        let mut components = self.components.lock();
-        components.retain(|(cached_path, _), _| cached_path != path);
-        components.insert(key, component.clone());
+        {
+            let mut components = self.components.lock();
+            components.retain(|(cached_path, _), _| cached_path != path);
+            components.insert(key, component.clone())
+        };
         Ok(component)
     }
 }
