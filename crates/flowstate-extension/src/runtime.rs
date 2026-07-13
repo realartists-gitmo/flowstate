@@ -152,3 +152,28 @@ impl<'a> RunningGuard<'a> {
 impl Drop for RunningGuard<'_> {
     fn drop(&mut self) { self.running.lock().remove(&self.extension_id); }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serializes_actions_per_extension() {
+        let running = Mutex::new(std::collections::HashSet::new());
+        let first = RunningGuard::acquire(&running, "com.example.one").unwrap();
+        assert!(matches!(RunningGuard::acquire(&running, "com.example.one"), Err(RuntimeError::AlreadyRunning)));
+        assert!(RunningGuard::acquire(&running, "com.example.two").is_ok());
+        drop(first);
+        assert!(RunningGuard::acquire(&running, "com.example.one").is_ok());
+    }
+
+    #[test]
+    fn cancellation_is_token_scoped() {
+        let runtime = Runtime::new(RuntimeConfig::default()).unwrap();
+        let cancelled = runtime.cancellation_handle();
+        let other = runtime.cancellation_handle();
+        cancelled.cancel();
+        assert!(cancelled.cancelled.load(Ordering::Acquire));
+        assert!(!other.cancelled.load(Ordering::Acquire));
+    }
+}
