@@ -17,12 +17,12 @@ use tokio::{
 };
 
 use crate::{
-  capability::{SessionCapability, unix_now},
+  admission::SessionAdmission,
   doc_io::DocIoHandle,
   ids::{BlobId, SessionId},
   proto_direct::{
-    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN, MAX_PAYLOAD_LEN, WireCodec, decode_frame,
-    encode_frame,
+    AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, DiscoveryAdmissionGrant, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN,
+    MAX_PAYLOAD_LEN, WireCodec, decode_frame, encode_frame,
   },
 };
 
@@ -76,6 +76,14 @@ pub enum DirectServeRequest {
 pub struct DirectServeState {
   inner: Arc<RwLock<DirectServeInner>>,
   auth: SessionAuthRegistry,
+  standing_access: Arc<RwLock<HashMap<SessionId, StandingAccessGrant>>>,
+}
+
+#[derive(Clone, Debug)]
+struct StandingAccessGrant {
+  document_fingerprint: [u8; 32],
+  title: String,
+  identities: HashSet<iroh::PublicKey>,
 }
 
 #[derive(Debug, Default)]
@@ -86,7 +94,7 @@ struct DirectServeInner {
 }
 
 impl DirectServeState {
-  /// Capability authentication state shared with the gossip layer.
+  /// Session admission state shared by all direct requests.
   #[must_use]
   pub fn auth(&self) -> &SessionAuthRegistry {
     &self.auth
@@ -106,6 +114,7 @@ impl DirectServeState {
       .remove(&session)
       .map_or(0, |outbox| outbox.len());
     let handler_removed = inner.handlers.remove(&session).is_some();
+    self.standing_access.write().await.remove(&session);
     tracing::debug!(%session, removed, blob_count, handler_removed, attached_sessions = inner.attached.len(), "detached collaboration direct session");
   }
 
@@ -114,6 +123,23 @@ impl DirectServeState {
     inner.attached.insert(session);
     let replaced = inner.handlers.insert(session, handler).is_some();
     tracing::debug!(%session, replaced, handler_count = inner.handlers.len(), "registered collaboration direct session handler");
+  }
+
+  pub async fn configure_standing_access(
+    &self,
+    session: SessionId,
+    document_fingerprint: [u8; 32],
+    title: String,
+    identities: HashSet<iroh::PublicKey>,
+  ) {
+    self.standing_access.write().await.insert(
+      session,
+      StandingAccessGrant {
+        document_fingerprint,
+        title,
+        identities,
+      },
+    );
   }
 
   #[allow(
@@ -149,22 +175,50 @@ impl DirectServeState {
     let request_detail_bytes = direct_request_detail_bytes(&request);
     tracing::trace!(%session, remote = %remote, request_kind, request_detail_bytes, "serving collaboration direct request");
 
-    // FS-080: the capability handshake and the authorization gate live here,
+    if let DirectRequest::RequestAdmission { request } = &request {
+      let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+      if request.verify(now).is_err() || request.session != session {
+        return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
+      }
+      let grants = self.standing_access.read().await;
+      let Some(grant) = grants.get(&session) else {
+        return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
+      };
+      if grant.document_fingerprint != request.document_fingerprint || !grant.identities.contains(&request.identity) {
+        return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
+      }
+      let Some(admission) = self.auth.admission(session) else {
+        return ServeOutcome::Header(DirectResponseHeader::NotAttached);
+      };
+      let payload = match postcard::to_stdvec(&DiscoveryAdmissionGrant {
+        admission,
+        title: grant.title.clone(),
+      }) {
+        Ok(payload) => payload,
+        Err(_) => return ServeOutcome::Header(DirectResponseHeader::NotFound),
+      };
+      return ServeOutcome::Payload(payload);
+    }
+
+    // The admission handshake and authorization gate live here,
     // on the serving side, so enforcement never depends on the client.
-    if let DirectRequest::Authenticate { session, capability } = &request {
-      return match self.auth.authenticate_peer(*session, remote, capability, unix_now()) {
-        Ok(role) => {
-          tracing::debug!(%session, remote = %remote, role = role.label(), "collaboration direct capability handshake accepted");
+    if let DirectRequest::Authenticate { session, admission } = &request {
+      return match self.auth.authenticate_peer(*session, remote, admission) {
+        Ok(()) => {
+          tracing::debug!(%session, remote = %remote, "collaboration direct admission handshake accepted");
           ServeOutcome::Payload(Vec::new())
         },
         Err(error) => {
-          tracing::warn!(%session, remote = %remote, error = %format_args!("{error:#}"), "collaboration direct capability handshake rejected");
+          tracing::warn!(%session, remote = %remote, error = %format_args!("{error:#}"), "collaboration direct admission handshake rejected");
           ServeOutcome::Header(DirectResponseHeader::Unauthorized)
         },
       };
     }
-    if !self.auth.authorize_direct(session, remote, unix_now()) {
-      tracing::warn!(%session, remote = %remote, request_kind, "collaboration direct request rejected without a valid capability");
+    if !self.auth.authorize_direct(session, remote) {
+      tracing::warn!(%session, remote = %remote, request_kind, "collaboration direct request rejected without valid admission");
       return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
     }
 
@@ -211,11 +265,17 @@ impl DirectServeState {
         if let Some(io) = handler.io.clone() {
           serve_updates_via_io(session, io, have_vv).await
         } else {
-          request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates { have_vv, reply }).await
+          request_payload(handler.requests, session, request_kind, |reply| DirectServeRequest::Updates {
+            have_vv,
+            reply,
+          })
+          .await
         }
       },
       DirectRequest::Asset { asset, .. } => request_asset(handler.requests, session, asset).await,
-      DirectRequest::Blob { .. } | DirectRequest::Authenticate { .. } => ServeOutcome::Header(DirectResponseHeader::NotFound),
+      DirectRequest::Blob { .. } | DirectRequest::Authenticate { .. } | DirectRequest::RequestAdmission { .. } => {
+        ServeOutcome::Header(DirectResponseHeader::NotFound)
+      },
     }
   }
 }
@@ -257,7 +317,14 @@ impl DirectProto {
     }
   }
 
-  async fn handle_stream(&self, mut send: SendStream, mut recv: RecvStream, remote: EndpointId, link_is_fast: bool, _permit: OwnedSemaphorePermit) -> Result<()> {
+  async fn handle_stream(
+    &self,
+    mut send: SendStream,
+    mut recv: RecvStream,
+    remote: EndpointId,
+    link_is_fast: bool,
+    _permit: OwnedSemaphorePermit,
+  ) -> Result<()> {
     let request = read_frame::<DirectRequest>(&mut recv).await?;
     let session = request.session();
     let request_kind = direct_request_kind(&request);
@@ -291,7 +358,10 @@ impl ProtocolHandler for DirectProto {
       };
       let proto = self.clone();
       tokio::spawn(async move {
-        if let Err(error) = proto.handle_stream(send, recv, remote, link_is_fast, permit).await {
+        if let Err(error) = proto
+          .handle_stream(send, recv, remote, link_is_fast, permit)
+          .await
+        {
           tracing::error!(error = %format_args!("{error:#}"), "collaboration direct stream failed");
         }
       });
@@ -387,19 +457,17 @@ async fn pull_once(endpoint: &Endpoint, peer: EndpointId, req: &DirectRequest, p
     .connect(peer, DIRECT_ALPN)
     .await
     .context("direct dial failed")?;
-  // FS-080: present our invite capability before requesting data, so the
-  // serving peer can record our role and authorize this endpoint.
-  if let Some(capability) = super::auth::local_capability(session) {
-    authenticate_connection(&connection, session, capability)
+  if let Some(admission) = super::auth::local_admission(session) {
+    authenticate_connection(&connection, session, admission)
       .await
-      .context("collaboration capability handshake failed")?;
+      .context("collaboration admission handshake failed")?;
   }
   request_on_connection(&connection, req, progress).await
 }
 
-async fn authenticate_connection(connection: &Connection, session: SessionId, capability: SessionCapability) -> Result<()> {
-  tracing::trace!(%session, "sending collaboration direct capability handshake");
-  let _ = request_on_connection(connection, &DirectRequest::Authenticate { session, capability }, None).await?;
+async fn authenticate_connection(connection: &Connection, session: SessionId, admission: SessionAdmission) -> Result<()> {
+  tracing::trace!(%session, "sending collaboration direct admission handshake");
+  let _ = request_on_connection(connection, &DirectRequest::Authenticate { session, admission }, None).await?;
   Ok(())
 }
 
@@ -419,7 +487,11 @@ async fn request_on_connection(connection: &Connection, req: &DirectRequest, pro
   let header = read_frame::<DirectResponseHeader>(&mut recv).await?;
   tracing::trace!(%session, request_kind, response = direct_response_header_kind(&header), "received collaboration direct response header");
   match header {
-    DirectResponseHeader::Ok { codec, wire_len, uncompressed_len } => {
+    DirectResponseHeader::Ok {
+      codec,
+      wire_len,
+      uncompressed_len,
+    } => {
       let wire = read_payload(&mut recv, wire_len, progress).await?;
       let uncompressed_len = usize::try_from(uncompressed_len).context("direct payload is too large for this platform")?;
       let payload = super::wire_compression::decompress_from_wire(codec, wire, uncompressed_len).context("decoding direct response payload")?;
@@ -429,7 +501,7 @@ async fn request_on_connection(connection: &Connection, req: &DirectRequest, pro
     DirectResponseHeader::NotAttached => Err(anyhow!("peer is not attached to this session")),
     DirectResponseHeader::NotFound => Err(anyhow!("peer does not have the requested collaboration data")),
     DirectResponseHeader::Busy => Err(anyhow!("peer is busy serving collaboration data")),
-    DirectResponseHeader::Unauthorized => Err(anyhow!("peer rejected our collaboration capability")),
+    DirectResponseHeader::Unauthorized => Err(anyhow!("peer rejected our collaboration session admission")),
   }
 }
 
@@ -551,7 +623,9 @@ where
 fn link_is_fast(connection: &Connection) -> bool {
   // `PathId::ZERO` is the primary path (iroh's own net-report reads rtt the same
   // way). An unknown rtt is treated as NOT fast, so we compress when in doubt.
-  connection.rtt(PathId::ZERO).is_some_and(|rtt| rtt < FAST_LINK_RTT)
+  connection
+    .rtt(PathId::ZERO)
+    .is_some_and(|rtt| rtt < FAST_LINK_RTT)
 }
 
 async fn write_response(send: &mut SendStream, outcome: ServeOutcome, compressible: bool, link_is_fast: bool) -> Result<()> {
@@ -634,10 +708,7 @@ async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&S
           });
         }
       },
-      None => bail!(
-        "direct payload ended early: expected {total_len_usize} bytes, received {}",
-        payload.len()
-      ),
+      None => bail!("direct payload ended early: expected {total_len_usize} bytes, received {}", payload.len()),
     }
   }
   Ok(payload)
@@ -646,6 +717,7 @@ async fn read_payload(recv: &mut RecvStream, total_len: u64, progress: Option<&S
 fn direct_request_kind(request: &DirectRequest) -> &'static str {
   match request {
     DirectRequest::Authenticate { .. } => "authenticate",
+    DirectRequest::RequestAdmission { .. } => "request-admission",
     DirectRequest::Snapshot { .. } => "snapshot",
     DirectRequest::Updates { .. } => "updates",
     DirectRequest::Blob { .. } => "blob",
@@ -656,7 +728,11 @@ fn direct_request_kind(request: &DirectRequest) -> &'static str {
 fn direct_request_detail_bytes(request: &DirectRequest) -> usize {
   match request {
     DirectRequest::Updates { have_vv, .. } => have_vv.len(),
-    DirectRequest::Authenticate { .. } | DirectRequest::Snapshot { .. } | DirectRequest::Blob { .. } | DirectRequest::Asset { .. } => 0,
+    DirectRequest::Authenticate { .. }
+    | DirectRequest::RequestAdmission { .. }
+    | DirectRequest::Snapshot { .. }
+    | DirectRequest::Blob { .. }
+    | DirectRequest::Asset { .. } => 0,
   }
 }
 
@@ -674,6 +750,9 @@ impl DirectRequest {
   fn session(&self) -> SessionId {
     match self {
       Self::Authenticate { session, .. }
+      | Self::RequestAdmission {
+        request: crate::discovery::DiscoveryAdmissionRequest { session, .. },
+      }
       | Self::Snapshot { session }
       | Self::Updates { session, .. }
       | Self::Blob { session, .. }
@@ -708,7 +787,9 @@ mod tests {
     let result = pull_with_endpoint(&endpoint, asset_request(), vec![unreachable], Duration::from_millis(250)).await;
     let error = result.expect_err("asset pull from an unreachable candidate must fail, not hang");
     assert!(
-      error.to_string().contains("direct pull failed for all candidates"),
+      error
+        .to_string()
+        .contains("direct pull failed for all candidates"),
       "expected the all-candidates-failed error, got: {error}"
     );
     Ok(())

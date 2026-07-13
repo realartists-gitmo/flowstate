@@ -46,7 +46,10 @@ impl NetBodyDelta {
   /// Any inserted run in the net delta carries a paragraph boundary or object
   /// placeholder.
   pub(crate) fn inserts_structure(&self) -> bool {
-    self.ops.iter().any(|op| matches!(op, NetOp::Insert { structure: true, .. }))
+    self
+      .ops
+      .iter()
+      .any(|op| matches!(op, NetOp::Insert { structure: true, .. }))
   }
 
   /// Deleted ranges in PRE-import coordinates, merged and ordered.
@@ -252,13 +255,7 @@ fn normalize(ops: &mut Vec<NetOp>) {
     match (merged.last_mut(), op) {
       (Some(NetOp::Retain(a)), NetOp::Retain(b)) => *a += b,
       (Some(NetOp::Delete(a)), NetOp::Delete(b)) => *a += b,
-      (
-        Some(NetOp::Insert {
-          len: a,
-          structure: sa,
-        }),
-        NetOp::Insert { len: b, structure: sb },
-      ) => {
+      (Some(NetOp::Insert { len: a, structure: sa }), NetOp::Insert { len: b, structure: sb }) => {
         *a += b;
         *sa |= sb;
       },

@@ -1,10 +1,14 @@
-use flowstate_collab::{SessionId, ticket::SessionTicket};
+use flowstate_collab::{
+  SessionId,
+  discovery::{DiscoveryAdvertisement, eligible_advertisements},
+  ticket::SessionTicket,
+};
 use gpui::{
   AnyElement, App, Context, Entity, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent, ParentElement, Render, SharedString,
   Subscription, WeakEntity, Window, div, prelude::*, px,
 };
 use gpui_component::{
-  Disableable, WindowExt as _,
+  ActiveTheme as _, Disableable, Sizable as _, WindowExt as _,
   button::{Button, ButtonVariants as _},
   h_flex,
   input::{Input, InputEvent, InputState},
@@ -38,6 +42,10 @@ pub struct CollabShareDialog {
   ticket_error: Option<SharedString>,
   copy_notice: Option<SharedString>,
   join_error: Option<SharedString>,
+  discovery_scanning: bool,
+  discovery_peers: Vec<DiscoveryAdvertisement>,
+  discovery_error: Option<SharedString>,
+  discovery_status: Option<SharedString>,
   _input_subscription: Subscription,
   _join_subscription: Option<Subscription>,
 }
@@ -71,11 +79,18 @@ impl CollabShareDialog {
       ticket_error: None,
       copy_notice: None,
       join_error: None,
+      discovery_scanning: false,
+      discovery_peers: Vec::new(),
+      discovery_error: None,
+      discovery_status: None,
       _input_subscription: input_subscription,
       _join_subscription: None,
     };
     if mode == CollabDialogMode::Share {
       dialog.refresh_ticket(cx);
+    }
+    if panel_id.is_some() {
+      dialog.scan_trusted_peers(cx);
     }
     dialog
   }
@@ -150,7 +165,7 @@ impl CollabShareDialog {
     cx.spawn(async move |dialog, cx| {
       let result = ticket_rx.recv().await;
       let encoded = match result {
-        Ok(Ok(ticket)) => Ok(ticket.encode_text()),
+        Ok(Ok(ticket)) => Ok(ticket.encode_invite_link()),
         Ok(Err(error)) => Err(format!("Creating collaboration invite failed: {error:#}")),
         Err(error) => Err(format!("Creating collaboration invite failed: {error}")),
       };
@@ -165,6 +180,44 @@ impl CollabShareDialog {
           Err(error) => {
             dialog.ticket_error = Some(error.into());
           },
+        }
+        cx.notify();
+      });
+    })
+    .detach();
+  }
+
+  fn save_invite_file(&mut self, cx: &mut Context<Self>) {
+    let Some(ticket) = self.ticket_text.clone() else { return };
+    let suggested = SessionTicket::decode_text(ticket.as_ref())
+      .ok()
+      .map(|ticket| ticket.title)
+      .unwrap_or_else(|| "Flowstate collaboration".into());
+    let safe_title = suggested
+      .chars()
+      .map(|character| {
+        if character.is_alphanumeric() || matches!(character, ' ' | '-' | '_') {
+          character
+        } else {
+          '_'
+        }
+      })
+      .collect::<String>();
+    let directory = dirs::document_dir().unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+    let path = cx.prompt_for_new_path(&directory, Some(&format!("{safe_title}.flowinvite")));
+    cx.spawn(async move |dialog, cx| {
+      let result = match path.await {
+        Ok(Ok(Some(path))) => std::fs::write(&path, ticket.as_bytes())
+          .map(|_| format!("Invite saved to {}.", path.display()))
+          .map_err(|error| format!("Saving invite failed: {error}")),
+        Ok(Ok(None)) => return,
+        Ok(Err(error)) => Err(format!("Opening the save dialog failed: {error}")),
+        Err(error) => Err(format!("The save dialog closed unexpectedly: {error}")),
+      };
+      let _ = dialog.update(cx, |dialog, cx| {
+        match result {
+          Ok(notice) => dialog.copy_notice = Some(notice.into()),
+          Err(error) => dialog.ticket_error = Some(error.into()),
         }
         cx.notify();
       });
@@ -233,6 +286,173 @@ impl CollabShareDialog {
     self._join_subscription = crate::collab::session_for_id(session_id, cx).map(|session| cx.observe(&session, |_, _, cx| cx.notify()));
   }
 
+  fn scan_trusted_peers(&mut self, cx: &mut Context<Self>) {
+    let Some(panel_id) = self.panel_id else { return };
+    let context = self
+      .workspace
+      .update(cx, |workspace, cx| workspace.collaboration_discovery_context(panel_id, cx))
+      .ok()
+      .flatten();
+    let Some((document_id, path)) = context else {
+      self.discovery_error = Some("Save this document before looking for trusted collaborators.".into());
+      cx.notify();
+      return;
+    };
+    self.discovery_scanning = true;
+    self.discovery_error = None;
+    self.discovery_status = Some("Looking for trusted collaborators...".into());
+    let receiver = crate::collab::scan_document_discovery(document_id, cx);
+    cx.spawn(async move |dialog, cx| {
+      let result = receiver.recv().await;
+      let _ = dialog.update(cx, |dialog, cx| {
+        dialog.discovery_scanning = false;
+        match result {
+          Ok(result) => {
+            dialog.discovery_status = if result.paused {
+              Some("Discovery is paused in Collaboration settings.".into())
+            } else if result.active_transports.is_empty() {
+              Some("No discovery transport is enabled. Invite links and files still work.".into())
+            } else {
+              Some(
+                format!(
+                  "Checked {}.",
+                  result
+                    .active_transports
+                    .iter()
+                    .map(|transport| format!("{transport:?}"))
+                    .collect::<Vec<_>>()
+                    .join(" and ")
+                )
+                .into(),
+              )
+            };
+            let fingerprint = flowstate_collab::discovery::document_fingerprint(document_id);
+            let now = std::time::SystemTime::now()
+              .duration_since(std::time::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_secs();
+            let own = crate::app_settings::load_local_user_profile().identity_fingerprint;
+            dialog.discovery_peers = eligible_advertisements(result.advertisements, fingerprint, now, |identity| {
+              identity.to_string() != own
+                && crate::app_settings::standing_access_for_path(&identity.to_string(), &path) == crate::app_settings::StandingAccess::Allowed
+            });
+            if !result.failures.is_empty() {
+              dialog.discovery_error = Some(
+                result
+                  .failures
+                  .into_iter()
+                  .map(|(transport, error)| format!("{transport:?}: {error}"))
+                  .collect::<Vec<_>>()
+                  .join("; ")
+                  .into(),
+              );
+            }
+          },
+          Err(error) => dialog.discovery_error = Some(format!("Discovery stopped: {error}").into()),
+        }
+        cx.notify();
+      });
+    })
+    .detach();
+  }
+
+  fn join_trusted_peer(&mut self, advertisement: DiscoveryAdvertisement, window: &mut Window, cx: &mut Context<Self>) {
+    if self.joining_session.is_some() {
+      return;
+    }
+    self.discovery_error = None;
+    let receiver = crate::collab::request_discovered_ticket(advertisement, cx);
+    let workspace = self.workspace.clone();
+    let window = window.window_handle();
+    cx.spawn(async move |dialog, cx| {
+      let result = receiver.recv().await;
+      let _ = window.update(cx, |_, window, cx| {
+        let _ = dialog.update(cx, |dialog, cx| {
+          match result {
+            Ok(Ok(ticket)) => match workspace.update(cx, |workspace, cx| workspace.join_collaboration_session(ticket, window, cx)) {
+              Ok(Some(session)) => {
+                dialog.joining_session = Some(session);
+                dialog.subscribe_join_session(session, cx);
+              },
+              _ => dialog.discovery_error = Some("The trusted collaboration session could not be joined.".into()),
+            },
+            Ok(Err(error)) => dialog.discovery_error = Some(format!("Trusted admission was refused: {error:#}").into()),
+            Err(error) => dialog.discovery_error = Some(format!("Trusted admission stopped: {error}").into()),
+          }
+          cx.notify();
+        });
+      });
+    })
+    .detach();
+  }
+
+  fn discovery_panel(&self, cx: &mut Context<Self>) -> AnyElement {
+    let mut panel = v_flex()
+      .gap_2()
+      .rounded_md()
+      .border_1()
+      .border_color(cx.theme().border)
+      .p_3()
+      .child(
+        h_flex()
+          .items_center()
+          .justify_between()
+          .child(
+            div()
+              .text_sm()
+              .font_weight(gpui::FontWeight::SEMIBOLD)
+              .child("Trusted collaborators"),
+          )
+          .child(
+            Button::new("scan-trusted-collaborators")
+              .label(if self.discovery_scanning { "Looking..." } else { "Look now" })
+              .small()
+              .outline()
+              .disabled(self.discovery_scanning)
+              .on_click(cx.listener(|dialog, _, _, cx| dialog.scan_trusted_peers(cx))),
+          ),
+      )
+      .child(helper_text(
+        "Only safety-code-verified people with standing access to this document appear here.",
+        cx,
+      ));
+    if let Some(status) = self.discovery_status.clone() {
+      panel = panel.child(
+        div()
+          .text_xs()
+          .text_color(cx.theme().muted_foreground)
+          .child(status),
+      );
+    }
+    if self.discovery_peers.is_empty() && !self.discovery_scanning {
+      panel = panel.child(
+        div()
+          .text_xs()
+          .text_color(cx.theme().muted_foreground)
+          .child("No trusted collaborators found."),
+      );
+    }
+    for peer in self.discovery_peers.clone() {
+      let name = peer.profile.display_name.clone();
+      panel = panel.child(
+        h_flex()
+          .items_center()
+          .justify_between()
+          .child(div().text_sm().child(name))
+          .child(
+            Button::new(("join-trusted-collaborator", peer.device_id as u64))
+              .label("Join")
+              .small()
+              .primary()
+              .on_click(cx.listener(move |dialog, _, window, cx| dialog.join_trusted_peer(peer.clone(), window, cx))),
+          ),
+      );
+    }
+    panel
+      .when_some(self.discovery_error.clone(), |this, error| this.child(error_text(error, cx)))
+      .into_any_element()
+  }
+
   fn confirm_leave(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some(panel_id) = self.panel_id else {
       return;
@@ -273,6 +493,7 @@ impl CollabShareDialog {
           "Start a session to create one invite ticket. Everyone who joins can edit, invite others, and leave independently.",
           cx,
         ))
+        .child(self.discovery_panel(cx))
         .child(
           Button::new("start-collaboration-session")
             .label("Start session")
@@ -300,7 +521,22 @@ impl CollabShareDialog {
       )
       .child(helper_text(connectivity_text(phase).as_str(), cx))
       .child(roster_list(roster, cx))
+      .child(self.discovery_panel(cx))
+      .child(helper_text(
+        "This invite names the document and works while the live session is available. Everyone who joins can edit and invite others.",
+        cx,
+      ))
       .child(ticket_box(self.ticket_text.clone(), self.ticket_loading, cx))
+      .child(
+        h_flex().gap_2().child(
+          Button::new("save-collaboration-invite")
+            .label("Save invite file")
+            .small()
+            .outline()
+            .disabled(self.ticket_loading || self.ticket_text.is_none())
+            .on_click(cx.listener(|dialog, _, _, cx| dialog.save_invite_file(cx))),
+        ),
+      )
       .when_some(self.ticket_error.clone(), |this, error| this.child(error_text(error, cx)))
       .when_some(self.copy_notice.clone(), |this, notice| this.child(success_text(notice, cx)))
       .child(

@@ -1,4 +1,3 @@
-
 enum DocumentRuntimeSource {
   FromProjection,
   Runtime(Box<flowstate_collab::crdt_runtime::CrdtRuntime>),
@@ -56,7 +55,16 @@ fn install_editor_write_authority(
         // this UI-agnostic save hook future has no GPUI context to reach the
         // collaboration session. The workspace re-syncs collaborators after
         // the save completes via collab::refresh_after_external_checkpoint.
-        io.checkpoint_package(title, Some(path)).await.map_err(runtime_io_error)?;
+        io.checkpoint_package(title.clone(), Some(path.clone()))
+          .await
+          .map_err(runtime_io_error)?;
+        if crate::app_settings::load_dropbox_document_binding(&path).is_some() {
+          let package = io
+            .package_bytes(title.clone())
+            .await
+            .map_err(runtime_io_error)?;
+          crate::collab::dropbox_checkpoint::sync_bound_checkpoint(&path, title, &io, package).await?;
+        }
         Ok(())
       })
     })));
@@ -64,8 +72,7 @@ fn install_editor_write_authority(
       let io = export_io.clone();
       Box::pin(async move {
         match format {
-          crate::rich_text_element::DocumentExportFormat::Native
-          | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
+          crate::rich_text_element::DocumentExportFormat::Native | crate::rich_text_element::DocumentExportFormat::NativeWithExtension(_) => {
             let bytes = io
               .package_bytes(document_package_title_for_path(&path))
               .await
@@ -78,7 +85,10 @@ fn install_editor_write_authority(
           },
           crate::rich_text_element::DocumentExportFormat::Pdf => {
             let document = io.projection_snapshot().await.map_err(runtime_io_error)?;
-            let bytes = io.package_bytes("PDF Source".to_string()).await.map_err(runtime_io_error)?;
+            let bytes = io
+              .package_bytes("PDF Source".to_string())
+              .await
+              .map_err(runtime_io_error)?;
             crate::docx_conversion::write_pdf_with_db8_bytes(&path, &document, &bytes)?;
           },
         };
@@ -170,7 +180,7 @@ impl Workspace {
       tab_bar_scroll_handle: ScrollHandle::new(),
       pinned_document_ids: Vec::new(),
       speech_document_id: None,
-      speech_word_count_cache: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      speech_word_count_cache: FxHashMap::default(),   // §perf: FxHash for trusted Uuid keys
       speech_word_count_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       body_resizable_state: cx.new(|_| ResizableState::default()),
       content_resizable_state: cx.new(|_| ResizableState::default()),
@@ -191,10 +201,11 @@ impl Workspace {
       settings_section: WorkspaceSettingsSection::General,
       autosave_enabled: load_autosave(),
       autosave_document_generations: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
-      autosave_pending_generation: FxHashMap::default(), // §act-five P9-throttle debounce
-      autosave_flow_in_flight: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
+      autosave_pending_generation: FxHashMap::default(),   // §act-five P9-throttle debounce
+      autosave_flow_in_flight: FxHashSet::default(),       // §perf: FxHash for trusted Uuid keys
       collaboration_dialog: None,
       revision_dialog: None,
+      comment_dialog: None,
       collab_notice_subscriptions: FxHashMap::default(), // §perf: FxHash for trusted SessionId keys
       collab_incompatible_version_notices: HashSet::new(),
       file_search_overlay: None,
@@ -264,7 +275,12 @@ impl Workspace {
     document.theme = load_document_theme();
     let runtime_title = title
       .as_deref()
-      .or_else(|| path.as_deref().and_then(Path::file_name).and_then(|name| name.to_str()))
+      .or_else(|| {
+        path
+          .as_deref()
+          .and_then(Path::file_name)
+          .and_then(|name| name.to_str())
+      })
       .unwrap_or("Flowstate Document");
     // §15/§31: freshly spawned runtimes get the durable author identity bound
     // below. A `Handle` is an already-live collaboration runtime that registered
@@ -375,9 +391,7 @@ impl Workspace {
     }
     let workspace = cx.entity().downgrade();
     let revisions = self.request_document_revisions(panel_id, cx);
-    let dialog = cx.new(|cx| {
-      crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, revisions, cx)
-    });
+    let dialog = cx.new(|cx| crate::workspace::revision_dialog::RevisionDialog::new(workspace, panel_id, revisions, cx));
     let dialog_for_render = dialog.clone();
     let workspace_for_close = cx.entity().downgrade();
     window.open_dialog(cx, move |component_dialog, _, _| {
@@ -399,30 +413,18 @@ impl Workspace {
     cx.notify();
   }
 
-  pub fn open_document_revision(
-    &mut self,
-    panel_id: Uuid,
-    revision_id: u128,
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> bool {
+  pub fn open_document_revision(&mut self, panel_id: Uuid, revision_id: u128, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(runtime) = self.document_runtimes.get(&panel_id).cloned() else {
       return false;
     };
     let window_handle = window.window_handle();
     cx.spawn(async move |workspace, cx| {
-      let result = runtime
-        .fork_revision(revision_id)
-        .await;
+      let result = runtime.fork_revision(revision_id).await;
       let _ = window_handle.update(cx, |_, window, cx| {
         let _ = workspace.update(cx, |workspace, cx| match result {
           Ok(events) => {
             let fork = events.into_iter().find_map(|event| match event {
-              flowstate_collab::crdt_runtime::RuntimeEvent::RevisionForked {
-                document,
-                package,
-                ..
-              } => Some((*document, *package)),
+              flowstate_collab::crdt_runtime::RuntimeEvent::RevisionForked { document, package, .. } => Some((*document, *package)),
               _ => None,
             });
             let Some((document, package)) = fork else {
@@ -822,8 +824,7 @@ impl Workspace {
           let panel_id = panel.read(cx).id();
           panel.update(cx, |panel, _| {
             if !entry.collapsed_outline_items.is_empty() {
-              panel.collapsed_outline_items =
-                Some(entry.collapsed_outline_items.iter().copied().collect());
+              panel.collapsed_outline_items = Some(entry.collapsed_outline_items.iter().copied().collect());
             }
             panel.outline_scrolled_paragraph = entry.outline_scrolled_paragraph;
           });
@@ -1154,7 +1155,9 @@ impl Workspace {
     // authoritative open path — `None` for imported docx/pdf, so autosave never
     // targets (and overwrites) the source file. Mirrors the one-shot open path.
     editor.update(cx, |editor, cx| editor.set_runtime_document_path(canonical_path, cx));
-    self.document_runtimes.insert(panel_id, attachment.io.clone());
+    self
+      .document_runtimes
+      .insert(panel_id, attachment.io.clone());
     self.editor_subscriptions.push((
       panel_id,
       cx.observe(&editor, move |workspace, editor, cx| {
@@ -1166,7 +1169,10 @@ impl Workspace {
     // Bind the durable author identity (fire-and-forget; never blocks open).
     let identity_io = attachment.io.clone();
     cx.spawn(async move |_, cx| {
-      let (user_id, display_name) = cx.background_executor().spawn(async { load_local_user_identity() }).await;
+      let (user_id, display_name) = cx
+        .background_executor()
+        .spawn(async { load_local_user_identity() })
+        .await;
       if let Err(error) = identity_io.set_author_identity(user_id, display_name).await {
         tracing::warn!(error = %format_args!("{error:#}"), "binding durable author identity to attached document runtime failed");
       }
@@ -1423,7 +1429,9 @@ impl Workspace {
     // edit is lost: the trailing timer always fires for the final generation, and
     // close-time `flush_package_caches` covers the tail.
     const AUTOSAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_millis(900);
-    self.autosave_pending_generation.insert(panel_id, generation);
+    self
+      .autosave_pending_generation
+      .insert(panel_id, generation);
     cx.spawn(async move |workspace, cx| {
       cx.background_executor().timer(AUTOSAVE_DEBOUNCE).await;
       // Superseded by a newer edit within the debounce window? Let that one save.
@@ -1432,7 +1440,9 @@ impl Workspace {
           return None;
         }
         workspace.autosave_pending_generation.remove(&panel_id);
-        workspace.autosave_document_generations.insert(panel_id, generation);
+        workspace
+          .autosave_document_generations
+          .insert(panel_id, generation);
         Some(editor.update(cx, |editor, cx| editor.save(cx)))
       });
       let Ok(Some(save_task)) = save_task else {

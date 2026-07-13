@@ -162,8 +162,16 @@ pub fn install_workspace_close_prompt(workspace: Entity<Workspace>, window: &mut
 }
 
 #[hotpath::measure]
-pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
+pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) -> WeakEntity<Workspace> {
+  let initial_invite = document_path
+    .as_ref()
+    .and_then(|path| path.to_str())
+    .filter(|text| text.starts_with(flowstate_collab::ticket::INVITE_URL_PREFIX))
+    .map(flowstate_collab::ticket::SessionTicket::decode_text);
+  let document_path = if initial_invite.is_some() { None } else { document_path };
   let window_bounds = startup_window_bounds(cx);
+  let opened_workspace = Rc::new(RefCell::new(None));
+  let opened_workspace_slot = opened_workspace.clone();
   cx.open_window(
     WindowOptions {
       window_bounds,
@@ -175,11 +183,27 @@ pub fn open_workspace_window(document_path: Option<PathBuf>, cx: &mut App) {
     |window, cx| {
       window.set_window_title("Flowstate");
       let workspace = cx.new(|cx| Workspace::new(document_path, window, cx));
+      if let Some(invite) = initial_invite {
+        match invite {
+          Ok(ticket) => workspace.update(cx, |workspace, cx| {
+            let _ = workspace.join_collaboration_session(ticket, window, cx);
+          }),
+          Err(error) => {
+            let detail = format!("This Flowstate collaboration link is invalid or damaged: {error}");
+            std::mem::drop(window.prompt(PromptLevel::Critical, "Invite couldn't be opened", Some(&detail), &[PromptButton::ok("Ok")], cx));
+          },
+        }
+      }
       install_workspace_close_prompt(workspace.clone(), window, cx);
+      *opened_workspace_slot.borrow_mut() = Some(workspace.downgrade());
       cx.new(|cx| Root::new(workspace, window, cx))
     },
   )
   .unwrap();
+  opened_workspace
+    .borrow_mut()
+    .take()
+    .expect("workspace window builder must install its workspace")
 }
 
 #[cfg(target_os = "windows")]

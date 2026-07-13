@@ -1,5 +1,5 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, RefCell},
   collections::{HashMap, HashSet},
   fs,
   path::{Path, PathBuf},
@@ -11,8 +11,8 @@ use std::{
 use gpui::{
   AnyElement, AnyWindowHandle, App, Context, Corner, DismissEvent, DummyKeyboardMapper, Entity, Focusable, Hsla, InteractiveElement,
   IntoElement, KeyBinding, Keystroke, MouseButton, NoAction, PathPromptOptions, Pixels, Point, PromptButton, PromptLevel, Render, ScrollHandle,
-  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div,
-  prelude::*, px,
+  SharedString, Subscription, WeakEntity, Window, WindowBounds, WindowDecorations, WindowOptions, anchored, black, deferred, div, prelude::*,
+  px,
 };
 #[cfg(target_os = "windows")]
 use gpui::{Bounds, size};
@@ -119,6 +119,7 @@ pub struct Workspace {
   autosave_flow_in_flight: FxHashSet<Uuid>,
   collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
   revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
+  comment_dialog: Option<Entity<crate::workspace::comment_dialog::CommentDialog>>,
   // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
   collab_incompatible_version_notices: HashSet<String>,
@@ -190,6 +191,7 @@ enum WorkspaceSettingsOverlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsSection {
   General,
+  Collaboration,
   Keymap,
 }
 
@@ -236,6 +238,7 @@ impl WorkspaceSettingsSection {
   fn title(self) -> &'static str {
     match self {
       Self::General => "General",
+      Self::Collaboration => "Collaboration",
       Self::Keymap => "Keymap",
     }
   }
@@ -243,7 +246,8 @@ impl WorkspaceSettingsSection {
   fn index(self) -> usize {
     match self {
       Self::General => 0,
-      Self::Keymap => 1,
+      Self::Collaboration => 1,
+      Self::Keymap => 2,
     }
   }
 }
@@ -297,6 +301,7 @@ include!("window.rs");
 include!("outline.rs");
 include!("top_bar.rs");
 include!("style_settings.rs");
+include!("collaboration_settings.rs");
 include!("keymap_settings.rs");
 include!("theme.rs");
 include!("tests.rs");

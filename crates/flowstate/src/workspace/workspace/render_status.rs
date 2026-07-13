@@ -303,6 +303,9 @@ impl Workspace {
     let collab_phase = self
       .active_document_id
       .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));
+    let collab_roster = self
+      .active_document_id
+      .map_or_else(Vec::new, |panel_id| crate::collab::roster_for_panel(panel_id, cx));
     if let Some(percent) = zoom {
       self.sync_zoom_slider(percent, window, cx);
     }
@@ -324,7 +327,7 @@ impl Workspace {
             Button::new("collaboration-status-pill")
               .text()
               .compact()
-              .child(crate::collab::status::status_pill(&phase, cx))
+              .child(crate::collab::status::participant_group(&phase, collab_roster, cx))
               .on_click(cx.listener(|workspace, _, window, cx| workspace.open_collaboration_dialog(window, cx))),
           )
         }

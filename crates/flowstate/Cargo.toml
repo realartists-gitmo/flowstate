@@ -19,10 +19,12 @@ flowstate-docx = { workspace = true }
 flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
+futures-util = "0.3"
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
+iroh = { workspace = true }
 loro = { workspace = true }
 memchr = "2.8.1"
 mimalloc = { workspace = true }
@@ -36,6 +38,7 @@ uuid = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["json"] }
+url = { workspace = true }
 atomicwrites = "0.4.4"
 blake3 = "1.8.5"
 flowstate-fidelity.workspace = true

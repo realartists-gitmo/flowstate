@@ -22,6 +22,7 @@ pub(super) fn paint_layout(
   default_caret_color: Hsla,
   external_carets: &[ExternalCaret],
   external_selections: &[ExternalSelection],
+  annotation_selections: &[ExternalSelection],
   search_highlights: &[Range<DocumentOffset>],
   active_search_highlight: Option<usize>,
   window: &mut Window,
@@ -98,6 +99,19 @@ pub(super) fn paint_layout(
       content_mask,
       visible_range.clone(),
       remote_selection_color(external.color_rgb),
+      window,
+    );
+  }
+  // Durable annotations use their own overlay layer so presence refreshes do
+  // not make comment anchors blink or disappear.
+  for annotation in annotation_selections {
+    paint_text_range_fill(
+      layout,
+      &annotation.selection,
+      bounds.origin,
+      content_mask,
+      visible_range.clone(),
+      annotation_selection_color(annotation.color_rgb),
       window,
     );
   }
@@ -199,7 +213,8 @@ pub(super) fn paint_layout(
     // located paragraph that differs from the remote offset's paragraph means
     // the remote caret is painted against a stale layout.
     if fidelity::enabled() {
-      let painted_paragraph = locate_line(layout, external_caret.offset, external_caret.visual_gravity).map(|(p_ix, _)| layout.paragraphs[p_ix].index);
+      let painted_paragraph =
+        locate_line(layout, external_caret.offset, external_caret.visual_gravity).map(|(p_ix, _)| layout.paragraphs[p_ix].index);
       fidelity::event(FidelityClass::Caret, "paint-external", || {
         format!(
           "offset={:?} gravity={:?} painted_paragraph={painted_paragraph:?} color=#{:06x}",
@@ -346,17 +361,12 @@ fn paint_table_block(
                   caret.block_ix, caret.row_ix, caret.cell_ix, paragraph.index, caret.byte, paragraph.len,
                 )
               });
-              fidelity::check(
-                caret.byte <= paragraph.len,
-                FidelityClass::Caret,
-                "caret-render-stale",
-                || {
-                  format!(
-                    "table caret byte={} exceeds paragraph_len={} (block={} paragraph={})",
-                    caret.byte, paragraph.len, caret.block_ix, paragraph.index,
-                  )
-                },
-              );
+              fidelity::check(caret.byte <= paragraph.len, FidelityClass::Caret, "caret-render-stale", || {
+                format!(
+                  "table caret byte={} exceeds paragraph_len={} (block={} paragraph={})",
+                  caret.byte, paragraph.len, caret.block_ix, paragraph.index,
+                )
+              });
             }
             if let Some(caret) = table_cell_caret
               && caret.block_ix == table.block_ix
@@ -696,6 +706,10 @@ pub(super) fn paint_selection(
 /// drop it to a translucent fill.
 fn remote_selection_color(color_rgb: u32) -> Hsla {
   Hsla::from(rgb(color_rgb)).opacity(0.30)
+}
+
+fn annotation_selection_color(color_rgb: u32) -> Hsla {
+  gpui::Hsla::from(rgb(color_rgb)).opacity(0.22)
 }
 
 fn paint_text_range_fill(

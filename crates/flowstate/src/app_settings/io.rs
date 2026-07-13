@@ -1,5 +1,6 @@
 use std::{
   collections::HashMap,
+  path::Path,
   sync::{Arc, Mutex, OnceLock},
 };
 
@@ -180,6 +181,36 @@ pub fn load_keymap() -> crate::commands::Keymap {
   load_cached_app_settings().effective_keymap.clone()
 }
 
+pub fn load_dropbox_collaboration() -> Option<(flowstate_collab::dropbox::DropboxCredentials, String)> {
+  let settings = load_app_settings().dropbox_collaboration;
+  if !settings.enabled || settings.access_token.is_empty() {
+    return None;
+  }
+  Some((
+    flowstate_collab::dropbox::DropboxCredentials {
+      app_key: settings.app_key,
+      access_token: settings.access_token,
+      refresh_token: settings.refresh_token,
+      access_token_expires_at: settings.access_token_expires_at,
+    },
+    settings.root,
+  ))
+}
+
+pub fn load_dropbox_document_binding(path: &Path) -> Option<DropboxDocumentBinding> {
+  let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+  load_app_settings()
+    .dropbox_documents
+    .into_iter()
+    .find(|binding| {
+      binding
+        .local_path
+        .canonicalize()
+        .unwrap_or_else(|_| binding.local_path.clone())
+        == canonical
+    })
+}
+
 #[hotpath::measure]
 pub fn load_keys_for_command(command: crate::commands::CommandId) -> Vec<String> {
   load_cached_app_settings()
@@ -205,19 +236,99 @@ pub fn load_first_key_for_command(command: crate::commands::CommandId) -> Option
 /// author and `users_by_id` is populated. Persisting is best-effort: a write
 /// failure is logged but never fatal (the id regenerates on the next launch).
 pub fn load_local_user_identity() -> (u128, Option<String>) {
-  let mut settings = load_app_settings();
-  if settings.local_user_id != 0 {
-    return (settings.local_user_id, settings.local_user_display_name);
-  }
+  let profile = load_local_user_profile();
+  (profile.user_id, Some(profile.display_name))
+}
 
-  let user_id = uuid::Uuid::new_v4().as_u128();
-  let display_name = os_username();
-  settings.local_user_id = user_id;
-  settings.local_user_display_name = display_name.clone();
-  if let Err(error) = save_app_settings(settings) {
-    tracing::warn!(error = %error, "persisting generated local user identity failed");
+pub fn load_local_identity_secret() -> Option<flowstate_collab::identity::PortableIdentitySecret> {
+  // Ensure first-run identity generation has happened before reading the seed.
+  let _ = load_local_user_profile();
+  load_app_settings()
+    .local_identity_signing_secret
+    .as_deref()
+    .and_then(|secret| flowstate_collab::identity::PortableIdentitySecret::from_hex(secret).ok())
+}
+
+pub fn load_local_signed_profile() -> Option<flowstate_collab::identity::SignedProfile> {
+  let profile = load_local_user_profile();
+  let settings = load_app_settings();
+  let secret = settings
+    .local_identity_signing_secret
+    .as_deref()
+    .and_then(|secret| flowstate_collab::identity::PortableIdentitySecret::from_hex(secret).ok())?;
+  let avatar_digest = profile
+    .avatar_path
+    .as_deref()
+    .and_then(|path| fs::read(path).ok())
+    .map(|bytes| *blake3::hash(&bytes).as_bytes());
+  Some(secret.sign_profile(
+    settings.local_profile_sequence.max(1),
+    profile.display_name,
+    profile.color_rgb,
+    avatar_digest,
+  ))
+}
+
+/// Load the one active portable person profile and ensure its per-device and
+/// signing identities exist. These writes are silent metadata persistence and
+/// never mark an open document dirty.
+pub fn load_local_user_profile() -> LocalUserProfile {
+  let mut settings = load_app_settings();
+  let mut changed = false;
+  if settings.local_user_id == 0 {
+    settings.local_user_id = uuid::Uuid::new_v4().as_u128();
+    changed = true;
   }
-  (user_id, display_name)
+  if settings.local_device_id == 0 {
+    settings.local_device_id = uuid::Uuid::new_v4().as_u128();
+    changed = true;
+  }
+  if settings
+    .local_user_display_name
+    .as_deref()
+    .is_none_or(str::is_empty)
+  {
+    settings.local_user_display_name = os_username().or_else(|| Some("Flowstate user".into()));
+    changed = true;
+  }
+  if settings.local_user_color_rgb.is_none() {
+    let digest = blake3::hash(&settings.local_user_id.to_le_bytes());
+    settings.local_user_color_rgb =
+      Some(flowstate_collab::ids::PALETTE[usize::from(digest.as_bytes()[0]) % flowstate_collab::ids::PALETTE.len()]);
+    changed = true;
+  }
+  if settings
+    .local_identity_signing_secret
+    .as_deref()
+    .and_then(|secret| flowstate_collab::identity::PortableIdentitySecret::from_hex(secret).ok())
+    .is_none()
+  {
+    settings.local_identity_signing_secret = Some(flowstate_collab::identity::PortableIdentitySecret::generate().to_hex());
+    settings.local_profile_sequence = settings.local_profile_sequence.max(1);
+    changed = true;
+  }
+  let secret = settings
+    .local_identity_signing_secret
+    .as_deref()
+    .unwrap_or_default();
+  let fingerprint = flowstate_collab::identity::PortableIdentitySecret::from_hex(secret)
+    .map(|secret| secret.public().to_string())
+    .unwrap_or_else(|_| blake3::hash(secret.as_bytes()).to_hex().to_string());
+  let profile = LocalUserProfile {
+    user_id: settings.local_user_id,
+    device_id: settings.local_device_id,
+    display_name: settings
+      .local_user_display_name
+      .clone()
+      .unwrap_or_else(|| "Flowstate user".into()),
+    color_rgb: settings.local_user_color_rgb.unwrap_or(0x5b8def) & 0x00ff_ffff,
+    avatar_path: settings.local_user_avatar_path.clone(),
+    identity_fingerprint: fingerprint,
+  };
+  if changed && let Err(error) = save_app_settings(settings) {
+    tracing::warn!(error = %error, "persisting generated local collaboration profile failed");
+  }
+  profile
 }
 
 /// Best-effort OS account name used as the default author display name. Uses
@@ -228,6 +339,89 @@ fn os_username() -> Option<String> {
     .ok()
     .map(|name| name.trim().to_owned())
     .filter(|name| !name.is_empty())
+}
+
+/// Evaluate standing access for ambient discovery. A TOFU contact is never
+/// enough: the contact must be safety-code verified, discovery must be active,
+/// and the document must fall inside an explicit person override or squad
+/// default without matching an exclusion.
+pub fn standing_access_for_path(identity_key: &str, document_path: &Path) -> StandingAccess {
+  standing_access_in_settings(&load_app_settings(), identity_key, document_path)
+}
+
+pub fn trusted_identity_keys_for_path(document_path: &Path) -> Vec<iroh::PublicKey> {
+  let settings = load_app_settings();
+  settings
+    .trusted_collaborators
+    .iter()
+    .filter(|contact| standing_access_in_settings(&settings, &contact.identity_key, document_path) == StandingAccess::Allowed)
+    .filter_map(|contact| contact.identity_key.parse().ok())
+    .collect()
+}
+
+fn standing_access_in_settings(settings: &AppSettings, identity_key: &str, document_path: &Path) -> StandingAccess {
+  if settings.collaboration_discovery_paused {
+    return StandingAccess::DiscoveryPaused;
+  }
+  let Some(contact) = settings
+    .trusted_collaborators
+    .iter()
+    .find(|contact| contact.identity_key == identity_key)
+  else {
+    return StandingAccess::UnknownIdentity;
+  };
+  if !contact.verified {
+    return StandingAccess::VerificationRequired;
+  }
+
+  let squad_scopes = settings
+    .collaboration_squads
+    .iter()
+    .filter(|squad| {
+      squad
+        .member_identity_keys
+        .iter()
+        .any(|member| member == identity_key)
+    })
+    .flat_map(|squad| squad.default_scopes.iter());
+  let all_scopes = contact
+    .scopes
+    .iter()
+    .chain(squad_scopes)
+    .collect::<Vec<_>>();
+  if all_scopes
+    .iter()
+    .any(|scope| matches!(scope, CollaborationScope::Exclusion(path) if document_path.starts_with(path)))
+  {
+    return StandingAccess::OutOfScope;
+  }
+  let person_has_positive_override = contact
+    .scopes
+    .iter()
+    .any(|scope| !matches!(scope, CollaborationScope::Exclusion(_)));
+  let allowed = all_scopes.iter().any(|scope| match scope {
+    CollaborationScope::Document(path) => path == document_path,
+    CollaborationScope::Folder(path) => document_path.starts_with(path),
+    CollaborationScope::Global => true,
+    CollaborationScope::Exclusion(_) => false,
+  });
+  if person_has_positive_override {
+    let person_allowed = contact.scopes.iter().any(|scope| match scope {
+      CollaborationScope::Document(path) => path == document_path,
+      CollaborationScope::Folder(path) => document_path.starts_with(path),
+      CollaborationScope::Global => true,
+      CollaborationScope::Exclusion(_) => false,
+    });
+    if person_allowed {
+      StandingAccess::Allowed
+    } else {
+      StandingAccess::OutOfScope
+    }
+  } else if allowed {
+    StandingAccess::Allowed
+  } else {
+    StandingAccess::OutOfScope
+  }
 }
 
 // Document style appearance is intentionally user-side. The DB8 file keeps
@@ -295,6 +489,135 @@ pub fn save_keymap_entries(keymap: Vec<crate::commands::KeymapEntry>) -> io::Res
   let mut settings = load_app_settings();
   settings.keymap = keymap;
   save_app_settings(settings)
+}
+
+pub fn save_dropbox_collaboration(credentials: flowstate_collab::dropbox::DropboxCredentials, root: String, enabled: bool) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.dropbox_collaboration = DropboxCollaborationSettings {
+    enabled,
+    root,
+    app_key: credentials.app_key,
+    access_token: credentials.access_token,
+    refresh_token: credentials.refresh_token,
+    access_token_expires_at: credentials.access_token_expires_at,
+  };
+  save_app_settings(settings)
+}
+
+pub fn save_collaboration_discovery_options(paused: bool, bluetooth_enabled: bool) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.collaboration_discovery_paused = paused;
+  settings.bluetooth_collaboration_discovery_enabled = bluetooth_enabled;
+  save_app_settings(settings)
+}
+
+pub fn save_dropbox_connection_draft(app_key: String, root: String) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.dropbox_collaboration.app_key = app_key;
+  settings.dropbox_collaboration.root = root;
+  save_app_settings(settings)
+}
+
+pub fn disconnect_dropbox_collaboration() -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.dropbox_collaboration.enabled = false;
+  settings.dropbox_collaboration.access_token.clear();
+  settings.dropbox_collaboration.refresh_token = None;
+  settings.dropbox_collaboration.access_token_expires_at = None;
+  save_app_settings(settings)
+}
+
+pub fn save_local_collaboration_profile(display_name: String, color_rgb: u32, avatar_path: Option<PathBuf>) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  settings.local_user_display_name = Some(display_name);
+  settings.local_user_color_rgb = Some(color_rgb & 0x00ff_ffff);
+  settings.local_user_avatar_path = avatar_path;
+  settings.local_profile_sequence = settings.local_profile_sequence.max(1).saturating_add(1);
+  save_app_settings(settings)
+}
+
+pub fn save_trusted_collaborator(collaborator: TrustedCollaborator) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  if let Some(existing) = settings
+    .trusted_collaborators
+    .iter_mut()
+    .find(|existing| existing.identity_key == collaborator.identity_key)
+  {
+    *existing = collaborator;
+  } else {
+    settings.trusted_collaborators.push(collaborator);
+  }
+  save_app_settings(settings)
+}
+
+pub fn remove_trusted_collaborator(identity_key: &str) -> io::Result<bool> {
+  let mut settings = load_app_settings();
+  let before = settings.trusted_collaborators.len();
+  settings
+    .trusted_collaborators
+    .retain(|collaborator| collaborator.identity_key != identity_key);
+  for squad in &mut settings.collaboration_squads {
+    squad
+      .member_identity_keys
+      .retain(|member| member != identity_key);
+  }
+  let removed = before != settings.trusted_collaborators.len();
+  if removed {
+    save_app_settings(settings)?;
+  }
+  Ok(removed)
+}
+
+pub fn save_collaboration_squad(squad: CollaborationSquad) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  if let Some(existing) = settings
+    .collaboration_squads
+    .iter_mut()
+    .find(|existing| existing.id == squad.id)
+  {
+    *existing = squad;
+  } else {
+    settings.collaboration_squads.push(squad);
+  }
+  save_app_settings(settings)
+}
+
+pub fn remove_collaboration_squad(id: &str) -> io::Result<bool> {
+  let mut settings = load_app_settings();
+  let before = settings.collaboration_squads.len();
+  settings.collaboration_squads.retain(|squad| squad.id != id);
+  let removed = before != settings.collaboration_squads.len();
+  if removed {
+    save_app_settings(settings)?;
+  }
+  Ok(removed)
+}
+
+pub fn save_dropbox_document_binding(binding: DropboxDocumentBinding) -> io::Result<()> {
+  let mut settings = load_app_settings();
+  if let Some(existing) = settings
+    .dropbox_documents
+    .iter_mut()
+    .find(|existing| existing.local_path == binding.local_path)
+  {
+    *existing = binding;
+  } else {
+    settings.dropbox_documents.push(binding);
+  }
+  save_app_settings(settings)
+}
+
+pub fn remove_dropbox_document_binding(path: &Path) -> io::Result<bool> {
+  let mut settings = load_app_settings();
+  let before = settings.dropbox_documents.len();
+  settings
+    .dropbox_documents
+    .retain(|binding| binding.local_path != path);
+  let removed = settings.dropbox_documents.len() != before;
+  if removed {
+    save_app_settings(settings)?;
+  }
+  Ok(removed)
 }
 
 #[hotpath::measure]

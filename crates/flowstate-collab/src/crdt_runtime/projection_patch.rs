@@ -392,8 +392,16 @@ pub(crate) fn splice_region_patches(
     return None;
   }
   let old_set: FxHashSet<flowstate_document::BlockId> = old_ids.iter().copied().collect();
-  let old_retained: Vec<_> = old_ids.iter().copied().filter(|id| new_set.contains(id)).collect();
-  let new_retained: Vec<_> = new_ids.iter().copied().filter(|id| old_set.contains(id)).collect();
+  let old_retained: Vec<_> = old_ids
+    .iter()
+    .copied()
+    .filter(|id| new_set.contains(id))
+    .collect();
+  let new_retained: Vec<_> = new_ids
+    .iter()
+    .copied()
+    .filter(|id| old_set.contains(id))
+    .collect();
   if old_retained != new_retained {
     return None;
   }
@@ -464,7 +472,11 @@ pub(crate) fn splice_region_patches(
     insert_runs.push((inserts, projection.ids.block_ids.get(old_hi).copied()));
   }
 
-  let dead: Vec<_> = old_ids.iter().copied().filter(|id| !new_set.contains(id)).collect();
+  let dead: Vec<_> = old_ids
+    .iter()
+    .copied()
+    .filter(|id| !new_set.contains(id))
+    .collect();
   if !dead.is_empty() {
     patches.push(ProjectionPatch::DeleteBlocks {
       block_ids: dead,
@@ -538,7 +550,11 @@ pub(crate) fn remote_object_projection_patches_scoped_or_full(
           "  scoped-object-readback BAILED to full: changed_blocks={:?} changed_tables={:?} nonbody_flows={:?}",
           invalidation.changed_blocks,
           invalidation.changed_tables,
-          invalidation.changed_flows.iter().filter(|flow| *flow != flowstate_document::ROOT_BODY_FLOW_ID).collect::<Vec<_>>()
+          invalidation
+            .changed_flows
+            .iter()
+            .filter(|flow| *flow != flowstate_document::ROOT_BODY_FLOW_ID)
+            .collect::<Vec<_>>()
         );
       }
       remote_object_projection_patches(projection, doc)
@@ -598,7 +614,11 @@ fn remote_object_projection_patches_scoped(
     }
     touched.push(owner_block_of_key(flow)?);
   }
-  for target in invalidation.changed_blocks.iter().chain(&invalidation.changed_tables) {
+  for target in invalidation
+    .changed_blocks
+    .iter()
+    .chain(&invalidation.changed_tables)
+  {
     match flowstate_document::owner_of_changed_container(doc, target)? {
       ChangedContainerOwner::Block(key) => {
         let id = flowstate_document::loro_schema::loro_id_trailing_u128(&key)?;
@@ -690,7 +710,9 @@ pub(crate) fn paragraph_projection_patches_ranged(
       // Durable-record resolution first (object-aware, coalesce-immune), the
       // projection's shifted live start as the fallback — same law as the old
       // per-paragraph `live_paragraph_range`.
-      start.or_else(|| live_starts.get(ix).copied()).map(|start| (ix, start))
+      start
+        .or_else(|| live_starts.get(ix).copied())
+        .map(|start| (ix, start))
     })
     .collect();
   let body_len = body_text(doc).len_unicode();
@@ -882,7 +904,9 @@ pub(crate) fn body_input_paragraph_at(
   if sentinel_unicode >= end {
     return None;
   }
-  let spans = text.slice_delta(sentinel_unicode, end, loro::cursor::PosType::Unicode).ok()?;
+  let spans = text
+    .slice_delta(sentinel_unicode, end, loro::cursor::PosType::Unicode)
+    .ok()?;
   let mut current = InputParagraph {
     style: fallback_style,
     runs: Vec::new(),

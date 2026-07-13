@@ -22,11 +22,101 @@ pub struct AppSettings {
   #[serde(with = "local_user_id_serde")]
   pub local_user_id: u128,
   pub local_user_display_name: Option<String>,
+  /// Stable profile metadata shared by presence, revisions, and discovery.
+  pub local_user_color_rgb: Option<u32>,
+  pub local_user_avatar_path: Option<PathBuf>,
+  #[serde(with = "local_user_id_serde")]
+  pub local_device_id: u128,
+  /// Plaintext-at-rest pending the platform keychain security review.
+  pub local_identity_signing_secret: Option<String>,
+  /// Monotonic signed-profile revision. Incremented whenever public profile
+  /// metadata changes so peers can reject stale rename/avatar updates.
+  pub local_profile_sequence: u64,
+  pub collaboration_discovery_paused: bool,
+  /// Nearby BLE rendezvous is opt-in because enabling it asks the operating
+  /// system for radio/privacy permission.
+  pub bluetooth_collaboration_discovery_enabled: bool,
+  pub dropbox_collaboration: DropboxCollaborationSettings,
+  pub dropbox_documents: Vec<DropboxDocumentBinding>,
   pub document_theme: Option<DocumentThemeSettings>,
   pub editor: EditorSettings,
   pub toolkit: ToolkitSettings,
   pub recent_documents: Vec<PathBuf>,
+  pub trusted_collaborators: Vec<TrustedCollaborator>,
+  pub collaboration_squads: Vec<CollaborationSquad>,
   pub keymap: Vec<crate::commands::KeymapEntry>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DropboxCollaborationSettings {
+  pub enabled: bool,
+  /// Dropbox folder containing the document, or empty for the app root.
+  pub root: String,
+  pub app_key: String,
+  /// Plaintext-at-rest pending the same platform-keychain review as the local
+  /// identity secret. Never included in diagnostics exports.
+  pub access_token: String,
+  pub refresh_token: Option<String>,
+  pub access_token_expires_at: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DropboxDocumentBinding {
+  pub local_path: PathBuf,
+  pub remote_path: String,
+  /// Last Dropbox revision successfully downloaded or uploaded. `None` makes
+  /// the first upload create-only rather than overwriting unknown cloud data.
+  pub revision: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct TrustedCollaborator {
+  pub identity_key: String,
+  pub display_name: String,
+  pub avatar_path: Option<PathBuf>,
+  pub color_rgb: Option<u32>,
+  pub verified: bool,
+  pub scopes: Vec<CollaborationScope>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", content = "path", rename_all = "snake_case")]
+pub enum CollaborationScope {
+  Document(PathBuf),
+  Folder(PathBuf),
+  Global,
+  Exclusion(PathBuf),
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(default)]
+pub struct CollaborationSquad {
+  pub id: String,
+  pub name: String,
+  pub member_identity_keys: Vec<String>,
+  pub default_scopes: Vec<CollaborationScope>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct LocalUserProfile {
+  pub user_id: u128,
+  pub device_id: u128,
+  pub display_name: String,
+  pub color_rgb: u32,
+  pub avatar_path: Option<PathBuf>,
+  pub identity_fingerprint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StandingAccess {
+  Allowed,
+  DiscoveryPaused,
+  UnknownIdentity,
+  VerificationRequired,
+  OutOfScope,
 }
 
 /// Serde adapter that stores `local_user_id` as a string. TOML integers are

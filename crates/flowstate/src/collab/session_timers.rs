@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 use flowstate_collab::{net::NetCommand, presence::PRESENCE_KEEPALIVE_SECS};
 use gpui::{Context, Timer};
 
-
 use super::{Attachment, CollabSession, Connectivity, DetachReason, SessionPhase};
 
 const ZERO_NEIGHBOR_OFFLINE_GRACE: Duration = Duration::from_secs(5);
@@ -208,18 +207,16 @@ impl CollabSession {
         if let Err(error) = self.net_tx.try_send(NetCommand::EnsureUp) {
           tracing::warn!(session = %self.session, error = %error, "queueing collaboration ensure-up recovery failed");
         }
-      } else if let Some(capability) = self.capability.clone() {
-        // FS-080: rejoining re-dials peers, so re-present the stored capability
-        // or the owner-side handshake rejects this endpoint.
+      } else if let Some(admission) = self.admission.clone() {
         if let Err(error) = self.net_tx.try_send(NetCommand::JoinSession {
           session: self.session,
           bootstrap: self.bootstrap_addrs.clone(),
-          capability,
+          admission,
         }) {
           tracing::warn!(session = %self.session, error = %error, "queueing collaboration join-session recovery failed");
         }
       } else {
-        tracing::warn!(session = %self.session, "cannot rejoin collaboration session without a stored capability");
+        tracing::warn!(session = %self.session, "cannot rejoin collaboration session without stored admission");
       }
       self.publish_digest();
       cx.notify();

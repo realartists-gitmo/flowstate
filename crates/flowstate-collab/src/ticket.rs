@@ -3,35 +3,35 @@ use iroh::EndpointAddr;
 use iroh_tickets::{ParseError, Ticket};
 use serde::{Deserialize, Serialize};
 
-use crate::{SessionId, capability::SessionCapability, proto_gossip::PROTOCOL_VERSION};
+use crate::{SessionId, admission::SessionAdmission, proto_gossip::PROTOCOL_VERSION};
 
 pub const TICKET_KIND: &str = "fscollab";
+pub const INVITE_URL_PREFIX: &str = "flowstate://join#";
 
-/// Invite ticket for a collaboration session (wire version 2, FS-080).
-///
-/// Version 2 replaces the unauthenticated version-1 payload: tickets now carry
-/// a [`SessionCapability`] — an owner-signed grant binding role, expiry, and
-/// revocation epoch to the session id. There is intentionally no back-compat
-/// decode path for version-1 tickets (pre-release).
+/// Symmetric editor invite for one ephemeral live session (wire version 3).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SessionTicket {
   pub version: u16,
   pub session: SessionId,
-  pub inviter: EndpointAddr,
+  pub bootstrap: Vec<EndpointAddr>,
   pub title: String,
-  pub capability: SessionCapability,
+  pub admission: SessionAdmission,
+  tag: [u8; 32],
 }
 
 impl SessionTicket {
   #[must_use]
-  pub fn new(session: SessionId, inviter: EndpointAddr, title: String, capability: SessionCapability) -> Self {
-    Self {
+  pub fn new(session: SessionId, bootstrap: Vec<EndpointAddr>, title: String, admission: SessionAdmission) -> Self {
+    let mut ticket = Self {
       version: PROTOCOL_VERSION,
       session,
-      inviter,
+      bootstrap,
       title,
-      capability,
-    }
+      admission,
+      tag: [0; 32],
+    };
+    ticket.tag = ticket.expected_tag().expect("ticket metadata serialization should not fail");
+    ticket
   }
 
   #[must_use]
@@ -39,21 +39,18 @@ impl SessionTicket {
     self.version == PROTOCOL_VERSION
   }
 
-  /// Client-side verification before dialing: version, owner binding, owner
-  /// signature, and expiry. The revocation epoch cannot be checked by a fresh
-  /// joiner (it does not know the current epoch yet); the owner re-verifies it
-  /// during the direct handshake, which is the enforcement point that does not
-  /// rely on the joining client being honest.
-  pub fn verify_for_join(&self, now_unix: u64) -> Result<()> {
+  /// Authenticate all user-visible and routing metadata before any dial.
+  pub fn verify_for_join(&self) -> Result<()> {
     ensure!(self.is_supported_version(), "unsupported collaboration protocol version");
-    ensure!(
-      self.capability.owner == self.inviter.id,
-      "collaboration ticket capability was not signed by the inviter"
-    );
-    self
-      .capability
-      .verify(self.session, now_unix, 0)
-      .context("collaboration ticket capability is invalid")
+    ensure!(!self.bootstrap.is_empty(), "collaboration invite has no reachable participants");
+    ensure!(self.tag == self.expected_tag()?, "collaboration invite metadata is invalid");
+    Ok(())
+  }
+
+  fn expected_tag(&self) -> Result<[u8; 32]> {
+    let payload = postcard::to_stdvec(&(self.version, self.session, &self.bootstrap, &self.title))
+      .context("encoding collaboration invite metadata")?;
+    Ok(self.admission.tag(&payload))
   }
 
   #[must_use]
@@ -61,25 +58,33 @@ impl SessionTicket {
     self.encode_string()
   }
 
+  /// User-facing deep link. The bearer ticket lives in the URL fragment so an
+  /// eventual HTTPS bridge never sends it to a web server in the request path.
+  #[must_use]
+  pub fn encode_invite_link(&self) -> String {
+    format!("{INVITE_URL_PREFIX}{}", self.encode_text())
+  }
+
   pub fn decode_text(text: &str) -> Result<Self, ParseError> {
-    Self::decode_string(text.trim())
+    let text = text.trim();
+    let ticket = text.strip_prefix(INVITE_URL_PREFIX).unwrap_or(text);
+    Self::decode_string(ticket)
   }
 }
 
 impl Ticket for SessionTicket {
   const KIND: &'static str = TICKET_KIND;
 
-  /// `iroh_tickets::Ticket::encode_bytes` cannot return a `Result`; `SessionTicket`
-  /// only contains postcard-serializable fields, so serialization failure would be a programmer error.
   fn encode_bytes(&self) -> Vec<u8> {
     postcard::to_stdvec(self).expect("SessionTicket serialization should not fail")
   }
 
   fn decode_bytes(bytes: &[u8]) -> Result<Self, ParseError> {
-    let ticket: Self = postcard::from_bytes(bytes).map_err(|_| ParseError::verification_failed("invalid collaboration ticket payload"))?;
-    if !ticket.is_supported_version() {
-      return Err(ParseError::verification_failed("unsupported collaboration protocol version"));
-    }
+    let ticket: Self = postcard::from_bytes(bytes)
+      .map_err(|_| ParseError::verification_failed("invalid collaboration ticket payload"))?;
+    ticket
+      .verify_for_join()
+      .map_err(|_| ParseError::verification_failed("invalid collaboration ticket authentication"))?;
     Ok(ticket)
   }
 }
@@ -89,63 +94,43 @@ mod tests {
   use iroh::{EndpointAddr, SecretKey};
 
   use super::SessionTicket;
-  use crate::{
-    SessionId,
-    capability::{CapabilityRole, SessionCapability},
-  };
+  use crate::{SessionAdmission, SessionId};
 
-  fn owner_secret(seed: u8) -> SecretKey {
-    SecretKey::from_bytes(&[seed; 32])
-  }
-
-  fn ticket(owner: &SecretKey, session: SessionId, role: CapabilityRole, expires_at: u64, epoch: u64) -> SessionTicket {
-    let capability = SessionCapability::issue(owner, session, role, expires_at, epoch);
-    SessionTicket::new(session, EndpointAddr::new(owner.public()), "Doc".to_string(), capability)
+  fn ticket() -> SessionTicket {
+    SessionTicket::new(
+      SessionId::from_bytes([1; 32]),
+      vec![EndpointAddr::new(SecretKey::from_bytes(&[2; 32]).public())],
+      "Shared brief".to_string(),
+      SessionAdmission::from_bytes([3; 32]),
+    )
   }
 
   #[test]
-  fn ticket_encodes_and_decodes_with_a_verifiable_capability() {
-    let owner = owner_secret(1);
-    let session = SessionId::from_bytes([1; 32]);
-    let ticket = ticket(&owner, session, CapabilityRole::Editor, 5_000, 2);
-
-    let text = ticket.encode_text();
-    let decoded = SessionTicket::decode_text(&text).expect("ticket text should decode");
-    assert_eq!(decoded.session, session);
-    assert_eq!(decoded.capability, ticket.capability);
-    decoded
-      .verify_for_join(4_999)
-      .expect("unexpired signed ticket should verify");
+  fn ticket_round_trips_and_authenticates_metadata() {
+    let encoded = ticket().encode_text();
+    let decoded = SessionTicket::decode_text(&encoded).expect("ticket should decode");
+    decoded.verify_for_join().expect("ticket should authenticate");
   }
 
   #[test]
-  fn expired_ticket_is_rejected_at_join() {
-    let owner = owner_secret(2);
-    let session = SessionId::from_bytes([2; 32]);
-    let ticket = ticket(&owner, session, CapabilityRole::Viewer, 100, 0);
-
-    assert!(ticket.verify_for_join(100).is_err());
-    assert!(ticket.verify_for_join(99).is_ok());
+  fn deep_link_and_raw_ticket_are_both_accepted() {
+    let ticket = ticket();
+    assert_eq!(SessionTicket::decode_text(&ticket.encode_text()).unwrap().session, ticket.session);
+    assert_eq!(SessionTicket::decode_text(&ticket.encode_invite_link()).unwrap().session, ticket.session);
   }
 
   #[test]
-  fn ticket_signed_by_someone_other_than_the_inviter_is_rejected() {
-    let owner = owner_secret(3);
-    let imposter = owner_secret(4);
-    let session = SessionId::from_bytes([3; 32]);
-    let capability = SessionCapability::issue(&imposter, session, CapabilityRole::Editor, 5_000, 0);
-    let ticket = SessionTicket::new(session, EndpointAddr::new(owner.public()), "Doc".to_string(), capability);
-
-    assert!(ticket.verify_for_join(10).is_err());
+  fn tampered_metadata_is_rejected() {
+    let mut ticket = ticket();
+    ticket.title.push_str(" (forged)");
+    assert!(ticket.verify_for_join().is_err());
   }
 
   #[test]
-  fn tampered_ticket_role_is_rejected_at_join() {
-    let owner = owner_secret(5);
-    let session = SessionId::from_bytes([4; 32]);
-    let mut ticket = ticket(&owner, session, CapabilityRole::Viewer, 5_000, 0);
-    ticket.capability.role = CapabilityRole::Editor;
-
-    assert!(ticket.verify_for_join(10).is_err());
+  fn any_participant_endpoint_can_be_the_bootstrap() {
+    let mut ticket = ticket();
+    ticket.bootstrap = vec![EndpointAddr::new(SecretKey::from_bytes(&[9; 32]).public())];
+    ticket.tag = ticket.expected_tag().expect("tag");
+    assert!(ticket.verify_for_join().is_ok());
   }
 }

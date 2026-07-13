@@ -77,9 +77,15 @@ impl WorkCounts {
   #[must_use]
   pub fn since(self, earlier: WorkCounts) -> WorkCounts {
     WorkCounts {
-      full_projections: self.full_projections.saturating_sub(earlier.full_projections),
-      cursor_pos_resolves: self.cursor_pos_resolves.saturating_sub(earlier.cursor_pos_resolves),
-      body_to_delta_builds: self.body_to_delta_builds.saturating_sub(earlier.body_to_delta_builds),
+      full_projections: self
+        .full_projections
+        .saturating_sub(earlier.full_projections),
+      cursor_pos_resolves: self
+        .cursor_pos_resolves
+        .saturating_sub(earlier.cursor_pos_resolves),
+      body_to_delta_builds: self
+        .body_to_delta_builds
+        .saturating_sub(earlier.body_to_delta_builds),
     }
   }
 }

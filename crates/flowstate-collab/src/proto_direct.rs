@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow, ensure};
 use serde::{Deserialize, Serialize};
 
-use crate::capability::SessionCapability;
+use crate::admission::SessionAdmission;
+use crate::discovery::DiscoveryAdmissionRequest;
 use crate::ids::{BlobId, SessionId};
 use crate::proto_gossip::PROTOCOL_VERSION;
 
@@ -20,15 +21,36 @@ pub const MAX_PAYLOAD_CHUNK_LEN: usize = 256 * 1024;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub enum DirectRequest {
-  /// Capability handshake (FS-080): presents the owner-signed grant from the
-  /// invite ticket. Peers verify signature, expiry, and revocation epoch and
-  /// record the sender endpoint with the granted role; data requests from
-  /// endpoints that never authenticated are refused with `Unauthorized`.
-  Authenticate { session: SessionId, capability: SessionCapability },
-  Snapshot { session: SessionId },
-  Updates { session: SessionId, have_vv: Vec<u8> },
-  Blob { session: SessionId, blob: BlobId },
-  Asset { session: SessionId, asset: u128 },
+  /// Proves possession of the symmetric editor admission secret before any
+  /// document data is served.
+  Authenticate {
+    session: SessionId,
+    admission: SessionAdmission,
+  },
+  RequestAdmission {
+    request: DiscoveryAdmissionRequest,
+  },
+  Snapshot {
+    session: SessionId,
+  },
+  Updates {
+    session: SessionId,
+    have_vv: Vec<u8>,
+  },
+  Blob {
+    session: SessionId,
+    blob: BlobId,
+  },
+  Asset {
+    session: SessionId,
+    asset: u128,
+  },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct DiscoveryAdmissionGrant {
+  pub admission: SessionAdmission,
+  pub title: String,
 }
 
 /// How a streamed direct payload is encoded on the wire. Rides on the response
@@ -50,12 +72,16 @@ pub enum DirectResponseHeader {
   /// A payload follows. `codec` is how the streamed `wire_len` bytes are encoded;
   /// `uncompressed_len` is the decoded size the receiver preallocates (equal to
   /// `wire_len` when `codec` is `None`).
-  Ok { codec: WireCodec, wire_len: u64, uncompressed_len: u64 },
+  Ok {
+    codec: WireCodec,
+    wire_len: u64,
+    uncompressed_len: u64,
+  },
   NotAttached,
   NotFound,
   Busy,
-  /// The request was refused because the sender presented no valid capability
-  /// (missing handshake, bad signature, expired, or revoked epoch).
+  /// The request was refused because the sender presented no valid admission
+  /// (missing handshake or wrong session secret).
   Unauthorized,
 }
 

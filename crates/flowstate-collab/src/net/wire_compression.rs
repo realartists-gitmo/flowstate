@@ -73,7 +73,11 @@ static DICT_ID_OK: LazyLock<bool> = LazyLock::new(|| {
   let id = zstd::zstd_safe::get_dict_id_from_dict(FLOWSTATE_DICT).map(std::num::NonZeroU32::get);
   let ok = id == Some(FLOWSTATE_DICT_ID);
   if !ok {
-    tracing::error!(?id, expected = FLOWSTATE_DICT_ID, "shipped zstd dictionary id does not match FLOWSTATE_DICT_ID; disabling the dictionary compression path");
+    tracing::error!(
+      ?id,
+      expected = FLOWSTATE_DICT_ID,
+      "shipped zstd dictionary id does not match FLOWSTATE_DICT_ID; disabling the dictionary compression path"
+    );
   }
   ok
 });
@@ -101,7 +105,9 @@ static COMPRESSED_CACHE: LazyLock<Mutex<Vec<CacheEntry>>> = LazyLock::new(|| Mut
 
 fn lock_cache() -> MutexGuard<'static, Vec<CacheEntry>> {
   // A poisoned cache must never take down serving — recover the inner value.
-  COMPRESSED_CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+  COMPRESSED_CACHE
+    .lock()
+    .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn cache_get(key: u128) -> Option<(WireCodec, Arc<[u8]>)> {
@@ -190,7 +196,9 @@ pub fn compress_for_wire(payload: &[u8], link_is_fast: bool) -> (WireCodec, Wire
 
 fn compress_with_dict(payload: &[u8]) -> Result<Vec<u8>> {
   let mut compressor = Compressor::with_prepared_dictionary(&ENCODER_DICT).context("preparing dictionary compressor")?;
-  compressor.compress(payload).context("zstd dictionary compression")
+  compressor
+    .compress(payload)
+    .context("zstd dictionary compression")
 }
 
 fn compress_long(payload: &[u8]) -> Result<Vec<u8>> {
@@ -198,8 +206,12 @@ fn compress_long(payload: &[u8]) -> Result<Vec<u8>> {
   compressor
     .set_parameter(CParameter::EnableLongDistanceMatching(true))
     .context("enabling long-distance matching")?;
-  compressor.set_parameter(CParameter::WindowLog(LONG_WINDOW_LOG)).context("setting window log")?;
-  compressor.compress(payload).context("zstd long-mode compression")
+  compressor
+    .set_parameter(CParameter::WindowLog(LONG_WINDOW_LOG))
+    .context("setting window log")?;
+  compressor
+    .compress(payload)
+    .context("zstd long-mode compression")
 }
 
 /// Decompress a wire payload streamed under `codec` back to `uncompressed_len`
@@ -207,25 +219,40 @@ fn compress_long(payload: &[u8]) -> Result<Vec<u8>> {
 /// payloads are returned verbatim. Reuses the prepared decoder dictionary and
 /// raises the decoder window for long frames.
 pub fn decompress_from_wire(codec: WireCodec, wire: Vec<u8>, uncompressed_len: usize) -> Result<Vec<u8>> {
-  ensure!(uncompressed_len <= MAX_PAYLOAD_LEN, "declared uncompressed length {uncompressed_len} exceeds {MAX_PAYLOAD_LEN} bytes");
+  ensure!(
+    uncompressed_len <= MAX_PAYLOAD_LEN,
+    "declared uncompressed length {uncompressed_len} exceeds {MAX_PAYLOAD_LEN} bytes"
+  );
   let decoded = match codec {
     WireCodec::None => {
-      ensure!(wire.len() == uncompressed_len, "uncompressed payload length {} does not match declared {uncompressed_len}", wire.len());
+      ensure!(
+        wire.len() == uncompressed_len,
+        "uncompressed payload length {} does not match declared {uncompressed_len}",
+        wire.len()
+      );
       return Ok(wire);
     },
     WireCodec::ZstdDict => {
       let mut decompressor = Decompressor::with_prepared_dictionary(&DECODER_DICT).context("preparing dictionary decompressor")?;
-      decompressor.decompress(&wire, uncompressed_len).context("zstd dictionary decompression")?
+      decompressor
+        .decompress(&wire, uncompressed_len)
+        .context("zstd dictionary decompression")?
     },
     WireCodec::ZstdLong => {
       let mut decompressor = Decompressor::new().context("creating long-mode decompressor")?;
       decompressor
         .set_parameter(DParameter::WindowLogMax(LONG_WINDOW_LOG))
         .context("raising decoder window for long frames")?;
-      decompressor.decompress(&wire, uncompressed_len).context("zstd long-mode decompression")?
+      decompressor
+        .decompress(&wire, uncompressed_len)
+        .context("zstd long-mode decompression")?
     },
   };
-  ensure!(decoded.len() == uncompressed_len, "decompressed length {} does not match declared {uncompressed_len}", decoded.len());
+  ensure!(
+    decoded.len() == uncompressed_len,
+    "decompressed length {} does not match declared {uncompressed_len}",
+    decoded.len()
+  );
   Ok(decoded)
 }
 
@@ -299,7 +326,10 @@ mod tests {
     for i in 0..(CACHE_MAX_ENTRIES as u128 + 4) {
       cache_put(base | i, WireCodec::ZstdLong, Arc::from(vec![0u8; 32]));
     }
-    assert!(lock_cache().len() <= CACHE_MAX_ENTRIES, "eviction must bound the cache to CACHE_MAX_ENTRIES");
+    assert!(
+      lock_cache().len() <= CACHE_MAX_ENTRIES,
+      "eviction must bound the cache to CACHE_MAX_ENTRIES"
+    );
   }
 
   #[test]

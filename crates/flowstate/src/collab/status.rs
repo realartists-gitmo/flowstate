@@ -1,7 +1,32 @@
-use gpui::{AnyElement, App, IntoElement, div, prelude::*, px};
-use gpui_component::{ActiveTheme as _, h_flex};
+use gpui::{AnyElement, App, IntoElement, div, prelude::*, px, rgb};
+use gpui_component::{
+  ActiveTheme as _, Sizable as _,
+  avatar::{Avatar, AvatarGroup},
+  h_flex,
+};
 
 use super::{Attachment, Connectivity, JoinStage, SessionPhase};
+
+pub fn participant_group(phase: &SessionPhase, entries: Vec<super::SessionRosterEntry>, cx: &App) -> AnyElement {
+  let mut avatars = AvatarGroup::new().xsmall().limit(4).ellipsis();
+  for entry in entries {
+    let color = gpui::Hsla::from(rgb(entry.color_rgb));
+    avatars = avatars.child(
+      Avatar::new()
+        .name(entry.name)
+        .bg(color.opacity(0.14))
+        .text_color(color)
+        .border_color(color.opacity(0.38)),
+    );
+  }
+  let (_, status_color) = status_label_and_color(phase, cx);
+  h_flex()
+    .items_center()
+    .gap_1()
+    .child(avatars)
+    .child(div().size(px(6.0)).rounded_full().bg(status_color))
+    .into_any_element()
+}
 
 pub fn status_pill(phase: &SessionPhase, cx: &App) -> AnyElement {
   let (label, color) = status_label_and_color(phase, cx);

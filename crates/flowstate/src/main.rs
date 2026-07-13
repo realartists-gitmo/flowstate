@@ -62,6 +62,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
+  /// Export recent local logs with invite bearers and home paths redacted.
+  ExportDiagnostics {
+    /// Destination text file.
+    output: PathBuf,
+  },
   /// Convert a DB8 document to DOCX and exit.
   Db8ToDocx {
     /// Input `.db8` document.
@@ -115,6 +120,9 @@ fn main() {
 
   if let Some(command) = cli.command {
     match command {
+      CliCommand::ExportDiagnostics { output } => {
+        logging::export_redacted_diagnostics(&output).expect("failed to export redacted diagnostics");
+      },
       CliCommand::Db8ToDocx { input, output } => {
         convert_db8_to_docx(input, output).expect("failed to export DOCX");
       },

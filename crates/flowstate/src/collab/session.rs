@@ -6,7 +6,7 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
-  SessionCapability, SessionId,
+  SessionAdmission, SessionId,
   crdt_runtime::{CrdtRuntime, RuntimeEvent},
   doc_io::DocIoHandle,
   ids::PeerId,
@@ -25,7 +25,7 @@ use gpui::{Context, Entity, EventEmitter, Subscription, Timer};
 use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
-use crate::app_settings::{load_document_theme, load_local_user_identity};
+use crate::app_settings::{load_document_theme, load_local_user_identity, load_local_user_profile};
 use crate::rich_text_element::{AssetId, AssetRecord, CollaborationRole, DocumentProjection, EditorEvent, RichTextEditor};
 
 use super::presence_view;
@@ -132,10 +132,9 @@ pub struct CollabSession {
   loro_subscriptions: Vec<LoroSubscription>,
   neighbors: HashSet<flowstate_collab::ids::PeerId>,
   bootstrap_addrs: Vec<PeerAddr>,
-  // FS-080: the owner-signed capability we present at the direct handshake, kept
-  // so reconnects can re-supply it. `None` for the owner (this endpoint is the
-  // session owner and needs no ticket).
-  capability: Option<SessionCapability>,
+  // Symmetric live-session admission, retained only in memory for reconnects
+  // and participant-created invitations.
+  admission: Option<SessionAdmission>,
   // The role this endpoint holds in the session; gates local writes/undo and is
   // pushed onto the editor at attach so `can_write_collaboration()` takes effect.
   collaboration_role: CollaborationRole,
@@ -146,6 +145,8 @@ pub struct CollabSession {
   presence_refresh_generation: u64,
   external_caret_refresh_pending: bool,
   external_caret_refresh_generation: u64,
+  comment_annotation_refresh_pending: bool,
+  comment_annotation_refresh_generation: u64,
   timers_started: bool,
   endpoint_online: bool,
   zero_neighbors_since: Option<Instant>,
@@ -210,10 +211,8 @@ impl CollabSession {
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
       bootstrap_addrs: Vec::new(),
-      // The endpoint that starts a session is its owner: full write access, no
-      // bearer capability to present.
-      capability: None,
-      collaboration_role: CollaborationRole::Owner,
+      admission: None,
+      collaboration_role: CollaborationRole::Editor,
       asset_pulls_in_flight: HashSet::new(),
       anti_entropy: AntiEntropyState::new(session, now),
       direct_pump_started: false,
@@ -221,6 +220,8 @@ impl CollabSession {
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
+      comment_annotation_refresh_pending: false,
+      comment_annotation_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -238,14 +239,8 @@ impl CollabSession {
     }
   }
 
-  pub fn joining(
-    session: SessionId,
-    title: String,
-    net_tx: CommandSender,
-    bootstrap_addrs: Vec<PeerAddr>,
-    capability: SessionCapability,
-  ) -> Self {
-    let collaboration_role = CollaborationRole::from(capability.role);
+  pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>, admission: SessionAdmission) -> Self {
+    let collaboration_role = CollaborationRole::Editor;
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
     tracing::info!(%session, title = %title, bootstrap_count = bootstrap_addrs.len(), "created joining collaboration session state");
@@ -270,7 +265,7 @@ impl CollabSession {
       loro_subscriptions: Vec::new(),
       neighbors: HashSet::new(),
       bootstrap_addrs,
-      capability: Some(capability),
+      admission: Some(admission),
       collaboration_role,
       asset_pulls_in_flight: HashSet::new(),
       anti_entropy: AntiEntropyState::new(session, now),
@@ -279,6 +274,8 @@ impl CollabSession {
       presence_refresh_generation: 0,
       external_caret_refresh_pending: false,
       external_caret_refresh_generation: 0,
+      comment_annotation_refresh_pending: false,
+      comment_annotation_refresh_generation: 0,
       timers_started: false,
       endpoint_online: true,
       zero_neighbors_since: Some(now),
@@ -306,6 +303,10 @@ impl CollabSession {
 
   pub fn title(&self) -> &str {
     &self.title
+  }
+
+  pub(super) fn set_admission(&mut self, admission: SessionAdmission) {
+    self.admission = Some(admission);
   }
 
   pub fn phase(&self) -> &SessionPhase {
@@ -543,7 +544,10 @@ impl CollabSession {
       tracing::info!(session = %self.session, from = %from, "starting collaboration resync pull after pre-attach queue overflow");
       // Also go through the dedup so this recovery pull registers the slot its
       // `finish_pull` will later clear (never clearing a digest pull's slot).
-      if let GapAction::Pull { from, our_vv } = self.anti_entropy.begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now()) {
+      if let GapAction::Pull { from, our_vv } = self
+        .anti_entropy
+        .begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now())
+      {
         self.start_update_pull(from, our_vv, cx);
       }
     }
@@ -561,6 +565,7 @@ impl CollabSession {
     self.attach_direct_request_pump(cx);
     self.attach_timers(cx);
     self.refresh_runtime_version_vector(cx);
+    self.refresh_comment_annotations(cx);
     // Spec §6: pump once immediately so intents committed before the session
     // started (the publish queue is filled by gate-held local commits
     // regardless of any session existing) broadcast right away.
@@ -596,10 +601,7 @@ impl CollabSession {
       if enforce_monotonic
         && !self.runtime_vv.is_empty()
         && !new_vv.is_empty()
-        && let (Ok(old), Ok(new)) = (
-          loro::VersionVector::decode(&self.runtime_vv),
-          loro::VersionVector::decode(&new_vv),
-        )
+        && let (Ok(old), Ok(new)) = (loro::VersionVector::decode(&self.runtime_vv), loro::VersionVector::decode(&new_vv))
       {
         let relation = new.partial_cmp(&old);
         fidelity::check(
@@ -673,7 +675,8 @@ impl CollabSession {
   pub fn establish_local_peer(&mut self, peer: &flowstate_collab::ids::PeerId, cx: &mut Context<Self>) {
     if self.presence.is_none() {
       tracing::info!(session = %self.session, peer = %peer, "establishing local collaboration peer presence");
-      let presence = PresenceStore::new(peer);
+      let profile = load_local_user_profile();
+      let presence = PresenceStore::new_with_color(peer, profile.color_rgb);
       let session = self.session;
       let net_tx = self.net_tx.clone();
       self
@@ -951,9 +954,14 @@ impl CollabSession {
               // stays buffered) must not fire a storm of identical pulls at one peer.
               // begin_pull admits at most one in-flight pull per peer (with a
               // deadline), and registers the slot the later `finish_pull` clears.
-              match self.anti_entropy.begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now()) {
+              match self
+                .anti_entropy
+                .begin_pull(from, self.runtime_vv.clone(), std::time::Instant::now())
+              {
                 GapAction::Pull { from, our_vv } => self.start_update_pull(from, our_vv, cx),
-                _ => tracing::debug!(session = %self.session, from = %from, "pending-dependency pull skipped; one is already in flight for this peer"),
+                _ => {
+                  tracing::debug!(session = %self.session, from = %from, "pending-dependency pull skipped; one is already in flight for this peer")
+                },
               }
             } else {
               tracing::warn!(session = %self.session, "cannot pull pending Loro dependencies because no collaboration peers are available");
@@ -984,6 +992,9 @@ impl CollabSession {
         | RuntimeEvent::RevisionOpened { .. }
         | RuntimeEvent::SelectionRestored { .. } => {},
       }
+    }
+    if event_count > 0 {
+      self.refresh_comment_annotations(cx);
     }
     let apply_ms = apply_started.elapsed().as_millis();
     if apply_ms > 150 {
@@ -1075,10 +1086,6 @@ impl CollabSession {
         Ok(())
       },
       GossipMsg::Digest { session, vv } => self.handle_digest(from, session, &vv, cx),
-      // FS-080: signed revocation control frames are consumed at the transport
-      // layer (see `net::swarm::handle_event`) and never reach a session; this
-      // arm keeps the match exhaustive defensively.
-      GossipMsg::CapabilityEpoch { .. } => Ok(()),
     };
     if let Err(error) = result {
       tracing::error!(session = %self.session, from = %from, gossip_kind, error = %format_args!("{error:#}"), "collaboration gossip handling failed");

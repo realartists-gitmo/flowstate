@@ -45,9 +45,7 @@ pub fn streaming_to_delta(text: &LoroText) -> Vec<TextDelta> {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::loro_schema::{
-    self, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
-  };
+  use crate::loro_schema::{self, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH};
   use loro::{LoroDoc, LoroValue};
 
   /// A delta-shape-diverse fixture: several paragraphs, overlapping marks of
@@ -58,15 +56,24 @@ mod tests {
     let doc = LoroDoc::new();
     loro_schema::configure_text_styles(&doc);
     let text = doc.get_text("streaming-fixture");
-    text.insert(0, "Plain lead-in with 宽字符 content.\nSecond paragraph body.\nThird row.")
+    text
+      .insert(0, "Plain lead-in with 宽字符 content.\nSecond paragraph body.\nThird row.")
       .expect("insert");
     // Fragment the chunk tree: a later insert in the MIDDLE of the first run
     // splits it into multiple same-style chunks that the delta must re-merge.
     text.insert(5, " spliced").expect("mid insert");
-    text.mark(0..12, MARK_RUN_SEMANTIC_STYLE, LoroValue::I64(2)).expect("mark semantic");
-    text.mark(8..20, MARK_HIGHLIGHT_STYLE, LoroValue::I64(1)).expect("mark highlight");
-    text.mark(30..44, MARK_DIRECT_UNDERLINE, LoroValue::Bool(true)).expect("mark underline");
-    text.mark(38..50, MARK_STRIKETHROUGH, LoroValue::Bool(true)).expect("mark strike");
+    text
+      .mark(0..12, MARK_RUN_SEMANTIC_STYLE, LoroValue::I64(2))
+      .expect("mark semantic");
+    text
+      .mark(8..20, MARK_HIGHLIGHT_STYLE, LoroValue::I64(1))
+      .expect("mark highlight");
+    text
+      .mark(30..44, MARK_DIRECT_UNDERLINE, LoroValue::Bool(true))
+      .expect("mark underline");
+    text
+      .mark(38..50, MARK_STRIKETHROUGH, LoroValue::Bool(true))
+      .expect("mark strike");
     // Unmark a subrange INSIDE the semantic run: writes a null-valued style
     // key, which the delta's attribute maps must treat as absent.
     text.unmark(4..9, MARK_RUN_SEMANTIC_STYLE).expect("unmark");
@@ -88,7 +95,9 @@ mod tests {
   #[test]
   fn streaming_matches_to_delta_on_decoded_snapshot_src_path() {
     let (doc, _text) = styled_doc();
-    let snapshot = doc.export(loro::ExportMode::Snapshot).expect("snapshot export");
+    let snapshot = doc
+      .export(loro::ExportMode::Snapshot)
+      .expect("snapshot export");
     // Streaming FIRST on the freshly decoded doc: the richtext state is still
     // `LazyLoad::Src`, so this exercises `for_each_span_from_src`.
     let reloaded = LoroDoc::new();

@@ -115,6 +115,7 @@ impl RichTextEditor {
       caret_blink_active: false,
       external_carets: Vec::new(),
       external_selections: Vec::new(),
+      annotation_selections: Vec::new(),
       search_highlights: Vec::new(),
       active_search_highlight: None,
       last_text_input_at: None,
@@ -243,6 +244,7 @@ impl RichTextEditor {
     self.caret_blink_active = false;
     self.external_carets.clear();
     self.external_selections.clear();
+    self.annotation_selections.clear();
     self.last_text_input_at = None;
     self.ime_marked_range = None;
     self.pending_typing_prefetch_resume = false;
@@ -448,11 +450,7 @@ impl RichTextEditor {
   pub fn set_selection(&mut self, selection: EditorSelection, cx: &mut Context<Self>) {
     let anchor = self.clamp_offset_to_document(selection.anchor);
     let head = self.clamp_offset_to_document(selection.head);
-    self.selection = EditorSelection {
-      anchor,
-      head,
-      ..selection
-    };
+    self.selection = EditorSelection { anchor, head, ..selection };
     self.emit_selection_changed(cx);
     cx.notify();
   }
@@ -484,6 +482,15 @@ impl RichTextEditor {
     }
   }
 
+  /// Install non-presence annotation ranges, such as unresolved comment
+  /// anchors. These are an overlay only and never mutate document run styles.
+  pub fn set_annotation_selections(&mut self, selections: Vec<ExternalSelection>, cx: &mut Context<Self>) {
+    if self.annotation_selections != selections {
+      self.annotation_selections = selections;
+      cx.notify();
+    }
+  }
+
   /// Peer selection spans that intersect `paragraph_ix`. A multi-paragraph
   /// selection is returned for every paragraph it covers; the shared paint path
   /// slices the correct byte span per paragraph, mirroring the local selection.
@@ -493,6 +500,18 @@ impl RichTextEditor {
       .iter()
       .filter(|external| {
         let range = external.selection.normalized();
+        range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
+      })
+      .cloned()
+      .collect()
+  }
+
+  pub(super) fn annotation_selections_for_paragraph(&self, paragraph_ix: usize) -> Vec<ExternalSelection> {
+    self
+      .annotation_selections
+      .iter()
+      .filter(|annotation| {
+        let range = annotation.selection.normalized();
         range.start.paragraph <= paragraph_ix && range.end.paragraph >= paragraph_ix
       })
       .cloned()
@@ -520,7 +539,10 @@ impl RichTextEditor {
   /// pre-value was captured via [`Self::fidelity_caret_before`]. No-op when the
   /// snapshot is `None` (tracing off).
   #[inline]
-  #[allow(clippy::ref_option, reason = "gated diagnostic helper borrows the caller's Option-typed caret snapshot; Option<&T> would push .as_ref() onto every call site")]
+  #[allow(
+    clippy::ref_option,
+    reason = "gated diagnostic helper borrows the caller's Option-typed caret snapshot; Option<&T> would push .as_ref() onto every call site"
+  )]
   pub(super) fn fidelity_caret_set(&self, site: &'static str, before: &Option<EditorSelection>) {
     if let Some(old) = before {
       self.fidelity_caret_set_from(site, old);
@@ -541,7 +563,6 @@ impl RichTextEditor {
       )
     });
   }
-
 }
 
 fn structural_block_for_input(block_id: BlockId, paragraph_id: Option<ParagraphId>, block: InputBlock) -> ProjectionStructuralBlock {
@@ -571,9 +592,12 @@ mod projection_theme_tests {
   fn replacement_projection_preserves_local_theme_catalog() {
     let mut current = blank_document();
     current.theme.body_font_size = px(18.0);
-    current.theme.custom_highlight_styles.insert(77, CustomHighlightStyle {
-      color: rgb(0x0012_3456).into(),
-    });
+    current.theme.custom_highlight_styles.insert(
+      77,
+      CustomHighlightStyle {
+        color: rgb(0x0012_3456).into(),
+      },
+    );
 
     let replacement = projection_with_local_theme(blank_document(), &current.theme);
 

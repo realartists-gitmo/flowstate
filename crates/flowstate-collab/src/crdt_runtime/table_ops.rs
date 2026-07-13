@@ -60,7 +60,10 @@ pub(crate) fn insert_table_row(
   row: &InputTableRow,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table row insert because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table row insert because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let row_order = table.ensure_mergeable_movable_list(TABLE_ROW_ORDER)?;
@@ -102,7 +105,10 @@ pub(crate) fn insert_table_row(
 /// row was already removed.
 pub(crate) fn delete_table_row(doc: &LoroDoc, table_block_id: BlockId, row_id: RowId) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table row delete because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table row delete because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(row_order) = child_movable_list(&table, TABLE_ROW_ORDER) else {
@@ -169,7 +175,11 @@ pub(crate) fn move_table_column(doc: &LoroDoc, table_block_id: BlockId, column_i
 /// or already in place.
 fn move_table_axis(doc: &LoroDoc, table_block_id: BlockId, order_key: &str, target_id: &str, after_id: Option<&str>) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, order_key, "skipping table move because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      order_key,
+      "skipping table move because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(order) = child_movable_list(&table, order_key) else {
@@ -210,7 +220,10 @@ pub(crate) fn insert_table_column(
   cells: &[InputTableCell],
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table column insert because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table column insert because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let row_order = table.ensure_mergeable_movable_list(TABLE_ROW_ORDER)?;
@@ -255,7 +268,10 @@ pub(crate) fn insert_table_column(
 /// defensively, any cell whose stored `column_id` field still names it).
 pub(crate) fn delete_table_column(doc: &LoroDoc, table_block_id: BlockId, column_id: ColumnId) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table column delete because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table column delete because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(column_order) = child_movable_list(&table, TABLE_COLUMN_ORDER) else {
@@ -302,7 +318,10 @@ pub(crate) fn replace_table_cell(
   cell: &InputTableCell,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table cell replace because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table cell replace because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let cells_by_id = table.ensure_mergeable_map(TABLE_CELLS_BY_ID)?;
@@ -324,7 +343,10 @@ pub(crate) fn set_table_cell_span(
   column_span: u16,
 ) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, "skipping table span command because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      "skipping table span command because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(cells_by_id) = child_map(&table, TABLE_CELLS_BY_ID) else {
@@ -341,27 +363,38 @@ pub(crate) fn set_table_cell_span(
 /// §P2b `SetTableColumnWidth`: the frozen command still addresses the column by
 /// its position (`column_ix`), so resolve that index against `column_order` to the
 /// durable column id, then write the width onto the id-keyed column record.
-pub(crate) fn set_table_column_width(
-  doc: &LoroDoc,
-  table_block_id: BlockId,
-  column_ix: usize,
-  width: &InputTableColumnWidth,
-) -> Result<bool> {
+pub(crate) fn set_table_column_width(doc: &LoroDoc, table_block_id: BlockId, column_ix: usize, width: &InputTableColumnWidth) -> Result<bool> {
   let Some(table) = projection_table_map_by_block_id(doc, table_block_id) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because no Loro table maps to the projected block id");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because no Loro table maps to the projected block id"
+    );
     return Ok(false);
   };
   let Some(column_order) = child_movable_list(&table, TABLE_COLUMN_ORDER) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the table has no column order");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the table has no column order"
+    );
     return Ok(false);
   };
   let column_ids = movable_list_strings(&column_order);
   let Some(column_id) = column_ids.get(column_ix) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the column index is out of range");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the column index is out of range"
+    );
     return Ok(false);
   };
   let Some(columns_by_id) = child_map(&table, TABLE_COLUMNS_BY_ID) else {
-    tracing::warn!(?table_block_id, column_ix, "skipping table column width command because the table has no columns map");
+    tracing::warn!(
+      ?table_block_id,
+      column_ix,
+      "skipping table column width command because the table has no columns map"
+    );
     return Ok(false);
   };
   let column = columns_by_id.ensure_mergeable_map(column_id)?;

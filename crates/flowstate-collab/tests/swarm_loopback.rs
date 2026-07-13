@@ -5,14 +5,16 @@ use std::time::Duration;
 use anyhow::{Context as _, Result, bail, ensure};
 use async_channel::Receiver;
 use flowstate_collab::{
-  DIRECT_ALPN, SessionId,
+  DIRECT_ALPN, SessionAdmission, SessionId,
   net::{
     NetEvent, PublishPayload,
+    auth,
     direct::{self, DirectProto, DirectServeRequest, DirectServeState, DirectSessionHandler},
     swarm::SwarmHandle,
   },
   proto_direct::DirectRequest,
   proto_gossip::{GOSSIP_INLINE_LIMIT, GossipMsg},
+  ticket::SessionTicket,
 };
 use iroh::{Endpoint, EndpointAddr, Watcher as _, address_lookup::memory::MemoryLookup, endpoint::presets, protocol::Router};
 use iroh_gossip::net::Gossip;
@@ -90,6 +92,11 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   let mut a = Peer::spawn(lookup.clone()).await?;
   let mut b = Peer::spawn(lookup.clone()).await?;
   let mut c = Peer::spawn(lookup.clone()).await?;
+  let admission = SessionAdmission::generate();
+  for peer in [&a, &b, &c] {
+    peer.direct_state.auth().configure_session(session, admission.clone());
+  }
+  auth::install_local_admission(session, admission.clone());
 
   let a_addr = wait_addr(&a.endpoint).await;
   let b_addr = wait_addr(&b.endpoint).await;
@@ -116,6 +123,21 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   )
   .await?;
   assert_eq!(snapshot, b"snapshot-from-a".to_vec());
+
+  // B received the same session bearer secret as A, so its invite is not an
+  // owner proxy: C can authenticate directly to B and bootstrap from B even
+  // if A is unavailable.
+  install_snapshot_handler(&b, session, b"snapshot-from-b".to_vec()).await;
+  let b_invite = SessionTicket::new(session, vec![b_addr.clone()], "Shared brief".into(), admission.clone());
+  let b_invite = SessionTicket::decode_text(&b_invite.encode_text())?;
+  let snapshot = direct::pull_with_endpoint(
+    &c.endpoint,
+    DirectRequest::Snapshot { session },
+    vec![b_invite.bootstrap[0].id],
+    Duration::from_secs(5),
+  )
+  .await?;
+  assert_eq!(snapshot, b"snapshot-from-b".to_vec());
 
   a.start_swarm(session, Vec::new())?;
   b.start_swarm(session, vec![a_addr.clone()])?;
@@ -181,6 +203,7 @@ async fn swarm_loopback_net_subset() -> Result<()> {
     .shutdown()
     .await
     .context("shutting down C router failed")?;
+  auth::clear_local_admission(session);
   Ok(())
 }
 

@@ -28,8 +28,8 @@ use flowstate_document::DocumentProjection;
 use loro::{ExportMode, VersionVector};
 
 use crate::crdt_runtime::{
-  CrdtRuntime, RuntimeAssetMetadata, RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo,
-  UndoSelectionSnapshot,
+  CrdtRuntime, RuntimeAssetMetadata, RuntimeCommentThread, RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets,
+  RuntimeRevisionInfo, UndoSelectionSnapshot,
 };
 use crate::local_write::{GateHolder, WriteGate};
 use crate::presence::PresenceSelection;
@@ -89,6 +89,40 @@ pub enum IoRequest {
   Revisions {
     reply: Sender<Result<Vec<RuntimeRevisionInfo>>>,
   },
+  Comments {
+    reply: Sender<Result<Vec<RuntimeCommentThread>>>,
+  },
+  CreateComment {
+    selection: gpui_flowtext::EditorSelection,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+    reply: Sender<Result<u128>>,
+  },
+  ReplyToComment {
+    comment_id: u128,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+    reply: Sender<Result<u128>>,
+  },
+  SetCommentResolved {
+    comment_id: u128,
+    resolved: bool,
+    reply: Sender<Result<()>>,
+  },
+  EditCommentMessage {
+    comment_id: u128,
+    message_id: u128,
+    body: String,
+    actor_user_id: u128,
+    reply: Sender<Result<()>>,
+  },
+  DeleteComment {
+    comment_id: u128,
+    actor_user_id: u128,
+    reply: Sender<Result<()>>,
+  },
   ProjectionFallbackStats {
     reply: Sender<Result<crate::crdt_runtime::ProjectionFallbackStats>>,
   },
@@ -137,6 +171,12 @@ fn io_request_kind(request: &IoRequest) -> &'static str {
     IoRequest::TakeRestoredUndoSelection { .. } => "take-restored-undo-selection",
     IoRequest::AssetMetadata { .. } => "asset-metadata",
     IoRequest::Revisions { .. } => "revisions",
+    IoRequest::Comments { .. } => "comments",
+    IoRequest::CreateComment { .. } => "create-comment",
+    IoRequest::ReplyToComment { .. } => "reply-to-comment",
+    IoRequest::SetCommentResolved { .. } => "set-comment-resolved",
+    IoRequest::EditCommentMessage { .. } => "edit-comment-message",
+    IoRequest::DeleteComment { .. } => "delete-comment",
     IoRequest::ProjectionFallbackStats { .. } => "projection-fallback-stats",
     IoRequest::PresenceSelection { .. } => "presence-selection",
     IoRequest::ResolvePresenceCarets { .. } => "resolve-presence-carets",
@@ -190,7 +230,9 @@ impl DocIoHandle {
   }
 
   pub async fn import_remote_update(&self, bytes: Vec<u8>) -> Result<Vec<RuntimeEvent>> {
-    self.request(|reply| IoRequest::ImportRemoteUpdate { bytes, reply }).await
+    self
+      .request(|reply| IoRequest::ImportRemoteUpdate { bytes, reply })
+      .await
   }
 
   /// Drain committed-but-unpublished local events (call after local intents,
@@ -200,73 +242,167 @@ impl DocIoHandle {
   }
 
   pub async fn projection_snapshot(&self) -> Result<DocumentProjection> {
-    self.request(|reply| IoRequest::ProjectionSnapshot { reply }).await
+    self
+      .request(|reply| IoRequest::ProjectionSnapshot { reply })
+      .await
   }
 
   pub async fn oplog_version_vector(&self) -> Result<Vec<u8>> {
-    self.request(|reply| IoRequest::OplogVersionVector { reply }).await
+    self
+      .request(|reply| IoRequest::OplogVersionVector { reply })
+      .await
   }
 
   pub async fn export_updates_for(&self, remote_vv: Vec<u8>) -> Result<Vec<u8>> {
-    self.request(|reply| IoRequest::ExportUpdatesFor { remote_vv, reply }).await
+    self
+      .request(|reply| IoRequest::ExportUpdatesFor { remote_vv, reply })
+      .await
   }
 
   pub async fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-    self.request(|reply| IoRequest::SnapshotBytes { reply }).await
+    self
+      .request(|reply| IoRequest::SnapshotBytes { reply })
+      .await
   }
 
   pub async fn checkpoint_package(&self, title: String, path: Option<PathBuf>) -> Result<Vec<RuntimeEvent>> {
-    self.request(|reply| IoRequest::CheckpointPackage { title, path, reply }).await
+    self
+      .request(|reply| IoRequest::CheckpointPackage { title, path, reply })
+      .await
   }
 
   pub async fn package_bytes(&self, title: String) -> Result<Vec<u8>> {
-    self.request(|reply| IoRequest::PackageBytes { title, reply }).await
+    self
+      .request(|reply| IoRequest::PackageBytes { title, reply })
+      .await
   }
 
   pub async fn save_package_to(&self, path: PathBuf) -> Result<()> {
-    self.request(|reply| IoRequest::SavePackageTo { path, reply }).await
+    self
+      .request(|reply| IoRequest::SavePackageTo { path, reply })
+      .await
   }
 
   pub async fn flush_package_caches(&self) -> Result<()> {
-    self.request(|reply| IoRequest::FlushPackageCaches { reply }).await
+    self
+      .request(|reply| IoRequest::FlushPackageCaches { reply })
+      .await
   }
 
   pub async fn take_restored_undo_selection(&self) -> Result<Option<UndoSelectionSnapshot>> {
-    self.request(|reply| IoRequest::TakeRestoredUndoSelection { reply }).await
+    self
+      .request(|reply| IoRequest::TakeRestoredUndoSelection { reply })
+      .await
   }
 
   pub async fn asset_metadata(&self) -> Result<Vec<RuntimeAssetMetadata>> {
-    self.request(|reply| IoRequest::AssetMetadata { reply }).await
+    self
+      .request(|reply| IoRequest::AssetMetadata { reply })
+      .await
   }
 
   pub async fn revisions(&self) -> Result<Vec<RuntimeRevisionInfo>> {
     self.request(|reply| IoRequest::Revisions { reply }).await
   }
 
+  pub async fn comments(&self) -> Result<Vec<RuntimeCommentThread>> {
+    self.request(|reply| IoRequest::Comments { reply }).await
+  }
+
+  pub async fn create_comment(
+    &self,
+    selection: gpui_flowtext::EditorSelection,
+    body: String,
+    author_user_id: u128,
+    author_display_name: String,
+  ) -> Result<u128> {
+    self
+      .request(|reply| IoRequest::CreateComment {
+        selection,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn reply_to_comment(&self, comment_id: u128, body: String, author_user_id: u128, author_display_name: String) -> Result<u128> {
+    self
+      .request(|reply| IoRequest::ReplyToComment {
+        comment_id,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn set_comment_resolved(&self, comment_id: u128, resolved: bool) -> Result<()> {
+    self
+      .request(|reply| IoRequest::SetCommentResolved { comment_id, resolved, reply })
+      .await
+  }
+
+  pub async fn edit_comment_message(&self, comment_id: u128, message_id: u128, body: String, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| IoRequest::EditCommentMessage {
+        comment_id,
+        message_id,
+        body,
+        actor_user_id,
+        reply,
+      })
+      .await
+  }
+
+  pub async fn delete_comment(&self, comment_id: u128, actor_user_id: u128) -> Result<()> {
+    self
+      .request(|reply| IoRequest::DeleteComment {
+        comment_id,
+        actor_user_id,
+        reply,
+      })
+      .await
+  }
+
   pub async fn projection_fallback_stats(&self) -> Result<crate::crdt_runtime::ProjectionFallbackStats> {
-    self.request(|reply| IoRequest::ProjectionFallbackStats { reply }).await
+    self
+      .request(|reply| IoRequest::ProjectionFallbackStats { reply })
+      .await
   }
 
   pub async fn presence_selection(&self, selection: gpui_flowtext::EditorSelection) -> Result<Option<PresenceSelection>> {
-    self.request(|reply| IoRequest::PresenceSelection { selection, reply }).await
+    self
+      .request(|reply| IoRequest::PresenceSelection { selection, reply })
+      .await
   }
 
   pub async fn resolve_presence_carets(&self, requests: Vec<RuntimePresenceCaretRequest>) -> Result<RuntimePresenceCarets> {
-    self.request(|reply| IoRequest::ResolvePresenceCarets { requests, reply }).await
+    self
+      .request(|reply| IoRequest::ResolvePresenceCarets { requests, reply })
+      .await
   }
 
   pub async fn open_revision(&self, revision_id: u128) -> Result<Vec<RuntimeEvent>> {
-    self.request(|reply| IoRequest::OpenRevision { revision_id, reply }).await
+    self
+      .request(|reply| IoRequest::OpenRevision { revision_id, reply })
+      .await
   }
 
   pub async fn fork_revision(&self, revision_id: u128) -> Result<Vec<RuntimeEvent>> {
-    self.request(|reply| IoRequest::ForkRevision { revision_id, reply }).await
+    self
+      .request(|reply| IoRequest::ForkRevision { revision_id, reply })
+      .await
   }
 
   /// Record fetched asset bytes into canonical state so saves/packages made by
   /// this replica include assets it pulled from peers.
   pub async fn record_assets(&self, assets: Vec<flowstate_document::AssetRecord>) -> Result<Vec<RuntimeEvent>> {
-    self.request(|reply| IoRequest::RecordAssets { assets, reply }).await
+    self
+      .request(|reply| IoRequest::RecordAssets { assets, reply })
+      .await
   }
 
   pub async fn set_author_identity(&self, user_id: u128, display_name: Option<String>) -> Result<Vec<RuntimeEvent>> {
@@ -418,11 +554,15 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
           .map_err(|poisoned| anyhow::anyhow!(poisoned));
         send_reply(&reply, result);
       },
-      IoRequest::ProjectionSnapshot { reply } =>
-
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.projection_snapshot())),
+      IoRequest::ProjectionSnapshot { reply } => send_reply(
+        &reply,
+        gate_call(core, GateHolder::DocumentService, |runtime| runtime.projection_snapshot()),
+      ),
       IoRequest::OplogVersionVector { reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::ExportUpdates, |runtime| Ok(runtime.doc().oplog_vv().encode())));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::ExportUpdates, |runtime| Ok(runtime.doc().oplog_vv().encode())),
+        );
       },
       IoRequest::ExportUpdatesFor { remote_vv, reply } => {
         let result = VersionVector::decode(&remote_vv)
@@ -440,7 +580,11 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         // package under the gate too (memcpy-scale, rare — joins only) and
         // reconstruct the FULL doc off-gate so joiners keep full history.
         let forked = gate_call(core, GateHolder::ExportFork, |runtime| {
-          let package = runtime.doc().is_shallow().then(|| runtime.package().cloned()).flatten();
+          let package = runtime
+            .doc()
+            .is_shallow()
+            .then(|| runtime.package().cloned())
+            .flatten();
           Ok((runtime.doc().fork(), package))
         });
         let result = forked.and_then(|(fork, package)| {
@@ -450,7 +594,9 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               .context("reconstructing full history for a join snapshot")?,
             None => fork,
           };
-          source.export(ExportMode::Snapshot).context("exporting Loro snapshot from fork")
+          source
+            .export(ExportMode::Snapshot)
+            .context("exporting Loro snapshot from fork")
         });
         send_reply(&reply, result);
       },
@@ -460,7 +606,9 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         // package restored under the gate afterwards. First-save (no package
         // yet) falls back to the in-place path.
         let begun = gate_call(core, GateHolder::DocumentService, |runtime| {
-          runtime.begin_checkpoint(&title, path.clone()).map_err(anyhow::Error::from)
+          runtime
+            .begin_checkpoint(&title, path.clone())
+            .map_err(anyhow::Error::from)
         });
         match begun {
           Ok(Some((job, events))) => {
@@ -469,16 +617,18 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               .name("flowstate-checkpoint".to_string())
               .spawn(move || {
                 let (package, wrote) = job.run();
-                let restore = core.lock(GateHolder::DocumentService).map(|mut guard| match wrote {
-                  Ok(wrote) => {
-                    guard.finish_checkpoint(package, wrote);
-                    Ok(())
-                  },
-                  Err(error) => {
-                    guard.finish_checkpoint(package, false);
-                    Err(anyhow::Error::from(error))
-                  },
-                });
+                let restore = core
+                  .lock(GateHolder::DocumentService)
+                  .map(|mut guard| match wrote {
+                    Ok(wrote) => {
+                      guard.finish_checkpoint(package, wrote);
+                      Ok(())
+                    },
+                    Err(error) => {
+                      guard.finish_checkpoint(package, false);
+                      Err(anyhow::Error::from(error))
+                    },
+                  });
                 match restore {
                   Ok(Ok(())) => send_reply(&reply, Ok(events)),
                   Ok(Err(error)) => send_reply(&reply, Err(error)),
@@ -490,9 +640,14 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             }
           },
           Ok(None) => {
-            send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| {
-              runtime.checkpoint_package(&title, path).map_err(anyhow::Error::from)
-            }));
+            send_reply(
+              &reply,
+              gate_call(core, GateHolder::DocumentService, |runtime| {
+                runtime
+                  .checkpoint_package(&title, path)
+                  .map_err(anyhow::Error::from)
+              }),
+            );
           },
           Err(error) => send_reply(&reply, Err(error)),
         }
@@ -532,16 +687,18 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               .name("flowstate-save".to_string())
               .spawn(move || {
                 let (package, wrote) = job.run();
-                let restore = core.lock(GateHolder::DocumentService).map(|mut guard| match wrote {
-                  Ok(wrote) => {
-                    guard.finish_checkpoint(package, wrote);
-                    Ok(())
-                  },
-                  Err(error) => {
-                    guard.finish_checkpoint(package, false);
-                    Err(anyhow::Error::from(error))
-                  },
-                });
+                let restore = core
+                  .lock(GateHolder::DocumentService)
+                  .map(|mut guard| match wrote {
+                    Ok(wrote) => {
+                      guard.finish_checkpoint(package, wrote);
+                      Ok(())
+                    },
+                    Err(error) => {
+                      guard.finish_checkpoint(package, false);
+                      Err(anyhow::Error::from(error))
+                    },
+                  });
                 match restore {
                   Ok(result) => send_reply(&reply, result),
                   Err(poisoned) => send_reply(&reply, Err(anyhow::anyhow!(poisoned))),
@@ -552,7 +709,12 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
             }
           },
           Ok(None) => {
-            send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.save_package_to(path).map_err(anyhow::Error::from)));
+            send_reply(
+              &reply,
+              gate_call(core, GateHolder::DocumentService, |runtime| {
+                runtime.save_package_to(path).map_err(anyhow::Error::from)
+              }),
+            );
           },
           Err(error) => send_reply(&reply, Err(error)),
         }
@@ -569,16 +731,18 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
               .name("flowstate-cache-flush".to_string())
               .spawn(move || {
                 let (package, wrote) = job.run();
-                let restore = core.lock(GateHolder::DocumentService).map(|mut guard| match wrote {
-                  Ok(wrote) => {
-                    guard.finish_checkpoint(package, wrote);
-                    Ok(())
-                  },
-                  Err(error) => {
-                    guard.finish_checkpoint(package, false);
-                    Err(anyhow::Error::from(error))
-                  },
-                });
+                let restore = core
+                  .lock(GateHolder::DocumentService)
+                  .map(|mut guard| match wrote {
+                    Ok(wrote) => {
+                      guard.finish_checkpoint(package, wrote);
+                      Ok(())
+                    },
+                    Err(error) => {
+                      guard.finish_checkpoint(package, false);
+                      Err(anyhow::Error::from(error))
+                    },
+                  });
                 match restore {
                   Ok(result) => send_reply(&reply, result),
                   Err(poisoned) => send_reply(&reply, Err(anyhow::anyhow!(poisoned))),
@@ -593,7 +757,10 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
         }
       },
       IoRequest::TakeRestoredUndoSelection { reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.take_restored_undo_selection())));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.take_restored_undo_selection())),
+        );
       },
       IoRequest::AssetMetadata { reply } => {
         send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.asset_metadata()));
@@ -601,34 +768,122 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
       IoRequest::Revisions { reply } => {
         send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.revisions())));
       },
+      IoRequest::Comments { reply } => {
+        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.comments())));
+      },
+      IoRequest::CreateComment {
+        selection,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.create_comment(&selection, &body, author_user_id, &author_display_name)
+          }),
+        );
+      },
+      IoRequest::ReplyToComment {
+        comment_id,
+        body,
+        author_user_id,
+        author_display_name,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.reply_to_comment(comment_id, &body, author_user_id, &author_display_name)
+          }),
+        );
+      },
+      IoRequest::SetCommentResolved { comment_id, resolved, reply } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.set_comment_resolved(comment_id, resolved)
+          }),
+        );
+      },
+      IoRequest::EditCommentMessage {
+        comment_id,
+        message_id,
+        body,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.edit_comment_message(comment_id, message_id, &body, actor_user_id)
+          }),
+        );
+      },
+      IoRequest::DeleteComment {
+        comment_id,
+        actor_user_id,
+        reply,
+      } => {
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.delete_comment(comment_id, actor_user_id)
+          }),
+        );
+      },
       IoRequest::ProjectionFallbackStats { reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.projection_fallback_stats())));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| Ok(runtime.projection_fallback_stats())),
+        );
       },
       IoRequest::PresenceSelection { selection, reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::Presence, |runtime| Ok(runtime.presence_selection(&selection))));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::Presence, |runtime| Ok(runtime.presence_selection(&selection))),
+        );
       },
       IoRequest::ResolvePresenceCarets { requests, reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::Presence, |runtime| Ok(runtime.resolve_presence_carets(requests))));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::Presence, |runtime| Ok(runtime.resolve_presence_carets(requests))),
+        );
       },
       IoRequest::SetAuthorIdentity {
         user_id,
         display_name,
         reply,
       } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.set_author_identity(user_id, display_name)));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.set_author_identity(user_id, display_name)
+          }),
+        );
       },
       IoRequest::OpenRevision { revision_id, reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| {
-          runtime.command(crate::crdt_runtime::SemanticCommand::OpenRevision { revision_id })
-        }));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.command(crate::crdt_runtime::SemanticCommand::OpenRevision { revision_id })
+          }),
+        );
       },
       IoRequest::ForkRevision { revision_id, reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| {
-          runtime.command(crate::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
-        }));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| {
+            runtime.command(crate::crdt_runtime::SemanticCommand::ForkRevision { revision_id })
+          }),
+        );
       },
       IoRequest::RecordAssets { assets, reply } => {
-        send_reply(&reply, gate_call(core, GateHolder::DocumentService, |runtime| runtime.merge_asset_records(assets)));
+        send_reply(
+          &reply,
+          gate_call(core, GateHolder::DocumentService, |runtime| runtime.merge_asset_records(assets)),
+        );
       },
     }
     let elapsed_ms = started.elapsed().as_millis();
@@ -638,11 +893,9 @@ fn io_loop(core: &Arc<WriteGate<CrdtRuntime>>, receiver: &Receiver<IoRequest>) {
   }
 }
 
-fn gate_call<T>(
-  core: &Arc<WriteGate<CrdtRuntime>>,
-  holder: GateHolder,
-  call: impl FnOnce(&mut CrdtRuntime) -> Result<T>,
-) -> Result<T> {
-  let mut guard = core.lock(holder).map_err(|poisoned| anyhow::anyhow!(poisoned))?;
+fn gate_call<T>(core: &Arc<WriteGate<CrdtRuntime>>, holder: GateHolder, call: impl FnOnce(&mut CrdtRuntime) -> Result<T>) -> Result<T> {
+  let mut guard = core
+    .lock(holder)
+    .map_err(|poisoned| anyhow::anyhow!(poisoned))?;
   call(&mut guard)
 }

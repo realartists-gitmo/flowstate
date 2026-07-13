@@ -34,8 +34,8 @@ use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroText, cursor::Cursor};
 
 use super::{
   BLOCKS_BY_ID, FLOWS_BY_ID, MARK_PARAGRAPH_STYLE, OBJECT_REPLACEMENT, ParagraphStyle, ROOT, ROOT_BODY_FLOW_ID, body_text, child_map,
-  child_movable_list, empty_input_table_cell, ensure_paragraph_metadata_at_boundary_with_keys, flow_text, map_binary_opt, map_i64_opt,
-  map_keys, map_string_opt, movable_list_strings, paragraph_style_value, write_table_cell_map_from_input,
+  child_movable_list, empty_input_table_cell, ensure_paragraph_metadata_at_boundary_with_keys, flow_text, map_binary_opt, map_i64_opt, map_keys,
+  map_string_opt, movable_list_strings, paragraph_style_value, write_table_cell_map_from_input,
 };
 
 /// Apply the single canonical repair for one projection defect.
@@ -330,8 +330,16 @@ fn repair_table_topology(
       }
       let cell_map = cells_by_id.ensure_mergeable_map(&cell_id_str)?;
       let empty = empty_input_table_cell(row_id, column_id);
-      write_table_cell_map_from_input(doc, &cell_map, &cell_id_str, &row_loro_id(row_id), &column_loro_id(column_id), &empty, false)
-        .context("materializing missing table cell for TableTopology defect")?;
+      write_table_cell_map_from_input(
+        doc,
+        &cell_map,
+        &cell_id_str,
+        &row_loro_id(row_id),
+        &column_loro_id(column_id),
+        &empty,
+        false,
+      )
+      .context("materializing missing table cell for TableTopology defect")?;
       Ok(true)
     },
     TableTopologyKind::InvalidSpan => {
@@ -346,14 +354,22 @@ fn repair_table_topology(
         .unwrap_or_default();
       let (Some(row_ix), Some(column_ix)) = (
         row_ids.iter().position(|id| id == &row_loro_id(row_id)),
-        column_ids.iter().position(|id| id == &column_loro_id(column_id)),
+        column_ids
+          .iter()
+          .position(|id| id == &column_loro_id(column_id)),
       ) else {
         return Ok(false);
       };
       let max_row_span = i64::try_from(row_ids.len() - row_ix).unwrap_or(1).max(1);
-      let max_column_span = i64::try_from(column_ids.len() - column_ix).unwrap_or(1).max(1);
-      let row_span = map_i64_opt(&cell, "row_span").unwrap_or(1).clamp(1, max_row_span);
-      let column_span = map_i64_opt(&cell, "column_span").unwrap_or(1).clamp(1, max_column_span);
+      let max_column_span = i64::try_from(column_ids.len() - column_ix)
+        .unwrap_or(1)
+        .max(1);
+      let row_span = map_i64_opt(&cell, "row_span")
+        .unwrap_or(1)
+        .clamp(1, max_row_span);
+      let column_span = map_i64_opt(&cell, "column_span")
+        .unwrap_or(1)
+        .clamp(1, max_column_span);
       cell.insert("row_span", row_span)?;
       cell.insert("column_span", column_span)?;
       Ok(true)
@@ -407,7 +423,11 @@ fn anchor_placeholder_pos(doc: &LoroDoc, block: &LoroMap, text: &LoroText) -> Op
   // record is dead-anchored, which multiplied into minutes). The batch query
   // is a single live-state scan; a dead id is simply absent.
   let id = cursor.id?;
-  let pos = doc.inner().query_text_id_positions(&text.id(), &[id]).pop().flatten()?;
+  let pos = doc
+    .inner()
+    .query_text_id_positions(&text.id(), &[id])
+    .pop()
+    .flatten()?;
   (text.char_at(pos) == Ok(OBJECT_REPLACEMENT)).then_some(pos)
 }
 

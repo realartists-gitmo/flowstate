@@ -42,14 +42,19 @@ impl CollabSession {
           .filter(|key| **key != expected_key)
           .cloned()
           .collect();
-        fidelity::check(
-          offending.is_empty(),
-          FidelityClass::Presence,
-          "presence-key-unbound",
-          || format!("session={} from={from} expected_key={expected_key} offending_keys={offending:?}", self.session),
-        );
+        fidelity::check(offending.is_empty(), FidelityClass::Presence, "presence-key-unbound", || {
+          format!(
+            "session={} from={from} expected_key={expected_key} offending_keys={offending:?}",
+            self.session
+          )
+        });
         fidelity::event(FidelityClass::Presence, "presence-apply", || {
-          format!("session={} from={from} bytes={} roster_keys={}", self.session, bytes.len(), after_keys.len())
+          format!(
+            "session={} from={from} bytes={} roster_keys={}",
+            self.session,
+            bytes.len(),
+            after_keys.len()
+          )
         });
       }
       let roster_changed = self.emit_presence_roster_diff(before, cx);
@@ -90,6 +95,7 @@ impl CollabSession {
           }
           let state = PresenceState {
             name: default_presence_name(),
+            color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
             selection,
           };
           tracing::trace!(session = %session_id, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
@@ -144,6 +150,50 @@ impl CollabSession {
       let _ = session.update(cx, |session, cx| {
         session.external_caret_refresh_pending = false;
         session.refresh_external_carets_now(cx);
+      });
+    })
+    .detach();
+  }
+
+  pub(super) fn refresh_comment_annotations(&mut self, cx: &mut Context<Self>) {
+    if self.comment_annotation_refresh_pending {
+      return;
+    }
+    let Some(runtime) = self.runtime.clone() else { return };
+    let Some(editor) = self.editor.clone() else { return };
+    self.comment_annotation_refresh_pending = true;
+    self.comment_annotation_refresh_generation = self.comment_annotation_refresh_generation.wrapping_add(1);
+    let generation = self.comment_annotation_refresh_generation;
+    let session_id = self.session;
+    cx.spawn(async move |session, cx| {
+      Timer::after(EXTERNAL_CARET_REFRESH_DEBOUNCE).await;
+      let result = runtime.comments().await;
+      let _ = session.update(cx, |session, cx| {
+        if session.comment_annotation_refresh_generation != generation {
+          return;
+        }
+        session.comment_annotation_refresh_pending = false;
+        match result {
+          Ok(comments)
+            if session
+              .editor
+              .as_ref()
+              .is_some_and(|current| current == &editor) =>
+          {
+            let selections = comments
+              .into_iter()
+              .filter(|thread| !thread.resolved)
+              .filter_map(|thread| thread.anchor)
+              .map(|(start, end)| crate::rich_text_element::ExternalSelection {
+                selection: crate::rich_text_element::EditorSelection::range(start, end),
+                color_rgb: 0xd99a20,
+              })
+              .collect();
+            editor.update(cx, |editor, cx| editor.set_annotation_selections(selections, cx));
+          },
+          Ok(_) => {},
+          Err(error) => tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "refreshing comment annotations failed"),
+        }
       });
     })
     .detach();
@@ -322,18 +372,13 @@ fn remote_roster(presence: &PresenceStore) -> HashMap<String, String> {
 /// fidelity presence-binding invariant to detect a frame that mutated a key
 /// other than the delivering peer's own.
 fn roster_key_set(presence: &PresenceStore) -> std::collections::HashSet<String> {
-  presence.roster().into_iter().map(|entry| entry.key).collect()
+  presence
+    .roster()
+    .into_iter()
+    .map(|entry| entry.key)
+    .collect()
 }
 
 fn default_presence_name() -> String {
-  // §perf: the name is process-stable; resolve the env lookups + alloc once and clone thereafter.
-  static CACHED: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-  CACHED
-    .get_or_init(|| {
-      std::env::var("FLOWSTATE_COLLAB_NAME")
-        .or_else(|_| std::env::var("USER"))
-        .or_else(|_| std::env::var("USERNAME"))
-        .unwrap_or_else(|_| "Flowstate user".to_string())
-    })
-    .clone()
+  crate::app_settings::load_local_user_profile().display_name
 }

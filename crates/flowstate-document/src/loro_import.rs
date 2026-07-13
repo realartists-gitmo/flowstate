@@ -168,7 +168,15 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       },
       (Block::Equation(equation), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "equation");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "equation", BODY_FLOW_ID, &body_text, body_text_op_base, *anchor_pos)?;
+        let block = ensure_block(
+          &blocks,
+          durable_block_id.clone(),
+          "equation",
+          BODY_FLOW_ID,
+          &body_text,
+          body_text_op_base,
+          *anchor_pos,
+        )?;
         let source_flow_id = nested_flow_id("equation_source", &durable_block_id);
         block.insert("source_flow_id", source_flow_id.as_str())?;
         let source_flow = ensure_flow(&flows, &source_flow_id, "equation_source")?;
@@ -179,7 +187,15 @@ pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProje
       },
       (Block::Table(table), FlowBlockPosition::Object { anchor_pos }) => {
         let durable_block_id = projection_block_id(document, block_ix, "table");
-        let block = ensure_block(&blocks, durable_block_id.clone(), "table", BODY_FLOW_ID, &body_text, body_text_op_base, *anchor_pos)?;
+        let block = ensure_block(
+          &blocks,
+          durable_block_id.clone(),
+          "table",
+          BODY_FLOW_ID,
+          &body_text,
+          body_text_op_base,
+          *anchor_pos,
+        )?;
         import_table(&flows, &block, table)?;
       },
       _ => unreachable!("flow import plan must preserve document block shape"),
@@ -208,13 +224,26 @@ fn import_image_block(
   text_op_base: Option<(u64, i32)>,
   anchor_pos: usize,
 ) -> LoroResult<()> {
-  let block = ensure_block(blocks, durable_block_id.clone(), "image", BODY_FLOW_ID, body_text, text_op_base, anchor_pos)?;
+  let block = ensure_block(
+    blocks,
+    durable_block_id.clone(),
+    "image",
+    BODY_FLOW_ID,
+    body_text,
+    text_op_base,
+    anchor_pos,
+  )?;
   block.insert("asset_id", image.asset_id.0.to_string())?;
   // §A11.9: a genuinely-LINKED image persists its external URL; the key is only
   // written when a non-empty URL exists (embedded images carry no key at all —
   // the presence-guarded delete keeps a re-imported block from resurrecting a
   // stale URL without minting tombstone ops on the common embedded path).
-  match image.external_url.as_ref().map(|url| -> &str { url.as_ref() }).filter(|url| !url.is_empty()) {
+  match image
+    .external_url
+    .as_ref()
+    .map(|url| -> &str { url.as_ref() })
+    .filter(|url| !url.is_empty())
+  {
     Some(url) => block.insert("external_url", url)?,
     None => {
       if block.get("external_url").is_some() {
@@ -363,14 +392,7 @@ fn section_page_attrs_to_loro(page: &gpui_flowtext::SectionPageAttrs) -> Section
 /// every constructed cursor against `get_cursor` (armed in the corpus
 /// sweep).
 fn body_cursor_at(text: &LoroText, base: Option<(u64, i32)>, pos: usize, side: Side) -> Option<loro::cursor::Cursor> {
-  let constructed = base.map(|(peer, counter)| {
-    loro::cursor::Cursor::new(
-      Some(loro::ID::new(peer, counter + pos as i32)),
-      text.id(),
-      side,
-      pos,
-    )
-  });
+  let constructed = base.map(|(peer, counter)| loro::cursor::Cursor::new(Some(loro::ID::new(peer, counter + pos as i32)), text.id(), side, pos));
   static VERIFY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
   let verify = *VERIFY.get_or_init(|| std::env::var_os("FLOWSTATE_IMPORT_CURSOR_VERIFY").is_some());
   if constructed.is_none() || verify {
@@ -557,7 +579,13 @@ impl FlowTextImportPlan {
     // text and do not fragment text ids; the end state (read back via
     // `to_delta`/the style tree) is identical because `apply_delta` itself
     // resolves attributes into `mark` calls after inserting.
-    let mut full_text = String::with_capacity(self.delta.iter().map(|span| span_text(span).map_or(0, str::len)).sum());
+    let mut full_text = String::with_capacity(
+      self
+        .delta
+        .iter()
+        .map(|span| span_text(span).map_or(0, str::len))
+        .sum(),
+    );
     for span in &self.delta {
       if let Some(insert) = span_text(span) {
         full_text.push_str(insert);
@@ -577,7 +605,12 @@ impl FlowTextImportPlan {
     let probe_t = std::time::Instant::now();
     hotpath::measure_block!("import_body_single_insert", text.insert(0, &full_text)?);
     if pop_probe {
-      eprintln!("[flowstate-populate-probe] insert={:?} chars={} spans={}", probe_t.elapsed(), full_text.chars().count(), self.delta.len());
+      eprintln!(
+        "[flowstate-populate-probe] insert={:?} chars={} spans={}",
+        probe_t.elapsed(),
+        full_text.chars().count(),
+        self.delta.len()
+      );
     }
     let probe_t = std::time::Instant::now();
 
@@ -1142,7 +1175,11 @@ mod tests {
     // scan did, at scale.
     let paragraphs = (0..2_000)
       .map(|ix| DocumentParagraphInput {
-        style: if ix % 11 == 0 { ParagraphStyle::Custom(1) } else { ParagraphStyle::Normal },
+        style: if ix % 11 == 0 {
+          ParagraphStyle::Custom(1)
+        } else {
+          ParagraphStyle::Normal
+        },
         runs: vec![gpui_flowtext::DocumentRunInput {
           text: format!("paragraph {ix}"),
           styles: RunStyles::default(),
@@ -1161,8 +1198,17 @@ mod tests {
     assert_eq!(projected.ids.block_ids, imported.projection.ids.block_ids);
     // ...and every boundary resolved to a distinct durable id (no collisions, no
     // fabricated fallbacks from a mis-keyed index).
-    let distinct_paragraph_ids = projected.ids.paragraph_ids.iter().map(|id| id.0).collect::<std::collections::BTreeSet<_>>();
-    assert_eq!(distinct_paragraph_ids.len(), 2_000, "every boundary must resolve to a unique paragraph id");
+    let distinct_paragraph_ids = projected
+      .ids
+      .paragraph_ids
+      .iter()
+      .map(|id| id.0)
+      .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+      distinct_paragraph_ids.len(),
+      2_000,
+      "every boundary must resolve to a unique paragraph id"
+    );
     Ok(())
   }
 

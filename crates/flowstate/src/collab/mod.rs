@@ -1,3 +1,6 @@
+mod discovery_runtime;
+pub(crate) mod dropbox_checkpoint;
+pub mod dropbox_oauth;
 mod manager;
 pub(crate) mod notify;
 mod presence_view;
@@ -7,7 +10,7 @@ pub mod share_dialog;
 mod shutdown;
 pub mod status;
 
-use std::sync::Arc;
+use std::{borrow::BorrowMut, sync::Arc};
 
 use anyhow::Result;
 use async_channel::Receiver;
@@ -17,6 +20,7 @@ use uuid::Uuid;
 
 use crate::rich_text_element::RichTextEditor;
 
+pub use discovery_runtime::DiscoveryScanResult;
 pub use manager::{CollabManager, JoinRequest};
 pub use session::{
   Attachment, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionNotice, SessionPhase, SessionRosterEntry,
@@ -104,6 +108,30 @@ pub fn session_for_id(session_id: SessionId, cx: &App) -> Option<Entity<CollabSe
 
 pub fn roster_for_panel(panel_id: Uuid, cx: &App) -> Vec<SessionRosterEntry> {
   CollabManager::global(cx).roster_for_panel(panel_id, cx)
+}
+
+pub fn scan_document_discovery<T>(document_id: u128, cx: &mut Context<T>) -> Receiver<DiscoveryScanResult>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.scan_document_discovery(document_id, cx))
+}
+
+pub fn reconfigure_discovery<C>(cx: &mut C)
+where
+  C: BorrowAppContext + BorrowMut<App>,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.reconfigure_discovery(cx));
+}
+
+pub fn request_discovered_ticket<T>(
+  advertisement: flowstate_collab::discovery::DiscoveryAdvertisement,
+  cx: &mut Context<T>,
+) -> Receiver<Result<SessionTicket>>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.request_discovered_ticket(advertisement, cx))
 }
 
 /// Notify the collaboration session for `panel_id` that the document's runtime

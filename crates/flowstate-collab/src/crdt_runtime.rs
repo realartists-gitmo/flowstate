@@ -13,12 +13,11 @@ use flowstate_document::{
   AssetId, AssetRecord, BLOCKS_BY_ID, Block, BlockId, CellId, ColumnId, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage,
   DocumentProjection, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, ImportedLoroDocument, InputBlock,
   InputBlockAlignment, InputEquationDisplay, InputImageSizing, InputParagraph, InputTableBlock, InputTableCell, InputTableCellBlock,
-  InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE,
-  MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId,
-  ParagraphStyle, ProjectionDefect, ProjectionPatch, ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RowId,
-  RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId, TableBlock, cell_loro_id, cell_loro_id_for, column_loro_id, document_from_loro,
-  document_from_loro_with_defects, import_document_projection, loro_import::assets_from_document, loro_schema::body_text, new_loro_document,
-  row_loro_id,
+  InputTableColumnWidth, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE,
+  MARK_STRIKETHROUGH, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, Paragraph, ParagraphId, ParagraphStyle, ProjectionDefect, ProjectionPatch,
+  ProjectionStructuralBlock, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID, RowId, RunSemanticStyle, RunStyles, SENTINEL_NEWLINE, SectionId,
+  TableBlock, cell_loro_id, cell_loro_id_for, column_loro_id, document_from_loro, document_from_loro_with_defects, import_document_projection,
+  loro_import::assets_from_document, loro_schema::body_text, new_loro_document, row_loro_id,
 };
 use loro::{
   Container, ContainerID, ExportMode, Frontiers, ID, ImportStatus, LoroDoc, LoroMap, LoroMovableList, LoroText, LoroValue, Subscription,
@@ -31,8 +30,8 @@ use loro::{
 // APIs (`peek_top_span` / `external_step_*`), which the thin wrapper type does
 // not surface. The wrapper's `UndoManager` is a passthrough over this exact
 // type, so behavior is otherwise identical.
-use loro::InnerUndoManager as UndoManager;
 use flowstate_fidelity::{self as fidelity, FidelityClass};
+use loro::InnerUndoManager as UndoManager;
 use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
@@ -56,9 +55,7 @@ pub(crate) mod table_ops;
 #[path = "crdt_runtime/types.rs"]
 mod types;
 use crate::presence::{PresenceSelection, SelectionAffinity, SelectionDirection, SelectionEndpoint, VisualGravity};
-use gpui_flowtext::{
-  DocumentOffset, EditorSelection, ExternalCaret, ExternalSelection, ProjectionPatchBatch, apply_projection_patch_batch,
-};
+use gpui_flowtext::{DocumentOffset, EditorSelection, ExternalCaret, ExternalSelection, ProjectionPatchBatch, apply_projection_patch_batch};
 use loro::{ContainerTrait as _, cursor::PosType};
 pub(crate) use projection_patch::{
   body_input_paragraph_at, paragraph_projection_patches_ranged, projection_patches_between, remote_nonstructural_projection_patches,
@@ -87,8 +84,8 @@ pub enum RepairEmission {
 }
 use types::UndoSelectionState;
 pub use types::{
-  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeEvent,
-  RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity,
+  ProjectionFallbackStats, ProjectionInvalidation, ProjectionTextRange, RuntimeAssetMetadata, RuntimeCommentMessage, RuntimeCommentThread,
+  RuntimeEvent, RuntimePresenceCaretRequest, RuntimePresenceCarets, RuntimeRevisionInfo, SemanticCommand, UndoSelectionAffinity,
   UndoSelectionDirection, UndoSelectionSnapshot,
 };
 
@@ -415,7 +412,9 @@ impl ProjectionRuntimeIndex {
       return None;
     }
     let unicode = *self.paragraph_body_unicode_starts.get(offset.paragraph)? + paragraph_text[..byte].chars().count();
-    fidelity::event(FidelityClass::Caret, "offset->unicode", || format!("offset={offset:?} byte={byte} -> body_unicode={unicode}"));
+    fidelity::event(FidelityClass::Caret, "offset->unicode", || {
+      format!("offset={offset:?} byte={byte} -> body_unicode={unicode}")
+    });
     Some(unicode)
   }
 
@@ -457,10 +456,17 @@ impl ProjectionRuntimeIndex {
         .paragraph_ids
         .get(offset.paragraph)
         .and_then(|paragraph_id| paragraph_body_start_in_loro(doc, *paragraph_id))
-        .or_else(|| self.paragraph_body_unicode_starts.get(offset.paragraph).copied())
+        .or_else(|| {
+          self
+            .paragraph_body_unicode_starts
+            .get(offset.paragraph)
+            .copied()
+        })
     })?;
     let unicode = paragraph_start + paragraph_text[..byte].chars().count();
-    fidelity::event(FidelityClass::Caret, "offset->unicode-loro", || format!("offset={offset:?} byte={byte} -> body_unicode={unicode}"));
+    fidelity::event(FidelityClass::Caret, "offset->unicode-loro", || {
+      format!("offset={offset:?} byte={byte} -> body_unicode={unicode}")
+    });
     Some(unicode)
   }
 
@@ -475,9 +481,15 @@ impl ProjectionRuntimeIndex {
     // paragraphs); a trailing object falls through to the normal clamp.
     if unicode > 0 && self.object_placeholder_positions.contains(&(unicode - 1)) {
       let following_start = unicode + 1;
-      if let Ok(start_ix) = self.paragraph_body_unicode_starts.binary_search(&following_start) {
+      if let Ok(start_ix) = self
+        .paragraph_body_unicode_starts
+        .binary_search(&following_start)
+      {
         let paragraph_ix = start_ix.min(projection.paragraphs.len().saturating_sub(1));
-        let offset = DocumentOffset { paragraph: paragraph_ix, byte: 0 };
+        let offset = DocumentOffset {
+          paragraph: paragraph_ix,
+          byte: 0,
+        };
         fidelity::event(FidelityClass::Caret, "unicode->offset-after-object", || {
           format!("body_unicode={unicode} -> offset={offset:?}")
         });
@@ -500,7 +512,9 @@ impl ProjectionRuntimeIndex {
       paragraph: paragraph_ix,
       byte,
     };
-    fidelity::event(FidelityClass::Caret, "unicode->offset", || format!("body_unicode={unicode} -> offset={offset:?}"));
+    fidelity::event(FidelityClass::Caret, "unicode->offset", || {
+      format!("body_unicode={unicode} -> offset={offset:?}")
+    });
     Some(offset)
   }
 
@@ -519,12 +533,9 @@ impl ProjectionRuntimeIndex {
         format!("placeholder_body_unicode={position} left_offset={left:?} right_offset={right:?}")
       });
       if let (Some(left), Some(right)) = (left, right) {
-        fidelity::check(
-          left != right,
-          FidelityClass::Caret,
-          "object-side-collapse",
-          || format!("U+FFFC object at body-unicode {position} collapses caret sides: both map to {left:?}"),
-        );
+        fidelity::check(left != right, FidelityClass::Caret, "object-side-collapse", || {
+          format!("U+FFFC object at body-unicode {position} collapses caret sides: both map to {left:?}")
+        });
       }
     }
   }
@@ -644,11 +655,7 @@ impl ProjectionRuntimeIndex {
   }
 
   /// Returns `(rebuild_required, table_ids_to_refresh_post_apply)`.
-  fn update_for_patches(
-    &mut self,
-    projection: &DocumentProjection,
-    patches: &[ProjectionPatch],
-  ) -> (bool, Vec<flowstate_document::BlockId>) {
+  fn update_for_patches(&mut self, projection: &DocumentProjection, patches: &[ProjectionPatch]) -> (bool, Vec<flowstate_document::BlockId>) {
     // §24: resolved cursor offsets shift whenever the projection's positions
     // change, so invalidate the memoized cursor cache on every incremental
     // update. (Full rebuilds construct a fresh index, which starts empty.)
@@ -750,7 +757,10 @@ impl ProjectionRuntimeIndex {
     // groups per paragraph), so each position's final shift is the prefix sum
     // of the deltas of paragraphs strictly before it — same result as the
     // sequential per-patch loops this replaces.
-    let mut text_deltas: Vec<(usize, isize)> = text_deltas.into_iter().filter(|(_, delta)| *delta != 0).collect();
+    let mut text_deltas: Vec<(usize, isize)> = text_deltas
+      .into_iter()
+      .filter(|(_, delta)| *delta != 0)
+      .collect();
     if text_deltas.is_empty() && structural.is_none() {
       return (false, table_refresh);
     }
@@ -845,7 +855,10 @@ impl ProjectionRuntimeIndex {
         if shift != 0 {
           span.unicode_start = span.unicode_start.saturating_add_signed(shift);
         }
-        if let Some(own_delta) = span.paragraph.and_then(|paragraph_ix| delta_by_paragraph.get(&paragraph_ix)) {
+        if let Some(own_delta) = span
+          .paragraph
+          .and_then(|paragraph_ix| delta_by_paragraph.get(&paragraph_ix))
+        {
           span.unicode_len = span.unicode_len.saturating_add_signed(*own_delta);
         }
       }
@@ -878,7 +891,9 @@ impl ProjectionRuntimeIndex {
         continue;
       };
       if let Some(Block::Table(table)) = projection.blocks.get(row) {
-        self.table_cells_by_block.insert(*id, table_index_entry(table));
+        self
+          .table_cells_by_block
+          .insert(*id, table_index_entry(table));
       }
     }
     self.asset_refs_by_id.clear();
@@ -886,7 +901,11 @@ impl ProjectionRuntimeIndex {
       if let Block::Image(image) = block
         && let Some(block_id) = projection.ids.block_ids.get(block_ix)
       {
-        self.asset_refs_by_id.entry(image.asset_id).or_default().push(*block_id);
+        self
+          .asset_refs_by_id
+          .entry(image.asset_id)
+          .or_default()
+          .push(*block_id);
       }
     }
   }
@@ -897,15 +916,36 @@ impl ProjectionRuntimeIndex {
   #[cfg(debug_assertions)]
   fn debug_assert_matches_fresh(&self, projection: &DocumentProjection) {
     let fresh = Self::from_projection(projection);
-    debug_assert_eq!(self.paragraph_body_unicode_starts, fresh.paragraph_body_unicode_starts, "A10.3 splice: paragraph starts diverged");
+    debug_assert_eq!(
+      self.paragraph_body_unicode_starts, fresh.paragraph_body_unicode_starts,
+      "A10.3 splice: paragraph starts diverged"
+    );
     debug_assert_eq!(self.body_unicode_end, fresh.body_unicode_end, "A10.3 splice: body end diverged");
-    debug_assert_eq!(self.paragraph_boundary_positions, fresh.paragraph_boundary_positions, "A10.3 splice: boundaries diverged");
-    debug_assert_eq!(self.object_placeholder_positions, fresh.object_placeholder_positions, "A10.3 splice: object positions diverged");
-    debug_assert_eq!(self.paragraph_metadata_by_id, fresh.paragraph_metadata_by_id, "A10.3 splice: paragraph id index diverged");
+    debug_assert_eq!(
+      self.paragraph_boundary_positions, fresh.paragraph_boundary_positions,
+      "A10.3 splice: boundaries diverged"
+    );
+    debug_assert_eq!(
+      self.object_placeholder_positions, fresh.object_placeholder_positions,
+      "A10.3 splice: object positions diverged"
+    );
+    debug_assert_eq!(
+      self.paragraph_metadata_by_id, fresh.paragraph_metadata_by_id,
+      "A10.3 splice: paragraph id index diverged"
+    );
     debug_assert_eq!(self.block_anchor_by_id, fresh.block_anchor_by_id, "A10.3 splice: block id index diverged");
-    debug_assert_eq!(self.table_cells_by_block, fresh.table_cells_by_block, "A10.3 splice: table index diverged");
-    debug_assert_eq!(self.style_runs_by_paragraph, fresh.style_runs_by_paragraph, "A10.3 splice: style intervals diverged");
-    debug_assert_eq!(self.section_anchor_by_id, fresh.section_anchor_by_id, "A10.3 splice: section anchors diverged");
+    debug_assert_eq!(
+      self.table_cells_by_block, fresh.table_cells_by_block,
+      "A10.3 splice: table index diverged"
+    );
+    debug_assert_eq!(
+      self.style_runs_by_paragraph, fresh.style_runs_by_paragraph,
+      "A10.3 splice: style intervals diverged"
+    );
+    debug_assert_eq!(
+      self.section_anchor_by_id, fresh.section_anchor_by_id,
+      "A10.3 splice: section anchors diverged"
+    );
     debug_assert_eq!(self.asset_refs_by_id, fresh.asset_refs_by_id, "A10.3 splice: asset refs diverged");
     debug_assert_eq!(self.search_unit_spans, fresh.search_unit_spans, "A10.3 splice: search spans diverged");
   }
@@ -939,13 +979,16 @@ impl ProjectionRuntimeIndex {
         if blocks.len() > SPLICE_MAX_ROWS || blocks.is_empty() {
           return false;
         }
-        let mut inserted: Vec<(flowstate_document::BlockId, ParagraphId, usize, Vec<StyleInterval>)> =
-          Vec::with_capacity(blocks.len());
+        let mut inserted: Vec<(flowstate_document::BlockId, ParagraphId, usize, Vec<StyleInterval>)> = Vec::with_capacity(blocks.len());
         for block in blocks {
           let (InputBlock::Paragraph(paragraph), Some(paragraph_id)) = (&block.block, block.paragraph_id) else {
             return false;
           };
-          let char_count: usize = paragraph.runs.iter().map(|run| run.text.chars().count()).sum();
+          let char_count: usize = paragraph
+            .runs
+            .iter()
+            .map(|run| run.text.chars().count())
+            .sum();
           let mut intervals = Vec::with_capacity(paragraph.runs.len());
           let mut start = 0usize;
           for run in &paragraph.runs {
@@ -990,11 +1033,15 @@ impl ProjectionRuntimeIndex {
         }
         let shift = acc as isize;
         let k = inserted.len();
-        self.paragraph_body_unicode_starts.splice(paragraph_at..paragraph_at, new_starts.iter().copied());
+        self
+          .paragraph_body_unicode_starts
+          .splice(paragraph_at..paragraph_at, new_starts.iter().copied());
         for start in &mut self.paragraph_body_unicode_starts[paragraph_at + k..] {
           *start = start.saturating_add_signed(shift);
         }
-        self.paragraph_boundary_positions.splice(paragraph_at..paragraph_at, new_boundaries.iter().copied());
+        self
+          .paragraph_boundary_positions
+          .splice(paragraph_at..paragraph_at, new_boundaries.iter().copied());
         for boundary in &mut self.paragraph_boundary_positions[paragraph_at + k..] {
           *boundary = boundary.saturating_add_signed(shift);
         }
@@ -1005,10 +1052,18 @@ impl ProjectionRuntimeIndex {
         }
         // Suffix re-index: ids after the splice point move by k (paragraphs)
         // and k rows (blocks). O(suffix) hash updates — no rope work.
-        for (offset, id) in projection.ids.paragraph_ids[paragraph_at.min(projection.ids.paragraph_ids.len())..].iter().enumerate() {
-          self.paragraph_metadata_by_id.insert(*id, paragraph_at + k + offset);
+        for (offset, id) in projection.ids.paragraph_ids[paragraph_at.min(projection.ids.paragraph_ids.len())..]
+          .iter()
+          .enumerate()
+        {
+          self
+            .paragraph_metadata_by_id
+            .insert(*id, paragraph_at + k + offset);
         }
-        for (offset, id) in projection.ids.block_ids[row.min(projection.ids.block_ids.len())..].iter().enumerate() {
+        for (offset, id) in projection.ids.block_ids[row.min(projection.ids.block_ids.len())..]
+          .iter()
+          .enumerate()
+        {
           self.block_anchor_by_id.insert(*id, row + k + offset);
         }
         for ix in (paragraph_at..old_paragraph_count).rev() {
@@ -1024,9 +1079,13 @@ impl ProjectionRuntimeIndex {
           }
         }
         for (i, (block_id, paragraph_id, char_count, intervals)) in inserted.into_iter().enumerate() {
-          self.paragraph_metadata_by_id.insert(paragraph_id, paragraph_at + i);
+          self
+            .paragraph_metadata_by_id
+            .insert(paragraph_id, paragraph_at + i);
           self.block_anchor_by_id.insert(block_id, row + i);
-          self.style_runs_by_paragraph.insert(paragraph_at + i, intervals);
+          self
+            .style_runs_by_paragraph
+            .insert(paragraph_at + i, intervals);
           self.search_unit_spans.insert(
             row + i,
             SearchUnitSpan {
@@ -1079,11 +1138,15 @@ impl ProjectionRuntimeIndex {
           None => self.body_unicode_end.saturating_add(1),
         };
         let shift = (upper - lower) as isize;
-        self.paragraph_body_unicode_starts.drain(paragraph_at..paragraph_at + k);
+        self
+          .paragraph_body_unicode_starts
+          .drain(paragraph_at..paragraph_at + k);
         for start in &mut self.paragraph_body_unicode_starts[paragraph_at..] {
           *start = start.saturating_add_signed(-shift);
         }
-        self.paragraph_boundary_positions.drain(paragraph_at..paragraph_at + k);
+        self
+          .paragraph_boundary_positions
+          .drain(paragraph_at..paragraph_at + k);
         for boundary in &mut self.paragraph_boundary_positions[paragraph_at..] {
           *boundary = boundary.saturating_add_signed(-shift);
         }
@@ -1095,13 +1158,21 @@ impl ProjectionRuntimeIndex {
         for id in &projection.ids.paragraph_ids[paragraph_at..(paragraph_at + k).min(projection.ids.paragraph_ids.len())] {
           self.paragraph_metadata_by_id.remove(id);
         }
-        for (offset, id) in projection.ids.paragraph_ids[(paragraph_at + k).min(projection.ids.paragraph_ids.len())..].iter().enumerate() {
-          self.paragraph_metadata_by_id.insert(*id, paragraph_at + offset);
+        for (offset, id) in projection.ids.paragraph_ids[(paragraph_at + k).min(projection.ids.paragraph_ids.len())..]
+          .iter()
+          .enumerate()
+        {
+          self
+            .paragraph_metadata_by_id
+            .insert(*id, paragraph_at + offset);
         }
         for id in block_ids {
           self.block_anchor_by_id.remove(id);
         }
-        for (offset, id) in projection.ids.block_ids[(row + k).min(projection.ids.block_ids.len())..].iter().enumerate() {
+        for (offset, id) in projection.ids.block_ids[(row + k).min(projection.ids.block_ids.len())..]
+          .iter()
+          .enumerate()
+        {
           self.block_anchor_by_id.insert(*id, row + offset);
         }
         for ix in paragraph_at..paragraph_at + k {
@@ -1112,7 +1183,9 @@ impl ProjectionRuntimeIndex {
             self.style_runs_by_paragraph.insert(ix - k, intervals);
           }
         }
-        self.search_unit_spans.drain(row..(row + k).min(self.search_unit_spans.len()));
+        self
+          .search_unit_spans
+          .drain(row..(row + k).min(self.search_unit_spans.len()));
         let span_from = row.min(self.search_unit_spans.len());
         for span in &mut self.search_unit_spans[span_from..] {
           span.unicode_start = span.unicode_start.saturating_add_signed(-shift);
@@ -1370,7 +1443,10 @@ impl CrdtRuntime {
       if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
         eprintln!(
           "  subscription: origin {} trigger {} epoch {} changes {}",
-          summary.origin, summary.triggered_by, summary.epoch, summary.changes.len()
+          summary.origin,
+          summary.triggered_by,
+          summary.epoch,
+          summary.changes.len()
         );
       }
       if let Ok(mut events) = subscription_events_for_callback.lock() {
@@ -1484,7 +1560,10 @@ impl CrdtRuntime {
   /// pre-commit tap since this core was constructed.
   #[must_use]
   pub fn commit_metrics(&self) -> (u64, u64) {
-    (self.commits_total.load(AtomicOrdering::Relaxed), self.ops_committed_total.load(AtomicOrdering::Relaxed))
+    (
+      self.commits_total.load(AtomicOrdering::Relaxed),
+      self.ops_committed_total.load(AtomicOrdering::Relaxed),
+    )
   }
 
   // ---- Loro-first local-write core surface (spec §4/§6) --------------------
@@ -1563,8 +1642,12 @@ impl CrdtRuntime {
     // object placeholder (any of those changes the projection's ROW set, which
     // pre-recorded patches index into).
     let structure_neutral = !drained.net.inserts_structure()
-      && !drained.net.deletes_any_position(self.projection_index.boundary_positions())
-      && !drained.net.deletes_any_position(self.projection_index.object_positions());
+      && !drained
+        .net
+        .deletes_any_position(self.projection_index.boundary_positions())
+      && !drained
+        .net
+        .deletes_any_position(self.projection_index.object_positions());
     let net = drained.net.clone();
     if !crate::local_write::recorded_inverse::rebase_recorded_inverse_through_remote(self, &net, &body_ranges_post, structure_neutral) {
       tracing::debug!("recorded-inverse stacks cleared by remote import (rebase declined)");
@@ -1603,7 +1686,11 @@ impl CrdtRuntime {
       return Ok(());
     }
     let detail = first_projection_divergence(&self.projection, &full);
-    tracing::error!(class, detail, "audit-mismatch: patch-applied projection != full rebuild; installing snapshot repair");
+    tracing::error!(
+      class,
+      detail,
+      "audit-mismatch: patch-applied projection != full rebuild; installing snapshot repair"
+    );
     if let Ok(mut counts) = self.projection_fallback_counts.lock() {
       *counts.entry("audit-mismatch".to_string()).or_default() += 1;
     }
@@ -1662,12 +1749,7 @@ impl CrdtRuntime {
       return;
     }
     let frontier_before_meta = self.projection.frontier.clone();
-    match self.events_after_local_change(
-      from_frontier,
-      from_vv,
-      ProjectionInvalidation::default(),
-      false,
-    ) {
+    match self.events_after_local_change(from_frontier, from_vv, ProjectionInvalidation::default(), false) {
       Ok(events) => self.queue_publish(events),
       Err(error) => tracing::warn!(%error, "publishing deferred author-identity update failed; anti-entropy recovers it"),
     }
@@ -1687,7 +1769,6 @@ impl CrdtRuntime {
     let event = self.projection_patched_event(empty, invalidation);
     self.queue_publish(vec![event]);
   }
-
 
   pub fn set_pending_undo_selection(&mut self, selection: Option<UndoSelectionSnapshot>) -> Result<()> {
     let pending_selection = selection
@@ -1765,6 +1846,8 @@ impl CrdtRuntime {
   }
 
   pub fn revisions(&self) -> Vec<RuntimeRevisionInfo> {
+    let root = flowstate_document::loro_schema::root_map(&self.doc);
+    let users = root.get(flowstate_document::loro_schema::USERS_BY_ID);
     self
       .package
       .as_ref()
@@ -1773,15 +1856,206 @@ impl CrdtRuntime {
           .revisions
           .iter()
           .rev()
-          .map(|revision| RuntimeRevisionInfo {
-            revision_id: revision.revision_id,
-            title: revision.title.clone(),
-            summary: revision.summary.clone(),
-            created_at_unix_secs: revision.created_at_unix_secs,
+          .map(|revision| {
+            let author_display_name = revision.author_user_id.and_then(|user_id| {
+              let ValueOrContainer::Container(Container::Map(users)) = users.as_ref()? else {
+                return None;
+              };
+              let Some(ValueOrContainer::Container(Container::Map(user))) = users.get(&user_id.to_string()) else {
+                return None;
+              };
+              map_string_opt(&user, "display_name")
+            });
+            RuntimeRevisionInfo {
+              revision_id: revision.revision_id,
+              title: revision.title.clone(),
+              summary: revision.summary.clone(),
+              created_at_unix_secs: revision.created_at_unix_secs,
+              author_user_id: revision.author_user_id,
+              author_display_name,
+              replica_id: revision.replica_id,
+            }
           })
           .collect()
       })
       .unwrap_or_default()
+  }
+
+  /// Materialize durable comment threads and resolve their CRDT anchors
+  /// against the current document. A deleted anchor remains discoverable with
+  /// `anchor: None` and its quoted-text fallback intact.
+  pub fn comments(&self) -> Vec<RuntimeCommentThread> {
+    let root = flowstate_document::loro_schema::root_map(&self.doc);
+    let Some(ValueOrContainer::Container(Container::Map(comments))) = root.get(flowstate_document::COMMENTS_BY_ID) else {
+      return Vec::new();
+    };
+    let mut threads = Vec::new();
+    comments.for_each(|key, value| {
+      let ValueOrContainer::Container(Container::Map(thread)) = value else {
+        return;
+      };
+      let Some(comment_id) = key.parse::<u128>().ok() else {
+        return;
+      };
+      let head_cursor = map_binary_opt(&thread, "head_cursor");
+      let anchor_cursor = map_binary_opt(&thread, "anchor_cursor");
+      let anchor = head_cursor
+        .zip(anchor_cursor)
+        .and_then(|(head, anchor)| self.resolve_selection_anchor(&head, &anchor))
+        .map(|(head, anchor)| if anchor <= head { (anchor, head) } else { (head, anchor) })
+        .filter(|(start, end)| start != end);
+      let mut messages = Vec::new();
+      if let Some(ValueOrContainer::Container(Container::Map(message_map))) = thread.get("messages_by_id") {
+        message_map.for_each(|message_key, value| {
+          let ValueOrContainer::Container(Container::Map(message)) = value else {
+            return;
+          };
+          let Some(message_id) = message_key.parse().ok() else {
+            return;
+          };
+          let Some(author_user_id) = map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) else {
+            return;
+          };
+          messages.push(RuntimeCommentMessage {
+            message_id,
+            author_user_id,
+            author_display_name: map_string_opt(&message, "author_display_name").unwrap_or_else(|| "Unknown author".into()),
+            body: map_string_opt(&message, "body").unwrap_or_default(),
+            created_at_unix_secs: map_i64_opt(&message, "created_at").unwrap_or_default(),
+            updated_at_unix_secs: map_i64_opt(&message, "updated_at").unwrap_or_default(),
+          });
+        });
+      }
+      messages.sort_by_key(|message| (message.created_at_unix_secs, message.message_id));
+      threads.push(RuntimeCommentThread {
+        comment_id,
+        quoted_text: map_string_opt(&thread, "quoted_text").unwrap_or_default(),
+        resolved: map_bool_opt(&thread, "resolved").unwrap_or(false),
+        created_at_unix_secs: map_i64_opt(&thread, "created_at").unwrap_or_default(),
+        updated_at_unix_secs: map_i64_opt(&thread, "updated_at").unwrap_or_default(),
+        anchor,
+        messages,
+      });
+    });
+    threads.sort_by_key(|thread| (thread.resolved, thread.created_at_unix_secs, thread.comment_id));
+    threads
+  }
+
+  pub fn create_comment(&mut self, selection: &EditorSelection, body: &str, author_user_id: u128, author_display_name: &str) -> Result<u128> {
+    let body = validated_comment_body(body)?;
+    anyhow::ensure!(selection.anchor != selection.head, "Select text before adding a comment");
+    self.register_pending_author_identity();
+    let (head_cursor, anchor_cursor) = self
+      .encode_selection_anchor(selection)
+      .context("The selected text cannot be anchored in this document")?;
+    let start = gpui_flowtext::global_byte(&self.projection, selection.anchor.min(selection.head));
+    let end = gpui_flowtext::global_byte(&self.projection, selection.anchor.max(selection.head));
+    let quoted_text = gpui_flowtext::document_text_slice(&self.projection, start..end);
+    let comment_id = Uuid::new_v4().as_u128();
+    let message_id = Uuid::new_v4().as_u128();
+    let now = unix_time_secs();
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    flowstate_document::touch_document_metadata(&self.doc)?;
+    let comments = flowstate_document::loro_schema::root_map(&self.doc).ensure_mergeable_map(flowstate_document::COMMENTS_BY_ID)?;
+    let thread = comments.ensure_mergeable_map(&comment_id.to_string())?;
+    thread.insert("id", comment_id.to_string())?;
+    thread.insert("head_cursor", LoroValue::Binary(head_cursor.into()))?;
+    thread.insert("anchor_cursor", LoroValue::Binary(anchor_cursor.into()))?;
+    thread.insert("quoted_text", quoted_text)?;
+    thread.insert("resolved", false)?;
+    thread.insert("created_at", now)?;
+    thread.insert("updated_at", now)?;
+    let messages = thread.ensure_mergeable_map("messages_by_id")?;
+    write_comment_message(&messages, message_id, body, author_user_id, author_display_name, now)?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-create")?;
+    Ok(comment_id)
+  }
+
+  pub fn reply_to_comment(&mut self, comment_id: u128, body: &str, author_user_id: u128, author_display_name: &str) -> Result<u128> {
+    let body = validated_comment_body(body)?;
+    self.register_pending_author_identity();
+    let message_id = Uuid::new_v4().as_u128();
+    let now = unix_time_secs();
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let thread = existing_comment_thread(&self.doc, comment_id)?;
+    let messages = thread.ensure_mergeable_map("messages_by_id")?;
+    write_comment_message(&messages, message_id, body, author_user_id, author_display_name, now)?;
+    thread.insert("updated_at", now)?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-reply")?;
+    Ok(message_id)
+  }
+
+  pub fn set_comment_resolved(&mut self, comment_id: u128, resolved: bool) -> Result<()> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let thread = existing_comment_thread(&self.doc, comment_id)?;
+    thread.insert("resolved", resolved)?;
+    thread.insert("updated_at", unix_time_secs())?;
+    self.finish_comment_mutation(from_frontier, from_vv, if resolved { "comment-resolve" } else { "comment-reopen" })
+  }
+
+  pub fn edit_comment_message(&mut self, comment_id: u128, message_id: u128, body: &str, actor_user_id: u128) -> Result<()> {
+    let body = validated_comment_body(body)?;
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let thread = existing_comment_thread(&self.doc, comment_id)?;
+    let messages = existing_child_map(&thread, "messages_by_id")?;
+    let message = existing_child_map(&messages, &message_id.to_string())?;
+    anyhow::ensure!(
+      map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) == Some(actor_user_id),
+      "Only the message author can edit it"
+    );
+    message.insert("body", body)?;
+    message.insert("updated_at", unix_time_secs())?;
+    thread.insert("updated_at", unix_time_secs())?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-edit")
+  }
+
+  pub fn delete_comment(&mut self, comment_id: u128, actor_user_id: u128) -> Result<()> {
+    let from_frontier = self.doc.state_frontiers();
+    let from_vv = self.doc.state_vv();
+    let root = flowstate_document::loro_schema::root_map(&self.doc);
+    let comments = existing_child_map(&root, flowstate_document::COMMENTS_BY_ID)?;
+    let thread = existing_child_map(&comments, &comment_id.to_string())?;
+    let messages = existing_child_map(&thread, "messages_by_id")?;
+    let first_author = messages
+      .values()
+      .filter_map(|value| match value {
+        ValueOrContainer::Container(Container::Map(message)) => Some(message),
+        _ => None,
+      })
+      .min_by_key(|message| map_i64_opt(message, "created_at").unwrap_or_default())
+      .and_then(|message| map_string_opt(&message, "author_user_id"))
+      .and_then(|id| id.parse::<u128>().ok());
+    anyhow::ensure!(first_author == Some(actor_user_id), "Only the thread author can delete it");
+    comments.delete(&comment_id.to_string())?;
+    self.finish_comment_mutation(from_frontier, from_vv, "comment-delete")
+  }
+
+  fn finish_comment_mutation(&mut self, from_frontier: Frontiers, from_vv: VersionVector, message: &str) -> Result<()> {
+    flowstate_document::touch_document_metadata(&self.doc)?;
+    self.doc.set_next_commit_origin("comment");
+    self.doc.set_next_commit_message(message);
+    self.doc.commit();
+    let frontier_before = self.projection.frontier.clone();
+    let mut invalidation = ProjectionInvalidation::default();
+    self.merge_subscription_invalidation(&mut invalidation);
+    let events = self.events_after_local_change(from_frontier, from_vv, invalidation, false)?;
+    self.queue_publish(events);
+    crate::local_write::recorded_inverse::rearm_recorded_inverse_frontier(self);
+    self.projection.frontier = self.doc.state_frontiers().encode();
+    let empty: Arc<[ProjectionPatch]> = Arc::from(Vec::new());
+    let _ = self.projection_patched_event(
+      empty,
+      ProjectionInvalidation {
+        frontier_before,
+        frontier_after: self.projection.frontier.clone(),
+        ..Default::default()
+      },
+    );
+    Ok(())
   }
 
   /// §caret-anchor: re-anchor an editor selection across a remote import using
@@ -1816,11 +2090,17 @@ impl CrdtRuntime {
       let cursor = cursor_for_boundary(&old_text, old_unicode, affinity)?;
       let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
       let new_unicode = resolved_cursor_boundary_unicode(&cur_text, &resolved)?;
-      self.projection_index.offset_for_body_unicode(&self.projection, new_unicode)
+      self
+        .projection_index
+        .offset_for_body_unicode(&self.projection, new_unicode)
     };
     let head = rebase(selection.head, SelectionAffinity::from(selection.head_affinity))?;
     let anchor = rebase(selection.anchor, SelectionAffinity::from(selection.anchor_affinity))?;
-    Some(EditorSelection { anchor, head, ..selection.clone() })
+    Some(EditorSelection {
+      anchor,
+      head,
+      ..selection.clone()
+    })
   }
 
   /// §caret-anchor FAST path: encode a selection's endpoints as Loro cursors
@@ -1848,7 +2128,10 @@ impl CrdtRuntime {
   /// offsets in the CURRENT canonical state. `None` if either endpoint no longer
   /// resolves (e.g. its container was removed) so the caller can fall back.
   pub fn resolve_selection_anchor(&self, head_cursor: &[u8], anchor_cursor: &[u8]) -> Option<(DocumentOffset, DocumentOffset)> {
-    Some((self.resolve_body_cursor_offset(head_cursor)?, self.resolve_body_cursor_offset(anchor_cursor)?))
+    Some((
+      self.resolve_body_cursor_offset(head_cursor)?,
+      self.resolve_body_cursor_offset(anchor_cursor)?,
+    ))
   }
 
   fn resolve_body_cursor_offset(&self, encoded: &[u8]) -> Option<DocumentOffset> {
@@ -1859,7 +2142,9 @@ impl CrdtRuntime {
     }
     let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
     let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
-    self.projection_index.offset_for_body_unicode(&self.projection, unicode)
+    self
+      .projection_index
+      .offset_for_body_unicode(&self.projection, unicode)
   }
 
   pub fn presence_selection(&self, selection: &EditorSelection) -> Option<PresenceSelection> {
@@ -1889,7 +2174,9 @@ impl CrdtRuntime {
       }
       let resolved = self.doc.get_cursor_pos(&cursor).ok()?;
       let unicode = resolved_cursor_boundary_unicode(&text, &resolved)?;
-      self.projection_index.offset_for_body_unicode(&self.projection, unicode)
+      self
+        .projection_index
+        .offset_for_body_unicode(&self.projection, unicode)
     };
     let mut carets = Vec::with_capacity(requests.len());
     let mut selections = Vec::new();
@@ -1959,7 +2246,9 @@ impl CrdtRuntime {
         .ensure_mergeable_map(&asset_id)
         .context("opening canonical asset record")?;
       let hash = blake3::hash(&record.bytes);
-      asset_map.insert("asset_id", asset_id.as_str()).context("writing asset id")?;
+      asset_map
+        .insert("asset_id", asset_id.as_str())
+        .context("writing asset id")?;
       asset_map
         .insert("content_hash", hash.to_hex().as_str())
         .context("writing asset content hash")?;
@@ -1988,7 +2277,10 @@ impl CrdtRuntime {
     let mut invalidation = ProjectionInvalidation {
       frontier_before: from_frontier.encode(),
       frontier_after: self.doc.state_frontiers().encode(),
-      changed_assets: records.iter().map(|record| record.id.0.to_string()).collect(),
+      changed_assets: records
+        .iter()
+        .map(|record| record.id.0.to_string())
+        .collect(),
       ..ProjectionInvalidation::default()
     };
     self.merge_subscription_invalidation(&mut invalidation);
@@ -2017,7 +2309,10 @@ impl CrdtRuntime {
       // (the frontier check would catch it; this frees the capture eagerly).
       self.clear_recorded_inverse();
     }
-    #[allow(clippy::needless_late_init, reason = "assigned across match arms that interleave with diverging early-return arms")]
+    #[allow(
+      clippy::needless_late_init,
+      reason = "assigned across match arms that interleave with diverging early-return arms"
+    )]
     let projection_invalidation;
     match command {
       SemanticCommand::InsertText { unicode_index, text, styles } => {
@@ -2167,9 +2462,10 @@ impl CrdtRuntime {
         // §act-three B.1: replay the recorded inverse when the lineage checks
         // hold — no checkout, no diff calc, no rebuild. Falls through to the
         // UndoManager slow path on any mismatch.
-        if let Some(events) =
-          hotpath::measure_block!("recorded_inverse_undo", crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Undo)?)
-        {
+        if let Some(events) = hotpath::measure_block!(
+          "recorded_inverse_undo",
+          crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Undo)?
+        ) {
           return Ok(events);
         }
         let applied = hotpath::measure_block!("loro_undo_manager_undo", self.undo.undo().context("applying Loro undo")?);
@@ -2177,7 +2473,11 @@ impl CrdtRuntime {
         // introduced local-peer ops (remote-origin ops are excluded from undo).
         if fidelity::enabled() {
           fidelity::event(FidelityClass::Undo, "undo", || {
-            format!("applied={applied} frontier {:?} -> {:?}", from_frontier.encode(), self.doc.state_frontiers().encode())
+            format!(
+              "applied={applied} frontier {:?} -> {:?}",
+              from_frontier.encode(),
+              self.doc.state_frontiers().encode()
+            )
           });
           if applied {
             self.fidelity_check_undo_local_only("undo", &from_vv);
@@ -2195,9 +2495,10 @@ impl CrdtRuntime {
       },
       SemanticCommand::Redo => {
         // §act-three B.1: symmetric fast path — replays the recorded delete.
-        if let Some(events) =
-          hotpath::measure_block!("recorded_inverse_redo", crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Redo)?)
-        {
+        if let Some(events) = hotpath::measure_block!(
+          "recorded_inverse_redo",
+          crate::local_write::recorded_inverse::try_fast_step(self, loro::UndoOrRedo::Redo)?
+        ) {
           return Ok(events);
         }
         let applied = hotpath::measure_block!("loro_undo_manager_redo", self.undo.redo().context("applying Loro redo")?);
@@ -2205,7 +2506,11 @@ impl CrdtRuntime {
         // introduced local-peer ops (remote-origin ops are excluded from redo).
         if fidelity::enabled() {
           fidelity::event(FidelityClass::Undo, "redo", || {
-            format!("applied={applied} frontier {:?} -> {:?}", from_frontier.encode(), self.doc.state_frontiers().encode())
+            format!(
+              "applied={applied} frontier {:?} -> {:?}",
+              from_frontier.encode(),
+              self.doc.state_frontiers().encode()
+            )
           });
           if applied {
             self.fidelity_check_undo_local_only("redo", &from_vv);
@@ -2340,7 +2645,10 @@ impl CrdtRuntime {
     events: &mut Vec<RuntimeEvent>,
   ) -> Result<()> {
     invalidation.has_remote_origin |= drained.has_remote_origin;
-    debug_assert!(!drained.checkout_seen || invalidation.rebuild_required, "checkout drains must force a rebuild");
+    debug_assert!(
+      !drained.checkout_seen || invalidation.rebuild_required,
+      "checkout drains must force a rebuild"
+    );
     let net = &drained.net;
     let body_neutral = net.is_empty();
     let structural = !body_neutral
@@ -2396,12 +2704,14 @@ impl CrdtRuntime {
         region_paragraphs,
       } = regional;
       let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
-      let touched = self.projection_index.paragraphs_for_changed_ranges(
-        &invalidation.changed_text_ranges,
-        self.projection.paragraphs.len(),
-        &live_starts,
-      );
-      let outside: Vec<usize> = touched.into_iter().filter(|ix| !region_paragraphs.contains(ix)).collect();
+      let touched =
+        self
+          .projection_index
+          .paragraphs_for_changed_ranges(&invalidation.changed_text_ranges, self.projection.paragraphs.len(), &live_starts);
+      let outside: Vec<usize> = touched
+        .into_iter()
+        .filter(|ix| !region_paragraphs.contains(ix))
+        .collect();
       if !outside.is_empty() {
         match paragraph_projection_patches_ranged(&self.projection, &self.doc, &live_starts, outside) {
           Some(extra) => patches.extend(extra),
@@ -2418,7 +2728,10 @@ impl CrdtRuntime {
       // (same derived values).
       if !invalidation.changed_blocks.is_empty()
         || !invalidation.changed_tables.is_empty()
-        || invalidation.changed_flows.iter().any(|flow| flow != ROOT_BODY_FLOW_ID)
+        || invalidation
+          .changed_flows
+          .iter()
+          .any(|flow| flow != ROOT_BODY_FLOW_ID)
       {
         match projection_patch::remote_object_projection_patches_scoped_or_full(&self.projection, &self.doc, &invalidation) {
           Some(extra) => patches.extend(extra),
@@ -2450,18 +2763,19 @@ impl CrdtRuntime {
       // starts shifted through the net delta — O(P + ops) arithmetic, no
       // body scan.
       let live_starts = net.shift_positions(self.projection_index.paragraph_starts());
-      let touched_paragraphs = self.projection_index.paragraphs_for_changed_ranges(
-        &invalidation.changed_text_ranges,
-        self.projection.paragraphs.len(),
-        &live_starts,
-      );
+      let touched_paragraphs =
+        self
+          .projection_index
+          .paragraphs_for_changed_ranges(&invalidation.changed_text_ranges, self.projection.paragraphs.len(), &live_starts);
       let nonstructural = remote_nonstructural_projection_patches(&self.projection, &self.doc, &invalidation, &touched_paragraphs, &live_starts);
       static DERIVE_DEBUG2: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
       if *DERIVE_DEBUG2.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
         eprintln!(
           "  nonstructural: touched={touched_paragraphs:?} patches={:?}",
-          nonstructural.as_ref().map(|patches| patches.iter().map(|p| format!("{p:?}").chars().take(90).collect::<String>()).collect::<Vec<_>>()
-          )
+          nonstructural.as_ref().map(|patches| patches
+            .iter()
+            .map(|p| format!("{p:?}").chars().take(90).collect::<String>())
+            .collect::<Vec<_>>())
         );
       }
       if let Some(patches) = nonstructural {
@@ -2489,7 +2803,10 @@ impl CrdtRuntime {
     if drained.checkout_seen
       || !invalidation.changed_sections.is_empty()
       || !invalidation.changed_tables.is_empty()
-      || invalidation.changed_flows.iter().any(|flow| flow != ROOT_BODY_FLOW_ID)
+      || invalidation
+        .changed_flows
+        .iter()
+        .any(|flow| flow != ROOT_BODY_FLOW_ID)
       || matches!(
         invalidation.fallback_reason,
         Some("checkout_trigger_projection_rebuild" | "unknown_loro_subscription_diff")
@@ -2531,7 +2848,13 @@ impl CrdtRuntime {
     let region_debug = *REGION_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some());
     let (region_lo, region_sentinel) = match (0..blk_lo).rev().find(|ix| is_paragraph_row(*ix)) {
       Some(row) => {
-        let id = self.projection.ids.paragraph_ids.get(paragraph_ix_of_row(row)).copied().ok_or("edge-paragraph-id-missing")?;
+        let id = self
+          .projection
+          .ids
+          .paragraph_ids
+          .get(paragraph_ix_of_row(row))
+          .copied()
+          .ok_or("edge-paragraph-id-missing")?;
         let start = paragraph_body_start_in_loro(&self.doc, id);
         if start.is_none() && region_debug {
           eprintln!("derive[region]: start unresolved — predecessor row {row} paragraph id {id:?} has no resolvable record");
@@ -2543,7 +2866,13 @@ impl CrdtRuntime {
     };
     let (region_hi, region_end) = match ((blk_hi + 1)..self.projection.blocks.len()).find(|ix| is_paragraph_row(*ix)) {
       Some(row) => {
-        let id = self.projection.ids.paragraph_ids.get(paragraph_ix_of_row(row)).copied().ok_or("edge-paragraph-id-missing")?;
+        let id = self
+          .projection
+          .ids
+          .paragraph_ids
+          .get(paragraph_ix_of_row(row))
+          .copied()
+          .ok_or("edge-paragraph-id-missing")?;
         let start = paragraph_body_start_in_loro(&self.doc, id).ok_or("region-end-unresolved")?;
         (row, start.checked_sub(1).ok_or("region-end-underflow")?)
       },
@@ -2573,10 +2902,22 @@ impl CrdtRuntime {
     let mut object_candidates: Vec<LoroMap> = Vec::new();
     let mut paragraph_pointer = paragraph_ix_of_row(region_lo);
     for row in region_lo..region_hi {
-      let block_id = self.projection.ids.block_ids.get(row).copied().ok_or("row-block-id-missing")?;
+      let block_id = self
+        .projection
+        .ids
+        .block_ids
+        .get(row)
+        .copied()
+        .ok_or("row-block-id-missing")?;
       match self.projection.blocks.get(row).ok_or("row-missing")? {
         flowstate_document::Block::Paragraph(_) => {
-          let id = self.projection.ids.paragraph_ids.get(paragraph_pointer).copied().ok_or("row-paragraph-id-missing")?;
+          let id = self
+            .projection
+            .ids
+            .paragraph_ids
+            .get(paragraph_pointer)
+            .copied()
+            .ok_or("row-paragraph-id-missing")?;
           paragraph_pointer += 1;
           // A missing record is not a bail: the boundary fabricates the same
           // stable id the repair writer mints, and defect repair converges it
@@ -2584,7 +2925,12 @@ impl CrdtRuntime {
           if let Some(candidate) = probe(&paragraphs_registry, format!("paragraph.{}", id.0), ROOT_FIRST_PARAGRAPH_ID, id.0) {
             paragraph_candidates.push(candidate);
           }
-          if let Some(candidate) = probe(&blocks_registry, format!("paragraph_block.{}", block_id.0), MAIN_BODY_BLOCK_ID, block_id.0) {
+          if let Some(candidate) = probe(
+            &blocks_registry,
+            format!("paragraph_block.{}", block_id.0),
+            MAIN_BODY_BLOCK_ID,
+            block_id.0,
+          ) {
             pblock_candidates.push(candidate);
           }
         },
@@ -2621,7 +2967,9 @@ impl CrdtRuntime {
     let decode_cursor_id = |record: &LoroMap, field: &str| -> Option<ID> {
       let bytes = map_binary_opt(record, field)?;
       let cursor = Cursor::decode(&bytes).ok()?;
-      (cursor.container == container).then_some(cursor.id).flatten()
+      (cursor.container == container)
+        .then_some(cursor.id)
+        .flatten()
     };
     let mut query_ids: Vec<ID> = Vec::new();
     let paragraph_cursor_ids: Vec<(Option<ID>, Option<ID>)> = paragraph_candidates
@@ -2647,7 +2995,12 @@ impl CrdtRuntime {
     }
     let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
     if !query_ids.is_empty() {
-      for (id, pos) in query_ids.iter().copied().zip(self.doc.inner().query_text_id_positions(&container, &query_ids)) {
+      for (id, pos) in query_ids.iter().copied().zip(
+        self
+          .doc
+          .inner()
+          .query_text_id_positions(&container, &query_ids),
+      ) {
         if let Some(pos) = pos {
           pos_by_id.insert(id, pos);
         }
@@ -2716,7 +3069,9 @@ impl CrdtRuntime {
     // (cursor-resolved, lexicographically smaller key) already claimed the
     // boundary in the maps above, so this only fills genuine holes.
     {
-      let region_text = body.slice(region_sentinel, region_end).map_err(|_| "region-slice-failed")?;
+      let region_text = body
+        .slice(region_sentinel, region_end)
+        .map_err(|_| "region-slice-failed")?;
       for (offset, ch) in region_text.chars().enumerate() {
         if ch != '\n' {
           continue;
@@ -2893,7 +3248,11 @@ impl CrdtRuntime {
       if import_applied_changes {
         self.clear_recorded_inverse();
       }
-      let mut invalidation = ProjectionInvalidation::full_rebuild(frontier_before.clone(), frontier_after.clone(), "remote_update_pending_projection_fallback");
+      let mut invalidation = ProjectionInvalidation::full_rebuild(
+        frontier_before.clone(),
+        frontier_after.clone(),
+        "remote_update_pending_projection_fallback",
+      );
       // Drain the subscription regardless so no stale events linger.
       self.merge_subscription_invalidation(&mut invalidation);
       // §act-five P4: a fully-pending import APPLIED NOTHING — Loro buffered the
@@ -2908,10 +3267,7 @@ impl CrdtRuntime {
     }
     if !below_root_chunks.is_empty() {
       let event = self.absorb_below_root_import(&below_root_chunks)?;
-      replies
-        .last_mut()
-        .expect("chunks is non-empty")
-        .push(event);
+      replies.last_mut().expect("chunks is non-empty").push(event);
     }
     // §act-four §8 fork-and-share: a remote import advances the canonical
     // frontier and forks a new read-model version. Because `blocks`/`paragraphs`
@@ -3019,9 +3375,7 @@ impl CrdtRuntime {
       self.package_journal_prepared = true;
     }
     let merged_frontier = full.state_frontiers().encode();
-    tracing::warn!(
-      "below-root remote history merged into the package; the session must reopen the document to see it"
-    );
+    tracing::warn!("below-root remote history merged into the package; the session must reopen the document to see it");
     fidelity::event(FidelityClass::Persistence, "below-root-absorb", || {
       format!("chunks={} merged_frontier_len={}", chunks.len(), merged_frontier.len())
     });
@@ -3067,7 +3421,11 @@ impl CrdtRuntime {
     ))
   }
 
-  pub(crate) fn projection_patched_event(&mut self, patches: std::sync::Arc<[flowstate_document::ProjectionPatch]>, invalidation: ProjectionInvalidation) -> RuntimeEvent {
+  pub(crate) fn projection_patched_event(
+    &mut self,
+    patches: std::sync::Arc<[flowstate_document::ProjectionPatch]>,
+    invalidation: ProjectionInvalidation,
+  ) -> RuntimeEvent {
     // §fidelity: the single choke point for every incrementally-patched projection
     // emission (local semantic commands + remote non-structural imports). Verify
     // the maintained projection still matches a fresh full rebuild.
@@ -3148,7 +3506,10 @@ impl CrdtRuntime {
       format!("frontier {:?} -> {:?}", before_frontier.encode(), after_frontier.encode())
     });
     fidelity::check(
-      matches!(before_vv.partial_cmp(&after_vv), Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+      matches!(
+        before_vv.partial_cmp(&after_vv),
+        Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)
+      ),
       FidelityClass::Frontier,
       "frontier-regressed",
       || {
@@ -3178,12 +3539,9 @@ impl CrdtRuntime {
         (*peer != local_peer && *counter > before).then_some((*peer, *counter - before))
       })
       .collect();
-    fidelity::check(
-      foreign.is_empty(),
-      FidelityClass::Undo,
-      "remote-origin-op-in-undo",
-      || format!("{op} advanced non-local peers {foreign:?} (local_peer={local_peer}); remote-origin ops must be excluded from undo"),
-    );
+    fidelity::check(foreign.is_empty(), FidelityClass::Undo, "remote-origin-op-in-undo", || {
+      format!("{op} advanced non-local peers {foreign:?} (local_peer={local_peer}); remote-origin ops must be excluded from undo")
+    });
   }
 
   pub fn projection_fallback_stats(&self) -> ProjectionFallbackStats {
@@ -3288,7 +3646,9 @@ impl CrdtRuntime {
       match projection_repair::apply_projection_repair(&self.doc, defect) {
         Ok(true) => applied += 1,
         Ok(false) => {},
-        Err(error) => tracing::error!(%error, stable_key = %defect.stable_key(), class = defect.class(), "applying projection defect repair failed"),
+        Err(error) => {
+          tracing::error!(%error, stable_key = %defect.stable_key(), class = defect.class(), "applying projection defect repair failed")
+        },
       }
     }
     if applied == 0 {
@@ -3336,12 +3696,9 @@ impl CrdtRuntime {
       let remaining = document_from_loro_with_defects(&self.doc)
         .map(|(_, defects)| defects.len())
         .unwrap_or(0);
-      fidelity::check(
-        remaining <= scheduled,
-        FidelityClass::Structure,
-        "repair-not-converging",
-        || format!("repair pass scheduled {scheduled} defect(s) but {remaining} remain after re-projection (cap={PROJECTION_REPAIR_ATTEMPT_CAP})"),
-      );
+      fidelity::check(remaining <= scheduled, FidelityClass::Structure, "repair-not-converging", || {
+        format!("repair pass scheduled {scheduled} defect(s) but {remaining} remain after re-projection (cap={PROJECTION_REPAIR_ATTEMPT_CAP})")
+      });
     }
 
     // Encode the pre-repair frontier before `from_frontier` is consumed by
@@ -3385,9 +3742,8 @@ impl CrdtRuntime {
     let neutral_batch = streamed
       && applied < REPAIR_PRUNE_THRESHOLD
       && actionable.iter().all(|defect| match defect {
-        ProjectionDefect::MissingParagraphMetadata { boundary_unicode, .. } | ProjectionDefect::MissingParagraphBlock { boundary_unicode, .. } => {
-          *boundary_unicode != Some(0)
-        },
+        ProjectionDefect::MissingParagraphMetadata { boundary_unicode, .. }
+        | ProjectionDefect::MissingParagraphBlock { boundary_unicode, .. } => *boundary_unicode != Some(0),
         ProjectionDefect::MissingParagraphStyleMark { .. } => true,
         _ => false,
       });
@@ -3474,8 +3830,7 @@ impl CrdtRuntime {
     let current_assets = self.projection.assets.clone();
     // §P2a: a full rebuild is where malformed canonical state surfaces; collect
     // the projection defects so we can schedule their canonical repair.
-    let (mut projection, defects) =
-      document_from_loro_with_defects(&self.doc).context("refreshing projection from canonical Loro state")?;
+    let (mut projection, defects) = document_from_loro_with_defects(&self.doc).context("refreshing projection from canonical Loro state")?;
     if let Some(package) = &self.package {
       attach_package_assets(&mut projection, package);
     }
@@ -3543,12 +3898,16 @@ impl CrdtRuntime {
     if rebuild_index {
       self.projection_index = ProjectionRuntimeIndex::from_projection(&self.projection);
     } else {
-      self.projection_index.refresh_object_entries(&self.projection, &table_refresh);
+      self
+        .projection_index
+        .refresh_object_entries(&self.projection, &table_refresh);
       // §act-ten A10.3 oracle (debug builds only): the incrementally-updated
       // index must equal a fresh full rebuild — the fuzz suites run this on
       // every spliced Enter/join/delete shape.
       #[cfg(debug_assertions)]
-      self.projection_index.debug_assert_matches_fresh(&self.projection);
+      self
+        .projection_index
+        .debug_assert_matches_fresh(&self.projection);
     }
   }
 
@@ -3626,7 +3985,9 @@ impl CrdtRuntime {
       projection.frontier = self.doc.state_frontiers().encode();
     }
     if begin_probe {
-      eprintln!("[flowstate-begin-probe] commits={probe_commits:?} export={probe_export:?} persist={probe_persist:?} fork=skipped(package-derived)");
+      eprintln!(
+        "[flowstate-begin-probe] commits={probe_commits:?} export={probe_export:?} persist={probe_persist:?} fork=skipped(package-derived)"
+      );
     }
     let job = CheckpointJob {
       // §A13.4.4: no gate-held fork — the job reconstructs from the package.
@@ -3714,11 +4075,7 @@ impl CrdtRuntime {
     }
     if self.package.is_none() {
       let package_creation_vv = self.doc.state_vv();
-      let mut created = DocumentPackage::from_loro_snapshot_with_assets(
-        &self.doc,
-        title,
-        assets_from_document(&self.projection),
-      )?;
+      let mut created = DocumentPackage::from_loro_snapshot_with_assets(&self.doc, title, assets_from_document(&self.projection))?;
       // §act-twelve A12.1.1: the runtime maintains paragraph-style marks, so
       // a package IT creates is marks-clean at its own frontier — later opens
       // skip the whole-corpus verification scan (the raw
@@ -3854,11 +4211,10 @@ impl CrdtRuntime {
     let mut window_start = start;
     while window_start < end {
       let window_end = (window_start + CHUNK_ATOMS).min(end);
-      match self.doc.export(ExportMode::updates_in_range(&[loro::IdSpan::new(
-        peer,
-        window_start,
-        window_end,
-      )])) {
+      match self
+        .doc
+        .export(ExportMode::updates_in_range(&[loro::IdSpan::new(peer, window_start, window_end)]))
+      {
         Ok(bytes) if !bytes.is_empty() => chunks.push(bytes),
         Ok(_) => {},
         Err(error) => {
@@ -3941,7 +4297,10 @@ impl CrdtRuntime {
         if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
           eprintln!(
             "  drain: DISCARDED stale-epoch summary (epoch {} != {current_epoch}, origin {}, trigger {}, changes {})",
-            summary.epoch, summary.origin, summary.triggered_by, summary.changes.len()
+            summary.epoch,
+            summary.origin,
+            summary.triggered_by,
+            summary.changes.len()
           );
         }
         continue;
@@ -3962,7 +4321,9 @@ impl CrdtRuntime {
         if *DERIVE_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
           eprintln!(
             "  drain: DEFERRED ahead-of-frontier summary (origin {}, trigger {}, changes {})",
-            summary.origin, summary.triggered_by, summary.changes.len()
+            summary.origin,
+            summary.triggered_by,
+            summary.changes.len()
           );
         }
         deferred.push(summary);
@@ -3986,7 +4347,11 @@ impl CrdtRuntime {
           "  drain: PROCESSING summary (origin {}, trigger {}, changes {:?})",
           summary.origin,
           summary.triggered_by,
-          summary.changes.iter().map(|change| format!("{change:?}")).collect::<Vec<_>>()
+          summary
+            .changes
+            .iter()
+            .map(|change| format!("{change:?}"))
+            .collect::<Vec<_>>()
         );
       }
       let mut batch_ops: Vec<import_delta::NetOp> = Vec::new();
@@ -4263,7 +4628,13 @@ impl CrdtRuntime {
     self.persist_update_segment_with_durability(from_frontier, from_vv, update, false)
   }
 
-  fn persist_update_segment_with_durability(&mut self, from_frontier: Frontiers, from_vv: VersionVector, update: Vec<u8>, sync: bool) -> Result<()> {
+  fn persist_update_segment_with_durability(
+    &mut self,
+    from_frontier: Frontiers,
+    from_vv: VersionVector,
+    update: Vec<u8>,
+    sync: bool,
+  ) -> Result<()> {
     if let Some(package) = &mut self.package {
       match package.append_update_segment(&from_frontier, &from_vv, &self.doc.state_frontiers(), &self.doc.state_vv(), update) {
         Ok(_) => {
@@ -4283,8 +4654,7 @@ impl CrdtRuntime {
           // wiring). 4x the routine threshold keeps the durability invariant
           // with a bound while removing the periodic latency spike from the
           // measured op (the recorded_inverse rows' hidden component).
-          let compacted =
-            package.compact_update_segments_if_needed(&self.doc, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD * 4)?;
+          let compacted = package.compact_update_segments_if_needed(&self.doc, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD * 4)?;
           if let Some(path) = &self.package_path {
             if compacted.is_some() {
               package.write(path)?;
@@ -4437,10 +4807,12 @@ fn classify_map_invalidation(invalidation: &mut ProjectionInvalidation, target: 
   }) {
     invalidation.changed_tables.push(target.to_string());
   }
-  if keys
-    .iter()
-    .any(|key| matches!(key.as_str(), "kind" | "flow_id" | "anchor_cursor" | "attrs" | "nested_refs" | "external_url"))
-  {
+  if keys.iter().any(|key| {
+    matches!(
+      key.as_str(),
+      "kind" | "flow_id" | "anchor_cursor" | "attrs" | "nested_refs" | "external_url"
+    )
+  }) {
     invalidation.changed_blocks.push(target.to_string());
   }
   if keys
@@ -4572,15 +4944,32 @@ fn first_projection_divergence(left: &DocumentProjection, right: &DocumentProjec
   if left.ids.paragraph_ids.len() != right.ids.paragraph_ids.len() {
     return format!("paragraph_ids len {} != {}", left.ids.paragraph_ids.len(), right.ids.paragraph_ids.len());
   }
-  for (ix, (l, r)) in left.ids.paragraph_ids.iter().zip(right.ids.paragraph_ids.iter()).enumerate() {
+  for (ix, (l, r)) in left
+    .ids
+    .paragraph_ids
+    .iter()
+    .zip(right.ids.paragraph_ids.iter())
+    .enumerate()
+  {
     if l != r {
-      return format!("paragraph_ids[{ix}] incremental={} full={} text={:?}", l.0, r.0, flowstate_document::paragraph_text(right, ix));
+      return format!(
+        "paragraph_ids[{ix}] incremental={} full={} text={:?}",
+        l.0,
+        r.0,
+        flowstate_document::paragraph_text(right, ix)
+      );
     }
   }
   if left.ids.block_ids.len() != right.ids.block_ids.len() {
     return format!("block_ids len {} != {}", left.ids.block_ids.len(), right.ids.block_ids.len());
   }
-  for (ix, (l, r)) in left.ids.block_ids.iter().zip(right.ids.block_ids.iter()).enumerate() {
+  for (ix, (l, r)) in left
+    .ids
+    .block_ids
+    .iter()
+    .zip(right.ids.block_ids.iter())
+    .enumerate()
+  {
     if l != r {
       return format!("block_ids[{ix}] incremental={} full={}", l.0, r.0);
     }
@@ -4590,7 +4979,11 @@ fn first_projection_divergence(left: &DocumentProjection, right: &DocumentProjec
   }
   for ix in 0..left.paragraphs.len().min(right.paragraphs.len()) {
     if flowstate_document::paragraph_text(left, ix) != flowstate_document::paragraph_text(right, ix) {
-      return format!("paragraph[{ix}] text incremental={:?} full={:?}", flowstate_document::paragraph_text(left, ix), flowstate_document::paragraph_text(right, ix));
+      return format!(
+        "paragraph[{ix}] text incremental={:?} full={:?}",
+        flowstate_document::paragraph_text(left, ix),
+        flowstate_document::paragraph_text(right, ix)
+      );
     }
     if left.paragraphs[ix].style != right.paragraphs[ix].style || left.paragraphs[ix].runs != right.paragraphs[ix].runs {
       return format!("paragraph[{ix}] style/runs differ");
@@ -4660,9 +5053,6 @@ enum SubscriptionChange {
   },
 }
 
-
-
-
 pub(crate) fn object_replacement_patch(projection: &DocumentProjection, block_ix: usize, block: InputBlock) -> Option<Vec<ProjectionPatch>> {
   Some(vec![ProjectionPatch::ReplaceObjectBlock {
     block_id: *projection.ids.block_ids.get(block_ix)?,
@@ -4723,7 +5113,12 @@ pub(crate) fn insert_projection_object_block(
   Ok(true)
 }
 
-pub(crate) fn insert_input_object_block(doc: &LoroDoc, unicode_index: usize, block_id: flowstate_document::BlockId, input: &InputBlock) -> Result<()> {
+pub(crate) fn insert_input_object_block(
+  doc: &LoroDoc,
+  unicode_index: usize,
+  block_id: flowstate_document::BlockId,
+  input: &InputBlock,
+) -> Result<()> {
   match input {
     InputBlock::Image(image) => insert_image_block_with_id(doc, unicode_index, block_id, image),
     InputBlock::Equation(equation) => insert_equation_block_with_id(doc, unicode_index, block_id, equation),
@@ -4748,11 +5143,25 @@ pub(crate) fn restore_input_object_block_containers(
   let body = body_text(doc);
   match input {
     InputBlock::Image(image) => {
-      let block = ensure_block_with_id(doc, &object_block_key("image", block_id), "image", ROOT_BODY_FLOW_ID, &body, unicode_index)?;
+      let block = ensure_block_with_id(
+        doc,
+        &object_block_key("image", block_id),
+        "image",
+        ROOT_BODY_FLOW_ID,
+        &body,
+        unicode_index,
+      )?;
       replace_image_block_from_input(doc, &block, image)
     },
     InputBlock::Equation(equation) => {
-      let block = ensure_block_with_id(doc, &object_block_key("equation", block_id), "equation", ROOT_BODY_FLOW_ID, &body, unicode_index)?;
+      let block = ensure_block_with_id(
+        doc,
+        &object_block_key("equation", block_id),
+        "equation",
+        ROOT_BODY_FLOW_ID,
+        &body,
+        unicode_index,
+      )?;
       replace_equation_block_from_input(doc, &block, equation)
     },
     InputBlock::Table(_) => anyhow::bail!("tables are excluded from the recorded-inverse fast path"),
@@ -5062,7 +5471,11 @@ pub(crate) fn move_projection_object_block(
   // to the pre-removal block whose lead position it lands before, skipping the source's
   // own slot, then resolve that lead position on the post-delete body via durable cursors
   // (which survive the char deletion). A target at/after the tail appends.
-  let source_ix = projection.ids.block_ids.iter().position(|id| *id == block_id);
+  let source_ix = projection
+    .ids
+    .block_ids
+    .iter()
+    .position(|id| *id == block_id);
   body
     .delete(anchor_pos, 1)
     .context("deleting object placeholder before move")?;
@@ -5156,7 +5569,6 @@ fn object_unicode_pos_for_projection_block(body: &LoroText, target_block_ix: usi
   None
 }
 
-
 /// Live start (unicode) of the paragraph identified by `paragraph_id` in the actual
 /// Loro body flow, resolved from its durable boundary cursor — the paragraph's text
 /// begins just past its boundary newline. Coalescing-agnostic: unlike the
@@ -5243,11 +5655,15 @@ pub(crate) fn paragraph_body_starts_in_loro(doc: &LoroDoc, paragraph_ids: &[Para
       .find(|key| loro_id_u128(key) == paragraph_id.0)
       .and_then(|key| child_map(&paragraphs, key));
     let id = record.and_then(|record| {
-      ["boundary_cursor", "start_cursor"].into_iter().find_map(|field| {
-        let bytes = map_binary_opt(&record, field)?;
-        let cursor = Cursor::decode(&bytes).ok()?;
-        (cursor.container == container).then_some(cursor.id).flatten()
-      })
+      ["boundary_cursor", "start_cursor"]
+        .into_iter()
+        .find_map(|field| {
+          let bytes = map_binary_opt(&record, field)?;
+          let cursor = Cursor::decode(&bytes).ok()?;
+          (cursor.container == container)
+            .then_some(cursor.id)
+            .flatten()
+        })
     });
     cursor_ids.push(id);
   }
@@ -6060,7 +6476,9 @@ fn persist_body_paragraph_style_mark_repair(doc: &LoroDoc, package: Option<&mut 
     if *OPEN_PROBE3.get_or_init(|| std::env::var_os("FLOWSTATE_OPEN_PROBE").is_some()) {
       eprintln!(
         "[flowstate-open-probe]   style-stamp: known_clean={marks_known_clean} stamp_present={} frontier_len={}",
-        package.as_ref().is_some_and(|p| p.manifest.style_marks_clean_frontier.is_some()),
+        package
+          .as_ref()
+          .is_some_and(|p| p.manifest.style_marks_clean_frontier.is_some()),
         from_frontier.encode().len()
       );
     }
@@ -6229,7 +6647,9 @@ fn ensure_paragraph_metadata_at_boundary_with_keys(
   // ONE cursor resolution for all three anchor fields — `get_cursor` walks
   // text chunks per call, and this writer runs per split and per boundary in
   // a mass-repair pass; the three identical calls tripled that cost.
-  let boundary_cursor = body.get_cursor(boundary, Side::Left).map(|cursor| cursor.encode());
+  let boundary_cursor = body
+    .get_cursor(boundary, Side::Left)
+    .map(|cursor| cursor.encode());
   let paragraph_id = forced_paragraph_id
     .or_else(|| paragraph_metadata_key_at_boundary(doc, body, &paragraphs, boundary))
     .unwrap_or_else(|| new_paragraph_metadata_id(boundary));
@@ -6477,7 +6897,11 @@ fn boundary_cursor_positions(doc: &LoroDoc, body: &loro::LoroText, records: &Lor
   if ids.is_empty() {
     return positions;
   }
-  for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+  for (id, pos) in ids
+    .iter()
+    .copied()
+    .zip(doc.inner().query_text_id_positions(&container, &ids))
+  {
     if let Some(pos) = pos {
       positions.insert(id, pos);
     }
@@ -6504,7 +6928,13 @@ fn live_boundary_positions(body_snapshot: &str) -> Vec<usize> {
 /// the sorted `live_boundaries` set to count — pass the full newline set to validate
 /// against the whole document, or a single-element slice to test one already-validated
 /// live boundary.
-fn live_cursor_pos(doc: &LoroDoc, live_boundaries: &[usize], pos_by_id: &FxHashMap<ID, usize>, map: &LoroMap, cursor_key: &str) -> Option<usize> {
+fn live_cursor_pos(
+  doc: &LoroDoc,
+  live_boundaries: &[usize],
+  pos_by_id: &FxHashMap<ID, usize>,
+  map: &LoroMap,
+  cursor_key: &str,
+) -> Option<usize> {
   let cursor = Cursor::decode(&map_binary_opt(map, cursor_key)?).ok()?;
   let pos = match cursor.id {
     // The batched resolver covered every id-carrying cursor: absence means the
@@ -6675,7 +7105,11 @@ fn install_undo_selection_callbacks(undo: &UndoManager, state: &Arc<Mutex<UndoSe
 
   let pop_state = Arc::clone(state);
   undo.set_on_pop(Some(Box::new(move |_, _, meta| {
-    let transformed: Vec<Vec<u8>> = meta.cursors.iter().map(|entry| entry.cursor.encode()).collect();
+    let transformed: Vec<Vec<u8>> = meta
+      .cursors
+      .iter()
+      .map(|entry| entry.cursor.encode())
+      .collect();
     let LoroValue::Binary(bytes) = meta.value else {
       return;
     };
@@ -6704,6 +7138,60 @@ fn map_i64_opt(map: &LoroMap, key: &str) -> Option<i64> {
     ValueOrContainer::Value(LoroValue::I64(value)) => Some(value),
     _ => None,
   })
+}
+
+fn map_bool_opt(map: &LoroMap, key: &str) -> Option<bool> {
+  map.get(key).and_then(|value| match value {
+    ValueOrContainer::Value(LoroValue::Bool(value)) => Some(value),
+    _ => None,
+  })
+}
+
+fn existing_child_map(parent: &LoroMap, key: &str) -> Result<LoroMap> {
+  match parent.get(key) {
+    Some(ValueOrContainer::Container(Container::Map(map))) => Ok(map),
+    _ => anyhow::bail!("Comment record `{key}` does not exist"),
+  }
+}
+
+fn existing_comment_thread(doc: &LoroDoc, comment_id: u128) -> Result<LoroMap> {
+  let root = flowstate_document::loro_schema::root_map(doc);
+  let comments = existing_child_map(&root, flowstate_document::COMMENTS_BY_ID)?;
+  existing_child_map(&comments, &comment_id.to_string())
+}
+
+fn validated_comment_body(body: &str) -> Result<&str> {
+  let body = body.trim();
+  anyhow::ensure!(!body.is_empty(), "Comment text cannot be empty");
+  anyhow::ensure!(body.len() <= 32 * 1024, "Comment text is too long");
+  Ok(body)
+}
+
+fn write_comment_message(
+  messages: &LoroMap,
+  message_id: u128,
+  body: &str,
+  author_user_id: u128,
+  author_display_name: &str,
+  now: i64,
+) -> Result<()> {
+  let message = messages.ensure_mergeable_map(&message_id.to_string())?;
+  message.insert("id", message_id.to_string())?;
+  message.insert("author_user_id", author_user_id.to_string())?;
+  message.insert("author_display_name", author_display_name)?;
+  message.insert("body", body)?;
+  message.insert("created_at", now)?;
+  message.insert("updated_at", now)?;
+  Ok(())
+}
+
+fn unix_time_secs() -> i64 {
+  std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_secs()
+    .try_into()
+    .unwrap_or(i64::MAX)
 }
 
 fn parse_blake3_hex(value: &str) -> Option<[u8; 32]> {
@@ -6933,7 +7421,12 @@ fn insert_table_block(
     let column = columns_by_id.ensure_mergeable_map(&column_id_str)?;
     column.insert("id", column_id_str.as_str())?;
     let _attrs = column.ensure_mergeable_map("attrs")?;
-    write_table_column_width(&column, column_widths.get(column_ix).unwrap_or(&InputTableColumnWidth::Auto))?;
+    write_table_column_width(
+      &column,
+      column_widths
+        .get(column_ix)
+        .unwrap_or(&InputTableColumnWidth::Auto),
+    )?;
     minted_columns.push((column_id, column_id_str));
   }
 
@@ -7099,7 +7592,9 @@ impl CheckpointJob {
       };
       let probe_derive = probe_t.elapsed();
       let probe_t = std::time::Instant::now();
-      self.package.replace_assets_from_document(&self.projection)?;
+      self
+        .package
+        .replace_assets_from_document(&self.projection)?;
       let probe_assets = probe_t.elapsed();
       // §act-five P9: ONE materialization feeds both the projection cache and the
       // search units (was two full `document_from_loro` walks per checkpoint).
@@ -7107,7 +7602,9 @@ impl CheckpointJob {
       // §A13.4.1: the job carries the runtime's maintained projection —
       // build the cache payload from IT when frontier-current (from-Loro
       // walk only on mismatch).
-      self.package.rebuild_caches_from_projection(&fork, &self.projection)?;
+      self
+        .package
+        .rebuild_caches_from_projection(&fork, &self.projection)?;
       let probe_caches = probe_t.elapsed();
       let probe_t = std::time::Instant::now();
       // §act-twelve A12.4.1 incremental persistence: routine revision
@@ -7119,8 +7616,7 @@ impl CheckpointJob {
       // threshold. The shallow accelerator still refreshes so the next open
       // stays fast.
       static ALWAYS_COMPACT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-      let always_compact =
-        *ALWAYS_COMPACT.get_or_init(|| std::env::var_os("FLOWSTATE_DISABLE_INCREMENTAL_CHECKPOINT").is_some());
+      let always_compact = *ALWAYS_COMPACT.get_or_init(|| std::env::var_os("FLOWSTATE_DISABLE_INCREMENTAL_CHECKPOINT").is_some());
       let consolidate = always_compact
         || !self.record_revision
         || self.package.loro_update_segments.len() >= flowstate_document::DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD;
@@ -7279,6 +7775,55 @@ mod tests {
     assert_eq!(flowstate_document::paragraph_text(&projection, 0), "styled");
     assert_eq!(projection.paragraphs[0].runs.len(), 1);
     assert_eq!(projection.paragraphs[0].runs[0].styles, styles);
+    Ok(())
+  }
+
+  #[test]
+  fn comment_threads_converge_and_anchors_survive_edits() -> Result<()> {
+    let base = flowstate_document::new_loro_document("Comments")?;
+    let mut source = CrdtRuntime::from_doc(base.fork(), None, None)?;
+    let mut target = CrdtRuntime::from_doc(base, None, None)?;
+    let insert = source.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "hello world".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    target.import_remote_update(&local_update_bytes(&insert))?;
+    source.set_author_identity(7, Some("Ada".into()))?;
+    let selection = EditorSelection::range(DocumentOffset { paragraph: 0, byte: 0 }, DocumentOffset { paragraph: 0, byte: 5 });
+    let comment_id = source.create_comment(&selection, "Needs a source", 7, "Ada")?;
+    source.reply_to_comment(comment_id, "Added one", 9, "Grace")?;
+    source.set_comment_resolved(comment_id, true)?;
+
+    let updates = source.take_pending_publish();
+    let chunks = updates
+      .iter()
+      .filter_map(|event| match event {
+        RuntimeEvent::LocalUpdate { bytes, .. } => Some(bytes.as_slice()),
+        _ => None,
+      })
+      .collect::<Vec<_>>();
+    target.import_remote_updates(&chunks)?;
+
+    let local = source.comments();
+    let remote = target.comments();
+    assert_eq!(local, remote);
+    assert_eq!(local.len(), 1);
+    assert_eq!(local[0].quoted_text, "hello");
+    assert_eq!(local[0].messages.len(), 2);
+    assert!(local[0].resolved);
+    assert!(local[0].anchor.is_some());
+
+    source.command(SemanticCommand::InsertText {
+      unicode_index: 1,
+      text: "Well, ".to_string(),
+      styles: RunStyles::default(),
+    })?;
+    let moved = source.comments()[0]
+      .anchor
+      .expect("anchor should survive an insertion before it");
+    assert_eq!(moved.0.byte, 6);
+    assert_eq!(moved.1.byte, 11);
     Ok(())
   }
 
@@ -7492,7 +8037,9 @@ mod tests {
     let violations = flowstate_fidelity::take_violations();
     flowstate_fidelity::set_enabled(false);
     assert!(
-      !violations.iter().any(|violation| violation.contains("object-side-collapse")),
+      !violations
+        .iter()
+        .any(|violation| violation.contains("object-side-collapse")),
       "no object-side-collapse violation must fire: {violations:?}"
     );
     Ok(())
@@ -8162,7 +8709,9 @@ mod tests {
       DocumentPackage::read_cached_projection(&path)?.is_none(),
       "an edit must null the projection cache (preview falls back to the full read)"
     );
-    let job = guard.begin_cache_flush().expect("edited package must need a cache flush");
+    let job = guard
+      .begin_cache_flush()
+      .expect("edited package must need a cache flush");
     drop(guard);
     let (package, wrote) = job.run();
     let wrote = wrote?;

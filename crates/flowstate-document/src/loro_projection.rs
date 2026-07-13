@@ -7,16 +7,19 @@ use gpui_flowtext::{
   InputTableCell, InputTableCellBlock, InputTableColumn, InputTableColumnWidth, InputTableRow, InputTableStyle, ParagraphId, RunSemanticStyle,
   RunStyles, SectionId, SectionKind, document_from_input_blocks,
 };
-use loro::{Container, ContainerID, ContainerTrait, ID, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer, cursor::{Cursor, Side}};
+use loro::{
+  Container, ContainerID, ContainerTrait, ID, LoroDoc, LoroMap, LoroText, LoroValue, ValueOrContainer,
+  cursor::{Cursor, Side},
+};
 use rustc_hash::FxHashMap;
 
 use crate::{
   BLOCKS_BY_ID, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID, MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE,
   MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, ROOT, ROOT_BODY_FLOW_ID,
   ROOT_FIRST_PARAGRAPH_ID, SECTIONS_BY_ID, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY, TABLE_ROW_ORDER,
-  flowstate_document_theme,
-  parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id, table_topology,
+  flowstate_document_theme, parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id,
   projection_defects::{ProjectionDefect, TableTopologyKind},
+  table_topology,
 };
 
 // §perf-heaven T7.24: object-anchor validation resolves positions from
@@ -69,7 +72,10 @@ pub struct RegionRows {
 /// boundary→record-key maps for the candidate paragraph/paragraph-block records
 /// and the region's resolved object blocks. Quarantine append and the empty-doc
 /// placeholder are full-rebuild concerns and intentionally do not apply here.
-#[allow(clippy::implicit_hasher, reason = "the maps are shared with the internal flow walker, whose boundary indexes are FxHashMap by construction")]
+#[allow(
+  clippy::implicit_hasher,
+  reason = "the maps are shared with the internal flow walker, whose boundary indexes are FxHashMap by construction"
+)]
 pub fn materialize_body_region(
   doc: &LoroDoc,
   sentinel_unicode: usize,
@@ -134,7 +140,12 @@ pub fn materialize_viewport(doc: &LoroDoc, start_unicode: usize, end_unicode: us
   let (object_map, _quarantined, pblock_map) = projector.object_blocks_for_flow(&body, ROOT_BODY_FLOW_ID, &mut defects)?;
   // Snap the start to the row-leading boundary at or before it (0 covers the
   // seed sentinel), so the region walk begins at a sentinel as required.
-  let sentinel = paragraph_map.keys().copied().filter(|boundary| *boundary <= start_unicode).max().unwrap_or(0);
+  let sentinel = paragraph_map
+    .keys()
+    .copied()
+    .filter(|boundary| *boundary <= start_unicode)
+    .max()
+    .unwrap_or(0);
   let end = end_unicode.max(sentinel + 1).min(body.len_unicode());
   materialize_body_region(doc, sentinel, end, &paragraph_map, &pblock_map, &object_map)
 }
@@ -155,7 +166,12 @@ pub fn body_block_boundaries(doc: &LoroDoc) -> io::Result<Vec<u32>> {
   boundaries.extend(objects.keys().copied());
   boundaries.sort_unstable();
   boundaries.dedup();
-  Ok(boundaries.into_iter().map(|position| u32::try_from(position).unwrap_or(u32::MAX)).collect())
+  Ok(
+    boundaries
+      .into_iter()
+      .map(|position| u32::try_from(position).unwrap_or(u32::MAX))
+      .collect(),
+  )
 }
 
 pub(crate) fn input_blocks_from_loro(doc: &LoroDoc) -> io::Result<Vec<InputBlock>> {
@@ -386,7 +402,9 @@ impl<'a> Projector<'a> {
     // gated, so it costs a single atomic load when tracing is disabled.
     if fidelity::enabled() {
       for defect in defects.iter() {
-        fidelity::event(FidelityClass::Structure, "defect", || format!("{} @ {}", defect.class(), defect.stable_key()));
+        fidelity::event(FidelityClass::Structure, "defect", || {
+          format!("{} @ {}", defect.class(), defect.stable_key())
+        });
       }
       check_body_projection_integrity(&body, &body_blocks, defects.as_slice());
     }
@@ -459,8 +477,14 @@ impl<'a> Projector<'a> {
     Ok(sections)
   }
 
-  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
-  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "projection threading requires flow context, id pools, output and defect sink together"
+  )]
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "projection threading requires flow context, id pools, output and defect sink together"
+  )]
   fn push_flow_blocks(
     &self,
     text: &LoroText,
@@ -481,28 +505,33 @@ impl<'a> Projector<'a> {
     // build), then do O(1) lookups per boundary below. Replaces a per-boundary
     // full rescan — an O(records²·chars) blow-up that pegged the CRDT actor
     // thread. The paragraph-BLOCK index arrives pre-built (§perf-heaven T4).
-    let paragraph_index = paragraph_ids.as_ref().map(|_| paragraph_ids_by_boundary(self.doc, text));
+    let paragraph_index = paragraph_ids
+      .as_ref()
+      .map(|_| paragraph_ids_by_boundary(self.doc, text));
 
     // §perf-heaven T3 tripwire: this materializes the WHOLE body as a delta
     // Vec (the cold-path allocation). Per-keystroke edits must take the regional
     // rematerializer instead and never reach here.
     crate::instrument::record_body_to_delta_tagged(if flow_id == crate::BODY_FLOW_ID { "body-flow" } else { "cell-flow" });
     let delta = hotpath::measure_block!("projector_body_to_delta", crate::streaming_delta::streaming_to_delta(text));
-    hotpath::measure_block!("projector_walk_flow_delta", Self::walk_flow_delta(
-      text,
-      delta,
-      0,
-      object_blocks,
-      flow_id,
-      paragraph_index.as_ref(),
-      paragraph_block_index.as_ref(),
-      paragraph_ids,
-      block_ids,
-      output,
-      defects,
-      flush_trailing_after_object,
-      |block, defects| self.object_block(block, defects),
-    ))
+    hotpath::measure_block!(
+      "projector_walk_flow_delta",
+      Self::walk_flow_delta(
+        text,
+        delta,
+        0,
+        object_blocks,
+        flow_id,
+        paragraph_index.as_ref(),
+        paragraph_block_index.as_ref(),
+        paragraph_ids,
+        block_ids,
+        output,
+        defects,
+        flush_trailing_after_object,
+        |block, defects| self.object_block(block, defects),
+      )
+    )
   }
 
   /// Core flow walk shared by the FULL materialization ([`Self::push_flow_blocks`])
@@ -512,7 +541,10 @@ impl<'a> Projector<'a> {
   /// starts at a row's leading boundary sentinel. `unicode_pos` runs in ABSOLUTE
   /// flow coordinates either way, so boundary-id maps and object positions are
   /// always absolute.
-  #[allow(clippy::too_many_arguments, reason = "projection threading requires flow context, id pools, output and defect sink together")]
+  #[allow(
+    clippy::too_many_arguments,
+    reason = "projection threading requires flow context, id pools, output and defect sink together"
+  )]
   fn walk_flow_delta(
     text: &LoroText,
     delta: Vec<loro::TextDelta>,
@@ -697,7 +729,10 @@ impl<'a> Projector<'a> {
   /// maps live placeholder positions to their blocks; the second collects the
   /// quarantined blocks (unresolved or displaced-by-collision anchors) in stable
   /// sorted-key order, with one defect recorded per quarantined block.
-  #[allow(clippy::type_complexity, reason = "returns resolved-by-position blocks, quarantined blocks, and the paragraph-block boundary index from ONE registry pass")]
+  #[allow(
+    clippy::type_complexity,
+    reason = "returns resolved-by-position blocks, quarantined blocks, and the paragraph-block boundary index from ONE registry pass"
+  )]
   #[hotpath::measure]
   fn object_blocks_for_flow(
     &self,
@@ -749,7 +784,12 @@ impl<'a> Projector<'a> {
     // paragraph-block boundary index below.
     let mut anchor_positions: FxHashMap<ID, usize> = FxHashMap::default();
     if !anchor_ids.is_empty() {
-      for (id, pos) in anchor_ids.iter().copied().zip(self.doc.inner().query_text_id_positions(&container, &anchor_ids)) {
+      for (id, pos) in anchor_ids.iter().copied().zip(
+        self
+          .doc
+          .inner()
+          .query_text_id_positions(&container, &anchor_ids),
+      ) {
         if let Some(pos) = pos {
           anchor_positions.insert(id, pos);
         }
@@ -785,7 +825,11 @@ impl<'a> Projector<'a> {
             Some(id) => anchor_positions.get(&id).copied(),
             None => {
               crate::instrument::record_cursor_pos_resolve();
-              self.doc.get_cursor_pos(&cursor).ok().map(|pos| pos.current.pos)
+              self
+                .doc
+                .get_cursor_pos(&cursor)
+                .ok()
+                .map(|pos| pos.current.pos)
             },
           })
           .filter(|pos| is_object_char(*pos));
@@ -952,8 +996,12 @@ impl<'a> Projector<'a> {
         continue;
       };
       let (Some(row_id), Some(column_id)) = (
-        map_string_opt(&cell, "row_id")?.as_deref().and_then(parse_row_loro_id),
-        map_string_opt(&cell, "column_id")?.as_deref().and_then(parse_column_loro_id),
+        map_string_opt(&cell, "row_id")?
+          .as_deref()
+          .and_then(parse_row_loro_id),
+        map_string_opt(&cell, "column_id")?
+          .as_deref()
+          .and_then(parse_column_loro_id),
       ) else {
         continue;
       };
@@ -962,8 +1010,12 @@ impl<'a> Projector<'a> {
         row_id,
         column_id,
         cell_id,
-        row_span: map_i64_opt(&cell, "row_span")?.and_then(i64_to_u16).unwrap_or(1),
-        col_span: map_i64_opt(&cell, "column_span")?.and_then(i64_to_u16).unwrap_or(1),
+        row_span: map_i64_opt(&cell, "row_span")?
+          .and_then(i64_to_u16)
+          .unwrap_or(1),
+        col_span: map_i64_opt(&cell, "column_span")?
+          .and_then(i64_to_u16)
+          .unwrap_or(1),
       });
       cell_maps.insert((row_id.0, column_id.0), cell);
     }
@@ -1118,7 +1170,12 @@ fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usi
     snapshot.starts_with(crate::SENTINEL_NEWLINE),
     FidelityClass::Structure,
     "missing-sentinel",
-    || format!("body flow does not start with the sentinel newline (first char {:?})", snapshot.chars().next()),
+    || {
+      format!(
+        "body flow does not start with the sentinel newline (first char {:?})",
+        snapshot.chars().next()
+      )
+    },
   );
   // (b) Every boundary newline must carry a paragraph-style mark. Walk the rich
   // delta so we see each insert's attributes, mirroring the projector's own scan.
@@ -1142,12 +1199,9 @@ fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usi
   // (c) Every live U+FFFC placeholder must be claimed by a resolved block record.
   for (pos, ch) in snapshot.chars().enumerate() {
     if ch == OBJECT_REPLACEMENT {
-      fidelity::check(
-        object_blocks.contains_key(&pos),
-        FidelityClass::Structure,
-        "orphan-object",
-        || format!("U+FFFC object placeholder at body unicode pos {pos} has no live block record"),
-      );
+      fidelity::check(object_blocks.contains_key(&pos), FidelityClass::Structure, "orphan-object", || {
+        format!("U+FFFC object placeholder at body unicode pos {pos} has no live block record")
+      });
     }
   }
   // (c, vice-versa) A block record whose anchor no longer resolves to a live
@@ -1155,12 +1209,9 @@ fn check_body_projection_integrity(body: &LoroText, object_blocks: &BTreeMap<usi
   // unresolved-anchor defect, which this invariant escalates loudly.
   for defect in defects {
     if let ProjectionDefect::UnresolvedObjectAnchor { block_key, flow_id, .. } = defect {
-      fidelity::check(
-        false,
-        FidelityClass::Identity,
-        "orphan-metadata",
-        || format!("block `{block_key}` in flow `{flow_id}` has no live U+FFFC placeholder"),
-      );
+      fidelity::check(false, FidelityClass::Identity, "orphan-metadata", || {
+        format!("block `{block_key}` in flow `{flow_id}` has no live U+FFFC placeholder")
+      });
     }
   }
 }
@@ -1223,7 +1274,10 @@ fn push_char(paragraph: &mut InputParagraph, ch: char, styles: RunStyles) {
   });
 }
 
-#[allow(clippy::too_many_arguments, reason = "paragraph metadata projection needs the flow text, prebuilt boundary indexes, flow/boundary context, id pools and defect sink")]
+#[allow(
+  clippy::too_many_arguments,
+  reason = "paragraph metadata projection needs the flow text, prebuilt boundary indexes, flow/boundary context, id pools and defect sink"
+)]
 fn push_paragraph_projection_metadata(
   text: &LoroText,
   paragraph_index: Option<&FxHashMap<usize, String>>,
@@ -1236,14 +1290,24 @@ fn push_paragraph_projection_metadata(
   block_ids: Option<&mut Vec<BlockId>>,
   defects: &mut Vec<ProjectionDefect>,
 ) {
-  let paragraph_resolved = boundary.and_then(|boundary| paragraph_index.and_then(|index| index.get(&boundary)).cloned());
-  let block_resolved = boundary.and_then(|boundary| paragraph_block_index.and_then(|index| index.get(&boundary)).cloned());
+  let paragraph_resolved = boundary.and_then(|boundary| {
+    paragraph_index
+      .and_then(|index| index.get(&boundary))
+      .cloned()
+  });
+  let block_resolved = boundary.and_then(|boundary| {
+    paragraph_block_index
+      .and_then(|index| index.get(&boundary))
+      .cloned()
+  });
   // §5: fabricate stable, position-independent ids (from the boundary's OpID —
   // the SAME keys the repair writer mints) for any boundary without a durable
   // record. Resolve the anchor once, and only when we actually must fabricate,
   // since `get_cursor` is not free.
   let needs_fabrication = (paragraph_ids.is_some() && paragraph_resolved.is_none()) || (block_ids.is_some() && block_resolved.is_none());
-  let fabricated_keys = needs_fabrication.then(|| boundary.and_then(|boundary| stable_boundary_metadata_keys(text, boundary))).flatten();
+  let fabricated_keys = needs_fabrication
+    .then(|| boundary.and_then(|boundary| stable_boundary_metadata_keys(text, boundary)))
+    .flatten();
 
   if let Some(paragraph_ids) = paragraph_ids {
     // §5/FS-004: a boundary with no durable paragraph metadata gets a fabricated,
@@ -1258,9 +1322,15 @@ fn push_paragraph_projection_metadata(
         // key ("paragraph.projection.{ix}") silently re-identified the row on
         // every edit above it (the object-fuzz undo arm caught the drift as a
         // maintained-vs-canonical id mismatch after a join).
-        let fabricated_id = fabricated_keys.as_ref().map(|(paragraph_key, _)| paragraph_key.clone()).unwrap_or_else(|| {
-          interstitial_anchor.map_or_else(|| format!("paragraph.projection.{block_ix}"), |anchor| format!("paragraph.after.{anchor}"))
-        });
+        let fabricated_id = fabricated_keys
+          .as_ref()
+          .map(|(paragraph_key, _)| paragraph_key.clone())
+          .unwrap_or_else(|| {
+            interstitial_anchor.map_or_else(
+              || format!("paragraph.projection.{block_ix}"),
+              |anchor| format!("paragraph.after.{anchor}"),
+            )
+          });
         {
           static FAB_DEBUG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
           if *FAB_DEBUG.get_or_init(|| std::env::var_os("FLOWSTATE_DERIVE_DEBUG").is_some()) {
@@ -1285,10 +1355,15 @@ fn push_paragraph_projection_metadata(
     let id = match block_resolved {
       Some(id) => id,
       None => {
-        let fabricated_id = fabricated_keys.as_ref().map(|(_, block_key)| block_key.clone()).unwrap_or_else(|| {
-          interstitial_anchor
-            .map_or_else(|| format!("paragraph_block.projection.{block_ix}"), |anchor| format!("paragraph_block.after.{anchor}"))
-        });
+        let fabricated_id = fabricated_keys
+          .as_ref()
+          .map(|(_, block_key)| block_key.clone())
+          .unwrap_or_else(|| {
+            interstitial_anchor.map_or_else(
+              || format!("paragraph_block.projection.{block_ix}"),
+              |anchor| format!("paragraph_block.after.{anchor}"),
+            )
+          });
         defects.push(ProjectionDefect::MissingParagraphBlock {
           flow_id: flow_id.to_string(),
           boundary_unicode: boundary,
@@ -1352,7 +1427,11 @@ fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize,
   }
   let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
   if !ids.is_empty() {
-    for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+    for (id, pos) in ids
+      .iter()
+      .copied()
+      .zip(doc.inner().query_text_id_positions(&container, &ids))
+    {
       if let Some(pos) = pos {
         pos_by_id.insert(id, pos);
       }
@@ -1406,7 +1485,10 @@ fn resolve_decoded_cursor(doc: &LoroDoc, text_len: usize, cursor: Option<&Cursor
 /// standalone function is retained as the REFERENCE the fused index is
 /// `debug_assert_eq!`'d against (and used by tests); hence `dead_code` in a
 /// release non-test build where the debug assert compiles out.
-#[allow(dead_code, reason = "reference implementation for the T4 fused-index debug_assert_eq + tests; unused only in release non-test builds")]
+#[allow(
+  dead_code,
+  reason = "reference implementation for the T4 fused-index debug_assert_eq + tests; unused only in release non-test builds"
+)]
 #[hotpath::measure]
 fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
   let mut index: FxHashMap<usize, String> = FxHashMap::default();
@@ -1443,7 +1525,11 @@ fn paragraph_block_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<
   }
   let mut pos_by_id: FxHashMap<ID, usize> = FxHashMap::default();
   if !ids.is_empty() {
-    for (id, pos) in ids.iter().copied().zip(doc.inner().query_text_id_positions(&container, &ids)) {
+    for (id, pos) in ids
+      .iter()
+      .copied()
+      .zip(doc.inner().query_text_id_positions(&container, &ids))
+    {
       if let Some(pos) = pos {
         pos_by_id.insert(id, pos);
       }
@@ -1866,7 +1952,10 @@ mod tests {
     // (2) A mid-doc sub-viewport equals the corresponding slice of the full
     // rebuild — the cold random-scroll case. Boundaries (sorted by position)
     // index paragraphs; [boundary[6], boundary[9]) covers paragraphs 6,7,8.
-    let mut boundaries: Vec<usize> = paragraph_ids_by_boundary(&doc, &body).keys().copied().collect();
+    let mut boundaries: Vec<usize> = paragraph_ids_by_boundary(&doc, &body)
+      .keys()
+      .copied()
+      .collect();
     boundaries.sort_unstable();
     assert!(boundaries.len() >= 10, "enough rows to sub-viewport");
     let viewport = materialize_viewport(&doc, boundaries[6], boundaries[9])?;
@@ -1889,7 +1978,10 @@ mod tests {
         .map(|ix| {
           InputBlock::Paragraph(InputParagraph {
             style: gpui_flowtext::ParagraphStyle::Normal,
-            runs: vec![InputRun { text: format!("paragraph {ix} — naïve café ☃ tail"), styles: RunStyles::default() }],
+            runs: vec![InputRun {
+              text: format!("paragraph {ix} — naïve café ☃ tail"),
+              styles: RunStyles::default(),
+            }],
           })
         })
         .collect(),
@@ -1924,13 +2016,19 @@ mod tests {
 
     let mut checked = 0usize;
     for ((_, cursor), batch_pos) in cursors.iter().zip(&batch) {
-      let per_cursor = doc.get_cursor_pos(cursor).ok().map(|result| result.current.pos);
+      let per_cursor = doc
+        .get_cursor_pos(cursor)
+        .ok()
+        .map(|result| result.current.pos);
       if let Some(pos) = batch_pos {
         assert_eq!(Some(*pos), per_cursor, "batch resolver disagreed with get_cursor_pos");
         checked += 1;
       }
     }
-    assert!(checked >= 40, "expected >=40 live boundary cursors resolved by the batch path, got {checked}");
+    assert!(
+      checked >= 40,
+      "expected >=40 live boundary cursors resolved by the batch path, got {checked}"
+    );
     Ok(())
   }
 
@@ -1962,7 +2060,8 @@ mod tests {
     let tb_end = tb.len_unicode();
     tb.insert(tb_end, " suffix").unwrap();
     b.commit();
-    a.import(&b.export(ExportMode::updates(&a.oplog_vv())).unwrap()).unwrap();
+    a.import(&b.export(ExportMode::updates(&a.oplog_vv())).unwrap())
+      .unwrap();
     a.commit();
 
     let text = a.get_text("t");
@@ -1986,9 +2085,16 @@ mod tests {
     assert_eq!(batch.len(), ids.len());
     let mut compared = 0usize;
     for (cursor, batch_pos) in cursors.iter().zip(&batch) {
-      let per_cursor = a.get_cursor_pos(cursor).ok().map(|result| result.current.pos);
+      let per_cursor = a
+        .get_cursor_pos(cursor)
+        .ok()
+        .map(|result| result.current.pos);
       if let Some(pos) = batch_pos {
-        assert_eq!(Some(*pos), per_cursor, "batch resolver diverged from get_cursor_pos on multi-peer/edited text");
+        assert_eq!(
+          Some(*pos),
+          per_cursor,
+          "batch resolver diverged from get_cursor_pos on multi-peer/edited text"
+        );
         compared += 1;
       }
     }
@@ -2005,17 +2111,38 @@ mod tests {
     let source = document_from_input_blocks(
       DocumentTheme::clone(&flowstate_document_theme()),
       vec![
-        InputBlock::Paragraph(InputParagraph { style: gpui_flowtext::ParagraphStyle::Normal, runs: vec![InputRun { text: "alpha".into(), styles: RunStyles::default() }] }),
-        InputBlock::Paragraph(InputParagraph { style: gpui_flowtext::ParagraphStyle::Normal, runs: vec![InputRun { text: "bravo".into(), styles: RunStyles::default() }] }),
+        InputBlock::Paragraph(InputParagraph {
+          style: gpui_flowtext::ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "alpha".into(),
+            styles: RunStyles::default(),
+          }],
+        }),
+        InputBlock::Paragraph(InputParagraph {
+          style: gpui_flowtext::ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "bravo".into(),
+            styles: RunStyles::default(),
+          }],
+        }),
       ],
     );
     let doc = document_to_loro(&source, "Stable boundary keys")?;
     let body = body_text(&doc);
 
     // A non-zero boundary (so it exercises the OpID path, not the boundary-0 seed).
-    let boundary = body.to_string().chars().enumerate().filter_map(|(i, c)| (c == '\n').then_some(i)).find(|&i| i > 0).expect("a non-zero boundary");
+    let boundary = body
+      .to_string()
+      .chars()
+      .enumerate()
+      .filter_map(|(i, c)| (c == '\n').then_some(i))
+      .find(|&i| i > 0)
+      .expect("a non-zero boundary");
     let before = stable_boundary_metadata_keys(&body, boundary).expect("keys for a live boundary");
-    assert!(before.0.contains("op-") && before.1.contains("op-"), "non-zero boundary keys derive from the OpID: {before:?}");
+    assert!(
+      before.0.contains("op-") && before.1.contains("op-"),
+      "non-zero boundary keys derive from the OpID: {before:?}"
+    );
     assert_ne!(before.0, before.1, "paragraph and block keys must be distinct");
 
     // Insert ahead of the boundary so it shifts by 4 unicode positions.
@@ -2052,8 +2179,14 @@ mod tests {
     let body = body_text(&doc);
     let root = doc.get_map(ROOT);
     let blocks = child_map(&root, BLOCKS_BY_ID)?.expect("blocks map");
-    let first_paragraph_id = paragraph_ids_by_boundary(&doc, &body).get(&0).cloned().expect("first paragraph id");
-    let first_block_id = paragraph_block_ids_by_boundary(&doc, &body).get(&0).cloned().expect("first paragraph block id");
+    let first_paragraph_id = paragraph_ids_by_boundary(&doc, &body)
+      .get(&0)
+      .cloned()
+      .expect("first paragraph id");
+    let first_block_id = paragraph_block_ids_by_boundary(&doc, &body)
+      .get(&0)
+      .cloned()
+      .expect("first paragraph block id");
     let image_id = map_keys(&blocks)
       .into_iter()
       .find(|key| {
@@ -2106,7 +2239,9 @@ mod tests {
     // durable paragraph metadata record.
     let end = body.len_unicode();
     body.insert(end, "\nextra").unwrap();
-    body.mark(end..end + 1, MARK_PARAGRAPH_STYLE, 0_i64).unwrap();
+    body
+      .mark(end..end + 1, MARK_PARAGRAPH_STYLE, 0_i64)
+      .unwrap();
     doc.commit();
 
     let (projection, defects) = document_from_loro_with_defects(&doc)?;
@@ -2152,9 +2287,18 @@ mod tests {
     let (projection, defects) = document_from_loro_with_defects(&doc)?;
     let (_, defects_again) = document_from_loro_with_defects(&doc)?;
     assert_eq!(defects, defects_again, "quarantine reporting must be deterministic");
-    assert!(defects.iter().any(|defect| matches!(defect, ProjectionDefect::UnresolvedObjectAnchor { .. })));
+    assert!(
+      defects
+        .iter()
+        .any(|defect| matches!(defect, ProjectionDefect::UnresolvedObjectAnchor { .. }))
+    );
     // The block is quarantined (appended), not silently dropped.
-    assert!(projection.blocks.iter().any(|block| matches!(block, gpui_flowtext::Block::Image(_))));
+    assert!(
+      projection
+        .blocks
+        .iter()
+        .any(|block| matches!(block, gpui_flowtext::Block::Image(_)))
+    );
     Ok(())
   }
 
@@ -2190,7 +2334,11 @@ mod tests {
     doc.commit();
 
     let (projection, defects) = document_from_loro_with_defects(&doc)?;
-    assert!(defects.iter().any(|defect| matches!(defect, ProjectionDefect::InvalidAssetId { .. })));
+    assert!(
+      defects
+        .iter()
+        .any(|defect| matches!(defect, ProjectionDefect::InvalidAssetId { .. }))
+    );
     // Never silently coerced away: projected as the deterministic AssetId(0) placeholder.
     assert!(
       projection

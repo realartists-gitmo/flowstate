@@ -213,6 +213,54 @@ fn log_directory() -> PathBuf {
       .join("flowstate-logs")
   })
 }
+
+/// Build a user-initiated diagnostics bundle without telemetry or network I/O.
+/// Invite bearers and the user's home-directory prefix are removed before the
+/// selected local log files are copied into one readable report.
+pub fn export_redacted_diagnostics(destination: &Path) -> Result<()> {
+  let directory = log_directory();
+  let mut logs = fs::read_dir(&directory)
+    .with_context(|| format!("reading log directory {} failed", directory.display()))?
+    .filter_map(std::result::Result::ok)
+    .map(|entry| entry.path())
+    .filter(|path| matches!(path.extension().and_then(|extension| extension.to_str()), Some("log" | "jsonl")))
+    .collect::<Vec<_>>();
+  logs.sort();
+  let home = dirs::home_dir().and_then(|path| path.to_str().map(str::to_owned));
+  let mut report = String::from("Flowstate diagnostics (local, redacted)\n\n");
+  for path in logs.into_iter().rev().take(4).rev() {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+      continue;
+    };
+    report.push_str(&format!("--- {name} ---\n"));
+    let contents = fs::read_to_string(&path).unwrap_or_else(|error| format!("[unreadable log: {error}]"));
+    for line in contents.lines() {
+      report.push_str(&redact_diagnostic_line(line, home.as_deref()));
+      report.push('\n');
+    }
+  }
+  atomicwrites::AtomicFile::new(destination, atomicwrites::OverwriteBehavior::AllowOverwrite)
+    .write(|file| std::io::Write::write_all(file, report.as_bytes()))
+    .with_context(|| format!("writing diagnostics export {} failed", destination.display()))
+}
+
+fn redact_diagnostic_line(line: &str, home: Option<&str>) -> String {
+  let mut redacted = line
+    .split_whitespace()
+    .map(|token| {
+      if token.contains(flowstate_collab::ticket::INVITE_URL_PREFIX) || token.contains(flowstate_collab::ticket::TICKET_KIND) {
+        "[REDACTED_INVITE]"
+      } else {
+        token
+      }
+    })
+    .collect::<Vec<_>>()
+    .join(" ");
+  if let Some(home) = home.filter(|home| !home.is_empty()) {
+    redacted = redacted.replace(home, "~");
+  }
+  redacted
+}
 const MAX_LOG_FILES: usize = 14;
 const MAX_LOG_AGE: Duration = Duration::from_hours(336);
 
@@ -272,5 +320,14 @@ mod tests {
       .filter(|name| name.to_string_lossy().starts_with("flowstate.log."))
       .count();
     assert!(retained <= MAX_LOG_FILES);
+  }
+
+  #[test]
+  fn diagnostic_redaction_removes_invites_and_home_paths() {
+    let line = "join flowstate://join#fscollab-secret from /home/alex/Documents/brief.db8";
+    let redacted = redact_diagnostic_line(line, Some("/home/alex"));
+    assert!(!redacted.contains("fscollab-secret"));
+    assert!(redacted.contains("[REDACTED_INVITE]"));
+    assert!(redacted.contains("~/Documents/brief.db8"));
   }
 }

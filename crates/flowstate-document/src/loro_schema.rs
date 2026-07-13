@@ -18,6 +18,7 @@ pub const SECTIONS_BY_ID: &str = "sections_by_id";
 pub const ASSETS_BY_ID: &str = "assets_by_id";
 pub const REVISIONS: &str = "revisions";
 pub const USERS_BY_ID: &str = "users_by_id";
+pub const COMMENTS_BY_ID: &str = "comments_by_id";
 pub const REPLICAS_BY_ID: &str = "replicas_by_id";
 
 pub const FLOW_TEXT_KEY: &str = "text";
@@ -92,7 +93,9 @@ pub fn loro_id_trailing_u128(id: &str) -> Option<u128> {
 }
 
 fn parse_trailing_u128(id: &str) -> Option<u128> {
-  id.rsplit('.').next().and_then(|segment| segment.parse().ok())
+  id.rsplit('.')
+    .next()
+    .and_then(|segment| segment.parse().ok())
 }
 
 /// Decode a `row.{u128}` Loro id into a [`gpui_flowtext::RowId`] (§P2b).
@@ -378,7 +381,10 @@ pub fn seed_document_body(doc: &LoroDoc) -> LoroResult<()> {
   // first-paragraph state that the projection integrity and import invariants
   // assert. Trace each seeding so a convergence/repair trail is visible.
   fidelity::event(FidelityClass::Structure, "seed-body", || {
-    format!("seeded canonical body sentinel + first paragraph (body_unicode_len={})", body_text.len_unicode())
+    format!(
+      "seeded canonical body sentinel + first paragraph (body_unicode_len={})",
+      body_text.len_unicode()
+    )
   });
   Ok(())
 }

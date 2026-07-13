@@ -17,7 +17,11 @@ fn flowstate_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
     .child(
       Button::new("top-flowstate")
-        .icon(Icon::default().path("logo/flowstate-mark.svg").with_size(px(13.0)))
+        .icon(
+          Icon::default()
+            .path("logo/flowstate-mark.svg")
+            .with_size(px(13.0)),
+        )
         .label("Flowstate")
         .xsmall()
         .ghost()
@@ -123,22 +127,50 @@ fn collaboration_top_bar_button(cx: &mut Context<Workspace>, has_document: bool,
         .ghost()
         .dropdown_menu(move |menu, _, _| {
           menu
-            .item(file_menu_item(workspace.clone(), "Share / Collaborate...", !has_document, |workspace, window, cx| {
-              workspace.open_collaboration_dialog(window, cx);
-            }))
-            .item(file_menu_item(workspace.clone(), "Copy Invite Ticket", !has_document, |workspace, window, cx| {
-              workspace.copy_active_collaboration_ticket(window, cx);
-            }))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Share / Collaborate...",
+              !has_document,
+              |workspace, window, cx| {
+                workspace.open_collaboration_dialog(window, cx);
+              },
+            ))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Copy Invite Ticket",
+              !has_document,
+              |workspace, window, cx| {
+                workspace.copy_active_collaboration_ticket(window, cx);
+              },
+            ))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Comments...",
+              !has_document,
+              |workspace, window, cx| {
+                workspace.open_comment_dialog(window, cx);
+              },
+            ))
             .separator()
             .item(file_menu_item(workspace.clone(), "Join Session...", false, |workspace, window, cx| {
               workspace.open_join_collaboration_dialog(window, cx);
             }))
-            .item(file_menu_item(workspace.clone(), "Join from Clipboard", false, |workspace, window, cx| {
-              workspace.join_collaboration_from_clipboard(window, cx);
-            }))
-            .item(file_menu_item(workspace.clone(), "Leave Shared Session", !active_collaborating, |workspace, window, cx| {
-              workspace.confirm_leave_collaboration_on_active_document(window, cx);
-            }))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Join from Clipboard",
+              false,
+              |workspace, window, cx| {
+                workspace.join_collaboration_from_clipboard(window, cx);
+              },
+            ))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Leave Shared Session",
+              !active_collaborating,
+              |workspace, window, cx| {
+                workspace.confirm_leave_collaboration_on_active_document(window, cx);
+              },
+            ))
         }),
     )
 }
@@ -180,9 +212,14 @@ fn file_top_bar_button(has_document: bool, cx: &mut Context<Workspace>) -> impl 
               workspace.save_active_as(window, cx);
             }))
             .separator()
-            .item(file_menu_item(workspace.clone(), "Share Document...", !has_document, |workspace, window, cx| {
-              workspace.open_collaboration_dialog(window, cx);
-            }))
+            .item(file_menu_item(
+              workspace.clone(),
+              "Share Document...",
+              !has_document,
+              |workspace, window, cx| {
+                workspace.open_collaboration_dialog(window, cx);
+              },
+            ))
             .item(file_menu_item(workspace.clone(), "Join Session...", false, |workspace, window, cx| {
               workspace.open_join_collaboration_dialog(window, cx);
             }))
@@ -332,18 +369,22 @@ fn settings_top_bar_button(cx: &mut Context<Workspace>) -> impl IntoElement {
         .xsmall()
         .ghost()
         .dropdown_menu(move |menu, _, _| {
-          [WorkspaceSettingsSection::General, WorkspaceSettingsSection::Keymap]
-            .into_iter()
-            .fold(menu, |menu, section| {
-              let workspace = workspace.clone();
-              menu.item(PopupMenuItem::new(section.title()).on_click(move |_, _, cx| {
-                let _ = workspace.update(cx, |workspace, cx| {
-                  workspace.settings_section = section;
-                  workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Settings);
-                  cx.notify();
-                });
-              }))
-            })
+          [
+            WorkspaceSettingsSection::General,
+            WorkspaceSettingsSection::Collaboration,
+            WorkspaceSettingsSection::Keymap,
+          ]
+          .into_iter()
+          .fold(menu, |menu, section| {
+            let workspace = workspace.clone();
+            menu.item(PopupMenuItem::new(section.title()).on_click(move |_, _, cx| {
+              let _ = workspace.update(cx, |workspace, cx| {
+                workspace.settings_section = section;
+                workspace.settings_overlay = Some(WorkspaceSettingsOverlay::Settings);
+                cx.notify();
+              });
+            }))
+          })
         }),
     )
 }
@@ -383,7 +424,7 @@ fn view_top_bar_button(cx: &mut Context<Workspace>, outline_open: bool, ribbon_o
                 }),
             )
             .item(
-          PopupMenuItem::new("Toolkit")
+              PopupMenuItem::new("Toolkit")
                 .checked(toolkit_open)
                 .on_click(move |_, _, cx| {
                   let _ = toolkit_workspace.update(cx, |workspace, cx| workspace.toggle_toolkit(cx));

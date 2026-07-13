@@ -1,10 +1,15 @@
-use std::collections::HashMap;
+use std::{
+  borrow::BorrowMut,
+  collections::HashMap,
+  path::PathBuf,
+  time::{Duration, SystemTime},
+};
 
 use anyhow::{Context as _, Result, anyhow, ensure};
 use async_channel::Receiver;
 use flowstate_collab::{
   SessionId,
-  capability::{CapabilityRole, DEFAULT_TICKET_TTL_SECS, unix_now},
+  discovery::{DiscoveryAdmissionRequest, DiscoveryAdvertisement, document_fingerprint},
   doc_io::DocIoHandle,
   ids::PeerId,
   net::{
@@ -16,9 +21,13 @@ use flowstate_collab::{
 use gpui::{App, AppContext, BorrowAppContext, Context, Entity, Global};
 use uuid::Uuid;
 
+use crate::app_settings::{load_local_identity_secret, load_local_signed_profile, load_local_user_profile, trusted_identity_keys_for_path};
 use crate::rich_text_element::RichTextEditor;
 
-use super::session::{CollabSession, DetachReason, JoinedDocument, SessionPhase, SessionRosterEntry};
+use super::{
+  discovery_runtime::{DiscoveryPublication, DiscoveryRuntime},
+  session::{CollabSession, DetachReason, JoinedDocument, SessionPhase, SessionRosterEntry},
+};
 
 pub struct JoinRequest {
   pub session: SessionId,
@@ -31,6 +40,11 @@ pub struct CollabManager {
   pub(super) sessions_by_id: HashMap<SessionId, Entity<CollabSession>>,
   session_by_panel: HashMap<Uuid, SessionId>,
   own_endpoint_id: Option<PeerId>,
+  discovery: Option<DiscoveryRuntime>,
+  discovery_documents: HashMap<SessionId, [u8; 32]>,
+  discovery_publications: HashMap<SessionId, DiscoveryPublication>,
+  discovery_paths: HashMap<SessionId, PathBuf>,
+  discovery_titles: HashMap<SessionId, String>,
   pub(super) endpoint_online: bool,
   pub(super) event_pump_started: bool,
 }
@@ -64,6 +78,13 @@ impl CollabManager {
     self.sessions_by_id.clear();
     self.session_by_panel.clear();
     self.own_endpoint_id = None;
+    if let Some(discovery) = self.discovery.take() {
+      discovery.shutdown();
+    }
+    self.discovery_documents.clear();
+    self.discovery_publications.clear();
+    self.discovery_paths.clear();
+    self.discovery_titles.clear();
     self.event_pump_started = false;
     self.endpoint_online = false;
     tracing::debug!("collaboration runtime shutdown state cleared");
@@ -87,12 +108,21 @@ impl CollabManager {
 
     let commands = self.ensure_runtime(cx)?;
     let session = SessionId::new();
+    let canonical_document_id = editor.read(cx).document().ids.document_id;
+    let document_path = editor.read(cx).document_path().cloned();
+    self
+      .discovery_documents
+      .insert(session, document_fingerprint(canonical_document_id));
     tracing::info!(
       %panel_id,
       %session,
       title = %title,
       "starting local collaboration session",
     );
+    if let Some(path) = document_path {
+      self.discovery_paths.insert(session, path);
+    }
+    self.discovery_titles.insert(session, title.clone());
     let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_io, commands.clone());
     let direct_handler = collab.direct_handler();
     let entity = cx.new(|_| collab);
@@ -113,6 +143,7 @@ impl CollabManager {
       return Err(error).context("registering collaboration direct handler failed");
     }
     tracing::debug!(%panel_id, %session, "registered collaboration direct handler for local session");
+    self.configure_standing_access(session);
 
     let (reply_tx, reply_rx) = async_channel::bounded(1);
     if let Err(error) = commands.try_send(NetCommand::CreateSession { session, reply: reply_tx }) {
@@ -134,7 +165,7 @@ impl CollabManager {
   where
     T: 'static,
   {
-    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, title = %ticket.title, "joining collaboration session from ticket");
+    tracing::info!(session = %ticket.session, bootstrap_count = ticket.bootstrap.len(), title = %ticket.title, "joining collaboration session from ticket");
     if !ticket.is_supported_version() {
       tracing::warn!(session = %ticket.session, "unsupported collaboration protocol version in ticket");
     }
@@ -143,14 +174,17 @@ impl CollabManager {
     // dial anyone. The owner re-verifies the epoch at the handshake, which a
     // dishonest joiner cannot skip.
     ticket
-      .verify_for_join(unix_now())
-      .context("collaboration invite is invalid or expired")?;
+      .verify_for_join()
+      .context("collaboration invite is invalid")?;
     let commands = self.ensure_runtime(cx)?;
     commands
       .try_send(NetCommand::EnsureUp)
       .context("starting collaboration networking failed")?;
     ensure!(
-      self.own_endpoint_id != Some(ticket.inviter.id),
+      !ticket
+        .bootstrap
+        .iter()
+        .any(|addr| self.own_endpoint_id == Some(addr.id)),
       "That's your own invite — open the Share dialog instead."
     );
     if self.unregister_detached_session(ticket.session, cx) {
@@ -163,17 +197,21 @@ impl CollabManager {
     }
 
     let session = ticket.session;
-    let inviter = ticket.inviter.id;
-    let capability = ticket.capability.clone();
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), vec![ticket.inviter.clone()], capability.clone());
+    let admission = ticket.admission.clone();
+    let bootstrap = ticket.bootstrap.clone();
+    let preferred_peer = bootstrap
+      .first()
+      .map(|addr| addr.id)
+      .ok_or_else(|| anyhow!("collaboration invite has no reachable participants"))?;
+    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), bootstrap.clone(), admission.clone());
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
     let neighbor_rx = entity.update(cx, |session, cx| session.prepare_join_neighbor_wait(cx));
 
     if let Err(error) = commands.try_send(NetCommand::JoinSession {
       session,
-      bootstrap: vec![ticket.inviter],
-      capability,
+      bootstrap,
+      admission,
     }) {
       tracing::error!(%session, error = %error, "queueing collaboration join-session command failed");
       entity.update(cx, |session, cx| {
@@ -185,8 +223,8 @@ impl CollabManager {
       self.unregister_session(session);
       return Err(error).context("joining collaboration network session failed");
     }
-    tracing::debug!(%session, inviter = %inviter, "queued collaboration join-session command");
-    let completed = entity.update(cx, |session, cx| session.begin_join_bootstrap(inviter, neighbor_rx, cx));
+    tracing::debug!(%session, peer = %preferred_peer, "queued collaboration join-session command");
+    let completed = entity.update(cx, |session, cx| session.begin_join_bootstrap(preferred_peer, neighbor_rx, cx));
     Ok(JoinRequest { session, completed })
   }
 
@@ -274,29 +312,25 @@ impl CollabManager {
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
-    // Default to an Editor invite. Seam: surface a Viewer/Editor choice from the
-    // Share UI and thread the chosen `CapabilityRole` in here.
     if let Err(error) = commands.try_send(NetCommand::MintTicket {
       session: session_id,
-      role: CapabilityRole::Editor,
-      ttl_secs: DEFAULT_TICKET_TTL_SECS,
       reply: reply_tx,
     }) {
       tracing::error!(%panel_id, %session_id, error = %error, "queueing collaboration mint-ticket command failed");
       return None;
     }
-    tracing::debug!(%panel_id, %session_id, "requested collaboration invite capability");
+    tracing::debug!(%panel_id, %session_id, "requested collaboration invite");
 
     cx.spawn(async move |_, cx| {
       let ticket = match reply_rx.recv().await {
         Ok(Ok(minted)) => {
-          tracing::info!(%session_id, inviter = %minted.inviter.id, role = %minted.capability.role.label(), "created collaboration share ticket");
+          tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          Ok(SessionTicket::new(session_id, minted.inviter, title, minted.capability))
+          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission))
         },
         Ok(Err(error)) => {
-          tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite capability failed");
+          tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite failed");
           Err(anyhow!("minting collaboration invite failed: {error:#}"))
         },
         Err(error) => {
@@ -341,6 +375,24 @@ impl CollabManager {
       .map_or_else(Vec::new, |session| session.read(cx).roster())
   }
 
+  pub fn scan_document_discovery<T>(
+    &mut self,
+    document_id: u128,
+    cx: &mut Context<T>,
+  ) -> async_channel::Receiver<super::discovery_runtime::DiscoveryScanResult>
+  where
+    T: 'static,
+  {
+    if self.discovery.is_none() {
+      self.discovery = Some(DiscoveryRuntime::start(cx));
+    }
+    self
+      .discovery
+      .as_ref()
+      .expect("discovery runtime initialized")
+      .scan(document_fingerprint(document_id))
+  }
+
   fn register_session<T>(&mut self, session: Entity<CollabSession>, cx: &mut Context<T>) {
     let id = session.read(cx).session_id();
     if let Some(panel_id) = session.read(cx).panel_id() {
@@ -352,6 +404,13 @@ impl CollabManager {
   }
 
   pub(super) fn unregister_session(&mut self, session: SessionId) {
+    if let Some(discovery) = &self.discovery {
+      discovery.remove(session);
+    }
+    self.discovery_documents.remove(&session);
+    self.discovery_publications.remove(&session);
+    self.discovery_paths.remove(&session);
+    self.discovery_titles.remove(&session);
     let removed = self.sessions_by_id.remove(&session).is_some();
     self.session_by_panel.retain(|_, active| *active != session);
     tracing::debug!(%session, removed, open_sessions = self.sessions_by_id.len(), "unregistered collaboration session");
@@ -383,6 +442,7 @@ impl CollabManager {
     tracing::info!("starting collaboration runtime for manager");
     let (commands, events) = runtime::start()?;
     self.runtime = Some(CollabRuntime { commands: commands.clone() });
+    self.discovery = Some(DiscoveryRuntime::start(cx));
     self.start_event_pump(events, cx);
     Ok(commands)
   }
@@ -397,7 +457,11 @@ impl CollabManager {
         tracing::info!(%session_id, inviter = %seed.inviter.id, "collaboration create-session completed");
         let own_endpoint_id = seed.inviter.id;
         let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-        let _ = session.update(cx, |session, cx| session.establish_local_peer(&seed.inviter.id, cx));
+        let _ = session.update(cx, |session, cx| {
+          session.set_admission(seed.admission);
+          session.establish_local_peer(&seed.inviter.id, cx);
+        });
+        let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.publish_discovery(session_id, seed.inviter));
       },
       Ok(Err(error)) => {
         tracing::error!(%session_id, error = %format_args!("{error:#}"), "collaboration create-session failed");
@@ -413,6 +477,109 @@ impl CollabManager {
       },
     })
     .detach();
+  }
+
+  fn publish_discovery(&mut self, session: SessionId, endpoint: iroh::EndpointAddr) {
+    let Some(runtime) = &self.discovery else { return };
+    let Some(document_fingerprint) = self.discovery_documents.get(&session).copied() else {
+      tracing::debug!(%session, "skipping collaboration discovery for a session without a canonical document identity");
+      return;
+    };
+    let Some(secret) = load_local_identity_secret() else {
+      tracing::warn!(%session, "skipping collaboration discovery because the local signing identity is unavailable");
+      return;
+    };
+    let Some(profile) = load_local_signed_profile() else {
+      tracing::warn!(%session, "skipping collaboration discovery because the signed local profile is unavailable");
+      return;
+    };
+    let local = load_local_user_profile();
+    let publication = DiscoveryPublication {
+      secret,
+      device_id: local.device_id,
+      document_fingerprint,
+      session,
+      endpoint,
+      profile,
+    };
+    runtime.upsert(publication.clone());
+    self.discovery_publications.insert(session, publication);
+  }
+
+  pub fn reconfigure_discovery<C>(&mut self, cx: &mut C)
+  where
+    C: BorrowMut<App>,
+  {
+    if let Some(discovery) = self.discovery.take() {
+      discovery.shutdown();
+    }
+    if self.runtime.is_none() {
+      return;
+    }
+    let discovery = DiscoveryRuntime::start(cx);
+    for publication in self.discovery_publications.values().cloned() {
+      discovery.upsert(publication);
+    }
+    self.discovery = Some(discovery);
+    for session in self.sessions_by_id.keys().copied().collect::<Vec<_>>() {
+      self.configure_standing_access(session);
+    }
+  }
+
+  fn configure_standing_access(&self, session: SessionId) {
+    let Some(runtime) = &self.runtime else { return };
+    let Some(document_fingerprint) = self.discovery_documents.get(&session).copied() else {
+      return;
+    };
+    let Some(path) = self.discovery_paths.get(&session) else { return };
+    let title = self
+      .discovery_titles
+      .get(&session)
+      .cloned()
+      .unwrap_or_else(|| "Shared document".into());
+    let identities = trusted_identity_keys_for_path(path);
+    if let Err(error) = runtime
+      .commands
+      .try_send(NetCommand::ConfigureStandingAccess {
+        session,
+        document_fingerprint,
+        title,
+        identities,
+      })
+    {
+      tracing::warn!(%error, %session, "queueing standing collaboration access failed");
+    }
+  }
+
+  pub fn request_discovered_ticket<T>(&mut self, advertisement: DiscoveryAdvertisement, cx: &mut Context<T>) -> Receiver<Result<SessionTicket>>
+  where
+    T: 'static,
+  {
+    let (reply, receiver) = async_channel::bounded(1);
+    let result = (|| {
+      let commands = self.ensure_runtime(cx)?;
+      let secret = load_local_identity_secret().context("local collaboration identity is unavailable")?;
+      let mut nonce = [0_u8; 32];
+      nonce[..16].copy_from_slice(Uuid::new_v4().as_bytes());
+      nonce[16..].copy_from_slice(Uuid::new_v4().as_bytes());
+      let expires = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or(Duration::ZERO)
+        .as_secs()
+        .saturating_add(30);
+      let request = DiscoveryAdmissionRequest::issue(&secret, advertisement.session, advertisement.document_fingerprint, nonce, expires);
+      commands
+        .try_send(NetCommand::RequestDiscoveredTicket {
+          advertisement,
+          request,
+          reply: reply.clone(),
+        })
+        .context("queueing trusted-peer admission request")
+    })();
+    if let Err(error) = result {
+      let _ = reply.try_send(Err(error));
+    }
+    receiver
   }
 
   fn establish_joined_peer<T>(session: Entity<CollabSession>, commands: CommandSender, cx: &mut Context<T>) -> Result<()>

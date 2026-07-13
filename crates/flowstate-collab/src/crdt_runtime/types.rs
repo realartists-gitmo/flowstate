@@ -22,6 +22,30 @@ pub struct RuntimeRevisionInfo {
   pub title: String,
   pub summary: String,
   pub created_at_unix_secs: i64,
+  pub author_user_id: Option<u128>,
+  pub author_display_name: Option<String>,
+  pub replica_id: Option<u128>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RuntimeCommentMessage {
+  pub message_id: u128,
+  pub author_user_id: u128,
+  pub author_display_name: String,
+  pub body: String,
+  pub created_at_unix_secs: i64,
+  pub updated_at_unix_secs: i64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RuntimeCommentThread {
+  pub comment_id: u128,
+  pub quoted_text: String,
+  pub resolved: bool,
+  pub created_at_unix_secs: i64,
+  pub updated_at_unix_secs: i64,
+  pub anchor: Option<(gpui_flowtext::DocumentOffset, gpui_flowtext::DocumentOffset)>,
+  pub messages: Vec<RuntimeCommentMessage>,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]

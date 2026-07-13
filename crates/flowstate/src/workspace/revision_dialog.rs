@@ -93,6 +93,23 @@ impl Render for RevisionDialog {
           let revision_id = revision.revision_id;
           let title: SharedString = revision.title.clone().into();
           let summary: SharedString = revision.summary.clone().into();
+          let author = revision
+            .author_display_name
+            .clone()
+            .or_else(|| {
+              revision
+                .author_user_id
+                .map(|id| format!("User {}", &format!("{id:032x}")[..8]))
+            })
+            .unwrap_or_else(|| "Unknown author".into());
+          let timestamp = chrono::DateTime::from_timestamp(revision.created_at_unix_secs, 0)
+            .map(|timestamp| {
+              timestamp
+                .with_timezone(&chrono::Local)
+                .format("%b %-d, %Y %-I:%M %p")
+                .to_string()
+            })
+            .unwrap_or_else(|| "Unknown time".into());
           Button::new(("open-revision", revision_id as u64))
             .ghost()
             .w_full()
@@ -112,6 +129,12 @@ impl Render for RevisionDialog {
                         .text_color(cx.theme().muted_foreground)
                         .text_ellipsis()
                         .child(summary),
+                    )
+                    .child(
+                      div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format!("{author} · {timestamp}")),
                     ),
                 )
                 .child(

@@ -43,8 +43,15 @@ pub(crate) fn search_units_from_input_blocks(
   let body_paragraph_cursors: Vec<(Vec<u8>, Vec<u8>)> = resolved
     .chunks(2)
     .map(|pair| {
-      let start = pair[0].as_ref().map(loro::cursor::Cursor::encode).unwrap_or_default();
-      let end = pair.get(1).and_then(|c| c.as_ref()).map(loro::cursor::Cursor::encode).unwrap_or_default();
+      let start = pair[0]
+        .as_ref()
+        .map(loro::cursor::Cursor::encode)
+        .unwrap_or_default();
+      let end = pair
+        .get(1)
+        .and_then(|c| c.as_ref())
+        .map(loro::cursor::Cursor::encode)
+        .unwrap_or_default();
       (start, end)
     })
     .collect();

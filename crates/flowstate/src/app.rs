@@ -328,19 +328,73 @@ fn install_flowtext_adapters() {
 
 /// Run the rich text processor by itself for focused component development.
 #[hotpath::measure]
-pub fn run_standalone(document_path: Option<PathBuf>) {
-  Application::new()
-    .with_assets(AppAssets)
-    .run(|cx: &mut App| {
-      gpui_component::init(cx);
-      init_theme_registry(cx);
-      apply_saved_theme(cx);
-      register_rich_text_editor_keybindings(cx);
-      install_prompt_renderer(cx);
-      install_flowtext_adapters();
-      open_workspace_window(document_path, cx);
-      cx.activate(true);
-    });
+pub fn run_standalone(mut document_path: Option<PathBuf>) {
+  let initial_invite = document_path
+    .as_ref()
+    .filter(|path| {
+      path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flowinvite"))
+    })
+    .and_then(|path| std::fs::read_to_string(path).ok());
+  if initial_invite.is_some() {
+    document_path = None;
+  }
+  let (open_url_tx, open_url_rx) = async_channel::unbounded();
+  let initial_url_tx = open_url_tx.clone();
+  let application = Application::new().with_assets(AppAssets);
+  application.on_open_urls(move |urls| {
+    for url in urls {
+      let _ = open_url_tx.try_send(url);
+    }
+  });
+  application.run(move |cx: &mut App| {
+    gpui_component::init(cx);
+    init_theme_registry(cx);
+    apply_saved_theme(cx);
+    register_rich_text_editor_keybindings(cx);
+    install_prompt_renderer(cx);
+    install_flowtext_adapters();
+    let workspace = open_workspace_window(document_path, cx);
+    if let Some(invite) = initial_invite {
+      let _ = initial_url_tx.try_send(invite);
+    }
+    cx.spawn(async move |cx| {
+      while let Ok(url) = open_url_rx.recv().await {
+        let handled = cx
+          .update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx))
+          .unwrap_or(false);
+        if handled {
+          continue;
+        }
+        let result = flowstate_collab::ticket::SessionTicket::decode_text(&url);
+        let _ = cx.update(|cx| {
+          let Some(window_handle) = cx.active_window() else {
+            tracing::warn!("received collaboration deep link without an active window");
+            return;
+          };
+          let _ = window_handle.update(cx, |_, window, cx| match result {
+            Ok(ticket) => {
+              let _ = workspace.update(cx, |workspace, cx| workspace.join_collaboration_session(ticket, window, cx));
+              cx.activate(true);
+            },
+            Err(error) => {
+              let detail = format!("This Flowstate collaboration link is invalid or damaged: {error}");
+              std::mem::drop(window.prompt(
+                PromptLevel::Critical,
+                "Invite couldn't be opened",
+                Some(&detail),
+                &[PromptButton::ok("Ok")],
+                cx,
+              ));
+            },
+          });
+        });
+      }
+    })
+    .detach();
+    cx.activate(true);
+  });
 }
 
 struct AppAssets;
@@ -378,9 +432,7 @@ impl AssetSource for AppAssets {
       "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
       "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
       "logo/flowstate-app-icon.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon.svg")))),
-      "logo/flowstate-app-icon-light.svg" => Ok(Some(Cow::Borrowed(include_bytes!(
-        "../assets/logo/flowstate-app-icon-light.svg"
-      )))),
+      "logo/flowstate-app-icon-light.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon-light.svg")))),
       "logo/flowstate-mark.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark.svg")))),
       "logo/flowstate-mark-white.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-white.svg")))),
       "logo/flowstate-mark-black.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-black.svg")))),

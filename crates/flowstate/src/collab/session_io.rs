@@ -366,7 +366,10 @@ impl CollabSession {
     // writes document CONTENT (invariant 5) — asset bytes are content-
     // addressed sideband records.
     if let Some(io) = self.runtime.clone() {
-      let records: Vec<AssetRecord> = asset_records.iter().map(|(_, record)| record.clone()).collect();
+      let records: Vec<AssetRecord> = asset_records
+        .iter()
+        .map(|(_, record)| record.clone())
+        .collect();
       cx.spawn(async move |_, _| {
         if let Err(error) = io.record_assets(records).await {
           tracing::warn!(%error, "recording pulled asset bytes into canonical state failed; saves may miss them until re-pull");

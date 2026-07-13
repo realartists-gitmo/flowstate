@@ -156,7 +156,9 @@ impl AntiEntropyState {
       tracing::debug!(session = %self.session, from = %from, "collaboration anti-entropy skipped pull because one is already in flight for this peer");
       return GapAction::None;
     }
-    self.pulls_in_flight.insert(from, now + PULL_IN_FLIGHT_DEADLINE);
+    self
+      .pulls_in_flight
+      .insert(from, now + PULL_IN_FLIGHT_DEADLINE);
     tracing::debug!(session = %self.session, from = %from, our_vv_bytes = our_vv.len(), in_flight = self.pulls_in_flight.len(), "collaboration anti-entropy pull started");
     GapAction::Pull { from, our_vv }
   }

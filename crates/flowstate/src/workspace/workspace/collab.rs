@@ -1,5 +1,49 @@
 #[hotpath::measure_all]
 impl Workspace {
+  pub(crate) fn collaboration_discovery_context(&self, panel_id: Uuid, cx: &App) -> Option<(u128, PathBuf)> {
+    let panel = self
+      .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)?;
+    let editor = panel.read(cx).editor();
+    let editor = editor.read(cx);
+    Some((editor.document().ids.document_id, editor.document_path()?.clone()))
+  }
+
+  pub fn open_comment_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(panel_id) = self.active_document_id else { return };
+    let Some(editor) = self.active_editor.clone() else { return };
+    let Some(io) = self.document_runtimes.get(&panel_id).cloned() else {
+      return;
+    };
+    if self.comment_dialog.is_some() {
+      window.close_dialog(cx);
+      self.comment_dialog = None;
+    }
+    let selection = editor.read(cx).selection().clone();
+    let profile = crate::app_settings::load_local_user_profile();
+    let dialog = cx
+      .new(|cx| crate::workspace::comment_dialog::CommentDialog::new(io, editor, selection, profile.user_id, profile.display_name, window, cx));
+    let rendered = dialog.clone();
+    let workspace = cx.entity().downgrade();
+    window.open_dialog(cx, move |component, _, _| {
+      let workspace = workspace.clone();
+      component
+        .title("Comments")
+        .w(px(620.0))
+        .max_w(px(620.0))
+        .on_close(move |_, _, cx| {
+          let _ = workspace.update(cx, |workspace, cx| {
+            workspace.comment_dialog = None;
+            cx.notify();
+          });
+        })
+        .child(rendered.clone())
+    });
+    self.comment_dialog = Some(dialog);
+    cx.notify();
+  }
+
   pub fn open_collaboration_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     self.open_collaboration_dialog_with_mode(crate::collab::share_dialog::CollabDialogMode::Share, window, cx);
   }
@@ -119,12 +163,12 @@ impl Workspace {
       let result = ticket_rx.recv().await;
       let _ = window_handle.update(cx, |_, window, cx| match result {
         Ok(Ok(ticket)) => {
-          tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "copied collaboration invite ticket to clipboard");
-          cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.encode_text()));
+          tracing::info!(session = %ticket.session, bootstrap_count = ticket.bootstrap.len(), "copied collaboration invite ticket to clipboard");
+          cx.write_to_clipboard(gpui::ClipboardItem::new_string(ticket.encode_invite_link()));
           std::mem::drop(window.prompt(
             PromptLevel::Info,
             "Invite copied",
-            Some("The collaboration invite ticket was copied to the clipboard."),
+            Some("A Flowstate invite link was copied to the clipboard."),
             &[PromptButton::ok("Ok")],
             cx,
           ));
@@ -177,8 +221,10 @@ impl Workspace {
         return true;
       },
     };
-    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "joining collaboration session from clipboard");
-    self.join_collaboration_session(ticket, window, cx).is_some()
+    tracing::info!(session = %ticket.session, bootstrap_count = ticket.bootstrap.len(), "joining collaboration session from clipboard");
+    self
+      .join_collaboration_session(ticket, window, cx)
+      .is_some()
   }
 
   pub fn confirm_leave_collaboration_on_active_document(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -227,19 +273,13 @@ impl Workspace {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Option<flowstate_collab::SessionId> {
-    tracing::info!(session = %ticket.session, inviter = %ticket.inviter.id, "workspace joining collaboration session");
+    tracing::info!(session = %ticket.session, bootstrap_count = ticket.bootstrap.len(), "workspace joining collaboration session");
     let request = match crate::collab::join_session(ticket, cx) {
       Ok(request) => request,
       Err(error) => {
         tracing::error!(error = %format_args!("{error:#}"), "joining collaboration session failed");
         let detail = format!("Joining collaboration session failed: {error:#}");
-        std::mem::drop(window.prompt(
-          PromptLevel::Critical,
-          "Join failed",
-          Some(&detail),
-          &[PromptButton::ok("Ok")],
-          cx,
-        ));
+        std::mem::drop(window.prompt(PromptLevel::Critical, "Join failed", Some(&detail), &[PromptButton::ok("Ok")], cx));
         return None;
       },
     };

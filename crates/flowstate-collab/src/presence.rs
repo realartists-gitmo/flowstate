@@ -23,6 +23,7 @@ pub const MAX_PRESENCE_CURSOR_BYTES: usize = 256;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct PresenceState {
   pub name: String,
+  pub color_rgb: u32,
   pub selection: Option<PresenceSelection>,
 }
 
@@ -105,10 +106,15 @@ pub struct PresenceStore {
 impl PresenceStore {
   #[must_use]
   pub fn new(self_peer: &PeerId) -> Self {
+    Self::new_with_color(self_peer, color_for_peer(self_peer))
+  }
+
+  #[must_use]
+  pub fn new_with_color(self_peer: &PeerId, color_rgb: u32) -> Self {
     Self {
       store: EphemeralStore::new(PRESENCE_TIMEOUT_MS),
       self_key: peer_key(self_peer),
-      self_color: color_for_peer(self_peer),
+      self_color: color_rgb & 0x00ff_ffff,
     }
   }
 
@@ -272,26 +278,12 @@ fn roster_entry_from_value(key: String, value: LoroValue) -> Option<RosterEntry>
     return None;
   };
   let state = decode_state(bytes.as_ref()).ok()?;
-  let color_rgb = color_for_peer_key(&key)?;
   Some(RosterEntry {
-    color_rgb,
+    color_rgb: state.color_rgb & 0x00ff_ffff,
     key,
     name: state.name,
     selection: state.selection,
   })
-}
-
-fn color_for_peer_key(key: &str) -> Option<u32> {
-  let mut bytes = Vec::with_capacity(key.len() / 2);
-  let mut chunks = key.as_bytes().chunks_exact(2);
-  if !chunks.remainder().is_empty() {
-    return None;
-  }
-  for chunk in &mut chunks {
-    let text = std::str::from_utf8(chunk).ok()?;
-    bytes.push(u8::from_str_radix(text, 16).ok()?);
-  }
-  Some(PALETTE[SessionId::color_index_for_peer_bytes(&bytes)])
 }
 
 /// Clamp a presence state to the Part B caps before it is broadcast: strip
@@ -304,6 +296,7 @@ fn sanitize_presence_state(state: &PresenceState) -> PresenceState {
   };
   PresenceState {
     name: sanitize_display_name(&state.name),
+    color_rgb: state.color_rgb & 0x00ff_ffff,
     selection,
   }
 }
@@ -350,6 +343,7 @@ mod tests {
   fn named_state(name: &str) -> PresenceState {
     PresenceState {
       name: name.to_string(),
+      color_rgb: 0x3b82f6,
       selection: None,
     }
   }

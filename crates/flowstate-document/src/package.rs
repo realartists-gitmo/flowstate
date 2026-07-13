@@ -521,7 +521,9 @@ impl DocumentPackage {
   /// (its real verification happens at decode via
   /// [`Self::verify_snapshot_chunk`]); everything else hashes for real.
   fn integrity_checksum_for_snapshot(&self, snapshot: &LoroSnapshotChunk) -> [u8; 32] {
-    if self.deferred_snapshot_checksums.contains_key(&snapshot.snapshot_id)
+    if self
+      .deferred_snapshot_checksums
+      .contains_key(&snapshot.snapshot_id)
       && let Some(entry) = self
         .integrity_index
         .iter()
@@ -996,10 +998,7 @@ impl DocumentPackage {
         );
         if verify && let Some(analytic) = analytic {
           assert!(
-            analytic.0 == decoded.0
-              && analytic.1 == decoded.1
-              && analytic.2 == decoded.2
-              && analytic.3 == decoded.3,
+            analytic.0 == decoded.0 && analytic.1 == decoded.1 && analytic.2 == decoded.2 && analytic.3 == decoded.3,
             "[flowstate-shallow-root-verify] analytic shallow root diverges from the decoded chunk"
           );
         }
@@ -1439,7 +1438,10 @@ impl DocumentPackage {
     // Decode from the LAST full generation: everything before it is
     // superseded, and decoding every stacked generation made opening a large
     // journal (~5 × 86MB on the impact-doc package) tens of seconds.
-    let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+    let latest_generation = payloads
+      .iter()
+      .rposition(|payload| payload.starts_with(PACKAGE_MAGIC))
+      .unwrap_or(0);
     let mut package = None;
     for payload in &payloads[latest_generation..] {
       let payload = *payload;
@@ -1452,7 +1454,11 @@ impl DocumentPackage {
         .as_mut()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"))?;
       match delta {
-        PackageJournalDelta::Update { manifest, segment, preview_header } => {
+        PackageJournalDelta::Update {
+          manifest,
+          segment,
+          preview_header,
+        } => {
           if !current
             .loro_update_segments
             .iter()
@@ -1906,8 +1912,7 @@ impl DocumentPackage {
     let probe_t = std::time::Instant::now();
     // §act-ten A10.5: block-boundary persistence removed (see
     // `rebuild_projection_cache_from_loro`).
-    self.search_units =
-      crate::package_search::search_units_from_input_blocks(doc, &projection.blocks, self.manifest.document_id, &frontier)?;
+    self.search_units = crate::package_search::search_units_from_input_blocks(doc, &projection.blocks, self.manifest.document_id, &frontier)?;
     let probe_search = probe_t.elapsed();
     let probe_t = std::time::Instant::now();
     self.manifest.search_cache_frontier = Some(frontier.clone());
@@ -2375,7 +2380,11 @@ fn projection_blocks_from_document(document: &crate::DocumentProjection) -> crat
   for block in document.blocks.range(0..block_count) {
     match block {
       crate::Block::Paragraph(_) => {
-        blocks.push(crate::InputBlock::Paragraph(crate::input_paragraph_from_document_range(document, paragraph_ix, 0..usize::MAX)));
+        blocks.push(crate::InputBlock::Paragraph(crate::input_paragraph_from_document_range(
+          document,
+          paragraph_ix,
+          0..usize::MAX,
+        )));
         paragraph_ix += 1;
       },
       other => blocks.push(crate::input_block_from_block(other)),
@@ -2400,7 +2409,11 @@ fn preview_header_blocks_from_document(document: &crate::DocumentProjection, k: 
   for block in document.blocks.range(0..block_count) {
     match block {
       crate::Block::Paragraph(_) => {
-        blocks.push(crate::InputBlock::Paragraph(crate::input_paragraph_from_document_range(document, paragraph_ix, 0..usize::MAX)));
+        blocks.push(crate::InputBlock::Paragraph(crate::input_paragraph_from_document_range(
+          document,
+          paragraph_ix,
+          0..usize::MAX,
+        )));
         paragraph_ix += 1;
       },
       other => blocks.push(crate::input_block_from_block(other)),
@@ -2443,7 +2456,10 @@ fn preview_header_positioned(path: &Path) -> io::Result<Option<PreviewHeaderPart
   let mut version = [0_u8; 4];
   file.read_exact(&mut version)?;
   if u32::from_le_bytes(version) != JOURNAL_HEADER_VERSION {
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "unsupported Flowstate package journal version"));
+    return Err(io::Error::new(
+      io::ErrorKind::InvalidData,
+      "unsupported Flowstate package journal version",
+    ));
   }
   // Walk committed transactions: record (payload_offset, payload_len, is_generation).
   let mut offset = (JOURNAL_MAGIC.len() + 4) as u64;
@@ -2463,7 +2479,10 @@ fn preview_header_positioned(path: &Path) -> io::Result<Option<PreviewHeaderPart
     file.read_exact(&mut len_bytes)?;
     let payload_len = u64::from_le_bytes(len_bytes);
     let payload_offset = offset + fixed_len;
-    let commit_end = match payload_offset.checked_add(payload_len).and_then(|end| end.checked_add(JOURNAL_COMMIT_MAGIC.len() as u64)) {
+    let commit_end = match payload_offset
+      .checked_add(payload_len)
+      .and_then(|end| end.checked_add(JOURNAL_COMMIT_MAGIC.len() as u64))
+    {
       Some(end) if end <= file_len => end,
       _ => break,
     };
@@ -2483,7 +2502,10 @@ fn preview_header_positioned(path: &Path) -> io::Result<Option<PreviewHeaderPart
     committed.push((payload_offset, payload_len, is_generation));
     offset = commit_end;
   }
-  let latest_generation = committed.iter().rposition(|(_, _, is_generation)| *is_generation).unwrap_or(0);
+  let latest_generation = committed
+    .iter()
+    .rposition(|(_, _, is_generation)| *is_generation)
+    .unwrap_or(0);
   let mut extracted: Option<PreviewHeaderParts> = None;
   for &(payload_offset, payload_len, is_generation) in &committed[latest_generation..] {
     if is_generation {
@@ -2494,12 +2516,16 @@ fn preview_header_positioned(path: &Path) -> io::Result<Option<PreviewHeaderPart
     file.seek(SeekFrom::Start(payload_offset))?;
     let mut payload = vec![
       0_u8;
-      usize::try_from(payload_len).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "journal payload length overflows usize"))?
+      usize::try_from(payload_len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "journal payload length overflows usize"))?
     ];
     file.read_exact(&mut payload)?;
     let delta = decode_journal_delta(&payload)?;
     let Some((manifest, headers)) = extracted.as_mut() else {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Flowstate package journal delta precedes a full generation",
+      ));
     };
     if let PackageJournalDelta::Update {
       manifest: next_manifest,
@@ -2559,10 +2585,8 @@ fn preview_header_from_compact_positioned(file: &mut fs::File, base: u64, region
       return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "Flowstate package chunk is truncated"));
     }
     file.seek(SeekFrom::Start(base + chunk_offset))?;
-    let mut payload = vec![
-      0_u8;
-      usize::try_from(chunk_len).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk length overflows usize"))?
-    ];
+    let mut payload =
+      vec![0_u8; usize::try_from(chunk_len).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "chunk length overflows usize"))?];
     file.read_exact(&mut payload)?;
     if blake3_hash(&payload) != checksum {
       return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package chunk checksum mismatch"));
@@ -2597,7 +2621,10 @@ fn preview_header_from_compact_bytes(bytes: &[u8]) -> io::Result<Option<PreviewH
 /// rides its journal delta).
 fn preview_header_from_journal_bytes(bytes: &[u8]) -> io::Result<Option<PreviewHeaderParts>> {
   let payloads = committed_journal_payloads(bytes)?;
-  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+  let latest_generation = payloads
+    .iter()
+    .rposition(|payload| payload.starts_with(PACKAGE_MAGIC))
+    .unwrap_or(0);
   let mut extracted: Option<PreviewHeaderParts> = None;
   for payload in &payloads[latest_generation..] {
     let payload = *payload;
@@ -2607,7 +2634,10 @@ fn preview_header_from_journal_bytes(bytes: &[u8]) -> io::Result<Option<PreviewH
     }
     let delta = decode_journal_delta(payload)?;
     let Some((manifest, headers)) = extracted.as_mut() else {
-      return Err(io::Error::new(io::ErrorKind::InvalidData, "Flowstate package journal delta precedes a full generation"));
+      return Err(io::Error::new(
+        io::ErrorKind::InvalidData,
+        "Flowstate package journal delta precedes a full generation",
+      ));
     };
     if let PackageJournalDelta::Update {
       manifest: next_manifest,
@@ -2629,7 +2659,10 @@ fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentP
   // Decode from the LAST full generation only — everything earlier is
   // superseded (same law as `from_journal_bytes`); decoding every stacked
   // generation re-parsed the whole journal history.
-  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+  let latest_generation = payloads
+    .iter()
+    .rposition(|payload| payload.starts_with(PACKAGE_MAGIC))
+    .unwrap_or(0);
   let mut cached = None;
   for payload in &payloads[latest_generation..] {
     let payload = *payload;
@@ -2662,7 +2695,10 @@ fn cached_search_units_from_journal_bytes(bytes: &[u8]) -> io::Result<(DocumentP
 /// cache stale, which the caller detects via the frontier mismatch).
 fn cached_projection_from_journal_bytes(bytes: &[u8]) -> io::Result<Option<CachedProjectionParts>> {
   let payloads = committed_journal_payloads(bytes)?;
-  let latest_generation = payloads.iter().rposition(|payload| payload.starts_with(PACKAGE_MAGIC)).unwrap_or(0);
+  let latest_generation = payloads
+    .iter()
+    .rposition(|payload| payload.starts_with(PACKAGE_MAGIC))
+    .unwrap_or(0);
   let mut cached = None;
   for payload in &payloads[latest_generation..] {
     let payload = *payload;
@@ -2847,7 +2883,10 @@ fn reject_foreign_package_path(path: &Path) -> io::Result<()> {
     if matches!(extension.as_str(), "docx" | "doc" | "docm" | "dotx" | "pdf" | "rtf" | "odt") {
       return Err(io::Error::new(
         io::ErrorKind::InvalidInput,
-        format!("refusing to write a Flowstate package to a foreign document path (would overwrite the source): {}", path.display()),
+        format!(
+          "refusing to write a Flowstate package to a foreign document path (would overwrite the source): {}",
+          path.display()
+        ),
       ));
     }
   }
@@ -3149,12 +3188,17 @@ mod tests {
 
     for foreign in ["source.docx", "paper.pdf", "brief.doc", "legacy.rtf", "notes.odt"] {
       let path = dir.path().join(foreign);
-      let error = package.write(&path).expect_err("package write to a foreign path must be rejected");
+      let error = package
+        .write(&path)
+        .expect_err("package write to a foreign path must be rejected");
       assert_eq!(error.kind(), io::ErrorKind::InvalidInput, "{foreign}");
     }
     // The append entry points guard identically.
     assert_eq!(
-      package.append_latest_update_to_path(&docx_path).expect_err("append must reject foreign path").kind(),
+      package
+        .append_latest_update_to_path(&docx_path)
+        .expect_err("append must reject foreign path")
+        .kind(),
       io::ErrorKind::InvalidInput
     );
 
@@ -3440,7 +3484,11 @@ mod tests {
     // The `SnapshotAt` chunk must survive package serialization.
     let package = DocumentPackage::from_bytes(&package.to_bytes()?)?;
     let revision_frontier_bytes = encode_frontiers(&revision_frontiers);
-    assert!(package.snapshot_for_frontier(&revision_frontier_bytes).is_some());
+    assert!(
+      package
+        .snapshot_for_frontier(&revision_frontier_bytes)
+        .is_some()
+    );
 
     let revision_doc = package.load_revision_loro_doc(revision_id)?;
     let reference = doc.fork_at(&revision_frontiers).map_err(loro_test_error)?;
@@ -3495,7 +3543,11 @@ mod tests {
 
     assert_eq!(package.sync_revisions_from_loro(&doc)?, 1);
     let remote_frontier_bytes = encode_frontiers(&remote_frontiers);
-    assert!(package.snapshot_for_frontier(&remote_frontier_bytes).is_some());
+    assert!(
+      package
+        .snapshot_for_frontier(&remote_frontier_bytes)
+        .is_some()
+    );
 
     let revision_doc = package.load_revision_loro_doc(remote_revision_id)?;
     let reference = doc.fork_at(&remote_frontiers).map_err(loro_test_error)?;
@@ -4160,10 +4212,17 @@ mod tests {
 
     // Checkpoint header == leading blocks of the full materialization.
     let header = DocumentPackage::read_preview_header(&path)?.expect("fresh header at checkpoint");
-    assert!(!header.paragraphs.is_empty() && header.paragraphs.len() <= PREVIEW_HEADER_BLOCKS, "header trims to the leading blocks");
+    assert!(
+      !header.paragraphs.is_empty() && header.paragraphs.len() <= PREVIEW_HEADER_BLOCKS,
+      "header trims to the leading blocks"
+    );
     let full = document_from_loro(&doc).map_err(loro_test_error)?;
     for ix in 0..header.paragraphs.len() {
-      assert_eq!(crate::paragraph_text(&header, ix), crate::paragraph_text(&full, ix), "header paragraph {ix} matches the full doc");
+      assert_eq!(
+        crate::paragraph_text(&header, ix),
+        crate::paragraph_text(&full, ix),
+        "header paragraph {ix} matches the full doc"
+      );
     }
 
     // Edit the document, persist as a journal delta (no full checkpoint). The
@@ -4174,18 +4233,30 @@ mod tests {
     let from_vv = doc.state_vv();
     text.insert(1, "EDIT ").map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(loro::ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(loro::ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
-    assert!(package.manifest.projection_cache_frontier.is_none(), "an edit nulls the full projection cache");
+    assert!(
+      package.manifest.projection_cache_frontier.is_none(),
+      "an edit nulls the full projection cache"
+    );
     let edited_projection = document_from_loro(&doc).map_err(loro_test_error)?;
     package.refresh_preview_header(&edited_projection)?;
     package.append_latest_update_to_path(&path)?;
 
     // The full cache is absent, but the header preview is fresh and correct.
-    assert!(DocumentPackage::read_cached_projection(&path)?.is_none(), "no fresh full cache after the edit");
+    assert!(
+      DocumentPackage::read_cached_projection(&path)?.is_none(),
+      "no fresh full cache after the edit"
+    );
     let header2 = DocumentPackage::read_preview_header(&path)?.expect("header fresh after edit via the journal delta");
     assert_eq!(header2.frontier, package.manifest.latest_frontier, "header is at the latest frontier");
-    assert_eq!(crate::paragraph_text(&header2, 0), "EDIT paragraph 000 of the document body", "header reflects the edit");
+    assert_eq!(
+      crate::paragraph_text(&header2, 0),
+      "EDIT paragraph 000 of the document body",
+      "header reflects the edit"
+    );
     Ok(())
   }
 
@@ -4201,7 +4272,9 @@ mod tests {
     let from_vv = doc.state_vv();
     body_text(&doc).insert(1, "x").map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
 
     // Corrupt HISTORY (the stored first segment's checksum): a delta-scoped
@@ -4211,7 +4284,9 @@ mod tests {
     let from_vv = doc.state_vv();
     body_text(&doc).insert(1, "y").map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package
       .append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)
       .expect("append validates only the delta, not all history");
@@ -4235,13 +4310,18 @@ mod tests {
         .insert(1, &format!("g{round}"))
         .map_err(loro_test_error)?;
       doc.commit();
-      let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+      let update = doc
+        .export(ExportMode::updates(&from_vv))
+        .map_err(loro_test_error)?;
       package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
       package.write(&path)?;
     }
     let bytes = fs::read(&path)?;
     let payloads = committed_journal_payloads(&bytes)?;
-    let generations = payloads.iter().filter(|payload| payload.starts_with(PACKAGE_MAGIC)).count();
+    let generations = payloads
+      .iter()
+      .filter(|payload| payload.starts_with(PACKAGE_MAGIC))
+      .count();
     assert!(generations >= 2, "test setup must stack multiple generations, got {generations}");
     let read_back = DocumentPackage::read(&path)?;
     assert_eq!(read_back.manifest.latest_frontier, package.manifest.latest_frontier);
@@ -4253,10 +4333,14 @@ mod tests {
   fn shallow_snapshot_chunk_round_trips_and_decodes_shallow() -> io::Result<()> {
     let doc = new_loro_document("Shallow").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "early history").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "early history")
+      .map_err(loro_test_error)?;
     doc.commit();
     let mid_frontier = doc.state_frontiers();
-    text.insert(text.len_unicode(), " and the recent window").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " and the recent window")
+      .map_err(loro_test_error)?;
     doc.commit();
 
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow")?;
@@ -4267,10 +4351,7 @@ mod tests {
     let shallow = reloaded
       .latest_shallow_snapshot()
       .expect("shallow chunk survives the round trip");
-    assert_eq!(
-      reloaded.manifest.shallow_snapshot_frontier.as_deref(),
-      Some(shallow.frontier.as_slice())
-    );
+    assert_eq!(reloaded.manifest.shallow_snapshot_frontier.as_deref(), Some(shallow.frontier.as_slice()));
     // The accelerator never displaces the full snapshot (invariant S1).
     assert!(!reloaded.loro_snapshots.is_empty());
 
@@ -4291,7 +4372,9 @@ mod tests {
   fn clear_shallow_snapshot_round_trips_clean() -> io::Result<()> {
     let doc = new_loro_document("Shallow clear").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "content").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "content")
+      .map_err(loro_test_error)?;
     doc.commit();
     let root = doc.state_frontiers();
 
@@ -4309,7 +4392,9 @@ mod tests {
     let doc = new_loro_document("Shallow stamp").map_err(loro_test_error)?;
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow stamp")?;
     package.manifest.shallow_snapshot_frontier = Some(package.manifest.latest_frontier.clone());
-    let error = package.validate().expect_err("stamp without a chunk must fail");
+    let error = package
+      .validate()
+      .expect_err("stamp without a chunk must fail");
     assert!(error.to_string().contains("shallow snapshot"));
     Ok(())
   }
@@ -4318,10 +4403,14 @@ mod tests {
   fn shallow_load_equals_full_load_with_trailing_segments() -> io::Result<()> {
     let doc = new_loro_document("Shallow equivalence").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "history before the root").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "history before the root")
+      .map_err(loro_test_error)?;
     doc.commit();
     let root = doc.state_frontiers();
-    text.insert(text.len_unicode(), " | window before checkpoint").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " | window before checkpoint")
+      .map_err(loro_test_error)?;
     doc.commit();
 
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow equivalence")?;
@@ -4332,9 +4421,13 @@ mod tests {
     // the shallow load must replay it on top of the shallow state.
     let from_frontier = doc.state_frontiers();
     let from_vv = doc.state_vv();
-    text.insert(text.len_unicode(), " | post-checkpoint edits").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " | post-checkpoint edits")
+      .map_err(loro_test_error)?;
     doc.commit();
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
 
     let reloaded = DocumentPackage::from_bytes(&package.to_bytes()?)?;
@@ -4365,10 +4458,14 @@ mod tests {
   fn compaction_refuses_a_shallow_live_doc() -> io::Result<()> {
     let doc = new_loro_document("Shallow compact guard").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "history").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "history")
+      .map_err(loro_test_error)?;
     doc.commit();
     let root = doc.state_frontiers();
-    text.insert(text.len_unicode(), " tip").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " tip")
+      .map_err(loro_test_error)?;
     doc.commit();
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow compact guard")?;
     package.record_shallow_snapshot(&doc, &root)?;
@@ -4381,7 +4478,11 @@ mod tests {
       .expect_err("compacting a shallow live doc must refuse (S1)");
     assert!(error.to_string().contains("shallow"));
     // The inline backstop silently skips instead of erroring.
-    assert!(package.compact_update_segments_if_needed(&shallow_doc, 1)?.is_none());
+    assert!(
+      package
+        .compact_update_segments_if_needed(&shallow_doc, 1)?
+        .is_none()
+    );
     // The package is untouched: full snapshot still present, still loadable.
     package.load_loro_doc()?;
     Ok(())
@@ -4391,10 +4492,14 @@ mod tests {
   fn shallow_session_checkpoint_preserves_full_history() -> io::Result<()> {
     let doc = new_loro_document("Shallow checkpoint").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "ancient history").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "ancient history")
+      .map_err(loro_test_error)?;
     doc.commit();
     let ancient_frontier = doc.state_frontiers();
-    text.insert(text.len_unicode(), " | window").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " | window")
+      .map_err(loro_test_error)?;
     doc.commit();
 
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow checkpoint")?;
@@ -4409,9 +4514,13 @@ mod tests {
     let from_frontier = live.state_frontiers();
     let from_vv = live.state_vv();
     let live_text = body_text(&live);
-    live_text.insert(live_text.len_unicode(), " | shallow session edit").map_err(loro_test_error)?;
+    live_text
+      .insert(live_text.len_unicode(), " | shallow session edit")
+      .map_err(loro_test_error)?;
     live.commit();
-    let update = live.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = live
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &live.state_frontiers(), &live.state_vv(), update)?;
 
     package.compact_to_snapshot_any(&live)?;
@@ -4442,19 +4551,27 @@ mod tests {
     // retained full history, never the live doc.
     let doc = new_loro_document("Shallow revision").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "ancient state").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "ancient state")
+      .map_err(loro_test_error)?;
     doc.commit();
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow revision")?;
     let (ancient_revision, _) = package.compact_to_named_snapshot(&doc, "Ancient", "pre-root", None, None)?;
 
-    text.insert(text.len_unicode(), " | later work").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " | later work")
+      .map_err(loro_test_error)?;
     doc.commit();
     let root = doc.state_frontiers();
-    text.insert(text.len_unicode(), " | window").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), " | window")
+      .map_err(loro_test_error)?;
     doc.commit();
     let from_frontier = package_tip_frontiers(&package)?;
     let from_vv = package_tip_vv(&package)?;
-    let update = doc.export(ExportMode::updates(&from_vv)).map_err(loro_test_error)?;
+    let update = doc
+      .export(ExportMode::updates(&from_vv))
+      .map_err(loro_test_error)?;
     package.append_update_segment(&from_frontier, &from_vv, &doc.state_frontiers(), &doc.state_vv(), update)?;
     package.record_shallow_snapshot(&doc, &root)?;
 
@@ -4478,7 +4595,9 @@ mod tests {
   fn deferred_snapshot_hash_still_catches_corruption_at_decode() -> io::Result<()> {
     let doc = new_loro_document("Deferred hash").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "content to corrupt").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "content to corrupt")
+      .map_err(loro_test_error)?;
     doc.commit();
     let package = DocumentPackage::from_loro_snapshot(&doc, "Deferred hash")?;
     let mut bytes = package.to_bytes()?;
@@ -4493,9 +4612,13 @@ mod tests {
     bytes[payload_at + payload.len() / 2] ^= 0xFF;
     let reloaded = DocumentPackage::from_bytes(&bytes)?;
     // ...but every consumer of those bytes must catch it.
-    let load_error = reloaded.load_loro_doc().expect_err("corrupt snapshot must fail at decode");
+    let load_error = reloaded
+      .load_loro_doc()
+      .expect_err("corrupt snapshot must fail at decode");
     assert!(load_error.to_string().contains("checksum"), "{load_error}");
-    let write_error = reloaded.to_bytes().expect_err("corrupt snapshot must never be re-written as valid");
+    let write_error = reloaded
+      .to_bytes()
+      .expect_err("corrupt snapshot must never be re-written as valid");
     assert!(write_error.to_string().contains("checksum"), "{write_error}");
     Ok(())
   }
@@ -4506,7 +4629,9 @@ mod tests {
     let path = dir.path().join("shallow-tail.db8");
     let doc = new_loro_document("Shallow tail").map_err(loro_test_error)?;
     let text = body_text(&doc);
-    text.insert(text.len_unicode(), "durable").map_err(loro_test_error)?;
+    text
+      .insert(text.len_unicode(), "durable")
+      .map_err(loro_test_error)?;
     doc.commit();
     let root = doc.state_frontiers();
     let mut package = DocumentPackage::from_loro_snapshot(&doc, "Shallow tail")?;

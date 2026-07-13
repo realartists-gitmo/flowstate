@@ -51,10 +51,7 @@ pub enum ProjectionDefect {
   /// FS-011: an image block whose `asset_id` is missing or unparseable. The
   /// projection uses a placeholder `AssetId(0)` and reports the defect so the
   /// runtime can recover the id (e.g. from the block's `content_hash`).
-  InvalidAssetId {
-    block_key: String,
-    raw_asset_id: Option<String>,
-  },
+  InvalidAssetId { block_key: String, raw_asset_id: Option<String> },
   /// adjustmentplan:224: a paragraph boundary newline without a
   /// paragraph-style mark. The projection defaults it to `Normal` and the
   /// runtime schedules the canonical mark repair.

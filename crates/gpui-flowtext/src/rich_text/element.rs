@@ -161,7 +161,23 @@ impl Element for RichTextDocumentElement {
     cx: &mut App,
   ) {
     if let Some((layout, bounds)) = self.layout.positioned() {
-      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, gpui::black(), &[], &[], &[], None, window, cx);
+      paint_layout(
+        layout.as_ref(),
+        bounds,
+        None,
+        None,
+        false,
+        px(1.0),
+        None,
+        gpui::black(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        window,
+        cx,
+      );
     }
   }
 }
@@ -239,11 +255,24 @@ impl Element for VirtualParagraphChunkElement {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (selection, drag_selection, caret_offset, caret_width, caret_color_rgb, default_caret_color, external_carets, external_selections, search_highlights, active_search_highlight) = {
+    let (
+      selection,
+      drag_selection,
+      caret_offset,
+      caret_width,
+      caret_color_rgb,
+      default_caret_color,
+      external_carets,
+      external_selections,
+      annotation_selections,
+      search_highlights,
+      active_search_highlight,
+    ) = {
       let editor = self.editor.read(cx);
       let drag_selection = editor.drag_source_selection();
       let external_carets = editor.external_carets_for_paragraph(self.paragraph_ix);
       let external_selections = editor.external_selections_for_paragraph(self.paragraph_ix);
+      let annotation_selections = editor.annotation_selections_for_paragraph(self.paragraph_ix);
       (
         editor.selection.clone(),
         drag_selection,
@@ -261,6 +290,7 @@ impl Element for VirtualParagraphChunkElement {
         editor.document.theme.default_text_color,
         external_carets,
         external_selections,
+        annotation_selections,
         editor.search_highlights.clone(),
         editor.active_search_highlight,
       )
@@ -311,6 +341,7 @@ impl Element for VirtualParagraphChunkElement {
         default_caret_color,
         &external_carets,
         &external_selections,
+        &annotation_selections,
         &search_highlights,
         active_search_highlight,
         window,

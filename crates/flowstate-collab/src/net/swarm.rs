@@ -11,9 +11,7 @@ use iroh_gossip::{
 use n0_future::StreamExt as _;
 
 use crate::{
-  capability::unix_now,
   ids::SessionId,
-  net::auth::SessionAuthRegistry,
   proto_gossip::{self, GOSSIP_INLINE_LIMIT, GossipMsg},
 };
 
@@ -122,7 +120,7 @@ async fn run_session(
         // Only unrecoverable subscription loss exits the loop (FS-071):
         // a `None`/`Err` here means the gossip topic itself is gone.
         let event = event.context("collaboration gossip receiver ended")??;
-        handle_event(event, session, local_peer, direct_state.auth(), &evt_tx, &mut dropped_coalescable).await;
+        handle_event(event, session, local_peer, &evt_tx, &mut dropped_coalescable).await;
       },
     }
   }
@@ -170,7 +168,6 @@ async fn handle_publish<S: FrameSink>(sink: &S, direct_state: &DirectServeState,
     },
     PublishPayload::Presence(bytes) => (GossipMsg::Presence(bytes), false),
     PublishPayload::Digest { vv } => (GossipMsg::Digest { session, vv }, true),
-    PublishPayload::CapabilityEpoch { epoch, signature } => (GossipMsg::CapabilityEpoch { epoch, signature }, false),
   };
 
   let mut frame = match if neighbors_only {
@@ -238,14 +235,7 @@ async fn update_message(direct_state: &DirectServeState, session: SessionId, byt
   })
 }
 
-async fn handle_event(
-  event: Event,
-  session: SessionId,
-  local_peer: EndpointId,
-  auth: &SessionAuthRegistry,
-  evt_tx: &Sender<NetEvent>,
-  dropped_coalescable: &mut u64,
-) {
+async fn handle_event(event: Event, session: SessionId, local_peer: EndpointId, evt_tx: &Sender<NetEvent>, dropped_coalescable: &mut u64) {
   match event {
     Event::Received(message) if message.delivered_from == local_peer => {
       tracing::trace!(
@@ -265,29 +255,6 @@ async fn handle_event(
           frame_bytes = message.content.len(),
           "received collaboration gossip frame",
         );
-        // FS-080: signed revocation control frames are consumed at the
-        // transport layer; they only mutate the shared auth registry.
-        if let GossipMsg::CapabilityEpoch { epoch, signature } = &msg {
-          let applied = auth.apply_epoch_bump(session, *epoch, signature);
-          tracing::info!(%session, from = %message.delivered_from, epoch, applied, "collaboration capability epoch frame received");
-          return;
-        }
-        // FS-080 role enforcement at the gossip layer: drop document updates
-        // delivered from endpoints that authenticated as viewers. Updates are
-        // authorless CRDT bytes and `delivered_from` is the delivering
-        // neighbor, so this catches direct frames from known viewers only;
-        // relayed or never-authenticated senders pass (see net::auth docs).
-        if matches!(msg, GossipMsg::Update(_) | GossipMsg::UpdateAvailable { .. })
-          && auth.should_drop_update_from(session, message.delivered_from, unix_now())
-        {
-          tracing::warn!(
-            %session,
-            from = %message.delivered_from,
-            gossip_kind = msg.kind(),
-            "dropped collaboration document update delivered from a view-only peer",
-          );
-          return;
-        }
         forward_event(
           evt_tx,
           NetEvent::Gossip {
@@ -406,8 +373,7 @@ mod tests {
 
   use crate::{
     SessionId,
-    capability::{CapabilityRole, SessionCapability, sign_epoch_bump},
-    net::{NetEvent, PublishPayload, auth::SessionAuthRegistry, direct::DirectServeState},
+    net::{NetEvent, PublishPayload, direct::DirectServeState},
     proto_gossip::{self, GossipMsg},
   };
 
@@ -438,13 +404,12 @@ mod tests {
     let session = SessionId::new();
     let local_peer = SecretKey::generate().public();
     let peer = SecretKey::generate().public();
-    let auth = SessionAuthRegistry::default();
     let mut frame = proto_gossip::encode(&GossipMsg::Presence(Vec::new())).expect("valid gossip frame");
     frame[0] = frame[0].wrapping_add(1);
 
     let (evt_tx, evt_rx) = async_channel::unbounded();
     let mut dropped = 0;
-    handle_event(received(frame, peer), session, local_peer, &auth, &evt_tx, &mut dropped).await;
+    handle_event(received(frame, peer), session, local_peer, &evt_tx, &mut dropped).await;
 
     match evt_rx.recv().await.expect("incompatible-version event") {
       NetEvent::IncompatibleVersion {
@@ -463,12 +428,11 @@ mod tests {
   async fn self_delivered_gossip_frame_is_ignored() {
     let session = SessionId::new();
     let local_peer = SecretKey::generate().public();
-    let auth = SessionAuthRegistry::default();
     let frame = proto_gossip::encode(&GossipMsg::Update(vec![1, 2, 3])).expect("valid gossip frame");
 
     let (evt_tx, evt_rx) = async_channel::unbounded();
     let mut dropped = 0;
-    handle_event(received(frame, local_peer), session, local_peer, &auth, &evt_tx, &mut dropped).await;
+    handle_event(received(frame, local_peer), session, local_peer, &evt_tx, &mut dropped).await;
 
     assert!(evt_rx.try_recv().is_err());
   }
@@ -495,30 +459,28 @@ mod tests {
     assert_eq!(attempts.load(Ordering::SeqCst), 1);
   }
 
-  /// FS-080: document updates delivered from an endpoint that authenticated
-  /// as a viewer are dropped before reaching the session, while presence from
-  /// the same endpoint still flows.
+  /// Protocol v3 has symmetric editors: update and presence frames from a
+  /// subscribed peer both reach the session projection.
   #[tokio::test]
-  async fn updates_delivered_from_an_authenticated_viewer_are_dropped() {
+  async fn editor_updates_and_presence_are_forwarded() {
     let session = SessionId::new();
     let local_peer = SecretKey::generate().public();
-    let owner = SecretKey::generate();
-    let viewer = SecretKey::generate().public();
-    let auth = SessionAuthRegistry::default();
-    auth.configure_session(session, owner.public(), 0);
-    let capability = SessionCapability::issue(&owner, session, CapabilityRole::Viewer, u64::MAX, 0);
-    auth
-      .authenticate_peer(session, viewer, &capability, 10)
-      .expect("viewer capability should authenticate");
+    let editor = SecretKey::generate().public();
 
     let (evt_tx, evt_rx) = async_channel::unbounded();
     let mut dropped = 0;
     let update = proto_gossip::encode(&GossipMsg::Update(vec![1])).expect("valid gossip frame");
-    handle_event(received(update, viewer), session, local_peer, &auth, &evt_tx, &mut dropped).await;
-    assert!(evt_rx.try_recv().is_err(), "viewer update must be dropped");
+    handle_event(received(update, editor), session, local_peer, &evt_tx, &mut dropped).await;
+    assert!(matches!(
+      evt_rx.try_recv(),
+      Ok(NetEvent::Gossip {
+        msg: GossipMsg::Update(_),
+        ..
+      })
+    ));
 
     let presence = proto_gossip::encode(&GossipMsg::Presence(vec![2])).expect("valid gossip frame");
-    handle_event(received(presence, viewer), session, local_peer, &auth, &evt_tx, &mut dropped).await;
+    handle_event(received(presence, editor), session, local_peer, &evt_tx, &mut dropped).await;
     assert!(
       matches!(
         evt_rx.try_recv(),
@@ -527,40 +489,8 @@ mod tests {
           ..
         })
       ),
-      "viewer presence must still flow"
+      "editor presence must flow"
     );
-  }
-
-  /// FS-080: signed epoch bumps are consumed at the transport layer and raise
-  /// the shared registry epoch; forged bumps are ignored.
-  #[tokio::test]
-  async fn capability_epoch_frames_update_the_auth_registry() {
-    let session = SessionId::new();
-    let local_peer = SecretKey::generate().public();
-    let owner = SecretKey::generate();
-    let relay = SecretKey::generate().public();
-    let auth = SessionAuthRegistry::default();
-    auth.configure_session(session, owner.public(), 0);
-
-    let (evt_tx, evt_rx) = async_channel::unbounded();
-    let mut dropped = 0;
-
-    let forged = proto_gossip::encode(&GossipMsg::CapabilityEpoch {
-      epoch: 5,
-      signature: sign_epoch_bump(&SecretKey::generate(), session, 5),
-    })
-    .expect("valid gossip frame");
-    handle_event(received(forged, relay), session, local_peer, &auth, &evt_tx, &mut dropped).await;
-    assert_eq!(auth.current_epoch(session), Some(0));
-
-    let genuine = proto_gossip::encode(&GossipMsg::CapabilityEpoch {
-      epoch: 5,
-      signature: sign_epoch_bump(&owner, session, 5),
-    })
-    .expect("valid gossip frame");
-    handle_event(received(genuine, relay), session, local_peer, &auth, &evt_tx, &mut dropped).await;
-    assert_eq!(auth.current_epoch(session), Some(5));
-    assert!(evt_rx.try_recv().is_err(), "epoch frames are not forwarded to sessions");
   }
 
   /// FS-074: when the event channel is full, coalescable frames (presence,
@@ -571,7 +501,6 @@ mod tests {
     let session = SessionId::new();
     let local_peer = SecretKey::generate().public();
     let peer = SecretKey::generate().public();
-    let auth = SessionAuthRegistry::default();
 
     let (evt_tx, evt_rx) = async_channel::bounded(1);
     evt_tx
@@ -580,7 +509,7 @@ mod tests {
 
     let mut dropped = 0;
     let presence = proto_gossip::encode(&GossipMsg::Presence(vec![1])).expect("valid gossip frame");
-    handle_event(received(presence, peer), session, local_peer, &auth, &evt_tx, &mut dropped).await;
+    handle_event(received(presence, peer), session, local_peer, &evt_tx, &mut dropped).await;
     assert_eq!(dropped, 1);
     assert!(matches!(evt_rx.try_recv(), Ok(NetEvent::GossipLagged { .. })));
     assert!(evt_rx.try_recv().is_err());

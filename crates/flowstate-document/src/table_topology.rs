@@ -317,10 +317,7 @@ mod tests {
     // Row 0's span of 9 clamps to the two rows remaining from position 0.
     assert_eq!(table.cells[0].row_span, 2);
     assert_eq!(table.cells[0].col_span, 1);
-    assert_eq!(
-      table.defects,
-      vec![TableTopologyDefect::InvalidSpan { row_id: r0, column_id: c0 }]
-    );
+    assert_eq!(table.defects, vec![TableTopologyDefect::InvalidSpan { row_id: r0, column_id: c0 }]);
   }
 
   #[test]

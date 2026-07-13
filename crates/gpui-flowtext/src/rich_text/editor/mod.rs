@@ -946,6 +946,10 @@ pub struct RichTextEditor {
   ime_marked_range: Option<Range<usize>>,
   external_carets: Vec<ExternalCaret>,
   external_selections: Vec<ExternalSelection>,
+  /// Durable document annotations (currently unresolved comment anchors).
+  /// Kept separate from peer presence so either layer can refresh without
+  /// erasing the other.
+  annotation_selections: Vec<ExternalSelection>,
   pub(super) search_highlights: Vec<Range<DocumentOffset>>,
   pub(super) active_search_highlight: Option<usize>,
   pending_typing_prefetch_resume: bool,
