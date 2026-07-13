@@ -240,8 +240,24 @@ impl Workspace {
       });
       return;
     };
+    let requires_document = self
+      .extensions
+      .extensions()
+      .iter()
+      .find(|extension| extension.id == extension_id)
+      .and_then(|extension| extension.actions.iter().find(|action| action.id == action_id))
+      .is_some_and(|action| action.requires_document);
     let editor = self.active_editor.clone();
-    let document_root = editor.as_ref().and_then(|editor| editor.read(cx).document_path().and_then(|path| path.parent().map(ToOwned::to_owned)));
+    if requires_document && editor.is_none() {
+      self.extensions.apply(super::super::extensions_panel::ExtensionPanelEvent::Failed {
+        extension_id,
+        message: "Open a document before running this action".into(),
+      });
+      return;
+    }
+    let document_root = requires_document
+      .then(|| editor.as_ref().and_then(|editor| editor.read(cx).document_path().and_then(|path| path.parent().map(ToOwned::to_owned))))
+      .flatten();
     let (host, requests) = super::super::extensions_panel::EditorHostBridge::bounded(32);
     self.spawn_extension_host_loop(extension_id.clone(), editor, requests, window, cx);
     self.extensions.invoke(extension_id.as_ref(), action_id.as_ref());
