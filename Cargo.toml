@@ -94,15 +94,6 @@ loro-internal = { path = "vendor/loro-internal" }
 # §act-eleven A11.2: vendored for the 2→1 parse collapse (from_parsed_parts +
 # into_typed_document accessors; upstream 0.1.2 keeps Document internals private).
 rdocx = { path = "vendor/rdocx" }
-# §perf: vendored to add lossless prompt-lookup speculative decoding to the greedy
-# search (CTranslate2/src/decoding.cc). The citation model's output is ~76% fixed
-# JSON scaffold + spans copied verbatim from the input; drafting those from the
-# (source ∥ output-so-far) n-grams and verifying with the existing batched decoder
-# forward (`layers::Decoder::operator()`) cuts real forward passes with an output
-# distribution identical to greedy. Exposed as `speculative_lookup`/`ngram_max` on
-# `TranslationOptions`; the loop stays in C++ to avoid a per-token FFI/tensor tax.
-# Re-apply on ct2rs upgrades.
-ct2rs = { path = "vendor/ct2rs" }
 
 [workspace.lints.clippy]
 correctness = { level = "deny", priority = -1 }
