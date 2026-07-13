@@ -181,3 +181,63 @@ fn clamped_extension_offset(document: &Document, offset: DocumentOffset) -> Docu
     byte: offset.byte.min(document.paragraphs.get(paragraph).map_or(0, paragraph_text_len)),
   }
 }
+
+#[cfg(test)]
+mod extension_api_tests {
+  use super::*;
+
+  fn text_document(text: &str) -> Document {
+    document_from_input(
+      DocumentTheme::default(),
+      vec![InputParagraph {
+        style: ParagraphStyle::Normal,
+        runs: vec![InputRun {
+          text: text.to_owned(),
+          styles: RunStyles::default(),
+        }],
+      }],
+    )
+  }
+
+  #[test]
+  fn rich_text_replacement_is_applied_to_a_candidate_document() {
+    let mut document = text_document("alpha omega");
+    let styles = RunStyles::default().with(RunStyle::Semantic(2));
+    let edit = ExtensionDocumentEdit::ReplaceText {
+      range: DocumentOffset { paragraph: 0, byte: 6 }..DocumentOffset { paragraph: 0, byte: 11 },
+      fragment: RichClipboardFragment {
+        format: RICH_TEXT_CLIPBOARD_FORMAT.to_owned(),
+        paragraphs: vec![InputParagraph {
+          style: ParagraphStyle::Normal,
+          runs: vec![InputRun {
+            text: "beta".to_owned(),
+            styles,
+          }],
+        }],
+        blocks: Vec::new(),
+        assets: Vec::new(),
+      },
+    };
+
+    apply_extension_edit(&mut document, &edit).unwrap();
+    assert_eq!(paragraph_text(&document, 0), "alpha beta");
+    assert_eq!(document.paragraphs[0].runs.last().unwrap().styles, styles);
+  }
+
+  #[test]
+  fn text_replacement_rejects_non_utf8_boundary() {
+    let mut document = text_document("café");
+    let edit = ExtensionDocumentEdit::ReplaceText {
+      range: DocumentOffset { paragraph: 0, byte: 4 }..DocumentOffset { paragraph: 0, byte: 5 },
+      fragment: RichClipboardFragment {
+        format: RICH_TEXT_CLIPBOARD_FORMAT.to_owned(),
+        paragraphs: Vec::new(),
+        blocks: Vec::new(),
+        assets: Vec::new(),
+      },
+    };
+
+    assert_eq!(apply_extension_edit(&mut document, &edit), Err(ExtensionEditError::InvalidRange));
+    assert_eq!(paragraph_text(&document, 0), "café");
+  }
+}
