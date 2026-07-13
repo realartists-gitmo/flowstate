@@ -947,6 +947,7 @@ pub struct RichTextEditor {
 include!("lifecycle.rs");
 include!("extension_api.rs");
 include!("extension_snapshot.rs");
+include!("extension_wire.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
 include!("search_highlights.rs");

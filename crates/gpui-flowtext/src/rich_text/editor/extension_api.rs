@@ -13,6 +13,11 @@ pub struct ExtensionDocumentSnapshot {
 pub enum ExtensionSelection {
   Text(EditorSelection),
   Object { block_ix: usize },
+  EquationSource {
+    block_ix: usize,
+    anchor: usize,
+    head: usize,
+  },
   TableCell {
     block_ix: usize,
     row_ix: usize,
