@@ -1,0 +1,45 @@
+manifest_version = 1
+id = "com.flowstate.example.all-capabilities"
+name = "All Capabilities Example"
+version = "0.1.0"
+component = "extension.wasm"
+
+[[actions]]
+id = "inspect"
+label = "Inspect document and selection"
+requires_document = true
+
+[[actions]]
+id = "replace-selection"
+label = "Replace selection (destructive)"
+requires_document = true
+
+[[actions]]
+id = "insert-blocks"
+label = "Insert styled blocks (destructive)"
+requires_document = true
+
+[[actions]]
+id = "refresh"
+label = "Refresh from disk (destructive)"
+requires_document = true
+
+[[actions]]
+id = "filesystem"
+label = "Exercise scoped filesystems"
+requires_document = true
+
+[[actions]]
+id = "network"
+label = "Fetch example.com"
+requires_document = false
+
+[[actions]]
+id = "request-directory"
+label = "Request directory access"
+requires_document = false
+
+[[actions]]
+id = "runtime"
+label = "Exercise clock, random, and output"
+requires_document = false
