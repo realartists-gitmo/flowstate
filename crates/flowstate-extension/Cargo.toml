@@ -1,0 +1,23 @@
+[package]
+name = "flowstate-extension"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+bytes = "1.12.1"
+hex = "0.4.3"
+parking_lot = "0.12.5"
+serde = { workspace = true, features = ["derive"] }
+sha2 = "0.11.0"
+thiserror = "2.0.18"
+toml.workspace = true
+wasmtime = { version = "38", features = ["component-model", "cranelift", "runtime"] }
+wasmtime-wasi = "38"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
