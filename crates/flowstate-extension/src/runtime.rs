@@ -136,10 +136,9 @@ impl Runtime {
             }
         });
         let mut linker = Linker::new(&self.engine);
+        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         if self.config.allow_network {
-            wasmtime_wasi_http::add_to_linker_sync(&mut linker)?;
-        } else {
-            wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+            wasmtime_wasi_http::add_only_http_to_linker_sync(&mut linker)?;
         }
         flowstate::extension::host::add_to_linker::<_, wasmtime::component::HasSelf<_>>(&mut linker, |state| state)?;
         let instance = Extension::instantiate(&mut store, &component, &linker)?;

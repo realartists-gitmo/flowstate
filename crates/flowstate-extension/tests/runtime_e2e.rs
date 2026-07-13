@@ -47,6 +47,28 @@ mod tests {
     }
 
     #[test]
+    fn network_enabled_runtime_also_links_base_wasi() {
+        let directory = tempfile::tempdir().unwrap();
+        let component = directory.path().join("wasi-environment.wat");
+        std::fs::write(&component, include_str!("fixtures/wasi_environment.wat")).unwrap();
+        let invocation = Invocation {
+            component,
+            extension_root: directory.path().to_path_buf(),
+            data_root: directory.path().join("data"),
+            document_root: None,
+            action_id: "run".to_owned(),
+            directory_grants: Vec::new(),
+        };
+        let runtime = Runtime::new(RuntimeConfig { allow_network: true, ..RuntimeConfig::default() }).unwrap();
+        let cancellation = runtime.cancellation_handle();
+        let status = Arc::new(Mutex::new(Vec::new()));
+
+        runtime.invoke("com.example.wasi", &invocation, Host { status: Arc::clone(&status), signal: None }, &cancellation).unwrap();
+
+        assert_eq!(*status.lock().unwrap(), ["called"]);
+    }
+
+    #[test]
     fn cancels_a_running_component() {
         let directory = tempfile::tempdir().unwrap();
         let component = directory.path().join("infinite.wat");
