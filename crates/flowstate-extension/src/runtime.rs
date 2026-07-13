@@ -9,6 +9,8 @@ use wasmtime::{Config, Engine, Store, StoreLimitsBuilder};
 use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{DirPerms, FilePerms, WasiCtx, WasiCtxBuilder};
 
+use crate::ComponentDigest;
+
 mod host_state;
 use host_state::State;
 
@@ -76,13 +78,19 @@ pub struct Runtime {
     engine: Engine,
     config: RuntimeConfig,
     running: Mutex<std::collections::HashSet<String>>,
+    components: Mutex<std::collections::HashMap<(PathBuf, ComponentDigest), Component>>,
 }
 
 impl Runtime {
     pub fn new(config: RuntimeConfig) -> Result<Self, RuntimeError> {
         let mut engine_config = Config::new();
         engine_config.wasm_component_model(true).epoch_interruption(true);
-        Ok(Self { engine: Engine::new(&engine_config)?, config, running: Mutex::new(std::collections::HashSet::new()) })
+        Ok(Self {
+            engine: Engine::new(&engine_config)?,
+            config,
+            running: Mutex::new(std::collections::HashSet::new()),
+            components: Mutex::new(std::collections::HashMap::new()),
+        })
     }
 
     pub fn cancellation_handle(&self) -> CancellationHandle {
@@ -92,7 +100,7 @@ impl Runtime {
     pub fn invoke<H: ExtensionHost>(&self, extension_id: &str, invocation: &Invocation, host: H, cancellation: &CancellationHandle) -> Result<InvocationOutput, RuntimeError> {
         let _guard = RunningGuard::acquire(&self.running, extension_id)?;
         if cancellation.cancelled.load(Ordering::Acquire) { return Err(RuntimeError::Cancelled); }
-        let component = Component::from_file(&self.engine, &invocation.component)?;
+        let component = self.load_component(&invocation.component)?;
         let stdout = MemoryOutputPipe::new(self.config.output_limit);
         let stderr = MemoryOutputPipe::new(self.config.output_limit);
         let wasi = build_wasi(invocation, &self.config, &stdout, &stderr)?;
@@ -120,6 +128,17 @@ impl Runtime {
         if cancellation.cancelled.load(Ordering::Acquire) { return Err(RuntimeError::Cancelled); }
         result.map_err(|message| RuntimeError::Wasmtime(anyhow::anyhow!(message)))?;
         Ok(InvocationOutput { stdout: stdout.contents().to_vec(), stderr: stderr.contents().to_vec() })
+    }
+
+    fn load_component(&self, path: &std::path::Path) -> Result<Component, RuntimeError> {
+        let digest = ComponentDigest::from_file(path).map_err(anyhow::Error::from)?;
+        let key = (path.to_path_buf(), digest);
+        if let Some(component) = self.components.lock().get(&key).cloned() { return Ok(component); }
+        let component = Component::from_file(&self.engine, path)?;
+        let mut components = self.components.lock();
+        components.retain(|(cached_path, _), _| cached_path != path);
+        components.insert(key, component.clone());
+        Ok(component)
     }
 }
 
@@ -179,5 +198,19 @@ mod tests {
         cancelled.cancel();
         assert!(cancelled.cancelled.load(Ordering::Acquire));
         assert!(!other.cancelled.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn caches_components_by_path_and_content() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("extension.wat");
+        std::fs::write(&path, "(component)").unwrap();
+        let runtime = Runtime::new(RuntimeConfig::default()).unwrap();
+        runtime.load_component(&path).unwrap();
+        runtime.load_component(&path).unwrap();
+        assert_eq!(runtime.components.lock().len(), 1);
+        std::fs::write(&path, "(component (type (func)))").unwrap();
+        runtime.load_component(&path).unwrap();
+        assert_eq!(runtime.components.lock().len(), 1);
     }
 }
