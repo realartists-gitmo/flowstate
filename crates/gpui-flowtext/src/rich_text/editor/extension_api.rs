@@ -317,4 +317,95 @@ mod extension_api_tests {
     assert_eq!(apply_extension_edit(&mut document, &edit), Err(ExtensionEditError::InvalidRange));
     assert_eq!(paragraph_text(&document, 0), "café");
   }
+
+  #[test]
+  fn block_splice_preserves_ordered_projection() {
+    let mut document = text_document("before");
+    let equation = InputBlock::Equation(InputEquationBlock {
+      source: "x^2".to_owned(),
+      syntax: InputEquationSyntax::Latex,
+      display: InputEquationDisplay::Display,
+    });
+    let paragraph = InputBlock::Paragraph(InputParagraph {
+      style: ParagraphStyle::Custom(2),
+      runs: vec![InputRun {
+        text: "after".to_owned(),
+        styles: RunStyles::default(),
+      }],
+    });
+
+    apply_extension_edit(
+      &mut document,
+      &ExtensionDocumentEdit::SpliceBlocks {
+        range: 0..1,
+        blocks: vec![equation, paragraph],
+        assets: Vec::new(),
+      },
+    )
+    .unwrap();
+
+    assert!(matches!(&document.blocks[0], Block::Equation(equation) if equation.source.as_ref() == "x^2"));
+    assert!(matches!(&document.blocks[1], Block::Paragraph(_)));
+    assert_eq!(paragraph_text(&document, 0), "after");
+    assert!(document_bytes(&document).is_ok());
+  }
+
+  #[gpui::test]
+  fn extension_batch_uses_one_generation_and_one_undo(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(text_document("abcd"), None, cx));
+    editor.update(cx, |editor, cx| {
+      let replacement = |start, end, text: &str| ExtensionDocumentEdit::ReplaceText {
+        range: DocumentOffset { paragraph: 0, byte: start }..DocumentOffset { paragraph: 0, byte: end },
+        fragment: RichClipboardFragment {
+          format: RICH_TEXT_CLIPBOARD_FORMAT.to_owned(),
+          paragraphs: vec![InputParagraph {
+            style: ParagraphStyle::Normal,
+            runs: vec![InputRun {
+              text: text.to_owned(),
+              styles: RunStyles::default(),
+            }],
+          }],
+          blocks: Vec::new(),
+          assets: Vec::new(),
+        },
+      };
+      let generation = editor
+        .apply_extension_edits(0, &[replacement(2, 4, "CD"), replacement(0, 2, "AB")], cx)
+        .unwrap();
+      assert_eq!(generation, 1);
+      assert_eq!(paragraph_text(editor.document(), 0), "ABCD");
+      assert!(matches!(
+        editor.apply_extension_edits(0, &[], cx),
+        Err(ExtensionEditError::StaleGeneration { actual: 1, .. })
+      ));
+
+      editor.undo(cx);
+      assert_eq!(paragraph_text(editor.document(), 0), "abcd");
+    });
+  }
+
+  #[gpui::test]
+  fn disk_refresh_resets_extension_history_and_generation(cx: &mut gpui::TestAppContext) {
+    use gpui::AppContext as _;
+
+    let editor = cx.new(|cx| RichTextEditor::new_with_path(text_document("old"), None, cx));
+    editor.update(cx, |editor, cx| {
+      editor
+        .apply_extension_edits(
+          0,
+          &[ExtensionDocumentEdit::ReplaceDocument(Box::new(text_document("edited")))],
+          cx,
+        )
+        .unwrap();
+      assert!(editor.has_unsaved_changes());
+
+      editor.replace_document_from_disk(text_document("disk"), cx);
+      assert_eq!(editor.edit_generation(), 0);
+      assert!(!editor.has_unsaved_changes());
+      editor.undo(cx);
+      assert_eq!(paragraph_text(editor.document(), 0), "disk");
+    });
+  }
 }
