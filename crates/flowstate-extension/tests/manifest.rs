@@ -1,3 +1,5 @@
+#[cfg(test)]
+mod tests {
 use std::fs;
 
 use flowstate_extension::{ComponentDigest, ManifestError, TrustDecision, TrustStore, discover_extensions};
@@ -54,4 +56,5 @@ fn component_changes_require_fresh_approval() {
     fs::write(&component, b"second").unwrap();
     let second = ComponentDigest::from_file(&component).unwrap();
     assert_eq!(trust.decision("com.example.test", &second), TrustDecision::ApprovalRequired);
+}
 }
