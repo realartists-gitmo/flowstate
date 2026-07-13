@@ -5,7 +5,7 @@ use std::sync::Arc;
 use gpui::SharedString;
 
 pub use model::{
-  ExtensionActionView, ExtensionPanelAdapter, ExtensionPanelController, ExtensionPanelEvent, ExtensionRunState, ExtensionView,
+  ExtensionPanelAdapter, ExtensionPanelController, ExtensionPanelEvent, ExtensionRunState, ExtensionView,
 };
 
 struct DisconnectedExtensionAdapter;

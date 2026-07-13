@@ -27,6 +27,7 @@ pub enum ExtensionRunState {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(dead_code, reason = "runtime events are consumed once the Wasmtime adapter is connected")]
 pub enum ExtensionPanelEvent {
   Started { extension_id: SharedString, action_id: SharedString },
   ActionLabel { extension_id: SharedString, action_id: SharedString, label: SharedString },
@@ -86,7 +87,7 @@ impl ExtensionPanelController {
   pub fn label(&self, extension_id: &str, action: &ExtensionActionView) -> SharedString {
     self
       .labels
-      .get(&(extension_id.into(), action.id.clone()))
+      .get(&(SharedString::from(extension_id.to_owned()), action.id.clone()))
       .cloned()
       .unwrap_or_else(|| action.label.clone())
   }
@@ -119,16 +120,19 @@ impl ExtensionPanelController {
   pub fn invoke(&mut self, extension_id: &str, action_id: &str) {
     self
       .states
-      .insert(extension_id.into(), ExtensionRunState::Running { action_id: action_id.into() });
+      .insert(
+        SharedString::from(extension_id.to_owned()),
+        ExtensionRunState::Running { action_id: SharedString::from(action_id.to_owned()) },
+      );
     self.outputs.remove(extension_id);
     if let Err(error) = self.adapter.invoke(extension_id, action_id) {
-      self.states.insert(extension_id.into(), ExtensionRunState::Failed(error));
+      self.states.insert(SharedString::from(extension_id.to_owned()), ExtensionRunState::Failed(error));
     }
   }
 
   pub fn cancel(&mut self, extension_id: &str) {
     if let Err(error) = self.adapter.cancel(extension_id) {
-      self.states.insert(extension_id.into(), ExtensionRunState::Failed(error));
+      self.states.insert(SharedString::from(extension_id.to_owned()), ExtensionRunState::Failed(error));
     }
   }
 

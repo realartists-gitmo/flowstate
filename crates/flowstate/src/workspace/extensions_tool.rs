@@ -1,6 +1,6 @@
 use gpui::{AnyElement, Context, IntoElement, PromptButton, PromptLevel, SharedString, Window, div, prelude::*, px};
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Sizable,
+  ActiveTheme as _, Disableable, Icon, IconName, Selectable, Sizable,
   button::{Button, ButtonVariants},
   collapsible::Collapsible,
   h_flex, v_flex,
@@ -69,7 +69,7 @@ impl Workspace {
               .on_click(cx.listener(|workspace, _, _, cx| workspace.toggle_toolkit(cx))),
           ),
       )
-      .child(div().flex_1().min_h_0().overflow_y_scroll().child(body))
+      .child(div().id("extensions-panel-scroll").flex_1().min_h_0().overflow_y_scroll().child(body))
       .into_any_element()
   }
 
@@ -100,7 +100,7 @@ impl Workspace {
         &state,
         ExtensionRunState::Running { action_id: running_action } if running_action == &action.id
       );
-      Button::new(format!("extension-action-{}-{}", extension_id, action.id))
+      Button::new(SharedString::from(format!("extension-action-{}-{}", extension_id, action.id)))
         .label(label)
         .w_full()
         .loading(action_running)
@@ -109,10 +109,10 @@ impl Workspace {
           workspace.request_extension_action(target_extension.clone(), action_id.clone(), window, cx);
         }))
     });
-    let status = match state {
+    let status = match &state {
       ExtensionRunState::Idle => None,
       ExtensionRunState::Running { .. } => Some("Running…".into()),
-      ExtensionRunState::Failed(message) => Some(message),
+      ExtensionRunState::Failed(message) => Some(message.clone()),
       ExtensionRunState::Cancelled => Some("Cancelled".into()),
     };
     let output = self.extensions.output(extension_id.as_ref()).cloned();
@@ -125,7 +125,7 @@ impl Workspace {
       .border_1()
       .border_color(cx.theme().border)
       .child(
-        Button::new(format!("extension-group-{extension_id}"))
+        Button::new(SharedString::from(format!("extension-group-{extension_id}")))
           .icon(Icon::new(chevron).text_color(cx.theme().muted_foreground))
           .label(extension.name.clone())
           .w_full()
@@ -149,7 +149,7 @@ impl Workspace {
           .children(actions)
           .when(running, |this| {
             this.child(
-              Button::new(format!("cancel-extension-{extension_id}"))
+              Button::new(SharedString::from(format!("cancel-extension-{extension_id}")))
                 .label("Cancel")
                 .outline()
                 .w_full()
@@ -164,6 +164,7 @@ impl Workspace {
           .when_some(output, |this, output| {
             this.child(
               div()
+                .id(SharedString::from(format!("extension-output-{extension_id}")))
                 .max_h(px(160.0))
                 .overflow_y_scroll()
                 .rounded(cx.theme().radius)
