@@ -38,7 +38,7 @@ pub enum ExtensionDocumentEdit {
     cell_ix: usize,
     blocks: Vec<TableCellBlock>,
   },
-  ReplaceDocument(Document),
+  ReplaceDocument(Box<Document>),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -53,17 +53,17 @@ pub enum ExtensionEditError {
 }
 
 impl fmt::Display for ExtensionEditError {
-  fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {
-      Self::StaleGeneration { expected, actual } => write!(formatter, "document generation changed (expected {expected}, found {actual})"),
-      Self::ReadOnly => formatter.write_str("document is read-only"),
-      Self::InvalidRange => formatter.write_str("text range is outside the document or not on UTF-8 boundaries"),
-      Self::InvalidBlock(block_ix) => write!(formatter, "block index {block_ix} is outside the document"),
-      Self::NotATable(block_ix) => write!(formatter, "block {block_ix} is not a table"),
+      Self::StaleGeneration { expected, actual } => write!(f, "document generation changed (expected {expected}, found {actual})"),
+      Self::ReadOnly => f.write_str("document is read-only"),
+      Self::InvalidRange => f.write_str("text range is outside the document or not on UTF-8 boundaries"),
+      Self::InvalidBlock(block_ix) => write!(f, "block index {block_ix} is outside the document"),
+      Self::NotATable(block_ix) => write!(f, "block {block_ix} is not a table"),
       Self::InvalidTableCell { block_ix, row_ix, cell_ix } => {
-        write!(formatter, "table cell {block_ix}:{row_ix}:{cell_ix} does not exist")
+        write!(f, "table cell {block_ix}:{row_ix}:{cell_ix} does not exist")
       },
-      Self::InvalidDocument => formatter.write_str("replacement would leave an invalid document"),
+      Self::InvalidDocument => f.write_str("replacement would leave an invalid document"),
     }
   }
 }
@@ -167,7 +167,7 @@ fn apply_extension_edit(document: &mut Document, edit: &ExtensionDocumentEdit) -
       cell.blocks.clone_from(blocks);
       table.version = table.version.wrapping_add(1);
     },
-    ExtensionDocumentEdit::ReplaceDocument(replacement) => *document = replacement.clone(),
+    ExtensionDocumentEdit::ReplaceDocument(replacement) => *document = (**replacement).clone(),
   }
   Ok(())
 }
