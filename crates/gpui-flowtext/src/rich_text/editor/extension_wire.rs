@@ -61,13 +61,13 @@ pub struct ExtensionWireSnapshot {
   pub selected_fragment: RichClipboardFragment,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ExtensionWireEditRequest {
   pub expected_generation: u64,
   pub edits: Vec<ExtensionWireEdit>,
 }
 
-#[derive(Clone, Debug, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExtensionWireEdit {
   ReplaceText {
@@ -218,5 +218,35 @@ fn table_cell_block_from_wire(block: &InputTableCellBlock) -> TableCellBlock {
       TableCellBlock::Paragraph(table_cell_paragraph_from_input_paragraph(paragraph))
     },
     InputTableCellBlock::Table(table) => TableCellBlock::Table(table_from_input_table(table)),
+  }
+}
+
+#[cfg(test)]
+mod extension_wire_tests {
+  use super::*;
+
+  #[test]
+  fn block_splice_request_round_trips_and_converts() {
+    let request = ExtensionWireEditRequest {
+      expected_generation: 7,
+      edits: vec![ExtensionWireEdit::SpliceBlocks {
+        start: 1,
+        end: 3,
+        blocks: vec![InputBlock::Equation(InputEquationBlock {
+          source: "x".to_owned(),
+          syntax: InputEquationSyntax::Latex,
+          display: InputEquationDisplay::Display,
+        })],
+        assets: Vec::new(),
+      }],
+    };
+    let json = serde_json::to_string(&request).unwrap();
+    let decoded: ExtensionWireEditRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.expected_generation, 7);
+    assert!(matches!(
+      extension_edit_from_wire(&decoded.edits[0]),
+      ExtensionDocumentEdit::SpliceBlocks { range, blocks, .. }
+        if range == (1..3) && matches!(&blocks[0], InputBlock::Equation(equation) if equation.source == "x")
+    ));
   }
 }
