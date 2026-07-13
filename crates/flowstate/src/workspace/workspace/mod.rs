@@ -62,6 +62,8 @@ const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
+#[path = "../extensions_tool.rs"]
+mod extensions_tool;
 
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
@@ -74,6 +76,7 @@ pub struct Workspace {
   toolkit_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
   extensions: ExtensionPanelController,
+  expanded_extensions: HashSet<SharedString>,
   recent_documents: Vec<PathBuf>,
   recent_document_previews: HashMap<PathBuf, Document>,
   recent_document_preview_generation: u64,

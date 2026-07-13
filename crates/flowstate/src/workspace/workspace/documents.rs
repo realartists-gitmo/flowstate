@@ -58,6 +58,7 @@ impl Workspace {
       toolkit_collapsed: false,
       active_toolkit_tool: None,
       extensions: super::super::extensions_panel::disconnected_controller(),
+      expanded_extensions: HashSet::new(),
       recent_documents: load_recent_documents(),
       recent_document_previews: HashMap::new(),
       recent_document_preview_generation: 0,

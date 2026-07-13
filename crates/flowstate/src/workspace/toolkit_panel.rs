@@ -93,8 +93,10 @@ impl Workspace {
   }
 
   fn render_toolkit_rail_area(&self, cx: &mut Context<Self>) -> impl IntoElement {
-    if self.active_toolkit_tool == Some(ToolkitTool::Tub) {
-      return self.render_toolkit_expanded(cx).into_any_element();
+    match self.active_toolkit_tool {
+      Some(ToolkitTool::Tub) => return self.render_toolkit_expanded(cx).into_any_element(),
+      Some(ToolkitTool::Extensions) => return self.render_extensions_panel(cx).into_any_element(),
+      None => {},
     }
 
     self.render_toolkit_icon_bar(cx).into_any_element()
@@ -102,6 +104,7 @@ impl Workspace {
 
   fn render_toolkit_icon_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
     let tub_selected = self.active_toolkit_tool == Some(ToolkitTool::Tub);
+    let extensions_selected = self.active_toolkit_tool == Some(ToolkitTool::Extensions);
 
     v_flex()
       .h_full()
@@ -140,6 +143,21 @@ impl Workspace {
           .tooltip("Tub index")
           .on_click(cx.listener(|workspace, _, _, cx| {
             workspace.toggle_toolkit_tool(ToolkitTool::Tub, cx);
+          })),
+      )
+      .child(
+        Button::new("toolkit-extensions-tool")
+          .icon(Icon::new(IconName::Bot).text_color(if extensions_selected {
+            cx.theme().link
+          } else {
+            cx.theme().muted_foreground
+          }))
+          .xsmall()
+          .ghost()
+          .selected(extensions_selected)
+          .tooltip("Extensions")
+          .on_click(cx.listener(|workspace, _, _, cx| {
+            workspace.toggle_toolkit_tool(ToolkitTool::Extensions, cx);
           })),
       )
       .child(div().flex_1())
