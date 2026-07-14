@@ -208,10 +208,7 @@ impl DocumentSearchBar {
   }
 
   pub fn has_active_run_filters(&self) -> bool {
-    self.highlight_types.iter().any(|&b| b)
-      || self.underline
-      || self.strikethrough
-      || self.semantic_styles.iter().any(|&b| b)
+    self.highlight_types.iter().any(|&b| b) || self.underline || self.strikethrough || self.semantic_styles.iter().any(|&b| b)
   }
 
   pub fn run_style_matches_for_range(&self, paragraph: &Paragraph, range: &Range<DocumentOffset>) -> bool {
@@ -231,9 +228,7 @@ impl DocumentSearchBar {
         if self.strikethrough && run.styles.strikethrough {
           return true;
         }
-        if self.semantic_styles.iter().any(|&b| b)
-          && self.semantic_style_enabled(run.styles.semantic)
-        {
+        if self.semantic_styles.iter().any(|&b| b) && self.semantic_style_enabled(run.styles.semantic) {
           return true;
         }
       }
@@ -586,28 +581,24 @@ impl Render for DocumentSearchBar {
                     menu = menu
                       .item(PopupMenuItem::submenu("Highlight", highlight_submenu).checked(any_highlight_checked))
                       .separator()
-                      .item(
-                        {
-                          let search_bar = search_bar.clone();
-                          PopupMenuItem::new("Underline")
-                            .checked(underline)
-                            .keep_open(true)
-                            .on_click(move |_, _, cx| {
-                              let _ = search_bar.update(cx, |bar, cx| bar.toggle_underline(cx));
-                            })
-                        },
-                      )
-                      .item(
-                        {
-                          let search_bar = search_bar.clone();
-                          PopupMenuItem::new("Strikethrough")
-                            .checked(strikethrough)
-                            .keep_open(true)
-                            .on_click(move |_, _, cx| {
-                              let _ = search_bar.update(cx, |bar, cx| bar.toggle_strikethrough(cx));
-                            })
-                        },
-                      );
+                      .item({
+                        let search_bar = search_bar.clone();
+                        PopupMenuItem::new("Underline")
+                          .checked(underline)
+                          .keep_open(true)
+                          .on_click(move |_, _, cx| {
+                            let _ = search_bar.update(cx, |bar, cx| bar.toggle_underline(cx));
+                          })
+                      })
+                      .item({
+                        let search_bar = search_bar.clone();
+                        PopupMenuItem::new("Strikethrough")
+                          .checked(strikethrough)
+                          .keep_open(true)
+                          .on_click(move |_, _, cx| {
+                            let _ = search_bar.update(cx, |bar, cx| bar.toggle_strikethrough(cx));
+                          })
+                      });
 
                     menu
                   }

@@ -1,3 +1,5 @@
+use flowstate_fidelity::{self as fidelity, FidelityClass};
+
 use super::*;
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -8,17 +10,33 @@ pub(super) struct MouseSelectionOptions {
 
 #[hotpath::measure]
 pub(super) fn expand_mouse_selection(
-  document: &Document,
+  document: &DocumentProjection,
   anchor: DocumentOffset,
   head: DocumentOffset,
   granularity: SelectionGranularity,
   options: MouseSelectionOptions,
 ) -> EditorSelection {
+  // Fidelity: anchor/head arrive here from hit-testing a screen point. Record
+  // the resolution and assert both endpoints land inside the document's
+  // paragraph range — an out-of-range paragraph means the point resolved
+  // against a stale/mismatched projection.
+  if fidelity::enabled() {
+    let paragraphs = document.paragraphs.len();
+    fidelity::event(FidelityClass::Caret, "mouse-select", || {
+      format!("anchor={anchor:?} head={head:?} granularity={granularity:?} options={options:?} paragraphs={paragraphs}")
+    });
+    fidelity::check(
+      paragraphs == 0 || (anchor.paragraph < paragraphs && head.paragraph < paragraphs),
+      FidelityClass::Structure,
+      "hit-test-offset-range",
+      || format!("anchor={anchor:?} head={head:?} paragraphs={paragraphs}"),
+    );
+  }
   if granularity != SelectionGranularity::Character {
     return expand_drag_selection(document, anchor, head, granularity);
   }
 
-  let exact = EditorSelection { anchor, head };
+  let exact = EditorSelection::range(anchor, head);
   if options.exact || !options.smart_word_selection || same_word_fragment(document, anchor, head) {
     return exact;
   }
@@ -27,22 +45,16 @@ pub(super) fn expand_mouse_selection(
 }
 
 #[hotpath::measure]
-fn smart_word_selection(document: &Document, anchor: DocumentOffset, head: DocumentOffset) -> EditorSelection {
+fn smart_word_selection(document: &DocumentProjection, anchor: DocumentOffset, head: DocumentOffset) -> EditorSelection {
   if head < anchor {
-    EditorSelection {
-      anchor: smart_word_selection_end(document, anchor),
-      head: smart_word_selection_start(document, head),
-    }
+    EditorSelection::range(smart_word_selection_end(document, anchor), smart_word_selection_start(document, head))
   } else {
-    EditorSelection {
-      anchor: smart_word_selection_start(document, anchor),
-      head: smart_word_selection_end(document, head),
-    }
+    EditorSelection::range(smart_word_selection_start(document, anchor), smart_word_selection_end(document, head))
   }
 }
 
 #[hotpath::measure]
-fn smart_word_selection_start(document: &Document, offset: DocumentOffset) -> DocumentOffset {
+fn smart_word_selection_start(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   let Some(text) = paragraph_text_for_offset(document, offset) else {
     return DocumentOffset::default();
   };
@@ -60,7 +72,7 @@ fn smart_word_selection_start(document: &Document, offset: DocumentOffset) -> Do
 }
 
 #[hotpath::measure]
-fn smart_word_selection_end(document: &Document, offset: DocumentOffset) -> DocumentOffset {
+fn smart_word_selection_end(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   let Some(text) = paragraph_text_for_offset(document, offset) else {
     return DocumentOffset::default();
   };
@@ -78,7 +90,7 @@ fn smart_word_selection_end(document: &Document, offset: DocumentOffset) -> Docu
 }
 
 #[hotpath::measure]
-fn paragraph_text_for_offset(document: &Document, offset: DocumentOffset) -> Option<String> {
+fn paragraph_text_for_offset(document: &DocumentProjection, offset: DocumentOffset) -> Option<String> {
   if document.paragraphs.is_empty() {
     return None;
   }
@@ -112,7 +124,7 @@ fn previous_word_end_at_or_before(text: &str, mut byte: usize) -> usize {
 }
 
 #[hotpath::measure]
-pub(super) fn offset_is_in_same_word_as(document: &Document, anchor: DocumentOffset, offset: DocumentOffset) -> bool {
+pub(super) fn offset_is_in_same_word_as(document: &DocumentProjection, anchor: DocumentOffset, offset: DocumentOffset) -> bool {
   if anchor.paragraph != offset.paragraph || document.paragraphs.is_empty() {
     return false;
   }
@@ -126,7 +138,7 @@ pub(super) fn offset_is_in_same_word_as(document: &Document, anchor: DocumentOff
 }
 
 #[hotpath::measure]
-fn same_word_fragment(document: &Document, anchor: DocumentOffset, head: DocumentOffset) -> bool {
+fn same_word_fragment(document: &DocumentProjection, anchor: DocumentOffset, head: DocumentOffset) -> bool {
   if anchor.paragraph != head.paragraph || anchor == head {
     return false;
   }

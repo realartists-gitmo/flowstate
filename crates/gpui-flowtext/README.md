@@ -26,7 +26,7 @@ This project is early and actively being extracted from a production GPUI applic
 - DOCX/PDF exporters by default
 - A prescribed file extension for host applications
 
-The default native extension is `gptx`, but applications can use their own extension when exporting or saving native documents.
+Native persistence is supplied by the host application. Flowstate uses its Loro-native `.db8` package adapter.
 
 ## API Tiers
 

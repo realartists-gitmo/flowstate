@@ -14,13 +14,16 @@ impl FlowEditor {
   }
 
   pub fn set_board_zoom(&mut self, zoom: f32, cx: &mut gpui::Context<Self>) {
-    let percent = ((zoom * 100.0 / ZOOM_STEP_PERCENT).round() * ZOOM_STEP_PERCENT)
-      .clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
+    let percent = ((zoom * 100.0 / ZOOM_STEP_PERCENT).round() * ZOOM_STEP_PERCENT).clamp(MIN_ZOOM_PERCENT, MAX_ZOOM_PERCENT);
     let zoom = percent / 100.0;
     if (self.board_zoom - zoom).abs() < f32::EPSILON {
       return;
     }
-    if !self.camera_apply_pending && self.camera_center.is_none_or(|center| !self.camera_center_is_current(center)) {
+    if !self.camera_apply_pending
+      && self
+        .camera_center
+        .is_none_or(|center| !self.camera_center_is_current(center))
+    {
       self.sync_camera_center_from_scroll();
     }
     self.board_zoom = zoom;
@@ -96,10 +99,7 @@ impl FlowEditor {
     let scroll_x = -offset.x.as_f32() / self.board_zoom;
     let scroll_y = -offset.y.as_f32() / self.board_zoom;
     BoardRect {
-      min: BoardPoint {
-        x: scroll_x,
-        y: scroll_y,
-      },
+      min: BoardPoint { x: scroll_x, y: scroll_y },
       max: BoardPoint {
         x: scroll_x + bounds.size.width.as_f32() / self.board_zoom,
         y: scroll_y + bounds.size.height.as_f32() / self.board_zoom,

@@ -1,5 +1,5 @@
 #[hotpath::measure]
-fn first_window_range(document: &Document, paragraph_count: usize) -> Range<DocumentOffset> {
+fn first_window_range(document: &DocumentProjection, paragraph_count: usize) -> Range<DocumentOffset> {
   let end_paragraph = document
     .paragraphs
     .len()
@@ -12,25 +12,25 @@ fn first_window_range(document: &Document, paragraph_count: usize) -> Range<Docu
 }
 
 #[hotpath::measure]
-fn top_selection(document: &Document) -> Option<EditorSelection> {
+fn top_selection(document: &DocumentProjection) -> Option<EditorSelection> {
   if document.paragraphs.is_empty() {
     return None;
   }
-  Some(EditorSelection {
-    anchor: DocumentOffset { paragraph: 0, byte: 0 },
-    head: first_window_range(document, 3).end,
-  })
+  Some(EditorSelection::range(
+    DocumentOffset { paragraph: 0, byte: 0 },
+    first_window_range(document, 3).end,
+  ))
 }
 
 #[hotpath::measure]
-fn first_char_range(document: &Document, paragraph_ix: usize) -> Option<Range<usize>> {
+fn first_char_range(document: &DocumentProjection, paragraph_ix: usize) -> Option<Range<usize>> {
   let text = paragraph_text(document, paragraph_ix);
   let ch = text.chars().next()?;
   Some(0..ch.len_utf8())
 }
 
 #[hotpath::measure]
-fn safe_mid_byte(document: &Document, paragraph_ix: usize) -> usize {
+fn safe_mid_byte(document: &DocumentProjection, paragraph_ix: usize) -> usize {
   let text = paragraph_text(document, paragraph_ix);
   if text.is_empty() {
     return 0;
@@ -45,7 +45,7 @@ fn safe_mid_byte(document: &Document, paragraph_ix: usize) -> usize {
 }
 
 #[hotpath::measure]
-fn fingerprint_document(document: &Document) -> u64 {
+fn fingerprint_document(document: &DocumentProjection) -> u64 {
   let mut hasher = std::collections::hash_map::DefaultHasher::new();
   for chunk in document.text.chunks() {
     chunk.hash(&mut hasher);
@@ -129,8 +129,8 @@ fn hash_paragraph(paragraph: &Paragraph, hasher: &mut impl Hasher) {
 fn hash_table(table: &TableBlock, hasher: &mut impl Hasher) {
   table.version.hash(hasher);
   table.style.header_row.hash(hasher);
-  table.column_widths.len().hash(hasher);
-  for width in &table.column_widths {
+  table.columns.len().hash(hasher);
+  for width in table.columns.iter().map(|column| &column.width) {
     match width {
       TableColumnWidth::Auto => 0u8.hash(hasher),
       TableColumnWidth::FixedPx(value) => {

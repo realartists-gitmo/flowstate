@@ -168,7 +168,7 @@ impl RichTextEditor {
     let width = self.current_layout_width();
     let (chunk_ix, layout) = self.paragraph_chunk_containing_byte(offset.paragraph, offset.byte, width)?;
     let item_top = self.item_top_for_paragraph_chunk(offset.paragraph, chunk_ix)?;
-    let caret = caret_bounds(&layout, offset, point(px(0.0), item_top))?;
+    let caret = caret_bounds(&layout, offset, VisualGravity::Neutral, point(px(0.0), item_top))?;
     Some(relative_line_y(content_y, caret.top(), caret.size.height))
   }
 
@@ -176,7 +176,7 @@ impl RichTextEditor {
     let width = self.current_layout_width();
     let (chunk_ix, layout) = self.paragraph_chunk_containing_byte(offset.paragraph, offset.byte, width)?;
     let item_top = self.item_top_for_paragraph_chunk(offset.paragraph, chunk_ix)?;
-    let caret = caret_bounds(&layout, offset, point(px(0.0), item_top))?;
+    let caret = caret_bounds(&layout, offset, VisualGravity::Neutral, point(px(0.0), item_top))?;
     Some(line_y_from_relative(caret.top(), caret.size.height, line_y_ratio))
   }
 

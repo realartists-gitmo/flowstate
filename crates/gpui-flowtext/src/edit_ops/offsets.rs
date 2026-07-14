@@ -1,4 +1,6 @@
-#[hotpath::measure]
+// §perf: not hotpath-measured — a field sum called on every offset/length
+// query; the measurement hooks dwarfed the work and skewed profiles.
+#[inline]
 #[must_use]
 pub fn paragraph_runs_len(paragraph: &Paragraph) -> usize {
   paragraph.runs.iter().map(|run| run.len).sum()
@@ -24,55 +26,59 @@ pub fn paragraph_width(paragraphs: &[Paragraph], paragraph_ix: usize) -> Option<
 
 #[hotpath::measure]
 #[must_use]
-pub fn paragraph_byte_range(document: &Document, paragraph_ix: usize) -> Range<usize> {
-  let start = document.offset_index.paragraph_start(paragraph_ix);
+pub fn paragraph_byte_range(document: &DocumentProjection, paragraph_ix: usize) -> Range<usize> {
+  // §act-four M3 Slice 2b: paragraph offsets come from the block tree's
+  // paragraph-space monoid (`paragraph_start`), which subsumes the Fenwick
+  // `ParagraphOffsetIndex`. Valid because the block tree mirrors the paragraph
+  // runs, and `paragraph_start` depends only on run lengths (not byte_range).
+  let start = document.blocks.paragraph_start(paragraph_ix);
   start..start + paragraph_text_len(&document.paragraphs[paragraph_ix])
 }
 
+/// Clamp a paragraph-local UTF-8 byte offset to the nearest valid character
+/// boundary at or before it.
+///
+/// Editor coordinates are byte-based. Keeping this normalization at the
+/// document boundary prevents a stale or transformed caret from ever reaching
+/// `crop::Rope` with an interior UTF-8 code-unit offset.
 #[hotpath::measure]
-pub fn refresh_paragraph_range(document: &mut Document, paragraph_ix: usize) {
-  let range = paragraph_byte_range(document, paragraph_ix);
-  paragraphs_mut(document)[paragraph_ix].byte_range = range;
-}
-
-#[hotpath::measure]
-pub fn refresh_paragraph_ranges(document: &mut Document) {
-  for paragraph_ix in 0..document.paragraphs.len() {
-    refresh_paragraph_range(document, paragraph_ix);
+#[must_use]
+pub fn clamp_paragraph_byte_to_char_boundary(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> usize {
+  let Some(paragraph) = document.paragraphs.get(paragraph_ix) else {
+    return 0;
+  };
+  let paragraph_start = document.blocks.paragraph_start(paragraph_ix);
+  let mut byte = byte.min(paragraph_text_len(paragraph));
+  while byte > 0 && !document.text.is_char_boundary(paragraph_start + byte) {
+    byte -= 1;
   }
+  byte
 }
 
+// Per-keystroke hot path: a single paragraph's text length changed (paragraph
+// COUNT is unchanged). §perf-heaven T8.6: `byte_range` is now DERIVED (the block
+// tree's `paragraph_start` prefix-sum from run lengths + `paragraph_text_len`),
+// so there is NO cached absolute offset to shift across the tail — the former
+// O(tail) `im::Vector` + block-tree COW (~3.8 MB/keystroke on a 6k-para doc) is
+// gone. The paragraph sequence already holds the edited runs; the only remaining
+// work is mirroring the edited paragraph's content into its ONE block copy (the
+// two representations hold separate `Paragraph` copies), found in O(log N) via
+// the tree rank query; `update_at` refreshes the tree's paragraph-rope summary
+// from the new run lengths.
 #[hotpath::measure]
-fn refresh_paragraph_ranges_from(document: &mut Document, start_paragraph: usize) {
-  let paragraph_count = document.paragraphs.len();
-  for paragraph_ix in start_paragraph.min(paragraph_count)..paragraph_count {
-    refresh_paragraph_range(document, paragraph_ix);
-  }
-}
-
-#[hotpath::measure]
-pub fn rebuild_document_offset_index(document: &mut Document) {
-  document.offset_index.rebuild(&document.paragraphs);
-  refresh_paragraph_ranges(document);
-}
-
-#[hotpath::measure]
-pub fn update_paragraph_offsets_after_len_change(document: &mut Document, paragraph_ix: usize) {
+pub fn update_paragraph_offsets_after_len_change(document: &mut DocumentProjection, paragraph_ix: usize) {
   if paragraph_ix >= document.paragraphs.len() {
     return;
   }
-  document
-    .offset_index
-    .update_paragraph_width(paragraph_ix, &document.paragraphs);
-  refresh_paragraph_ranges_from(document, paragraph_ix);
-  let paragraph_count = document.paragraphs.len();
-  let replacements = document.paragraphs[paragraph_ix..].to_vec();
-  replace_paragraph_blocks(
-    document,
-    paragraph_ix,
-    paragraph_count.saturating_sub(paragraph_ix),
-    &replacements,
-  );
+  let source = document.paragraphs[paragraph_ix].clone();
+  let Some(row) = crate::block_ix_for_paragraph(document, paragraph_ix) else {
+    return;
+  };
+  document.blocks.update_at(row, |block| {
+    if let Block::Paragraph(paragraph) = block {
+      paragraph.clone_from(&source);
+    }
+  });
 }
 
 // Returns `(run_index, local_byte)` for the given absolute byte offset within
@@ -128,8 +134,12 @@ mod offsets_tests {
 
     insert_text_at(&mut document, 0, "alpha".len(), " beta", RunStyles::default());
 
-    assert_eq!(document.paragraphs[1].byte_range, "alpha beta\n".len().."alpha beta\nKepe et al. ‘23".len());
-    assert!(matches!(&document.blocks[1], Block::Paragraph(paragraph) if paragraph.byte_range == document.paragraphs[1].byte_range));
+    // §perf-heaven T8.6: the byte range is now DERIVED from the block tree's
+    // `paragraph_start` prefix-sum. Verify the derive tracks the insert, and
+    // that the block-tree mirror's runs stayed in sync (which is what makes the
+    // derive correct).
+    assert_eq!(paragraph_byte_range(&document, 1), "alpha beta\n".len().."alpha beta\nKepe et al. ‘23".len());
+    assert!(matches!(&document.blocks[1], Block::Paragraph(paragraph) if paragraph.runs == document.paragraphs[1].runs));
   }
 }
 

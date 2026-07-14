@@ -48,11 +48,7 @@ fn connector_geometry(parent: Bounds<Pixels>, children: &[Bounds<Pixels>], devic
     .iter()
     .map(|child| point(snap(child.left()), snap(child.center().y)))
     .collect();
-  Some(ConnectorGeometry {
-    start,
-    midpoint_x,
-    children,
-  })
+  Some(ConnectorGeometry { start, midpoint_x, children })
 }
 
 #[cfg(test)]

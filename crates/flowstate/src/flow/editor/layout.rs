@@ -42,7 +42,11 @@ pub(super) struct CellLayout {
 }
 
 pub(super) fn sheet_cell_layout(sheet: &Sheet, measurements: &HashMap<CellId, CellMeasurement>, zoom: f32) -> HashMap<CellId, CellLayout> {
-  let cells = sheet.cells.iter().map(|cell| (cell.id, cell)).collect::<HashMap<_, _>>();
+  let cells = sheet
+    .cells
+    .iter()
+    .map(|cell| (cell.id, cell))
+    .collect::<HashMap<_, _>>();
   let mut children: HashMap<CellId, Vec<CellId>> = HashMap::new();
   for cell in &sheet.cells {
     if let Some(parent) = cell.parent_id {
@@ -145,10 +149,7 @@ mod tests {
       cells: vec![root.clone(), child.clone()],
       annotations: Vec::new(),
     };
-    let heights = HashMap::from([
-      (root.id, CellMeasurement::new(80.0, 1.0)),
-      (child.id, CellMeasurement::new(120.0, 1.0)),
-    ]);
+    let heights = HashMap::from([(root.id, CellMeasurement::new(80.0, 1.0)), (child.id, CellMeasurement::new(120.0, 1.0))]);
 
     let small = sheet_cell_layout(&sheet, &heights, 0.25);
     let large = sheet_cell_layout(&sheet, &heights, 4.0);

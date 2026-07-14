@@ -1,21 +1,21 @@
 use std::{cell::RefCell, rc::Rc};
 
 use gpui::{
-  App, AvailableSpace, Background, Bounds, Element, ElementId, Entity, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Pixels,
-  Style, Window, fill, px, relative,
+  App, AvailableSpace, Background, Bounds, Element, ElementId, ElementInputHandler, Entity, GlobalElementId, InspectorElementId, IntoElement,
+  LayoutId, Pixels, Style, Window, fill, px, relative,
 };
 
 use super::*;
 
 pub struct RichTextDocumentElement {
-  pub(super) document: Document,
+  pub(super) document: DocumentProjection,
   pub(super) layout: WordElementLayout,
   pub(super) invisibility_mode: bool,
 }
 
 #[hotpath::measure_all]
 impl RichTextDocumentElement {
-  pub fn new(document: Document) -> Self {
+  pub fn new(document: DocumentProjection) -> Self {
     Self {
       document,
       layout: WordElementLayout::default(),
@@ -161,7 +161,23 @@ impl Element for RichTextDocumentElement {
     cx: &mut App,
   ) {
     if let Some((layout, bounds)) = self.layout.positioned() {
-      paint_layout(layout.as_ref(), bounds, None, None, false, px(1.0), None, &[], &[], None, window, cx);
+      paint_layout(
+        layout.as_ref(),
+        bounds,
+        None,
+        None,
+        false,
+        px(1.0),
+        None,
+        gpui::black(),
+        &[],
+        &[],
+        &[],
+        &[],
+        None,
+        window,
+        cx,
+      );
     }
   }
 }
@@ -239,10 +255,24 @@ impl Element for VirtualParagraphChunkElement {
     window: &mut Window,
     cx: &mut App,
   ) {
-    let (selection, drag_selection, caret_offset, caret_width, caret_color, external_carets, search_highlights, active_search_highlight) = {
+    let (
+      selection,
+      drag_selection,
+      caret_offset,
+      caret_width,
+      caret_color_rgb,
+      default_caret_color,
+      external_carets,
+      external_selections,
+      annotation_selections,
+      search_highlights,
+      active_search_highlight,
+    ) = {
       let editor = self.editor.read(cx);
       let drag_selection = editor.drag_source_selection();
       let external_carets = editor.external_carets_for_paragraph(self.paragraph_ix);
+      let external_selections = editor.external_selections_for_paragraph(self.paragraph_ix);
+      let annotation_selections = editor.annotation_selections_for_paragraph(self.paragraph_ix);
       (
         editor.selection.clone(),
         drag_selection,
@@ -253,20 +283,37 @@ impl Element for VirtualParagraphChunkElement {
           && editor.focus_handle.is_focused(window))
         .then_some(editor.selection.head),
         editor.caret_paint_width(),
-        editor.config().caret_color,
+        editor.local_caret_color_rgb(),
+        // The caret's fallback color = the configured caret color (flow cells
+        // tint the caret to the cell text color) or the theme's default text
+        // color, so it contrasts with the background (a hardcoded black caret
+        // is invisible on a dark theme).
+        editor
+          .config()
+          .caret_color
+          .unwrap_or(editor.document.theme.default_text_color),
         external_carets,
+        external_selections,
+        annotation_selections,
         editor.search_highlights.clone(),
         editor.active_search_highlight,
       )
     };
     if let Some((layout, bounds)) = self.layout.positioned() {
+      let focus_handle = self.editor.read(cx).focus_handle.clone();
+      window.handle_input(&focus_handle, ElementInputHandler::new(bounds, self.editor.clone()), cx);
       if self.chunk_ix == 0 {
         let collapse_state = self
           .editor
           .read(cx)
           .config()
           .show_section_collapse_controls
-          .then(|| self.editor.read(cx).section_collapse_state_at_paragraph(self.paragraph_ix, &[0, 1, 2, 3]))
+          .then(|| {
+            self
+              .editor
+              .read(cx)
+              .section_collapse_state_at_paragraph(self.paragraph_ix, &[0, 1, 2, 3])
+          })
           .flatten();
         if let Some(collapsed) = collapse_state {
           let indicator_width = px(9.0);
@@ -302,8 +349,11 @@ impl Element for VirtualParagraphChunkElement {
         drag_selection.as_ref(),
         show_caret,
         caret_width,
-        caret_color,
+        caret_color_rgb,
+        default_caret_color,
         &external_carets,
+        &external_selections,
+        &annotation_selections,
         &search_highlights,
         active_search_highlight,
         window,
@@ -494,7 +544,7 @@ fn packed_element_pair(first: usize, second: usize) -> u64 {
 
 #[hotpath::measure]
 pub(super) fn request_word_layout(
-  document: Document,
+  document: DocumentProjection,
   layout_cell: WordElementLayout,
   invisibility_mode: bool,
   window: &mut Window,

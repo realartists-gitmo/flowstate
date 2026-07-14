@@ -15,7 +15,7 @@ fn document_position_round_trips_top_level_text_blocks() {
       },
     ],
   );
-  document.blocks = std::sync::Arc::new(vec![
+  document.blocks = crate::BlockSeq::from_vec(vec![
     Block::Paragraph(document.paragraphs[0].clone()),
     Block::Image(ImageBlock {
       asset_id: AssetId(42),
@@ -23,6 +23,7 @@ fn document_position_round_trips_top_level_text_blocks() {
       caption: None,
       sizing: ImageSizing::Intrinsic,
       alignment: BlockAlignment::Center,
+      external_url: None,
       version: 0,
     }),
     Block::Paragraph(document.paragraphs[1].clone()),
@@ -42,37 +43,6 @@ fn document_position_round_trips_top_level_text_blocks() {
     ),
     None
   );
-}
-
-#[test]
-#[hotpath::measure]
-fn document_validation_rejects_zero_sized_fixed_images() {
-  let mut document = document_from_input(
-    DocumentTheme::default(),
-    vec![InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![plain("body")],
-    }],
-  );
-  document.blocks = std::sync::Arc::new(vec![
-    Block::Paragraph(document.paragraphs[0].clone()),
-    Block::Image(ImageBlock {
-      asset_id: AssetId(99),
-      alt_text: "invalid".into(),
-      caption: None,
-      sizing: ImageSizing::Fixed {
-        width_px: 0,
-        height_px: None,
-      },
-      alignment: BlockAlignment::Left,
-      version: 0,
-    }),
-  ]);
-
-  let path = std::env::temp_dir().join(format!("flowtext-invalid-image-{}.document", uuid::Uuid::new_v4()));
-  let error = write_document(&path, &document).unwrap_err();
-  assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-  let _ = std::fs::remove_file(path);
 }
 
 #[test]
@@ -102,13 +72,13 @@ fn double_click_at_text_paragraph_end_selects_only_that_paragraph() {
 
   assert_eq!(
     selection,
-    EditorSelection {
-      anchor: DocumentOffset { paragraph: 0, byte: 0 },
-      head: DocumentOffset {
+    EditorSelection::range(
+      DocumentOffset { paragraph: 0, byte: 0 },
+      DocumentOffset {
         paragraph: 0,
         byte: "first paragraph".len(),
       },
-    }
+    )
   );
 }
 
@@ -137,50 +107,8 @@ fn double_click_empty_paragraph_selects_only_empty_paragraph() {
 
   assert_eq!(
     selection,
-    EditorSelection {
-      anchor: DocumentOffset { paragraph: 1, byte: 0 },
-      head: DocumentOffset { paragraph: 1, byte: 0 },
-    }
+    EditorSelection::collapsed(DocumentOffset { paragraph: 1, byte: 0 })
   );
-}
-
-#[test]
-#[hotpath::measure]
-fn selection_across_empty_paragraphs_and_clear_formatting_policy() {
-  let emphasized = RunStyles::default().with(RunStyle::Semantic(2));
-  let mut document = document_from_input(
-    DocumentTheme::default(),
-    vec![
-      InputParagraph {
-        style: ParagraphStyle::Custom(3),
-        runs: vec![run("tag", emphasized)],
-      },
-      InputParagraph {
-        style: ParagraphStyle::Custom(0),
-        runs: Vec::new(),
-      },
-      InputParagraph {
-        style: ParagraphStyle::Normal,
-        runs: vec![run("body", emphasized)],
-      },
-    ],
-  );
-  let selection = DocumentOffset { paragraph: 0, byte: 1 }..DocumentOffset { paragraph: 2, byte: 1 };
-  assert!(selection_contains_whole_paragraph(&document, selection.clone()));
-
-  for paragraph_ix in selection.start.paragraph..=selection.end.paragraph {
-    clear_whole_paragraph_formatting(&mut document, paragraph_ix);
-  }
-
-  for paragraph in document.paragraphs.iter() {
-    assert_eq!(paragraph.style, ParagraphStyle::Normal);
-    assert!(
-      paragraph
-        .runs
-        .iter()
-        .all(|run| run.styles == RunStyles::default())
-    );
-  }
 }
 
 #[test]
@@ -221,59 +149,4 @@ fn semantic_run_styles_are_mutually_exclusive() {
   assert_eq!(styles.semantic, RunSemanticStyle::Custom(4));
   styles.apply(RunStyle::Semantic(5));
   assert_eq!(styles.semantic, RunSemanticStyle::Custom(5));
-}
-
-#[test]
-#[hotpath::measure]
-fn document_round_trip_preserves_condensed_semantic_styles() {
-  let path = std::env::temp_dir().join(format!("flowtext-semantic-{}.document", uuid::Uuid::new_v4()));
-  let document = document_from_input(
-    DocumentTheme::default(),
-    vec![InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![
-        run("condensed", RunStyles::default().with(RunStyle::Semantic(4))),
-        run(
-          " ultra",
-          RunStyles::default()
-            .with(RunStyle::Semantic(5))
-            .with(RunStyle::Highlight(1)),
-        ),
-      ],
-    }],
-  );
-  write_document(&path, &document).unwrap();
-  let loaded = read_document(&path).unwrap();
-  let _ = std::fs::remove_file(path);
-
-  assert_eq!(loaded.paragraphs[0].runs[0].styles.semantic, RunSemanticStyle::Custom(4));
-  assert_eq!(loaded.paragraphs[0].runs[1].styles.semantic, RunSemanticStyle::Custom(5));
-  assert_eq!(loaded.paragraphs[0].runs[1].styles.highlight, Some(HighlightStyle::Custom(1)));
-}
-
-#[test]
-#[hotpath::measure]
-fn document_save_can_replace_existing_file() {
-  let path = std::env::temp_dir().join(format!("flowtext-replace-{}.document", uuid::Uuid::new_v4()));
-  let first = document_from_input(
-    DocumentTheme::default(),
-    vec![InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![plain("first")],
-    }],
-  );
-  let second = document_from_input(
-    DocumentTheme::default(),
-    vec![InputParagraph {
-      style: ParagraphStyle::Normal,
-      runs: vec![plain("second")],
-    }],
-  );
-
-  write_document(&path, &first).unwrap();
-  write_document(&path, &second).unwrap();
-  let loaded = read_document(&path).unwrap();
-  let _ = std::fs::remove_file(path);
-
-  assert_eq!(paragraph_text(&loaded, 0), "second");
 }

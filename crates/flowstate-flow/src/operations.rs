@@ -17,16 +17,22 @@ pub enum FlowDropIntent {
   AfterSibling(CellId),
   FirstChildOf(CellId),
   LastChildOf(CellId),
-  RootInColumn {
-    column_index: usize,
-    insertion_index: usize,
-  },
+  RootInColumn { column_index: usize, insertion_index: usize },
 }
 
 impl FlowDocument {
   pub fn child_append_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let parent_index = sheet.cells.iter().position(|cell| cell.id == parent_id).context("unknown cell")?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let parent_index = sheet
+      .cells
+      .iter()
+      .position(|cell| cell.id == parent_id)
+      .context("unknown cell")?;
     Ok(
       sheet
         .cells
@@ -41,13 +47,26 @@ impl FlowDocument {
   }
 
   pub fn child_prepend_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let parent_index = sheet.cells.iter().position(|cell| cell.id == parent_id).context("unknown cell")?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let parent_index = sheet
+      .cells
+      .iter()
+      .position(|cell| cell.id == parent_id)
+      .context("unknown cell")?;
     Ok(parent_index + 1)
   }
 
   pub fn deletion_fallback(&self, sheet_id: SheetId, cell_id: CellId) -> Option<CellId> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)?;
     let definition = self.projection().format.sheet_type(sheet.sheet_type_id)?;
     let index = sheet.cells.iter().position(|cell| cell.id == cell_id)?;
     let cell = &sheet.cells[index];
@@ -63,8 +82,14 @@ impl FlowDocument {
       return Some(parent);
     }
 
-    let column = definition.columns.iter().position(|column| column.id == cell.column_id)?;
-    let left_column = column.checked_sub(1).and_then(|index| definition.columns.get(index))?.id;
+    let column = definition
+      .columns
+      .iter()
+      .position(|column| column.id == cell.column_id)?;
+    let left_column = column
+      .checked_sub(1)
+      .and_then(|index| definition.columns.get(index))?
+      .id;
     sheet
       .cells
       .iter()
@@ -77,7 +102,10 @@ impl FlowDocument {
     let id = Uuid::new_v4();
     let name = name.into();
     self.update(|projection| {
-      projection.format.sheet_type(sheet_type_id).context("unknown sheet type")?;
+      projection
+        .format
+        .sheet_type(sheet_type_id)
+        .context("unknown sheet type")?;
       projection.sheets.push(Sheet {
         id,
         name,
@@ -116,9 +144,15 @@ impl FlowDocument {
 
   pub fn move_sheet(&mut self, sheet_id: SheetId, target_index: usize) -> anyhow::Result<()> {
     self.update(|projection| {
-      let source = projection.sheets.iter().position(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+      let source = projection
+        .sheets
+        .iter()
+        .position(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
       let sheet = projection.sheets.remove(source);
-      projection.sheets.insert(target_index.min(projection.sheets.len()), sheet);
+      projection
+        .sheets
+        .insert(target_index.min(projection.sheets.len()), sheet);
       Ok(())
     })
   }
@@ -130,15 +164,37 @@ impl FlowDocument {
     parent_id: Option<CellId>,
     insertion_index: Option<usize>,
   ) -> anyhow::Result<CellId> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let definition = self.projection().format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
-    let column_id = definition.columns.get(column_index).context("column index out of range")?.id;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let definition = self
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+      .context("unknown sheet type")?;
+    let column_id = definition
+      .columns
+      .get(column_index)
+      .context("column index out of range")?
+      .id;
     let mut cell = Cell::plain(column_id)?;
     cell.parent_id = parent_id;
     let id = cell.id;
     self.update(|projection| {
-      let sheet = projection.sheets.iter_mut().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-      sheet.cells.insert(insertion_index.unwrap_or(sheet.cells.len()).min(sheet.cells.len()), cell);
+      let sheet = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
+      sheet.cells.insert(
+        insertion_index
+          .unwrap_or(sheet.cells.len())
+          .min(sheet.cells.len()),
+        cell,
+      );
       Ok(())
     })?;
     Ok(id)
@@ -149,11 +205,28 @@ impl FlowDocument {
   }
 
   pub fn add_sibling(&mut self, sheet_id: SheetId, cell_id: CellId, position: RelativePosition) -> anyhow::Result<CellId> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let index = sheet.cells.iter().position(|cell| cell.id == cell_id).context("unknown cell")?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let index = sheet
+      .cells
+      .iter()
+      .position(|cell| cell.id == cell_id)
+      .context("unknown cell")?;
     let source = &sheet.cells[index];
-    let definition = self.projection().format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
-    let column = definition.columns.iter().position(|column| column.id == source.column_id).context("unknown column")?;
+    let definition = self
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+      .context("unknown sheet type")?;
+    let column = definition
+      .columns
+      .iter()
+      .position(|column| column.id == source.column_id)
+      .context("unknown column")?;
     let insertion = match position {
       RelativePosition::Before => index,
       RelativePosition::After => index + 1,
@@ -162,10 +235,27 @@ impl FlowDocument {
   }
 
   pub fn add_response(&mut self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<CellId> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let parent = sheet.cells.iter().find(|cell| cell.id == parent_id).context("unknown cell")?;
-    let definition = self.projection().format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
-    let parent_column = definition.columns.iter().position(|column| column.id == parent.column_id).context("unknown column")?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let parent = sheet
+      .cells
+      .iter()
+      .find(|cell| cell.id == parent_id)
+      .context("unknown cell")?;
+    let definition = self
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+      .context("unknown sheet type")?;
+    let parent_column = definition
+      .columns
+      .iter()
+      .position(|column| column.id == parent.column_id)
+      .context("unknown column")?;
     let child_column = parent_column + 1;
     if child_column >= definition.columns.len() {
       bail!("rightmost cells cannot receive responses");
@@ -175,10 +265,27 @@ impl FlowDocument {
   }
 
   pub fn add_first_response(&mut self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<CellId> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-    let parent = sheet.cells.iter().find(|cell| cell.id == parent_id).context("unknown cell")?;
-    let definition = self.projection().format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
-    let parent_column = definition.columns.iter().position(|column| column.id == parent.column_id).context("unknown column")?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+      .context("unknown sheet")?;
+    let parent = sheet
+      .cells
+      .iter()
+      .find(|cell| cell.id == parent_id)
+      .context("unknown cell")?;
+    let definition = self
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+      .context("unknown sheet type")?;
+    let parent_column = definition
+      .columns
+      .iter()
+      .position(|column| column.id == parent.column_id)
+      .context("unknown column")?;
     let child_column = parent_column + 1;
     if child_column >= definition.columns.len() {
       bail!("rightmost cells cannot receive responses");
@@ -189,7 +296,11 @@ impl FlowDocument {
 
   pub fn delete_cell(&mut self, sheet_id: SheetId, cell_id: CellId) -> anyhow::Result<()> {
     self.update(|projection| {
-      let sheet = projection.sheets.iter_mut().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+      let sheet = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
       let before = sheet.cells.len();
       sheet.cells.retain(|cell| cell.id != cell_id);
       if sheet.cells.len() == before {
@@ -216,16 +327,22 @@ impl FlowDocument {
         .find(|cell| cell.id == cell_id)
         .context("unknown cell")?;
       let mut document = cell.document()?;
-      let paragraphs = std::sync::Arc::make_mut(&mut document.paragraphs);
-      let struck = paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.styles.strikethrough);
-      for paragraph in paragraphs {
-        for run in &mut paragraph.runs {
-          run.styles.strikethrough = !struck;
+      {
+        let mut paragraphs = document.paragraphs.make_mut();
+        let struck = paragraphs
+          .iter()
+          .flat_map(|paragraph| &paragraph.runs)
+          .all(|run| run.styles.strikethrough);
+        for paragraph in &mut *paragraphs {
+          for run in &mut paragraph.runs {
+            run.styles.strikethrough = !struck;
+          }
+          paragraph.version = paragraph.version.wrapping_add(1);
         }
-        paragraph.version = paragraph.version.wrapping_add(1);
       }
-      document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
-      cell.document_bytes = flowstate_document::db8_bytes(&document)?;
+      document.blocks =
+        flowstate_document::BlockSeq::from_vec(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs.to_vec()));
+      cell.document_bytes = crate::document::db8_bytes(&document)?;
       Ok(())
     })
   }
@@ -234,9 +351,9 @@ impl FlowDocument {
     &mut self,
     sheet_id: SheetId,
     cell_id: CellId,
-    document: &flowstate_document::Document,
+    document: &flowstate_document::DocumentProjection,
   ) -> anyhow::Result<()> {
-    let bytes = flowstate_document::db8_bytes(document)?;
+    let bytes = crate::document::db8_bytes(document)?;
     self.update(|projection| {
       projection
         .sheets
@@ -277,12 +394,16 @@ impl FlowDocument {
         .find(|cell| cell.id == cell_id)
         .context("unknown cell")?;
       let mut document = cell.document()?;
-      let paragraphs = std::sync::Arc::make_mut(&mut document.paragraphs);
-      let paragraph = paragraphs.first_mut().context("cell document has no paragraph")?;
+      let mut paragraphs = document.paragraphs.make_mut();
+      let paragraph = paragraphs
+        .first_mut()
+        .context("cell document has no paragraph")?;
       paragraph.style = flowstate_document::PARAGRAPH_TAG;
       paragraph.version = paragraph.version.wrapping_add(1);
-      document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
-      cell.document_bytes = flowstate_document::db8_bytes(&document)?;
+      drop(paragraphs);
+      document.blocks =
+        flowstate_document::BlockSeq::from_vec(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs.to_vec()));
+      cell.document_bytes = crate::document::db8_bytes(&document)?;
       Ok(())
     })?;
     Ok(true)
@@ -309,7 +430,11 @@ impl FlowDocument {
   pub fn move_cell_subtree(&mut self, sheet_id: SheetId, cell_id: CellId, intent: FlowDropIntent) -> anyhow::Result<()> {
     self.update(|projection| {
       let column_ids = sheet_column_ids(projection, sheet_id)?;
-      let sheet = projection.sheets.iter_mut().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+      let sheet = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
       apply_move_subtree(sheet, &column_ids, cell_id, intent)
     })
   }
@@ -320,7 +445,11 @@ impl FlowDocument {
   pub fn preview_move_cell_subtree(&self, sheet_id: SheetId, cell_id: CellId, intent: FlowDropIntent) -> Option<Sheet> {
     let projection = self.projection();
     let column_ids = sheet_column_ids(projection, sheet_id).ok()?;
-    let mut sheet = projection.sheets.iter().find(|sheet| sheet.id == sheet_id)?.clone();
+    let mut sheet = projection
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)?
+      .clone();
     apply_move_subtree(&mut sheet, &column_ids, cell_id, intent).ok()?;
     // Only report a landing the real (fully validated) move would accept, so the drag preview never
     // shows the cell dropping somewhere the commit will silently reject.
@@ -330,7 +459,11 @@ impl FlowDocument {
   /// Read-only preview of the sheet with the dragged cell and its whole subtree lifted out, so the
   /// board can reflow as if it were gone while a drag is in flight and no valid target is hovered yet.
   pub fn preview_without_subtree(&self, sheet_id: SheetId, cell_id: CellId) -> Option<Sheet> {
-    let sheet = self.projection().sheets.iter().find(|sheet| sheet.id == sheet_id)?;
+    let sheet = self
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)?;
     let subtree: HashSet<CellId> = subtree_cell_ids(sheet, cell_id).into_iter().collect();
     if subtree.is_empty() {
       return None;
@@ -369,8 +502,14 @@ impl FlowDocument {
 
   pub fn clear_annotations(&mut self, sheet_id: SheetId, originator: &AnnotationOriginator) -> anyhow::Result<()> {
     self.update(|projection| {
-      let sheet = projection.sheets.iter_mut().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-      sheet.annotations.retain(|stroke| &stroke.originator != originator);
+      let sheet = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
+      sheet
+        .annotations
+        .retain(|stroke| &stroke.originator != originator);
       Ok(())
     })
   }
@@ -378,7 +517,9 @@ impl FlowDocument {
   pub fn clear_all_annotations(&mut self, originator: &AnnotationOriginator) -> anyhow::Result<()> {
     self.update(|projection| {
       for sheet in &mut projection.sheets {
-        sheet.annotations.retain(|stroke| &stroke.originator != originator);
+        sheet
+          .annotations
+          .retain(|stroke| &stroke.originator != originator);
       }
       Ok(())
     })
@@ -387,9 +528,15 @@ impl FlowDocument {
   pub fn delete_annotation(&mut self, sheet_id: SheetId, stroke_id: uuid::Uuid, originator: &AnnotationOriginator) -> anyhow::Result<bool> {
     let mut removed = false;
     self.update(|projection| {
-      let sheet = projection.sheets.iter_mut().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
+      let sheet = projection
+        .sheets
+        .iter_mut()
+        .find(|sheet| sheet.id == sheet_id)
+        .context("unknown sheet")?;
       let before = sheet.annotations.len();
-      sheet.annotations.retain(|stroke| stroke.id != stroke_id || &stroke.originator != originator);
+      sheet
+        .annotations
+        .retain(|stroke| stroke.id != stroke_id || &stroke.originator != originator);
       removed = sheet.annotations.len() != before;
       Ok(())
     })?;
@@ -398,12 +545,20 @@ impl FlowDocument {
 }
 
 fn is_descendant_of(sheet: &Sheet, cell_id: CellId, ancestor_id: CellId) -> bool {
-  let mut parent = sheet.cells.iter().find(|cell| cell.id == cell_id).and_then(|cell| cell.parent_id);
+  let mut parent = sheet
+    .cells
+    .iter()
+    .find(|cell| cell.id == cell_id)
+    .and_then(|cell| cell.parent_id);
   while let Some(parent_id) = parent {
     if parent_id == ancestor_id {
       return true;
     }
-    parent = sheet.cells.iter().find(|cell| cell.id == parent_id).and_then(|cell| cell.parent_id);
+    parent = sheet
+      .cells
+      .iter()
+      .find(|cell| cell.id == parent_id)
+      .and_then(|cell| cell.parent_id);
   }
   false
 }
@@ -448,7 +603,10 @@ fn sheet_topology_ok(sheet: &Sheet, column_ids: &[Uuid]) -> bool {
         if let Some(parent) = current_parent {
           completed_parents.insert(parent);
         }
-        if cell.parent_id.is_some_and(|parent| completed_parents.contains(&parent)) {
+        if cell
+          .parent_id
+          .is_some_and(|parent| completed_parents.contains(&parent))
+        {
           return false;
         }
         current_parent = cell.parent_id;
@@ -459,8 +617,15 @@ fn sheet_topology_ok(sheet: &Sheet, column_ids: &[Uuid]) -> bool {
 }
 
 fn sheet_column_ids(projection: &FlowProjection, sheet_id: SheetId) -> anyhow::Result<Vec<Uuid>> {
-  let sheet = projection.sheets.iter().find(|sheet| sheet.id == sheet_id).context("unknown sheet")?;
-  let definition = projection.format.sheet_type(sheet.sheet_type_id).context("unknown sheet type")?;
+  let sheet = projection
+    .sheets
+    .iter()
+    .find(|sheet| sheet.id == sheet_id)
+    .context("unknown sheet")?;
+  let definition = projection
+    .format
+    .sheet_type(sheet.sheet_type_id)
+    .context("unknown sheet type")?;
   Ok(definition.columns.iter().map(|column| column.id).collect())
 }
 
@@ -468,7 +633,11 @@ fn sheet_column_ids(projection: &FlowProjection, sheet_id: SheetId) -> anyhow::R
 /// same algorithm backs both the committing [`FlowDocument::move_cell_subtree`] and the read-only
 /// drag previews.
 fn apply_move_subtree(sheet: &mut Sheet, column_ids: &[Uuid], cell_id: CellId, intent: FlowDropIntent) -> anyhow::Result<()> {
-  let source = sheet.cells.iter().position(|cell| cell.id == cell_id).context("unknown cell")?;
+  let source = sheet
+    .cells
+    .iter()
+    .position(|cell| cell.id == cell_id)
+    .context("unknown cell")?;
   let source_level = column_ids
     .iter()
     .position(|column| *column == sheet.cells[source].column_id)
@@ -498,7 +667,9 @@ fn apply_move_subtree(sheet: &mut Sheet, column_ids: &[Uuid], cell_id: CellId, i
       remaining.push(cell);
     }
   }
-  let insertion_index = target_index.saturating_sub(removed_before_target).min(remaining.len());
+  let insertion_index = target_index
+    .saturating_sub(removed_before_target)
+    .min(remaining.len());
 
   for cell in &mut subtree {
     let old_level = column_ids
@@ -533,7 +704,11 @@ fn resolve_drop_intent(
       if is_descendant_of(sheet, target, dragged) {
         bail!("cannot drop a cell relative to one of its descendants");
       }
-      let target_index = sheet.cells.iter().position(|cell| cell.id == target).context("unknown target cell")?;
+      let target_index = sheet
+        .cells
+        .iter()
+        .position(|cell| cell.id == target)
+        .context("unknown target cell")?;
       let target_cell = &sheet.cells[target_index];
       let column_index = column_ids
         .iter()
@@ -553,24 +728,33 @@ fn resolve_drop_intent(
       if is_descendant_of(sheet, parent, dragged) {
         bail!("cannot drop a cell onto one of its descendants");
       }
-      let parent_index = sheet.cells.iter().position(|cell| cell.id == parent).context("unknown parent cell")?;
+      let parent_index = sheet
+        .cells
+        .iter()
+        .position(|cell| cell.id == parent)
+        .context("unknown parent cell")?;
       let parent_cell = &sheet.cells[parent_index];
       let parent_column = column_ids
         .iter()
         .position(|column| *column == parent_cell.column_id)
         .context("parent cell references unknown column")?;
-      let child_column = parent_column.checked_add(1).filter(|index| *index < column_ids.len()).context("parent has no child column")?;
+      let child_column = parent_column
+        .checked_add(1)
+        .filter(|index| *index < column_ids.len())
+        .context("parent has no child column")?;
       let insertion_index = match intent {
         FlowDropIntent::FirstChildOf(_) => parent_index + 1,
-        FlowDropIntent::LastChildOf(_) => sheet
-          .cells
-          .iter()
-          .enumerate()
-          .filter(|(_, cell)| is_descendant_of(sheet, cell.id, parent))
-          .map(|(index, _)| index)
-          .max()
-          .unwrap_or(parent_index)
-          + 1,
+        FlowDropIntent::LastChildOf(_) => {
+          sheet
+            .cells
+            .iter()
+            .enumerate()
+            .filter(|(_, cell)| is_descendant_of(sheet, cell.id, parent))
+            .map(|(index, _)| index)
+            .max()
+            .unwrap_or(parent_index)
+            + 1
+        },
         FlowDropIntent::BeforeSibling(_) | FlowDropIntent::AfterSibling(_) | FlowDropIntent::RootInColumn { .. } => unreachable!(),
       };
       Ok((child_column, insertion_index, Some(parent)))
@@ -605,7 +789,15 @@ mod tests {
     let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
     let child = document.add_response(sheet, parent).unwrap();
     document.delete_cell(sheet, parent).unwrap();
-    assert_eq!(document.projection().sheets[0].cells.iter().find(|cell| cell.id == child).unwrap().parent_id, None);
+    assert_eq!(
+      document.projection().sheets[0]
+        .cells
+        .iter()
+        .find(|cell| cell.id == child)
+        .unwrap()
+        .parent_id,
+      None
+    );
   }
 
   #[test]
@@ -617,7 +809,11 @@ mod tests {
 
     document.move_cell(sheet_id, first, 0, 2, None).unwrap();
 
-    let ids: Vec<_> = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    let ids: Vec<_> = document.projection().sheets[0]
+      .cells
+      .iter()
+      .map(|cell| cell.id)
+      .collect();
     assert_eq!(ids, vec![second, first, third]);
   }
 
@@ -635,9 +831,15 @@ mod tests {
         }],
       }],
     );
-    document.replace_cell_document(sheet_id, cell_id, &source).unwrap();
+    document
+      .replace_cell_document(sheet_id, cell_id, &source)
+      .unwrap();
 
-    assert!(document.ensure_cell_editable_projection(sheet_id, cell_id).unwrap());
+    assert!(
+      document
+        .ensure_cell_editable_projection(sheet_id, cell_id)
+        .unwrap()
+    );
     let cell = &document.projection().sheets[0].cells[0];
     assert_eq!(cell.summary_text().unwrap(), "Preserve me");
     assert_eq!(cell.document().unwrap().paragraphs[0].style, flowstate_document::PARAGRAPH_TAG);
@@ -651,7 +853,11 @@ mod tests {
     let grandchild = document.add_response(sheet_id, first).unwrap();
     let second = document.add_response(sheet_id, parent).unwrap();
 
-    let ids: Vec<_> = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    let ids: Vec<_> = document.projection().sheets[0]
+      .cells
+      .iter()
+      .map(|cell| cell.id)
+      .collect();
     assert_eq!(ids, vec![parent, first, grandchild, second]);
   }
 
@@ -659,8 +865,12 @@ mod tests {
   fn deletion_fallback_prefers_previous_sibling_then_parent() {
     let (mut document, sheet) = document_with_sheet();
     let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
-    let first = document.add_plain_cell(sheet, 1, Some(parent), None).unwrap();
-    let second = document.add_plain_cell(sheet, 1, Some(parent), None).unwrap();
+    let first = document
+      .add_plain_cell(sheet, 1, Some(parent), None)
+      .unwrap();
+    let second = document
+      .add_plain_cell(sheet, 1, Some(parent), None)
+      .unwrap();
     assert_eq!(document.deletion_fallback(sheet, second), Some(first));
     assert_eq!(document.deletion_fallback(sheet, first), Some(parent));
   }
@@ -696,7 +906,11 @@ mod tests {
     let sheet = &document.projection().sheets[0];
     let parent_cell = sheet.cells.iter().find(|cell| cell.id == parent).unwrap();
     let child_cell = sheet.cells.iter().find(|cell| cell.id == child).unwrap();
-    let grandchild_cell = sheet.cells.iter().find(|cell| cell.id == grandchild).unwrap();
+    let grandchild_cell = sheet
+      .cells
+      .iter()
+      .find(|cell| cell.id == grandchild)
+      .unwrap();
     let columns = &document.projection().format.sheet_types[0].columns;
     assert_eq!(parent_cell.column_id, columns[1].id);
     assert_eq!(parent_cell.parent_id, None);
@@ -713,7 +927,9 @@ mod tests {
     let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
     let child = document.add_response(sheet, parent).unwrap();
     let grandchild = document.add_response(sheet, child).unwrap();
-    document.move_cell_subtree(sheet, parent, FlowDropIntent::BeforeSibling(other)).unwrap();
+    document
+      .move_cell_subtree(sheet, parent, FlowDropIntent::BeforeSibling(other))
+      .unwrap();
     let sheet = &document.projection().sheets[0];
     assert_eq!(
       sheet.cells.iter().map(|cell| cell.id).collect::<Vec<_>>(),
@@ -727,12 +943,20 @@ mod tests {
     let first = document.add_plain_cell(sheet, 0, None, None).unwrap();
     let second = document.add_plain_cell(sheet, 0, None, None).unwrap();
 
-    let preview = document.preview_move_cell_subtree(sheet, first, FlowDropIntent::AfterSibling(second)).unwrap();
-    document.move_cell_subtree(sheet, first, FlowDropIntent::AfterSibling(second)).unwrap();
+    let preview = document
+      .preview_move_cell_subtree(sheet, first, FlowDropIntent::AfterSibling(second))
+      .unwrap();
+    document
+      .move_cell_subtree(sheet, first, FlowDropIntent::AfterSibling(second))
+      .unwrap();
 
     assert_eq!(
       preview.cells.iter().map(|cell| cell.id).collect::<Vec<_>>(),
-      document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect::<Vec<_>>()
+      document.projection().sheets[0]
+        .cells
+        .iter()
+        .map(|cell| cell.id)
+        .collect::<Vec<_>>()
     );
   }
 
@@ -758,13 +982,21 @@ mod tests {
 
     // Dropping the parentless `orphan` between `parent`'s two responses would split their sibling run,
     // which the committed move rejects — so the preview must decline to show a landing there.
-    let insertion_index = document.projection().sheets[0].cells.iter().position(|cell| cell.id == second).unwrap();
+    let insertion_index = document.projection().sheets[0]
+      .cells
+      .iter()
+      .position(|cell| cell.id == second)
+      .unwrap();
     let intent = FlowDropIntent::RootInColumn {
       column_index: 1,
       insertion_index,
     };
 
-    assert!(document.preview_move_cell_subtree(sheet, orphan, intent).is_none());
+    assert!(
+      document
+        .preview_move_cell_subtree(sheet, orphan, intent)
+        .is_none()
+    );
     assert!(document.move_cell_subtree(sheet, orphan, intent).is_err());
   }
 
@@ -774,7 +1006,11 @@ mod tests {
     let parent = document.add_plain_cell(sheet, 0, None, None).unwrap();
     let child = document.add_response(sheet, parent).unwrap();
 
-    assert!(document.preview_move_cell_subtree(sheet, parent, FlowDropIntent::LastChildOf(child)).is_none());
+    assert!(
+      document
+        .preview_move_cell_subtree(sheet, parent, FlowDropIntent::LastChildOf(child))
+        .is_none()
+    );
   }
 
   #[test]
@@ -821,14 +1057,26 @@ mod tests {
     document.strike_cell(sheet, cell).unwrap();
     let cell = &document.projection().sheets[0].cells[0];
     let rich_text = cell.document().unwrap();
-    assert!(rich_text.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.styles.strikethrough));
+    assert!(
+      rich_text
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .all(|run| run.styles.strikethrough)
+    );
     assert!(rich_text.blocks.iter().all(|block| match block {
       flowstate_document::Block::Paragraph(paragraph) => paragraph.runs.iter().all(|run| run.styles.strikethrough),
       _ => true,
     }));
     document.strike_cell(sheet, cell.id).unwrap();
     let rich_text = document.projection().sheets[0].cells[0].document().unwrap();
-    assert!(rich_text.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| !run.styles.strikethrough));
+    assert!(
+      rich_text
+        .paragraphs
+        .iter()
+        .flat_map(|paragraph| &paragraph.runs)
+        .all(|run| !run.styles.strikethrough)
+    );
   }
 
   #[test]
@@ -838,7 +1086,11 @@ mod tests {
     let existing = document.add_response(sheet, parent).unwrap();
     let grandchild = document.add_response(sheet, existing).unwrap();
     let first = document.add_first_response(sheet, parent).unwrap();
-    let ids = document.projection().sheets[0].cells.iter().map(|cell| cell.id).collect::<Vec<_>>();
+    let ids = document.projection().sheets[0]
+      .cells
+      .iter()
+      .map(|cell| cell.id)
+      .collect::<Vec<_>>();
     assert_eq!(ids, vec![parent, first, existing, grandchild]);
   }
 
@@ -848,8 +1100,12 @@ mod tests {
     let snapshot = base.snapshot().unwrap();
     let mut one = FlowDocument::from_snapshot(&snapshot).unwrap();
     let mut two = FlowDocument::from_snapshot(&snapshot).unwrap();
-    one.add_annotation(sheet, test_stroke(sheet, "one")).unwrap();
-    two.add_annotation(sheet, test_stroke(sheet, "two")).unwrap();
+    one
+      .add_annotation(sheet, test_stroke(sheet, "one"))
+      .unwrap();
+    two
+      .add_annotation(sheet, test_stroke(sheet, "two"))
+      .unwrap();
     let one_updates = one.updates_since(&two.version_vector()).unwrap();
     let two_updates = two.updates_since(&one.version_vector()).unwrap();
     one.import_updates(&two_updates).unwrap();
@@ -864,15 +1120,25 @@ mod tests {
     let sheet_type = document.projection().format.sheet_types[0].id;
     let second_sheet = document.create_sheet("Other", sheet_type).unwrap();
     for sheet in [first_sheet, second_sheet] {
-      document.add_annotation(sheet, test_stroke(sheet, "local")).unwrap();
-      document.add_annotation(sheet, test_stroke(sheet, "collaborator")).unwrap();
+      document
+        .add_annotation(sheet, test_stroke(sheet, "local"))
+        .unwrap();
+      document
+        .add_annotation(sheet, test_stroke(sheet, "collaborator"))
+        .unwrap();
     }
 
-    document.clear_all_annotations(&AnnotationOriginator("local".into())).unwrap();
+    document
+      .clear_all_annotations(&AnnotationOriginator("local".into()))
+      .unwrap();
 
-    assert!(document.projection().sheets.iter().all(|sheet| {
-      sheet.annotations.len() == 1 && sheet.annotations[0].originator == AnnotationOriginator("collaborator".into())
-    }));
+    assert!(
+      document
+        .projection()
+        .sheets
+        .iter()
+        .all(|sheet| { sheet.annotations.len() == 1 && sheet.annotations[0].originator == AnnotationOriginator("collaborator".into()) })
+    );
   }
 
   #[test]

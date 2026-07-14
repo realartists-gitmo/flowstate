@@ -37,7 +37,7 @@ pub(super) struct VisibilityIndex {
 
 #[hotpath::measure_all]
 impl VisibilityIndex {
-  pub(super) fn build(document: &Document, invisibility_mode: bool) -> Self {
+  pub(super) fn build(document: &DocumentProjection, invisibility_mode: bool) -> Self {
     let mut visible_blocks = Vec::with_capacity(document.blocks.len());
 
     for block in document.blocks.iter() {
@@ -60,7 +60,7 @@ impl VisibilityIndex {
 }
 
 #[hotpath::measure]
-pub(super) fn paragraph_is_visible(document: &Document, paragraph: &Paragraph) -> bool {
+pub(super) fn paragraph_is_visible(document: &DocumentProjection, paragraph: &Paragraph) -> bool {
   paragraph_is_visible_for_theme(&document.theme, paragraph)
 }
 
@@ -85,7 +85,7 @@ pub(super) fn paragraph_style_is_visible_for_theme(theme: &DocumentTheme, style:
 pub(super) const INVISIBILITY_PROJECTED_VERSION_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
 
 #[hotpath::measure]
-pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix: usize) -> Option<Document> {
+pub(super) fn invisibility_projected_document(document: &DocumentProjection, paragraph_ix: usize) -> Option<DocumentProjection> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   if paragraph_style_is_visible_for_theme(&document.theme, paragraph.style) {
     return None;
@@ -95,7 +95,6 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
 
   let paragraph = Paragraph {
     style: ParagraphStyle::Normal,
-    byte_range: 0..text.len(),
     runs,
     // Give the projected paragraph a distinct cache key from the source
     // paragraph so invisible-mode layout cannot reuse a full-text layout.
@@ -103,15 +102,17 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
       .version
       .wrapping_add(INVISIBILITY_PROJECTED_VERSION_OFFSET),
   };
-  let paragraphs = Arc::new(vec![paragraph.clone()]);
-  let mut projected = Document {
+  let paragraphs = vec![paragraph.clone()];
+  let paragraph_count = paragraphs.len();
+  let mut projected = DocumentProjection {
+    frontier: document.frontier.clone(),
     text: Rope::from(text),
-    blocks: Arc::new(vec![Block::Paragraph(paragraph)]),
-    paragraphs: paragraphs.clone(),
+    blocks: BlockSeq::from_vec(vec![Block::Paragraph(paragraph)]),
+    paragraphs: ParagraphSeq::from_vec(paragraphs),
     assets: document.assets.clone(),
-    ids: document_ids_for_shape(paragraphs.len(), 1),
+    ids: document_ids_for_shape(paragraph_count, 1),
     sections: Arc::new(Vec::new()),
-    offset_index: ParagraphOffsetIndex::new(&paragraphs),
+    outline: Arc::new(Vec::new()),
     theme: document.theme.clone(),
   };
   rebuild_document_sections(&mut projected);
@@ -119,7 +120,7 @@ pub(super) fn invisibility_projected_document(document: &Document, paragraph_ix:
 }
 
 #[hotpath::measure]
-pub(super) fn run_is_visible(document: &Document, styles: RunStyles) -> bool {
+pub(super) fn run_is_visible(document: &DocumentProjection, styles: RunStyles) -> bool {
   run_is_visible_for_theme(&document.theme, styles)
 }
 
@@ -157,7 +158,7 @@ pub(super) fn decode_remainder_item_ix(encoded: u32) -> Option<usize> {
 }
 
 #[hotpath::measure]
-pub(super) fn projected_visible_paragraph_text_and_runs(document: &Document, paragraph_ix: usize) -> Option<(String, Vec<TextRun>)> {
+pub(super) fn projected_visible_paragraph_text_and_runs(document: &DocumentProjection, paragraph_ix: usize) -> Option<(String, Vec<TextRun>)> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   let paragraph_len = paragraph_text_len(paragraph);

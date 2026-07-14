@@ -1,5 +1,5 @@
 use std::{
-  cell::Cell,
+  cell::{Cell, RefCell},
   collections::{HashMap, HashSet},
   fs,
   path::{Path, PathBuf},
@@ -31,22 +31,23 @@ use gpui_component::tab::{Tab, TabBar};
 use gpui_component::tree::{TreeItem, TreeState, tree};
 use gpui_component::{
   ActiveTheme as _, Colorize as _, Disableable, Icon, IconName, PixelsExt, Root, Selectable, Sizable, Theme, ThemeRegistry, TitleBar,
-  VirtualListScrollHandle, h_flex, v_flex,
+  VirtualListScrollHandle, WindowExt as _, h_flex, v_flex,
 };
+use rustc_hash::{FxHashMap, FxHashSet};
 use uuid::Uuid;
 
 use crate::app_settings::{
-  load_autosave, load_document_theme, load_recent_documents, load_send_custom_directory, load_send_to_document_directory,
-  load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents, save_send_custom_directory,
-  save_send_to_document_directory, save_smart_word_selection, save_theme_name,
+  load_autosave, load_document_theme, load_local_user_identity, load_recent_documents, load_send_custom_directory,
+  load_send_to_document_directory, load_smart_word_selection, load_tub_root, save_autosave, save_document_theme, save_recent_documents,
+  save_send_custom_directory, save_send_to_document_directory, save_smart_word_selection, save_theme_name,
 };
-use crate::commands::{context_for, CommandId};
-use crate::docx_conversion::convert_docx_to_document;
+use crate::commands::{CommandId, context_for};
+use crate::docx_conversion::{convert_docx_to_document, import_docx_to_loro};
 use crate::flow::{FlowEditor, FlowPanel};
 use crate::rich_text_element::{
-  ArmedInlineTool, CustomParagraphBorder, Document, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
+  ArmedInlineTool, CustomParagraphBorder, DocumentProjection, DocumentTheme, InputParagraph, InputRun, ParagraphStyle, RichTextDocumentElement,
   RichTextEditor, Save, SectionKind, ThemeUnderline, ZoomIn, ZoomOut, document_from_input, document_text_slice, flowstate_document_theme,
-  load_or_create_document, paragraph_byte_range, paragraph_index_for_id,
+  paragraph_byte_range, paragraph_index_for_id,
 };
 use crate::workspace::document_panel::DocumentPanel;
 use crate::workspace::file_management::{
@@ -62,8 +63,18 @@ const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
 
+#[cfg(test)]
+mod headless_tests;
+
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
+  document_runtime_flush_pending: FxHashSet<Uuid>,
+  /// §act-three C (background open): panels painted read-only from a phase-V
+  /// cached projection whose authority runtime has not yet attached (phase G).
+  /// Editing is inert until attach; session-persist + autosave skip them.
+  pending_authority_panels: FxHashSet<Uuid>,
   flow_panels: Vec<Entity<FlowPanel>>,
   active_document_id: Option<Uuid>,
   active_editor: Option<Entity<RichTextEditor>>,
@@ -72,7 +83,7 @@ pub struct Workspace {
   outline_collapsed: bool,
   active_toolkit_tool: Option<ToolkitTool>,
   recent_documents: Vec<PathBuf>,
-  recent_document_previews: HashMap<PathBuf, Document>,
+  recent_document_previews: HashMap<PathBuf, DocumentProjection>,
   recent_document_preview_generation: u64,
   temporary_workspace_session_pending: Option<TemporaryWorkspaceSession>,
   temporary_workspace_session_persist_scheduled: bool,
@@ -80,8 +91,9 @@ pub struct Workspace {
   tab_bar_scroll_handle: ScrollHandle,
   pinned_document_ids: Vec<Uuid>,
   speech_document_id: Option<Uuid>,
-  speech_word_count_cache: HashMap<Uuid, (u64, usize)>,
-  speech_word_count_pending: HashSet<Uuid>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  speech_word_count_cache: FxHashMap<Uuid, (u64, usize)>,
+  speech_word_count_pending: FxHashSet<Uuid>,
   body_resizable_state: Entity<ResizableState>,
   content_resizable_state: Entity<ResizableState>,
   ribbon_resizable_state: Entity<ResizableState>,
@@ -100,8 +112,19 @@ pub struct Workspace {
   document_style_section: DocumentStyleSection,
   settings_section: WorkspaceSettingsSection,
   autosave_enabled: bool,
-  autosave_document_generations: HashMap<Uuid, u64>,
-  autosave_flow_in_flight: HashSet<Uuid>,
+  // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  autosave_document_generations: FxHashMap<Uuid, u64>,
+  /// §act-five P9-throttle: the latest edit generation a debounced autosave is
+  /// SCHEDULED for. A newer edit overwrites it, so the trailing timer coalesces a
+  /// burst into ONE checkpoint instead of a full checkpoint per keystroke.
+  autosave_pending_generation: FxHashMap<Uuid, u64>,
+  autosave_flow_in_flight: FxHashSet<Uuid>,
+  collaboration_dialog: Option<Entity<crate::collab::share_dialog::CollabShareDialog>>,
+  revision_dialog: Option<Entity<crate::workspace::revision_dialog::RevisionDialog>>,
+  comment_dialog: Option<Entity<crate::workspace::comment_dialog::CommentDialog>>,
+  // §perf: SessionId keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
+  collab_notice_subscriptions: FxHashMap<flowstate_collab::SessionId, Subscription>,
+  collab_incompatible_version_notices: HashSet<String>,
   file_search_overlay: Option<Entity<FileSearchOverlay>>,
   tub_root: Option<PathBuf>,
   tub_index: Option<Arc<TubIndex>>,
@@ -170,6 +193,7 @@ enum WorkspaceSettingsOverlay {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum WorkspaceSettingsSection {
   General,
+  Collaboration,
   Keymap,
 }
 
@@ -216,6 +240,7 @@ impl WorkspaceSettingsSection {
   fn title(self) -> &'static str {
     match self {
       Self::General => "General",
+      Self::Collaboration => "Collaboration",
       Self::Keymap => "Keymap",
     }
   }
@@ -223,7 +248,8 @@ impl WorkspaceSettingsSection {
   fn index(self) -> usize {
     match self {
       Self::General => 0,
-      Self::Keymap => 1,
+      Self::Collaboration => 1,
+      Self::Keymap => 2,
     }
   }
 }
@@ -260,6 +286,8 @@ impl DocumentStyleSection {
 }
 
 include!("documents.rs");
+include!("collab_prompts.rs");
+include!("collab.rs");
 include!("workspace_state.rs");
 include!("load.rs");
 include!("traits.rs");
@@ -275,6 +303,7 @@ include!("window.rs");
 include!("outline.rs");
 include!("top_bar.rs");
 include!("style_settings.rs");
+include!("collaboration_settings.rs");
 include!("keymap_settings.rs");
 include!("theme.rs");
 include!("tests.rs");

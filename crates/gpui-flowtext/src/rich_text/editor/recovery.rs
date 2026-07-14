@@ -71,23 +71,20 @@ impl RichTextEditor {
     self
       .paragraph_chunk_layout_cache
       .resize(paragraph_count, None);
-    self
-      .paragraph_shaping_cache
-      .resize_with(paragraph_count, || None);
-    self.paragraph_prep_cache.resize_with(paragraph_count, ParagraphPrepSlot::default);
 
+    // §perf-heaven T8.12: prep/shaping caches are id-keyed maps; evict the
+    // offscreen paragraphs by removing their id entries (no positional resize).
     for paragraph_ix in 0..paragraph_count {
       if !layout_keep_ranges.contains(paragraph_ix) {
-        let entry = &mut self.paragraph_chunk_layout_cache[paragraph_ix];
-        *entry = None;
-        if let Some(shape_cache) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
-          *shape_cache = None;
+        self.paragraph_chunk_layout_cache[paragraph_ix] = None;
+        if let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix) {
+          self.paragraph_shaping_cache.remove(&paragraph_id);
         }
       }
       if !prep_keep_ranges.contains(paragraph_ix)
-        && let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix)
+        && let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix)
       {
-        slot.clear();
+        self.paragraph_prep_cache.remove(&paragraph_id);
       }
     }
     self
@@ -148,6 +145,7 @@ impl RichTextEditor {
     let Some(path) = self.recovery_path.clone() else {
       return;
     };
+    let source_path = self.document_path.clone();
     if !self.has_unsaved_changes() {
       return;
     }
@@ -159,9 +157,10 @@ impl RichTextEditor {
       return;
     }
 
+    let delay = self.recovery_write_delay();
     self.recovery_write_in_progress = true;
     cx.spawn(async move |editor, cx| {
-      Timer::after(Duration::from_millis(750)).await;
+      Timer::after(delay).await;
       let snapshot_timing = Instant::now();
       let decision = editor
         .update(cx, |editor, cx| {
@@ -174,9 +173,18 @@ impl RichTextEditor {
             editor.recovery_write_in_progress = false;
             editor.schedule_recovery_write(cx);
             RecoveryWriteDecision::Rescheduled
+          } else if editor.last_text_input_at.is_some_and(|last_input| last_input.elapsed() < RECOVERY_TYPING_IDLE_WINDOW) {
+            editor.recovery_write_in_progress = false;
+            editor.schedule_recovery_write(cx);
+            RecoveryWriteDecision::Rescheduled
           } else if !editor.has_unsaved_changes() || editor.last_recovery_generation == editor.edit_generation {
             editor.recovery_write_in_progress = false;
             RecoveryWriteDecision::Idle
+          } else if let Some(hook) = editor.native_recovery_hook.clone() {
+            RecoveryWriteDecision::WriteRuntime {
+              generation: editor.edit_generation,
+              hook,
+            }
           } else {
             RecoveryWriteDecision::Write {
               generation: editor.edit_generation,
@@ -186,19 +194,29 @@ impl RichTextEditor {
         })
         .ok();
       log_timing("recovery snapshot", snapshot_timing, "");
-      let Some(RecoveryWriteDecision::Write { generation, document }) = decision else {
-        return;
+      let (generation, write_result, detail) = match decision {
+        Some(RecoveryWriteDecision::Write { generation, document }) => {
+          let write_timing = Instant::now();
+          let paragraph_count = document.paragraphs.len();
+          let result = cx
+            .background_executor()
+            .spawn(async move {
+              let document = detach_document_for_background_write(&document);
+              write_recovery_snapshot(&path, source_path.as_deref(), &document)
+            })
+            .await;
+          log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));
+          (generation, result, format!("paragraphs={paragraph_count}"))
+        },
+        Some(RecoveryWriteDecision::WriteRuntime { generation, hook }) => {
+          let write_timing = Instant::now();
+          let result = hook(path).await;
+          log_timing("runtime recovery write", write_timing, "");
+          (generation, result, "runtime".to_string())
+        },
+        _ => return,
       };
-      let write_timing = Instant::now();
-      let paragraph_count = document.paragraphs.len();
-      let write_result = cx
-        .background_executor()
-        .spawn(async move {
-          let document = detach_document_for_background_write(&document);
-          write_document(path, &document)
-        })
-        .await;
-      log_timing_lazy("recovery write", write_timing, || format!("paragraphs={paragraph_count}"));
+      let _ = detail;
       match write_result {
         Ok(()) => {
           let _ = editor.update(cx, |editor, _| {
@@ -206,7 +224,7 @@ impl RichTextEditor {
           });
         },
         Err(error) => {
-          eprintln!("failed to write recovery file: {error}");
+          tracing::warn!(%error, "failed to write recovery file");
         },
       }
       let _ = editor.update(cx, |editor, cx| {
@@ -222,6 +240,14 @@ impl RichTextEditor {
       });
     })
     .detach();
+  }
+
+  fn recovery_write_delay(&self) -> Duration {
+    self
+      .last_text_input_at
+      .and_then(|last_input| RECOVERY_TYPING_IDLE_WINDOW.checked_sub(last_input.elapsed()))
+      .filter(|delay| *delay > RECOVERY_WRITE_DEBOUNCE)
+      .unwrap_or(RECOVERY_WRITE_DEBOUNCE)
   }
 
 }

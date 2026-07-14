@@ -39,7 +39,11 @@ impl FlowEditor {
   }
 
   pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
-    if self.document.clear_all_annotations(&self.local_annotation_originator).is_ok() {
+    if self
+      .document
+      .clear_all_annotations(&self.local_annotation_originator)
+      .is_ok()
+    {
       self.changed(self.active_cell, cx);
     }
   }
@@ -119,10 +123,14 @@ impl FlowEditor {
   }
 
   fn erase_at(&mut self, point: BoardPoint, cx: &mut Context<Self>) {
-    let Some(sheet) = self
-      .active_sheet
-      .and_then(|sheet_id| self.document.projection().sheets.iter().find(|sheet| sheet.id == sheet_id))
-    else {
+    let Some(sheet) = self.active_sheet.and_then(|sheet_id| {
+      self
+        .document
+        .projection()
+        .sheets
+        .iter()
+        .find(|sheet| sheet.id == sheet_id)
+    }) else {
       return;
     };
     let radius = 10.0;
@@ -135,7 +143,10 @@ impl FlowEditor {
           && point.x <= stroke.bbox.max.x + radius
           && point.y >= stroke.bbox.min.y - radius
           && point.y <= stroke.bbox.max.y + radius
-          && stroke.points.windows(2).any(|segment| segment_distance(point, segment[0], segment[1]) <= radius)
+          && stroke
+            .points
+            .windows(2)
+            .any(|segment| segment_distance(point, segment[0], segment[1]) <= radius)
       })
       .map(|stroke| stroke.id);
     if let Some(stroke_id) = touched

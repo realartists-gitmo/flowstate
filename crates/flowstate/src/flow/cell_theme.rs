@@ -1,8 +1,14 @@
-use flowstate_document::{Document, DocumentTheme};
+use flowstate_document::{DocumentProjection, DocumentTheme};
 use gpui::{Hsla, transparent_black};
 use palette::{FromColor as _, LinSrgb, Oklch, Srgb};
 
-pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &DocumentTheme, foreground: Hsla, background: Hsla, zoom: f32) {
+pub(super) fn apply_flow_cell_theme(
+  document: &mut DocumentProjection,
+  client_theme: &DocumentTheme,
+  foreground: Hsla,
+  background: Hsla,
+  zoom: f32,
+) {
   document.theme = client_theme.clone();
   document.theme.zoom_factor *= zoom;
   scale_flow_layout_metrics(&mut document.theme, zoom);
@@ -14,12 +20,19 @@ pub(super) fn apply_flow_cell_theme(document: &mut Document, client_theme: &Docu
   document.theme.pageless_inset_bottom = gpui::px(0.0);
   document.theme.invisibility_visible_paragraph_styles.clear();
   for slot in [3, 4, 6] {
-    document.theme.invisibility_visible_paragraph_styles.insert(slot);
+    document
+      .theme
+      .invisibility_visible_paragraph_styles
+      .insert(slot);
   }
   document.theme.invisibility_visible_semantic_styles.clear();
-  document.theme.invisibility_visible_semantic_styles.insert(1);
+  document
+    .theme
+    .invisibility_visible_semantic_styles
+    .insert(1);
   document.theme.invisibility_visible_highlight_styles.clear();
-  document.theme.default_highlight_color = transform_color(document.theme.default_highlight_color, source_default, foreground, background, false);
+  document.theme.default_highlight_color =
+    transform_color(document.theme.default_highlight_color, source_default, foreground, background, false);
 
   for style in document.theme.custom_paragraph_styles.values_mut() {
     style.color = transform_color(style.color, source_default, foreground, background, true);

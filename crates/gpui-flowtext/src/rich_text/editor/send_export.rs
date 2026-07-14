@@ -6,13 +6,22 @@ pub trait DocumentExportAdapter: Send + Sync + 'static {
       .map(Path::to_path_buf)
   }
 
-  fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()>;
+  fn write_document_export(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()>;
+}
+
+pub trait DocumentRecoveryAdapter: Send + Sync + 'static {
+  fn write_recovery_snapshot(&self, recovery_path: &Path, source_path: Option<&Path>, document: &DocumentProjection) -> io::Result<()>;
 }
 
 static DOCUMENT_EXPORT_ADAPTER: OnceLock<Arc<dyn DocumentExportAdapter>> = OnceLock::new();
+static DOCUMENT_RECOVERY_ADAPTER: OnceLock<Arc<dyn DocumentRecoveryAdapter>> = OnceLock::new();
 
 pub fn set_document_export_adapter(adapter: Arc<dyn DocumentExportAdapter>) -> Result<(), Arc<dyn DocumentExportAdapter>> {
   DOCUMENT_EXPORT_ADAPTER.set(adapter)
+}
+
+pub fn set_document_recovery_adapter(adapter: Arc<dyn DocumentRecoveryAdapter>) -> Result<(), Arc<dyn DocumentRecoveryAdapter>> {
+  DOCUMENT_RECOVERY_ADAPTER.set(adapter)
 }
 
 #[hotpath::measure_all]
@@ -29,6 +38,22 @@ impl RichTextEditor {
     };
     let generation = self.edit_generation;
     let document = self.document.clone();
+    if let Some(export_hook) = self.native_export_hook.clone() {
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let result = export_hook(output_path.clone(), format, assets).await;
+        match result {
+          Ok(()) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.last_send_document_generation = Some(generation);
+              cx.notify();
+            });
+            Ok(output_path)
+          },
+          Err(error) => Err(error),
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let result = cx
         .background_executor()
@@ -59,6 +84,22 @@ impl RichTextEditor {
     };
     let generation = self.edit_generation;
     let document = self.document.clone();
+    if let Some(export_hook) = self.native_export_hook.clone() {
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let result = export_hook(output_path.clone(), format, assets).await;
+        match result {
+          Ok(()) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.last_format_export_generation = Some(generation);
+              cx.notify();
+            });
+            Ok(output_path)
+          },
+          Err(error) => Err(error),
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let result = cx
         .background_executor()
@@ -195,15 +236,83 @@ impl DocumentExportFormat {
 }
 
 #[hotpath::measure]
-fn write_document_export(output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
+fn write_document_export(output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()> {
   if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
     return adapter.write_document_export(output_path, document, format);
   }
-  match format {
-    DocumentExportFormat::Native | DocumentExportFormat::NativeWithExtension(_) => write_document(output_path, document),
-    DocumentExportFormat::Docx | DocumentExportFormat::Pdf => Err(io::Error::new(
-      io::ErrorKind::Unsupported,
-      "DOCX and PDF export are host-application adapters; gpui-flowtext only writes its native binary format directly",
-    )),
+  let _ = (output_path, document, format);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "document export requires a host-application adapter",
+  ))
+}
+
+#[hotpath::measure]
+fn write_native_document(output_path: &Path, document: &DocumentProjection) -> io::Result<()> {
+  if let Some(adapter) = DOCUMENT_EXPORT_ADAPTER.get() {
+    return adapter.write_document_export(output_path, document, DocumentExportFormat::Native);
+  }
+  let _ = (output_path, document);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "native save requires a host-application adapter",
+  ))
+}
+
+#[hotpath::measure]
+fn write_recovery_snapshot(recovery_path: &Path, source_path: Option<&Path>, document: &DocumentProjection) -> io::Result<()> {
+  if let Some(adapter) = DOCUMENT_RECOVERY_ADAPTER.get() {
+    return adapter.write_recovery_snapshot(recovery_path, source_path, document);
+  }
+  let _ = (recovery_path, source_path, document);
+  Err(io::Error::new(
+    io::ErrorKind::Unsupported,
+    "recovery snapshots require a host-application adapter",
+  ))
+}
+
+#[cfg(test)]
+mod send_export_tests {
+  use super::*;
+
+  #[test]
+  fn native_extension_without_adapter_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("document.db8");
+
+    let error = write_document_export(&path, &blank_document(), DocumentExportFormat::NativeWithExtension("db8")).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert!(!path.exists());
+  }
+
+  #[test]
+  fn native_save_without_adapter_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("document.db8");
+
+    let error = write_native_document(&path, &blank_document()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+    assert!(!path.exists());
+  }
+
+  #[test]
+  fn recovery_for_db8_source_without_adapter_is_unsupported() {
+    let error = write_recovery_snapshot(
+      Path::new("document.db8.recovery"),
+      Some(Path::new("document.db8")),
+      &blank_document(),
+    )
+    .unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+  }
+
+  #[test]
+  fn recovery_for_db8_path_without_source_without_adapter_is_unsupported() {
+    let error = write_recovery_snapshot(Path::new("collaboration.db8"), None, &blank_document()).unwrap_err();
+
+    assert_eq!(error.kind(), io::ErrorKind::Unsupported);
   }
 }

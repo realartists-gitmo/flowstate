@@ -10,8 +10,8 @@ fn highlight_color(style: HighlightStyle, theme: &DocumentTheme) -> Hsla {
 
 #[hotpath::measure]
 fn shortcut_for(command_id: CommandId) -> Option<String> {
-  active_keys_for(command_id).first().map(|key| {
-    Keystroke::parse(key)
+  active_first_key_for(command_id).map(|key| {
+    Keystroke::parse(&key)
       .map(|stroke| Kbd::format(&stroke))
       .unwrap_or_else(|_| key.clone())
   })
@@ -129,6 +129,7 @@ fn ribbon_command_key(command_id: RibbonCommandId) -> u64 {
     RibbonCommandId::ClearFormatting => 5_003,
     RibbonCommandId::Undo => 6_000,
     RibbonCommandId::Redo => 6_001,
+    RibbonCommandId::Revisions => 6_002,
     RibbonCommandId::ExportFormat => 7_000,
     RibbonCommandId::ExportSend => 7_001,
     RibbonCommandId::ToggleInvisibility => 8_000,

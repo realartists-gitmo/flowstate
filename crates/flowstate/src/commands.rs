@@ -5,7 +5,7 @@ use gpui::actions;
 pub(crate) use keymap::action_for_command;
 pub use keymap::{Keymap, KeymapEntry, register_default_keybindings, register_keymap};
 
-actions!(flowstate_workspace, [FindInDocumentAction]);
+actions!(flowstate_workspace, [FindInDocumentAction, FidelityMarkAction]);
 
 pub const RICH_TEXT_CONTEXT: &str = "RichTextEditor";
 
@@ -77,6 +77,12 @@ pub enum CommandId {
   OpenDocument,
   OpenDemoDocument,
   CloseDocument,
+  ShareDocument,
+  JoinSession,
+  StartCollaboration,
+  CopyCollaborationTicket,
+  JoinCollaborationFromClipboard,
+  LeaveCollaboration,
   FindInDocument,
   ToggleRibbon,
   NextTab,
@@ -205,6 +211,12 @@ pub const COMMAND_SPECS: &[CommandSpec] = &[
   CommandSpec::new(CommandId::OpenDocument, "Open Document", APP, &[]),
   CommandSpec::new(CommandId::OpenDemoDocument, "Open Demo Document", APP, &[]),
   CommandSpec::new(CommandId::CloseDocument, "Close Document", APP, &[]),
+  CommandSpec::new(CommandId::ShareDocument, "Share / Collaborate...", APP, &[]),
+  CommandSpec::new(CommandId::JoinSession, "Join Collaboration Session...", APP, &[]),
+  CommandSpec::new(CommandId::StartCollaboration, "Start Collaboration", APP, &[]),
+  CommandSpec::new(CommandId::CopyCollaborationTicket, "Copy Collaboration Invite", APP, &[]),
+  CommandSpec::new(CommandId::JoinCollaborationFromClipboard, "Join Collaboration from Clipboard", APP, &[]),
+  CommandSpec::new(CommandId::LeaveCollaboration, "Leave Collaboration", APP, &[]),
   CommandSpec::new(CommandId::FindInDocument, "Find in Document", APP, &["cmd-f", "ctrl-f"]),
   CommandSpec::new(CommandId::ToggleRibbon, "Toggle Ribbon", APP, &[]),
   CommandSpec::new(CommandId::NextTab, "Next Tab", APP, &["ctrl-tab"]),
@@ -274,13 +286,12 @@ pub fn default_keys_for(id: CommandId) -> &'static [&'static str] {
 
 #[hotpath::measure]
 pub fn active_keys_for(id: CommandId) -> Vec<String> {
-  let keymap = crate::app_settings::load_keymap();
-  keymap
-    .entries
-    .iter()
-    .filter(|entry| entry.command == id)
-    .map(|entry| entry.key.clone())
-    .collect()
+  crate::app_settings::load_keys_for_command(id)
+}
+
+#[hotpath::measure]
+pub fn active_first_key_for(id: CommandId) -> Option<String> {
+  crate::app_settings::load_first_key_for_command(id)
 }
 
 #[hotpath::measure]

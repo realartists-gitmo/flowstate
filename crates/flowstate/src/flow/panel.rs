@@ -31,7 +31,9 @@ impl FlowPanel {
     cx: &mut Context<Self>,
   ) -> Self {
     let ribbon = cx.new(|cx| FlowRibbon::new(editor.clone(), window, cx));
-    let title = title.map(Into::into).unwrap_or_else(|| title_for_path(path.as_ref()));
+    let title = title
+      .map(Into::into)
+      .unwrap_or_else(|| title_for_path(path.as_ref()));
     Self {
       id: Uuid::new_v4(),
       title,
@@ -136,16 +138,24 @@ impl Panel for FlowPanel {
     if active {
       let editor = self.editor.clone();
       let panel_id = self.id;
-      let _ = self.workspace.update(cx, |workspace, cx| {
-        workspace.set_active_flow(panel_id, editor, cx);
+      let workspace = self.workspace.clone();
+      // Dock plumbing may invoke this while the Workspace lease is held
+      // (same double-lease shape as the fixed share-dialog panic) — defer.
+      cx.defer(move |cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+          workspace.set_active_flow(panel_id, editor, cx);
+        });
       });
     }
   }
 
   fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let panel_id = self.id;
-    let _ = self.workspace.update(cx, |workspace, cx| {
-      workspace.remove_document_panel(panel_id, window, cx);
+    let workspace = self.workspace.clone();
+    window.defer(cx, move |window, cx| {
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.remove_document_panel(panel_id, window, cx);
+      });
     });
   }
 
@@ -168,6 +178,9 @@ impl Panel for FlowPanel {
 
 impl Render for FlowPanel {
   fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    div().size_full().bg(cx.theme().background).child(self.editor.clone())
+    div()
+      .size_full()
+      .bg(cx.theme().background)
+      .child(self.editor.clone())
   }
 }

@@ -190,31 +190,18 @@ impl RichTextEditor {
   }
 
   fn paragraph_before_block(&self, target_block_ix: usize) -> Option<usize> {
-    let mut paragraph_ix = 0;
-    let mut last = None;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if block_ix >= target_block_ix {
-        return last;
-      }
-      if matches!(block, Block::Paragraph(_)) {
-        last = Some(paragraph_ix);
-        paragraph_ix += 1;
-      }
-    }
-    last
+    // §act-ten A10.8: O(log N) tree rank instead of the per-call block walk.
+    self
+      .document
+      .blocks
+      .paragraphs_before_row(target_block_ix)
+      .checked_sub(1)
   }
 
   fn paragraph_after_block(&self, target_block_ix: usize) -> Option<usize> {
-    let mut paragraph_ix = 0;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if matches!(block, Block::Paragraph(_)) {
-        if block_ix > target_block_ix {
-          return Some(paragraph_ix);
-        }
-        paragraph_ix += 1;
-      }
-    }
-    None
+    // §act-ten A10.8: rank of the first paragraph past `target_block_ix`.
+    let rank = self.document.blocks.paragraphs_before_row(target_block_ix.saturating_add(1));
+    (rank < self.document.paragraphs.len()).then_some(rank)
   }
 
   fn collapse_object_selection(&mut self, dir: HDir, cx: &mut Context<Self>) -> bool {
@@ -239,10 +226,15 @@ impl RichTextEditor {
         .map(|paragraph| DocumentOffset { paragraph, byte: 0 }),
     };
     if let Some(offset) = offset {
-      self.selection = EditorSelection {
-        anchor: offset,
-        head: offset,
+      // §16 object boundary: collapsing leftward lands after the preceding
+      // paragraph's content (After); rightward lands before the following
+      // paragraph's content (Before).
+      let affinity = match dir {
+        HDir::Left => SelectionAffinity::After,
+        HDir::Right => SelectionAffinity::Before,
       };
+      self.note_explicit_selection_movement();
+      self.selection = EditorSelection::collapsed_with(offset, affinity, VisualGravity::Neutral);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
       cx.notify();
@@ -253,26 +245,11 @@ impl RichTextEditor {
   }
 
   fn paragraph_ix_for_block(&self, target_block_ix: usize) -> Option<usize> {
-    if self.document.blocks.len() == self.document.paragraphs.len()
-      && self
-        .document
-        .blocks
-        .get(target_block_ix)
-        .is_some_and(|block| matches!(block, Block::Paragraph(_)))
-    {
-      return Some(target_block_ix);
-    }
-
-    let mut paragraph_ix = 0;
-    for (block_ix, block) in self.document.blocks.iter().enumerate() {
-      if matches!(block, Block::Paragraph(_)) {
-        if block_ix == target_block_ix {
-          return Some(paragraph_ix);
-        }
-        paragraph_ix += 1;
-      }
-    }
-    None
+    // §act-ten A10.8: O(log N) tree rank (was a per-call full block walk —
+    // O(visible items x blocks) per layout pass on object docs via
+    // `paragraph_range_for_item_range`). Same semantics: `Some` iff the row is
+    // a paragraph block.
+    self.document.blocks.paragraph_ix_for_block_row(target_block_ix)
   }
 
   fn document_has_object_blocks(&self) -> bool {
@@ -333,26 +310,16 @@ impl RichTextEditor {
     let mut found_start = false;
 
     for paragraph_ix in 0..paragraph_count {
-      let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      if self.document.paragraphs.get(paragraph_ix).is_none() {
         break;
-      };
-      let key = paragraph_cache_key(&self.document, paragraph);
+      }
       let height = self
-        .paragraph_height_cache
-        .get(paragraph_ix)
-        .and_then(|entry| *entry)
-        .filter(|entry| {
-          entry.key == key
-            && entry.width == width
-            && entry.invisibility_mode == self.invisibility_mode
-            && entry.edit_generation == self.edit_generation
-        })
-        .map(|entry| entry.height)
+        .valid_paragraph_height(paragraph_ix, width)
         .unwrap_or_else(|| {
           self
             .valid_paragraph_prep(paragraph_ix)
             .as_deref()
-            .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, width))
+            .map(|prep| estimate_paragraph_prep_item_height(&self.document, prep, paragraph_ix, width))
             .unwrap_or_else(|| estimate_paragraph_item_height_with_visibility(&self.document, paragraph_ix, width, self.invisibility_mode))
         });
       let next_y = y + height;
@@ -420,6 +387,33 @@ impl RichTextEditor {
   }
 
   fn prepare_render_layout(&mut self, window: &mut Window, cx: &mut Context<Self>) -> RenderLayoutSnapshot {
+    // §hang-watchdog: time the whole render. The freeze shows as multi-second
+    // gaps between render passes; timing the render tells us whether the stall is
+    // INSIDE the render (this logs a `slow-render`) or between renders (collab /
+    // projection apply — then this stays quiet and the collab path is the cause).
+    // Logged always (not gated on `enabled()`), at WARN, so it survives even with
+    // fidelity tracing off and can't be lost to a dropped-under-load JSONL buffer.
+    let render_started = std::time::Instant::now();
+    // §hang-probe: one line per render-layout pass capturing the virtualization
+    // state that drives the scroll-materialization loop. In a freeze this fires
+    // continuously; diffing consecutive lines shows WHICH field changes each
+    // iteration (the invalidation source): a drifting `scroll_y` means the stall
+    // guard's signature never settles (scroll-anchor restoration), a bumping
+    // `layout_gen`/`height_rev` means a per-frame cache clear, etc.
+    if flowstate_fidelity::enabled() {
+      let scroll_px: f32 = (-self.scroll_handle.offset().y).max(px(0.0)).into();
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "render-layout-pass", || {
+        format!(
+          "scroll_y={scroll_px:.1} edit_gen={} layout_gen={} height_rev={} measured_w={:?} item_cache={} stall={}",
+          self.edit_generation,
+          self.layout_generation,
+          self.paragraph_height_cache_revision,
+          self.measured_item_width,
+          self.item_sizes_cache.is_some(),
+          self.scroll_materialize_stall_frames,
+        )
+      });
+    }
     let hide_until_viewport_measured = self.scroll_handle.bounds().size.width <= px(1.0);
     let mut item_sizes = self.paragraph_item_sizes(window, cx);
     self.apply_pending_zoom_anchor();
@@ -449,6 +443,14 @@ impl RichTextEditor {
       .map(|cache| cache.items.clone())
       .unwrap_or_else(|| Rc::new(Vec::new()));
     let (items, item_sizes) = self.render_items_with_drop_preview(base_items, item_sizes, width, window, cx);
+    let render_ms = render_started.elapsed().as_millis();
+    if render_ms > 150 {
+      let paragraphs = self.document.paragraphs.len();
+      tracing::warn!("slow editor render pass (hang watchdog): {render_ms}ms, paragraphs={paragraphs}");
+      flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "slow-render", || {
+        format!("render took {render_ms}ms (paragraphs={paragraphs})")
+      });
+    }
     RenderLayoutSnapshot {
       width,
       item_sizes,

@@ -62,7 +62,10 @@ fn append_record(record: &Value) {
 
 fn append_line(path: &Path, line: &str) -> std::io::Result<()> {
   use std::io::Write as _;
-  let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+  let mut file = std::fs::OpenOptions::new()
+    .create(true)
+    .append(true)
+    .open(path)?;
   writeln!(file, "{line}")
 }
 
@@ -80,7 +83,15 @@ impl FlowEditor {
     let dragged = self.cell_label(dragged);
     let sheet = self
       .active_sheet
-      .and_then(|id| self.document().projection().sheets.iter().find(|sheet| sheet.id == id).map(|sheet| sheet.name.clone()))
+      .and_then(|id| {
+        self
+          .document()
+          .projection()
+          .sheets
+          .iter()
+          .find(|sheet| sheet.id == id)
+          .map(|sheet| sheet.name.clone())
+      })
       .unwrap_or_default();
     self.drag_log_counter += 1;
     self.drag_log = Some(DragLogSession {
@@ -103,7 +114,10 @@ impl FlowEditor {
     let valid = self.landing_is_valid(intent);
     let width = bounds.size.width.as_f32().max(1.0);
     let height = bounds.size.height.as_f32().max(1.0);
-    let offset_frac = [round((cursor.x.as_f32() - bounds.left().as_f32()) / width, 3), round((cursor.y.as_f32() - bounds.top().as_f32()) / height, 3)];
+    let offset_frac = [
+      round((cursor.x.as_f32() - bounds.left().as_f32()) / width, 3),
+      round((cursor.y.as_f32() - bounds.top().as_f32()) / height, 3),
+    ];
     let key = format!("cell:{over_label}:{intent_str}");
     let over = json!({ "kind": "cell", "label": over_label, "offset_frac": offset_frac });
     self.push_sample(key, over, cursor, intent_str, valid);
@@ -142,7 +156,10 @@ impl FlowEditor {
   }
 
   fn push_sample(&mut self, key: String, over: Value, cursor: Point<Pixels>, intent: String, valid: bool) {
-    let board_pt = [round((cursor.x.as_f32() - self.viewport_origin.x) / self.board_zoom(), 2), round((cursor.y.as_f32() - self.viewport_origin.y) / self.board_zoom(), 2)];
+    let board_pt = [
+      round((cursor.x.as_f32() - self.viewport_origin.x) / self.board_zoom(), 2),
+      round((cursor.y.as_f32() - self.viewport_origin.y) / self.board_zoom(), 2),
+    ];
     let Some(session) = self.drag_log.as_mut() else {
       return;
     };
@@ -191,12 +208,20 @@ impl FlowEditor {
     self
       .active_sheet
       .zip(self.dragging_cell)
-      .is_some_and(|(sheet, dragged)| self.document().preview_move_cell_subtree(sheet, dragged, intent).is_some())
+      .is_some_and(|(sheet, dragged)| {
+        self
+          .document()
+          .preview_move_cell_subtree(sheet, dragged, intent)
+          .is_some()
+      })
   }
 
   fn sheet_topology_snapshot(&self) -> Vec<Value> {
     let projection = self.document().projection();
-    let Some(sheet) = self.active_sheet.and_then(|id| projection.sheets.iter().find(|sheet| sheet.id == id)) else {
+    let Some(sheet) = self
+      .active_sheet
+      .and_then(|id| projection.sheets.iter().find(|sheet| sheet.id == id))
+    else {
       return Vec::new();
     };
     let definition = projection.format.sheet_type(sheet.sheet_type_id);
@@ -204,7 +229,12 @@ impl FlowEditor {
       .cells
       .iter()
       .map(|cell| {
-        let column = definition.and_then(|definition| definition.columns.iter().position(|column| column.id == cell.column_id));
+        let column = definition.and_then(|definition| {
+          definition
+            .columns
+            .iter()
+            .position(|column| column.id == cell.column_id)
+        });
         json!({
           "label": self.cell_label(cell.id),
           "column": column,

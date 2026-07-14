@@ -24,6 +24,26 @@ pub struct AssetRecord {
   pub bytes: Arc<Vec<u8>>,
 }
 
+pub const IMAGE_LOADING_PLACEHOLDER_WIDTH_PX: f32 = 240.0;
+pub const IMAGE_LOADING_PLACEHOLDER_HEIGHT_PX: f32 = 160.0;
+
+impl AssetRecord {
+  #[must_use]
+  pub fn stable_content_hash(bytes: &[u8]) -> u64 {
+    let digest = blake3::hash(bytes);
+    u64::from_le_bytes(
+      digest.as_bytes()[..8]
+        .try_into()
+        .expect("BLAKE3 digest always contains at least eight bytes"),
+    )
+  }
+
+  #[must_use]
+  pub fn is_loading_placeholder(&self) -> bool {
+    self.bytes.is_empty()
+  }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ImageBlock {
   pub asset_id: AssetId,
@@ -31,6 +51,12 @@ pub struct ImageBlock {
   pub caption: Option<Paragraph>,
   pub sizing: ImageSizing,
   pub alignment: BlockAlignment,
+  /// §A11.9: a genuinely-LINKED image's external target URL (`a:blip r:link` /
+  /// VML `r:href` resolving to a `TargetMode="External"` relationship). Such an
+  /// image has no embedded media part — `asset_id` is derived from the URL
+  /// bytes and no [`AssetRecord`] carries bytes for it. `None` for embedded
+  /// images (the overwhelmingly common case).
+  pub external_url: Option<SharedString>,
   pub version: u64,
 }
 
@@ -73,18 +99,32 @@ pub enum EquationDisplay {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableBlock {
   pub rows: Vec<TableRow>,
-  pub column_widths: Vec<TableColumnWidth>,
+  /// Ordered columns, each with its durable [`ColumnId`] and width (§P2b).
+  /// Replaces the id-less `column_widths` list; read a width as
+  /// `columns[i].width`.
+  pub columns: Vec<TableColumn>,
   pub style: TableStyle,
   pub version: u64,
 }
 
+/// A table column carrying its durable identity and rendered width (§P2b).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableColumn {
+  pub id: ColumnId,
+  pub width: TableColumnWidth,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableRow {
+  pub id: RowId,
   pub cells: Vec<TableCell>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TableCell {
+  pub id: CellId,
+  pub row_id: RowId,
+  pub column_id: ColumnId,
   pub blocks: Vec<TableCellBlock>,
   pub row_span: u16,
   pub col_span: u16,

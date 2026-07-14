@@ -2,21 +2,50 @@ use std::fs;
 use std::io::{self, Cursor, Read as _};
 use std::path::Path;
 
+use anyhow::{Context as _, bail};
+use uuid::Uuid;
+
 use crate::document::FlowDocument;
 
 const MAGIC: &[u8; 8] = b"FLOWFL0\0";
 const VERSION: u32 = 1;
+/// Refuse to read pathological on-disk sizes before allocating for them.
+const MAX_FL0_BYTES: u64 = 64 * 1024 * 1024;
 
 pub fn load_flow_document(path: impl AsRef<Path>) -> anyhow::Result<FlowDocument> {
+  let path = path.as_ref();
+  let metadata = fs::metadata(path).with_context(|| format!("failed to stat {}", path.display()))?;
+  if metadata.len() > MAX_FL0_BYTES {
+    bail!(
+      "refusing to read {}: file too large ({} bytes > {} bytes)",
+      path.display(),
+      metadata.len(),
+      MAX_FL0_BYTES
+    );
+  }
   decode(&fs::read(path)?)
 }
 
 pub fn save_flow_document(path: impl AsRef<Path>, document: &FlowDocument) -> anyhow::Result<()> {
   let path = path.as_ref();
-  if let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) {
+  if let Some(parent) = path
+    .parent()
+    .filter(|parent| !parent.as_os_str().is_empty())
+  {
     fs::create_dir_all(parent)?;
   }
-  fs::write(path, encode(document)?)?;
+  // Write-then-rename so a crash mid-save can't leave a truncated .fl0 in
+  // place of the previous good document.
+  let temp_path = path.with_file_name(format!(
+    ".{}.{}.tmp",
+    path
+      .file_name()
+      .and_then(|name| name.to_str())
+      .unwrap_or("flowstate"),
+    Uuid::new_v4()
+  ));
+  fs::write(&temp_path, encode(document)?).with_context(|| format!("failed to write temporary {}", temp_path.display()))?;
+  fs::rename(&temp_path, path).with_context(|| format!("failed to atomically replace {} with {}", path.display(), temp_path.display()))?;
   Ok(())
 }
 
@@ -67,6 +96,57 @@ fn read_u64(cursor: &mut Cursor<&[u8]>) -> io::Result<u64> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::{path::PathBuf, time::SystemTime};
+
+  fn test_dir(name: &str) -> PathBuf {
+    let unique = format!(
+      "{name}-{}-{}",
+      std::process::id(),
+      SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+    );
+    let path = std::env::temp_dir().join(unique);
+    fs::create_dir_all(&path).unwrap();
+    path
+  }
+
+  #[test]
+  fn rejects_oversized_documents_before_reading() {
+    let dir = test_dir("flowstate-fl0-size");
+    let path = dir.join("oversized.fl0");
+    fs::write(&path, vec![b'{'; (MAX_FL0_BYTES as usize) + 1]).unwrap();
+
+    let error = load_flow_document(&path).map(|_| ()).unwrap_err();
+    assert!(error.to_string().contains("file too large"));
+  }
+
+  #[test]
+  fn load_failure_leaves_the_file_untouched() {
+    let dir = test_dir("flowstate-fl0-corrupt");
+    let path = dir.join("broken.fl0");
+    fs::write(&path, b"{not a flow document").unwrap();
+
+    assert!(load_flow_document(&path).is_err());
+    assert_eq!(fs::read(&path).unwrap(), b"{not a flow document");
+  }
+
+  #[test]
+  fn save_replaces_atomically_without_leaving_temp_files() {
+    let dir = test_dir("flowstate-fl0-atomic");
+    let path = dir.join("doc.fl0");
+    let document = FlowDocument::new();
+    save_flow_document(&path, &document).unwrap();
+    save_flow_document(&path, &document).unwrap();
+
+    let entries: Vec<_> = fs::read_dir(&dir)
+      .unwrap()
+      .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+      .collect();
+    assert_eq!(entries, vec!["doc.fl0".to_owned()]);
+    assert!(decode(&fs::read(&path).unwrap()).is_ok());
+  }
 
   #[test]
   fn rejects_corruption() {

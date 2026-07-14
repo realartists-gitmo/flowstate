@@ -25,15 +25,27 @@ env:
   RUST_BACKTRACE: "1"
 
 jobs:
+  raw-authority-guard:
+    name: Raw-authority guard (Loro-first spec invariant 6)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Forbidden raw-authority surfaces must not exist in production source
+        run: bash tools/check_raw_authority.sh
+
   fmt:
     name: fmt
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       # rustfmt config (.rustfmt.toml) uses nightly-only options.
+      # Nightly is date-pinned across all jobs: nightly-2026-07-13 ICEs while
+      # expanding test attributes (rustc_test_entrypoint_marker, see the
+      # 2026-07-14 build failures). Bump the pin deliberately, not implicitly.
       - name: Install nightly rustfmt
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-06-23
           components: rustfmt
       # Fails the check if anything isn't formatted. The repo's pre-commit hook
       # runs `cargo fmt` locally, so this should normally pass on the first try.
@@ -56,11 +68,14 @@ jobs:
 
       # GPUI links against Vulkan / Wayland / X11 / fontconfig and friends;
       # xvfb + a software Vulkan driver cover any test that builds a gpui::App.
+      # libdbus-1-dev: bluer (BLE collab discovery) links libdbus via
+      # dbus/libdbus-sys.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang pkg-config \
+            libdbus-1-dev \
             libfontconfig1-dev libasound2-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \
@@ -70,9 +85,11 @@ jobs:
 
       # Nightly is mandatory: the workspace uses
       # `cargo-features = ["profile-rustflags"]` and `-Z` flags.
+      # Date-pinned — see the fmt job's pin comment.
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-06-23
           components: clippy
 
       - name: Cache cargo build artifacts
@@ -95,6 +112,9 @@ jobs:
 
       # Runs the binaries built in "Build test binaries" (nothing to recompile);
       # xvfb + software Vulkan cover any test that builds a gpui::App context.
+      # The default (fast) suite. The multi_peer_convergence fuzzers run here
+      # (they converge in ~0.5s). Only the `caret_soak` reconcile-race soak is
+      # still `#[ignore]`d for wall-clock (~66s); run it explicitly when needed.
       - name: cargo test
         run: xvfb-run -a cargo test --workspace
         env:
@@ -107,8 +127,11 @@ jobs:
       - uses: actions/checkout@v4
       # cargo-deny runs `cargo metadata`, which needs nightly cargo to parse the
       # workspace's `cargo-features = ["profile-rustflags"]`.
+      # Date-pinned — see the fmt job's pin comment.
       - name: Install nightly toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-06-23
       - name: Install cargo-deny
         uses: taiki-e/install-action@v2
         with:

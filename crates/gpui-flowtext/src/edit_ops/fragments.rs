@@ -1,6 +1,6 @@
 #[hotpath::measure]
 #[must_use]
-pub fn selected_rich_fragment(document: &Document, range: Range<DocumentOffset>) -> RichClipboardFragment {
+pub fn selected_rich_fragment(document: &DocumentProjection, range: Range<DocumentOffset>) -> RichClipboardFragment {
   if document.paragraphs.is_empty() || range.start.paragraph > range.end.paragraph {
     return RichClipboardFragment {
       format: RICH_TEXT_CLIPBOARD_FORMAT.to_owned(),

@@ -1,20 +1,20 @@
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 
 use flowstate_flow::{
-  AnnotationOriginator, BoardPoint, CellId, FlowCommitResult, FlowDocument, FlowFrontier, FlowProjection, FlowProjectionSnapshot,
-  FlowDropIntent, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, RelativePosition, SheetId, VersionVector,
+  AnnotationOriginator, BoardPoint, CellId, FlowCommitResult, FlowDocument, FlowDropIntent, FlowFrontier, FlowProjection,
+  FlowProjectionSnapshot, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, RelativePosition, SheetId, VersionVector,
 };
 use gpui::{
-  AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent,
-  KeyDownEvent, KeyUpEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Subscription, Task, Window, canvas, div, point,
-  prelude::*, px, rgba, ScrollHandle, ScrollWheelEvent,
+  AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent,
+  MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window,
+  canvas, div, point, prelude::*, px, rgba,
 };
-use gpui_component::{Icon, IconName, Sizable as _};
-use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::ActiveTheme as _;
 use gpui_component::PixelsExt as _;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+use gpui_component::{Icon, IconName, Sizable as _};
 
 use crate::{
   app_settings::load_document_theme,
@@ -190,7 +190,11 @@ impl FlowEditor {
 
   pub fn focus_active_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     cx.on_next_frame(window, |flow, window, cx| {
-      let Some(editor) = flow.active_cell.and_then(|cell| flow.cell_editors.get(&cell)).cloned() else {
+      let Some(editor) = flow
+        .active_cell
+        .and_then(|cell| flow.cell_editors.get(&cell))
+        .cloned()
+      else {
         return;
       };
       editor.update(cx, |editor, cx| editor.move_document_start(cx));
@@ -203,7 +207,9 @@ impl FlowEditor {
   }
 
   pub fn annotations_visible(&self) -> bool {
-    self.active_sheet.is_some_and(|sheet| !self.hidden_annotation_sheets.contains(&sheet))
+    self
+      .active_sheet
+      .is_some_and(|sheet| !self.hidden_annotation_sheets.contains(&sheet))
   }
 
   pub fn document_path(&self) -> Option<&PathBuf> {
@@ -220,7 +226,13 @@ impl FlowEditor {
   }
 
   pub fn activate_sheet(&mut self, sheet_id: SheetId, cx: &mut Context<Self>) {
-    if self.document.projection().sheets.iter().any(|sheet| sheet.id == sheet_id) {
+    if self
+      .document
+      .projection()
+      .sheets
+      .iter()
+      .any(|sheet| sheet.id == sheet_id)
+    {
       self.active_sheet = Some(sheet_id);
       self.active_cell = None;
       cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
@@ -237,7 +249,11 @@ impl FlowEditor {
       .find(|sheet| sheet.cells.iter().any(|cell| cell.id == cell_id))
       .map(|sheet| sheet.id);
     if let Some(sheet_id) = sheet_id {
-      if self.document.ensure_cell_editable_projection(sheet_id, cell_id).is_ok_and(|changed| changed) {
+      if self
+        .document
+        .ensure_cell_editable_projection(sheet_id, cell_id)
+        .is_ok_and(|changed| changed)
+      {
         self.dirty = true;
         cx.emit(FlowEditorEvent::Changed);
       }
@@ -287,9 +303,25 @@ impl FlowEditor {
     self
       .active_sheet
       .zip(self.active_cell)
-      .and_then(|(sheet, cell)| self.document.projection().sheets.iter().find(|candidate| candidate.id == sheet)?.cells.iter().find(|candidate| candidate.id == cell))
+      .and_then(|(sheet, cell)| {
+        self
+          .document
+          .projection()
+          .sheets
+          .iter()
+          .find(|candidate| candidate.id == sheet)?
+          .cells
+          .iter()
+          .find(|candidate| candidate.id == cell)
+      })
       .and_then(|cell| cell.document().ok())
-      .is_some_and(|document| document.paragraphs.iter().flat_map(|paragraph| &paragraph.runs).all(|run| run.styles.strikethrough))
+      .is_some_and(|document| {
+        document
+          .paragraphs
+          .iter()
+          .flat_map(|paragraph| &paragraph.runs)
+          .all(|run| run.styles.strikethrough)
+      })
   }
 
   pub fn add_first_argument(&mut self, cx: &mut Context<Self>) {
@@ -319,7 +351,13 @@ impl FlowEditor {
   }
 
   pub fn create_sheet_of_type(&mut self, sheet_type_index: usize, cx: &mut Context<Self>) {
-    let Some(sheet_type) = self.document.projection().format.sheet_types.get(sheet_type_index) else {
+    let Some(sheet_type) = self
+      .document
+      .projection()
+      .format
+      .sheet_types
+      .get(sheet_type_index)
+    else {
       return;
     };
     let name = format!("Sheet {}", self.document.projection().sheets.len() + 1);
@@ -349,7 +387,12 @@ impl FlowEditor {
     };
     if self.document.delete_sheet(sheet).is_ok() {
       self.collapsed_outline_items.remove(&sheet);
-      self.active_sheet = self.document.projection().sheets.first().map(|sheet| sheet.id);
+      self.active_sheet = self
+        .document
+        .projection()
+        .sheets
+        .first()
+        .map(|sheet| sheet.id);
       self.active_cell = None;
       self.dirty = true;
       cx.emit(FlowEditorEvent::Changed);
@@ -363,10 +406,18 @@ impl FlowEditor {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    let Some(index) = self.document.projection().sheets.iter().position(|candidate| candidate.id == sheet) else {
+    let Some(index) = self
+      .document
+      .projection()
+      .sheets
+      .iter()
+      .position(|candidate| candidate.id == sheet)
+    else {
       return;
     };
-    let target = index.saturating_add_signed(direction).min(self.document.projection().sheets.len().saturating_sub(1));
+    let target = index
+      .saturating_add_signed(direction)
+      .min(self.document.projection().sheets.len().saturating_sub(1));
     if target != index && self.document.move_sheet(sheet, target).is_ok() {
       self.changed(self.active_cell, cx);
     }
@@ -414,8 +465,15 @@ impl FlowEditor {
       .iter()
       .find_map(|sheet| {
         let cell = sheet.cells.iter().find(|cell| cell.id == cell_id)?;
-        let definition = self.document.projection().format.sheet_type(sheet.sheet_type_id)?;
-        let column = definition.columns.iter().find(|column| column.id == cell.column_id)?;
+        let definition = self
+          .document
+          .projection()
+          .format
+          .sheet_type(sheet.sheet_type_id)?;
+        let column = definition
+          .columns
+          .iter()
+          .find(|column| column.id == cell.column_id)?;
         Some(flow_side_palette(column.side, cx).base)
       })
       .unwrap_or(cx.theme().foreground)
@@ -589,7 +647,13 @@ impl FlowEditor {
   pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 
   fn render_sheet(&self, sheet_id: SheetId, cx: &mut Context<Self>) -> AnyElement {
-    let Some(real_sheet) = self.document.projection().sheets.iter().find(|sheet| sheet.id == sheet_id) else {
+    let Some(real_sheet) = self
+      .document
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+    else {
       return div().child("Select a sheet").into_any_element();
     };
     // During a drag the layout stays stable (no reflow) so drop locations don't move under the pointer:
@@ -597,7 +661,12 @@ impl FlowEditor {
     // shown by a directional accent on the target cell. The real subtree move still happens on drop.
     let sheet = real_sheet;
     let drop_target = self.drag_drop_target(real_sheet);
-    let Some(definition) = self.document.projection().format.sheet_type(sheet.sheet_type_id) else {
+    let Some(definition) = self
+      .document
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+    else {
       return div().child("Invalid sheet type").into_any_element();
     };
     let active = self.active_cell;
@@ -605,7 +674,11 @@ impl FlowEditor {
       sheet
         .annotations
         .iter()
-        .filter(|stroke| !self.hidden_annotation_originators.contains(&stroke.originator))
+        .filter(|stroke| {
+          !self
+            .hidden_annotation_originators
+            .contains(&stroke.originator)
+        })
         .cloned()
         .collect()
     } else {
@@ -626,7 +699,10 @@ impl FlowEditor {
     let column_gap: Option<(usize, f32, f32)> = drop_target.and_then(|(target, edge)| {
       let target_cell = sheet.cells.iter().find(|cell| cell.id == target)?;
       let target_layout = cell_layout.get(&target)?;
-      let target_column = definition.columns.iter().position(|column| column.id == target_cell.column_id)?;
+      let target_column = definition
+        .columns
+        .iter()
+        .position(|column| column.id == target_cell.column_id)?;
       // Keep well under a card's half-height (min card is 54px) so opening the bar never displaces the
       // target far enough for the pointer to fall off it.
       let height = 5.0 * zoom;
@@ -649,7 +725,11 @@ impl FlowEditor {
     let connector_families = sheet
       .cells
       .iter()
-      .filter_map(|parent| children_by_parent.remove(&parent.id).map(|children| (parent.id, children)))
+      .filter_map(|parent| {
+        children_by_parent
+          .remove(&parent.id)
+          .map(|children| (parent.id, children))
+      })
       .collect::<Vec<_>>();
     div()
       .id("flow-columns")
@@ -799,12 +879,20 @@ impl FlowEditor {
             let mut uses_summary_projection = cell.uses_summary_projection().unwrap_or(false);
             let mut rendered_document = cell.document().ok();
             if let Some(document) = rendered_document.as_mut() {
-              if !uses_summary_projection
-                && let Some(paragraph) = std::sync::Arc::make_mut(&mut document.paragraphs).first_mut()
-              {
-                paragraph.style = flowstate_document::PARAGRAPH_TAG;
-                document.blocks = std::sync::Arc::new(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs));
-                uses_summary_projection = true;
+              if !uses_summary_projection {
+                let restyled = {
+                  let mut paragraphs = document.paragraphs.make_mut();
+                  if let Some(paragraph) = paragraphs.first_mut() {
+                    paragraph.style = flowstate_document::PARAGRAPH_TAG;
+                    true
+                  } else {
+                    false
+                  }
+                };
+                if restyled {
+                  document.blocks = flowstate_document::BlockSeq::from_vec(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs.to_vec()));
+                  uses_summary_projection = true;
+                }
               }
               apply_flow_cell_theme(document, &client_document_theme, side_color, cx.theme().background, self.board_zoom);
             }
@@ -1094,14 +1182,20 @@ impl Render for FlowEditor {
           cx.stop_propagation();
         }
       }))
-      .on_mouse_down(MouseButton::Left, cx.listener(|editor, event: &MouseDownEvent, _, cx| {
-        if editor.space_pan_armed {
-          editor.begin_pan(event.position, cx);
-          cx.stop_propagation();
-        }
-      }))
+      .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+          if editor.space_pan_armed {
+            editor.begin_pan(event.position, cx);
+            cx.stop_propagation();
+          }
+        }),
+      )
       .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| editor.queue_pan(event.position, window, cx)))
-      .on_mouse_up(MouseButton::Left, cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)))
+      .on_mouse_up(
+        MouseButton::Left,
+        cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)),
+      )
       .child(
         canvas(
           |_, _, _| {},
@@ -1142,10 +1236,13 @@ impl Render for FlowEditor {
             gpui::CursorStyle::OpenHand
           })
           .when(self.annotation_tool == AnnotationTool::None && !self.space_pan_armed, |this| {
-            this.on_mouse_down(MouseButton::Left, cx.listener(|editor, event: &MouseDownEvent, _, cx| {
-              editor.begin_pan(event.position, cx);
-              cx.stop_propagation();
-            }))
+            this.on_mouse_down(
+              MouseButton::Left,
+              cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+                editor.begin_pan(event.position, cx);
+                cx.stop_propagation();
+              }),
+            )
           })
           .on_scroll_wheel(cx.listener(|editor, event: &ScrollWheelEvent, window, cx| {
             if event.modifiers.shift {
@@ -1162,10 +1259,19 @@ impl Render for FlowEditor {
           }))
           .when(self.annotation_tool != AnnotationTool::None && !self.space_pan_armed, |this| {
             this
-              .on_mouse_down(MouseButton::Left, cx.listener(|editor, event: &MouseDownEvent, _, cx| editor.begin_annotation(event.position, cx)))
+              .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, event: &MouseDownEvent, _, cx| editor.begin_annotation(event.position, cx)),
+              )
               .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, _, cx| editor.continue_annotation(event.position, cx)))
-              .on_mouse_up(MouseButton::Left, cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)))
-              .on_mouse_up_out(MouseButton::Left, cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)))
+              .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)),
+              )
+              .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)),
+              )
           })
           .child(
             canvas(

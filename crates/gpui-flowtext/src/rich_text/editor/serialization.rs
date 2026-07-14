@@ -1,22 +1,4 @@
 #[hotpath::measure]
-fn canonical_insert_text_operations(paragraph_id: ParagraphId, start_byte: usize, paragraph: &InputParagraph) -> Vec<CanonicalOperation> {
-  let mut byte = start_byte;
-  let mut operations = Vec::with_capacity(paragraph.runs.len());
-  for run in &paragraph.runs {
-    if !run.text.is_empty() {
-      operations.push(CanonicalOperation::InsertText {
-        paragraph: paragraph_id,
-        byte,
-        text: run.text.clone(),
-        styles: run.styles,
-      });
-    }
-    byte += run.text.len();
-  }
-  operations
-}
-
-#[hotpath::measure]
 pub(super) fn input_paragraph_text(paragraph: &InputParagraph) -> String {
   paragraph.runs.iter().map(|run| run.text.as_str()).collect()
 }
@@ -51,7 +33,7 @@ fn collect_block_assets(block: &Block, assets: &AssetStore, output: &mut Vec<Inp
 }
 
 #[hotpath::measure]
-fn input_block_from_block(block: &Block) -> InputBlock {
+pub fn input_block_from_block(block: &Block) -> InputBlock {
   match block {
     Block::Paragraph(paragraph) => InputBlock::Paragraph(input_paragraph_from_paragraph(paragraph)),
     Block::Image(image) => InputBlock::Image(InputImageBlock {
@@ -64,6 +46,7 @@ fn input_block_from_block(block: &Block) -> InputBlock {
         ImageSizing::Fixed { width_px, height_px } => InputImageSizing::Fixed { width_px, height_px },
       },
       alignment: input_alignment_from_alignment(image.alignment),
+      external_url: image.external_url.as_ref().map(ToString::to_string),
     }),
     Block::Equation(equation) => InputBlock::Equation(InputEquationBlock {
       source: equation.source.to_string(),
@@ -78,7 +61,7 @@ fn input_block_from_block(block: &Block) -> InputBlock {
 }
 
 #[hotpath::measure]
-fn block_from_input_block(block: &InputBlock) -> Block {
+pub fn block_from_input_block(block: &InputBlock) -> Block {
   match block {
     InputBlock::Paragraph(paragraph) => Block::Paragraph(paragraph_from_input_paragraph(paragraph)),
     InputBlock::Image(image) => Block::Image(ImageBlock {
@@ -91,6 +74,7 @@ fn block_from_input_block(block: &InputBlock) -> Block {
         InputImageSizing::Fixed { width_px, height_px } => ImageSizing::Fixed { width_px, height_px },
       },
       alignment: alignment_from_input_alignment(image.alignment),
+      external_url: image.external_url.clone().map(Into::into),
       version: 0,
     }),
     InputBlock::Equation(equation) => Block::Equation(EquationBlock {
@@ -104,6 +88,58 @@ fn block_from_input_block(block: &InputBlock) -> Block {
     }),
     InputBlock::Table(table) => Block::Table(table_from_input_table(table)),
   }
+}
+
+#[hotpath::measure]
+#[must_use]
+pub fn document_from_input_blocks(theme: DocumentTheme, input_blocks: Vec<InputBlock>) -> DocumentProjection {
+  let mut text = String::new();
+  let mut paragraphs = Vec::new();
+  let mut blocks = Vec::with_capacity(input_blocks.len());
+
+  for input_block in input_blocks {
+    match input_block {
+      InputBlock::Paragraph(paragraph) => {
+        if !paragraphs.is_empty() {
+          text.push('\n');
+        }
+        text.push_str(&input_paragraph_text(&paragraph));
+        let paragraph = paragraph_from_input_paragraph(&paragraph);
+        paragraphs.push(paragraph.clone());
+        blocks.push(Block::Paragraph(paragraph));
+      },
+      InputBlock::Image(image) => blocks.push(block_from_input_block(&InputBlock::Image(image))),
+      InputBlock::Equation(equation) => blocks.push(block_from_input_block(&InputBlock::Equation(equation))),
+      InputBlock::Table(table) => blocks.push(block_from_input_block(&InputBlock::Table(table))),
+    }
+  }
+
+  if paragraphs.is_empty() {
+    let paragraph = Paragraph {
+      style: ParagraphStyle::Normal,
+      runs: Vec::new(),
+      version: 0,
+    };
+    paragraphs.push(paragraph.clone());
+    blocks.push(Block::Paragraph(paragraph));
+  }
+
+  let paragraph_count = paragraphs.len();
+  let block_count = blocks.len();
+  let mut document = DocumentProjection {
+    frontier: Vec::new(),
+    text: Rope::from(text),
+    paragraphs: ParagraphSeq::from_vec(paragraphs),
+    blocks: BlockSeq::from_vec(blocks),
+    assets: AssetStore::default(),
+    ids: document_ids_for_shape(paragraph_count, block_count),
+    sections: Arc::new(Vec::new()),
+    outline: Arc::new(Vec::new()),
+    theme,
+  };
+  reconcile_document_ids(&mut document);
+  rebuild_document_sections(&mut document);
+  document
 }
 
 #[hotpath::measure]
@@ -122,7 +158,7 @@ fn input_paragraph_from_paragraph(paragraph: &Paragraph) -> InputParagraph {
 }
 
 #[hotpath::measure]
-fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
+pub fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let start = range.start.min(paragraph_text_len(paragraph));
@@ -201,10 +237,8 @@ fn input_paragraph_from_table_cell_range(paragraph: &TableCellParagraph, range: 
 
 #[hotpath::measure]
 fn paragraph_from_input_paragraph(paragraph: &InputParagraph) -> Paragraph {
-  let len = paragraph.runs.iter().map(|run| run.text.len()).sum();
   Paragraph {
     style: paragraph.style,
-    byte_range: 0..len,
     runs: merge_adjacent_runs(
       paragraph
         .runs
@@ -234,37 +268,59 @@ fn input_table_from_table(table: &TableBlock) -> InputTableBlock {
     rows: table
       .rows
       .iter()
-      .map(|row| InputTableRow {
-        cells: row
-          .cells
-          .iter()
-          .map(|cell| InputTableCell {
-            blocks: cell
-              .blocks
-              .iter()
-              .map(|block| match block {
-                TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(input_paragraph_from_table_cell_paragraph(paragraph)),
-                TableCellBlock::Table(table) => InputTableCellBlock::Table(input_table_from_table(table)),
-              })
-              .collect(),
-            row_span: cell.row_span,
-            col_span: cell.col_span,
-          })
-          .collect(),
-      })
+      .map(input_table_row_from_table_row)
       .collect(),
-    column_widths: table
-      .column_widths
+    columns: table
+      .columns
       .iter()
-      .map(|width| match *width {
-        TableColumnWidth::Auto => InputTableColumnWidth::Auto,
-        TableColumnWidth::FixedPx(px) => InputTableColumnWidth::FixedPx(px),
-        TableColumnWidth::Fraction(fraction) => InputTableColumnWidth::Fraction(fraction),
+      .map(|column| InputTableColumn {
+        id: column.id,
+        width: input_table_column_width_from_table_column_width(&column.width),
       })
       .collect(),
     style: InputTableStyle {
       header_row: table.style.header_row,
     },
+  }
+}
+
+#[hotpath::measure]
+fn input_table_row_from_table_row(row: &TableRow) -> InputTableRow {
+  InputTableRow {
+    id: row.id,
+    cells: row
+      .cells
+      .iter()
+      .map(input_table_cell_from_table_cell)
+      .collect(),
+  }
+}
+
+#[hotpath::measure]
+fn input_table_cell_from_table_cell(cell: &TableCell) -> InputTableCell {
+  InputTableCell {
+    id: cell.id,
+    row_id: cell.row_id,
+    column_id: cell.column_id,
+    blocks: cell
+      .blocks
+      .iter()
+      .map(|block| match block {
+        TableCellBlock::Paragraph(paragraph) => InputTableCellBlock::Paragraph(input_paragraph_from_table_cell_paragraph(paragraph)),
+        TableCellBlock::Table(table) => InputTableCellBlock::Table(input_table_from_table(table)),
+      })
+      .collect(),
+    row_span: cell.row_span,
+    col_span: cell.col_span,
+  }
+}
+
+#[hotpath::measure]
+fn input_table_column_width_from_table_column_width(width: &TableColumnWidth) -> InputTableColumnWidth {
+  match *width {
+    TableColumnWidth::Auto => InputTableColumnWidth::Auto,
+    TableColumnWidth::FixedPx(px) => InputTableColumnWidth::FixedPx(px),
+    TableColumnWidth::Fraction(fraction) => InputTableColumnWidth::Fraction(fraction),
   }
 }
 
@@ -275,10 +331,14 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
       .rows
       .iter()
       .map(|row| TableRow {
+        id: row.id,
         cells: row
           .cells
           .iter()
           .map(|cell| TableCell {
+            id: cell.id,
+            row_id: cell.row_id,
+            column_id: cell.column_id,
             blocks: cell
               .blocks
               .iter()
@@ -293,13 +353,12 @@ fn table_from_input_table(table: &InputTableBlock) -> TableBlock {
           .collect(),
       })
       .collect(),
-    column_widths: table
-      .column_widths
+    columns: table
+      .columns
       .iter()
-      .map(|width| match *width {
-        InputTableColumnWidth::Auto => TableColumnWidth::Auto,
-        InputTableColumnWidth::FixedPx(px) => TableColumnWidth::FixedPx(px),
-        InputTableColumnWidth::Fraction(fraction) => TableColumnWidth::Fraction(fraction),
+      .map(|column| TableColumn {
+        id: column.id,
+        width: table_column_width_from_input_width(&column.width),
       })
       .collect(),
     style: TableStyle {

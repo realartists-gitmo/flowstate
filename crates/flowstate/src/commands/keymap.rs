@@ -151,6 +151,12 @@ pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> 
     | CommandId::OpenDocument
     | CommandId::OpenDemoDocument
     | CommandId::CloseDocument
+    | CommandId::ShareDocument
+    | CommandId::JoinSession
+    | CommandId::StartCollaboration
+    | CommandId::CopyCollaborationTicket
+    | CommandId::JoinCollaborationFromClipboard
+    | CommandId::LeaveCollaboration
     | CommandId::ToggleRibbon
     | CommandId::NextTab
     | CommandId::PreviousTab

@@ -61,7 +61,9 @@ impl FlowEditor {
     let dragging = self.dragging_cell?;
     let intent = self.pending_cell_drop?;
     let sheet_id = self.active_sheet?;
-    self.document.preview_move_cell_subtree(sheet_id, dragging, intent)?;
+    self
+      .document
+      .preview_move_cell_subtree(sheet_id, dragging, intent)?;
     match intent {
       FlowDropIntent::BeforeSibling(target) => Some((target, DropEdge::Before)),
       FlowDropIntent::AfterSibling(target) => Some((target, DropEdge::After)),
@@ -89,8 +91,20 @@ impl FlowEditor {
         if let Some(cell) = sheet.cells.get(insertion_index) {
           Some((cell.id, DropEdge::Before))
         } else {
-          let column = self.document.projection().format.sheet_type(sheet.sheet_type_id)?.columns.get(column_index)?.id;
-          sheet.cells.iter().rev().find(|cell| cell.column_id == column).map(|cell| (cell.id, DropEdge::After))
+          let column = self
+            .document
+            .projection()
+            .format
+            .sheet_type(sheet.sheet_type_id)?
+            .columns
+            .get(column_index)?
+            .id;
+          sheet
+            .cells
+            .iter()
+            .rev()
+            .find(|cell| cell.column_id == column)
+            .map(|cell| (cell.id, DropEdge::After))
         }
       },
     }
@@ -100,7 +114,10 @@ impl FlowEditor {
   /// defer to that cell's own drop zones. The dragged cell holds its slot as a faded placeholder, so
   /// the pointer passes through it to the column beneath.
   pub(super) fn cursor_over_live_cell(&self, position: Point<Pixels>) -> bool {
-    self.cell_bounds.iter().any(|(id, bounds)| Some(*id) != self.dragging_cell && bounds.contains(&position))
+    self
+      .cell_bounds
+      .iter()
+      .any(|(id, bounds)| Some(*id) != self.dragging_cell && bounds.contains(&position))
   }
 
   /// A parent in `parent_column` with no children yet whose card vertically contains `y`, so a drop in
@@ -108,7 +125,10 @@ impl FlowEditor {
   /// to itself.
   fn childless_parent_at_row(&self, parent_column: usize, child_column: usize, y: gpui::Pixels) -> Option<CellId> {
     let projection = self.document.projection();
-    let sheet = projection.sheets.iter().find(|sheet| Some(sheet.id) == self.active_sheet)?;
+    let sheet = projection
+      .sheets
+      .iter()
+      .find(|sheet| Some(sheet.id) == self.active_sheet)?;
     let definition = projection.format.sheet_type(sheet.sheet_type_id)?;
     let parent_column = definition.columns.get(parent_column)?.id;
     let _ = definition.columns.get(child_column)?;
@@ -116,8 +136,18 @@ impl FlowEditor {
       .cells
       .iter()
       .filter(|cell| cell.column_id == parent_column && Some(cell.id) != self.dragging_cell)
-      .filter(|cell| !sheet.cells.iter().any(|other| other.parent_id == Some(cell.id)))
-      .find(|cell| self.cell_bounds.get(&cell.id).is_some_and(|bounds| y >= bounds.top() && y <= bounds.bottom()))
+      .filter(|cell| {
+        !sheet
+          .cells
+          .iter()
+          .any(|other| other.parent_id == Some(cell.id))
+      })
+      .find(|cell| {
+        self
+          .cell_bounds
+          .get(&cell.id)
+          .is_some_and(|bounds| y >= bounds.top() && y <= bounds.bottom())
+      })
       .map(|cell| cell.id)
   }
 
@@ -132,10 +162,21 @@ impl FlowEditor {
     let Some(sheet_id) = self.active_sheet else {
       return;
     };
-    let Some(sheet) = self.document.projection().sheets.iter().find(|sheet| sheet.id == sheet_id) else {
+    let Some(sheet) = self
+      .document
+      .projection()
+      .sheets
+      .iter()
+      .find(|sheet| sheet.id == sheet_id)
+    else {
       return;
     };
-    let Some(definition) = self.document.projection().format.sheet_type(sheet.sheet_type_id) else {
+    let Some(definition) = self
+      .document
+      .projection()
+      .format
+      .sheet_type(sheet.sheet_type_id)
+    else {
       return;
     };
     let Some(column) = definition.columns.get(column_index) else {
@@ -147,11 +188,16 @@ impl FlowEditor {
       .enumerate()
       .filter(|(_, cell)| cell.column_id == column.id)
       .collect();
-    let below_position = column_cells
-      .iter()
-      .position(|(_, cell)| self.cell_bounds.get(&cell.id).is_some_and(|bounds| y < bounds.center().y));
+    let below_position = column_cells.iter().position(|(_, cell)| {
+      self
+        .cell_bounds
+        .get(&cell.id)
+        .is_some_and(|bounds| y < bounds.center().y)
+    });
     if let Some(below_position) = below_position
-      && let Some((_, above)) = below_position.checked_sub(1).and_then(|position| column_cells.get(position))
+      && let Some((_, above)) = below_position
+        .checked_sub(1)
+        .and_then(|position| column_cells.get(position))
       && let Some((_, below)) = column_cells.get(below_position)
       && above.parent_id == below.parent_id
     {
@@ -231,7 +277,10 @@ impl FlowEditor {
     self.dragging_cell = None;
     self.drag_autoscroll = None;
     let committed = match (destination, self.active_sheet) {
-      (Some(destination), Some(sheet_id)) => self.document.move_cell_subtree(sheet_id, dragged, destination).is_ok(),
+      (Some(destination), Some(sheet_id)) => self
+        .document
+        .move_cell_subtree(sheet_id, dragged, destination)
+        .is_ok(),
       _ => false,
     };
     self.finish_drag_log(destination, committed);

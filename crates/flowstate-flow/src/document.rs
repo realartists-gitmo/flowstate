@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use anyhow::{Context as _, bail};
-use loro::{ExportMode, LoroDoc, LoroValue, UndoManager, VersionVector, ValueOrContainer};
+use loro::{ExportMode, LoroDoc, LoroValue, UndoManager, ValueOrContainer, VersionVector};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -84,7 +84,10 @@ impl FlowFormat {
   }
 
   pub fn sheet_type(&self, id: SheetTypeId) -> Option<&SheetTypeDefinition> {
-    self.sheet_types.iter().find(|definition| definition.id == id)
+    self
+      .sheet_types
+      .iter()
+      .find(|definition| definition.id == id)
   }
 }
 
@@ -127,11 +130,11 @@ impl Cell {
       id: Uuid::new_v4(),
       column_id,
       parent_id: None,
-      document_bytes: flowstate_document::db8_bytes(&document)?,
+      document_bytes: db8_bytes(&document)?,
     })
   }
 
-  pub fn document(&self) -> std::io::Result<flowstate_document::Document> {
+  pub fn document(&self) -> std::io::Result<flowstate_document::DocumentProjection> {
     flowstate_document::read_db8_bytes(&self.document_bytes)
   }
 
@@ -146,9 +149,7 @@ impl Cell {
     for (index, paragraph) in document.paragraphs.iter().enumerate() {
       if matches!(
         paragraph.style,
-        flowstate_document::PARAGRAPH_TAG
-          | flowstate_document::PARAGRAPH_UNDERTAG
-          | flowstate_document::PARAGRAPH_ANALYTIC
+        flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_UNDERTAG | flowstate_document::PARAGRAPH_ANALYTIC
       ) {
         projection.push(paragraph_text(&document, index));
         continue;
@@ -179,9 +180,7 @@ impl Cell {
     Ok(document.paragraphs.iter().any(|paragraph| {
       matches!(
         paragraph.style,
-        flowstate_document::PARAGRAPH_TAG
-          | flowstate_document::PARAGRAPH_UNDERTAG
-          | flowstate_document::PARAGRAPH_ANALYTIC
+        flowstate_document::PARAGRAPH_TAG | flowstate_document::PARAGRAPH_UNDERTAG | flowstate_document::PARAGRAPH_ANALYTIC
       ) || paragraph
         .runs
         .iter()
@@ -190,7 +189,14 @@ impl Cell {
   }
 }
 
-fn paragraph_text(document: &flowstate_document::Document, index: usize) -> String {
+/// Encode a cell's rich-text projection as .db8 bytes. Post-Loro-cutover the
+/// package writer is keyed off a `LoroDoc`, so round-trip through an import.
+pub fn db8_bytes(document: &flowstate_document::DocumentProjection) -> std::io::Result<Vec<u8>> {
+  let doc = flowstate_document::document_to_loro(document, "Flow cell")?;
+  flowstate_document::loro_db8_bytes(&doc, "Flow cell")
+}
+
+fn paragraph_text(document: &flowstate_document::DocumentProjection, index: usize) -> String {
   document
     .text
     .byte_slice(flowstate_document::paragraph_byte_range(document, index))
@@ -300,9 +306,13 @@ impl FlowProjection {
         if !valid_columns.contains(&cell.column_id) {
           bail!("cell references a column outside its sheet type");
         }
-        let _ = cell.document().context("cell contains invalid rich-text document")?;
+        let _ = cell
+          .document()
+          .context("cell contains invalid rich-text document")?;
         if let Some(parent_id) = cell.parent_id {
-          let parent = cells.get(&parent_id).context("cell references missing parent")?;
+          let parent = cells
+            .get(&parent_id)
+            .context("cell references missing parent")?;
           let child_level = column_levels[&cell.column_id];
           let parent_level = column_levels[&parent.column_id];
           if child_level != parent_level + 1 {
@@ -311,7 +321,11 @@ impl FlowProjection {
         }
       }
       for column in &definition.columns {
-        let column_cells: Vec<_> = sheet.cells.iter().filter(|cell| cell.column_id == column.id).collect();
+        let column_cells: Vec<_> = sheet
+          .cells
+          .iter()
+          .filter(|cell| cell.column_id == column.id)
+          .collect();
         let mut completed_parents = HashSet::new();
         let mut current_parent = None;
         for cell in column_cells {
@@ -319,14 +333,21 @@ impl FlowProjection {
             if let Some(parent) = current_parent {
               completed_parents.insert(parent);
             }
-            if cell.parent_id.is_some_and(|parent| completed_parents.contains(&parent)) {
+            if cell
+              .parent_id
+              .is_some_and(|parent| completed_parents.contains(&parent))
+            {
               bail!("orphan or unrelated cell breaks a sibling run");
             }
             current_parent = cell.parent_id;
           }
         }
       }
-      if sheet.annotations.iter().any(|stroke| stroke.sheet_id != sheet.id) {
+      if sheet
+        .annotations
+        .iter()
+        .any(|stroke| stroke.sheet_id != sheet.id)
+      {
         bail!("annotation references the wrong sheet");
       }
     }
@@ -364,9 +385,15 @@ impl FlowDocument {
   pub fn from_projection(projection: FlowProjection) -> anyhow::Result<Self> {
     projection.validate()?;
     let loro = LoroDoc::new();
-    loro.get_map("flow").insert(FORMAT_KEY, postcard::to_allocvec(&projection.format)?)?;
+    loro
+      .get_map("flow")
+      .insert(FORMAT_KEY, postcard::to_allocvec(&projection.format)?)?;
     let annotations = loro.get_map(ANNOTATIONS_MAP);
-    for stroke in projection.sheets.iter().flat_map(|sheet| &sheet.annotations) {
+    for stroke in projection
+      .sheets
+      .iter()
+      .flat_map(|sheet| &sheet.annotations)
+    {
       annotations.insert(&stroke.id.to_string(), postcard::to_allocvec(stroke)?)?;
     }
     write_all_entity_records(&loro, &projection)?;
@@ -446,11 +473,13 @@ impl FlowDocument {
   ) -> anyhow::Result<FlowCommitResult> {
     let actual_frontier = self.frontier();
     if !base_frontier.is_empty() && base_frontier != actual_frontier.as_slice() {
-      return Err(StaleFlowProjectionError {
-        expected: base_frontier.to_vec(),
-        actual: actual_frontier,
-      }
-      .into());
+      return Err(
+        StaleFlowProjectionError {
+          expected: base_frontier.to_vec(),
+          actual: actual_frontier,
+        }
+        .into(),
+      );
     }
 
     let base_frontier = actual_frontier;
@@ -532,17 +561,17 @@ impl FlowDocument {
 /// blob to read back.
 fn load_projection(loro: &LoroDoc) -> anyhow::Result<FlowProjection> {
   let format = read_immutable_format(loro)?;
-  let mut projection = FlowProjection {
-    format,
-    sheets: Vec::new(),
-  };
+  let mut projection = FlowProjection { format, sheets: Vec::new() };
   merge_entity_records_from_loro(&mut projection, loro)?;
   projection.validate()?;
   Ok(projection)
 }
 
 fn read_immutable_format(loro: &LoroDoc) -> anyhow::Result<FlowFormat> {
-  let value = loro.get_map("flow").get(FORMAT_KEY).context("Loro snapshot is missing immutable format definition")?;
+  let value = loro
+    .get_map("flow")
+    .get(FORMAT_KEY)
+    .context("Loro snapshot is missing immutable format definition")?;
   let ValueOrContainer::Value(LoroValue::Binary(bytes)) = value else {
     bail!("Loro immutable format definition has invalid type");
   };
@@ -616,10 +645,14 @@ fn apply_entity_delta(loro: &LoroDoc, ops: Vec<EntityOp>) -> anyhow::Result<()> 
 
 fn write_all_entity_records(loro: &LoroDoc, projection: &FlowProjection) -> anyhow::Result<()> {
   for (id, record) in sheet_records(projection) {
-    loro.get_map(SHEETS_MAP).insert(&id.to_string(), postcard::to_allocvec(&record)?)?;
+    loro
+      .get_map(SHEETS_MAP)
+      .insert(&id.to_string(), postcard::to_allocvec(&record)?)?;
   }
   for (id, record) in cell_records(projection) {
-    loro.get_map(CELLS_MAP).insert(&id.to_string(), postcard::to_allocvec(&record)?)?;
+    loro
+      .get_map(CELLS_MAP)
+      .insert(&id.to_string(), postcard::to_allocvec(&record)?)?;
   }
   Ok(())
 }
@@ -677,13 +710,20 @@ fn merge_entity_records_from_loro(projection: &mut FlowProjection, loro: &LoroDo
       name: record.name,
       sheet_type_id: record.sheet_type_id,
       cells: Vec::new(),
-      annotations: existing_annotations.get(&record.id).cloned().unwrap_or_default(),
+      annotations: existing_annotations
+        .get(&record.id)
+        .cloned()
+        .unwrap_or_default(),
     })
     .collect();
   let mut cells: Vec<CellRecord> = read_record_map(loro, CELLS_MAP)?;
   cells.sort_by_key(|record| (record.sheet_id, record.order, record.cell.id));
   for record in cells {
-    if let Some(sheet) = projection.sheets.iter_mut().find(|sheet| sheet.id == record.sheet_id) {
+    if let Some(sheet) = projection
+      .sheets
+      .iter_mut()
+      .find(|sheet| sheet.id == record.sheet_id)
+    {
       sheet.cells.push(record.cell);
     }
   }
@@ -733,7 +773,11 @@ fn merge_annotations_from_loro(projection: &mut FlowProjection, loro: &LoroDoc) 
       error = Some(anyhow::anyhow!("annotation key does not match stable stroke id"));
       return;
     }
-    if let Some(sheet) = projection.sheets.iter_mut().find(|sheet| sheet.id == stroke.sheet_id) {
+    if let Some(sheet) = projection
+      .sheets
+      .iter_mut()
+      .find(|sheet| sheet.id == stroke.sheet_id)
+    {
       sheet.annotations.push(stroke);
     }
   });
@@ -750,7 +794,7 @@ mod tests {
       id: Uuid::new_v4(),
       column_id: Uuid::new_v4(),
       parent_id: None,
-      document_bytes: flowstate_document::db8_bytes(&document).unwrap(),
+      document_bytes: db8_bytes(&document).unwrap(),
     }
   }
 

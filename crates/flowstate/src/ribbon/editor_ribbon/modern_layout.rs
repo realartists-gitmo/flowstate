@@ -127,7 +127,9 @@ fn command_chip_width(
   cx: &mut Context<EditorRibbon>,
 ) -> gpui::Pixels {
   match command.id {
-    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::ToggleInvisibility => px(metrics.chip_height.as_f32()),
+    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::Revisions | RibbonCommandId::ToggleInvisibility => {
+      px(metrics.chip_height.as_f32())
+    },
     RibbonCommandId::ExportFormat => {
       let text_width = measure_ribbon_text("Format", metrics.chip_text_size, window, cx).as_f32();
       px(text_width + 10.0 + metrics.chip_padding_x.as_f32() * 2.0 + 10.0)
@@ -261,6 +263,11 @@ fn modern_command_chip(
           let _ = workspace.update(cx, |workspace, cx| workspace.toggle_speech_document(panel_id, cx));
         }
       },
+      RibbonCommandId::Revisions => {
+        if let Some(workspace) = workspace.clone() {
+          let _ = workspace.update(cx, |workspace, cx| workspace.open_revision_dialog(window, cx));
+        }
+      },
       _ => {
         editor.update(cx, |editor, cx| {
           perform_ribbon_command(editor, command_id, window, cx);
@@ -283,7 +290,7 @@ fn ribbon_command_color(command: &RibbonCommand, cx: &App) -> Hsla {
     | RibbonCommandId::SendToSpeechDocument
     | RibbonCommandId::SendToSpeechDocumentEnd => cx.theme().info,
     RibbonCommandId::ToggleSpeechDocument => cx.theme().success,
-    RibbonCommandId::Undo | RibbonCommandId::Redo => cx.theme().primary,
+    RibbonCommandId::Undo | RibbonCommandId::Redo | RibbonCommandId::Revisions => cx.theme().primary,
     RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend => cx.theme().info,
     RibbonCommandId::ToggleInvisibility => cx.theme().primary,
   }

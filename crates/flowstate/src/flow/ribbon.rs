@@ -1,5 +1,8 @@
 use flowstate_flow::RelativePosition;
-use gpui::{App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Subscription, Window, div, prelude::*, px};
+use gpui::{
+  App, Context, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent, Render, Subscription, Window, div,
+  prelude::*, px,
+};
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{ActiveTheme as _, Disableable as _, Selectable as _, Sizable as _};
@@ -66,7 +69,10 @@ impl Render for FlowRibbon {
     let clear_editor = self.editor.clone();
     let has_active_sheet = self.editor.read(cx).active_sheet().is_some();
     let has_active_cell = self.editor.read(cx).active_cell().is_some();
-    #[allow(clippy::needless_collect, reason = "Release the editor read guard before constructing buttons that clone the editor entity.")]
+    #[allow(
+      clippy::needless_collect,
+      reason = "Release the editor read guard before constructing buttons that clone the editor entity."
+    )]
     let sheet_types: Vec<_> = self
       .editor
       .read(cx)
@@ -90,7 +96,11 @@ impl Render for FlowRibbon {
         .clone();
       let editor = self.editor.clone();
       let state = window.use_keyed_state(("flow-sheet-name-input", sheet_id.as_u128() as u64), cx, move |window, cx| {
-        let input = cx.new(|cx| InputState::new(window, cx).default_value(sheet_name).placeholder("Sheet name"));
+        let input = cx.new(|cx| {
+          InputState::new(window, cx)
+            .default_value(sheet_name)
+            .placeholder("Sheet name")
+        });
         let subscription = cx.subscribe_in(&input, window, move |_: &mut SheetNameInputState, input, event: &InputEvent, _, cx| {
           if matches!(event, InputEvent::Change) {
             let name = input.read(cx).value().to_string();
@@ -116,7 +126,9 @@ impl Render for FlowRibbon {
         let editor = self.editor.clone();
         move |_: &MouseDownEvent, _, cx| editor.update(cx, |editor, cx| editor.set_annotation_tool(AnnotationTool::None, cx))
       })
-      .when_some(sheet_name_input, |this, input| this.child(div().w(px(180.0)).child(Input::new(&input).w_full())))
+      .when_some(sheet_name_input, |this, input| {
+        this.child(div().w(px(180.0)).child(Input::new(&input).w_full()))
+      })
       .child(
         Button::new("flow-undo")
           .label("Undo")
@@ -165,40 +177,48 @@ impl Render for FlowRibbon {
           .label("Add argument")
           .small()
           .disabled(!has_active_sheet)
-          .on_click(move |_, window, cx| first_argument_editor.update(cx, |editor, cx| {
-            editor.add_first_argument(cx);
-            editor.focus_active_cell(window, cx);
-          })),
+          .on_click(move |_, window, cx| {
+            first_argument_editor.update(cx, |editor, cx| {
+              editor.add_first_argument(cx);
+              editor.focus_active_cell(window, cx);
+            });
+          }),
       )
       .child(
         Button::new("flow-add-response")
           .label("Add response")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| response_editor.update(cx, |editor, cx| {
-            editor.add_response(cx);
-            editor.focus_active_cell(window, cx);
-          })),
+          .on_click(move |_, window, cx| {
+            response_editor.update(cx, |editor, cx| {
+              editor.add_response(cx);
+              editor.focus_active_cell(window, cx);
+            });
+          }),
       )
       .child(
         Button::new("flow-add-sibling-above")
           .label("Sibling above")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| above_editor.update(cx, |editor, cx| {
-            editor.add_sibling(RelativePosition::Before, cx);
-            editor.focus_active_cell(window, cx);
-          })),
+          .on_click(move |_, window, cx| {
+            above_editor.update(cx, |editor, cx| {
+              editor.add_sibling(RelativePosition::Before, cx);
+              editor.focus_active_cell(window, cx);
+            });
+          }),
       )
       .child(
         Button::new("flow-add-sibling")
           .label("Add sibling")
           .small()
           .disabled(!has_active_cell)
-          .on_click(move |_, window, cx| below_editor.update(cx, |editor, cx| {
-            editor.add_sibling(RelativePosition::After, cx);
-            editor.focus_active_cell(window, cx);
-          })),
+          .on_click(move |_, window, cx| {
+            below_editor.update(cx, |editor, cx| {
+              editor.add_sibling(RelativePosition::After, cx);
+              editor.focus_active_cell(window, cx);
+            });
+          }),
       )
       .child(
         Button::new("flow-delete-selected")

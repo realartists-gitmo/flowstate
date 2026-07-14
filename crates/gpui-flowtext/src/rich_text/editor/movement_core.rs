@@ -1,13 +1,16 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn move_to_offset(&mut self, new_head: DocumentOffset, extend: bool, cx: &mut Context<Self>) {
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+  fn move_to_offset(&mut self, new_head: DocumentOffset, head_affinity: SelectionAffinity, head_gravity: VisualGravity, extend: bool, cx: &mut Context<Self>) {
+    let selection = self.selection.moved(new_head, head_affinity, head_gravity, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_to_offset", &fid_before);
+    self.emit_selection_changed(cx);
     self.goal_x = None;
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
@@ -39,7 +42,7 @@ impl RichTextEditor {
     let new_offset = clamp_scroll_offset(&self.scroll_handle, point(old_offset.x, old_offset.y + signed_delta));
     self.scroll_handle.set_offset(new_offset);
 
-    let Some(caret) = caret_bounds(&layout, head, bounds.origin) else {
+    let Some(caret) = caret_bounds(&layout, head, self.selection.head_gravity, bounds.origin) else {
       cx.notify();
       return;
     };
@@ -50,22 +53,22 @@ impl RichTextEditor {
     let target = self
       .hit_test_cached_position(point(caret.origin.x, target_y))
       .unwrap_or_else(|| layout.hit_test(point(caret.origin.x, target_y)));
-    self.move_to_offset(target, extend, cx);
+    self.move_to_offset(target, SelectionAffinity::Neutral, VisualGravity::Neutral, extend, cx);
   }
 
+  // §act-ten A10.12: neither hook invalidates layout caches anymore. The
+  // caches are CONTENT-keyed (§act-nine A9.3 — style+version keys at all four
+  // sites), so a mutation's own version bumps invalidate exactly the touched
+  // paragraphs; the unconditional whole-cache nuke these hooks used to run
+  // (via the dead `layout_invalidation_hint` fallback — its setters were
+  // deleted in the loro-first cutover) cost delete-word, toolbar formatting
+  // and collab asset arrival a full O(doc) re-prep each. The one caller that
+  // genuinely replaces the whole document (`replace_document_projection`)
+  // performs its own explicit invalidation.
   pub(super) fn after_text_mutation(&mut self, cx: &mut Context<Self>) {
     self.mark_text_input_interaction();
     self.pending_styles = None;
     self.goal_x = None;
-    if let Some(range) = self.layout_invalidation_hint.take() {
-      let end = range
-        .end
-        .max(self.selection.head.paragraph.saturating_add(2))
-        .min(self.document.paragraphs.len());
-      self.invalidate_paragraph_layout_cache_range(range.start..end.max(range.start));
-    } else {
-      self.invalidate_stale_paragraph_layout_caches();
-    }
     self.pending_scroll_head_after_layout = true;
     self.reset_caret_blink(cx);
     self.notify_after_mutation(cx);
@@ -74,11 +77,6 @@ impl RichTextEditor {
   pub(super) fn after_formatting_mutation(&mut self, cx: &mut Context<Self>) {
     self.pending_styles = None;
     self.goal_x = None;
-    if let Some(range) = self.layout_invalidation_hint.take() {
-      self.invalidate_paragraph_layout_cache_range(range);
-    } else {
-      self.invalidate_stale_paragraph_layout_caches();
-    }
     self.reset_caret_blink(cx);
     self.notify_after_mutation(cx);
   }

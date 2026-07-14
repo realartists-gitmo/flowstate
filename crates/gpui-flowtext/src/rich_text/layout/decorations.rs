@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub(super) fn rects_for_line(document: &Document, line: &LaidOutLine) -> Vec<RunRect> {
+pub(super) fn rects_for_line(document: &DocumentProjection, line: &LaidOutLine) -> Vec<RunRect> {
   let mut backgrounds = Vec::new();
   let mut borders = Vec::new();
   let text_top = line.baseline_y() - line.ascent;
@@ -148,8 +148,10 @@ pub(super) fn push_box_rules(rects: &mut Vec<RunRect>, bounds: Bounds<Pixels>, t
 }
 
 #[hotpath::measure]
-pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
-  let mut underlines = Vec::with_capacity(line.segments.len().saturating_mul(2));
+pub(super) fn underlines_for_line(document: &DocumentProjection, line: &LaidOutLine, cx: &mut App) -> Vec<Decoration> {
+  // §perf: the common prose line has no underlines, so start empty (no allocation
+  // until the first push) rather than eagerly allocating a buffer that stays empty.
+  let mut underlines = Vec::new();
   let baseline = line.baseline_y();
   for segment in &line.segments {
     match segment.format.underline {
@@ -188,9 +190,10 @@ pub(super) fn underlines_for_line(document: &Document, line: &LaidOutLine, cx: &
 }
 
 #[hotpath::measure]
-pub(super) fn strikethroughs_for_line(document: &Document, line: &LaidOutLine) -> Vec<Decoration> {
+pub(super) fn strikethroughs_for_line(document: &DocumentProjection, line: &LaidOutLine) -> Vec<Decoration> {
   let baseline = line.baseline_y();
-  let mut decorations = Vec::with_capacity(line.segments.len());
+  // §perf: most lines have no strikethrough; defer allocation until the first push.
+  let mut decorations = Vec::new();
   for segment in &line.segments {
     if segment.format.strikethrough {
       let thickness = document.theme.underline_rule_thickness.max(px(1.0));
@@ -232,6 +235,22 @@ pub(super) fn merge_inline_decorations(decorations: Vec<Decoration>) -> Vec<Deco
   for decoration in decorations {
     push_merged_decoration(&mut merged, decoration);
   }
+  // Fidelity: underline/strikethrough rules are painted (paint.rs) at these
+  // exact bounds, so a non-finite coordinate here paints a corrupt or invisible
+  // rule that trails the model text. Gated; runs only when tracing is enabled.
+  if flowstate_fidelity::enabled() {
+    let class = flowstate_fidelity::FidelityClass::Structure;
+    flowstate_fidelity::event(class, "decorations", || format!("count={}", merged.len()));
+    let finite = merged.iter().all(|decoration| {
+      f32::from(decoration.bounds.origin.x).is_finite()
+        && f32::from(decoration.bounds.origin.y).is_finite()
+        && f32::from(decoration.bounds.size.width).is_finite()
+        && f32::from(decoration.bounds.size.height).is_finite()
+    });
+    flowstate_fidelity::check(finite, class, "decoration-geometry", || {
+      format!("non-finite decoration bounds among {} decorations", merged.len())
+    });
+  }
   merged
 }
 
@@ -271,7 +290,7 @@ fn same_color(a: Hsla, b: Hsla) -> bool {
 }
 
 #[hotpath::measure]
-pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &Document, cx: &mut App) -> (Pixels, Pixels) {
+pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, document: &DocumentProjection, cx: &mut App) -> (Pixels, Pixels) {
   // GPUI exposes glyph bounds in font coordinates. For Calibri, the
   // underscore bbox is below the baseline. The origin is the lower
   // edge of the glyph box on this metric path; Word positions an
@@ -297,7 +316,7 @@ pub(super) fn single_underline_metrics_for_segment(segment: &LaidOutSegment, doc
 }
 
 #[hotpath::measure]
-pub(super) fn double_underline_metrics_for_segment(document: &Document) -> (Pixels, Pixels) {
+pub(super) fn double_underline_metrics_for_segment(document: &DocumentProjection) -> (Pixels, Pixels) {
   (document.theme.double_underline_top_from_baseline, document.theme.underline_rule_thickness)
 }
 

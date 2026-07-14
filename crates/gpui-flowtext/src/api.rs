@@ -2,7 +2,9 @@ use std::{borrow::Cow, path::Path, sync::Arc};
 
 use gpui::Pixels;
 
-use crate::{Document, DocumentExportFormat, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle};
+use crate::{
+  DocumentExportFormat, DocumentProjection, EditorSelection, HighlightStyle, ParagraphStyle, RichTextEditorCommand, RunSemanticStyle,
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub struct StyleId(pub Cow<'static, str>);
@@ -105,10 +107,26 @@ impl Default for LayoutPolicy {
 
 #[derive(Clone, Debug)]
 pub enum EditorEvent {
-  Changed { edit_generation: u64 },
-  SelectionChanged { selection: EditorSelection },
-  CommandDispatched { command: RichTextEditorCommand },
-  Exported { format: DocumentExportFormat },
+  Changed {
+    edit_generation: u64,
+  },
+  SelectionChanged {
+    selection: EditorSelection,
+  },
+  CommandDispatched {
+    command: RichTextEditorCommand,
+  },
+  Exported {
+    format: DocumentExportFormat,
+  },
+  /// The editor could not reconcile optimistic local state with the canonical
+  /// projection and recovered by discarding or rebuilding. Hosts must surface
+  /// this (telemetry at minimum); it indicates replay/projection divergence.
+  ReconciliationRecovery {
+    dropped_batches: usize,
+    reason: gpui::SharedString,
+    total_recoveries: u64,
+  },
 }
 
 pub trait EditorEventSink: Send + Sync + 'static {
@@ -120,10 +138,10 @@ pub trait AssetResolver: Send + Sync + 'static {
 }
 
 pub trait DocumentSerializer: Send + Sync + 'static {
-  fn read(&self, bytes: &[u8]) -> std::io::Result<Document>;
-  fn write(&self, document: &Document) -> std::io::Result<Vec<u8>>;
+  fn read(&self, bytes: &[u8]) -> std::io::Result<DocumentProjection>;
+  fn write(&self, document: &DocumentProjection) -> std::io::Result<Vec<u8>>;
 }
 
 pub trait ExternalFormatExporter: Send + Sync + 'static {
-  fn write_external_format(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> std::io::Result<()>;
+  fn write_external_format(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> std::io::Result<()>;
 }

@@ -1,71 +1,90 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
+  /// Plain-text paste, Loro-first (spec §5): a single line is ONE `InsertText`
+  /// intent; multi-line text converts to ONE `InsertRichFragment` intent (one
+  /// gate hold, one commit, one undo unit). No direct projection mutation.
+  ///
+  /// Returns true when this path owned the paste. With an object block
+  /// selected the caller's block-selection flows own placement instead.
   fn insert_plain_text_paste_at_caret(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
-    if !self.selection.is_caret() || self.selected_block.is_some() || text.is_empty() || text.contains('\r') || text.contains('\n') {
+    if self.selected_block.is_some() {
       return false;
     }
-    let paragraph_style = self.document.paragraphs[self.selection.head.paragraph].style;
-    let fragment = RichClipboardFragment {
-      format: RICH_TEXT_CLIPBOARD_FORMAT.to_string(),
-      paragraphs: vec![InputParagraph {
-        style: paragraph_style,
-        runs: vec![InputRun {
-          text: text.to_string(),
-          styles: self.styles_at_caret(),
-        }],
-      }],
-      blocks: Vec::new(),
-      assets: Vec::new(),
-    };
-    self.insert_rich_fragment_paste_at_caret(&fragment, cx)
+    self.write_plain_text_paste(text, cx)
   }
 
-  fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
-    if !self.selection.is_caret()
-      || self.selected_block.is_some()
-      || !fragment.blocks.is_empty()
-      || !fragment.assets.is_empty()
-      || fragment.paragraphs.len() != 1
-    {
+  /// Shared plain-text paste body (also the `insert_plain_text_fragment`
+  /// compatibility surface, which historically ignored `selected_block`).
+  /// Selection replacement + undo grouping are the write helpers' law.
+  pub(super) fn write_plain_text_paste(&mut self, text: &str, cx: &mut Context<Self>) -> bool {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    if normalized.is_empty() {
       return false;
     }
-    let Some(paragraph_id) = self
-      .identity_map
-      .paragraph_id(self.selection.head.paragraph)
-    else {
-      return false;
-    };
-    let paragraph = &fragment.paragraphs[0];
-    if paragraph.runs.iter().all(|run| run.text.is_empty()) {
+    if !normalized.contains('\n') {
+      // Single line, no structure: plain insert. Style inheritance is Loro's
+      // job (expand-`After` marks, spec §9) — no restated run styles.
+      self.write_insert_text_at_caret(&normalized, cx);
       return true;
     }
+    // Multi-line: one rich fragment so the whole paste is one intent and one
+    // undo unit. Lines keep the caret paragraph's style and the caret's run
+    // styles (previous paste behavior).
+    let start = self.selection.normalized().start;
+    let paragraph_style = self
+      .document
+      .paragraphs
+      .get(start.paragraph)
+      .map(|paragraph| paragraph.style)
+      .unwrap_or(ParagraphStyle::Normal);
+    let styles = self.styles_at_caret();
+    let blocks = normalized
+      .split('\n')
+      .map(|line| {
+        FragmentBlock::Paragraph(InputParagraph {
+          style: paragraph_style,
+          runs: if line.is_empty() {
+            Vec::new()
+          } else {
+            vec![InputRun {
+              text: line.to_string(),
+              styles,
+            }]
+          },
+        })
+      })
+      .collect::<Vec<_>>();
+    self.write_insert_rich_fragment_at_caret(blocks, cx);
+    true
+  }
 
-    let before_selection = self.selection.clone();
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    let offset = self.selection.head;
-    let inserted_end = insert_rich_fragment_at(&mut self.document, offset, fragment);
-    self.selection = EditorSelection {
-      anchor: inserted_end,
-      head: inserted_end,
-    };
-    self.undo_stack.push(EditRecord {
-      before_selection,
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::InsertRichFragment {
-        offset,
-        inserted_end,
-        fragment: fragment.clone(),
-      }],
-      canonical_operations: canonical_insert_text_operations(paragraph_id, offset.byte, paragraph),
-    });
-    self.redo_stack.clear();
-    self.layout_invalidation_hint = Some(offset.paragraph..offset.paragraph + 1);
-    self.after_text_mutation(cx);
-    self.mark_document_changed_with_reconcile(after_generation, false, cx);
+  /// Rich-fragment paste (the JSON-metadata clipboard path), Loro-first: the
+  /// fragment's paragraphs + objects convert to `FragmentBlock`s in order and
+  /// commit as ONE `InsertRichFragment` intent (a lone object commits as the
+  /// precise `InsertObject` intent instead). Caret placement comes from the
+  /// commit's `selection_after`, never from editor arithmetic.
+  pub fn insert_rich_fragment_paste_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+    if self.selected_block.is_some() {
+      return false;
+    }
+    self.write_clipboard_fragment_at_caret(fragment, cx)
+  }
+
+  /// Convert a clipboard fragment into intent vocabulary and commit it through
+  /// the write authority. Empty fragments are a handled no-op (true) rather
+  /// than an `EmptyIntent` round-trip through the authority.
+  pub(super) fn write_clipboard_fragment_at_caret(&mut self, fragment: &RichClipboardFragment, cx: &mut Context<Self>) -> bool {
+    let blocks = fragment_blocks_from_clipboard(fragment);
+    if clipboard_fragment_is_empty(&blocks) {
+      return true;
+    }
+    self.adopt_clipboard_assets(&fragment.assets);
+    if let [FragmentBlock::Object(block)] = blocks.as_slice() {
+      let block = block.clone();
+      self.write_object_block_replacing_selection(block, cx);
+      return true;
+    }
+    self.write_insert_rich_fragment_at_caret(blocks, cx);
     true
   }
 
@@ -145,9 +164,10 @@ impl RichTextEditor {
 
   fn insert_paragraphs_into_selected_table_cell(&mut self, paragraphs: &[InputParagraph], cx: &mut Context<Self>) -> bool {
     let Some(BlockSelection::TableCell {
-      block_ix: _,
+      block_ix,
       row_ix,
       cell_ix,
+      ..
     }) = self.selected_block
     else {
       return false;
@@ -158,14 +178,7 @@ impl RichTextEditor {
     let current_paragraph_ix = self.table_cell_block_ix;
     let caret = self.table_cell_caret;
     let mut new_caret = None;
-    self.edit_selected_table(cx, |table| {
-      let Some(cell) = table
-        .rows
-        .get_mut(row_ix)
-        .and_then(|row| row.cells.get_mut(cell_ix))
-      else {
-        return;
-      };
+    self.edit_table_cell(block_ix, row_ix, cell_ix, cx, |cell| {
       new_caret = insert_table_cell_paragraphs_at(cell, current_paragraph_ix, caret, paragraphs);
     });
     if let Some((paragraph_ix, byte)) = new_caret {
@@ -233,7 +246,7 @@ impl RichTextEditor {
   }
 
   fn selected_table_cell(&self) -> Option<&TableCell> {
-    let BlockSelection::TableCell { block_ix, row_ix, cell_ix } = self.selected_block? else {
+    let BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. } = self.selected_block? else {
       return None;
     };
     let Block::Table(table) = self.document.blocks.get(block_ix)? else {
@@ -257,12 +270,11 @@ impl RichTextEditor {
   }
 
   fn clear_selected_table_cell(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     self.edit_table_cell_paragraph(block_ix, row_ix, cell_ix, cx, |paragraph| {
       paragraph.text.clear();
-      paragraph.paragraph.byte_range = 0..0;
       paragraph.paragraph.runs.clear();
       paragraph.paragraph.version = paragraph.paragraph.version.wrapping_add(1);
     });
@@ -270,7 +282,7 @@ impl RichTextEditor {
   }
 
   fn move_selected_table_cell(&mut self, forward: bool, cx: &mut Context<Self>) -> bool {
-    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block else {
+    let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block else {
       return false;
     };
     let Some(Block::Table(table)) = self.document.blocks.get(block_ix) else {
@@ -292,7 +304,14 @@ impl RichTextEditor {
     let Some(&(row_ix, cell_ix)) = positions.get(next) else {
       return false;
     };
-    self.selected_block = Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix });
+    let (row_id, column_id) = table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix);
+    self.selected_block = Some(BlockSelection::TableCell {
+      block_ix,
+      row_ix,
+      cell_ix,
+      row_id,
+      column_id,
+    });
     self.table_cell_block_ix = 0;
     self.table_cell_caret = self
       .selected_table_cell_text()
@@ -302,4 +321,38 @@ impl RichTextEditor {
     true
   }
 
+}
+
+/// Order-preserving conversion of a clipboard fragment into the intent
+/// vocabulary: block-shaped fragments already carry paragraphs and objects in
+/// document order; paragraph-only fragments are just paragraphs.
+fn fragment_blocks_from_clipboard(fragment: &RichClipboardFragment) -> Vec<FragmentBlock> {
+  if fragment.blocks.is_empty() {
+    fragment
+      .paragraphs
+      .iter()
+      .cloned()
+      .map(FragmentBlock::Paragraph)
+      .collect()
+  } else {
+    fragment
+      .blocks
+      .iter()
+      .map(|block| match block {
+        InputBlock::Paragraph(paragraph) => FragmentBlock::Paragraph(paragraph.clone()),
+        block => FragmentBlock::Object(block.clone()),
+      })
+      .collect()
+  }
+}
+
+/// True when the fragment would insert nothing: no blocks, or exactly one
+/// paragraph with no text. Multiple empty paragraphs still insert paragraph
+/// boundaries and are NOT empty.
+fn clipboard_fragment_is_empty(blocks: &[FragmentBlock]) -> bool {
+  match blocks {
+    [] => true,
+    [FragmentBlock::Paragraph(paragraph)] => paragraph.runs.iter().all(|run| run.text.is_empty()),
+    _ => false,
+  }
 }

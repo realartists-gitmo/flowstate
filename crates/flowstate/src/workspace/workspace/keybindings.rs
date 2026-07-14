@@ -101,6 +101,18 @@ impl Workspace {
         self.close_active_document(window, cx);
         true
       },
+      CommandId::ShareDocument => {
+        self.open_collaboration_dialog(window, cx);
+        true
+      },
+      CommandId::JoinSession => {
+        self.open_join_collaboration_dialog(window, cx);
+        true
+      },
+      CommandId::StartCollaboration => self.start_collaboration_on_active_document(cx).is_some(),
+      CommandId::CopyCollaborationTicket => self.copy_active_collaboration_ticket(window, cx),
+      CommandId::JoinCollaborationFromClipboard => self.join_collaboration_from_clipboard(window, cx),
+      CommandId::LeaveCollaboration => self.confirm_leave_collaboration_on_active_document(window, cx),
       CommandId::FindInDocument => self.open_active_document_search_bar(window, cx),
       CommandId::ZoomIn => {
         if let Some(editor) = self.active_editor.clone() {
@@ -240,6 +252,10 @@ impl Workspace {
     self.open_active_document_search_bar(window, cx);
   }
 
+  fn on_fidelity_mark(&mut self, _: &crate::commands::FidelityMarkAction, _window: &mut Window, _cx: &mut Context<Self>) {
+    flowstate_fidelity::marker("keybinding");
+  }
+
   fn open_active_document_search_bar(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
     let Some(active_document_id) = self.active_document_id else {
       return false;
@@ -263,7 +279,10 @@ impl Workspace {
   }
 
   fn non_document_keybinding_surface_is_open(&self) -> bool {
-    self.settings_overlay.is_some() || self.file_search_overlay.is_some()
+    self.settings_overlay.is_some()
+      || self.file_search_overlay.is_some()
+      || self.collaboration_dialog.is_some()
+      || self.revision_dialog.is_some()
   }
 
   fn focused_workspace_input_is_focused(&self, window: &Window, cx: &App) -> bool {
@@ -281,6 +300,14 @@ impl Workspace {
         .file_search_overlay
         .as_ref()
         .is_some_and(|overlay| overlay.read(cx).focus_handle(cx).is_focused(window))
+      || self
+        .collaboration_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.read(cx).focus_handle(cx).is_focused(window))
+      || self
+        .revision_dialog
+        .as_ref()
+        .is_some_and(|dialog| dialog.read(cx).focus_handle(cx).is_focused(window))
       || self
         .document_panels
         .iter()

@@ -145,8 +145,8 @@ impl Render for RichTextEditor {
                   .clone()
                   .map(|preview| render_drop_preview(preview, editor.invisibility_mode, cx).into_any_element())
                   .unwrap_or_else(|| EmptyVirtualItemElement.into_any_element()),
-                RenderVirtualItem::Document(VirtualItem::HiddenBlock { .. }) => EmptyVirtualItemElement.into_any_element(),
-                RenderVirtualItem::Document(VirtualItem::ParagraphChunk {
+                RenderVirtualItem::DocumentProjection(VirtualItem::HiddenBlock { .. }) => EmptyVirtualItemElement.into_any_element(),
+                RenderVirtualItem::DocumentProjection(VirtualItem::ParagraphChunk {
                   paragraph_ix,
                   chunk_ix,
                   ..
@@ -159,7 +159,7 @@ impl Render for RichTextEditor {
                   layout: WordElementLayout::default(),
                 }
                 .into_any_element(),
-                RenderVirtualItem::Document(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
+                RenderVirtualItem::DocumentProjection(VirtualItem::ParagraphRemainder { paragraph_ix, .. }) => {
                   let width = editor.current_layout_width();
                   let chunk_ix = editor.materialize_paragraph_remainder_for_render(paragraph_ix, width, window, cx);
                   if let Some(chunk_ix) = chunk_ix {
@@ -176,7 +176,7 @@ impl Render for RichTextEditor {
                     EmptyVirtualItemElement.into_any_element()
                   }
                 },
-                RenderVirtualItem::Document(VirtualItem::StructuralBlock { block_ix }) => {
+                RenderVirtualItem::DocumentProjection(VirtualItem::StructuralBlock { block_ix }) => {
                 let editor_entity = cx.entity();
                 let selection = match editor.document.blocks.get(block_ix) {
                   Some(Block::Image(_)) => Some(BlockSelection::Image(block_ix)),

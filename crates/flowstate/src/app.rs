@@ -17,7 +17,7 @@ use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable as _, StyledExt a
 use crate::app_settings::{load_app_settings, load_keymap};
 use crate::commands::register_keymap;
 use crate::rich_text_element::{
-  Document, DocumentExportAdapter, DocumentExportFormat, RichTextEditor, demo_document, set_document_export_adapter, write_db8,
+  DocumentExportAdapter, DocumentExportFormat, DocumentProjection, RichTextEditor, demo_document, set_document_export_adapter,
 };
 use crate::workspace::open_workspace_window;
 
@@ -38,7 +38,7 @@ pub struct RichTextEditorView {
 #[hotpath::measure_all]
 impl RichTextEditorView {
   /// Create a new editor entity from a loaded document.
-  pub fn new(document: Document, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
+  pub fn new(document: DocumentProjection, document_path: Option<PathBuf>, cx: &mut Context<Self>) -> Self {
     let editor = cx.new(|cx| RichTextEditor::new_with_path(document, document_path, cx));
     Self { editor }
   }
@@ -72,6 +72,9 @@ impl Render for RichTextEditorView {
 #[hotpath::measure]
 pub fn register_rich_text_editor_keybindings(cx: &mut App) {
   register_keymap(cx, &load_keymap());
+  // Global fidelity marker: stamps "the bug is happening now" + the recent event
+  // ring into the diagnostics stream. No-op unless FLOWSTATE_TRACE_FIDELITY is on.
+  cx.bind_keys([KeyBinding::new("ctrl-alt-m", crate::commands::FidelityMarkAction, None)]);
 }
 
 #[hotpath::measure]
@@ -286,13 +289,15 @@ impl Focusable for FlowPromptRenderer {
 /// can call the same maintenance path as the standalone binary.
 #[hotpath::measure]
 pub fn write_demo_document() -> anyhow::Result<()> {
-  write_db8("data/demo.db8", &demo_document())?;
+  let document = demo_document();
+  let mut runtime = flowstate_collab::crdt_runtime::CrdtRuntime::from_document_projection(&document, "Flowstate Demo")?;
+  let _ = runtime.checkpoint_package("Flowstate Demo", Some("data/demo.db8".into()))?;
   Ok(())
 }
 
-struct FlowstateDocumentExportAdapter;
+struct FlowstateFlowtextAdapter;
 
-impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
+impl DocumentExportAdapter for FlowstateFlowtextAdapter {
   fn send_output_directory(&self, source_path: Option<&Path>, recovery_path: Option<&Path>) -> Option<PathBuf> {
     if crate::app_settings::load_send_to_document_directory() {
       source_path
@@ -304,36 +309,92 @@ impl DocumentExportAdapter for FlowstateDocumentExportAdapter {
     }
   }
 
-  fn write_document_export(&self, output_path: &Path, document: &Document, format: DocumentExportFormat) -> io::Result<()> {
+  fn write_document_export(&self, output_path: &Path, document: &DocumentProjection, format: DocumentExportFormat) -> io::Result<()> {
     match format {
-      DocumentExportFormat::Native => write_db8(output_path, document),
-      DocumentExportFormat::NativeWithExtension(_) => write_db8(output_path, document),
+      DocumentExportFormat::Native | DocumentExportFormat::NativeWithExtension(_) | DocumentExportFormat::Pdf => Err(io::Error::new(
+        io::ErrorKind::Unsupported,
+        "native Flowstate and PDF source export require the document CRDT runtime",
+      )),
       DocumentExportFormat::Docx => crate::docx_conversion::write_docx(output_path, document),
-      DocumentExportFormat::Pdf => crate::docx_conversion::write_pdf(output_path, document),
     }
   }
 }
 
 #[hotpath::measure]
 fn install_flowtext_adapters() {
-  let _ = set_document_export_adapter(Arc::new(FlowstateDocumentExportAdapter));
+  let adapter = Arc::new(FlowstateFlowtextAdapter);
+  let _ = set_document_export_adapter(adapter);
 }
 
 /// Run the rich text processor by itself for focused component development.
 #[hotpath::measure]
-pub fn run_standalone(document_path: Option<PathBuf>) {
-  Application::new()
-    .with_assets(AppAssets)
-    .run(|cx: &mut App| {
-      gpui_component::init(cx);
-      init_theme_registry(cx);
-      apply_saved_theme(cx);
-      register_rich_text_editor_keybindings(cx);
-      install_prompt_renderer(cx);
-      install_flowtext_adapters();
-      open_workspace_window(document_path, cx);
-      cx.activate(true);
-    });
+pub fn run_standalone(mut document_path: Option<PathBuf>) {
+  let initial_invite = document_path
+    .as_ref()
+    .filter(|path| {
+      path
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("flowinvite"))
+    })
+    .and_then(|path| std::fs::read_to_string(path).ok());
+  if initial_invite.is_some() {
+    document_path = None;
+  }
+  let (open_url_tx, open_url_rx) = async_channel::unbounded();
+  let initial_url_tx = open_url_tx.clone();
+  let application = Application::new().with_assets(AppAssets);
+  application.on_open_urls(move |urls| {
+    for url in urls {
+      let _ = open_url_tx.try_send(url);
+    }
+  });
+  application.run(move |cx: &mut App| {
+    gpui_component::init(cx);
+    init_theme_registry(cx);
+    apply_saved_theme(cx);
+    register_rich_text_editor_keybindings(cx);
+    install_prompt_renderer(cx);
+    install_flowtext_adapters();
+    let workspace = open_workspace_window(document_path, cx);
+    if let Some(invite) = initial_invite {
+      let _ = initial_url_tx.try_send(invite);
+    }
+    cx.spawn(async move |cx| {
+      while let Ok(url) = open_url_rx.recv().await {
+        let handled = cx
+          .update(|cx| crate::collab::dropbox_oauth::route_callback(&url, cx))
+          .unwrap_or(false);
+        if handled {
+          continue;
+        }
+        let result = flowstate_collab::ticket::SessionTicket::decode_text(&url);
+        let _ = cx.update(|cx| {
+          let Some(window_handle) = cx.active_window() else {
+            tracing::warn!("received collaboration deep link without an active window");
+            return;
+          };
+          let _ = window_handle.update(cx, |_, window, cx| match result {
+            Ok(ticket) => {
+              let _ = workspace.update(cx, |workspace, cx| workspace.join_collaboration_session(ticket, window, cx));
+              cx.activate(true);
+            },
+            Err(error) => {
+              let detail = format!("This Flowstate collaboration link is invalid or damaged: {error}");
+              std::mem::drop(window.prompt(
+                PromptLevel::Critical,
+                "Invite couldn't be opened",
+                Some(&detail),
+                &[PromptButton::ok("Ok")],
+                cx,
+              ));
+            },
+          });
+        });
+      }
+    })
+    .detach();
+    cx.activate(true);
+  });
 }
 
 struct AppAssets;
@@ -375,6 +436,11 @@ impl AssetSource for AppAssets {
       "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
       "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
       "icons/text-search.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-search.svg")))),
+      "logo/flowstate-app-icon.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon.svg")))),
+      "logo/flowstate-app-icon-light.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon-light.svg")))),
+      "logo/flowstate-mark.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark.svg")))),
+      "logo/flowstate-mark-white.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-white.svg")))),
+      "logo/flowstate-mark-black.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark-black.svg")))),
       _ => gpui_component_assets::Assets.load(path),
     }
   }
@@ -480,6 +546,21 @@ impl AssetSource for AppAssets {
     }
     if "icons/text-search.svg".starts_with(path) {
       assets.push("icons/text-search.svg".into());
+    }
+    if "logo/flowstate-app-icon.svg".starts_with(path) {
+      assets.push("logo/flowstate-app-icon.svg".into());
+    }
+    if "logo/flowstate-app-icon-light.svg".starts_with(path) {
+      assets.push("logo/flowstate-app-icon-light.svg".into());
+    }
+    if "logo/flowstate-mark.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark.svg".into());
+    }
+    if "logo/flowstate-mark-white.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark-white.svg".into());
+    }
+    if "logo/flowstate-mark-black.svg".starts_with(path) {
+      assets.push("logo/flowstate-mark-black.svg".into());
     }
     Ok(assets)
   }

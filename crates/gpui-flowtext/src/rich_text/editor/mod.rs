@@ -1,10 +1,12 @@
 use std::{
   collections::{VecDeque, hash_map::DefaultHasher},
   fs,
+  future::Future,
   hash::{Hash, Hasher},
   io,
   ops::Range,
   path::{Path, PathBuf},
+  pin::Pin,
   rc::Rc,
   sync::{Arc, Mutex, OnceLock},
   time::{Duration, Instant},
@@ -12,15 +14,15 @@ use std::{
 
 use crop::Rope;
 use gpui::{
-  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, ExternalPaths, FocusHandle, Focusable, Image,
-  ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PathPromptOptions,
-  Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, Window, actions, div, img, point, prelude::*, px, relative, rgb, size,
+  App, Bounds, ClipboardEntry, ClipboardItem, Context, CursorStyle, DragMoveEvent, Entity, EntityInputHandler, ExternalPaths, FocusHandle,
+  Focusable, Image, ImageFormat, InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+  PathPromptOptions, Pixels, Point, Render, SharedString, Size, Subscription, Task, Timer, UTF16Selection, Window, actions, div, img, point,
+  prelude::*, px, relative, rgb, size,
 };
 use gpui_component::ActiveTheme as _;
 use gpui_component::scroll::{Scrollbar, ScrollbarHandle, ScrollbarShow};
 use gpui_component::{VirtualListScrollHandle, v_virtual_list};
 use rustc_hash::{FxHashMap, FxHashSet};
-use unicode_segmentation::UnicodeSegmentation;
 
 use super::*;
 
@@ -28,7 +30,9 @@ const DISABLE_SCROLL_LIMITING_FUNCTIONS: bool = true; // cfg!(target_os = "linux
 const SCROLL_FOREGROUND_OVERSCAN_PX: f32 = 384.0;
 const SCROLL_FOREGROUND_MATERIALIZE_BUDGET_MS: u64 = 8;
 const SCROLL_FOREGROUND_MAX_CHUNK_LINES: usize = 96;
-const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(150);
+const TYPING_PREFETCH_SUPPRESSION_WINDOW: Duration = Duration::from_millis(500);
+const RECOVERY_WRITE_DEBOUNCE: Duration = Duration::from_millis(750);
+const RECOVERY_TYPING_IDLE_WINDOW: Duration = Duration::from_secs(2);
 const OFFSCREEN_LAYOUT_CACHE_OVERSCAN_PARAGRAPHS: usize = 24;
 const OFFSCREEN_PREP_CACHE_OVERSCAN_PARAGRAPHS: usize = 160;
 
@@ -156,17 +160,96 @@ impl Render for ToolkitTextDrag {
   }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// Editor selection (§16).
+///
+/// `anchor`/`head` remain plain [`DocumentOffset`]s so all existing
+/// position/range math keeps working unchanged. Each endpoint additionally
+/// carries an explicit [`SelectionAffinity`] and [`VisualGravity`] describing
+/// the user's intent. These are a genuine, stored part of the selection — the
+/// collaboration runtime reads them directly instead of re-deriving a side from
+/// selection direction.
+///
+/// Construct selections through the helpers below ([`EditorSelection::collapsed`],
+/// [`EditorSelection::range`], [`EditorSelection::moved`]) rather than struct
+/// literals so the affinity/gravity fields are always populated; all default to
+/// neutral.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct EditorSelection {
   pub anchor: DocumentOffset,
   pub head: DocumentOffset,
+  /// Affinity of the fixed (anchor) endpoint.
+  pub anchor_affinity: SelectionAffinity,
+  /// Affinity of the moving (head) endpoint. This is the side the caret sits on
+  /// for a collapsed selection.
+  pub head_affinity: SelectionAffinity,
+  /// Visual gravity of the fixed (anchor) endpoint at a soft-wrap seam.
+  pub anchor_gravity: VisualGravity,
+  /// Visual gravity of the moving (head) endpoint at a soft-wrap seam. This is
+  /// the gravity consumed when painting a collapsed caret.
+  pub head_gravity: VisualGravity,
 }
 
 #[hotpath::measure_all]
 impl EditorSelection {
   fn caret() -> Self {
-    let zero = DocumentOffset::default();
-    Self { anchor: zero, head: zero }
+    Self::default()
+  }
+
+  /// Collapsed caret at `offset` with neutral affinity/gravity.
+  #[must_use]
+  pub fn collapsed(offset: DocumentOffset) -> Self {
+    Self {
+      anchor: offset,
+      head: offset,
+      ..Self::default()
+    }
+  }
+
+  /// Collapsed caret at `offset` carrying an explicit affinity/gravity. Used by
+  /// boundary navigation (objects, line edges) where the side/gravity matters
+  /// even though the selection is collapsed.
+  #[must_use]
+  pub fn collapsed_with(offset: DocumentOffset, affinity: SelectionAffinity, gravity: VisualGravity) -> Self {
+    Self {
+      anchor: offset,
+      head: offset,
+      anchor_affinity: affinity,
+      head_affinity: affinity,
+      anchor_gravity: gravity,
+      head_gravity: gravity,
+    }
+  }
+
+  /// Range selection from `anchor` to `head` with neutral affinity/gravity on
+  /// both endpoints.
+  #[must_use]
+  pub fn range(anchor: DocumentOffset, head: DocumentOffset) -> Self {
+    Self {
+      anchor,
+      head,
+      ..Self::default()
+    }
+  }
+
+  /// Apply a caret motion: move `head` to `new_head` carrying the supplied
+  /// affinity/gravity. When `extend` is set the anchor (and its intent) is
+  /// preserved, producing/continuing a range; otherwise the selection collapses
+  /// onto the new head and the anchor mirrors the head's intent. This preserves
+  /// the moving endpoint's affinity across selection extension (§16).
+  #[must_use]
+  pub(super) fn moved(&self, new_head: DocumentOffset, head_affinity: SelectionAffinity, head_gravity: VisualGravity, extend: bool) -> Self {
+    if extend {
+      Self {
+        anchor: self.anchor,
+        head: new_head,
+        anchor_affinity: self.anchor_affinity,
+        head_affinity,
+        anchor_gravity: self.anchor_gravity,
+        head_gravity,
+      }
+    } else {
+      Self::collapsed_with(new_head, head_affinity, head_gravity)
+    }
   }
 
   pub(super) fn normalized(&self) -> Range<DocumentOffset> {
@@ -175,6 +258,13 @@ impl EditorSelection {
 
   pub fn is_caret(&self) -> bool {
     self.anchor == self.head
+  }
+
+  /// Whether two selections occupy the same anchor/head offsets, ignoring
+  /// affinity/gravity. Used by directional movement to detect a true positional
+  /// no-op (preserving the historical offset-based early-return behavior).
+  pub(super) fn same_positions(&self, other: &Self) -> bool {
+    self.anchor == other.anchor && self.head == other.head
   }
 }
 
@@ -192,138 +282,8 @@ impl CollaborationRole {
   }
 }
 
-struct EditRecord {
-  before_selection: EditorSelection,
-  before_generation: u64,
-  after_selection: EditorSelection,
-  after_generation: u64,
-  operations: Vec<EditOperation>,
-  canonical_operations: Vec<CanonicalOperation>,
-}
-
-#[derive(Clone, Debug)]
-pub(super) enum EditOperation {
-  InsertText {
-    paragraph: usize,
-    byte: usize,
-    text: String,
-    styles: RunStyles,
-  },
-  ReplaceParagraphSpan {
-    before: DocumentSpan,
-    after: DocumentSpan,
-  },
-  InsertRichFragment {
-    offset: DocumentOffset,
-    inserted_end: DocumentOffset,
-    fragment: RichClipboardFragment,
-  },
-  DeleteBlock {
-    block_ix: usize,
-    block: Block,
-  },
-  #[allow(dead_code, reason = "IME state accessor is retained for platform input diagnostics.")]
-  InsertBlocks {
-    block_ix: usize,
-    blocks: Vec<Block>,
-  },
-  ReplaceBlock {
-    block_ix: usize,
-    before: Block,
-    after: Block,
-  },
-  ReplaceDocument {
-    before: Box<Document>,
-    after: Box<Document>,
-  },
-  MoveRichText {
-    source_range: Range<DocumentOffset>,
-    adjusted_drop: DocumentOffset,
-    inserted_range: Range<DocumentOffset>,
-    fragment: RichClipboardFragment,
-  },
-}
-
-#[hotpath::measure_all]
-impl EditOperation {
-  pub(super) fn undo(&self, document: &mut Document) {
-    match self {
-      Self::InsertText { paragraph, byte, text, .. } => {
-        delete_range_in_paragraph(document, *paragraph, *byte..*byte + text.len());
-      },
-      Self::ReplaceParagraphSpan { before, after } => apply_document_span_replacement(document, after, before),
-      Self::InsertRichFragment { offset, inserted_end, .. } => delete_cross_paragraph_range(document, *offset..*inserted_end),
-      Self::DeleteBlock { block_ix, block } => {
-        let insert_ix = (*block_ix).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).insert(insert_ix, block.clone());
-      },
-      Self::InsertBlocks { block_ix, blocks } => {
-        let end = (*block_ix + blocks.len()).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).drain(*block_ix..end);
-      },
-      Self::ReplaceBlock { block_ix, before, .. } => {
-        if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(*block_ix) {
-          *block = before.clone();
-        }
-      },
-      Self::ReplaceDocument { before, .. } => {
-        *document = before.as_ref().clone();
-      },
-      Self::MoveRichText {
-        source_range,
-        inserted_range,
-        fragment,
-        ..
-      } => {
-        delete_cross_paragraph_range(document, inserted_range.clone());
-        insert_rich_fragment_at(document, source_range.start, fragment);
-      },
-    }
-  }
-
-  pub(super) fn redo(&self, document: &mut Document) {
-    match self {
-      Self::InsertText {
-        paragraph,
-        byte,
-        text,
-        styles,
-      } => {
-        insert_text_at(document, *paragraph, *byte, text, *styles);
-      },
-      Self::ReplaceParagraphSpan { before, after } => apply_document_span_replacement(document, before, after),
-      Self::InsertRichFragment { offset, fragment, .. } => {
-        insert_rich_fragment_at(document, *offset, fragment);
-      },
-      Self::DeleteBlock { block_ix, .. } => {
-        if !matches!(document.blocks.get(*block_ix), Some(Block::Paragraph(_))) {
-          Arc::make_mut(&mut document.blocks).remove(*block_ix);
-        }
-      },
-      Self::InsertBlocks { block_ix, blocks } => {
-        let insert_ix = (*block_ix).min(document.blocks.len());
-        Arc::make_mut(&mut document.blocks).splice(insert_ix..insert_ix, blocks.clone());
-      },
-      Self::ReplaceBlock { block_ix, after, .. } => {
-        if let Some(block) = Arc::make_mut(&mut document.blocks).get_mut(*block_ix) {
-          *block = after.clone();
-        }
-      },
-      Self::ReplaceDocument { after, .. } => {
-        *document = after.as_ref().clone();
-      },
-      Self::MoveRichText {
-        source_range,
-        adjusted_drop,
-        fragment,
-        ..
-      } => {
-        delete_cross_paragraph_range(document, source_range.clone());
-        insert_rich_fragment_at(document, *adjusted_drop, fragment);
-      },
-    }
-  }
-}
+// Loro-first (spec §10, invariant 11): the editor holds NO content history.
+// Undo/redo executes through the write authority's Loro UndoManager.
 
 #[derive(Clone, Debug)]
 pub enum SaveStatus {
@@ -398,11 +358,6 @@ fn point_distance_squared(a: Point<Pixels>, b: Point<Pixels>) -> f32 {
 }
 
 #[hotpath::measure]
-fn is_single_grapheme_text_insert(text: &str) -> bool {
-  !text.is_empty() && !text.contains('\n') && !text.contains(SOFT_LINE_BREAK) && text.graphemes(true).take(2).count() == 1
-}
-
-#[hotpath::measure]
 pub(super) fn adjust_drop_after_source_delete(drop: DocumentOffset, source: Range<DocumentOffset>) -> DocumentOffset {
   if drop <= source.start {
     return drop;
@@ -452,6 +407,7 @@ pub struct RichTextEditorConfig {
   pub flow_cell_surface: bool,
   pub show_section_collapse_controls: bool,
   pub caret_color: Option<gpui::Hsla>,
+  pub show_own_collaboration_caret_color: bool,
 }
 
 #[hotpath::measure_all]
@@ -463,6 +419,7 @@ impl Default for RichTextEditorConfig {
       flow_cell_surface: false,
       show_section_collapse_controls: true,
       caret_color: None,
+      show_own_collaboration_caret_color: true,
     }
   }
 }
@@ -470,14 +427,37 @@ impl Default for RichTextEditorConfig {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ExternalCaret {
   pub offset: DocumentOffset,
+  pub visual_gravity: VisualGravity,
   pub color_rgb: u32,
 }
+
+/// A remote peer's (non-collapsed) selection range, painted behind the text in
+/// that peer's presence color. The head caret is carried separately as an
+/// [`ExternalCaret`]; this is only the highlighted span.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ExternalSelection {
+  pub selection: EditorSelection,
+  pub color_rgb: u32,
+}
+
+// Loro-first: hooks carry NO pending edit batches (nothing is ever pending —
+// intents commit synchronously) and return no replacement projection (the
+// canonical doc is always current; there is nothing to replay).
+pub type NativeSaveHook = Rc<dyn Fn(PathBuf, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+pub type NativeExportHook = Rc<dyn Fn(PathBuf, DocumentExportFormat, Vec<AssetRecord>) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+pub type NativeRecoveryHook = Rc<dyn Fn(PathBuf) -> Pin<Box<dyn Future<Output = io::Result<()>>>>>;
+
 #[derive(Clone)]
-struct ParagraphChunkLayoutCacheEntry {
+pub(super) struct ParagraphChunkLayoutCacheEntry {
   key: ParagraphCacheKey,
+  // §act-nine A9.3: the chunk cache is POSITIONAL (indexed by paragraph_ix),
+  // and the (style, version) `key` alone can collide across DIFFERENT
+  // paragraphs after a row shift. The stable id pins the slot to the paragraph
+  // the chunks were built for — replacing the old global `edit_generation`
+  // check, which nuked every paragraph's chunks on any edit.
+  paragraph_id: ParagraphId,
   width: Pixels,
   invisibility_mode: bool,
-  edit_generation: u64,
   layout_generation: u64,
   prep: Arc<ParagraphPrep>,
   chunks: Vec<ParagraphChunkLayout>,
@@ -515,11 +495,6 @@ impl ParagraphPrepSlot {
     } else {
       self.normal = Some(prep);
     }
-  }
-
-  fn clear(&mut self) {
-    self.normal = None;
-    self.invisible = None;
   }
 }
 
@@ -561,9 +536,17 @@ fn range_within(outer: &Range<usize>, inner: &Range<usize>) -> bool {
 #[derive(Clone, Copy, PartialEq)]
 struct ParagraphEstimateHeightCacheEntry {
   key: ParagraphCacheKey,
+  // §perf-heaven T5: the STABLE paragraph identity for this slot. The estimate
+  // cache is indexed by paragraph_ix, and `key` hashes only (style, version) —
+  // so after an insert/delete a slot can be reused by a different paragraph
+  // that coincidentally shares (style, version). Storing the paragraph id makes
+  // slot reuse a cache MISS instead of a stale-height hit, which lets validity
+  // drop the global `edit_generation` (that over-invalidated EVERY paragraph's
+  // estimate on any edit — the O(document) cold estimate cost). `layout_generation`
+  // still catches theme/zoom changes the per-paragraph key cannot see.
+  paragraph_id: ParagraphId,
   width: Pixels,
   invisibility_mode: bool,
-  edit_generation: u64,
   layout_generation: u64,
   height: Pixels,
   source_len: usize,
@@ -572,7 +555,6 @@ struct ParagraphEstimateHeightCacheEntry {
 #[derive(Clone)]
 struct LayoutPrepRequest {
   width: Pixels,
-  edit_generation: u64,
   invisibility_mode: bool,
   paragraphs: Vec<usize>,
 }
@@ -596,22 +578,41 @@ struct LayoutRuntimeMetrics {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ItemSizeBenchmarkResult {
-  pub(crate) elapsed: Duration,
-  pub(crate) cache_hit: bool,
-  pub(crate) item_count: usize,
-  pub(crate) exact_height_count: usize,
-  pub(crate) total_height: f32,
-  pub(crate) prep_requested: usize,
-  pub(crate) prep_completed: usize,
-  pub(crate) prep_installed: usize,
-  pub(crate) prep_stale: usize,
-  pub(crate) prep_batches: usize,
-  pub(crate) prep_text_bytes: usize,
-  pub(crate) ui_chunk_builds: usize,
-  pub(crate) ui_chunk_build_time: Duration,
-  pub(crate) prefetch_budget_overruns: usize,
-  pub(crate) scroll_budget_overruns: usize,
+pub struct ItemSizeBenchmarkResult {
+  pub elapsed: Duration,
+  pub cache_hit: bool,
+  pub item_count: usize,
+  pub exact_height_count: usize,
+  pub total_height: f32,
+  pub prep_requested: usize,
+  pub prep_completed: usize,
+  pub prep_installed: usize,
+  pub prep_stale: usize,
+  pub prep_batches: usize,
+  pub prep_text_bytes: usize,
+  pub ui_chunk_builds: usize,
+  pub ui_chunk_build_time: Duration,
+  pub prefetch_budget_overruns: usize,
+  pub scroll_budget_overruns: usize,
+}
+
+/// §perf-heaven T5 net: the layout-fidelity oracle for the per-paragraph height
+/// ESTIMATE — the heuristic scroll uses for not-yet-laid-out paragraphs, and the
+/// value a persisted read model would serialize/reload. Layout heights are NOT
+/// covered by the CRDT convergence fuzz or the corpus sweep, so this IS the net:
+/// for every paragraph that has a COMPLETE exact layout, it compares the estimate
+/// to the exact height. A test asserts the estimate never wildly UNDER-shoots
+/// (the dangerous case — scroll jumps up as the real height lands) and stays in a
+/// bounded band, so any change to the estimate (or a persisted estimate that
+/// diverges from a fresh one) trips loudly.
+#[derive(Clone, Debug, Default)]
+pub struct EstimateAccuracy {
+  /// Paragraphs with a complete exact layout that were compared.
+  pub compared: usize,
+  /// Worst estimate/exact - 1 over the compared set (estimate too TALL).
+  pub max_over_ratio: f32,
+  /// Worst 1 - estimate/exact over the compared set (estimate too SHORT).
+  pub max_under_ratio: f32,
 }
 
 #[derive(Clone)]
@@ -675,7 +676,17 @@ pub(super) enum BlockSelection {
   Image(usize),
   Equation(usize),
   Table(usize),
-  TableCell { block_ix: usize, row_ix: usize, cell_ix: usize },
+  /// A selected table cell (§P2b). `row_ix`/`cell_ix` stay for positional access
+  /// by the layout/paint/caret readers, while `row_id`/`column_id` carry the
+  /// durable identity resolved from the id-bearing model at selection time so
+  /// structural emission and replay address the cell by id, not by a stale index.
+  TableCell {
+    block_ix: usize,
+    row_ix: usize,
+    cell_ix: usize,
+    row_id: RowId,
+    column_id: ColumnId,
+  },
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -683,6 +694,8 @@ pub(super) struct TableCellCaret {
   pub(super) block_ix: usize,
   pub(super) row_ix: usize,
   pub(super) cell_ix: usize,
+  pub(super) row_id: RowId,
+  pub(super) column_id: ColumnId,
   pub(super) paragraph_block_ix: usize,
   pub(super) anchor: usize,
   pub(super) byte: usize,
@@ -732,27 +745,31 @@ struct RenderLayoutSnapshot {
 
 #[derive(Clone)]
 enum RenderVirtualItems {
-  Document(Rc<Vec<VirtualItem>>),
+  DocumentProjection(Rc<Vec<VirtualItem>>),
   WithDropPreview(Rc<Vec<RenderVirtualItem>>),
 }
 
 #[derive(Clone)]
 enum RenderVirtualItem {
-  Document(VirtualItem),
+  DocumentProjection(VirtualItem),
   DropPreview,
 }
 
 impl RenderVirtualItems {
   fn get(&self, item_ix: usize) -> Option<RenderVirtualItem> {
     match self {
-      Self::Document(items) => items.get(item_ix).cloned().map(RenderVirtualItem::Document),
+      Self::DocumentProjection(items) => items
+        .get(item_ix)
+        .cloned()
+        .map(RenderVirtualItem::DocumentProjection),
       Self::WithDropPreview(items) => items.get(item_ix).cloned(),
     }
   }
 }
 
 enum RecoveryWriteDecision {
-  Write { generation: u64, document: Box<Document> },
+  Write { generation: u64, document: Box<DocumentProjection> },
+  WriteRuntime { generation: u64, hook: NativeRecoveryHook },
   Rescheduled,
   Idle,
 }
@@ -856,6 +873,21 @@ impl HeightPrefixIndex {
   }
 }
 
+use crate::local_intents::{
+  DeleteRangeIntent, FragmentBlock, InsertObjectIntent, InsertRichFragmentIntent, InsertTextIntent, JoinParagraphsIntent, LocalCommit,
+  LocalIntent, LocalWriteAuthority, LocalWriteOutcome, ProjectionStreamItem, ReplaceMatch, ReplaceMatchesIntent, SetMarksIntent,
+  SetParagraphStyleIntent, SetParagraphStylesIntent, SplitParagraphIntent, TextAnchor, UndoOutcome as LocalUndoOutcome, WriteRejected,
+};
+
+/// §caret-anchor: the local caret encoded as CRDT cursors, captured while the
+/// editor and canonical core are in sync. `selection` is the caret it was
+/// captured for — the fast path is used only while the live caret still equals it.
+struct CaretAnchor {
+  selection: EditorSelection,
+  head_cursor: Vec<u8>,
+  anchor_cursor: Vec<u8>,
+}
+
 pub struct RichTextEditor {
   pub(super) focus_handle: FocusHandle,
   focus_subscriptions: Vec<Subscription>,
@@ -864,8 +896,17 @@ pub struct RichTextEditor {
   document_path: Option<PathBuf>,
   document_display_name: Option<SharedString>,
   recovery_path: Option<PathBuf>,
-  pub(super) document: Document,
+  pub(super) document: DocumentProjection,
+  /// Loro-first: the injected write authority — the ONE local write path
+  /// (spec invariant 5). `None` = read-only display surface.
+  write_authority: Option<std::sync::Arc<dyn LocalWriteAuthority>>,
   pub(super) selection: EditorSelection,
+  /// §caret-anchor FAST path: the selection's CRDT cursors, captured at synced
+  /// moments. When a remote patch arrives while `selection` still equals
+  /// `anchor.selection`, the caret is repositioned by resolving these cursors
+  /// (O(log n)) instead of the O(doc) `fork_at` rebase. `None`/stale ⇒ fallback.
+  caret_anchor: Option<CaretAnchor>,
+  selection_movement_epoch: u64,
   config: RichTextEditorConfig,
   edit_generation: u64,
   saved_generation: u64,
@@ -876,11 +917,13 @@ pub struct RichTextEditor {
   zoom_anchor: Option<ZoomAnchorSnapshot>,
   zoom_anchor_apply_pending: bool,
   save_status: SaveStatus,
-  undo_stack: Vec<EditRecord>,
-  redo_stack: Vec<EditRecord>,
   identity_map: DocumentIdentityMap,
-  last_collaboration_edit: Option<CollaborationEdit>,
+  reconciliation_recoveries: u64,
+  native_save_hook: Option<NativeSaveHook>,
+  native_export_hook: Option<NativeExportHook>,
+  native_recovery_hook: Option<NativeRecoveryHook>,
   collaboration_role: Option<CollaborationRole>,
+  own_collaboration_caret_color_rgb: Option<u32>,
   recovery_write_in_progress: bool,
   recovery_write_pending: bool,
   last_recovery_generation: u64,
@@ -910,15 +953,36 @@ pub struct RichTextEditor {
   pub(super) caret_visible: bool,
   caret_blink_active: bool,
   last_text_input_at: Option<Instant>,
+  ime_marked_range: Option<Range<usize>>,
   external_carets: Vec<ExternalCaret>,
+  external_selections: Vec<ExternalSelection>,
+  /// Durable document annotations (currently unresolved comment anchors).
+  /// Kept separate from peer presence so either layer can refresh without
+  /// erasing the other.
+  annotation_selections: Vec<ExternalSelection>,
   pub(super) search_highlights: Vec<Range<DocumentOffset>>,
   pub(super) active_search_highlight: Option<usize>,
   pending_typing_prefetch_resume: bool,
   resume_chunk_prefetch_after_typing: bool,
   paragraph_chunk_layout_cache: Vec<Option<ParagraphChunkLayoutCacheEntry>>,
-  paragraph_prep_cache: Vec<ParagraphPrepSlot>,
-  paragraph_shaping_cache: Vec<Option<ParagraphShapingCacheEntry>>,
-  paragraph_estimate_height_cache: Vec<Option<ParagraphEstimateHeightCacheEntry>>,
+  // §perf-heaven T8.12: keyed by STABLE `ParagraphId`, not by `paragraph_ix`.
+  // A positional `Vec` had to `resize_with` on every structural edit and left
+  // trailing slots misaligned with the shifted paragraphs; the id-keyed map lets
+  // an unchanged paragraph keep its slot regardless of position. Validity is
+  // gated by the content key (style, version) + id + position inside the slot
+  // (§act-nine A9.3 — no global `edit_generation`), so this is
+  // correctness-neutral. Bounded in `resize_layout_aux_caches` against leaking
+  // entries for deleted paragraphs (same policy as the estimate cache below).
+  paragraph_prep_cache: FxHashMap<ParagraphId, ParagraphPrepSlot>,
+  paragraph_shaping_cache: FxHashMap<ParagraphId, ParagraphShapingCacheEntry>,
+  // §perf-heaven T7.14: keyed by STABLE `ParagraphId`, not by `paragraph_ix`.
+  // A positional `Vec` shifted on any mid-document insert/delete, turning every
+  // trailing paragraph's estimate into a stale-slot MISS → an O(document) tail
+  // recompute on the total-height pass. An id-keyed map lets a shifted paragraph
+  // keep its cached estimate, so a structural edit recomputes only the touched
+  // paragraphs. Bounded against unbounded growth from deletions in
+  // `resize_layout_aux_caches`.
+  paragraph_estimate_height_cache: FxHashMap<ParagraphId, ParagraphEstimateHeightCacheEntry>,
   pending_layout_prep_task: Option<Task<()>>,
   pending_layout_prep_request: Option<LayoutPrepRequest>,
   layout_generation: u64,
@@ -928,9 +992,18 @@ pub struct RichTextEditor {
   chunk_prefetch_queue: VecDeque<usize>,
   paragraph_height_cache: Vec<Option<ParagraphHeightCacheEntry>>,
   paragraph_height_cache_revision: u64,
+  // Convergence backstop for the scroll-materialization render loop. Records the
+  // (rounded scroll-y, edit_generation) of the last render-path materialization
+  // pass and how many consecutive passes ran at that unchanged signature. A large
+  // document whose item-size cache cannot be incrementally patched re-runs a full
+  // O(doc) rebuild + `cx.notify()` every render; if materialization never
+  // "sticks" it loops forever and freezes the window. Any real scroll or edit
+  // changes the signature and resets the count, so this caps ONLY the
+  // pathological non-converging loop.
+  scroll_materialize_signature: Option<(i32, u64)>,
+  scroll_materialize_stall_frames: u32,
   item_sizes_cache: Option<ItemSizesCache>,
   pending_item_sizes_patch_range: Option<Range<usize>>,
-  layout_invalidation_hint: Option<Range<usize>>,
   suppress_mutation_notify: usize,
   last_scroll_anchor: Option<ScrollAnchorSnapshot>,
   scroll_anchor_lock: Option<ScrollAnchorLock>,
@@ -956,7 +1029,11 @@ pub struct RichTextEditor {
   goal_x: Option<Pixels>,
 }
 
+impl gpui::EventEmitter<EditorEvent> for RichTextEditor {}
+
 include!("lifecycle.rs");
+include!("local_write_path.rs");
+include!("projection_apply.rs");
 include!("object_selection.rs");
 include!("style_state.rs");
 include!("search_highlights.rs");
@@ -990,7 +1067,6 @@ include!("traits.rs");
 include!("platform.rs");
 include!("virtual_helpers.rs");
 include!("table_helpers.rs");
-include!("block_helpers.rs");
 include!("render_blocks.rs");
 include!("equation_renderer.rs");
 include!("object_assets.rs");

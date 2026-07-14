@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use flowstate::{
   docx_conversion::{convert_db8_to_docx, convert_db8_to_pdf, convert_docx_to_pdf, convert_pdf_to_db8},
-  run_standalone, write_demo_document,
+  logging, run_standalone, write_demo_document,
 };
 
 struct FlowstateAllocator;
@@ -75,6 +75,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum CliCommand {
+  /// Export recent local logs with invite bearers and home paths redacted.
+  ExportDiagnostics {
+    /// Destination text file.
+    output: PathBuf,
+  },
   /// Convert a DB8 document to DOCX and exit.
   Db8ToDocx {
     /// Input `.db8` document.
@@ -107,6 +112,18 @@ enum CliCommand {
 
 #[hotpath::main(allocator = FlowstateAllocator)]
 fn main() {
+  let _logging_guard = match logging::init() {
+    Ok(guard) => Some(guard),
+    Err(error) => {
+      eprintln!("flowstate logging initialization failed: {error:#}");
+      None
+    },
+  };
+
+  // Enable CRDT/document fidelity diagnostics when FLOWSTATE_TRACE_FIDELITY is
+  // set. Must run after logging init so violation dumps reach the subscriber.
+  flowstate_fidelity::init_from_env();
+
   let cli = Cli::parse();
 
   if cli.write_demo_db8 {
@@ -116,6 +133,9 @@ fn main() {
 
   if let Some(command) = cli.command {
     match command {
+      CliCommand::ExportDiagnostics { output } => {
+        logging::export_redacted_diagnostics(&output).expect("failed to export redacted diagnostics");
+      },
       CliCommand::Db8ToDocx { input, output } => {
         convert_db8_to_docx(input, output).expect("failed to export DOCX");
       },

@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>dev.flowstate.Flowstate</string>
+  <key>CFBundleName</key>
+  <string>Flowstate</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>Flowstate uses Bluetooth to find nearby collaborators you have already verified and allowed for this document.</string>
+  <key>CFBundleURLTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleURLName</key>
+      <string>Flowstate links</string>
+      <key>CFBundleURLSchemes</key>
+      <array><string>flowstate</string></array>
+    </dict>
+  </array>
+  <key>CFBundleDocumentTypes</key>
+  <array>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Flowstate Debate Document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSItemContentTypes</key>
+      <array><string>dev.flowstate.document</string></array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>Flowstate Collaboration Invite</string>
+      <key>CFBundleTypeRole</key>
+      <string>Viewer</string>
+      <key>LSItemContentTypes</key>
+      <array><string>dev.flowstate.invite</string></array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.flowstate.document</string>
+      <key>UTTypeDescription</key>
+      <string>Flowstate Debate Document</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.data</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>db8</string></array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeIdentifier</key>
+      <string>dev.flowstate.invite</string>
+      <key>UTTypeDescription</key>
+      <string>Flowstate Collaboration Invite</string>
+      <key>UTTypeConformsTo</key>
+      <array><string>public.plain-text</string></array>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array><string>flowinvite</string></array>
+      </dict>
+    </dict>
+  </array>
+</dict>
+</plist>

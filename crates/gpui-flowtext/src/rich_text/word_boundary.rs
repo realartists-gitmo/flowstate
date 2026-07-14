@@ -90,7 +90,7 @@ pub(super) fn next_debate_word_boundary_in_paragraph_text(text: &str, byte: usiz
 }
 
 #[hotpath::measure]
-pub(super) fn previous_debate_word_boundary_in_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
+pub(super) fn previous_debate_word_boundary_in_document(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   if document.paragraphs.is_empty() {
     return DocumentOffset::default();
   }
@@ -131,7 +131,7 @@ pub(super) fn previous_debate_word_boundary_in_document(document: &Document, off
 }
 
 #[hotpath::measure]
-pub(super) fn next_debate_word_boundary_in_document(document: &Document, offset: DocumentOffset) -> DocumentOffset {
+pub(super) fn next_debate_word_boundary_in_document(document: &DocumentProjection, offset: DocumentOffset) -> DocumentOffset {
   if document.paragraphs.is_empty() {
     return DocumentOffset::default();
   }
@@ -166,82 +166,73 @@ pub(super) fn next_debate_word_boundary_in_document(document: &Document, offset:
 }
 
 #[hotpath::measure]
-pub(super) fn selection_for_word_at(document: &Document, offset: DocumentOffset) -> EditorSelection {
+pub(super) fn selection_for_word_at(document: &DocumentProjection, offset: DocumentOffset) -> EditorSelection {
   let Some(paragraph) = document.paragraphs.get(offset.paragraph) else {
-    return EditorSelection {
-      anchor: DocumentOffset::default(),
-      head: DocumentOffset::default(),
-    };
+    return EditorSelection::collapsed(DocumentOffset::default());
   };
   let paragraph_len = paragraph_text_len(paragraph);
   if paragraph_len == 0 || offset.byte >= paragraph_len {
     return selection_for_paragraph_at(document, offset.paragraph);
   }
-  EditorSelection {
-    anchor: previous_debate_word_boundary_in_document(document, offset),
-    head: next_debate_word_boundary_in_document(document, offset),
-  }
+  EditorSelection::range(
+    previous_debate_word_boundary_in_document(document, offset),
+    next_debate_word_boundary_in_document(document, offset),
+  )
 }
 
 #[hotpath::measure]
-pub(super) fn selection_for_paragraph_at(document: &Document, paragraph: usize) -> EditorSelection {
+pub(super) fn selection_for_paragraph_at(document: &DocumentProjection, paragraph: usize) -> EditorSelection {
   let paragraph = paragraph.min(document.paragraphs.len().saturating_sub(1));
-  EditorSelection {
-    anchor: DocumentOffset { paragraph, byte: 0 },
-    head: DocumentOffset {
+  EditorSelection::range(
+    DocumentOffset { paragraph, byte: 0 },
+    DocumentOffset {
       paragraph,
       byte: paragraph_text_len(&document.paragraphs[paragraph]),
     },
-  }
+  )
 }
 
 #[hotpath::measure]
 pub(super) fn expand_drag_selection(
-  document: &Document,
+  document: &DocumentProjection,
   anchor: DocumentOffset,
   head: DocumentOffset,
   granularity: SelectionGranularity,
 ) -> EditorSelection {
   match granularity {
-    SelectionGranularity::Character => EditorSelection { anchor, head },
+    SelectionGranularity::Character => EditorSelection::range(anchor, head),
     SelectionGranularity::Word => {
       let anchor_range = selection_for_word_at(document, anchor).normalized();
       let head_range = selection_for_word_at(document, head).normalized();
       if head < anchor {
-        EditorSelection {
-          anchor: anchor_range.end,
-          head: head_range.start,
-        }
+        EditorSelection::range(anchor_range.end, head_range.start)
       } else {
-        EditorSelection {
-          anchor: anchor_range.start,
-          head: head_range.end,
-        }
+        EditorSelection::range(anchor_range.start, head_range.end)
       }
     },
     SelectionGranularity::Paragraph => {
       if head < anchor {
-        EditorSelection {
-          anchor: DocumentOffset {
+        EditorSelection::range(
+          DocumentOffset {
             paragraph: anchor.paragraph,
             byte: paragraph_text_len(&document.paragraphs[anchor.paragraph]),
           },
-          head: DocumentOffset {
+          DocumentOffset {
             paragraph: head.paragraph,
             byte: 0,
           },
-        }
+        )
       } else {
-        EditorSelection {
-          anchor: DocumentOffset {
+        EditorSelection::range(
+          DocumentOffset {
             paragraph: anchor.paragraph,
             byte: 0,
           },
-          head: DocumentOffset {
+          DocumentOffset {
             paragraph: head.paragraph,
             byte: paragraph_text_len(&document.paragraphs[head.paragraph]),
           },
-        }
+        )
       }
     },
   }
@@ -250,7 +241,7 @@ pub(super) fn expand_drag_selection(
 // Grapheme-cluster-aware step backwards. Handles combining marks and
 // compound emoji correctly, so one keystroke deletes one visible character.
 #[hotpath::measure]
-pub(super) fn prev_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
+pub(super) fn prev_grapheme_boundary_in_paragraph(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> usize {
   if byte == 0 {
     return 0;
   }
@@ -265,7 +256,7 @@ pub(super) fn prev_grapheme_boundary_in_paragraph(document: &Document, paragraph
 }
 
 #[hotpath::measure]
-pub(super) fn next_grapheme_boundary_in_paragraph(document: &Document, paragraph_ix: usize, byte: usize) -> usize {
+pub(super) fn next_grapheme_boundary_in_paragraph(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> usize {
   let paragraph = &document.paragraphs[paragraph_ix];
   let len = paragraph_text_len(paragraph);
   if byte >= len {
@@ -279,7 +270,7 @@ pub(super) fn next_grapheme_boundary_in_paragraph(document: &Document, paragraph
 }
 
 #[hotpath::measure]
-fn paragraph_byte_at(document: &Document, paragraph_ix: usize, byte: usize) -> Option<u8> {
+fn paragraph_byte_at(document: &DocumentProjection, paragraph_ix: usize, byte: usize) -> Option<u8> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
   (byte < paragraph_text_len(paragraph)).then(|| {
     document

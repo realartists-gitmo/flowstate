@@ -1,3 +1,6 @@
+mod omml;
+mod structured;
+
 use std::{io, path::Path};
 
 use quick_xml::{
@@ -13,8 +16,20 @@ use rustc_hash::{FxHashMap, FxHashSet};
 
 use super::cleaner::{CleanedDocx, DocxCleanReport, clean_docx_path};
 use flowstate_document::{
-  Document, DocumentParagraphInput, DocumentRunInput, DocumentTheme, ParagraphStyle, RunSemanticStyle, RunStyles, document_from_paragraphs,
+  DocumentParagraphInput, DocumentProjection, DocumentRunInput, ImportedLoroDocument, ParagraphStyle, RunSemanticStyle, RunStyles,
+  SOFT_LINE_BREAK_STR, VertAlign, document_from_input_blocks, document_from_paragraphs, flowstate_document_theme, import_document_projection,
 };
+
+/// Map an OOXML `w:vertAlign` value (`superscript` / `subscript` / `baseline`)
+/// to the model's [`VertAlign`]. Unknown/absent ⇒ `Baseline`.
+fn vert_align_from_ooxml(value: Option<&str>) -> VertAlign {
+  match value {
+    Some("superscript") => VertAlign::Superscript,
+    Some("subscript") => VertAlign::Subscript,
+    _ => VertAlign::Baseline,
+  }
+}
+use flowstate_fidelity::FidelityClass;
 
 pub const RECOGNITION_RULES: &[RecognitionRule] = &[
   RecognitionRule::ParagraphStyle {
@@ -83,35 +98,243 @@ pub struct DocxConversionReport {
   pub recognition_rules: &'static [RecognitionRule],
   pub paragraphs_imported: usize,
   pub runs_imported: usize,
+  pub tables_imported: usize,
+  pub images_imported: usize,
+  pub equations_imported: usize,
   pub unknown_paragraph_styles: Vec<String>,
   pub unknown_run_styles: Vec<String>,
 }
 
 #[hotpath::measure]
-pub fn convert_docx_to_document(path: impl AsRef<Path>) -> io::Result<(Document, DocxConversionReport)> {
+pub fn convert_docx_to_document(path: impl AsRef<Path>) -> io::Result<(DocumentProjection, DocxConversionReport)> {
   let cleaned = clean_docx_path(path)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
 #[hotpath::measure]
-pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(Document, DocxConversionReport)> {
+pub fn convert_docx_bytes_to_document(bytes: &[u8]) -> io::Result<(DocumentProjection, DocxConversionReport)> {
   let cleaned = super::cleaner::clean_docx_bytes(bytes)?;
   convert_cleaned_docx_to_document(cleaned)
 }
 
 #[hotpath::measure]
-pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Document, DocxConversionReport)> {
-  let CleanedDocx {
-    bytes,
-    main_document_xml,
-    report: clean_report,
-  } = cleaned;
-  let docx = RDocxDocument::from_bytes(&bytes).map_err(rdocx_error)?;
-  let direct_properties = match main_document_xml.as_deref() {
-    Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml)?,
-    None => direct_properties_by_paragraph_package(&bytes)?,
+pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
+  let interpreted = interpret_cleaned_docx(&cleaned)?;
+  build_structured_document(&cleaned, interpreted)
+}
+
+/// Walks the cleaned DOCX body into the structured block model (paragraphs,
+/// tables, images, equations) and folds the object counts into the report. When
+/// the body has no tables/images/equations the structured walk is discarded and
+/// the flat paragraph projection is used, preserving the prior behavior exactly.
+#[hotpath::measure]
+fn build_structured_document(cleaned: &CleanedDocx, interpreted: InterpretedDocx) -> io::Result<(DocumentProjection, DocxConversionReport)> {
+  // §perf: the structured walk (full DOM parse, OPC package open, per-run text
+  // clones) is discarded whenever the body has no tables/images/equations, yet it
+  // ran unconditionally. When the captured main-document XML provably contains
+  // none of those object markers, skip the entire build and take the object-free
+  // path directly — byte-identical to the discard branch below.
+  //
+  // Correctness: the walk recognizes elements by prefix-stripped local name and
+  // detects equations via the `oMath` substring, so scanning the same bytes for
+  // the bare substrings `tbl`/`drawing`/`oMath` can never produce a false
+  // negative (a real object's start tag always contains its local name regardless
+  // of namespace prefix). False positives (the substring appearing in text) only
+  // forgo the optimization and fall through to the identical full build. When no
+  // captured XML is available (`None`), `interpret_structured` would read from the
+  // package, so we conservatively run the full build (`is_some_and` → `false`).
+  let object_free = cleaned.main_document_xml.as_deref().is_some_and(|xml| {
+    memchr::memmem::find(xml, b"tbl").is_none()
+      && memchr::memmem::find(xml, b"drawing").is_none()
+      && memchr::memmem::find(xml, b"oMath").is_none()
+      // §act-eleven C7 (fixture-caught): legacy VML images (`w:pict`) are
+      // objects too — without this probe a VML-ONLY document took the
+      // object-free fast path and its images were never scanned at all.
+      && memchr::memmem::find(xml, b"imagedata").is_none()
+  });
+
+  let (document, report) = if object_free {
+    let mut report = interpreted.report;
+    // Matches the counts a fully-walked object-free body would yield.
+    report.tables_imported = 0;
+    report.images_imported = 0;
+    report.equations_imported = 0;
+    let document = document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs);
+    (document, report)
+  } else {
+    // §act-nine A9.2: the structured walk consumes the CT_Document the
+    // direct-properties pass already parsed instead of building its own owned
+    // XmlNode tree (collapses the third heavy document.xml parse).
+    let structured = structured::interpret_structured(cleaned, &interpreted.document, &interpreted.paragraphs)?;
+    let mut report = interpreted.report;
+    report.tables_imported = structured.tables_imported;
+    report.images_imported = structured.images_imported;
+    report.equations_imported = structured.equations_imported;
+
+    let has_objects = structured.tables_imported + structured.images_imported + structured.equations_imported > 0;
+    let document = if has_objects {
+      let mut document = document_from_input_blocks(flowstate_document_theme(), structured.blocks);
+      for (asset_id, record) in structured.assets {
+        document.assets.assets.insert(asset_id, record);
+      }
+      document
+    } else {
+      document_from_paragraphs(flowstate_document_theme(), interpreted.paragraphs)
+    };
+    (document, report)
   };
-  drop(main_document_xml);
+  // Import/export fidelity: record the shape of the projection produced from the
+  // cleaned DOCX. Shared funnel for both the db8 and Loro import entries.
+  flowstate_fidelity::event(FidelityClass::ImportExport, "import-docx", || {
+    format!(
+      "paragraphs={} runs={} tables={} images={} equations={} sections={}",
+      report.paragraphs_imported,
+      report.runs_imported,
+      report.tables_imported,
+      report.images_imported,
+      report.equations_imported,
+      document.sections.len()
+    )
+  });
+  Ok((document, report))
+}
+
+/// Imports DOCX semantics directly into the canonical Loro document and returns
+/// the frontier-matched initial projection. No package, snapshot, search cache,
+/// or second Loro projection is created on the open path.
+#[hotpath::measure]
+pub fn import_docx_to_loro(path: impl AsRef<Path>, title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let cleaned = clean_docx_path(path)?;
+  import_cleaned_docx_to_loro(cleaned, title)
+}
+
+#[hotpath::measure]
+pub fn import_docx_bytes_to_loro(bytes: &[u8], title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let cleaned = super::cleaner::clean_docx_bytes(bytes)?;
+  import_cleaned_docx_to_loro(cleaned, title)
+}
+
+#[hotpath::measure]
+pub fn import_cleaned_docx_to_loro(cleaned: CleanedDocx, title: &str) -> io::Result<(ImportedLoroDocument, DocxConversionReport)> {
+  let interpreted = interpret_cleaned_docx(&cleaned)?;
+  let (document, report) = build_structured_document(&cleaned, interpreted)?;
+  let imported = import_document_projection(document, title)?;
+  Ok((imported, report))
+}
+
+struct InterpretedDocx {
+  paragraphs: Vec<DocumentParagraphInput>,
+  /// The typed main-document parse harvested for `DirectParagraphFacts`, kept
+  /// alive so the structured object walk can consume it too (§act-nine A9.2).
+  document: CT_Document,
+  report: DocxConversionReport,
+}
+
+/// rdocx's run/paragraph `text()` collapses every `<w:br>` (line, page, and
+/// column alike) to '\n' before the break type is visible here. A docx break is
+/// an INTRA-paragraph line break, while '\n' is the paragraph separator in the
+/// body flow — letting it through fabricates a bare paragraph boundary with no
+/// metadata/block/style record, which full reprojection reports as
+/// `missing_paragraph_*` defects (see `structured::collect_run_text`, the
+/// table-cell counterpart of this mapping). Remap to the model's soft break.
+/// Page/column breaks also becoming soft breaks matches the table-cell path
+/// and is provisional pending a product decision on their semantics. `<w:cr>`
+/// is dropped inside rdocx itself and never reaches this text.
+fn soften_rdocx_breaks(text: String) -> String {
+  // U+FFFC (OBJECT_REPLACEMENT) is a RESERVED body-flow encoding sentinel: the
+  // projector treats every U+FFFC as an object placeholder. A literal one sitting
+  // in source run text (seen in real docx) reads back as an OrphanObjectPlaceholder
+  // defect, so strip it at ingestion. Rare, so the contains-checks keep the common
+  // path allocation-free.
+  let strip_object = text.contains('\u{FFFC}');
+  // §act-ten A9.6: normalize CR too. quick-xml does not perform XML line-ending
+  // normalization, so a literal `\r\n` (or bare `\r`) inside `w:t` survives into
+  // run text; the un-normalized `\r` then rides the body flow as a phantom char
+  // the exporter cannot represent — the corpus caught a 52-CRLF doc losing one
+  // char per CRLF on roundtrip. Map CRLF/CR/LF each to ONE soft line break, the
+  // same visual Word gives them.
+  let soften = text.contains('\n') || text.contains('\r');
+  match (strip_object, soften) {
+    (false, false) => text,
+    (true, false) => text.replace('\u{FFFC}', ""),
+    (false, true) => soften_line_endings(&text),
+    (true, true) => soften_line_endings(&text.replace('\u{FFFC}', "")),
+  }
+}
+
+fn soften_line_endings(text: &str) -> String {
+  let mut out = String::with_capacity(text.len());
+  let mut chars = text.chars().peekable();
+  while let Some(ch) = chars.next() {
+    match ch {
+      '\r' => {
+        if chars.peek() == Some(&'\n') {
+          chars.next();
+        }
+        out.push_str(SOFT_LINE_BREAK_STR);
+      },
+      '\n' => out.push_str(SOFT_LINE_BREAK_STR),
+      other => out.push(other),
+    }
+  }
+  out
+}
+
+#[hotpath::measure]
+fn interpret_cleaned_docx(cleaned: &CleanedDocx) -> io::Result<InterpretedDocx> {
+  // §act-eleven A11.2: ONE typed parse + ONE unzip feed rdocx, the facts
+  // harvest, AND (via `InterpretedDocx.document`) the structured walk. The
+  // cleaner's already-open package supplies styles.xml; the vendored
+  // `from_parsed_parts` skips rdocx's own document/numbering/core parses and
+  // the `cleaned.bytes` re-inflate. Files whose package or captured
+  // document.xml is unavailable fall back to the previous overlapped
+  // two-parse path — output is byte-identical either way (corpus-netted).
+  let (docx, mut parsed_document, direct_properties) = match (cleaned.package.as_deref(), cleaned.main_document_xml.as_deref()) {
+    (Some(package), Some(doc_xml)) => {
+      // §act-five P6 carried over: the light streaming run-border pass hides
+      // under the one heavy typed parse.
+      let probe_t0 = std::time::Instant::now();
+      let (document, run_borders) = std::thread::scope(|scope| {
+        let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
+        // §act-twelve A12.3.1-full: fragment-parallel typed parse (equal tree,
+        // corpus-netted; falls back to the sequential parse on any anomaly).
+        let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
+        let borders = borders
+          .join()
+          .unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+        (document, borders)
+      });
+      let probe_parse = probe_t0.elapsed();
+      let document = document?;
+      let probe_t1 = std::time::Instant::now();
+      let facts = direct_paragraph_facts(&document, &run_borders?);
+      let docx = RDocxDocument::from_parsed_parts(package, document).map_err(rdocx_error)?;
+      static PARSE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+      if *PARSE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_PARSE_PROBE").is_some()) {
+        eprintln!("[flowstate-parse-probe] typed_parse={probe_parse:?} facts+parts={:?}", probe_t1.elapsed());
+      }
+      (docx, None, facts)
+    },
+    _ => {
+      let (docx, direct_properties) = std::thread::scope(|scope| {
+        let direct_properties = scope.spawn(|| match cleaned.main_document_xml.as_deref() {
+          Some(doc_xml) => direct_properties_by_paragraph_xml(doc_xml),
+          None => direct_properties_by_paragraph_package(&cleaned.bytes),
+        });
+        let docx = RDocxDocument::from_bytes(&cleaned.bytes).map_err(rdocx_error);
+        (
+          docx,
+          direct_properties
+            .join()
+            .expect("direct-properties parse thread panicked"),
+        )
+      });
+      let docx = docx?;
+      let (document, direct_properties) = direct_properties?;
+      (docx, Some(document), direct_properties)
+    },
+  };
+  let probe_walk_t0 = std::time::Instant::now();
   let style_resolver = StyleResolver::new(&docx);
   let docx_paragraphs = docx.paragraphs();
   let mut paragraphs = Vec::with_capacity(docx_paragraphs.len());
@@ -144,7 +367,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
       .runs()
       .enumerate()
       .map(|(run_ix, run)| {
-        let text = run.text();
+        let text = soften_rdocx_breaks(run.text());
         let run_style_id = run.style_id().map(str::to_owned);
         let run_style_id_ref = run_style_id.as_deref();
         let effective_properties = run_property_cache
@@ -166,6 +389,11 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
           source_size_pt,
           size_pt: source_size_pt.or_else(|| effective.sz.map(rdocx_oxml::HalfPoint::to_pt)),
           color: run.color().is_some() || direct.color || effective.color.is_some() || effective.color_theme.is_some(),
+          vert_align: if direct.vert_align == VertAlign::Baseline {
+            vert_align_from_ooxml(effective.vert_align.as_deref())
+          } else {
+            direct.vert_align
+          },
         }
       })
       .collect::<Vec<_>>();
@@ -259,7 +487,7 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
     }
 
     if runs.is_empty() {
-      let text = paragraph.text();
+      let text = soften_rdocx_breaks(paragraph.text());
       if !text.is_empty() {
         runs.push(DocumentRunInput {
           text,
@@ -272,17 +500,33 @@ pub fn convert_cleaned_docx_to_document(cleaned: CleanedDocx) -> io::Result<(Doc
     paragraphs.push(DocumentParagraphInput { style, runs });
   }
 
-  let paragraphs_imported = paragraphs.len();
-  let document = document_from_paragraphs(DocumentTheme::default(), paragraphs);
   let report = DocxConversionReport {
-    clean: clean_report,
+    clean: cleaned.report.clone(),
     recognition_rules: RECOGNITION_RULES,
-    paragraphs_imported,
+    paragraphs_imported: paragraphs.len(),
     runs_imported,
+    tables_imported: 0,
+    images_imported: 0,
+    equations_imported: 0,
     unknown_paragraph_styles,
     unknown_run_styles,
   };
-  Ok((document, report))
+  let document = parsed_document
+    .take()
+    .unwrap_or_else(|| docx.into_typed_document());
+  static PARSE_PROBE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+  if *PARSE_PROBE.get_or_init(|| std::env::var_os("FLOWSTATE_PARSE_PROBE").is_some()) {
+    eprintln!(
+      "[flowstate-parse-probe] conversion_walk={:?} paragraphs={}",
+      probe_walk_t0.elapsed(),
+      paragraphs.len()
+    );
+  }
+  Ok(InterpretedDocx {
+    paragraphs,
+    document,
+    report,
+  })
 }
 #[derive(Clone, Debug)]
 struct RunFact {
@@ -297,6 +541,7 @@ struct RunFact {
   source_size_pt: Option<f64>,
   size_pt: Option<f64>,
   color: bool,
+  vert_align: VertAlign,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,6 +560,7 @@ struct DirectRunProperties {
   border: bool,
   size_pt: Option<f64>,
   color: bool,
+  vert_align: VertAlign,
 }
 
 struct EffectiveParagraphProperties<'properties> {
@@ -330,7 +576,7 @@ impl ParagraphProperties for EffectiveParagraphProperties<'_> {
 }
 
 #[hotpath::measure]
-fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
+fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<(CT_Document, Vec<DirectParagraphFacts>)> {
   let package = OpcPackage::from_reader(std::io::Cursor::new(bytes)).map_err(rdocx_opc_error)?;
   let doc_part_name = package
     .main_document_part()
@@ -341,66 +587,87 @@ fn direct_properties_by_paragraph_package(bytes: &[u8]) -> io::Result<Vec<Direct
   direct_properties_by_paragraph_xml(doc_xml)
 }
 
+/// Returns the typed `CT_Document` ALONGSIDE the harvested facts (§act-nine
+/// A9.2): the same parse also feeds the structured object walk, which used to
+/// re-derive an owned `XmlNode` tree from the same bytes.
 #[hotpath::measure]
-fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<DirectParagraphFacts>> {
-  let document = CT_Document::from_xml(doc_xml).map_err(rdocx_oxml_error)?;
-  let run_borders_by_paragraph = direct_run_borders_by_paragraph_xml(doc_xml)?;
-  Ok(
-    document
-      .body
-      .paragraphs()
-      .enumerate()
-      .map(|(paragraph_ix, paragraph)| {
-        let paragraph_run_borders = run_borders_by_paragraph
-          .get(paragraph_ix)
-          .map(Vec::as_slice)
-          .unwrap_or_default();
-        let runs = paragraph
-          .runs
-          .iter()
-          .enumerate()
-          .map(|(run_ix, run)| {
-            let Some(properties) = run.properties.as_ref() else {
-              return DirectRunProperties {
-                border: paragraph_run_borders
-                  .get(run_ix)
-                  .copied()
-                  .unwrap_or_default(),
-                ..DirectRunProperties::default()
-              };
-            };
-            DirectRunProperties {
-              bold: properties.bold == Some(true) || properties.bold_cs == Some(true),
-              bold_off: properties.bold == Some(false) && properties.bold_cs != Some(true),
-              underline: underline_is_on(properties.underline.as_ref()),
-              strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
-              highlight: properties.highlight.is_some() || properties.shading.is_some(),
+fn direct_properties_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<(CT_Document, Vec<DirectParagraphFacts>)> {
+  // §act-five P6: the two INDEPENDENT parses of the same bytes — the heavy
+  // structured `CT_Document::from_xml` and the light streaming run-border pass —
+  // overlap on a scoped thread so the border parse hides under the structured
+  // one (both borrow `doc_xml` immutably; the scope guarantees it outlives them).
+  let (document, run_borders_by_paragraph) = std::thread::scope(|scope| {
+    let borders = scope.spawn(|| direct_run_borders_by_paragraph_xml(doc_xml));
+    let document = crate::fragment_parse::ct_document_from_xml(doc_xml).map_err(rdocx_oxml_error);
+    let borders = borders
+      .join()
+      .unwrap_or_else(|_| Err(io::Error::other("docx run-border parse thread panicked")));
+    (document, borders)
+  });
+  let document = document?;
+  let facts = direct_paragraph_facts(&document, &run_borders_by_paragraph?);
+  Ok((document, facts))
+}
+
+/// §act-eleven A11.2: the facts harvest over an already-parsed typed tree —
+/// shared by the single-parse fast path (which hands the tree straight to
+/// rdocx afterward) and the legacy overlapped path above.
+#[hotpath::measure]
+fn direct_paragraph_facts(document: &CT_Document, run_borders_by_paragraph: &[Vec<bool>]) -> Vec<DirectParagraphFacts> {
+  document
+    .body
+    .paragraphs()
+    .enumerate()
+    .map(|(paragraph_ix, paragraph)| {
+      let paragraph_run_borders = run_borders_by_paragraph
+        .get(paragraph_ix)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+      let runs = paragraph
+        .runs
+        .iter()
+        .enumerate()
+        .map(|(run_ix, run)| {
+          let Some(properties) = run.properties.as_ref() else {
+            return DirectRunProperties {
               border: paragraph_run_borders
                 .get(run_ix)
                 .copied()
                 .unwrap_or_default(),
-              size_pt: properties.sz.map(|size| size.to_pt()),
-              color: properties.color.is_some() || properties.color_theme.is_some(),
-            }
-          })
-          .collect();
-        DirectParagraphFacts {
-          outline_lvl: paragraph
-            .properties
-            .as_ref()
-            .and_then(|properties| properties.outline_lvl),
-          runs,
-        }
-      })
-      .collect(),
-  )
+              ..DirectRunProperties::default()
+            };
+          };
+          DirectRunProperties {
+            bold: properties.bold == Some(true) || properties.bold_cs == Some(true),
+            bold_off: properties.bold == Some(false) && properties.bold_cs != Some(true),
+            underline: underline_is_on(properties.underline.as_ref()),
+            strikethrough: properties.strike == Some(true) || properties.dstrike == Some(true),
+            highlight: properties.highlight.is_some() || properties.shading.is_some(),
+            border: paragraph_run_borders
+              .get(run_ix)
+              .copied()
+              .unwrap_or_default(),
+            size_pt: properties.sz.map(|size| size.to_pt()),
+            color: properties.color.is_some() || properties.color_theme.is_some(),
+            vert_align: vert_align_from_ooxml(properties.vert_align.as_deref()),
+          }
+        })
+        .collect();
+      DirectParagraphFacts {
+        outline_lvl: paragraph
+          .properties
+          .as_ref()
+          .and_then(|properties| properties.outline_lvl),
+        runs,
+      }
+    })
+    .collect()
 }
 
 #[hotpath::measure]
 fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<bool>>> {
   let mut reader = XmlReader::from_reader(doc_xml);
   reader.config_mut().trim_text(false);
-  let mut buf = Vec::new();
   let mut paragraphs = Vec::new();
   let mut current_paragraph: Option<Vec<bool>> = None;
   let mut in_run = false;
@@ -408,7 +675,9 @@ fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<boo
   let mut current_run_border = false;
 
   loop {
-    match reader.read_event_into(&mut buf) {
+    // §A14.5.1: borrowed events — `read_event_into` copies every event into
+    // the buffer, and this pass only inspects names/attrs.
+    match reader.read_event() {
       Ok(Event::Start(event)) if local_name_is(event.name().as_ref(), b"p") => {
         current_paragraph = Some(Vec::new());
       },
@@ -442,7 +711,6 @@ fn direct_run_borders_by_paragraph_xml(doc_xml: &[u8]) -> io::Result<Vec<Vec<boo
       Err(error) => return Err(io::Error::new(io::ErrorKind::InvalidData, error)),
       _ => {},
     }
-    buf.clear();
   }
 
   Ok(paragraphs)
@@ -641,6 +909,10 @@ fn recognize_run_styles_for_context(
     direct_underline: structural_run_formatting_allowed && run.underline,
     strikethrough: !suppress_semantic_styles && run.strikethrough,
     highlight: (direct_highlight_allowed && run.highlight).then_some(flowstate_document::HIGHLIGHT_SPOKEN),
+    // Vertical alignment is orthogonal to the debate semantics and is preserved
+    // as-is (a `CO₂` subscript in a Tag keeps its subscript) — losslessly carried
+    // even where the semantic slot is suppressed for headings.
+    vert_align: run.vert_align,
   }
 }
 
@@ -974,6 +1246,7 @@ mod tests {
       source_size_pt: None,
       size_pt: None,
       color: false,
+      vert_align: VertAlign::Baseline,
     }
   }
 

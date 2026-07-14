@@ -4,9 +4,9 @@ impl RichTextEditor {
     let Some(BlockSelection::Image(block_ix)) = self.selected_block else {
       return;
     };
-    self.edit_selected_image(block_ix, cx, |image| {
+    let alignment = input_alignment_from_alignment(alignment);
+    self.write_selected_image_layout(block_ix, cx, |image| {
       image.alignment = alignment;
-      image.version = image.version.wrapping_add(1);
     });
   }
 
@@ -14,9 +14,8 @@ impl RichTextEditor {
     let Some(BlockSelection::Image(block_ix)) = self.selected_block else {
       return;
     };
-    self.edit_selected_image(block_ix, cx, |image| {
-      image.sizing = ImageSizing::FitWidth;
-      image.version = image.version.wrapping_add(1);
+    self.write_selected_image_layout(block_ix, cx, |image| {
+      image.sizing = InputImageSizing::FitWidth;
     });
   }
 
@@ -24,9 +23,8 @@ impl RichTextEditor {
     let Some(BlockSelection::Image(block_ix)) = self.selected_block else {
       return;
     };
-    self.edit_selected_image(block_ix, cx, |image| {
-      image.sizing = ImageSizing::Intrinsic;
-      image.version = image.version.wrapping_add(1);
+    self.write_selected_image_layout(block_ix, cx, |image| {
+      image.sizing = InputImageSizing::Intrinsic;
     });
   }
 
@@ -69,12 +67,11 @@ impl RichTextEditor {
         _ => None,
       })
       .unwrap_or(320);
-    self.edit_selected_image(block_ix, cx, |image| {
-      image.sizing = ImageSizing::Fixed {
+    self.write_selected_image_layout(block_ix, cx, |image| {
+      image.sizing = InputImageSizing::Fixed {
         width_px: (current_width + delta_px).clamp(32, 2400) as u32,
         height_px: None,
       };
-      image.version = image.version.wrapping_add(1);
     });
   }
 
@@ -109,65 +106,49 @@ impl RichTextEditor {
     cx.notify();
   }
 
+  /// Track a live image-resize drag. Loro-first (spec §5): the drag never
+  /// touches THE projection — it only accumulates the target width (rebased
+  /// into `start_width`/`start_position` each move), and the commit at drag
+  /// end is one typed `SetImageLayout` intent.
   fn update_image_resize_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-    let Some(drag) = self.image_resize_drag.clone() else {
+    if self.image_resize_drag.is_none() {
+      return false;
+    }
+    let max_width: f32 = (self.current_layout_width() - self.document.theme.pageless_inset_x * 2.0)
+      .max(px(32.0))
+      .into();
+    let Some(drag) = self.image_resize_drag.as_mut() else {
       return false;
     };
     let delta: f32 = (position.x - drag.start_position.x).into();
     let delta = delta * drag.handle.horizontal_sign();
     let start_width: f32 = drag.start_width.into();
-    let max_width: f32 = (self.current_layout_width() - self.document.theme.pageless_inset_x * 2.0)
-      .max(px(32.0))
-      .into();
-    let width_px = (start_width + delta)
-      .clamp(32.0, max_width.max(32.0))
-      .round() as u32;
-    let Some(Block::Image(image)) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) else {
-      self.image_resize_drag = None;
-      return true;
-    };
-    if image.sizing == (ImageSizing::Fixed { width_px, height_px: None }) {
-      return true;
-    }
-    image.sizing = ImageSizing::Fixed { width_px, height_px: None };
-    image.version = drag.before.version.wrapping_add(1);
-    self.invalidate_document_layout_caches();
+    let width = (start_width + delta).clamp(32.0, max_width.max(32.0)).round();
+    drag.start_width = px(width);
+    drag.start_position = position;
     cx.notify();
     true
   }
 
+  /// Commit the image resize at drag end through the ONE write path: one
+  /// typed `SetImageLayout` intent addressed by the image's durable identity.
+  /// The runtime's patches advance THE projection — no direct write, no
+  /// history snapshot. A drag that ends at its starting width is a no-op.
   fn finish_image_resize_drag(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(drag) = self.image_resize_drag.take() else {
       return false;
     };
-    let Some(Block::Image(after)) = self.document.blocks.get(drag.block_ix).cloned() else {
-      cx.notify();
-      return true;
-    };
-    if after == drag.before {
+    let final_width: f32 = drag.start_width.into();
+    let width_px = final_width.round() as u32;
+    let initial_width: f32 = self.image_rendered_width(&drag.before).into();
+    if width_px == initial_width.round() as u32 {
       cx.notify();
       return true;
     }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock {
-        block_ix: drag.block_ix,
-        before: Block::Image(drag.before),
-        after: Block::Image(after),
-      }],
-      canonical_operations: vec![CanonicalOperation::ReplaceBlock {
-        block: self.identity_map.block_id(drag.block_ix),
-      }],
+    self.write_selected_image_layout(drag.block_ix, cx, |image| {
+      image.sizing = InputImageSizing::Fixed { width_px, height_px: None };
     });
-    self.redo_stack.clear();
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    cx.notify();
     true
   }
 
@@ -192,52 +173,64 @@ impl RichTextEditor {
       return;
     };
     let alt_text = alt_text.into();
-    self.edit_selected_image(block_ix, cx, |image| {
-      image.alt_text = alt_text;
-      image.version = image.version.wrapping_add(1);
-    });
-  }
-
-  fn edit_selected_image(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut ImageBlock)) {
-    let Some(Block::Image(image)) = self.document.blocks.get(block_ix).cloned() else {
+    let Some(Block::Image(image)) = self.document.blocks.get(block_ix) else {
       return;
     };
-    let mut updated = image.clone();
-    update(&mut updated);
-    if updated == image {
+    if image.alt_text == alt_text {
       return;
     }
-    let before = Block::Image(image);
-    let after = Block::Image(updated);
-    if let Some(block) = Arc::make_mut(&mut self.document.blocks).get_mut(block_ix) {
-      *block = after.clone();
+    let Some(image_id) = self.identity_map.block_id(block_ix) else {
+      tracing::warn!(block_ix, "refusing image alt-text edit: projection block has no durable id, so no intent can address it");
+      return;
+    };
+    self.write_intent(
+      LocalIntent::ReplaceImageAltText(crate::local_intents::ReplaceImageAltTextIntent {
+        image: image_id,
+        text: alt_text.to_string(),
+      }),
+      cx,
+    );
+  }
+
+  /// Route an image layout change through the ONE write path: convert the
+  /// current projection image to its input shape, apply the change, and
+  /// commit one typed `SetImageLayout` intent addressed by the image's
+  /// durable identity. Unchanged layouts never reach the authority.
+  fn write_selected_image_layout(&mut self, block_ix: usize, cx: &mut Context<Self>, update: impl FnOnce(&mut InputImageBlock)) {
+    let Some(block @ Block::Image(_)) = self.document.blocks.get(block_ix) else {
+      return;
+    };
+    let InputBlock::Image(current) = input_block_from_block(block) else {
+      return;
+    };
+    let mut updated = current.clone();
+    update(&mut updated);
+    if updated.sizing == current.sizing && updated.alignment == current.alignment {
+      return;
     }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock { block_ix, before, after }],
-      canonical_operations: vec![CanonicalOperation::ReplaceBlock {
-        block: self.identity_map.block_id(block_ix),
-      }],
-    });
-    self.redo_stack.clear();
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    let Some(image_id) = self.identity_map.block_id(block_ix) else {
+      tracing::warn!(block_ix, "refusing image layout edit: projection block has no durable id, so no intent can address it");
+      return;
+    };
+    self.write_intent(
+      LocalIntent::SetImageLayout(crate::local_intents::SetImageLayoutIntent {
+        image: image_id,
+        sizing: updated.sizing,
+        alignment: updated.alignment,
+      }),
+      cx,
+    );
   }
 
   pub fn insert_equation(&mut self, source: impl Into<SharedString>, cx: &mut Context<Self>) {
-    self.insert_blocks_after_caret(
-      vec![Block::Equation(EquationBlock {
-        source: source.into(),
-        syntax: EquationSyntax::Latex,
-        display: EquationDisplay::Display,
-        version: 0,
-      })],
+    // Loro-first: the equation enters through an InsertObject intent (identity
+    // minted by the write path), matching the converted table insertion.
+    self.write_insert_object_at_caret(
+      InputBlock::Equation(InputEquationBlock {
+        source: source.into().to_string(),
+        syntax: InputEquationSyntax::Latex,
+        display: InputEquationDisplay::Display,
+      }),
       cx,
     );
   }
@@ -246,12 +239,13 @@ impl RichTextEditor {
     self.insert_image_assets(vec![(asset, alt_text.into())], cx);
   }
 
+  /// Loro-first: asset bytes are content-addressed sideband state (same
+  /// pattern as clipboard adoption and the remote `AssetArrived` path); the
+  /// image BLOCKS commit as intents through the write authority.
   fn insert_image_assets(&mut self, assets: Vec<(AssetRecord, SharedString)>, cx: &mut Context<Self>) {
     if assets.is_empty() {
       return;
     }
-    let before_document = self.document.clone();
-    let before_selection = self.selection.clone();
     let mut blocks = Vec::with_capacity(assets.len());
     for (asset, alt_text) in assets {
       let asset_id = asset.id;
@@ -262,11 +256,11 @@ impl RichTextEditor {
         caption: None,
         sizing: ImageSizing::FitWidth,
         alignment: BlockAlignment::Center,
+        external_url: None,
         version: 0,
       }));
     }
-    self.insert_blocks_after_caret_without_history(blocks);
-    self.push_replace_document_history(before_document, before_selection, cx);
+    self.insert_blocks_after_caret(blocks, cx);
   }
 
   pub fn prompt_insert_image(&mut self, cx: &mut Context<Self>) {
@@ -360,10 +354,7 @@ impl RichTextEditor {
       }
     }
     let offset = self.hit_test_document_position(position, window, cx);
-    self.selection = EditorSelection {
-      anchor: offset,
-      head: offset,
-    };
+    self.selection = EditorSelection::collapsed(offset);
     self.clear_block_selection();
     self.goal_x = None;
     self.reset_caret_blink(cx);

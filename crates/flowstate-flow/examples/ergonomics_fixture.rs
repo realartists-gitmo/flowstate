@@ -8,7 +8,7 @@
 //! chains, orphans mid-column, and cells of varied height.
 
 use flowstate_document::{
-  Document, InputParagraph, InputRun, PARAGRAPH_ANALYTIC, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, ParagraphStyle, RunStyles, SEMANTIC_CITE,
+  DocumentProjection, InputParagraph, InputRun, PARAGRAPH_ANALYTIC, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, ParagraphStyle, RunStyles, SEMANTIC_CITE,
   document_from_input, flowstate_document_theme,
 };
 use flowstate_flow::{CellId, FlowDocument, SheetId, save_flow_document};
@@ -38,7 +38,7 @@ fn paragraph(style: ParagraphStyle, runs: Vec<InputRun>) -> InputParagraph {
   InputParagraph { style, runs }
 }
 
-fn content(label: &str, tier: Tier) -> Document {
+fn content(label: &str, tier: Tier) -> DocumentProjection {
   let mut paragraphs = vec![paragraph(PARAGRAPH_TAG, vec![run(label)])];
   match tier {
     Tier::Short => {},
@@ -47,32 +47,48 @@ fn content(label: &str, tier: Tier) -> Document {
       paragraphs.push(paragraph(PARAGRAPH_UNDERTAG, vec![run(&format!("underview supporting {label}"))]));
       paragraphs.push(paragraph(
         PARAGRAPH_ANALYTIC,
-        vec![run(&format!("analytic {label}: first supporting line, long enough to wrap and add real height"))],
+        vec![run(&format!(
+          "analytic {label}: first supporting line, long enough to wrap and add real height"
+        ))],
       ));
-      paragraphs.push(paragraph(PARAGRAPH_ANALYTIC, vec![run(&format!("analytic {label}: second supporting line"))]));
+      paragraphs.push(paragraph(
+        PARAGRAPH_ANALYTIC,
+        vec![run(&format!("analytic {label}: second supporting line"))],
+      ));
     },
     Tier::Card => paragraphs.push(paragraph(
       ParagraphStyle::Normal,
-      vec![cite(&format!("{label} — Author 2024")), run(" full card body that stays hidden in the summary projection")],
+      vec![
+        cite(&format!("{label} — Author 2024")),
+        run(" full card body that stays hidden in the summary projection"),
+      ],
     )),
   }
   document_from_input(flowstate_document_theme(), paragraphs)
 }
 
 fn add(document: &mut FlowDocument, sheet: SheetId, column: usize, parent: Option<CellId>, label: &str, tier: Tier) -> CellId {
-  let id = document.add_plain_cell(sheet, column, parent, None).expect("add cell");
-  document.replace_cell_document(sheet, id, &content(label, tier)).expect("set cell content");
+  let id = document
+    .add_plain_cell(sheet, column, parent, None)
+    .expect("add cell");
+  document
+    .replace_cell_document(sheet, id, &content(label, tier))
+    .expect("set cell content");
   id
 }
 
 fn main() {
-  let out = std::env::args().nth(1).unwrap_or_else(|| "flow-ergonomics-fixture.fl0".to_string());
+  let out = std::env::args()
+    .nth(1)
+    .unwrap_or_else(|| "flow-ergonomics-fixture.fl0".to_string());
   let mut document = FlowDocument::new();
   let affirmative = document.projection().format.sheet_types[0].id; // 1AC 1NC 2AC Block 1AR 2NR 2AR
   let negative = document.projection().format.sheet_types[1].id; // 1NC 2AC Block 1AR 2NR 2AR
 
   // ---- Sheet 1: "Ergonomics" (Affirmative, 7 columns) ----
-  let sheet = document.create_sheet("Ergonomics", affirmative).expect("create sheet");
+  let sheet = document
+    .create_sheet("Ergonomics", affirmative)
+    .expect("create sheet");
 
   // A1 with two responses B1/B2, and a deep chain B1 -> C1 -> D1 -> E1 -> F1.
   let a1 = add(&mut document, sheet, 0, None, "A1", Tier::Medium);
@@ -98,13 +114,19 @@ fn main() {
   add(&mut document, sheet, 2, None, "C4", Tier::Short);
 
   // ---- Sheet 2: "Scratch" (Negative, 6 columns) ----
-  let scratch = document.create_sheet("Scratch", negative).expect("create sheet");
+  let scratch = document
+    .create_sheet("Scratch", negative)
+    .expect("create sheet");
   let s1 = add(&mut document, scratch, 0, None, "S1", Tier::Short);
   add(&mut document, scratch, 1, Some(s1), "S2", Tier::Short);
   add(&mut document, scratch, 0, None, "S3", Tier::Medium);
 
   save_flow_document(&out, &document).expect("save fixture");
   let projection = document.projection();
-  let cells: usize = projection.sheets.iter().map(|sheet| sheet.cells.len()).sum();
+  let cells: usize = projection
+    .sheets
+    .iter()
+    .map(|sheet| sheet.cells.len())
+    .sum();
   println!("wrote {out} — {} sheets, {cells} cells", projection.sheets.len());
 }

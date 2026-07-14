@@ -1,5 +1,5 @@
 #[hotpath::measure]
-pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
+pub fn insert_rich_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(first_paragraph) = fragment.paragraphs.first() else {
     return offset;
   };
@@ -10,7 +10,7 @@ pub fn insert_rich_fragment_at(document: &mut Document, offset: DocumentOffset, 
 }
 
 #[hotpath::measure]
-fn insert_single_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, paragraph: &InputParagraph) -> DocumentOffset {
+fn insert_single_paragraph_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, paragraph: &InputParagraph) -> DocumentOffset {
   let text = input_paragraph_text(paragraph);
   if text.is_empty() {
     return offset;
@@ -18,7 +18,7 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
   let Some(target) = document.paragraphs.get(offset.paragraph) else {
     return offset;
   };
-  let byte = offset.byte.min(paragraph_text_len(target));
+  let byte = clamp_paragraph_byte_to_char_boundary(document, offset.paragraph, offset.byte);
   let paragraph_start = paragraph_byte_range(document, offset.paragraph).start;
   let (left_runs, right_runs) = split_runs_at(&target.runs, byte);
   document.text.insert(paragraph_start + byte, &text);
@@ -26,12 +26,11 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
   runs.extend(left_runs);
   runs.extend(input_paragraph_text_runs(paragraph));
   runs.extend(right_runs);
-  {
-    let target = &mut paragraphs_mut(document)[offset.paragraph];
+  if let Some(target) = paragraphs_mut(document).get_mut(offset.paragraph) {
     target.style = paragraph.style;
     target.runs = merge_adjacent_runs(runs);
     bump_paragraph_version(target);
-  };
+  }
   update_paragraph_offsets_after_len_change(document, offset.paragraph);
   rebuild_document_sections(document);
   DocumentOffset {
@@ -41,11 +40,11 @@ fn insert_single_paragraph_fragment_at(document: &mut Document, offset: Document
 }
 
 #[hotpath::measure]
-fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
+fn insert_multi_paragraph_fragment_at(document: &mut DocumentProjection, offset: DocumentOffset, fragment: &RichClipboardFragment) -> DocumentOffset {
   let Some(target) = document.paragraphs.get(offset.paragraph).cloned() else {
     return offset;
   };
-  let byte = offset.byte.min(paragraph_text_len(&target));
+  let byte = clamp_paragraph_byte_to_char_boundary(document, offset.paragraph, offset.byte);
   let paragraph_start = paragraph_byte_range(document, offset.paragraph).start;
   let (left_runs, right_runs) = split_runs_at(&target.runs, byte);
   let inserted_text = fragment
@@ -70,22 +69,17 @@ fn insert_multi_paragraph_fragment_at(document: &mut Document, offset: DocumentO
     }
     replacements.push(Paragraph {
       style: if ix == 0 && !left_runs.is_empty() { target.style } else { paragraph.style },
-      byte_range: 0..0,
       runs: merge_adjacent_runs(runs),
       version: target.version.wrapping_add(1),
     });
   }
 
   let replacement_count = replacements.len();
-  {
-    let paragraphs = paragraphs_mut(document);
-    paragraphs.splice(offset.paragraph..=offset.paragraph, replacements)
-  };
+  paragraphs_mut(document).splice(offset.paragraph..offset.paragraph + 1, replacements);
   for insert_ix in 1..replacement_count {
     insert_paragraph_id(document, offset.paragraph + insert_ix);
   }
-  rebuild_document_offset_index(document);
-  let block_replacements = document.paragraphs[offset.paragraph..offset.paragraph + replacement_count].to_vec();
+  let block_replacements = document.paragraphs.range_to_vec(offset.paragraph..offset.paragraph + replacement_count);
   replace_paragraph_blocks(document, offset.paragraph, 1, &block_replacements);
   rebuild_document_sections(document);
 

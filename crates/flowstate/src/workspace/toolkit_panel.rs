@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
-  APP_CHROME_BORDER_WIDTH, LeftNavMode, OutlineRowGuides, SidebarTreeAction, SidebarTreeRow, ToolkitSearchFilter,
-  ToolkitTool, Workspace, outline_hierarchy_color, render_sidebar_tree_row,
+  APP_CHROME_BORDER_WIDTH, LeftNavMode, OutlineRowGuides, SidebarTreeAction, SidebarTreeRow, ToolkitSearchFilter, ToolkitTool, Workspace,
+  outline_hierarchy_color, render_sidebar_tree_row,
 };
 
 const TOOLKIT_RESULT_LIMIT: usize = 32;
@@ -50,16 +50,8 @@ impl Workspace {
   /// search results are miniature scrollable windows that can be opened,
   /// inserted, or dragged into the editor.
   pub(super) fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    let toolkit_width = if self.active_toolkit_tool.is_some() {
-      px(380.0)
-    } else {
-      px(40.0)
-    };
-    let toolkit_range_end = if self.active_toolkit_tool.is_none() {
-      toolkit_width
-    } else {
-      px(620.0)
-    };
+    let toolkit_width = if self.active_toolkit_tool.is_some() { px(380.0) } else { px(40.0) };
+    let toolkit_range_end = if self.active_toolkit_tool.is_none() { toolkit_width } else { px(620.0) };
 
     h_resizable("workspace-content-resizable")
       .with_state(&self.content_resizable_state)
@@ -1046,7 +1038,7 @@ fn toolkit_preview_document(
   fallback_text: &str,
   mut theme: DocumentTheme,
   expanded: bool,
-) -> crate::rich_text_element::Document {
+) -> crate::rich_text_element::DocumentProjection {
   theme.zoom_factor *= TOOLKIT_PREVIEW_ZOOM;
   theme.pageless_inset_x = px(10.0);
   theme.pageless_inset_top = px(8.0);
