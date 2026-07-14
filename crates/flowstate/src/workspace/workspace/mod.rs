@@ -63,6 +63,9 @@ const SIDE_PANEL_COLLAPSED_WIDTH: Pixels = px(30.0);
 #[path = "../toolkit_panel.rs"]
 mod toolkit_panel;
 
+#[cfg(test)]
+mod headless_tests;
+
 pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.

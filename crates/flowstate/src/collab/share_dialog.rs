@@ -90,7 +90,14 @@ impl CollabShareDialog {
       dialog.refresh_ticket(cx);
     }
     if panel_id.is_some() {
-      dialog.scan_trusted_peers(cx);
+      // The dialog is constructed inside the Workspace's own update (via
+      // `open_collaboration_dialog_with_mode`), so the scan — which reads
+      // discovery context through `workspace.update` — must wait until the
+      // Workspace lease is released or GPUI panics on the double lease.
+      let handle = cx.entity().downgrade();
+      cx.defer(move |cx| {
+        let _ = handle.update(cx, |dialog, cx| dialog.scan_trusted_peers(cx));
+      });
     }
     dialog
   }

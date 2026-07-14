@@ -1818,7 +1818,12 @@ enum TemporaryWorkspaceSessionEntryKind {
 
 #[hotpath::measure]
 fn temporary_workspace_session_path() -> PathBuf {
-  std::env::temp_dir().join("flowstate-open-tabs-session.json")
+  // FLOWSTATE_CONFIG_DIR is the headless-test sandbox root; the tab-session
+  // file must follow it or tests restore/clobber the real user's open tabs.
+  std::env::var_os("FLOWSTATE_CONFIG_DIR")
+    .map(PathBuf::from)
+    .unwrap_or_else(std::env::temp_dir)
+    .join("flowstate-open-tabs-session.json")
 }
 
 #[hotpath::measure]

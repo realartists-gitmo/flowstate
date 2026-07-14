@@ -360,7 +360,9 @@ impl Workspace {
       return;
     }
     let target = if offset.is_negative() {
-      active_index.wrapping_sub(offset.unsigned_abs()) % len
+      // usize::MAX % len (the wrapping_sub shortcut) only wraps correctly
+      // when len is a power of two; add len before subtracting instead.
+      (active_index + len - (offset.unsigned_abs() % len)) % len
     } else {
       (active_index + offset as usize) % len
     };
