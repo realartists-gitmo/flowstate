@@ -29,6 +29,10 @@ pub async fn sync_bound_checkpoint(local_path: &Path, title: String, io_handle: 
   {
     Ok(metadata) => metadata,
     Err(DropboxWriteError::Conflict { .. }) => {
+      // Trust boundary: whoever can write the bound Dropbox path is a squad
+      // collaborator, so their checkpoint merges without any further
+      // authentication. The document-id gate below only prevents accidental
+      // cross-document clobbering, not a malicious folder member.
       let remote = client
         .download(&binding.remote_path)
         .await

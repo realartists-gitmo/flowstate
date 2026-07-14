@@ -1960,6 +1960,7 @@ impl CrdtRuntime {
     let comments = flowstate_document::loro_schema::root_map(&self.doc).ensure_mergeable_map(flowstate_document::COMMENTS_BY_ID)?;
     let thread = comments.ensure_mergeable_map(&comment_id.to_string())?;
     thread.insert("id", comment_id.to_string())?;
+    thread.insert("author_user_id", author_user_id.to_string())?;
     thread.insert("head_cursor", LoroValue::Binary(head_cursor.into()))?;
     thread.insert("anchor_cursor", LoroValue::Binary(anchor_cursor.into()))?;
     thread.insert("quoted_text", quoted_text)?;
@@ -1967,7 +1968,7 @@ impl CrdtRuntime {
     thread.insert("created_at", now)?;
     thread.insert("updated_at", now)?;
     let messages = thread.ensure_mergeable_map("messages_by_id")?;
-    write_comment_message(&messages, message_id, body, author_user_id, author_display_name, now)?;
+    write_comment_message(&messages, message_id, &body, author_user_id, author_display_name, now)?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-create")?;
     Ok(comment_id)
   }
@@ -1981,7 +1982,7 @@ impl CrdtRuntime {
     let from_vv = self.doc.state_vv();
     let thread = existing_comment_thread(&self.doc, comment_id)?;
     let messages = thread.ensure_mergeable_map("messages_by_id")?;
-    write_comment_message(&messages, message_id, body, author_user_id, author_display_name, now)?;
+    write_comment_message(&messages, message_id, &body, author_user_id, author_display_name, now)?;
     thread.insert("updated_at", now)?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-reply")?;
     Ok(message_id)
@@ -2007,7 +2008,7 @@ impl CrdtRuntime {
       map_string_opt(&message, "author_user_id").and_then(|id| id.parse().ok()) == Some(actor_user_id),
       "Only the message author can edit it"
     );
-    message.insert("body", body)?;
+    message.insert("body", body.as_str())?;
     message.insert("updated_at", unix_time_secs())?;
     thread.insert("updated_at", unix_time_secs())?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-edit")
@@ -2019,17 +2020,23 @@ impl CrdtRuntime {
     let root = flowstate_document::loro_schema::root_map(&self.doc);
     let comments = existing_child_map(&root, flowstate_document::COMMENTS_BY_ID)?;
     let thread = existing_child_map(&comments, &comment_id.to_string())?;
-    let messages = existing_child_map(&thread, "messages_by_id")?;
-    let first_author = messages
-      .values()
-      .filter_map(|value| match value {
-        ValueOrContainer::Container(Container::Map(message)) => Some(message),
-        _ => None,
-      })
-      .min_by_key(|message| map_i64_opt(message, "created_at").unwrap_or_default())
-      .and_then(|message| map_string_opt(&message, "author_user_id"))
-      .and_then(|id| id.parse::<u128>().ok());
-    anyhow::ensure!(first_author == Some(actor_user_id), "Only the thread author can delete it");
+    // Threads written before the author field existed fall back to the
+    // earliest message's author.
+    let thread_author = map_string_opt(&thread, "author_user_id")
+      .and_then(|id| id.parse::<u128>().ok())
+      .or_else(|| {
+        let messages = existing_child_map(&thread, "messages_by_id").ok()?;
+        messages
+          .values()
+          .filter_map(|value| match value {
+            ValueOrContainer::Container(Container::Map(message)) => Some(message),
+            _ => None,
+          })
+          .min_by_key(|message| map_i64_opt(message, "created_at").unwrap_or_default())
+          .and_then(|message| map_string_opt(&message, "author_user_id"))
+          .and_then(|id| id.parse::<u128>().ok())
+      });
+    anyhow::ensure!(thread_author == Some(actor_user_id), "Only the thread author can delete it");
     comments.delete(&comment_id.to_string())?;
     self.finish_comment_mutation(from_frontier, from_vv, "comment-delete")
   }
@@ -3647,7 +3654,7 @@ impl CrdtRuntime {
         Ok(true) => applied += 1,
         Ok(false) => {},
         Err(error) => {
-          tracing::error!(%error, stable_key = %defect.stable_key(), class = defect.class(), "applying projection defect repair failed")
+          tracing::error!(%error, stable_key = %defect.stable_key(), class = defect.class(), "applying projection defect repair failed");
         },
       }
     }
@@ -7160,11 +7167,17 @@ fn existing_comment_thread(doc: &LoroDoc, comment_id: u128) -> Result<LoroMap> {
   existing_child_map(&comments, &comment_id.to_string())
 }
 
-fn validated_comment_body(body: &str) -> Result<&str> {
-  let body = body.trim();
+fn validated_comment_body(body: &str) -> Result<String> {
+  // Strip control characters (a pasted `\r\n` becomes `\n`) so a comment can
+  // never smuggle escape sequences or zero-width control bytes into peers' UIs.
+  let sanitized: String = body
+    .chars()
+    .filter(|ch| *ch == '\n' || *ch == '\t' || !ch.is_control())
+    .collect();
+  let body = sanitized.trim();
   anyhow::ensure!(!body.is_empty(), "Comment text cannot be empty");
   anyhow::ensure!(body.len() <= 32 * 1024, "Comment text is too long");
-  Ok(body)
+  Ok(body.to_owned())
 }
 
 fn write_comment_message(

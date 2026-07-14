@@ -29,6 +29,22 @@ const CONTENT_BASE: &str = "https://content.dropboxapi.com/2";
 const TOKEN_URL: &str = "https://api.dropboxapi.com/oauth2/token";
 const API_ARG: &str = "Dropbox-API-Arg";
 const API_RESULT: &str = "Dropbox-API-Result";
+/// Large checkpoints upload/download in one request, so there is no overall
+/// request deadline — only bounded connect and read-idle times, so a dead
+/// connection can never hang a discovery refresh or checkpoint save forever.
+const HTTP_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const HTTP_READ_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound on a downloaded checkpoint/advertisement body. Snapshots are
+/// zstd-compressed and orders of magnitude smaller than this in practice.
+const MAX_DOWNLOAD_LEN: u64 = 256 * 1024 * 1024;
+
+fn http_client() -> Client {
+  Client::builder()
+    .connect_timeout(HTTP_CONNECT_TIMEOUT)
+    .read_timeout(HTTP_READ_TIMEOUT)
+    .build()
+    .unwrap_or_default()
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct DropboxCredentials {
@@ -101,7 +117,7 @@ impl DropboxPkceFlow {
 
   pub async fn exchange(&self, callback: &Url) -> Result<DropboxCredentials> {
     let code = self.verify_callback(callback)?;
-    let response = Client::new()
+    let response = http_client()
       .post(TOKEN_URL)
       .form(&[
         ("grant_type", "authorization_code"),
@@ -149,7 +165,7 @@ impl DropboxClient {
   #[must_use]
   pub fn with_endpoints(credentials: DropboxCredentials, api_base: &str, content_base: &str, token_url: &str) -> Self {
     Self {
-      http: Client::new(),
+      http: http_client(),
       credentials: Arc::new(Mutex::new(credentials)),
       api_base: api_base.trim_end_matches('/').into(),
       content_base: content_base.trim_end_matches('/').into(),
@@ -194,6 +210,7 @@ impl DropboxClient {
       .context("decoding Dropbox token response")?;
     credentials.access_token = token.access_token.clone();
     credentials.access_token_expires_at = token.expires_in.map(|seconds| now.saturating_add(seconds));
+    drop(credentials);
     Ok(token.access_token)
   }
 
@@ -263,11 +280,23 @@ impl DropboxClient {
       .to_str()
       .context("Dropbox download metadata is not UTF-8")?;
     let metadata: DropboxFileMetadata = serde_json::from_str(metadata).context("decoding Dropbox download metadata")?;
-    let bytes = response
-      .bytes()
+    ensure!(
+      response.content_length().unwrap_or(0) <= MAX_DOWNLOAD_LEN,
+      "Dropbox download exceeds the {MAX_DOWNLOAD_LEN}-byte limit"
+    );
+    let mut response = response;
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response
+      .chunk()
       .await
       .context("reading Dropbox download body")?
-      .to_vec();
+    {
+      ensure!(
+        (bytes.len() as u64).saturating_add(chunk.len() as u64) <= MAX_DOWNLOAD_LEN,
+        "Dropbox download exceeds the {MAX_DOWNLOAD_LEN}-byte limit"
+      );
+      bytes.extend_from_slice(&chunk);
+    }
     Ok(DropboxDownloadedFile { metadata, bytes })
   }
 
@@ -410,7 +439,10 @@ impl RendezvousBackend for DropboxRendezvousBackend {
       };
       let mut advertisements = Vec::new();
       for entry in entries {
-        if entry.tag != "file" || !entry.name.ends_with(".ad") {
+        let is_sidecar = std::path::Path::new(&entry.name)
+          .extension()
+          .is_some_and(|extension| extension.eq_ignore_ascii_case("ad"));
+        if entry.tag != "file" || !is_sidecar {
           continue;
         }
         let Some(path) = entry.path_lower.as_deref() else { continue };

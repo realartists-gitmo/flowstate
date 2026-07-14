@@ -960,7 +960,7 @@ impl CollabSession {
               {
                 GapAction::Pull { from, our_vv } => self.start_update_pull(from, our_vv, cx),
                 _ => {
-                  tracing::debug!(session = %self.session, from = %from, "pending-dependency pull skipped; one is already in flight for this peer")
+                  tracing::debug!(session = %self.session, from = %from, "pending-dependency pull skipped; one is already in flight for this peer");
                 },
               }
             } else {

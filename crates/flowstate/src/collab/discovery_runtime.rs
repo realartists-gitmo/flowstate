@@ -9,7 +9,7 @@ use flowstate_collab::{
 };
 use futures_util::{FutureExt as _, future::Either};
 use gpui::{App, Timer};
-use iroh::{EndpointAddr, PublicKey};
+use iroh::EndpointAddr;
 
 use crate::app_settings::{load_app_settings, load_dropbox_collaboration};
 
@@ -33,7 +33,7 @@ pub(super) struct DiscoveryPublication {
 }
 
 enum DiscoveryCommand {
-  Upsert(DiscoveryPublication),
+  Upsert(Box<DiscoveryPublication>),
   Remove {
     session: SessionId,
   },
@@ -70,7 +70,7 @@ impl DiscoveryRuntime {
   pub fn upsert(&self, publication: DiscoveryPublication) {
     if let Err(error) = self
       .commands
-      .try_send(DiscoveryCommand::Upsert(publication))
+      .try_send(DiscoveryCommand::Upsert(Box::new(publication)))
     {
       tracing::warn!(%error, "queueing collaboration discovery publication failed");
     }
@@ -125,7 +125,7 @@ async fn run_discovery_actor(
     match futures_util::future::select(command, refresh).await {
       Either::Left((Ok(DiscoveryCommand::Upsert(publication)), _)) => {
         let session = publication.session;
-        publications.insert(session, publication);
+        publications.insert(session, *publication);
         publish_session(&backends, publications.get(&session).expect("inserted publication")).await;
       },
       Either::Left((Ok(DiscoveryCommand::Remove { session }), _)) => {
@@ -201,7 +201,7 @@ async fn publish_backend(backend: &Arc<dyn RendezvousBackend>, publication: &Dis
 }
 
 async fn clear_publication(backends: &[Arc<dyn RendezvousBackend>], publication: &DiscoveryPublication) {
-  let identity: PublicKey = publication.secret.public();
+  let identity = publication.secret.public();
   for backend in backends {
     if let Err(error) = backend
       .clear(identity, publication.device_id, publication.document_fingerprint)

@@ -232,7 +232,8 @@ pub fn export_redacted_diagnostics(destination: &Path) -> Result<()> {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
       continue;
     };
-    report.push_str(&format!("--- {name} ---\n"));
+    use std::fmt::Write as _;
+    let _ = writeln!(report, "--- {name} ---");
     let contents = fs::read_to_string(&path).unwrap_or_else(|error| format!("[unreadable log: {error}]"));
     for line in contents.lines() {
       report.push_str(&redact_diagnostic_line(line, home.as_deref()));

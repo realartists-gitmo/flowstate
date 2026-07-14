@@ -56,6 +56,7 @@ impl SessionAuthRegistry {
       .ok_or_else(|| anyhow!("collaboration session is not configured for admission"))?;
     ensure!(state.admission == *admission, "collaboration admission secret is invalid");
     state.peers.insert(peer);
+    drop(sessions);
     Ok(())
   }
 

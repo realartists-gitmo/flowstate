@@ -68,7 +68,7 @@ mod linux {
     _advertisement: AdvertisementHandle,
   }
 
-  /// BlueZ implementation used on Linux. Registration handles remain live for
+  /// `BlueZ` implementation used on Linux. Registration handles remain live for
   /// exactly as long as the signed advertisement is published.
   pub struct NativeBluetoothBackend {
     adapter: Adapter,
@@ -222,6 +222,14 @@ mod linux {
           Ok(Err(error)) => tracing::debug!(%error, %address, "nearby Flowstate Bluetooth record could not be read"),
           Err(_) => tracing::debug!(%address, "nearby Flowstate Bluetooth read timed out"),
         }
+        // Leaving the link up occupies the peer's (often single) peripheral
+        // connection slot and suppresses its advertising for other scanners.
+        if tokio::time::timeout(Duration::from_secs(2), device.disconnect())
+          .await
+          .is_err()
+        {
+          tracing::debug!(%address, "nearby Flowstate Bluetooth disconnect timed out");
+        }
       }
       Ok(found)
     }
@@ -253,6 +261,7 @@ mod linux {
         }) {
           *published = None;
         }
+        drop(published);
         Ok(())
       })
     }
@@ -557,6 +566,9 @@ mod windows_backend {
       ensure!(characteristics.Size()? > 0, "Flowstate GATT characteristic is missing");
       characteristics.GetAt(0)?
     };
+    // WinRT performs ATT long reads (Read Blob continuation) internally, so
+    // this single call returns the complete characteristic value; a truncated
+    // frame still fails loud on the length prefix in `decode_gatt_advertisement`.
     let value = characteristic
       .ReadValueWithCacheModeAsync(BluetoothCacheMode::Uncached)?
       .await?;
@@ -594,14 +606,15 @@ mod macos_backend {
   use std::{
     sync::{
       Arc, Mutex,
-      atomic::{AtomicBool, Ordering},
+      atomic::{AtomicIsize, Ordering},
     },
     thread,
   };
 
-  use anyhow::{Context as _, ensure};
+  use anyhow::Context as _;
+  use dispatch2::DispatchQueue;
   use objc2::{
-    AnyThread, DefinedClass, define_class, msg_send,
+    AnyThread, DefinedClass, Message as _, define_class, msg_send,
     rc::Retained,
     runtime::{AnyObject, ProtocolObject},
   };
@@ -614,9 +627,12 @@ mod macos_backend {
 
   use super::*;
 
+  /// `manager_state` holds the raw `CBManagerState` (`Unknown` = 0 matches the
+  /// atomic's default), so waiters can tell a pending permission prompt apart
+  /// from Bluetooth that is definitively off.
   #[derive(Default)]
   struct MacDelegateState {
-    powered_on: AtomicBool,
+    manager_state: AtomicIsize,
     scan_sender: Mutex<Option<async_channel::Sender<DiscoveryAdvertisement>>>,
     peripherals: Mutex<Vec<Retained<CBPeripheral>>>,
   }
@@ -639,12 +655,12 @@ mod macos_backend {
     unsafe impl CBCentralManagerDelegate for MacBluetoothDelegate {
       #[unsafe(method(centralManagerDidUpdateState:))]
       unsafe fn central_manager_did_update_state(&self, central: &CBCentralManager) {
-        let powered = unsafe { central.state() } == CBManagerState::PoweredOn;
+        let state = unsafe { central.state() };
         self
           .ivars()
           .state
-          .powered_on
-          .store(powered, Ordering::Release);
+          .manager_state
+          .store(state.0, Ordering::Release);
       }
 
       #[unsafe(method(centralManager:didDiscoverPeripheral:advertisementData:RSSI:))]
@@ -655,7 +671,7 @@ mod macos_backend {
         _advertisement_data: &NSDictionary<NSString, AnyObject>,
         _rssi: &NSNumber,
       ) {
-        let retained = Retained::retain(peripheral);
+        let retained = peripheral.retain();
         unsafe {
           peripheral.setDelegate(Some(ProtocolObject::from_ref(self)));
           central.connectPeripheral_options(peripheral, None);
@@ -672,7 +688,7 @@ mod macos_backend {
       #[unsafe(method(centralManager:didConnectPeripheral:))]
       unsafe fn central_manager_did_connect(&self, _central: &CBCentralManager, peripheral: &CBPeripheral) {
         let services = NSArray::from_retained_slice(&[service_uuid()]);
-        unsafe { peripheral.discoverServices(Some(&services)) };
+        unsafe { peripheral.discoverServices(Some(&*services)) };
       }
     }
 
@@ -687,7 +703,7 @@ mod macos_backend {
           for service in &*services {
             if unsafe { service.UUID() } == expected {
               let characteristics = NSArray::from_retained_slice(&[characteristic_uuid()]);
-              unsafe { peripheral.discoverCharacteristics_forService(Some(&characteristics), service) };
+              unsafe { peripheral.discoverCharacteristics_forService(Some(&*characteristics), &service) };
             }
           }
         }
@@ -702,7 +718,7 @@ mod macos_backend {
         if let Some(characteristics) = unsafe { service.characteristics() } {
           for characteristic in &*characteristics {
             if unsafe { characteristic.UUID() } == expected {
-              unsafe { peripheral.readValueForCharacteristic(characteristic) };
+              unsafe { peripheral.readValueForCharacteristic(&characteristic) };
             }
           }
         }
@@ -732,12 +748,12 @@ mod macos_backend {
     unsafe impl CBPeripheralManagerDelegate for MacBluetoothDelegate {
       #[unsafe(method(peripheralManagerDidUpdateState:))]
       unsafe fn peripheral_manager_did_update_state(&self, peripheral: &CBPeripheralManager) {
-        let powered = unsafe { peripheral.state() } == CBManagerState::PoweredOn;
+        let state = unsafe { peripheral.state() };
         self
           .ivars()
           .state
-          .powered_on
-          .store(powered, Ordering::Release);
+          .manager_state
+          .store(state.0, Ordering::Release);
       }
     }
   );
@@ -760,72 +776,53 @@ mod macos_backend {
     _advertisement: Retained<NSDictionary<NSString, AnyObject>>,
   }
 
+  enum PeripheralCommand {
+    Publish {
+      advertisement: DiscoveryAdvertisement,
+      reply: async_channel::Sender<Result<()>>,
+    },
+    Clear {
+      identity: PublicKey,
+      device_id: u128,
+      document_fingerprint: [u8; 32],
+      reply: async_channel::Sender<Result<()>>,
+    },
+  }
+
+  /// CoreBluetooth objects are not `Send`, so every peripheral-role object is
+  /// confined to one dedicated OS thread; the backend holds only plain-data
+  /// channels, keeping it `Send + Sync` for the discovery actor.
   pub struct NativeBluetoothBackend {
-    published: Mutex<Option<PublishedAdvertisement>>,
+    peripheral: async_channel::Sender<PeripheralCommand>,
     scan_lock: tokio::sync::Mutex<()>,
     scan_duration: Duration,
   }
 
   impl NativeBluetoothBackend {
     pub async fn new(scan_duration: Duration) -> Result<Self> {
+      let (peripheral, commands) = async_channel::unbounded();
+      thread::Builder::new()
+        .name("flowstate-ble-peripheral".into())
+        .spawn(move || peripheral_actor(commands))
+        .context("starting the macOS Bluetooth peripheral thread")?;
       Ok(Self {
-        published: Mutex::new(None),
+        peripheral,
         scan_lock: tokio::sync::Mutex::new(()),
         scan_duration,
       })
     }
 
-    fn publish_inner(&self, advertisement: DiscoveryAdvertisement) -> Result<()> {
-      let mut published = self
-        .published
-        .lock()
-        .expect("Bluetooth publication lock poisoned");
-      if let Some(current) = published.take() {
-        unsafe {
-          current.manager.stopAdvertising();
-          current.manager.removeAllServices();
-          current.manager.setDelegate(None);
-        }
-      }
-
-      let state = Arc::new(MacDelegateState::default());
-      let delegate = MacBluetoothDelegate::new(Arc::clone(&state));
-      let manager =
-        unsafe { CBPeripheralManager::initWithDelegate_queue(CBPeripheralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), None) };
-      wait_for_power(&state, "macOS Bluetooth peripheral manager")?;
-
-      let framed = NSData::from_vec(encode_gatt_advertisement(&advertisement)?);
-      let characteristic = unsafe {
-        CBMutableCharacteristic::initWithType_properties_value_permissions(
-          CBMutableCharacteristic::alloc(),
-          &characteristic_uuid(),
-          CBCharacteristicProperties::Read,
-          Some(&framed),
-          CBAttributePermissions::Readable,
-        )
-      };
-      let service = unsafe { CBMutableService::initWithType_primary(CBMutableService::alloc(), &service_uuid(), true) };
-      let characteristics = NSArray::from_slice(&[&*characteristic]);
-      unsafe { service.setCharacteristics(Some(&characteristics)) };
-      unsafe { manager.addService(&service) };
-
-      let advertised_services = NSArray::from_retained_slice(&[service_uuid()]);
-      let advertised_services_object: &AnyObject = advertised_services.as_ref();
-      let advertisement_data =
-        unsafe { NSDictionary::<NSString, AnyObject>::from_slices(&[CBAdvertisementDataServiceUUIDsKey], &[advertised_services_object]) };
-      unsafe { manager.startAdvertising(Some(&advertisement_data)) };
-
-      *published = Some(PublishedAdvertisement {
-        identity: advertisement.identity,
-        device_id: advertisement.device_id,
-        document_fingerprint: advertisement.document_fingerprint,
-        manager,
-        _delegate: delegate,
-        _service: service,
-        _characteristic: characteristic,
-        _advertisement: advertisement_data,
-      });
-      Ok(())
+    async fn request(&self, build: impl FnOnce(async_channel::Sender<Result<()>>) -> PeripheralCommand) -> Result<()> {
+      let (reply, response) = async_channel::bounded(1);
+      self
+        .peripheral
+        .send(build(reply))
+        .await
+        .map_err(|_| anyhow::anyhow!("macOS Bluetooth peripheral thread stopped"))?;
+      response
+        .recv()
+        .await
+        .map_err(|_| anyhow::anyhow!("macOS Bluetooth peripheral thread stopped"))?
     }
 
     async fn scan_inner(&self, document_fingerprint: [u8; 32]) -> Result<Vec<DiscoveryAdvertisement>> {
@@ -843,7 +840,7 @@ mod macos_backend {
     }
 
     fn publish(&self, advertisement: DiscoveryAdvertisement) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-      Box::pin(async move { self.publish_inner(advertisement) })
+      Box::pin(self.request(move |reply| PeripheralCommand::Publish { advertisement, reply }))
     }
 
     fn scan(&self, document_fingerprint: [u8; 32]) -> Pin<Box<dyn Future<Output = Result<Vec<DiscoveryAdvertisement>>> + Send + '_>> {
@@ -856,24 +853,99 @@ mod macos_backend {
       device_id: u128,
       document_fingerprint: [u8; 32],
     ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
-      Box::pin(async move {
-        let mut published = self
-          .published
-          .lock()
-          .expect("Bluetooth publication lock poisoned");
-        if published.as_ref().is_some_and(|current| {
-          current.identity == identity && current.device_id == device_id && current.document_fingerprint == document_fingerprint
-        }) && let Some(current) = published.take()
-        {
-          unsafe {
-            current.manager.stopAdvertising();
-            current.manager.removeAllServices();
-            current.manager.setDelegate(None);
-          }
-        }
-        Ok(())
-      })
+      Box::pin(self.request(move |reply| PeripheralCommand::Clear {
+        identity,
+        device_id,
+        document_fingerprint,
+        reply,
+      }))
     }
+  }
+
+  fn peripheral_actor(commands: async_channel::Receiver<PeripheralCommand>) {
+    let mut published: Option<PublishedAdvertisement> = None;
+    while let Ok(command) = commands.recv_blocking() {
+      match command {
+        PeripheralCommand::Publish { advertisement, reply } => {
+          let _ = reply.try_send(publish_on_thread(&mut published, advertisement));
+        },
+        PeripheralCommand::Clear {
+          identity,
+          device_id,
+          document_fingerprint,
+          reply,
+        } => {
+          if published.as_ref().is_some_and(|current| {
+            current.identity == identity && current.device_id == device_id && current.document_fingerprint == document_fingerprint
+          }) {
+            stop_publishing(published.take());
+          }
+          let _ = reply.try_send(Ok(()));
+        },
+      }
+    }
+    // The backend was dropped: withdraw the advertisement with the thread.
+    stop_publishing(published.take());
+  }
+
+  fn stop_publishing(published: Option<PublishedAdvertisement>) {
+    if let Some(current) = published {
+      unsafe {
+        current.manager.stopAdvertising();
+        current.manager.removeAllServices();
+        current.manager.setDelegate(None);
+      }
+    }
+  }
+
+  fn publish_on_thread(published: &mut Option<PublishedAdvertisement>, advertisement: DiscoveryAdvertisement) -> Result<()> {
+    // One peripheral-manager slot: release the old GATT/advertisement pair
+    // before registering its replacement.
+    stop_publishing(published.take());
+
+    let state = Arc::new(MacDelegateState::default());
+    let delegate = MacBluetoothDelegate::new(Arc::clone(&state));
+    // A dedicated serial queue keeps delegate callbacks (and therefore
+    // `wait_for_power` progress) independent of the main thread's run loop.
+    let queue = DispatchQueue::new("dev.flowstate.bluetooth.peripheral", None);
+    let manager = unsafe {
+      CBPeripheralManager::initWithDelegate_queue(CBPeripheralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), Some(&queue))
+    };
+    wait_for_power(&state, "macOS Bluetooth peripheral manager")?;
+
+    let framed = NSData::from_vec(encode_gatt_advertisement(&advertisement)?);
+    let characteristic = unsafe {
+      CBMutableCharacteristic::initWithType_properties_value_permissions(
+        CBMutableCharacteristic::alloc(),
+        &characteristic_uuid(),
+        CBCharacteristicProperties::Read,
+        Some(&*framed),
+        CBAttributePermissions::Readable,
+      )
+    };
+    let service = unsafe { CBMutableService::initWithType_primary(CBMutableService::alloc(), &service_uuid(), true) };
+    let characteristic_ref: &CBCharacteristic = characteristic.as_ref();
+    let characteristics = NSArray::from_slice(&[characteristic_ref]);
+    unsafe { service.setCharacteristics(Some(&*characteristics)) };
+    unsafe { manager.addService(&service) };
+
+    let advertised_services = NSArray::from_retained_slice(&[service_uuid()]);
+    let advertised_services_object: &AnyObject = advertised_services.as_ref();
+    let advertisement_data =
+      unsafe { NSDictionary::<NSString, AnyObject>::from_slices(&[CBAdvertisementDataServiceUUIDsKey], &[advertised_services_object]) };
+    unsafe { manager.startAdvertising(Some(&*advertisement_data)) };
+
+    *published = Some(PublishedAdvertisement {
+      identity: advertisement.identity,
+      device_id: advertisement.device_id,
+      document_fingerprint: advertisement.document_fingerprint,
+      manager,
+      _delegate: delegate,
+      _service: service,
+      _characteristic: characteristic,
+      _advertisement: advertisement_data,
+    });
+    Ok(())
   }
 
   fn scan_blocking(document_fingerprint: [u8; 32], duration: Duration) -> Result<Vec<DiscoveryAdvertisement>> {
@@ -884,11 +956,16 @@ mod macos_backend {
       .lock()
       .expect("Bluetooth scan sender lock poisoned") = Some(sender);
     let delegate = MacBluetoothDelegate::new(Arc::clone(&state));
-    let manager =
-      unsafe { CBCentralManager::initWithDelegate_queue(CBCentralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), None) };
+    // This blocking scan sleeps its own thread, so callbacks must arrive on a
+    // dedicated queue — on the main queue they would deadlock against a busy
+    // (or GPUI-owned) main thread.
+    let queue = DispatchQueue::new("dev.flowstate.bluetooth.central", None);
+    let manager = unsafe {
+      CBCentralManager::initWithDelegate_queue(CBCentralManager::alloc(), Some(ProtocolObject::from_ref(&*delegate)), Some(&queue))
+    };
     wait_for_power(&state, "macOS Bluetooth central manager")?;
     let services = NSArray::from_retained_slice(&[service_uuid()]);
-    unsafe { manager.scanForPeripheralsWithServices_options(Some(&services), None) };
+    unsafe { manager.scanForPeripheralsWithServices_options(Some(&*services), None) };
     thread::sleep(duration);
     unsafe { manager.stopScan() };
     for peripheral in state
@@ -910,14 +987,20 @@ mod macos_backend {
     Ok(found)
   }
 
+  /// Definitive states (off/unauthorized/unsupported) fail fast so a refresh
+  /// tick never stalls the discovery actor; `Unknown`/`Resetting` wait long
+  /// enough to cover the first-run Bluetooth permission prompt.
   fn wait_for_power(state: &MacDelegateState, label: &str) -> Result<()> {
-    for _ in 0..40 {
-      if state.powered_on.load(Ordering::Acquire) {
-        return Ok(());
+    for _ in 0..300 {
+      match CBManagerState(state.manager_state.load(Ordering::Acquire)) {
+        CBManagerState::PoweredOn => return Ok(()),
+        CBManagerState::PoweredOff => anyhow::bail!("{label}: Bluetooth is turned off"),
+        CBManagerState::Unauthorized => anyhow::bail!("{label}: Bluetooth permission was denied"),
+        CBManagerState::Unsupported => anyhow::bail!("{label}: Bluetooth LE is not supported on this device"),
+        _ => thread::sleep(Duration::from_millis(50)),
       }
-      thread::sleep(Duration::from_millis(50));
     }
-    ensure!(false, "{label} is not powered on")
+    anyhow::bail!("{label} did not become ready")
   }
 
   fn service_uuid() -> Retained<CBUUID> {

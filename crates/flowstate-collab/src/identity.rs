@@ -25,7 +25,10 @@ impl PortableIdentitySecret {
   }
 
   pub fn from_hex(text: &str) -> Result<Self> {
-    ensure!(text.len() == 64, "identity signing seed must contain 64 hexadecimal characters");
+    ensure!(
+      text.len() == 64 && text.is_ascii(),
+      "identity signing seed must contain 64 hexadecimal characters"
+    );
     let mut bytes = [0u8; 32];
     for (index, byte) in bytes.iter_mut().enumerate() {
       *byte = u8::from_str_radix(&text[index * 2..index * 2 + 2], 16).map_err(|_| anyhow!("identity signing seed is not hexadecimal"))?;
@@ -35,12 +38,15 @@ impl PortableIdentitySecret {
 
   #[must_use]
   pub fn to_hex(&self) -> String {
+    use std::fmt::Write as _;
     self
       .0
       .to_bytes()
       .iter()
-      .map(|byte| format!("{byte:02x}"))
-      .collect()
+      .fold(String::with_capacity(64), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+      })
   }
 
   #[must_use]
@@ -54,7 +60,16 @@ impl PortableIdentitySecret {
   }
 
   #[must_use]
-  pub fn sign_profile(&self, sequence: u64, display_name: String, color_rgb: u32, avatar_digest: Option<[u8; 32]>) -> SignedProfile {
+  pub fn sign_profile(&self, sequence: u64, mut display_name: String, color_rgb: u32, avatar_digest: Option<[u8; 32]>) -> SignedProfile {
+    // `SignedProfile::verify` rejects names over 64 bytes; clamp here so a
+    // locally-entered long name can never mint a profile every peer discards.
+    if display_name.len() > 64 {
+      let mut cut = 64;
+      while !display_name.is_char_boundary(cut) {
+        cut -= 1;
+      }
+      display_name.truncate(cut);
+    }
     let identity = self.public();
     let payload = profile_payload(&identity, sequence, &display_name, color_rgb, avatar_digest.as_ref());
     SignedProfile {
@@ -182,5 +197,15 @@ mod tests {
     let restored = PortableIdentitySecret::from_hex(&secret.to_hex()).unwrap();
     assert_eq!(restored.public(), secret.public());
     assert!(!format!("{secret:?}").contains(&secret.to_hex()));
+    // 64 BYTES of non-ASCII must error, not panic on a char boundary.
+    assert!(PortableIdentitySecret::from_hex(&"é".repeat(32)).is_err());
+  }
+
+  #[test]
+  fn oversized_display_names_are_clamped_to_verifiable_profiles() {
+    let secret = PortableIdentitySecret::generate();
+    let profile = secret.sign_profile(1, "é".repeat(64), 0x123456, None);
+    assert!(profile.display_name.len() <= 64);
+    assert!(profile.verify());
   }
 }

@@ -521,7 +521,7 @@ impl CollabManager {
       discovery.upsert(publication);
     }
     self.discovery = Some(discovery);
-    for session in self.sessions_by_id.keys().copied().collect::<Vec<_>>() {
+    for session in self.sessions_by_id.keys().copied() {
       self.configure_standing_access(session);
     }
   }
@@ -570,8 +570,8 @@ impl CollabManager {
       let request = DiscoveryAdmissionRequest::issue(&secret, advertisement.session, advertisement.document_fingerprint, nonce, expires);
       commands
         .try_send(NetCommand::RequestDiscoveredTicket {
-          advertisement,
-          request,
+          advertisement: Box::new(advertisement),
+          request: Box::new(request),
           reply: reply.clone(),
         })
         .context("queueing trusted-peer admission request")

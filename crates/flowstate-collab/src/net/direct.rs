@@ -183,20 +183,22 @@ impl DirectServeState {
       if request.verify(now).is_err() || request.session != session {
         return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
       }
-      let grants = self.standing_access.read().await;
-      let Some(grant) = grants.get(&session) else {
+      let title = self
+        .standing_access
+        .read()
+        .await
+        .get(&session)
+        .and_then(|grant| {
+          (grant.document_fingerprint == request.document_fingerprint && grant.identities.contains(&request.identity))
+            .then(|| grant.title.clone())
+        });
+      let Some(title) = title else {
         return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
       };
-      if grant.document_fingerprint != request.document_fingerprint || !grant.identities.contains(&request.identity) {
-        return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
-      }
       let Some(admission) = self.auth.admission(session) else {
         return ServeOutcome::Header(DirectResponseHeader::NotAttached);
       };
-      let payload = match postcard::to_stdvec(&DiscoveryAdmissionGrant {
-        admission,
-        title: grant.title.clone(),
-      }) {
+      let payload = match postcard::to_stdvec(&DiscoveryAdmissionGrant { admission, title }) {
         Ok(payload) => payload,
         Err(_) => return ServeOutcome::Header(DirectResponseHeader::NotFound),
       };

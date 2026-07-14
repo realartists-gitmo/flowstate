@@ -62,8 +62,8 @@ pub enum NetCommand {
     identities: Vec<PublicKey>,
   },
   RequestDiscoveredTicket {
-    advertisement: crate::discovery::DiscoveryAdvertisement,
-    request: crate::discovery::DiscoveryAdmissionRequest,
+    advertisement: Box<crate::discovery::DiscoveryAdvertisement>,
+    request: Box<crate::discovery::DiscoveryAdmissionRequest>,
     reply: Reply<Result<crate::ticket::SessionTicket>>,
   },
   CreateSession {

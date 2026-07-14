@@ -3146,6 +3146,7 @@ dependencies = [
  "base64",
  "blake3",
  "bluer",
+ "dispatch2",
  "flowstate-document",
  "flowstate-fidelity",
  "futures-util",

@@ -169,7 +169,7 @@ async fn net_main(cmd_rx: async_channel::Receiver<NetCommand>, evt_tx: async_cha
             "discovery request document does not match advertisement"
           );
           let bytes = direct::pull_with_fallback(
-            DirectRequest::RequestAdmission { request },
+            DirectRequest::RequestAdmission { request: *request },
             vec![advertisement.endpoint.id],
             DIRECT_PULL_TIMEOUT,
           )

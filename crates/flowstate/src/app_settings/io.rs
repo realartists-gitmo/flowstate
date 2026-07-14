@@ -637,5 +637,19 @@ fn save_app_settings_to_path(settings: &AppSettings, path: PathBuf) -> io::Resul
     fs::create_dir_all(parent)?;
   }
   let text = toml::to_string_pretty(settings).map_err(io::Error::other)?;
-  fs::write(path, text)
+  fs::write(&path, text)?;
+  restrict_to_owner(&path)
+}
+
+/// The settings file carries the identity signing seed and Dropbox tokens,
+/// so it must never be group/world readable.
+#[cfg(unix)]
+fn restrict_to_owner(path: &Path) -> io::Result<()> {
+  use std::os::unix::fs::PermissionsExt as _;
+  fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+}
+
+#[cfg(not(unix))]
+fn restrict_to_owner(_path: &Path) -> io::Result<()> {
+  Ok(())
 }
