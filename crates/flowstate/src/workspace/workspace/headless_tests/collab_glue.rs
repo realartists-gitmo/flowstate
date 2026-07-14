@@ -108,6 +108,78 @@ fn start_and_leave_flow_collaboration_session_round_trip(cx: &mut TestAppContext
   });
 }
 
+/// Build-order step 10 gate: the join handoff — a snapshot-built flow
+/// authority + I/O service become a PATHLESS tab (autosave skips it) that
+/// paints the host's board and stays editable through its own gate, with a
+/// debounced `.fl0` recovery file that discard removes.
+#[gpui::test]
+fn flow_join_handoff_pathless_tab_recovery_written_and_discarded(cx: &mut TestAppContext) {
+  use flowstate_collab::flow::{FlowDocHandle, FlowIoHandle, FlowRuntime};
+  use flowstate_flow::FlowIntent;
+
+  // "Remote host" side: a flow with one sheet, snapshotted for the joiner.
+  let format = flowstate_flow::FlowFormat::policy_debate();
+  let (host, _host_gate) = FlowDocHandle::new(FlowRuntime::new(&format).expect("host runtime"));
+  let sheet_id = uuid::Uuid::new_v4();
+  host
+    .apply(FlowIntent::CreateSheet {
+      sheet_id,
+      name: "Shared sheet".into(),
+      sheet_type_id: format.sheet_types[0].id,
+    })
+    .expect("host sheet");
+  let snapshot = host.snapshot().expect("host snapshot");
+  let expected_board = host.board_projection().expect("host board");
+
+  // Joiner session side (the `finish_join_flow_snapshot` shape): runtime from
+  // snapshot → authority + I/O service, handed to the workspace.
+  let h = support::open_workspace(cx);
+  let runtime = FlowRuntime::from_snapshot(&snapshot).expect("joined runtime");
+  let (authority, gate) = FlowDocHandle::new(runtime);
+  let io = FlowIoHandle::spawn(gate).expect("joined flow io");
+  h.update(cx, |ws, window, cx| {
+    ws.add_joined_collaboration_flow_panel(authority, io, "Untitled (shared)".to_string(), window, cx);
+  });
+  cx.run_until_parked();
+
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("joined flow tab active");
+  h.update(cx, |_, _, cx| {
+    let editor = flow.read(cx);
+    assert!(editor.document_path().is_none(), "joined tab must be pathless (autosave skips it)");
+    assert_eq!(editor.board(), &expected_board, "joined tab paints the host's board");
+  });
+
+  // Recovery: the session sets a recovery path on pathless joined tabs; edits
+  // schedule a debounced snapshot write.
+  let dir = std::env::temp_dir().join(format!("flowstate-headless-join-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).expect("temp dir");
+  let recovery = dir.join("recovery.fl0");
+  h.update(cx, |_, _, cx| {
+    flow.update(cx, |editor, cx| editor.set_recovery_path(Some(recovery.clone()), cx));
+  });
+  // The joined tab stays editable through its own authority (invariant 5).
+  h.update(cx, |_, _, cx| flow.update(cx, |editor, cx| editor.create_sheet(cx)));
+  cx.run_until_parked();
+  h.update(cx, |_, _, cx| {
+    assert_eq!(flow.read(cx).board().sheets.len(), 2, "joined tab edits commit through the gate");
+  });
+  cx.executor().advance_clock(std::time::Duration::from_millis(800));
+  let recovery_for_wait = recovery.clone();
+  h.wait_until(cx, "flow recovery file write", move |_| recovery_for_wait.exists());
+  let recovered = flowstate_flow::read_fl0(&recovery).expect("recovery file is a valid .fl0 v2");
+  FlowRuntime::from_snapshot(&recovered).expect("recovery snapshot reloads");
+
+  // Autosave skipped: the pathless tab stays dirty (nothing saved it).
+  h.update(cx, |_, _, cx| {
+    assert!(flow.read(cx).has_unsaved_changes(), "pathless joined tab is never autosaved");
+  });
+
+  // Leave/close discards the recovery file.
+  h.update(cx, |_, _, cx| flow.update(cx, |editor, _| editor.discard_recovery_file()));
+  assert!(!recovery.exists(), "discard removes the recovery file");
+  std::fs::remove_dir_all(&dir).ok();
+}
+
 /// Build-order step 9 gate: the window-close prompt cascade covers live FLOW
 /// sessions (`collaboration_close_panels` scans `flow_panels` too).
 #[gpui::test]
