@@ -88,7 +88,7 @@ fn keybinding_for_entry(entry: &KeymapEntry) -> Option<KeyBinding> {
 }
 
 #[hotpath::measure]
-fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
+pub(crate) fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
   let action: Box<dyn Action> = match command {
     CommandId::MoveLeft => Box::new(MoveLeft),
     CommandId::MoveRight => Box::new(MoveRight),
@@ -181,6 +181,7 @@ fn action_for_command(command: CommandId) -> Option<Box<dyn Action>> {
     | CommandId::SwitchToTab9
     | CommandId::SwitchToTab10
     | CommandId::ScrollToParagraph => return None,
+    CommandId::FlowAddSiblingAbove | CommandId::FlowDeleteSelected | CommandId::FlowStrike => return None,
   };
   Some(action)
 }

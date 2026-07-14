@@ -25,10 +25,13 @@ impl Workspace {
             cx,
             !self.outline_collapsed,
             !self.ribbon_collapsed,
-            !self.toolkit_collapsed,
           ))
           .child(div().flex_1())
-          .child(share_top_bar_button(cx, self.active_editor.is_some(), active_collaborating))
+          .child(share_top_bar_button(
+            cx,
+            self.active_editor.is_some() || self.active_flow.is_some(),
+            active_collaborating,
+          ))
           .child(settings_top_bar_button(cx)),
       )
   }

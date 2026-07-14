@@ -27,8 +27,8 @@ use crate::{
 };
 
 use super::{
-  APP_CHROME_BORDER_WIDTH, LeftNavMode, OutlineRowGuides, SIDE_PANEL_COLLAPSED_WIDTH, SidebarTreeAction, SidebarTreeRow, ToolkitSearchFilter,
-  ToolkitTool, Workspace, outline_hierarchy_color, render_sidebar_tree_row,
+  APP_CHROME_BORDER_WIDTH, LeftNavMode, OutlineRowGuides, SidebarTreeAction, SidebarTreeRow, ToolkitSearchFilter, ToolkitTool, Workspace,
+  outline_hierarchy_color, render_sidebar_tree_row,
 };
 
 const TOOLKIT_RESULT_LIMIT: usize = 32;
@@ -50,18 +50,8 @@ impl Workspace {
   /// search results are miniature scrollable windows that can be opened,
   /// inserted, or dragged into the editor.
   pub(super) fn render_content_area(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-    let toolkit_width = if self.toolkit_collapsed {
-      SIDE_PANEL_COLLAPSED_WIDTH
-    } else if self.active_toolkit_tool.is_some() {
-      px(380.0)
-    } else {
-      px(40.0)
-    };
-    let toolkit_range_end = if self.toolkit_collapsed || self.active_toolkit_tool.is_none() {
-      toolkit_width
-    } else {
-      px(620.0)
-    };
+    let toolkit_width = if self.active_toolkit_tool.is_some() { px(380.0) } else { px(40.0) };
+    let toolkit_range_end = if self.active_toolkit_tool.is_none() { toolkit_width } else { px(620.0) };
 
     h_resizable("workspace-content-resizable")
       .with_state(&self.content_resizable_state)
@@ -82,13 +72,7 @@ impl Workspace {
           .size(toolkit_width)
           .size_range(toolkit_width..toolkit_range_end)
           .grow(false)
-          .child(if self.toolkit_collapsed {
-            self
-              .render_collapsed_side_panel("Show toolkit", IconName::PanelRightOpen, |workspace, cx| workspace.toggle_toolkit(cx), cx)
-              .into_any_element()
-          } else {
-            self.render_toolkit_rail_area(cx).into_any_element()
-          }),
+          .child(self.render_toolkit_rail_area(cx)),
       )
   }
 
@@ -143,16 +127,6 @@ impl Workspace {
           })),
       )
       .child(div().flex_1())
-      .child(
-        Button::new("collapse-toolkit-rail")
-          .icon(Icon::new(IconName::PanelRightClose).text_color(cx.theme().muted_foreground))
-          .xsmall()
-          .ghost()
-          .tooltip("Hide toolkit")
-          .on_click(cx.listener(|workspace, _, _, cx| {
-            workspace.toggle_toolkit(cx);
-          })),
-      )
   }
 
   pub(super) fn load_tub_root(&mut self, root: PathBuf, cx: &mut Context<Self>) {
@@ -483,17 +457,13 @@ impl Workspace {
     cx.notify();
   }
 
-  fn insert_toolkit_hit(&mut self, hit_ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+  fn insert_toolkit_hit(&mut self, hit_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
     let Some(hit) = self.toolkit_hits.get(hit_ix).cloned() else {
       return;
     };
     if let Some(editor) = self.active_editor.clone() {
       let paragraphs = toolkit_hit_insert_paragraphs(&hit);
       editor.update(cx, |editor, cx| editor.insert_toolkit_text_at_caret(paragraphs, cx));
-      return;
-    }
-    if let Some(editor) = self.active_flow.clone() {
-      editor.update(cx, |editor, cx| editor.insert_toolkit_text(&hit.title, &hit.insert_text, window, cx));
     }
   }
 
@@ -690,7 +660,7 @@ impl Workspace {
       .justify_center()
       .child(
         Button::new(id)
-          .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().primary_foreground))
+          .icon(Icon::new(IconName::FolderOpen).text_color(cx.theme().secondary_foreground))
           .label(label)
           .small()
           .tooltip("Select debate tub folder")
@@ -902,6 +872,11 @@ impl Workspace {
           is_active,
           has_search_match: false,
           guide,
+          hierarchy_color: None,
+          label_color: None,
+          interaction_palette: None,
+          guide_colors: None,
+          incoming_branch: None,
           icon: Some(icon),
           icon_color: Some(icon_color),
           toggle_action: Some(toggle_action),

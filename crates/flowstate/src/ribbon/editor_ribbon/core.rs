@@ -1,6 +1,6 @@
 use gpui::{
-  AnyElement, App, Context, Entity, Focusable, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window, div,
-  prelude::*, px, relative,
+  Action, AnyElement, App, Context, Entity, Focusable, Hsla, IntoElement, Keystroke, ParentElement as _, Render, Styled as _, WeakEntity, Window,
+  div, prelude::*, px, relative,
 };
 use gpui_component::Size;
 use gpui_component::button::DropdownButton;
@@ -11,7 +11,7 @@ use gpui_component::menu::PopupMenuItem;
 use gpui_component::{ActiveTheme as _, Disableable as _, Icon, IconName, PixelsExt as _, Selectable as _, Sizable as _};
 use serde::{Deserialize, Serialize};
 
-use crate::commands::{CommandId, active_first_key_for};
+use crate::commands::{CommandId, action_for_command, active_first_key_for, context_for};
 use crate::ribbon::style_catalog::{HIGHLIGHT_STYLE_SPECS, PARAGRAPH_STYLE_SPECS, SEMANTIC_STYLE_SPECS};
 use crate::workspace::Workspace;
 use uuid::Uuid;

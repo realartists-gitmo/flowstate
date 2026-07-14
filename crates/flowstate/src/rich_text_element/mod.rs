@@ -94,6 +94,9 @@ pub fn flowstate_command_to_rich_text(command: CommandId) -> Option<RichTextEdit
     | CommandId::SwitchToTab8
     | CommandId::SwitchToTab9
     | CommandId::SwitchToTab10
-    | CommandId::ScrollToParagraph => return None,
+    | CommandId::ScrollToParagraph
+    | CommandId::FlowAddSiblingAbove
+    | CommandId::FlowDeleteSelected
+    | CommandId::FlowStrike => return None,
   })
 }

@@ -48,7 +48,7 @@ impl Workspace {
       )
       .child(
         icon_button("tab-bar-save-file", AppIcon::SaveFile)
-          .tooltip("Save current file")
+          .tooltip_with_action("Save current file", &Save, context_for(CommandId::Save))
           .on_click(cx.listener(|workspace, _, window, cx| {
             workspace.save_active(window, cx);
           })),
@@ -299,7 +299,11 @@ impl Workspace {
     } else {
       None
     };
-    let zoom = self.active_editor.as_ref().map(|editor| editor.read(cx).zoom_percent());
+    let zoom = self
+      .active_editor
+      .as_ref()
+      .map(|editor| editor.read(cx).zoom_percent())
+      .or_else(|| self.active_flow.as_ref().map(|flow| flow.read(cx).zoom_percent()));
     let collab_phase = self
       .active_document_id
       .and_then(|panel_id| crate::collab::phase_for_panel(panel_id, cx));

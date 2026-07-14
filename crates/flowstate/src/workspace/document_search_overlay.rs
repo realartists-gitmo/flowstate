@@ -3,15 +3,17 @@ use gpui::{
   prelude::*, px,
 };
 use gpui_component::{
-  ActiveTheme as _, Icon, IconName, Sizable as _,
+  ActiveTheme as _, Icon, IconName, Side, Sizable as _,
   button::{Button, ButtonVariants as _},
   checkbox::Checkbox,
   h_flex,
   input::{Input, InputEvent, InputState},
-  menu::{DropdownMenu as _, PopupMenuItem},
+  menu::{DropdownMenu as _, PopupMenu, PopupMenuItem},
 };
 
-use crate::rich_text_element::ParagraphStyle;
+use std::ops::Range;
+
+use crate::rich_text_element::{DocumentOffset, HighlightStyle, Paragraph, ParagraphStyle, RunSemanticStyle};
 
 #[derive(Clone, Copy)]
 struct SearchStyleFilter {
@@ -50,6 +52,64 @@ const SEARCH_STYLE_FILTERS: &[SearchStyleFilter] = &[
   },
 ];
 
+#[derive(Clone, Copy)]
+struct HighlightFilter {
+  label: &'static str,
+  style: HighlightStyle,
+}
+
+const HIGHLIGHT_FILTERS: &[HighlightFilter] = &[
+  HighlightFilter {
+    label: "Spoken",
+    style: flowstate_document::HIGHLIGHT_SPOKEN,
+  },
+  HighlightFilter {
+    label: "Insert",
+    style: flowstate_document::HIGHLIGHT_INSERT,
+  },
+  HighlightFilter {
+    label: "Alternative",
+    style: flowstate_document::HIGHLIGHT_ALTERNATIVE,
+  },
+  HighlightFilter {
+    label: "Marked",
+    style: flowstate_document::HIGHLIGHT_MARKED,
+  },
+];
+
+#[derive(Clone, Copy)]
+struct SemanticStyleFilter {
+  label: &'static str,
+  style: RunSemanticStyle,
+}
+
+const SEMANTIC_STYLE_FILTERS: &[SemanticStyleFilter] = &[
+  SemanticStyleFilter {
+    label: "Plain",
+    style: RunSemanticStyle::Plain,
+  },
+  SemanticStyleFilter {
+    label: "Cite",
+    style: flowstate_document::SEMANTIC_CITE,
+  },
+  SemanticStyleFilter {
+    label: "Emphasis",
+    style: flowstate_document::SEMANTIC_EMPHASIS,
+  },
+  SemanticStyleFilter {
+    label: "Underline",
+    style: flowstate_document::SEMANTIC_UNDERLINE,
+  },
+  SemanticStyleFilter {
+    label: "Condensed",
+    style: flowstate_document::SEMANTIC_CONDENSED,
+  },
+  SemanticStyleFilter {
+    label: "Ultracondensed",
+    style: flowstate_document::SEMANTIC_ULTRACONDENSED,
+  },
+];
+
 #[derive(Clone, Copy, Debug)]
 pub enum DocumentSearchBarEvent {
   QueryChanged,
@@ -58,6 +118,7 @@ pub enum DocumentSearchBarEvent {
   StyleFilterChanged,
   PreviousRequested,
   NextRequested,
+  ApplyReplaceCurrentRequested,
   ApplyReplaceRequested,
   CloseRequested,
 }
@@ -70,6 +131,10 @@ pub struct DocumentSearchBar {
   case_sensitive: bool,
   whole_words: bool,
   enabled_styles: [bool; SEARCH_STYLE_FILTERS.len()],
+  highlight_types: [bool; HIGHLIGHT_FILTERS.len()],
+  underline: bool,
+  strikethrough: bool,
+  semantic_styles: [bool; SEMANTIC_STYLE_FILTERS.len()],
   _input_subscription: Subscription,
 }
 
@@ -94,6 +159,10 @@ impl DocumentSearchBar {
       case_sensitive: false,
       whole_words: false,
       enabled_styles: [true; SEARCH_STYLE_FILTERS.len()],
+      highlight_types: [true; HIGHLIGHT_FILTERS.len()],
+      underline: true,
+      strikethrough: true,
+      semantic_styles: [true; SEMANTIC_STYLE_FILTERS.len()],
       _input_subscription,
     }
   }
@@ -136,6 +205,82 @@ impl DocumentSearchBar {
       .iter()
       .position(|filter| filter.style == style)
       .is_none_or(|ix| self.enabled_styles[ix])
+  }
+
+  pub fn has_active_run_filters(&self) -> bool {
+    self.highlight_types.iter().any(|&b| b) || self.underline || self.strikethrough || self.semantic_styles.iter().any(|&b| b)
+  }
+
+  pub fn run_style_matches_for_range(&self, paragraph: &Paragraph, range: &Range<DocumentOffset>) -> bool {
+    let mut run_start = 0usize;
+    for run in &paragraph.runs {
+      let run_end = run_start + run.len;
+      if run_start < range.end.byte && run_end > range.start.byte {
+        if self.highlight_types.iter().any(|&b| b)
+          && let Some(highlight) = run.styles.highlight
+          && self.highlight_type_enabled(highlight)
+        {
+          return true;
+        }
+        if self.underline && run.styles.direct_underline {
+          return true;
+        }
+        if self.strikethrough && run.styles.strikethrough {
+          return true;
+        }
+        if self.semantic_styles.iter().any(|&b| b) && self.semantic_style_enabled(run.styles.semantic) {
+          return true;
+        }
+      }
+      run_start = run_end;
+    }
+    false
+  }
+
+  fn semantic_style_enabled(&self, style: RunSemanticStyle) -> bool {
+    SEMANTIC_STYLE_FILTERS
+      .iter()
+      .position(|filter| filter.style == style)
+      .is_some_and(|ix| self.semantic_styles[ix])
+  }
+
+  fn highlight_type_enabled(&self, style: HighlightStyle) -> bool {
+    HIGHLIGHT_FILTERS
+      .iter()
+      .position(|filter| filter.style == style)
+      .is_some_and(|ix| self.highlight_types[ix])
+  }
+
+  fn toggle_highlight_type(&mut self, ix: usize, cx: &mut Context<Self>) {
+    self.highlight_types[ix] = !self.highlight_types[ix];
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::StyleFilterChanged);
+    cx.notify();
+  }
+
+  fn toggle_underline(&mut self, cx: &mut Context<Self>) {
+    self.underline = !self.underline;
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::StyleFilterChanged);
+    cx.notify();
+  }
+
+  fn toggle_strikethrough(&mut self, cx: &mut Context<Self>) {
+    self.strikethrough = !self.strikethrough;
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::StyleFilterChanged);
+    cx.notify();
+  }
+
+  fn toggle_semantic_style(&mut self, ix: usize, cx: &mut Context<Self>) {
+    self.semantic_styles[ix] = !self.semantic_styles[ix];
+    self.active_match = None;
+    self.match_count = 0;
+    cx.emit(DocumentSearchBarEvent::StyleFilterChanged);
+    cx.notify();
   }
 
   fn set_case_sensitive(&mut self, case_sensitive: bool, cx: &mut Context<Self>) {
@@ -252,7 +397,7 @@ impl Render for DocumentSearchBar {
           .gap_2()
           .items_center()
           .child(
-            Icon::new(IconName::Search)
+            Icon::new(IconName::TextSearch)
               .with_size(px(12.0))
               .text_color(cx.theme().muted_foreground),
           )
@@ -376,9 +521,15 @@ impl Render for DocumentSearchBar {
                 .tooltip("Paragraph styles to search")
                 .dropdown_menu({
                   let search_bar = search_bar.clone();
-                  let enabled_styles = self.enabled_styles;
-                  move |menu, _, _| {
-                    SEARCH_STYLE_FILTERS
+                  move |menu, window, cx| {
+                    let sb = search_bar.upgrade().unwrap();
+                    let enabled_styles = sb.read(cx).enabled_styles;
+                    let highlight_types = sb.read(cx).highlight_types;
+                    let underline = sb.read(cx).underline;
+                    let strikethrough = sb.read(cx).strikethrough;
+                    let semantic_styles = sb.read(cx).semantic_styles;
+
+                    let mut menu = SEARCH_STYLE_FILTERS
                       .iter()
                       .enumerate()
                       .fold(menu.min_w(px(140.0)), |menu, (ix, filter)| {
@@ -386,11 +537,70 @@ impl Render for DocumentSearchBar {
                         menu.item(
                           PopupMenuItem::new(filter.label)
                             .checked(enabled_styles[ix])
+                            .keep_open(true)
                             .on_click(move |_, _, cx| {
                               let _ = search_bar.update(cx, |bar, cx| bar.toggle_style_filter(filter.style, cx));
                             }),
                         )
                       })
+                      .separator();
+                    for (ix, filter) in SEMANTIC_STYLE_FILTERS.iter().enumerate() {
+                      let search_bar = search_bar.clone();
+                      menu = menu.item(
+                        PopupMenuItem::new(filter.label)
+                          .checked(semantic_styles[ix])
+                          .keep_open(true)
+                          .on_click(move |_, _, cx| {
+                            let _ = search_bar.update(cx, |bar, cx| bar.toggle_semantic_style(ix, cx));
+                          }),
+                      );
+                    }
+                    menu = menu.separator();
+
+                    let any_highlight_checked = highlight_types.iter().any(|&b| b);
+                    let highlight_submenu = PopupMenu::build(window, cx, |submenu, _window, _cx| {
+                      let mut submenu = submenu.min_w(px(130.0)).check_side(Side::Right);
+                      for (ix, filter) in HIGHLIGHT_FILTERS.iter().enumerate() {
+                        let search_bar = search_bar.clone();
+                        submenu = submenu.item(
+                          PopupMenuItem::new(filter.label)
+                            .checked(highlight_types[ix])
+                            .keep_open(true)
+                            .on_click(move |_, _, cx| {
+                              let _ = search_bar.update(cx, |bar, cx| bar.toggle_highlight_type(ix, cx));
+                            }),
+                        );
+                      }
+                      submenu
+                    });
+                    let parent = cx.entity().downgrade();
+                    highlight_submenu.update(cx, |sub, _| {
+                      sub.parent_menu = Some(parent);
+                    });
+
+                    menu = menu
+                      .item(PopupMenuItem::submenu("Highlight", highlight_submenu).checked(any_highlight_checked))
+                      .separator()
+                      .item({
+                        let search_bar = search_bar.clone();
+                        PopupMenuItem::new("Underline")
+                          .checked(underline)
+                          .keep_open(true)
+                          .on_click(move |_, _, cx| {
+                            let _ = search_bar.update(cx, |bar, cx| bar.toggle_underline(cx));
+                          })
+                      })
+                      .item({
+                        let search_bar = search_bar.clone();
+                        PopupMenuItem::new("Strikethrough")
+                          .checked(strikethrough)
+                          .keep_open(true)
+                          .on_click(move |_, _, cx| {
+                            let _ = search_bar.update(cx, |bar, cx| bar.toggle_strikethrough(cx));
+                          })
+                      });
+
+                    menu
                   }
                 }),
             ),
@@ -404,16 +614,33 @@ impl Render for DocumentSearchBar {
             ),
           )
           .child(
-            Button::new("apply-document-search-replace")
-              .icon(
-                Icon::default()
-                  .path("icons/replace.svg")
-                  .text_color(cx.theme().muted_foreground),
+            h_flex()
+              .gap_0()
+              .items_center()
+              .child(
+                Button::new("apply-document-search-replace-current")
+                  .icon(
+                    Icon::default()
+                      .path("icons/replace.svg")
+                      .text_color(cx.theme().muted_foreground),
+                  )
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Replace current match")
+                  .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::ApplyReplaceCurrentRequested))),
               )
-              .xsmall()
-              .ghost()
-              .tooltip("Replace all matches")
-              .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::ApplyReplaceRequested))),
+              .child(
+                Button::new("apply-document-search-replace-all")
+                  .icon(
+                    Icon::default()
+                      .path("icons/replace-all.svg")
+                      .text_color(cx.theme().muted_foreground),
+                  )
+                  .xsmall()
+                  .ghost()
+                  .tooltip("Replace all matches")
+                  .on_click(cx.listener(|_, _, _, cx| cx.emit(DocumentSearchBarEvent::ApplyReplaceRequested))),
+              ),
           )
           .child(div().flex_1())
           .child(

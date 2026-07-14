@@ -120,6 +120,11 @@ fn modern_condense_menu(
   let label = RibbonLabel::for_command(command);
   let command_color = ribbon_command_color(command, cx);
   let shortcut = command.shortcut.clone();
+  let condense_action = command
+    .command_id
+    .and_then(action_for_command)
+    .map(|action| (action, command.command_id.and_then(context_for)));
+  let has_condense_action = condense_action.is_some();
 
   DropdownButton::new("modern-ribbon-condense-dropdown")
     .with_size(Size::Size(chip_height))
@@ -131,7 +136,10 @@ fn modern_condense_menu(
         .ghost()
         .h(chip_height)
         .px(metrics.chip_padding_x)
-        .tooltip(command_tooltip(command))
+        .when_some(condense_action, |this, (action_box, ctx)| {
+          this.tooltip_with_action(command.label, &*action_box, ctx)
+        })
+        .when(!has_condense_action, |this| this.tooltip(command.label))
         .when_some(label.icon_path, |this, path| {
           this.child(
             Icon::default()
@@ -186,6 +194,7 @@ fn modern_condensed_menu(
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
+  options: ModernRibbonOptions,
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let mode_active = command.selected;
@@ -193,6 +202,7 @@ fn modern_condensed_menu(
   let chip_height = metrics.chip_height;
   let label = RibbonLabel::for_command(command);
   let command_color = ribbon_command_color(command, cx);
+  let shortcut = command.shortcut.clone();
 
   DropdownButton::new("modern-ribbon-condensed-dropdown")
     .with_size(Size::Size(chip_height))
@@ -230,6 +240,9 @@ fn modern_condensed_menu(
               .text_color(command_color)
               .child(label.text),
           )
+        })
+        .when(show_shortcut(options), |this| {
+          this.when_some(shortcut, |this, shortcut| this.child(keycap(shortcut, cx)))
         })
         .on_click({
           let editor = editor.clone();
@@ -517,12 +530,18 @@ fn modern_undo_button(
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let enabled = editor.read(cx).can_undo();
-  let tooltip = shortcut_for(CommandId::Undo)
-    .map(|s| format!("Undo ({s})"))
-    .unwrap_or_else(|| "Undo".to_string());
-  modern_icon_chip(IconName::Undo, tooltip, command, editor, metrics, cx, enabled, |editor, cx| {
-    editor.undo(cx);
-  })
+  let undo_action = action_for_command(CommandId::Undo).map(|a| (a, context_for(CommandId::Undo)));
+  modern_icon_chip(
+    IconName::Undo,
+    "Undo",
+    undo_action,
+    command,
+    editor,
+    metrics,
+    cx,
+    enabled,
+    |editor, cx| editor.undo(cx),
+  )
 }
 
 #[hotpath::measure]
@@ -533,17 +552,24 @@ fn modern_redo_button(
   cx: &mut Context<EditorRibbon>,
 ) -> AnyElement {
   let enabled = editor.read(cx).can_redo();
-  let tooltip = shortcut_for(CommandId::Redo)
-    .map(|s| format!("Redo ({s})"))
-    .unwrap_or_else(|| "Redo".to_string());
-  modern_icon_chip(IconName::Redo, tooltip, command, editor, metrics, cx, enabled, |editor, cx| {
-    editor.redo(cx);
-  })
+  let redo_action = action_for_command(CommandId::Redo).map(|a| (a, context_for(CommandId::Redo)));
+  modern_icon_chip(
+    IconName::Redo,
+    "Redo",
+    redo_action,
+    command,
+    editor,
+    metrics,
+    cx,
+    enabled,
+    |editor, cx| editor.redo(cx),
+  )
 }
 
 fn modern_icon_chip(
   icon: IconName,
-  tooltip: String,
+  tooltip: &'static str,
+  action_with_ctx: Option<(Box<dyn Action>, Option<&'static str>)>,
   command: &RibbonCommand,
   editor: Entity<RichTextEditor>,
   metrics: RibbonLayoutMetrics,
@@ -557,6 +583,7 @@ fn modern_icon_chip(
   } else {
     cx.theme().muted_foreground.opacity(0.5)
   };
+  let has_tooltip_action = action_with_ctx.is_some();
   Button::new(("modern-ribbon-command", ribbon_command_key(command.id)))
     .xsmall()
     .compact()
@@ -565,7 +592,10 @@ fn modern_icon_chip(
     .w(metrics.chip_height)
     .px(metrics.chip_padding_x)
     .icon(Icon::new(icon).xsmall().text_color(icon_color))
-    .tooltip(tooltip)
+    .when_some(action_with_ctx, |this, (action_box, ctx)| {
+      this.tooltip_with_action(tooltip, &*action_box, ctx)
+    })
+    .when(!has_tooltip_action, |this| this.tooltip(tooltip))
     .disabled(!enabled)
     .on_click(move |_, _, cx| {
       editor.update(cx, |editor, cx| action(editor, cx));

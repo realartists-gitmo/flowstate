@@ -24,7 +24,48 @@ pub const MAX_PRESENCE_CURSOR_BYTES: usize = 256;
 pub struct PresenceState {
   pub name: String,
   pub color_rgb: u32,
-  pub selection: Option<PresenceSelection>,
+  pub focus: Option<PresenceFocus>,
+}
+
+/// What the peer is focused on — kind-specific (spec Part C, presence). The
+/// wire change from `Option<PresenceSelection>` is covered by the protocol v4
+/// bump: v3 peers never reach presence exchange with a v4 session.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PresenceFocus {
+  /// Rich-text (.db8) selection in the document body.
+  Text(PresenceSelection),
+  /// Flow (.fl0) board focus.
+  Flow(FlowPresenceFocus),
+}
+
+impl PresenceFocus {
+  #[must_use]
+  pub fn text(&self) -> Option<&PresenceSelection> {
+    match self {
+      Self::Text(selection) => Some(selection),
+      Self::Flow(_) => None,
+    }
+  }
+
+  #[must_use]
+  pub fn flow(&self) -> Option<&FlowPresenceFocus> {
+    match self {
+      Self::Flow(focus) => Some(focus),
+      Self::Text(_) => None,
+    }
+  }
+}
+
+/// A peer's board focus inside a flow session: which sheet they view, which
+/// cell they focus, and — because cells are real CRDT text — an exact caret as
+/// encoded Loro cursors (resolved under the flow gate on the receiving side).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct FlowPresenceFocus {
+  pub sheet: Option<uuid::Uuid>,
+  pub cell: Option<uuid::Uuid>,
+  /// Whether the peer has the cell's editor open (vs merely selecting it).
+  pub editing: bool,
+  pub caret: Option<PresenceSelection>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -93,7 +134,7 @@ pub struct RosterEntry {
   pub key: String,
   pub name: String,
   pub color_rgb: u32,
-  pub selection: Option<PresenceSelection>,
+  pub focus: Option<PresenceFocus>,
 }
 
 #[derive(Clone, Debug)]
@@ -282,22 +323,30 @@ fn roster_entry_from_value(key: String, value: LoroValue) -> Option<RosterEntry>
     color_rgb: state.color_rgb & 0x00ff_ffff,
     key,
     name: state.name,
-    selection: state.selection,
+    focus: state.focus,
   })
 }
 
 /// Clamp a presence state to the Part B caps before it is broadcast: strip
-/// control characters, truncate the display name, and drop a selection whose
+/// control characters, truncate the display name, and drop a focus whose
 /// cursor encodings exceed the cap (a corrupt/oversized cursor is unusable).
 fn sanitize_presence_state(state: &PresenceState) -> PresenceState {
-  let selection = match &state.selection {
-    Some(selection) if selection_within_caps(selection) => Some(selection.clone()),
+  let focus = match &state.focus {
+    Some(focus) if focus_within_caps(focus) => Some(focus.clone()),
+    Some(PresenceFocus::Flow(focus)) => {
+      // A flow focus with only an oversized caret is still useful board
+      // presence — drop just the caret rather than the whole focus.
+      Some(PresenceFocus::Flow(FlowPresenceFocus {
+        caret: None,
+        ..focus.clone()
+      }))
+    },
     _ => None,
   };
   PresenceState {
     name: sanitize_display_name(&state.name),
     color_rgb: state.color_rgb & 0x00ff_ffff,
-    selection,
+    focus,
   }
 }
 
@@ -323,7 +372,14 @@ fn truncate_to_bytes(text: &str, max_bytes: usize) -> String {
 fn presence_state_within_caps(state: &PresenceState) -> bool {
   state.name.len() <= MAX_PRESENCE_NAME_BYTES
     && !state.name.chars().any(|c| c.is_control())
-    && state.selection.as_ref().is_none_or(selection_within_caps)
+    && state.focus.as_ref().is_none_or(focus_within_caps)
+}
+
+fn focus_within_caps(focus: &PresenceFocus) -> bool {
+  match focus {
+    PresenceFocus::Text(selection) => selection_within_caps(selection),
+    PresenceFocus::Flow(focus) => focus.caret.as_ref().is_none_or(selection_within_caps),
+  }
 }
 
 fn selection_within_caps(selection: &PresenceSelection) -> bool {
@@ -344,7 +400,7 @@ mod tests {
     PresenceState {
       name: name.to_string(),
       color_rgb: 0x3b82f6,
-      selection: None,
+      focus: None,
     }
   }
 

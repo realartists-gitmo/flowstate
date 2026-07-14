@@ -13,8 +13,9 @@ pub use loro_import::{
   ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
 };
 pub use loro_projection::{
-  ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_table_block,
-  object_input_blocks_for_ids, object_input_blocks_from_loro, owner_of_changed_container, section_page_attrs,
+  ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_single_flow,
+  materialize_table_block, object_input_blocks_for_ids, object_input_blocks_from_loro, owner_of_changed_container, paragraph_ids_by_boundary_in,
+  section_page_attrs,
 };
 pub use loro_schema::{
   BLOCKS_BY_ID, BODY_FLOW_ID, COMMENTS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
@@ -25,9 +26,9 @@ pub use loro_schema::{
   SECTION_ATTR_PAGE_NUMBERING_START, SECTION_ATTR_PAGE_WIDTH, SECTIONS_BY_ID, SENTINEL_NEWLINE, SectionMargins, SectionOrientation,
   SectionPageAttrs, SectionPageNumbering, SectionPageSize, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY,
   TABLE_ROW_ORDER, TABLE_ROWS_BY_ID, USERS_BY_ID, cell_flow_loro_id, cell_loro_id, cell_loro_id_for, column_loro_id, document_id,
-  document_schema_version, ensure_section, fork_document_lineage, init_loro_document, new_loro_document, parse_cell_loro_id,
-  parse_column_loro_id, parse_row_loro_id, read_section_page_attrs, record_revision, register_replica, register_user, row_loro_id,
-  set_section_page_attrs, touch_document_metadata,
+  document_schema_version, ensure_flow, ensure_section, ensure_sentinel, fork_document_lineage, init_loro_document, new_loro_document,
+  parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id, read_section_page_attrs, record_revision, register_replica, register_user,
+  row_loro_id, set_section_page_attrs, touch_document_metadata,
 };
 pub use package::{
   AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,

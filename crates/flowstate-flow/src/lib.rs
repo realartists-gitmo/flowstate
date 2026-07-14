@@ -1,25 +1,25 @@
-//! Native Flowstate model for competitive-debate flow documents.
-//!
-//! This crate ports the core data and mutation model from `debate-flow` into
-//! Rust. It intentionally contains no GPUI code so `.fl0` documents can be
-//! loaded, saved, tested, and transformed independently from the desktop UI.
+//! The .fl0 flow FORMAT crate (CRDT-first, spec Part A) — what
+//! `flowstate-document` is to `.db8`: the Loro container schema, the total
+//! board materializer + normalization law, the plain-data intent vocabulary,
+//! the pure board operations behind drag preview AND commit, and the FLOWFL0
+//! v2 container. The gated write path lives in `flowstate-collab::flow`.
 
-mod actions;
-mod document;
-mod history;
+pub mod board_ops;
+pub mod format;
+pub mod intents;
+pub mod loro_projection;
+pub mod loro_schema;
 mod persistence;
-mod styles;
+pub mod projection;
 
-pub use actions::{
-  Action, ActionBundle, CommandResult, FormatKind, add_new_box_actions, add_new_empty_actions, add_new_extension_actions, add_new_flow_actions,
-  delete_node_actions, move_node_actions, new_update_action, toggle_box_format_actions,
+pub use format::{
+  AnnotationOriginator, AnnotationStroke, ArgumentSide, BoardPoint, BoardRect, CellId, ColumnDefinition, ColumnId, FlowFormat, FormatId,
+  SheetId, SheetTypeDefinition, SheetTypeId, StrokeId, StrokeStyle,
 };
-pub use document::{BoxNode, Flow, FlowDocument, Node, NodeId, NodeValue, Nodes, ROOT_ID, constrain_index, new_box_id, new_flow_id};
-pub use history::{History, HistoryAction, HistoryHolder};
-pub use persistence::{
-  CURRENT_SAVE_VERSION, SaveableFlowDocument, get_json, load_flow_document, load_flow_document_or_new, load_nodes, save_flow_document,
-};
-pub use styles::{
-  DebateStyle, DebateStyleFlow, DebateStyleKey, DebateStyleTemplate, TimerSpeech, all_debate_style_templates, debate_style, debate_style_label,
-  debate_style_templates,
-};
+pub use intents::{CellPlacement, CellSeed, FlowDropIntent, FlowIntent, RelativePosition};
+pub use loro::VersionVector;
+pub use loro_projection::FlowDefect;
+pub use persistence::{FL0_VERSION, decode_fl0_snapshot, encode_fl0_snapshot, read_fl0, write_fl0};
+pub use projection::{Cell, CellSummary, FlowBoardProjection, Sheet};
+
+pub const FLOW_EXTENSION: &str = "fl0";

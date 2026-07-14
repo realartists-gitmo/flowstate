@@ -66,16 +66,8 @@ pub(super) fn paragraph_is_visible(document: &DocumentProjection, paragraph: &Pa
 
 #[hotpath::measure]
 pub(super) fn paragraph_is_visible_for_theme(theme: &DocumentTheme, paragraph: &Paragraph) -> bool {
-  match paragraph.style {
-    ParagraphStyle::Normal => {},
-    ParagraphStyle::Custom(slot)
-      if theme
-        .invisibility_visible_paragraph_styles
-        .contains(&(slot & 0x7f)) =>
-    {
-      return true;
-    },
-    ParagraphStyle::Custom(_) => {},
+  if paragraph_style_is_visible_for_theme(theme, paragraph.style) {
+    return true;
   }
   paragraph
     .runs
@@ -83,12 +75,19 @@ pub(super) fn paragraph_is_visible_for_theme(theme: &DocumentTheme, paragraph: &
     .any(|run| run_is_visible_for_theme(theme, run.styles))
 }
 
+pub(super) fn paragraph_style_is_visible_for_theme(theme: &DocumentTheme, style: ParagraphStyle) -> bool {
+  matches!(
+    style,
+    ParagraphStyle::Custom(slot) if theme.invisibility_visible_paragraph_styles.contains(&(slot & 0x7f))
+  )
+}
+
 pub(super) const INVISIBILITY_PROJECTED_VERSION_OFFSET: u64 = 0x9E37_79B9_7F4A_7C15;
 
 #[hotpath::measure]
 pub(super) fn invisibility_projected_document(document: &DocumentProjection, paragraph_ix: usize) -> Option<DocumentProjection> {
   let paragraph = document.paragraphs.get(paragraph_ix)?;
-  if !matches!(paragraph.style, ParagraphStyle::Normal) {
+  if paragraph_style_is_visible_for_theme(&document.theme, paragraph.style) {
     return None;
   }
 

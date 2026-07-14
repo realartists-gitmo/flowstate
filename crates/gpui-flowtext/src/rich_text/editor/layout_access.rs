@@ -416,6 +416,7 @@ impl RichTextEditor {
     }
     let hide_until_viewport_measured = self.scroll_handle.bounds().size.width <= px(1.0);
     let mut item_sizes = self.paragraph_item_sizes(window, cx);
+    self.apply_pending_zoom_anchor();
     let has_startup_layout_width = self.measured_item_width.is_some() || self.document.paragraphs.is_empty();
     if !hide_until_viewport_measured && self.initial_layout_hidden && has_startup_layout_width {
       self.initial_layout_hidden = false;
@@ -434,6 +435,7 @@ impl RichTextEditor {
       && let Some(cache) = &self.item_sizes_cache
     {
       item_sizes = cache.sizes.clone();
+      self.apply_pending_zoom_anchor();
     }
     let base_items = self
       .item_sizes_cache

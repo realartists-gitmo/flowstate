@@ -19,6 +19,12 @@ impl Render for Workspace {
                   } else {
                     editor.update(cx, |editor, cx| editor.zoom_out(cx));
                   }
+                } else if let Some(flow) = workspace.active_flow.clone() {
+                  if delta.y < px(0.0) {
+                    flow.update(cx, |flow, cx| flow.zoom_in(cx));
+                  } else {
+                    flow.update(cx, |flow, cx| flow.zoom_out(cx));
+                  }
                 }
               });
             }
@@ -47,7 +53,7 @@ impl Render for Workspace {
               .flex_1()
               .min_h_0()
               .overflow_hidden()
-              .child(self.render_resizable_workspace(cx)),
+              .child(self.render_resizable_workspace(window, cx)),
           )
           .child(self.render_status_bar(window, cx)),
       )

@@ -9,7 +9,7 @@ impl RichTextEditor {
     self.last_drag_position = Some(event.position);
     self.goal_x = None;
     let offset = self.hit_test_document_position(event.position, window, cx);
-    if self.collapse_gutter_hit(event.position, offset.paragraph) {
+    if self.config.show_section_collapse_controls && self.collapse_gutter_hit(event.position, offset.paragraph) {
       self.toggle_section_collapsed_at_paragraph(offset.paragraph, &[0, 1, 2, 3], cx);
       return;
     }
@@ -97,10 +97,9 @@ impl RichTextEditor {
       let paragraph_ix = self
         .hit_test_document_position(event.position, window, cx)
         .paragraph;
-      let next_hover = self
-        .section_collapsed_at_heading(paragraph_ix, &[0, 1, 2, 3])
-        .is_some()
-        .then_some(paragraph_ix);
+      let next_hover = self.config.show_section_collapse_controls.then_some(paragraph_ix).filter(|paragraph_ix| {
+        self.section_collapsed_at_heading(*paragraph_ix, &[0, 1, 2, 3]).is_some()
+      });
       if self.hovered_collapse_paragraph != next_hover {
         self.hovered_collapse_paragraph = next_hover;
         cx.notify();

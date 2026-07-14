@@ -10,11 +10,11 @@ pub mod share_dialog;
 mod shutdown;
 pub mod status;
 
-use std::{borrow::BorrowMut, sync::Arc};
+use std::borrow::BorrowMut;
 
 use anyhow::Result;
 use async_channel::Receiver;
-use flowstate_collab::{SessionId, doc_io::DocIoHandle, local_write::LocalDocHandle, ticket::SessionTicket};
+use flowstate_collab::{SessionId, doc_io::DocIoHandle, ticket::SessionTicket};
 use gpui::{App, BorrowAppContext, Context, Entity, ReadGlobal};
 use uuid::Uuid;
 
@@ -23,7 +23,8 @@ use crate::rich_text_element::RichTextEditor;
 pub use discovery_runtime::DiscoveryScanResult;
 pub use manager::{CollabManager, JoinRequest};
 pub use session::{
-  Attachment, CollabSession, Connectivity, DetachReason, JoinStage, JoinedDocument, SessionNotice, SessionPhase, SessionRosterEntry,
+  Attachment, CollabEditor, CollabSession, Connectivity, DetachReason, JoinStage, JoinedAuthority, JoinedDocument, JoinedDocumentPayload,
+  SessionNotice, SessionPhase, SessionRosterEntry,
 };
 pub use shutdown::shutdown;
 
@@ -47,12 +48,29 @@ where
   cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_session_for_panel(panel_id, editor, title, io, cx))
 }
 
+/// Flow-tab variant of [`start_session_for_panel`] (spec Part C).
+pub fn start_flow_session_for_panel<T>(
+  panel_id: Uuid,
+  editor: Entity<crate::flow::FlowEditor>,
+  title: String,
+  io: flowstate_collab::flow::FlowIoHandle,
+  cx: &mut Context<T>,
+) -> Result<SessionId>
+where
+  T: 'static,
+{
+  cx.update_default_global::<CollabManager, _>(|manager, cx| manager.start_flow_session_for_panel(panel_id, editor, title, io, cx))
+}
+
 /// JOIN handoff (Loro-first spec §3): take the document services the joining
 /// session constructed from the initial snapshot — the write authority for the
 /// editor and the I/O handle for saves/exports. One-shot: the write authority
 /// moves out of the session (the session is transport-only, invariant 5);
 /// subsequent calls return `None`.
-pub fn take_joined_document_services_for_session<T>(session_id: SessionId, cx: &mut Context<T>) -> Option<(Arc<LocalDocHandle>, DocIoHandle)>
+pub fn take_joined_document_services_for_session<T>(
+  session_id: SessionId,
+  cx: &mut Context<T>,
+) -> Option<(session::JoinedAuthority, flowstate_collab::SyncIoHandle)>
 where
   T: 'static,
 {
@@ -69,7 +87,7 @@ where
   cx.update_default_global::<CollabManager, _>(|manager, cx| manager.join_session(ticket, cx))
 }
 
-pub fn attach_joined_session<T>(session_id: SessionId, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<T>) -> Result<()>
+pub fn attach_joined_session<T>(session_id: SessionId, panel_id: Uuid, editor: session::CollabEditor, cx: &mut Context<T>) -> Result<()>
 where
   T: 'static,
 {

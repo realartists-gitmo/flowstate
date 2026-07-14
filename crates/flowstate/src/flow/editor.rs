@@ -1,111 +1,279 @@
-use std::{
-  collections::hash_map::DefaultHasher,
-  hash::{Hash, Hasher},
-  path::PathBuf,
-};
+use std::collections::HashSet;
+use std::path::PathBuf;
 
+use std::sync::Arc;
+
+use flowstate_collab::flow::{FlowDocHandle, FlowStreamItem, FlowUndoMeta};
+use flowstate_flow::intents::{CellPlacement, CellSeed};
 use flowstate_flow::{
-  Action, BoxNode, CommandResult, DebateStyleFlow, DebateStyleKey, FlowDocument, FormatKind, HistoryHolder, Node, NodeId, NodeValue, ROOT_ID,
-  add_new_box_actions, add_new_empty_actions, add_new_extension_actions, add_new_flow_actions, all_debate_style_templates,
-  debate_style_templates, delete_node_actions, get_json, load_flow_document_or_new, move_node_actions, new_box_id, save_flow_document,
-  toggle_box_format_actions,
+  AnnotationOriginator, BoardPoint, CellId, FlowBoardProjection, FlowDropIntent, FlowIntent, RelativePosition, SheetId, board_ops,
 };
 use gpui::{
-  App, Context, Entity, EventEmitter, FocusHandle, Focusable, FontWeight, Hsla, InteractiveElement, IntoElement, KeyDownEvent, MouseButton,
-  ParentElement, Render, Subscription, Task, Window, div, prelude::*, px,
+  AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent,
+  MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window,
+  canvas, div, point, prelude::*, px, rgba,
 };
-use gpui_component::button::{Button, ButtonVariants};
-use gpui_component::input::{Input, InputEvent, InputState};
-use gpui_component::scroll::ScrollableElement;
-use gpui_component::{ActiveTheme as _, Icon, IconName, Sizable, h_flex, v_flex};
-use rustc_hash::{FxHashMap, FxHashSet};
+use gpui_component::ActiveTheme as _;
+use gpui_component::PixelsExt as _;
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::scroll::{Scrollbar, ScrollbarShow};
+use gpui_component::{Icon, IconName, Sizable as _};
 
-use crate::rich_text_element::ToolkitTextDrag;
+use crate::{
+  app_settings::load_document_theme,
+  flow::{cell_theme::apply_flow_cell_theme, flow_side_palette},
+  rich_text_element::{RichTextDocumentElement, RichTextEditor},
+};
 
-const COLUMN_WIDTH: f32 = 172.0;
+mod annotation;
+mod cell_editing;
+mod connector;
+mod drag_drop;
+mod layout;
+mod telemetry;
+mod zoom;
 
-pub struct FlowEditor {
-  document: FlowDocument,
-  path: Option<PathBuf>,
-  dirty: bool,
-  history: HistoryHolder,
-  focus_handle: FocusHandle,
-  selected_style: DebateStyleKey,
-  ld_toc_circuit: bool,
-  switch_speakers: bool,
-  selected_flow_id: Option<NodeId>,
-  focus_id: Option<NodeId>,
-  last_focus_ids: FxHashMap<NodeId, NodeId>,
-  folded: FxHashSet<NodeId>,
-  box_inputs: FxHashMap<NodeId, Entity<InputState>>,
-  input_subscriptions: Vec<Subscription>,
-  syncing_inputs: FxHashSet<NodeId>,
-  pending_edit: Option<PendingEdit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FlowOutlineItem {
-  pub id: NodeId,
-  pub label: String,
-  pub index: usize,
-  pub selected: bool,
-  pub invert: bool,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct FlowCommandState {
-  pub has_flow: bool,
-  pub has_selected_box: bool,
-  pub can_format: bool,
-  pub can_fold: bool,
-  pub selected_bold: bool,
-  pub selected_crossed: bool,
-  pub selected_folded: bool,
-  pub can_undo: bool,
-  pub can_redo: bool,
-}
+use annotation::paint_stroke;
+use connector::paint_connector_family;
+use drag_drop::{DropEdge, FlowCellDrag, FlowCellDragPreview};
+use layout::{CellMeasurement, sheet_cell_layout};
+use zoom::grid_dot_metrics;
 
 #[derive(Clone, Debug)]
-struct PendingEdit {
-  id: NodeId,
-  owner: NodeId,
-  before_focus: Option<NodeId>,
-  after_focus: Option<NodeId>,
-  old_value: NodeValue,
+pub enum FlowEditorEvent {
+  Changed,
+  ActiveCellChanged(Option<CellId>),
+  ActiveSheetChanged(Option<SheetId>),
+  /// The caret moved inside the active cell's editor (presence refresh only —
+  /// no document change).
+  CellSelectionChanged,
 }
 
-#[hotpath::measure_all]
-impl FlowEditor {
-  pub fn new_with_path(document: FlowDocument, path: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let selected_flow_id = document.flow_ids().first().cloned();
-    let focus_id = selected_flow_id.clone();
+/// One remote peer's board focus, resolved for rendering: which sheet they
+/// are on, which cell they focus (outline + name chip), whether they are
+/// editing inside it, and — because cells are real CRDT text — their exact
+/// caret as encoded Loro cursors (forwarded into the open cell editor).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowExternalPresence {
+  pub name: String,
+  pub color_rgb: u32,
+  pub sheet: Option<SheetId>,
+  pub cell: Option<CellId>,
+  pub editing: bool,
+  pub caret: Option<flowstate_collab::presence::PresenceSelection>,
+}
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnnotationTool {
+  #[default]
+  None,
+  Marker,
+  Eraser,
+}
+
+struct PanDragState {
+  pointer_anchor: gpui::Point<gpui::Pixels>,
+  scroll_anchor: gpui::Point<gpui::Pixels>,
+  pending_position: gpui::Point<gpui::Pixels>,
+  frame_scheduled: bool,
+}
+
+pub struct FlowEditor {
+  /// The ONE local write path (invariant 5): identical handle for solo and
+  /// collaborative tabs; the board copy advances only via the ordered stream.
+  handle: Arc<FlowDocHandle>,
+  board: FlowBoardProjection,
+  /// Render cache for INACTIVE cells' rich-text previews (materialized on
+  /// demand, dropped on any board change / remote sync).
+  cell_documents: std::collections::HashMap<CellId, flowstate_document::DocumentProjection>,
+  path: Option<PathBuf>,
+  /// Debounced `.fl0` recovery file for pathless joined collaboration tabs.
+  recovery_path: Option<PathBuf>,
+  recovery_write_pending: bool,
+  /// Remote peers' board focus (presence rendering, spec Part C).
+  external_presences: Vec<FlowExternalPresence>,
+  dirty: bool,
+  active_sheet: Option<SheetId>,
+  active_cell: Option<CellId>,
+  collapsed_outline_items: HashSet<uuid::Uuid>,
+  annotation_tool: AnnotationTool,
+  hidden_annotation_sheets: HashSet<SheetId>,
+  hidden_annotation_originators: HashSet<AnnotationOriginator>,
+  local_annotation_originator: AnnotationOriginator,
+  drawing_points: Vec<BoardPoint>,
+  cell_editors: std::collections::HashMap<CellId, Entity<RichTextEditor>>,
+  cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla, u32)>,
+  cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
+  pending_cell_drop: Option<FlowDropIntent>,
+  dragging_cell: Option<CellId>,
+  drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
+  drag_autoscroll_scheduled: bool,
+  drag_log: Option<telemetry::DragLogSession>,
+  drag_log_counter: u64,
+  cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
+  cell_measurements: std::collections::HashMap<CellId, CellMeasurement>,
+  board_scroll: ScrollHandle,
+  board_zoom: f32,
+  camera_center: Option<BoardPoint>,
+  camera_apply_pending: bool,
+  viewport_origin: BoardPoint,
+  space_pan_armed: bool,
+  pan_drag: Option<PanDragState>,
+  focus_handle: FocusHandle,
+}
+
+impl FlowEditor {
+  pub fn new_with_path(handle: Arc<FlowDocHandle>, path: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let board = handle.board_projection().unwrap_or(FlowBoardProjection {
+      format: flowstate_flow::FlowFormat::policy_debate(),
+      sheets: Vec::new(),
+    });
+    let active_sheet = board.sheets.first().map(|sheet| sheet.id);
+    let collapsed_outline_items = board
+      .sheets
+      .iter()
+      .flat_map(|sheet| std::iter::once(sheet.id).chain(sheet.cells.iter().map(|cell| cell.id)))
+      .collect();
     Self {
-      document,
+      handle,
+      board,
+      cell_documents: std::collections::HashMap::new(),
       path,
+      recovery_path: None,
+      recovery_write_pending: false,
+      external_presences: Vec::new(),
       dirty: false,
-      history: HistoryHolder::new(),
+      active_sheet,
+      active_cell: None,
+      collapsed_outline_items,
+      annotation_tool: AnnotationTool::None,
+      hidden_annotation_sheets: HashSet::new(),
+      hidden_annotation_originators: HashSet::new(),
+      local_annotation_originator: AnnotationOriginator("local".into()),
+      drawing_points: Vec::new(),
+      cell_editors: std::collections::HashMap::new(),
+      cell_editor_themes: std::collections::HashMap::new(),
+      cell_editor_subscriptions: std::collections::HashMap::new(),
+      pending_cell_drop: None,
+      dragging_cell: None,
+      drag_autoscroll: None,
+      drag_autoscroll_scheduled: false,
+      drag_log: None,
+      drag_log_counter: 0,
+      cell_bounds: std::collections::HashMap::new(),
+      cell_measurements: std::collections::HashMap::new(),
+      board_scroll: ScrollHandle::new(),
+      board_zoom: 1.0,
+      camera_center: None,
+      camera_apply_pending: false,
+      viewport_origin: BoardPoint::default(),
+      space_pan_armed: false,
+      pan_drag: None,
       focus_handle: cx.focus_handle(),
-      selected_style: DebateStyleKey::Policy,
-      ld_toc_circuit: false,
-      switch_speakers: false,
-      selected_flow_id,
-      focus_id,
-      last_focus_ids: FxHashMap::default(),
-      folded: FxHashSet::default(),
-      box_inputs: FxHashMap::default(),
-      input_subscriptions: Vec::new(),
-      syncing_inputs: FxHashSet::default(),
-      pending_edit: None,
     }
   }
 
   pub fn blank(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    Self::new_with_path(FlowDocument::new(), None, window, cx)
+    let (handle, _gate) = FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()).expect("fresh flow document");
+    Self::new_with_path(handle, None, window, cx)
   }
 
-  pub fn load_or_new(path: PathBuf, window: &mut Window, cx: &mut Context<Self>) -> Self {
-    Self::new_with_path(load_flow_document_or_new(&path), Some(path), window, cx)
+  pub fn handle(&self) -> &Arc<FlowDocHandle> {
+    &self.handle
+  }
+
+  pub fn board(&self) -> &FlowBoardProjection {
+    &self.board
+  }
+
+  /// Drain the ordered board stream and adopt the latest Replace — the ONE
+  /// way this editor's board copy advances. Local intents call it right after
+  /// `apply`; the collaboration session calls it as a pump when remote
+  /// batches land; solo tabs need no pump.
+  pub fn sync_board_from_handle(&mut self, cx: &mut Context<Self>) {
+    let Ok(items) = self.handle.drain_board_stream() else {
+      return;
+    };
+    let Some(FlowStreamItem::Board(board)) = items.into_iter().next_back() else {
+      return;
+    };
+    self.board = *board;
+    self.cell_documents.clear();
+    self.prune_dead_cell_state(cx);
+    if let Some(active) = self.active_sheet
+      && self.board.sheet(active).is_none()
+    {
+      self.active_sheet = self.board.sheets.first().map(|sheet| sheet.id);
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(self.active_sheet));
+    }
+    if let Some(active) = self.active_cell
+      && self.board.cell(active).is_none()
+    {
+      self.active_cell = None;
+      cx.emit(FlowEditorEvent::ActiveCellChanged(None));
+    }
+    cx.notify();
+  }
+
+  /// Apply one flow intent through the handle and integrate the outcome.
+  fn apply_intent(&mut self, intent: FlowIntent, cx: &mut Context<Self>) -> bool {
+    match self.handle.apply(intent) {
+      Ok(outcome) => {
+        self.sync_board_from_handle(cx);
+        if outcome.changed {
+          self.dirty = true;
+          cx.emit(FlowEditorEvent::Changed);
+          cx.notify();
+        }
+        outcome.changed
+      },
+      Err(rejection) => {
+        tracing::warn!(%rejection, "flow intent rejected");
+        false
+      },
+    }
+  }
+
+  /// Update the undo context riding future commits (focus restoration).
+  fn refresh_undo_context(&self) {
+    self.handle.set_undo_context(FlowUndoMeta {
+      active_sheet: self.active_sheet,
+      focused_cell: self.active_cell,
+      head_cursor: None,
+      anchor_cursor: None,
+    });
+  }
+
+  pub fn active_sheet(&self) -> Option<SheetId> {
+    self.active_sheet
+  }
+
+  pub fn active_cell(&self) -> Option<CellId> {
+    self.active_cell
+  }
+
+  pub fn focus_active_cell(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    cx.on_next_frame(window, |flow, window, cx| {
+      let Some(editor) = flow
+        .active_cell
+        .and_then(|cell| flow.cell_editors.get(&cell))
+        .cloned()
+      else {
+        return;
+      };
+      editor.update(cx, |editor, cx| editor.move_document_start(cx));
+      editor.read(cx).focus_handle(cx).focus(window);
+    });
+  }
+
+  pub fn annotation_tool(&self) -> AnnotationTool {
+    self.annotation_tool
+  }
+
+  pub fn annotations_visible(&self) -> bool {
+    self
+      .active_sheet
+      .is_some_and(|sheet| !self.hidden_annotation_sheets.contains(&sheet))
   }
 
   pub fn document_path(&self) -> Option<&PathBuf> {
@@ -118,11 +286,423 @@ impl FlowEditor {
   }
 
   pub fn has_unsaved_changes(&self) -> bool {
-    self.dirty || self.pending_edit.is_some()
+    self.dirty
+  }
+
+  pub fn activate_sheet(&mut self, sheet_id: SheetId, cx: &mut Context<Self>) {
+    if self.board.sheet(sheet_id).is_some() {
+      self.active_sheet = Some(sheet_id);
+      self.active_cell = None;
+      self.refresh_undo_context();
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
+      cx.notify();
+    }
+  }
+
+  pub fn activate_cell(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
+    let sheet_id = self.board.cell(cell_id).map(|(sheet, _)| sheet.id);
+    if let Some(sheet_id) = sheet_id {
+      self.apply_intent(FlowIntent::EnsureCellEditable { sheet_id, cell_id }, cx);
+      self.ensure_cell_editor(cell_id, cx);
+      self.active_sheet = Some(sheet_id);
+      self.active_cell = Some(cell_id);
+      self.refresh_undo_context();
+      self.scroll_cell_into_view(cell_id);
+      cx.emit(FlowEditorEvent::ActiveCellChanged(Some(cell_id)));
+      cx.notify();
+    }
+  }
+
+  pub fn outline_item_expanded(&self, id: uuid::Uuid) -> bool {
+    !self.collapsed_outline_items.contains(&id)
+  }
+
+  pub fn toggle_outline_item(&mut self, id: uuid::Uuid, cx: &mut Context<Self>) {
+    if !self.collapsed_outline_items.remove(&id) {
+      self.collapsed_outline_items.insert(id);
+    }
+    cx.notify();
+  }
+
+  pub fn add_response(&mut self, cx: &mut Context<Self>) {
+    let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
+      return;
+    };
+    self.add_cell_with_placement(sheet, CellPlacement::ResponseTo { parent: cell }, cx);
+  }
+
+  pub fn add_first_response_to(&mut self, cell: CellId, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet else {
+      return;
+    };
+    self.add_cell_with_placement(sheet, CellPlacement::FirstResponseTo { parent: cell }, cx);
+  }
+
+  /// The one `AddCell` path behind every `add_*` entry point.
+  fn add_cell_with_placement(&mut self, sheet_id: SheetId, placement: CellPlacement, cx: &mut Context<Self>) {
+    let cell_id = uuid::Uuid::new_v4();
+    if self.apply_intent(
+      FlowIntent::AddCell {
+        sheet_id,
+        cell_id,
+        placement,
+        seed: CellSeed::Empty,
+      },
+      cx,
+    ) {
+      self.collapsed_outline_items.insert(cell_id);
+      self.ensure_cell_editor(cell_id, cx);
+      self.changed(Some(cell_id), cx);
+    }
+  }
+
+  pub fn active_cell_is_struck(&self) -> bool {
+    self
+      .active_cell
+      .and_then(|cell| self.board.cell(cell))
+      .is_some_and(|(_, cell)| cell.summary.struck)
+  }
+
+  pub fn add_first_argument(&mut self, cx: &mut Context<Self>) {
+    self.add_orphan_at_column_top(0, cx);
+  }
+
+  pub fn add_orphan_at_column_top(&mut self, column_index: usize, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet else {
+      return;
+    };
+    self.add_cell_with_placement(sheet, CellPlacement::ColumnTop { column_index }, cx);
+  }
+
+  pub fn create_sheet(&mut self, cx: &mut Context<Self>) {
+    self.create_sheet_of_type(0, cx);
+  }
+
+  pub fn create_sheet_of_type(&mut self, sheet_type_index: usize, cx: &mut Context<Self>) {
+    let Some(sheet_type) = self.board.format.sheet_types.get(sheet_type_index) else {
+      return;
+    };
+    let sheet_type_id = sheet_type.id;
+    let name = format!("Sheet {}", self.board.sheets.len() + 1);
+    let sheet_id = uuid::Uuid::new_v4();
+    if self.apply_intent(
+      FlowIntent::CreateSheet {
+        sheet_id,
+        name,
+        sheet_type_id,
+      },
+      cx,
+    ) {
+      self.collapsed_outline_items.insert(sheet_id);
+      self.active_sheet = Some(sheet_id);
+      self.active_cell = None;
+      self.refresh_undo_context();
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
+      cx.notify();
+    }
+  }
+
+  pub fn rename_active_sheet(&mut self, name: impl Into<String>, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet else {
+      return;
+    };
+    if self.apply_intent(
+      FlowIntent::RenameSheet {
+        sheet_id: sheet,
+        name: name.into(),
+      },
+      cx,
+    ) {
+      self.changed(self.active_cell, cx);
+    }
+  }
+
+  pub fn delete_active_sheet(&mut self, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet else {
+      return;
+    };
+    if self.apply_intent(FlowIntent::DeleteSheet { sheet_id: sheet }, cx) {
+      self.collapsed_outline_items.remove(&sheet);
+      self.active_sheet = self.board.sheets.first().map(|sheet| sheet.id);
+      self.active_cell = None;
+      self.refresh_undo_context();
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(self.active_sheet));
+      cx.emit(FlowEditorEvent::ActiveCellChanged(None));
+      cx.notify();
+    }
+  }
+
+  pub fn move_active_sheet(&mut self, direction: isize, cx: &mut Context<Self>) {
+    let Some(sheet) = self.active_sheet else {
+      return;
+    };
+    let Some(index) = self
+      .board
+      .sheets
+      .iter()
+      .position(|candidate| candidate.id == sheet)
+    else {
+      return;
+    };
+    let target = index
+      .saturating_add_signed(direction)
+      .min(self.board.sheets.len().saturating_sub(1));
+    if target != index
+      && self.apply_intent(
+        FlowIntent::MoveSheet {
+          sheet_id: sheet,
+          target_index: target,
+        },
+        cx,
+      )
+    {
+      self.changed(self.active_cell, cx);
+    }
+  }
+
+  fn set_cell_bounds(&mut self, cell_id: CellId, bounds: Bounds<gpui::Pixels>, cx: &mut Context<Self>) {
+    self.cell_bounds.insert(cell_id, bounds);
+    let screen_height = bounds.size.height.as_f32();
+    let model_height_changed = match self.cell_measurements.entry(cell_id) {
+      std::collections::hash_map::Entry::Occupied(mut entry) => entry.get_mut().update(screen_height, self.board_zoom),
+      std::collections::hash_map::Entry::Vacant(entry) => {
+        entry.insert(CellMeasurement::new(screen_height, self.board_zoom));
+        true
+      },
+    };
+    if model_height_changed {
+      cx.notify();
+    }
+  }
+
+  fn scroll_cell_into_view(&mut self, cell_id: CellId) {
+    let Some(cell) = self.cell_bounds.get(&cell_id) else {
+      return;
+    };
+    let viewport = self.board_scroll.bounds();
+    let mut offset = self.board_scroll.offset();
+    if cell.left() < viewport.left() {
+      offset.x += viewport.left() - cell.left();
+    } else if cell.right() > viewport.right() {
+      offset.x -= cell.right() - viewport.right();
+    }
+    if cell.top() < viewport.top() {
+      offset.y += viewport.top() - cell.top();
+    } else if cell.bottom() > viewport.bottom() {
+      offset.y -= cell.bottom() - viewport.bottom();
+    }
+    self.set_user_scroll_offset(offset);
+  }
+
+  fn cell_text_color(&self, cell_id: CellId, cx: &App) -> gpui::Hsla {
+    self
+      .board
+      .cell(cell_id)
+      .and_then(|(sheet, cell)| {
+        let definition = self.board.format.sheet_type(sheet.sheet_type_id)?;
+        let column = definition
+          .columns
+          .iter()
+          .find(|column| column.id == cell.column_id)?;
+        Some(flow_side_palette(column.side, cx).base)
+      })
+      .unwrap_or(cx.theme().foreground)
+  }
+
+  fn begin_pan(&mut self, position: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
+    self.pan_drag = Some(PanDragState {
+      pointer_anchor: position,
+      scroll_anchor: self.board_scroll.offset(),
+      pending_position: position,
+      frame_scheduled: false,
+    });
+    cx.notify();
+  }
+
+  fn queue_pan(&mut self, position: gpui::Point<gpui::Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+    let Some(pan_drag) = self.pan_drag.as_mut() else {
+      return;
+    };
+    pan_drag.pending_position = position;
+    if pan_drag.frame_scheduled {
+      return;
+    }
+    pan_drag.frame_scheduled = true;
+    cx.on_next_frame(window, |editor, _, cx| {
+      let offset = {
+        let Some(pan_drag) = editor.pan_drag.as_mut() else {
+          return;
+        };
+        pan_drag.frame_scheduled = false;
+        pan_drag.scroll_anchor + (pan_drag.pending_position - pan_drag.pointer_anchor)
+      };
+      editor.set_user_scroll_offset(offset);
+      cx.notify();
+    });
+  }
+
+  fn finish_space_pan(&mut self, cx: &mut Context<Self>) {
+    self.pan_drag = None;
+    cx.notify();
+  }
+
+  pub fn add_sibling(&mut self, position: RelativePosition, cx: &mut Context<Self>) {
+    let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
+      return;
+    };
+    self.add_cell_with_placement(sheet, CellPlacement::Sibling { of: cell, position }, cx);
+  }
+
+  pub fn active_cell_is_empty(&self) -> bool {
+    self
+      .active_cell
+      .and_then(|cell| self.board.cell(cell))
+      .is_some_and(|(_, cell)| cell.summary.is_empty)
+  }
+
+  pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
+      return;
+    };
+    let fallback = board_ops::deletion_fallback(&self.board, sheet, cell);
+    if self.apply_intent(
+      FlowIntent::DeleteCell {
+        sheet_id: sheet,
+        cell_id: cell,
+      },
+      cx,
+    ) {
+      self.drop_cell_editor(cell);
+      if let Some(fallback) = fallback {
+        self.ensure_cell_editor(fallback, cx);
+        self.changed(Some(fallback), cx);
+        if let Some(editor) = self.cell_editors.get(&fallback) {
+          editor.read(cx).focus_handle(cx).focus(window);
+        }
+        self.scroll_cell_into_view(fallback);
+      } else {
+        self.changed(None, cx);
+      }
+    }
+  }
+
+  pub fn strike_selected(&mut self, cx: &mut Context<Self>) {
+    let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
+      return;
+    };
+    let struck = self
+      .board
+      .cell(cell)
+      .is_some_and(|(_, cell)| cell.summary.struck);
+    if self.apply_intent(
+      FlowIntent::SetCellStruck {
+        sheet_id: sheet,
+        cell_id: cell,
+        struck: !struck,
+      },
+      cx,
+    ) {
+      self.changed(Some(cell), cx);
+    }
+  }
+
+  pub fn can_undo(&self) -> bool {
+    self.handle.can_undo().unwrap_or(false)
+  }
+
+  pub fn can_redo(&self) -> bool {
+    self.handle.can_redo().unwrap_or(false)
+  }
+
+  pub fn undo(&mut self, cx: &mut Context<Self>) {
+    if let Ok(outcome) = self.handle.undo()
+      && outcome.applied
+    {
+      self.sync_board_from_handle(cx);
+      self.restore_undo_focus(outcome.meta, cx);
+      self.dirty = true;
+      cx.emit(FlowEditorEvent::Changed);
+      cx.notify();
+    }
+  }
+
+  pub fn redo(&mut self, cx: &mut Context<Self>) {
+    if let Ok(outcome) = self.handle.redo()
+      && outcome.applied
+    {
+      self.sync_board_from_handle(cx);
+      self.restore_undo_focus(outcome.meta, cx);
+      self.dirty = true;
+      cx.emit(FlowEditorEvent::Changed);
+      cx.notify();
+    }
+  }
+
+  /// `FlowUndoMeta` focus restoration: bring back the sheet/cell the undone
+  /// commit was made under (cell-text selection restores through the cell's
+  /// own authority).
+  fn restore_undo_focus(&mut self, meta: Option<FlowUndoMeta>, cx: &mut Context<Self>) {
+    let Some(meta) = meta else {
+      return;
+    };
+    if let Some(sheet) = meta.active_sheet
+      && self.board.sheet(sheet).is_some()
+      && self.active_sheet != Some(sheet)
+    {
+      self.active_sheet = Some(sheet);
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet)));
+    }
+    if let Some(cell) = meta.focused_cell
+      && self.board.cell(cell).is_some()
+      && self.active_cell != Some(cell)
+    {
+      self.ensure_cell_editor(cell, cx);
+      self.active_cell = Some(cell);
+      cx.emit(FlowEditorEvent::ActiveCellChanged(Some(cell)));
+    }
+  }
+
+  /// Drop every per-cell UI artifact for cells no longer on the board, and
+  /// release their runtime streams.
+  fn prune_dead_cell_state(&mut self, cx: &mut Context<Self>) {
+    let live: HashSet<CellId> = self
+      .board
+      .sheets
+      .iter()
+      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .collect();
+    let dead: Vec<CellId> = self
+      .cell_editors
+      .keys()
+      .copied()
+      .filter(|id| !live.contains(id))
+      .collect();
+    for id in dead {
+      self.drop_cell_editor(id);
+    }
+    self.cell_bounds.retain(|id, _| live.contains(id));
+    self.cell_measurements.retain(|id, _| live.contains(id));
+    self.cell_documents.retain(|id, _| live.contains(id));
+    let _ = cx;
+  }
+
+  fn drop_cell_editor(&mut self, cell: CellId) {
+    self.cell_editors.remove(&cell);
+    self.cell_editor_themes.remove(&cell);
+    self.cell_editor_subscriptions.remove(&cell);
+    let _ = self.handle.close_cell(cell);
+  }
+
+  fn changed(&mut self, active_cell: Option<CellId>, cx: &mut Context<Self>) {
+    self.active_cell = active_cell;
+    self.dirty = true;
+    self.schedule_recovery_write(cx);
+    cx.emit(FlowEditorEvent::Changed);
+    cx.emit(FlowEditorEvent::ActiveCellChanged(active_cell));
+    cx.notify();
   }
 
   pub fn save(&mut self, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
-    self.resolve_pending_edit(cx);
     let Some(path) = self.path.clone() else {
       return cx
         .background_executor()
@@ -132,1386 +712,867 @@ impl FlowEditor {
   }
 
   pub fn save_as(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
-    self.resolve_pending_edit(cx);
     self.path = Some(path.clone());
     self.save_to_path(path, cx)
   }
 
   fn save_to_path(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
-    let saved_document = self.document.clone();
+    // Fork under the gate (brief), encode + write on the background executor
+    // (the I-9a long-export rule at editor scale).
+    let handle = self.handle.clone();
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()
-        .spawn({
-          let saved_document = saved_document.clone();
-          async move { save_flow_document(&path, &saved_document).map_err(std::io::Error::other) }
+        .spawn(async move {
+          let snapshot = handle.snapshot().map_err(std::io::Error::other)?;
+          flowstate_flow::write_fl0(&path, &snapshot).map_err(std::io::Error::other)
         })
         .await;
-      match write_result {
-        Ok(()) => {
-          let _ = editor.update(cx, |editor, cx| {
-            if editor.pending_edit.is_none() && editor.document == saved_document {
-              editor.dirty = false;
-            }
-            cx.notify();
-          });
-          Ok(())
-        },
-        Err(error) => Err(error),
+      if write_result.is_ok() {
+        let _ = editor.update(cx, |editor, cx| {
+          editor.dirty = false;
+          cx.notify();
+        });
       }
+      write_result
     })
   }
 
-  pub fn discard_recovery_file(&mut self) {}
-
-  pub fn json_snapshot(&mut self, cx: &mut Context<Self>) -> Option<String> {
-    self.resolve_pending_edit(cx);
-    get_json(&self.document).ok()
+  /// Pathless joined tabs write a debounced `.fl0` recovery file so a crash
+  /// mid-session cannot lose the shared board (lifecycle parity, spec Part C).
+  pub fn set_recovery_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+    self.recovery_path = path;
+    if self.recovery_path.is_some() {
+      self.schedule_recovery_write(cx);
+    }
   }
 
-  pub fn resolve_pending(&mut self, cx: &mut Context<Self>) {
-    self.resolve_pending_edit(cx);
-  }
-
-  pub fn selected_flow_id(&self) -> Option<&str> {
-    self.selected_flow_id.as_deref()
-  }
-
-  pub fn selected_flow_title(&self) -> String {
-    self
-      .selected_flow_id
-      .as_ref()
-      .and_then(|id| self.document.flow(id))
-      .map(|flow| flow.content.clone())
-      .unwrap_or_default()
-  }
-
-  pub fn set_selected_flow_title(&mut self, value: String, cx: &mut Context<Self>) {
-    let Some(flow_id) = self.selected_flow_id.clone() else {
+  fn schedule_recovery_write(&mut self, cx: &mut Context<Self>) {
+    if self.recovery_write_pending {
+      return;
+    }
+    let Some(path) = self.recovery_path.clone() else {
       return;
     };
-    self.on_title_change(&flow_id, value, cx);
+    self.recovery_write_pending = true;
+    let handle = self.handle.clone();
+    cx.spawn(async move |editor, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(750))
+        .await;
+      let write = cx
+        .background_executor()
+        .spawn(async move {
+          let snapshot = handle.snapshot().map_err(std::io::Error::other)?;
+          flowstate_flow::write_fl0(&path, &snapshot).map_err(std::io::Error::other)
+        })
+        .await;
+      if let Err(error) = write {
+        tracing::warn!(%error, "writing flow collaboration recovery file failed");
+      }
+      let _ = editor.update(cx, |editor, _| {
+        editor.recovery_write_pending = false;
+      });
+    })
+    .detach();
   }
 
-  pub fn outline_items(&self) -> Vec<FlowOutlineItem> {
+  pub fn discard_recovery_file(&mut self) {
+    if let Some(path) = self.recovery_path.take()
+      && let Err(error) = std::fs::remove_file(&path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!(%error, path = %path.display(), "removing flow collaboration recovery file failed");
+    }
+  }
+
+  /// Remote peers' board focus (peer-color cell outlines + name chips; peers
+  /// on other sheets show as colored dots on the sheet switcher).
+  pub fn set_external_presences(&mut self, presences: Vec<FlowExternalPresence>, cx: &mut Context<Self>) {
+    if self.external_presences != presences {
+      self.external_presences = presences;
+      self.sync_external_cell_carets(cx);
+      cx.notify();
+    }
+  }
+
+  /// The local user's board focus for the presence channel: active sheet/cell,
+  /// whether the cell editor is open, and the exact caret encoded as Loro
+  /// cursors under the flow gate.
+  pub fn presence_focus(&self, cx: &gpui::App) -> flowstate_collab::presence::FlowPresenceFocus {
+    let caret = self.active_cell.and_then(|cell| {
+      let editor = self.cell_editors.get(&cell)?;
+      let selection = editor.read(cx).selection().clone();
+      self.handle.presence_selection(cell, &selection)
+    });
+    flowstate_collab::presence::FlowPresenceFocus {
+      sheet: self.active_sheet,
+      cell: self.active_cell,
+      editing: self
+        .active_cell
+        .is_some_and(|cell| self.cell_editors.contains_key(&cell)),
+      caret,
+    }
+  }
+
+  /// The open editor for a cell, if any (presence caret forwarding + tests).
+  pub fn cell_editor(&self, cell: CellId) -> Option<Entity<RichTextEditor>> {
+    self.cell_editors.get(&cell).cloned()
+  }
+
+  /// The peer-color outline for a cell a remote peer focuses (render + gate
+  /// test hook). First matching peer wins; roster order is deterministic.
+  pub fn presence_for_cell(&self, cell: CellId) -> Option<&FlowExternalPresence> {
     self
-      .document
-      .flow_ids()
+      .external_presences
       .iter()
-      .enumerate()
-      .map(|(index, id)| {
-        let flow = self.document.flow(id);
-        let label = flow
-          .map(|flow| {
-            if flow.content.is_empty() {
-              format!("Flow {}", index + 1)
-            } else {
-              flow.content.clone()
-            }
-          })
-          .unwrap_or_else(|| "Missing flow".to_string());
-        FlowOutlineItem {
-          id: id.clone(),
-          label,
-          index,
-          selected: self.selected_flow_id.as_deref() == Some(id.as_str()),
-          invert: flow.is_some_and(|flow| flow.invert),
-        }
-      })
+      .find(|presence| presence.cell == Some(cell))
+  }
+
+  /// Peers focused on a sheet OTHER than the local active one — rendered as
+  /// colored dots on that sheet's switcher row.
+  pub fn presence_dots_for_sheet(&self, sheet: SheetId) -> Vec<u32> {
+    self
+      .external_presences
+      .iter()
+      .filter(|presence| presence.sheet == Some(sheet))
+      .map(|presence| presence.color_rgb)
       .collect()
   }
 
-  pub fn command_state(&self) -> FlowCommandState {
-    let selected_box = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id));
-    let can_format = selected_box
-      .as_ref()
-      .and_then(|id| self.document.box_node(id))
-      .is_some_and(|box_node| !box_node.is_extension);
-    let can_fold = selected_box
-      .as_ref()
-      .and_then(|id| self.document.node(id))
-      .is_some_and(|node| !node.children.is_empty());
-    let selected_box_node = selected_box
-      .as_ref()
-      .and_then(|id| self.document.box_node(id));
-    let owner = self
-      .selected_flow_id
-      .clone()
-      .unwrap_or_else(|| ROOT_ID.to_string());
-    FlowCommandState {
-      has_flow: self.selected_flow_id.is_some(),
-      has_selected_box: selected_box.is_some(),
-      can_format,
-      can_fold,
-      selected_bold: selected_box_node.is_some_and(|box_node| box_node.bold),
-      selected_crossed: selected_box_node.is_some_and(|box_node| box_node.crossed),
-      selected_folded: selected_box
-        .as_ref()
-        .is_some_and(|id| self.folded.contains(id)),
-      can_undo: self.history.can_undo(&owner),
-      can_redo: self.history.can_redo(&owner),
-    }
-  }
-
-  pub fn selected_style(&self) -> DebateStyleKey {
-    self.selected_style
-  }
-
-  pub fn selected_style_label(&self) -> &'static str {
-    all_debate_style_templates()
-      .into_iter()
-      .find(|template| template.key == self.selected_style)
-      .map(|template| template.label)
-      .unwrap_or("Policy")
-  }
-
-  #[hotpath::measure]
-  pub fn set_selected_style(&mut self, style: DebateStyleKey, cx: &mut Context<Self>) {
-    if self.selected_style != style {
-      self.selected_style = style;
-      self.switch_speakers = false;
-      cx.notify();
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn ld_toc_circuit(&self) -> bool {
-    self.ld_toc_circuit
-  }
-
-  #[hotpath::measure]
-  pub fn toggle_ld_toc_circuit(&mut self, cx: &mut Context<Self>) {
-    self.ld_toc_circuit = !self.ld_toc_circuit;
-    self.switch_speakers = false;
-    cx.notify();
-  }
-
-  #[hotpath::measure]
-  pub fn switch_speakers(&self) -> bool {
-    self.switch_speakers
-  }
-
-  #[hotpath::measure]
-  pub fn toggle_switch_speakers(&mut self, cx: &mut Context<Self>) {
-    if self.has_switchable_templates() {
-      self.switch_speakers = !self.switch_speakers;
-      cx.notify();
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn templates(&self) -> Vec<DebateStyleFlow> {
-    let mut templates = debate_style_templates(self.selected_style, self.ld_toc_circuit);
-    if self.switch_speakers {
-      let mut flipped = Vec::with_capacity(templates.len());
-      for pair in templates.chunks(2) {
-        if pair.len() == 2 {
-          flipped.push(pair[1].clone());
-          flipped.push(pair[0].clone());
-        } else if let Some(flow) = pair.first() {
-          flipped.push(flow.clone());
+  /// Forward remote peers' carets into the matching OPEN cell editors via the
+  /// existing external-caret API (exact positions — the cursors resolve under
+  /// the flow gate against the cell's current text).
+  pub(super) fn sync_external_cell_carets(&mut self, cx: &mut Context<Self>) {
+    for (cell_id, editor) in &self.cell_editors {
+      let mut carets = Vec::new();
+      let mut selections = Vec::new();
+      for presence in &self.external_presences {
+        if presence.cell != Some(*cell_id) {
+          continue;
+        }
+        let Some(caret) = presence.caret.as_ref() else {
+          continue;
+        };
+        let Some((head, anchor)) = self.handle.resolve_presence_selection(*cell_id, caret) else {
+          continue;
+        };
+        carets.push(crate::rich_text_element::ExternalCaret {
+          offset: head,
+          visual_gravity: crate::rich_text_element::VisualGravity::Neutral,
+          color_rgb: presence.color_rgb,
+        });
+        if anchor != head {
+          selections.push(crate::rich_text_element::ExternalSelection {
+            selection: crate::rich_text_element::EditorSelection::range(anchor, head),
+            color_rgb: presence.color_rgb,
+          });
         }
       }
-      templates = flipped;
-    }
-    templates
-  }
-
-  #[hotpath::measure]
-  pub fn has_switchable_templates(&self) -> bool {
-    debate_style_templates(self.selected_style, self.ld_toc_circuit)
-      .iter()
-      .any(|template| template.columns_switch.is_some())
-  }
-
-  #[hotpath::measure]
-  pub fn select_flow(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-    self.resolve_pending_edit(cx);
-    self.selected_flow_id = Some(flow_id.clone());
-    let focus = self
-      .last_focus_ids
-      .get(&flow_id)
-      .cloned()
-      .unwrap_or(flow_id);
-    self.set_focus(Some(focus), window, cx);
-  }
-
-  #[hotpath::measure]
-  fn set_focus(&mut self, focus_id: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
-    if self.focus_id != focus_id {
-      self.resolve_pending_edit(cx);
-    }
-    self.focus_id = focus_id.clone();
-    if let Some(focus_id) = focus_id {
-      if let Some(flow_id) = self.document.parent_flow_id(&focus_id) {
-        self.last_focus_ids.insert(flow_id, focus_id.clone());
-      }
-      self.focus_input(&focus_id, window, cx);
-    }
-    cx.notify();
-  }
-
-  #[hotpath::measure]
-  fn focus_input(&self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-    if let Some(input) = self.box_inputs.get(id) {
-      input.update(cx, |input, cx| input.focus(window, cx));
-    }
-  }
-
-  #[hotpath::measure]
-  fn perform_command(&mut self, command: CommandResult, before_focus: Option<NodeId>, window: &mut Window, cx: &mut Context<Self>) {
-    self.resolve_pending_edit(cx);
-    let after_focus = command.focus.clone().or(before_focus.clone());
-    let inverse = self.document.apply_action_bundle(command.actions);
-    self
-      .history
-      .add(command.owner, inverse, before_focus, after_focus.clone());
-    self.dirty = true;
-    if let Some(focus) = after_focus {
-      if self.document.node(&focus).is_some() {
-        self.set_focus(Some(focus), window, cx);
-      } else {
-        cx.notify();
-      }
-    } else {
-      cx.notify();
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn add_flow(&mut self, template: DebateStyleFlow, window: &mut Window, cx: &mut Context<Self>) {
-    let command = add_new_flow_actions(self.document.flow_ids().len(), &template, self.switch_speakers);
-    let new_flow_id = command.focus.clone();
-    self.perform_command(command, self.focus_id.clone(), window, cx);
-    if let Some(flow_id) = new_flow_id {
-      self.selected_flow_id = Some(flow_id.clone());
-      self.set_focus(Some(flow_id), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn delete_selected_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(flow_id) = self.selected_flow_id.clone() else {
-      return;
-    };
-    let old_index = self
-      .document
-      .flow_ids()
-      .iter()
-      .position(|id| id == &flow_id)
-      .unwrap_or(0);
-    let Some(command) = delete_node_actions(&self.document, flow_id) else {
-      return;
-    };
-    self.perform_command(command, self.focus_id.clone(), window, cx);
-    let next_flow = if self.document.flow_ids().is_empty() {
-      None
-    } else if old_index == 0 {
-      self.document.flow_ids().first().cloned()
-    } else {
-      self.document.flow_ids().get(old_index - 1).cloned()
-    };
-    self.selected_flow_id = next_flow.clone();
-    self.set_focus(next_flow, window, cx);
-  }
-
-  #[hotpath::measure]
-  pub fn move_flow_to_index(&mut self, flow_id: NodeId, new_index: usize, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(current_index) = self
-      .document
-      .flow_ids()
-      .iter()
-      .position(|id| id == &flow_id)
-    else {
-      return;
-    };
-    let target_index = new_index.min(self.document.flow_ids().len().saturating_sub(1));
-    if current_index == target_index {
-      self.select_flow(flow_id, window, cx);
-      return;
-    }
-    let Some(command) = move_node_actions(&self.document, flow_id.clone(), target_index) else {
-      return;
-    };
-    self.perform_command(command, self.focus_id.clone(), window, cx);
-    self.selected_flow_id = Some(flow_id.clone());
-    self.set_focus(Some(flow_id), window, cx);
-  }
-
-  #[hotpath::measure]
-  fn add_empty_at_column(&mut self, level: usize, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(flow_id) = self.selected_flow_id.clone() else {
-      return;
-    };
-    if let Some(command) = add_new_empty_actions(&self.document, flow_id, level) {
-      self.perform_command(command, self.focus_id.clone(), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn add_child_to_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self.focus_id.clone() else {
-      return;
-    };
-    self.add_child(target_id, window, cx);
-  }
-
-  #[hotpath::measure]
-  fn add_child(&mut self, target_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(node) = self.document.node(&target_id).cloned() else {
-      return;
-    };
-    let Some(flow_id) = self.document.parent_flow_id(&target_id) else {
-      return;
-    };
-    let Some(flow) = self.document.flow(&flow_id) else {
-      return;
-    };
-    if node.level >= flow.columns.len() as i32 {
-      self.set_focus(Some(target_id), window, cx);
-      return;
-    }
-    let mut index = 0;
-    if let Some(first_child) = node.children.first()
-      && self
-        .document
-        .box_node(first_child)
-        .is_some_and(|box_node| box_node.is_extension)
-    {
-      index = 1;
-    }
-    if let Some(command) = add_new_box_actions(&self.document, target_id, index, None) {
-      self.perform_command(command, self.focus_id.clone(), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn add_sibling_to_focus(&mut self, direction: usize, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    let Some(node) = self.document.node(&target_id).cloned() else {
-      return;
-    };
-    let Some(parent_id) = node.parent.clone() else {
-      return;
-    };
-    let index = self
-      .document
-      .child_index(&parent_id, &target_id)
-      .map(|index| index + direction)
-      .unwrap_or(direction);
-    if let Some(command) = add_new_box_actions(&self.document, parent_id, index, None) {
-      self.perform_command(command, Some(target_id), window, cx);
-    }
-  }
-
-  pub fn insert_toolkit_text(&mut self, title: &str, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-    let content = sanitize_input_value(text.trim().to_string());
-    if content.is_empty() {
-      return;
-    }
-    self.resolve_pending_edit(cx);
-    let Some(flow_id) = self.selected_flow_id.clone() else {
-      return;
-    };
-    let parent_id = self
-      .focus_id
-      .as_ref()
-      .filter(|id| self.document.check_box_id(id).is_some())
-      .filter(|id| {
-        let Some(node) = self.document.node(id) else {
-          return false;
-        };
-        let Some(flow) = self.document.flow(&flow_id) else {
-          return false;
-        };
-        node.level + 1 < flow.columns.len() as i32
-      })
-      .cloned()
-      .unwrap_or_else(|| flow_id.clone());
-    let Some(parent) = self.document.node(&parent_id) else {
-      return;
-    };
-    let box_id = new_box_id();
-    let action = Action::Add {
-      parent: parent_id,
-      id: box_id.clone(),
-      index: parent.children.len(),
-      value: NodeValue::Box(BoxNode {
-        content,
-        flow_id: flow_id.clone(),
-        placeholder: (!title.trim().is_empty()).then(|| title.trim().to_string()),
-        empty: false,
-        crossed: false,
-        bold: false,
-        is_extension: false,
-      }),
-    };
-    self.perform_command(
-      CommandResult {
-        actions: vec![action],
-        owner: flow_id,
-        focus: Some(box_id),
-      },
-      self.focus_id.clone(),
-      window,
-      cx,
-    );
-  }
-
-  #[hotpath::measure]
-  pub fn extend_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    if self
-      .document
-      .node(&target_id)
-      .and_then(|node| node.children.first())
-      .and_then(|first| self.document.box_node(first))
-      .is_some_and(|box_node| box_node.is_extension)
-    {
-      return;
-    }
-    if self
-      .document
-      .box_node(&target_id)
-      .is_some_and(|box_node| box_node.is_extension)
-    {
-      return;
-    }
-    let Some(flow_id) = self.document.parent_flow_id(&target_id) else {
-      return;
-    };
-    let Some(flow) = self.document.flow(&flow_id) else {
-      return;
-    };
-    let Some(node) = self.document.node(&target_id) else {
-      return;
-    };
-    if node.level >= flow.columns.len() as i32 - 1 {
-      return;
-    }
-    if let Some(command) = add_new_extension_actions(&self.document, target_id.clone()) {
-      self.perform_command(command, Some(target_id), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn delete_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    let Some(node) = self.document.node(&target_id).cloned() else {
-      return;
-    };
-    let Some(parent_id) = node.parent.clone() else {
-      return;
-    };
-    let Some(parent) = self.document.node(&parent_id).cloned() else {
-      return;
-    };
-    if parent.value == NodeValue::Root || (matches!(parent.value, NodeValue::Flow(_)) && parent.children.len() <= 1) {
-      self.set_focus(Some(target_id), window, cx);
-      return;
-    }
-    let target_index = parent
-      .children
-      .iter()
-      .position(|child| child == &target_id)
-      .unwrap_or(0);
-    let next_focus = if target_index > 0 {
-      parent.children.get(target_index - 1).cloned()
-    } else {
-      Some(parent_id.clone()).filter(|id| id != ROOT_ID)
-    };
-    if let Some(command) = delete_node_actions(&self.document, target_id.clone()) {
-      self.perform_command(command, Some(target_id), window, cx);
-      self.set_focus(next_focus, window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  fn delete_empty_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    if !self
-      .document
-      .box_node(&target_id)
-      .is_some_and(|box_node| box_node.content.is_empty())
-    {
-      return;
-    }
-    let Some(node) = self.document.node(&target_id).cloned() else {
-      return;
-    };
-    let Some(parent_id) = node.parent.clone() else {
-      return;
-    };
-    let Some(parent) = self.document.node(&parent_id).cloned() else {
-      return;
-    };
-    if parent.value == NodeValue::Root || (matches!(parent.value, NodeValue::Flow(_)) && parent.children.len() <= 1) {
-      return;
-    }
-    let target_index = parent
-      .children
-      .iter()
-      .position(|child| child == &target_id)
-      .unwrap_or(0);
-    let next_focus = if target_index > 0 {
-      parent.children.get(target_index - 1).cloned()
-    } else {
-      Some(parent_id.clone()).filter(|id| id != ROOT_ID)
-    };
-    if let Some(command) = delete_node_actions(&self.document, target_id.clone()) {
-      self.perform_command(command, Some(target_id), window, cx);
-      self.set_focus(next_focus, window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn toggle_format_focus(&mut self, format: FormatKind, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    if self
-      .document
-      .box_node(&target_id)
-      .is_some_and(|box_node| box_node.is_extension)
-    {
-      return;
-    }
-    if let Some(command) = toggle_box_format_actions(&self.document, target_id.clone(), format) {
-      self.perform_command(command, Some(target_id), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn toggle_fold_focus(&mut self, cx: &mut Context<Self>) {
-    let Some(target_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
-    };
-    if self
-      .document
-      .node(&target_id)
-      .is_none_or(|node| node.children.is_empty())
-    {
-      return;
-    }
-    if !self.folded.insert(target_id.clone()) {
-      self.folded.remove(&target_id);
-    }
-    cx.notify();
-  }
-
-  #[hotpath::measure]
-  pub fn undo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.resolve_pending_edit(cx);
-    let Some(owner) = self.selected_flow_id.clone() else {
-      return;
-    };
-    if let Some(focus) = self.history.undo(owner, &mut self.document) {
-      self.dirty = true;
-      self.set_focus(focus, window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  pub fn redo_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.resolve_pending_edit(cx);
-    let Some(owner) = self.selected_flow_id.clone() else {
-      return;
-    };
-    if let Some(focus) = self.history.redo(owner, &mut self.document) {
-      self.dirty = true;
-      self.set_focus(focus, window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  fn begin_or_update_edit(&mut self, id: NodeId, value: NodeValue, cx: &mut Context<Self>) {
-    if self.syncing_inputs.contains(&id) {
-      return;
-    }
-    let Some(old_node) = self.document.node(&id).cloned() else {
-      return;
-    };
-    if old_node.value == value {
-      return;
-    }
-    let owner = match &value {
-      NodeValue::Flow(_) => id.clone(),
-      NodeValue::Box(_) => self
-        .document
-        .parent_flow_id(&id)
-        .unwrap_or_else(|| ROOT_ID.to_string()),
-      NodeValue::Root => ROOT_ID.to_string(),
-    };
-    if self
-      .pending_edit
-      .as_ref()
-      .is_none_or(|pending| pending.id != id)
-    {
-      self.resolve_pending_edit(cx);
-      self.pending_edit = Some(PendingEdit {
-        id: id.clone(),
-        owner,
-        before_focus: self.focus_id.clone(),
-        after_focus: self.focus_id.clone(),
-        old_value: old_node.value.clone(),
+      editor.update(cx, |editor, cx| {
+        editor.set_external_carets(carets, cx);
+        editor.set_external_selections(selections, cx);
       });
-    } else if let Some(pending) = &mut self.pending_edit {
-      pending.after_focus = self.focus_id.clone();
-    }
-    if let Some(node) = self.document.node_mut(&id) {
-      node.value = value;
-      self.dirty = true;
-      cx.notify();
     }
   }
 
-  #[hotpath::measure]
-  fn resolve_pending_edit(&mut self, cx: &mut Context<Self>) {
-    let Some(pending) = self.pending_edit.take() else {
-      return;
-    };
-    let Some(current) = self
-      .document
-      .node(&pending.id)
-      .map(|node| node.value.clone())
-    else {
-      return;
-    };
-    if current == pending.old_value {
-      return;
-    }
-    self.history.add(
-      pending.owner,
-      vec![Action::Update {
-        id: pending.id,
-        new_value: pending.old_value,
-      }],
-      pending.before_focus,
-      pending.after_focus,
-    );
-    cx.notify();
+  pub fn external_presences(&self) -> &[FlowExternalPresence] {
+    &self.external_presences
   }
 
-  #[hotpath::measure]
-  fn on_title_change(&mut self, flow_id: &str, value: String, cx: &mut Context<Self>) {
-    let Some(flow) = self.document.flow(flow_id).cloned() else {
-      return;
-    };
-    let mut next = flow;
-    next.content = sanitize_input_value(value);
-    self.begin_or_update_edit(flow_id.to_string(), NodeValue::Flow(next), cx);
-  }
+  pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 
-  #[hotpath::measure]
-  fn on_box_change(&mut self, box_id: &str, value: String, cx: &mut Context<Self>) {
-    let Some(box_node) = self.document.box_node(box_id).cloned() else {
-      return;
-    };
-    let mut next = box_node;
-    next.content = sanitize_input_value(value);
-    self.begin_or_update_edit(box_id.to_string(), NodeValue::Box(next), cx);
-  }
-
-  #[hotpath::measure]
-  fn focus_first_child(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) {
-    let focus = self
-      .document
-      .node(&flow_id)
-      .and_then(|flow| {
-        flow
-          .children
+  fn render_sheet(&mut self, sheet_id: SheetId, cx: &mut Context<Self>) -> AnyElement {
+    // Prefill the inactive-cell rich-text preview cache OUTSIDE the render
+    // borrow (materialize-on-miss; dropped on any board change).
+    let missing: Vec<CellId> = self
+      .board
+      .sheet(sheet_id)
+      .map(|sheet| {
+        sheet
+          .cells
           .iter()
-          .find(|child_id| {
-            self
-              .document
-              .box_node(child_id)
-              .is_some_and(|box_node| !box_node.empty)
-          })
-          .cloned()
+          .map(|cell| cell.id)
+          .filter(|id| !self.cell_documents.contains_key(id))
+          .collect()
       })
-      .unwrap_or(flow_id);
-    self.set_focus(Some(focus), window, cx);
-  }
-
-  #[hotpath::measure]
-  fn ensure_box_input(&mut self, box_id: &str, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
-    if let Some(input) = self.box_inputs.get(box_id) {
-      return input.clone();
-    }
-    let box_node = self.document.box_node(box_id).cloned();
-    let value = box_node
-      .as_ref()
-      .map(|box_node| box_node.content.clone())
       .unwrap_or_default();
-    let placeholder = box_node
-      .and_then(|box_node| box_node.placeholder)
-      .unwrap_or_else(|| "type here".to_string());
-    let input = cx.new(|cx| {
-      InputState::new(window, cx)
-        .placeholder(placeholder)
-        .default_value(value)
-    });
-    let id = box_id.to_string();
-    let subscription = cx.subscribe_in(&input, window, move |editor, input, event: &InputEvent, window, cx| match event {
-      InputEvent::Change => {
-        let value = input.read(cx).value().to_string();
-        editor.on_box_change(&id, value, cx);
-      },
-      InputEvent::Focus => {
-        if editor.focus_id.as_deref() != Some(id.as_str()) {
-          editor.resolve_pending_edit(cx);
-          editor.focus_id = Some(id.clone());
-          if let Some(flow_id) = editor.document.parent_flow_id(&id) {
-            editor.last_focus_ids.insert(flow_id, id.clone());
-          }
-          cx.notify();
-        }
-      },
-      InputEvent::Blur => {
-        editor.resolve_pending_edit(cx);
-      },
-      InputEvent::BackspaceEmpty | InputEvent::DeleteEmpty => {
-        if editor.focus_id.as_deref() == Some(id.as_str()) {
-          editor.delete_empty_focus(window, cx);
-        }
-      },
-      InputEvent::PressEnter { secondary: false } => {
-        if editor.focus_id.as_deref() == Some(id.as_str()) {
-          editor.add_sibling_to_focus(1, window, cx);
-        }
-      },
-      InputEvent::PressEnter { secondary: true } => {
-        if editor.focus_id.as_deref() == Some(id.as_str()) {
-          editor.add_child_to_focus(window, cx);
-        }
-      },
-    });
-    self.input_subscriptions.push(subscription);
-    self.box_inputs.insert(box_id.to_string(), input.clone());
-    input
-  }
-
-  #[hotpath::measure]
-  fn sync_input(&mut self, id: &str, input: &Entity<InputState>, value: &str, window: &mut Window, cx: &mut Context<Self>) {
-    if input.read(cx).value().as_ref() == value {
-      return;
+    for id in missing {
+      if let Ok(document) = self.handle.cell_preview(id) {
+        self.cell_documents.insert(id, document);
+      }
     }
-    self.syncing_inputs.insert(id.to_string());
-    input.update(cx, |input, cx| input.set_value(value.to_string(), window, cx));
-    self.syncing_inputs.remove(id);
-  }
-
-  #[hotpath::measure]
-  fn focused_box_input_is_focused(&self, window: &Window, cx: &App) -> bool {
-    self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.box_inputs.get(id))
-      .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
-  }
-
-  #[hotpath::measure]
-  fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-    let key = event.keystroke.key.as_str();
-    let modifiers = &event.keystroke.modifiers;
-    let command_control = modifiers.platform || modifiers.control;
-    let mut handled = true;
-
-    if matches!(key, "enter" | "backspace" | "delete") && self.focused_box_input_is_focused(window, cx) {
-      return;
-    }
-
-    match (command_control, modifiers.shift, modifiers.alt, key) {
-      (true, true, _, "z") => self.redo_selected(window, cx),
-      (true, false, _, "z") => self.undo_selected(window, cx),
-      (true, false, _, "y") => self.redo_selected(window, cx),
-      (true, false, _, "n") => {
-        if let Some(template) = self.templates().first().cloned() {
-          self.add_flow(template, window, cx);
-        }
-      },
-      (true, true, _, "n") => {
-        if let Some(template) = self.templates().get(1).cloned() {
-          self.add_flow(template, window, cx);
-        }
-      },
-      (true, false, _, "b") => self.toggle_format_focus(FormatKind::Bold, window, cx),
-      (true, true, _, "x") => self.toggle_format_focus(FormatKind::Crossed, window, cx),
-      (true, false, _, "e") => self.extend_focus(window, cx),
-      (true, false, _, "backspace") | (true, false, _, "delete") => self.delete_focus(window, cx),
-      (false, false, false, "enter") => {
-        if let Some(flow_id) = self
-          .focus_id
-          .clone()
-          .filter(|id| self.document.flow(id).is_some())
-        {
-          self.focus_first_child(flow_id, window, cx);
-        } else {
-          self.add_sibling_to_focus(1, window, cx);
-        }
-      },
-      (false, true, _, "enter") => self.add_child_to_focus(window, cx),
-      (false, false, true, "enter") => self.add_sibling_to_focus(0, window, cx),
-      (false, false, _, "tab") => self.focus_sibling(1, window, cx),
-      (false, true, _, "tab") => self.focus_sibling_reverse(window, cx),
-      (false, false, _, "left") => self.focus_parent(window, cx),
-      (false, false, _, "right") => self.focus_first_child_of_focus(window, cx),
-      (false, false, _, "up") => self.focus_adjacent(-1, window, cx),
-      (false, false, _, "down") => self.focus_adjacent(1, window, cx),
-      (false, false, _, "backspace") => {
-        let can_delete_empty = self
-          .focus_id
-          .as_ref()
-          .and_then(|id| self.document.box_node(id))
-          .is_some_and(|box_node| box_node.content.is_empty());
-        if can_delete_empty {
-          self.delete_focus(window, cx);
-        } else {
-          handled = false;
-        }
-      },
-      (false, false, _, "l") if modifiers.control => self.toggle_fold_focus(cx),
-      _ => handled = false,
-    }
-
-    if handled {
-      window.prevent_default();
-      cx.stop_propagation();
-    }
-  }
-
-  #[hotpath::measure]
-  fn focus_sibling(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(focus_id) = self
-      .focus_id
-      .as_ref()
-      .and_then(|id| self.document.check_box_id(id))
-    else {
-      return;
+    let Some(real_sheet) = self.board.sheet(sheet_id) else {
+      return div().child("Select a sheet").into_any_element();
     };
-    let Some(node) = self.document.node(&focus_id) else {
-      return;
+    // During a drag the layout stays stable (no reflow) so drop locations don't move under the pointer:
+    // the dragged cell holds its slot as a faded placeholder, its children stay put, and the landing is
+    // shown by a directional accent on the target cell. The real subtree move still happens on drop.
+    let sheet = real_sheet;
+    let drop_target = self.drag_drop_target(real_sheet);
+    let Some(definition) = self.board.format.sheet_type(sheet.sheet_type_id) else {
+      return div().child("Invalid sheet type").into_any_element();
     };
-    let Some(parent_id) = node.parent.clone() else {
-      return;
-    };
-    let Some(parent) = self.document.node(&parent_id) else {
-      return;
-    };
-    let Some(index) = parent.children.iter().position(|id| id == &focus_id) else {
-      return;
-    };
-    let next_index = if direction < 0 {
-      index.checked_sub(direction.unsigned_abs())
-    } else {
-      Some(index + direction as usize).filter(|ix| *ix < parent.children.len())
-    };
-    if let Some(next_focus) = next_index.and_then(|ix| parent.children.get(ix)).cloned() {
-      self.set_focus(Some(next_focus), window, cx);
-    } else if parent_id != ROOT_ID {
-      self.set_focus(Some(parent_id), window, cx);
-    }
-  }
-
-  #[hotpath::measure]
-  fn focus_sibling_reverse(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.focus_sibling(-1, window, cx);
-  }
-
-  #[hotpath::measure]
-  fn focus_parent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(focus_id) = self.focus_id.clone() else {
-      return;
-    };
-    let Some(parent_id) = self
-      .document
-      .node(&focus_id)
-      .and_then(|node| node.parent.clone())
-      .filter(|id| id != ROOT_ID)
-    else {
-      return;
-    };
-    self.set_focus(Some(parent_id), window, cx);
-  }
-
-  #[hotpath::measure]
-  fn focus_first_child_of_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(focus_id) = self.focus_id.clone() else {
-      return;
-    };
-    let Some(child_id) = self
-      .document
-      .node(&focus_id)
-      .and_then(|node| node.children.first())
-      .cloned()
-    else {
-      return;
-    };
-    self.set_focus(Some(child_id), window, cx);
-  }
-
-  #[hotpath::measure]
-  fn focus_adjacent(&mut self, direction: isize, window: &mut Window, cx: &mut Context<Self>) {
-    let Some(flow_id) = self.selected_flow_id.clone() else {
-      return;
-    };
-    let mut ids = Vec::new();
-    self.collect_visible_boxes(&flow_id, &mut ids);
-    let Some(focus_id) = self.focus_id.clone() else {
-      return;
-    };
-    let Some(index) = ids.iter().position(|id| id == &focus_id) else {
-      return;
-    };
-    let next = if direction < 0 {
-      index
-        .checked_sub(direction.unsigned_abs())
-        .and_then(|ix| ids.get(ix))
+    let active = self.active_cell;
+    let strokes: Vec<_> = if !self.hidden_annotation_sheets.contains(&sheet_id) {
+      sheet
+        .annotations
+        .iter()
+        .filter(|stroke| {
+          !self
+            .hidden_annotation_originators
+            .contains(&stroke.originator)
+        })
         .cloned()
+        .collect()
     } else {
-      ids.get(index + direction as usize).cloned()
+      Vec::new()
     };
-    if let Some(next) = next {
-      self.set_focus(Some(next), window, cx);
+    let draft = self.drawing_points.clone();
+    let client_document_theme = load_document_theme();
+    let zoom = self.board_zoom;
+    let control_size = px(20.0 * zoom);
+    let control_icon_size = px(12.0 * zoom);
+    let cell_layout = sheet_cell_layout(sheet, &self.cell_measurements, zoom);
+    // The drop preview marks the target with a thin, non-displacing landing bar. A full-card-height
+    // gap used to be inserted here, which shoved the target — and everything below it — down by a
+    // whole card; for a Before landing that slid the very cell you were aiming at out from under the
+    // pointer (making fine placement feel like chasing a moving target, and silently handing the drop
+    // off to the column handler at family boundaries). A slim bar keeps the pointer over its target.
+    // Tuple: (column index, top in layout space, bar height).
+    let column_gap: Option<(usize, f32, f32)> = drop_target.and_then(|(target, edge)| {
+      let target_cell = sheet.cells.iter().find(|cell| cell.id == target)?;
+      let target_layout = cell_layout.get(&target)?;
+      let target_column = definition
+        .columns
+        .iter()
+        .position(|column| column.id == target_cell.column_id)?;
+      // Keep well under a card's half-height (min card is 54px) so opening the bar never displaces the
+      // target far enough for the pointer to fall off it.
+      let height = 5.0 * zoom;
+      Some(match edge {
+        DropEdge::Before => (target_column, target_layout.top, height),
+        DropEdge::After => (target_column, target_layout.top + target_layout.height, height),
+        DropEdge::Child => (target_column + 1, target_layout.top, height),
+      })
+    });
+    let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
+    let column_count = definition.columns.len();
+    let weak_editor = cx.entity().downgrade();
+    let weak_connector_editor = weak_editor.clone();
+    let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
+    for cell in &sheet.cells {
+      if let Some(parent) = cell.parent_id {
+        children_by_parent.entry(parent).or_default().push(cell.id);
+      }
     }
-  }
-
-  #[hotpath::measure]
-  fn collect_visible_boxes(&self, id: &str, ids: &mut Vec<NodeId>) {
-    let Some(node) = self.document.node(id) else {
-      return;
-    };
-    if matches!(node.value, NodeValue::Box(_)) {
-      ids.push(id.to_string());
-    }
-    if self.folded.contains(id) {
-      return;
-    }
-    for child in &node.children {
-      self.collect_visible_boxes(child, ids);
-    }
-  }
-
-  #[hotpath::measure]
-  fn render_main(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let Some(flow_id) = self.selected_flow_id.clone() else {
-      return self.render_empty_flow_state(cx).into_any_element();
-    };
-    if self.document.flow(&flow_id).is_none() {
-      return self.render_empty_flow_state(cx).into_any_element();
-    }
-    v_flex()
-      .flex_1()
-      .size_full()
-      .overflow_hidden()
-      .bg(cx.theme().background)
-      .child(self.render_flow_board(flow_id, window, cx))
-      .into_any_element()
-  }
-
-  #[hotpath::measure]
-  fn render_empty_flow_state(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    let connector_families = sheet
+      .cells
+      .iter()
+      .filter_map(|parent| {
+        children_by_parent
+          .remove(&parent.id)
+          .map(|children| (parent.id, children))
+      })
+      .collect::<Vec<_>>();
     div()
-      .flex_1()
-      .size_full()
+      .id("flow-columns")
+      .relative()
+      .min_w_full()
+      .min_h_full()
+      .w(board_width)
       .flex()
-      .items_center()
-      .justify_center()
-      .text_sm()
-      .text_color(cx.theme().muted_foreground)
-      .child("Choose a debate style and add a flow")
-  }
-
-  #[hotpath::measure]
-  fn render_flow_board(&mut self, flow_id: NodeId, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    let Some(flow) = self.document.flow(&flow_id).cloned() else {
-      return self.render_empty_flow_state(cx).into_any_element();
-    };
-    let width = px(COLUMN_WIDTH * flow.columns.len().max(1) as f32);
-    let children = self
-      .document
-      .node(&flow_id)
-      .map(|node| node.children.clone())
-      .unwrap_or_default();
-    v_flex()
-      .flex_1()
-      .overflow_scrollbar()
-      .p_4()
-      .child(
-        v_flex()
-          .w(width)
-          .min_w(width)
-          .gap_2()
+      .gap(px(16.0 * zoom))
+      .p(px(16.0 * zoom))
+      // Board-level fallback so the landing preview never freezes in a dead zone. The per-column
+      // handlers only act inside a column div, but the 16px inter-column flex gaps and the outer
+      // padding lie outside every column, so a pointer crossing between columns would otherwise stop
+      // updating the drop. This runs first (capture phase, parent-before-child), so a real column or
+      // cell handler still overrides it whenever the pointer is genuinely inside one; it only "wins"
+      // in the strips no column covers.
+      .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+        let bounds = event.bounds;
+        let position = event.event.position;
+        if !bounds.contains(&position) {
+          return;
+        }
+        editor.update_drag_autoscroll(position, window, cx);
+        if editor.cursor_over_live_cell(position) {
+          return;
+        }
+        let zoom = editor.board_zoom;
+        let column_width = 280.0 * zoom;
+        let stride = (280.0 + 16.0) * zoom;
+        let relative = (position.x - bounds.left()).as_f32() - 16.0 * zoom;
+        if relative < 0.0 {
+          editor.update_column_drop(0, position.y, cx);
+          return;
+        }
+        let raw_index = (relative / stride).floor();
+        let within = relative - raw_index * stride;
+        let index = raw_index as usize;
+        if within <= column_width && index < column_count {
+          // Inside a real column — its own handler already covers this point, so don't fight it.
+          return;
+        }
+        // In the gap after `index` (or the trailing padding) — snap to the nearest real column.
+        editor.update_column_drop(index.min(column_count.saturating_sub(1)), position.y, cx);
+      }))
+      .children(definition.columns.iter().enumerate().map(|(column_index, column)| {
+        let side_palette = flow_side_palette(column.side, cx);
+        let side_color = side_palette.base;
+        let can_receive_child = column_index + 1 < definition.columns.len();
+        let add_editor = cx.entity().clone();
+        div()
+          .w(px(280.0 * zoom))
+          .flex_none()
+          .flex_col()
+          .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+            // Same as the cell handler: `on_drag_move` is not hit-tested, so gate on this column's own
+            // bounds, and defer to the cell handler whenever the pointer is actually over a live cell.
+            if !event.bounds.contains(&event.event.position) {
+              return;
+            }
+            editor.update_drag_autoscroll(event.event.position, window, cx);
+            if editor.cursor_over_live_cell(event.event.position) {
+              return;
+            }
+            editor.update_column_drop(column_index, event.event.position.y, cx);
+            if let Some(intent) = editor.pending_cell_drop {
+              editor.log_drag_over_column(column_index, event.event.position, intent);
+            }
+          }))
+          .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| editor.finish_cell_drop(drag.cell_id, cx)))
           .child(
-            h_flex()
-              .bg(cx.theme().background)
-              .children(flow.columns.iter().enumerate().map(|(ix, column)| {
-                let colors = flow_column_colors(column, cx);
-                h_flex()
-                  .w(px(COLUMN_WIDTH))
-                  .h(px(34.0))
-                  .items_center()
-                  .justify_center()
-                  .gap_1()
-                  .border_1()
-                  .border_color(colors.border)
-                  .bg(colors.background)
-                  .text_color(colors.foreground)
-                  .text_sm()
-                  .font_weight(FontWeight::MEDIUM)
-                  .child(div().truncate().child(column.clone()))
+            div()
+              .flex()
+              .items_center()
+              .justify_between()
+              .font_weight(gpui::FontWeight::BOLD)
+              .text_size(px(14.0 * zoom))
+              .text_color(side_color)
+              .border_b(px(2.0 * zoom))
+              .border_color(side_color)
+              .child(column.label.clone())
+              .child(
+                div()
+                  .flex()
+                  .gap(px(4.0 * zoom))
                   .child(
-                    Button::new(("flow-add-empty-column", ix))
-                      .icon(IconName::Plus)
-                      .xsmall()
+                    Button::new(("flow-send-to-document", column_index))
+                      .with_size(control_size)
                       .ghost()
-                      .tooltip("Add argument in column")
-                      .on_click(cx.listener(move |editor, _, window, cx| {
-                        editor.add_empty_at_column(ix, window, cx);
-                      })),
+                      .tooltip("Send to document")
+                      .child(Icon::default().path("icons/file-input.svg").with_size(control_icon_size))
+                      .on_click(|_, _, _| {}),
                   )
-                  .into_any_element()
-              })),
+                  .child(
+                    Button::new(("flow-add-column-orphan", column_index))
+                      .with_size(control_size)
+                      .ghost()
+                      .tooltip("Add orphan at top")
+                      .icon(IconName::Plus)
+                      .on_click(move |_, window, cx| {
+                        add_editor.update(cx, |editor, cx| {
+                          editor.set_annotation_tool(AnnotationTool::None, cx);
+                          editor.add_orphan_at_column_top(column_index, cx);
+                          editor.focus_active_cell(window, cx);
+                        });
+                      }),
+                  ),
+              ),
           )
-          .child(
-            v_flex().gap_2().children(
-              children
-                .into_iter()
-                .map(|child| self.render_box_tree(child, &flow.columns, window, cx)),
-            ),
-          ),
-      )
-      .into_any_element()
-  }
-
-  #[hotpath::measure]
-  fn render_box_tree(&mut self, box_id: NodeId, columns: &[String], window: &mut Window, cx: &mut Context<Self>) -> gpui::AnyElement {
-    let Some(node) = self.document.node(&box_id).cloned() else {
-      return div().into_any_element();
-    };
-    if self
-      .document
-      .box_node(&box_id)
-      .is_some_and(|box_node| box_node.empty)
-    {
-      return h_flex()
-        .items_start()
-        .child(div().w(px(COLUMN_WIDTH)).h(px(10.0)).flex_none())
-        .child(
-          v_flex().gap_2().children(
-            node
-              .children
-              .into_iter()
-              .map(|child| self.render_box_tree(child, columns, window, cx)),
-          ),
-        )
-        .into_any_element();
-    }
-    let children = node.children.clone();
-    h_flex()
-      .items_start()
-      .child(self.render_box_cell(box_id.clone(), node, columns, window, cx))
-      .when(!self.folded.contains(&box_id), |this| {
-        this.child(
-          v_flex().gap_2().children(
-            children
-              .into_iter()
-              .map(|child| self.render_box_tree(child, columns, window, cx)),
-          ),
-        )
-      })
-      .when(self.folded.contains(&box_id), |this| {
-        this.child(
-          Button::new(("flow-unfold", stable_element_id(&box_id)))
-            .icon(IconName::PanelRightOpen)
-            .xsmall()
-            .ghost()
-            .tooltip("Unfold")
-            .on_click(cx.listener(move |editor, _, _, cx| {
-              editor.folded.remove(&box_id);
-              cx.notify();
-            })),
-        )
-      })
-      .into_any_element()
-  }
-
-  #[hotpath::measure]
-  fn render_box_cell(
-    &mut self,
-    box_id: NodeId,
-    node: Node,
-    columns: &[String],
-    window: &mut Window,
-    cx: &mut Context<Self>,
-  ) -> impl IntoElement {
-    let Some(box_node) = self.document.box_node(&box_id).cloned() else {
-      return div().into_any_element();
-    };
-    let input = self.ensure_box_input(&box_id, window, cx);
-    self.sync_input(&box_id, &input, &box_node.content, window, cx);
-    if self.focus_id.as_deref() == Some(box_id.as_str()) && !input.focus_handle(cx).is_focused(window) {
-      input.update(cx, |input, cx| input.focus(window, cx));
-    }
-
-    let selected = self.focus_id.as_deref() == Some(box_id.as_str());
-    let colors = columns
-      .get(flow_box_column_index(node.level))
-      .map(|column| flow_column_colors(column, cx))
-      .unwrap_or_else(|| affirmative_flow_colors(cx));
-    let weak = cx.theme().muted_foreground;
-    let id_for_click = box_id.clone();
-    v_flex()
-      .id(("flow-box-cell", stable_element_id(&box_id)))
-      .w(px(COLUMN_WIDTH))
-      .min_h(px(44.0))
-      .p_1()
-      .border_1()
-      .border_color(if selected { colors.selected_border } else { colors.border })
-      .bg(if selected { colors.selected_background } else { colors.background })
-      .text_color(if box_node.crossed { weak } else { colors.foreground })
-      .when(box_node.bold, |this| this.font_weight(FontWeight::BOLD))
-      .when(box_node.crossed, |this| this.line_through())
-      .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-      .on_click(cx.listener(move |editor, _, window, cx| {
-        editor.set_focus(Some(id_for_click.clone()), window, cx);
+          .child(div().h(px(12.0 * zoom)).flex_none())
+          .children({
+            // Render this column's cells in vertical (layout `top`) order, not sheet order. A cell's
+            // vertical band comes from the family tree, so after some moves sheet order diverges from
+            // top order; iterating in sheet order with push-down-only spacers would stack cells wrong
+            // (e.g. a first child's subtree rendering *below* a later sibling's).
+            let mut column_cells: Vec<_> = sheet.cells.iter().filter(|cell| cell.column_id == column.id).collect();
+            column_cells.sort_by(|a, b| {
+              let top = |id| cell_layout.get(id).map(|layout| layout.top).unwrap_or(0.0);
+              top(&a.id).partial_cmp(&top(&b.id)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            // Open the landing gap (if it belongs to this column) before the first cell at/after its
+            // top, shifting the rest of the column down by the gap's height. Everything else stays put.
+            let mut gap_pending = column_gap.filter(|(gap_column, _, _)| *gap_column == column_index).map(|(_, top, height)| (top, height));
+            let mut previous_bottom = 0.0;
+            let mut shift = 0.0;
+            let mut elements: Vec<AnyElement> = column_cells.into_iter().map(|cell| {
+            let id = cell.id;
+            let is_ghost = self.dragging_cell == Some(id);
+            let layout = cell_layout.get(&id).copied().unwrap_or_default();
+            let gap_slot = if let Some((gap_top, gap_height)) = gap_pending
+              && layout.top >= gap_top - 0.5
+            {
+              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
+              previous_bottom = gap_top + gap_height;
+              shift = gap_height;
+              gap_pending = None;
+              Some((gap_spacer, px(gap_height)))
+            } else {
+              None
+            };
+            let cell_top = layout.top + shift;
+            let spacer_height = px((cell_top - previous_bottom).max(0.0));
+            previous_bottom = cell_top + layout.height;
+            let label: SharedString = cell.summary.summary_text.to_string().into();
+            let mut uses_summary_projection = cell.summary.uses_summary_projection;
+            let mut rendered_document = self.cell_documents.get(&id).cloned();
+            if let Some(document) = rendered_document.as_mut() {
+              if !uses_summary_projection {
+                let restyled = {
+                  let mut paragraphs = document.paragraphs.make_mut();
+                  if let Some(paragraph) = paragraphs.first_mut() {
+                    paragraph.style = flowstate_document::PARAGRAPH_TAG;
+                    true
+                  } else {
+                    false
+                  }
+                };
+                if restyled {
+                  document.blocks = flowstate_document::BlockSeq::from_vec(flowstate_document::paragraph_blocks_from_paragraphs(&document.paragraphs.to_vec()));
+                  uses_summary_projection = true;
+                }
+              }
+              apply_flow_cell_theme(document, &client_document_theme, side_color, cx.theme().background, self.board_zoom);
+            }
+            let cell_editor = self.cell_editors.get(&id).cloned();
+            let reply_editor = cx.entity().clone();
+            // Remote peer focus: peer-color outline + name chip on the card
+            // (spec Part C presence rendering).
+            let presence = self.presence_for_cell(id).cloned();
+            let presence_color = presence
+              .as_ref()
+              .map(|presence| gpui::Hsla::from(gpui::rgb(presence.color_rgb)));
+            div()
+              .w_full()
+              .flex_col()
+              .when_some(gap_slot, |this, (gap_spacer, gap_height)| {
+                this.child(div().h(gap_spacer).flex_none()).child(
+                  div()
+                    .w_full()
+                    .h(gap_height)
+                    .rounded(px(2.0 * zoom))
+                    .bg(side_palette.active),
+                )
+              })
+              .when(spacer_height > px(0.0), |this| this.child(div().h(spacer_height).flex_none()))
+              .on_children_prepainted({
+                let weak_editor = weak_editor.clone();
+                move |bounds, _, cx| {
+                  if let Some(card_bounds) = bounds.last().copied() {
+                    let _ = weak_editor.update(cx, |editor, cx| editor.set_cell_bounds(id, card_bounds, cx));
+                  }
+                }
+              })
+              .child(
+              div()
+                .id(("flow-cell", id.as_u128() as u64))
+                .relative()
+                .w_full()
+                .min_h(px(54.0 * zoom))
+                .p(px(10.0 * zoom))
+                .rounded(px(6.0 * zoom))
+                .border(px(if presence_color.is_some() { 2.0 * zoom } else { 1.0 * zoom }))
+                .border_color(if let Some(color) = presence_color {
+                  color
+                } else if active == Some(id) {
+                  side_palette.active
+                } else {
+                  side_color.opacity(0.56)
+                })
+                .bg(if active == Some(id) {
+                  side_palette.active.opacity(0.14)
+                } else {
+                  cx.theme().background
+                })
+                .hover(|style| style.bg(side_palette.hover.opacity(0.12)))
+                .cursor_pointer()
+                .when(active != Some(id) && !is_ghost, |this| {
+                  // The whole card (except the one being edited) is a drag handle; a plain click still
+                  // selects because GPUI only starts a drag past a small movement threshold.
+                  let weak = weak_editor.clone();
+                  let drag_label = label.clone();
+                  this.on_drag(FlowCellDrag { cell_id: id }, move |drag, _, _, cx| {
+                    let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
+                    cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                  })
+                })
+                .on_mouse_down(MouseButton::Left, cx.listener(|editor, _, _, cx| {
+                  if editor.annotation_tool != AnnotationTool::None {
+                    editor.set_annotation_tool(AnnotationTool::None, cx);
+                  }
+                  cx.stop_propagation();
+                }))
+                .on_click(cx.listener(move |editor, _, window, cx| {
+                  editor.activate_cell(id, cx);
+                  if let Some(cell_editor) = editor.cell_editors.get(&id) {
+                    cell_editor.read(cx).focus_handle(cx).focus(window);
+                  }
+                }))
+                // Ghost cells (the dragged subtree drawn in its previewed drop position) must not be drop
+                // targets. Otherwise the ghost sits under the cursor, captures the drag, resolves to a
+                // self-referential intent, and the placement oscillates and pins near the source/parent.
+                .when(!is_ghost, |this| {
+                  this
+                    .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+                      // `on_drag_move` is dispatched in the CAPTURE phase to every registered element
+                      // (not hit-tested), parent-before-child — so the column handler above has already
+                      // run this frame. Each handler hit-tests itself against its own bounds; the actual
+                      // column-vs-cell arbitration is the `cursor_over_live_cell` guard in the column
+                      // handler, NOT the `stop_propagation` below (which fires too late to gate the
+                      // already-executed column handler and only suppresses later-painted siblings).
+                      if !event.bounds.contains(&event.event.position) {
+                        return;
+                      }
+                      // Left 60% reorders siblings (before/after by vertical half); right 40% nests as a
+                      // child (first/last by vertical half). The wider child zone is far easier to hit
+                      // than the old 28% strip, and top/bottom finally makes "first child" reachable.
+                      let in_child_zone = event.event.position.x >= event.bounds.left() + event.bounds.size.width * 0.6;
+                      let upper_half = event.event.position.y < event.bounds.top() + event.bounds.size.height / 2.0;
+                      let destination = if in_child_zone && can_receive_child {
+                        if upper_half {
+                          FlowDropIntent::FirstChildOf(id)
+                        } else {
+                          FlowDropIntent::LastChildOf(id)
+                        }
+                      } else if upper_half {
+                        FlowDropIntent::BeforeSibling(id)
+                      } else {
+                        FlowDropIntent::AfterSibling(id)
+                      };
+                      editor.update_cell_drop(destination, cx);
+                      editor.update_drag_autoscroll(event.event.position, window, cx);
+                      editor.log_drag_over_cell(id, event.event.position, event.bounds, destination);
+                      cx.stop_propagation();
+                    }))
+                    .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| {
+                      editor.finish_cell_drop(drag.cell_id, cx);
+                      cx.stop_propagation();
+                    }))
+                })
+                .when(is_ghost, |this| this.opacity(0.5).border_dashed().border_color(side_palette.active))
+                .when_some(presence, |this, presence| {
+                  let color = gpui::Hsla::from(gpui::rgb(presence.color_rgb));
+                  let chip: SharedString = if presence.editing {
+                    format!("{} ✎", presence.name).into()
+                  } else {
+                    presence.name.clone().into()
+                  };
+                  this.child(
+                    div()
+                      .absolute()
+                      .top(px(-10.0 * zoom))
+                      .left(px(6.0 * zoom))
+                      .px(px(6.0 * zoom))
+                      .rounded(px(4.0 * zoom))
+                      .text_size(px(10.0 * zoom))
+                      .bg(color)
+                      .text_color(gpui::white())
+                      .child(chip),
+                  )
+                })
+                .child(
+                  div()
+                    .id(("flow-cell-drag-handle", id.as_u128() as u64))
+                    .absolute()
+                    .top(px(2.0 * zoom))
+                    .right(px(4.0 * zoom))
+                    .text_size(px(14.0 * zoom))
+                    .cursor_move()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("⠿")
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |editor, _, _, cx| editor.activate_cell(id, cx)))
+                    .on_drag(FlowCellDrag { cell_id: id }, {
+                      let weak = weak_editor.clone();
+                      let drag_label = label.clone();
+                      move |drag, _, _, cx| {
+                        let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
+                        cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                      }
+                    }),
+                )
+                .when(can_receive_child, |this| {
+                  this.child(
+                    Button::new(("flow-cell-reply", id.as_u128() as u64))
+                      .absolute()
+                      .top(px(24.0 * zoom))
+                      .right(px(2.0 * zoom))
+                      .with_size(control_size)
+                      .ghost()
+                      .tooltip("Add first reply")
+                      .child(Icon::default().path("icons/message-square-reply.svg").with_size(control_icon_size))
+                      .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        reply_editor.update(cx, |editor, cx| {
+                          editor.set_annotation_tool(AnnotationTool::None, cx);
+                          editor.add_first_response_to(id, cx);
+                          editor.focus_active_cell(window, cx);
+                        });
+                      }),
+                  )
+                })
+                .child(if active == Some(id) {
+                  cell_editor.map_or_else(|| div().child(label).into_any_element(), |editor| editor.into_any_element())
+                } else {
+                  rendered_document.map_or_else(
+                    || div().child(label).into_any_element(),
+                    |document| RichTextDocumentElement::new(document).with_invisibility_mode(uses_summary_projection).into_any_element(),
+                  )
+                }),
+            )
+            .into_any_element()
+          }).collect();
+            if let Some((gap_top, gap_height)) = gap_pending {
+              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
+              elements.push(
+                div()
+                  .w_full()
+                  .flex_col()
+                  .child(div().h(gap_spacer).flex_none())
+                  .child(
+                    div()
+                      .w_full()
+                      .h(px(gap_height))
+                      .rounded(px(2.0 * zoom))
+                      .bg(side_palette.active),
+                  )
+                  .into_any_element(),
+              );
+            }
+            elements
+          })
       }))
       .child(
-        h_flex()
-          .w_full()
-          .items_start()
-          .gap_1()
-          .when(box_node.is_extension, |this| {
-            this.child(
-              Icon::new(IconName::ArrowRight)
-                .xsmall()
-                .text_color(colors.foreground),
-            )
-          })
+        canvas(
+          |_, _, _| {},
+          move |_canvas_bounds, _, window, cx| {
+            let Some(editor) = weak_connector_editor.upgrade() else {
+              return;
+            };
+            let connector_bounds = &editor.read(cx).cell_bounds;
+            for (parent_id, child_ids) in &connector_families {
+              let Some(parent) = connector_bounds.get(parent_id) else {
+                continue;
+              };
+              let children = child_ids
+                .iter()
+                .filter_map(|id| connector_bounds.get(id).copied())
+                .collect::<Vec<_>>();
+              paint_connector_family(*parent, &children, cx.theme().foreground, window);
+            }
+          },
+        )
+        .absolute()
+        .inset_0(),
+      )
+      .child(
+        div()
+          .id("flow-annotation-layer")
+          .absolute()
+          .inset_0()
           .child(
-            div().flex_1().child(
-              Input::new(&input)
-                .appearance(false)
-                .bordered(false)
-                .focus_bordered(false)
-                .text_color(if box_node.crossed { weak } else { colors.foreground })
-                .placeholder_color(colors.foreground.opacity(0.62))
-                .w_full(),
-            ),
+            canvas(
+              |_, _, _| {},
+              move |bounds, _, window, _| {
+                for stroke in &strokes {
+                  let color = gpui::Hsla::from(rgba(stroke.style.color_rgba));
+                  paint_stroke(
+                    bounds.origin,
+                    &stroke.points,
+                    px(stroke.style.width * zoom),
+                    color.opacity(color.a * stroke.style.opacity),
+                    zoom,
+                    window,
+                  );
+                }
+                if !draft.is_empty() {
+                  paint_stroke(bounds.origin, &draft, px(4.0 * zoom), gpui::Hsla::from(rgba(0xf59e_0bff)).opacity(0.55), zoom, window);
+                }
+              },
+            )
+            .absolute()
+            .size_full(),
           ),
       )
       .into_any_element()
   }
 }
 
-impl EventEmitter<()> for FlowEditor {}
+impl EventEmitter<FlowEditorEvent> for FlowEditor {}
 
-#[hotpath::measure_all]
 impl Focusable for FlowEditor {
   fn focus_handle(&self, _: &App) -> FocusHandle {
     self.focus_handle.clone()
   }
 }
 
-#[hotpath::measure_all]
 impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    self.apply_pending_camera_center();
+    self.refresh_active_cell_theme(cx);
+    if !cx.has_active_drag() && (self.pending_cell_drop.is_some() || self.dragging_cell.is_some()) {
+      self.pending_cell_drop = None;
+      self.dragging_cell = None;
+      self.drag_autoscroll = None;
+      // A drag that ended without an accepted drop (released over empty space) still flushes, tagged
+      // as an uncommitted attempt.
+      self.finish_drag_log(None, false);
+    }
+    if self.pan_drag.is_some() {
+      let editor = cx.entity();
+      window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+        if phase.bubble() && event.button == MouseButton::Left {
+          editor.update(cx, |editor, cx| editor.finish_space_pan(cx));
+        }
+      });
+    }
+    let grid_scroll = self.board_scroll.clone();
+    let board_zoom = self.board_zoom;
     div()
+      .id("flow-editor")
+      .relative()
       .size_full()
-      .overflow_hidden()
       .track_focus(&self.focus_handle)
-      .on_key_down(cx.listener(Self::on_key_down))
-      .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))
-      .on_drop(cx.listener(|editor, drag: &ToolkitTextDrag, window, cx| {
-        editor.insert_toolkit_text(&drag.title, &drag.text, window, cx);
+      .on_key_down(cx.listener(|editor, event: &KeyDownEvent, window, cx| {
+        // Only arm panning when the board itself holds focus. Otherwise a space typed inside a focused
+        // cell editor would silently arm a pan (and a later click would pan instead of act).
+        if event.keystroke.key == "space" && editor.focus_handle.is_focused(window) {
+          editor.space_pan_armed = true;
+          cx.stop_propagation();
+          cx.notify();
+        }
       }))
-      .child(self.render_main(window, cx))
-  }
-}
-
-#[hotpath::measure]
-fn sanitize_input_value(value: String) -> String {
-  value.replace(['\r', '\n'], " ")
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct FlowSideColors {
-  pub background: Hsla,
-  pub border: Hsla,
-  pub foreground: Hsla,
-  pub selected_background: Hsla,
-  pub selected_border: Hsla,
-}
-
-#[hotpath::measure]
-pub fn affirmative_flow_colors(cx: &mut App) -> FlowSideColors {
-  FlowSideColors {
-    background: cx.theme().primary_hover,
-    border: cx.theme().primary,
-    foreground: cx.theme().primary_foreground,
-    selected_background: cx.theme().primary_active,
-    selected_border: cx.theme().primary_active,
-  }
-}
-
-#[hotpath::measure]
-pub fn flow_column_colors(column: &str, cx: &mut App) -> FlowSideColors {
-  let affirmative = affirmative_flow_colors(cx);
-  match debate_column_side(column) {
-    DebateColumnSide::Negative => affirmative.inverse(),
-    DebateColumnSide::Affirmative | DebateColumnSide::Unknown => affirmative,
-  }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DebateColumnSide {
-  Affirmative,
-  Negative,
-  Unknown,
-}
-
-#[hotpath::measure]
-fn debate_column_side(column: &str) -> DebateColumnSide {
-  column
-    .split(|ch: char| !ch.is_ascii_alphanumeric())
-    .find_map(debate_column_token_side)
-    .unwrap_or(DebateColumnSide::Unknown)
-}
-
-#[hotpath::measure]
-fn debate_column_token_side(token: &str) -> Option<DebateColumnSide> {
-  let token = token.trim().to_ascii_uppercase();
-  if token.is_empty() {
-    return None;
-  }
-
-  const AFFIRMATIVE_TOKENS: &[&str] = &["A1", "A2", "A3", "P1", "P2", "PC", "PR", "PM", "DPM", "MG", "GW", "PW"];
-  const NEGATIVE_TOKENS: &[&str] = &["N1", "N2", "N3", "O1", "O2", "CC", "CR", "LO", "DLO", "MO", "CW", "OW", "OR"];
-
-  if token.contains("NEG")
-    || token.contains("CON")
-    || token.contains("OPP")
-    || token.contains("NC")
-    || token.contains("NR")
-    || token.contains("NFF")
-    || NEGATIVE_TOKENS.contains(&token.as_str())
-    || token == "NS"
-    || token.ends_with('N')
-  {
-    return Some(DebateColumnSide::Negative);
-  }
-
-  if token.contains("AFF")
-    || token.contains("PRO")
-    || token.contains("PROP")
-    || token.contains("AC")
-    || token.contains("AR")
-    || AFFIRMATIVE_TOKENS.contains(&token.as_str())
-    || token == "AS"
-    || token.ends_with('A')
-  {
-    return Some(DebateColumnSide::Affirmative);
-  }
-
-  None
-}
-
-#[hotpath::measure_all]
-impl FlowSideColors {
-  fn inverse(self) -> Self {
-    Self {
-      background: inverse_color(self.background),
-      border: inverse_color(self.border),
-      foreground: inverse_color(self.foreground),
-      selected_background: inverse_color(self.selected_background),
-      selected_border: inverse_color(self.selected_border),
-    }
-  }
-}
-
-#[hotpath::measure]
-fn inverse_color(color: Hsla) -> Hsla {
-  let rgb = color.to_rgb();
-  Hsla::from(gpui::Rgba {
-    r: 1.0 - rgb.r,
-    g: 1.0 - rgb.g,
-    b: 1.0 - rgb.b,
-    a: rgb.a,
-  })
-}
-
-#[hotpath::measure]
-fn flow_box_column_index(level: i32) -> usize {
-  level.saturating_sub(1).max(0) as usize
-}
-
-#[hotpath::measure]
-fn stable_element_id(value: &str) -> u64 {
-  let mut hasher = DefaultHasher::new();
-  value.hash(&mut hasher);
-  hasher.finish()
-}
-
-#[cfg(test)]
-mod tests {
-  use super::{DebateColumnSide, debate_column_side, flow_box_column_index};
-
-  #[test]
-  #[hotpath::measure]
-  fn classifies_affirmative_speech_columns() {
-    for column in ["1AC", "2AC", "1AR", "2AR", "AC", "AFF", "Q/2A", "A3", "P1", "PC", "PM", "MG"] {
-      assert_eq!(debate_column_side(column), DebateColumnSide::Affirmative, "{column}");
-    }
-  }
-
-  #[test]
-  #[hotpath::measure]
-  fn classifies_negative_speech_columns() {
-    for column in ["1NC", "2NC/1NR", "1NR", "2NR", "NC", "NFF", "Q/1N", "N3", "O1", "CC", "LO", "MO"] {
-      assert_eq!(debate_column_side(column), DebateColumnSide::Negative, "{column}");
-    }
-  }
-
-  #[test]
-  #[hotpath::measure]
-  fn maps_flow_box_levels_to_column_indices() {
-    assert_eq!(flow_box_column_index(1), 0);
-    assert_eq!(flow_box_column_index(2), 1);
-    assert_eq!(flow_box_column_index(3), 2);
+      .on_key_up(cx.listener(|editor, event: &KeyUpEvent, _, cx| {
+        if event.keystroke.key == "space" && editor.space_pan_armed {
+          editor.space_pan_armed = false;
+          editor.finish_space_pan(cx);
+          cx.stop_propagation();
+        }
+      }))
+      .on_mouse_down(
+        MouseButton::Left,
+        cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+          if editor.space_pan_armed {
+            editor.begin_pan(event.position, cx);
+            cx.stop_propagation();
+          }
+        }),
+      )
+      .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, window, cx| editor.queue_pan(event.position, window, cx)))
+      .on_mouse_up(
+        MouseButton::Left,
+        cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_space_pan(cx)),
+      )
+      .child(
+        canvas(
+          |_, _, _| {},
+          move |bounds, _, window, cx| {
+            let spacing = px(24.0 * board_zoom);
+            let scale = window.scale_factor();
+            let (dot_size, dot_opacity) = grid_dot_metrics(board_zoom, scale);
+            let offset = grid_scroll.offset();
+            let mut x = offset.x % spacing;
+            let color = cx.theme().border.opacity(0.56 * dot_opacity);
+            let snap = |value: gpui::Pixels| px((value.as_f32() * scale).round() / scale);
+            while x < bounds.size.width {
+              let mut y = offset.y % spacing;
+              while y < bounds.size.height {
+                window.paint_quad(gpui::fill(
+                  gpui::Bounds::new(bounds.origin + point(snap(x), snap(y)), gpui::size(dot_size, dot_size)),
+                  color,
+                ));
+                y += spacing;
+              }
+              x += spacing;
+            }
+          },
+        )
+        .absolute()
+        .inset_0(),
+      )
+      .child(
+        div()
+          .id("flow-board-scroll")
+          .relative()
+          .size_full()
+          .overflow_scroll()
+          .track_scroll(&self.board_scroll)
+          .cursor(if self.pan_drag.is_some() {
+            gpui::CursorStyle::ClosedHand
+          } else {
+            gpui::CursorStyle::OpenHand
+          })
+          .when(self.annotation_tool == AnnotationTool::None && !self.space_pan_armed, |this| {
+            this.on_mouse_down(
+              MouseButton::Left,
+              cx.listener(|editor, event: &MouseDownEvent, _, cx| {
+                editor.begin_pan(event.position, cx);
+                cx.stop_propagation();
+              }),
+            )
+          })
+          .on_scroll_wheel(cx.listener(|editor, event: &ScrollWheelEvent, window, cx| {
+            if event.modifiers.shift {
+              let delta = event.delta.pixel_delta(window.line_height());
+              let mut offset = editor.board_scroll.offset();
+              offset.x += delta.y + delta.x;
+              editor.set_user_scroll_offset(offset);
+              cx.stop_propagation();
+              cx.notify();
+            } else if !event.modifiers.control {
+              editor.camera_center = None;
+              cx.on_next_frame(window, |editor, _, _| editor.sync_camera_center_from_scroll());
+            }
+          }))
+          .when(self.annotation_tool != AnnotationTool::None && !self.space_pan_armed, |this| {
+            this
+              .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|editor, event: &MouseDownEvent, _, cx| editor.begin_annotation(event.position, cx)),
+              )
+              .on_mouse_move(cx.listener(|editor, event: &MouseMoveEvent, _, cx| editor.continue_annotation(event.position, cx)))
+              .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)),
+              )
+              .on_mouse_up_out(
+                MouseButton::Left,
+                cx.listener(|editor, _: &MouseUpEvent, _, cx| editor.finish_annotation(cx)),
+              )
+          })
+          .child(
+            canvas(
+              {
+                let weak = cx.entity().downgrade();
+                move |bounds, _, cx| {
+                  let _ = weak.update(cx, |editor, _| editor.set_viewport_origin(bounds.origin));
+                }
+              },
+              |_, _, _, _| {},
+            )
+            .absolute()
+            .size_full(),
+          )
+          .child(match self.active_sheet {
+            Some(sheet) => self.render_sheet(sheet, cx).into_any_element(),
+            None => div()
+              .size_full()
+              .flex()
+              .items_center()
+              .justify_center()
+              .text_color(cx.theme().muted_foreground)
+              .child("Create a sheet to begin flowing")
+              .into_any_element(),
+          }),
+      )
+      .child(
+        div()
+          .absolute()
+          .inset_0()
+          .child(Scrollbar::vertical(&self.board_scroll).scrollbar_show(ScrollbarShow::Always))
+          .child(Scrollbar::horizontal(&self.board_scroll).scrollbar_show(ScrollbarShow::Always)),
+      )
   }
 }

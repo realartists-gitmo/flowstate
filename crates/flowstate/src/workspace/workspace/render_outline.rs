@@ -1,11 +1,11 @@
 #[hotpath::measure_all]
 impl Workspace {
-  fn render_left_nav(&mut self, nav_width: Pixels, cx: &mut Context<Self>) -> AnyElement {
+  fn render_left_nav(&mut self, nav_width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
     if self.left_nav_mode == LeftNavMode::Tub {
       return self.render_tub_nav(nav_width, cx);
     }
     if self.active_flow.is_some() {
-      return self.render_flow_nav(cx);
+      return self.render_flow_nav(nav_width, window, cx);
     }
     self.refresh_outline_tree(cx);
     self.refresh_outline_viewport(cx);
@@ -94,6 +94,11 @@ impl Workspace {
                 is_active: is_active_outline,
                 has_search_match,
                 guide,
+                hierarchy_color: None,
+                label_color: None,
+                interaction_palette: None,
+                guide_colors: None,
+                incoming_branch: None,
                 icon: None,
                 icon_color: None,
                 toggle_action: Some(toggle_action),
@@ -140,15 +145,110 @@ impl Workspace {
     outline_paragraphs
   }
 
-  fn render_flow_nav(&mut self, cx: &mut Context<Self>) -> AnyElement {
-    let workspace = cx.entity().downgrade();
-    let items = self
-      .active_flow
-      .as_ref()
-      .map(|editor| editor.read(cx).outline_items())
-      .unwrap_or_default();
-    let len = items.len();
-
+  fn render_flow_nav(&mut self, nav_width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    let Some(editor) = self.active_flow.clone() else {
+      return div().into_any_element();
+    };
+    let projection = editor.read(cx).board().clone();
+    let active_sheet = editor.read(cx).active_sheet();
+    let active_cell = editor.read(cx).active_cell();
+    let mut rows = Vec::new();
+    for sheet in &projection.sheets {
+      let sheet_id = sheet.id;
+      let sheet_expanded = editor.read(cx).outline_item_expanded(sheet_id);
+      let sheet_palette = projection.format.sheet_type(sheet.sheet_type_id).and_then(|definition| definition.columns.first()).map(|column| {
+        let side = crate::flow::flow_side_palette(column.side, cx);
+        crate::flow::FlowSidePalette {
+          base: sheet_type_color(side.base, cx.theme().sidebar),
+          foreground: cx.theme().sidebar_accent_foreground,
+          hover: side.hover.opacity(0.16),
+          active: cx.theme().sidebar_accent.mix(side.active, 0.36),
+        }
+      });
+      let sheet_color = sheet_palette.map(|palette| palette.base);
+      let toggle_editor = editor.clone();
+      let activate_editor = editor.clone();
+      let key = sheet_id.as_u128() as usize;
+      // Remote peers focused on this sheet show as colored dots on its
+      // switcher row (spec Part C presence rendering).
+      let presence_dots = editor.read(cx).presence_dots_for_sheet(sheet_id);
+      let sheet_row = render_sidebar_tree_row(
+          SidebarTreeRow {
+            row_id: ("flow-outline-sheet", key),
+            toggle_id: ("flow-outline-sheet-toggle", key),
+            label_id: ("flow-outline-sheet-label", key),
+            label: sheet.name.clone().into(),
+            nav_width,
+            depth: 0,
+            is_folder: !sheet.cells.is_empty(),
+            is_expanded: sheet_expanded,
+            is_active: active_sheet == Some(sheet_id) && active_cell.is_none(),
+            has_search_match: false,
+            guide: OutlineRowGuides::default(),
+            hierarchy_color: sheet_color,
+            label_color: None,
+            interaction_palette: sheet_palette,
+            guide_colors: None,
+            incoming_branch: None,
+            icon: None,
+            icon_color: None,
+            toggle_action: Some(Rc::new(move |_, cx| {
+              toggle_editor.update(cx, |editor, cx| editor.toggle_outline_item(sheet_id, cx));
+            })),
+            label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_sheet(sheet_id, cx))),
+            stop_icon_mouse_down: true,
+            stop_label_mouse_down: true,
+            context_menu_action: None,
+          },
+          window,
+          cx,
+        );
+      rows.push(if presence_dots.is_empty() {
+        sheet_row.into_any_element()
+      } else {
+        div()
+          .relative()
+          .child(sheet_row)
+          .child(
+            div()
+              .absolute()
+              .right_2()
+              .top_2()
+              .flex()
+              .gap_1()
+              .children(presence_dots.into_iter().map(|color| {
+                div()
+                  .size(px(8.0))
+                  .rounded_full()
+                  .bg(Hsla::from(gpui::rgb(color)))
+              })),
+          )
+          .into_any_element()
+      });
+      if !sheet_expanded {
+        continue;
+      }
+      let Some(definition) = projection.format.sheet_type(sheet.sheet_type_id) else {
+        continue;
+      };
+      let roots: Vec<_> = sheet.cells.iter().filter(|cell| cell.parent_id.is_none()).map(|cell| cell.id).collect();
+      for cell_id in roots {
+        append_flow_outline_cell_rows(
+          sheet,
+          definition,
+          cell_id,
+          &editor,
+          active_cell,
+          nav_width,
+          window,
+          &[0],
+          sheet_color,
+          true,
+          cx,
+          &mut rows,
+        );
+      }
+    }
     v_flex()
       .size_full()
       .h_full()
@@ -156,130 +256,124 @@ impl Workspace {
       .p_2()
       .bg(cx.theme().sidebar)
       .text_color(cx.theme().sidebar_foreground)
-      .child(
-        div()
-          .w_full()
-          .flex()
-          .flex_row()
-          .items_center()
-          .justify_between()
-          .child(
-            div()
-              .text_sm()
-              .font_weight(gpui::FontWeight::SEMIBOLD)
-              .text_color(cx.theme().sidebar_primary)
-              .child("Flows"),
-          )
-          .child(
-            Button::new("collapse-flow-outline-panel")
-              .icon(Icon::new(IconName::PanelLeftClose).text_color(cx.theme().sidebar_foreground))
-              .xsmall()
-              .ghost()
-              .tooltip("Collapse outline")
-              .on_click(cx.listener(|workspace, _, _, cx| {
-                workspace.toggle_outline(cx);
-              })),
-          ),
-      )
-      .child(
-        v_flex()
-          .flex_1()
-          .w_full()
-          .gap_1()
-          .overflow_y_scrollbar()
-          .children(items.into_iter().map(|item| {
-            let flow_id = item.id.clone();
-            let label = item.label.clone();
-            let selected = item.selected;
-            let source_index = item.index;
-            let target_index = item.index;
-            let colors = crate::flow::editor::affirmative_flow_colors(cx);
-            let workspace_for_click = workspace.clone();
-            div()
-              .id(("flow-outline-drop-row", source_index))
-              .w_full()
-              .on_drag(
-                FlowOutlineDrag {
-                  flow_id: flow_id.clone(),
-                  label: label.clone(),
-                  source_index,
-                },
-                |drag, _, _, cx| {
-                  cx.stop_propagation();
-                  cx.new(|_| drag.clone())
-                },
-              )
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_t_2().border_color(cx.theme().drag_border))
-              .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
-                let new_index = flow_drop_index(drag.source_index, target_index);
-                if let Some(editor) = workspace.active_flow.clone() {
-                  editor.update(cx, |editor, cx| editor.move_flow_to_index(drag.flow_id.clone(), new_index, window, cx));
-                }
-                cx.notify();
-              }))
-              .child(
-                ListItem::new(("flow-outline-item", source_index))
-                  .selected(selected)
-                  .rounded(cx.theme().radius)
-                  .on_click(move |_, window, cx| {
-                    let _ = workspace_for_click.update(cx, |workspace, cx| {
-                      if let Some(editor) = workspace.active_flow.clone() {
-                        editor.update(cx, |editor, cx| editor.select_flow(flow_id.clone(), window, cx));
-                      }
-                    });
-                  })
-                  .child(
-                    h_flex()
-                      .w_full()
-                      .min_w_0()
-                      .items_center()
-                      .gap_2()
-                      .child(
-                        div()
-                          .w(px(3.0))
-                          .h(px(20.0))
-                          .rounded(px(2.0))
-                          .bg(colors.border),
-                      )
-                      .child(
-                        div()
-                          .flex_1()
-                          .min_w_0()
-                          .text_xs()
-                          .truncate()
-                          .text_color(if selected {
-                            cx.theme().sidebar_foreground
-                          } else {
-                            cx.theme().muted_foreground
-                          })
-                          .child(label),
-                      )
-                      .child(
-                        Icon::new(IconName::Menu)
-                          .xsmall()
-                          .text_color(cx.theme().muted_foreground),
-                      ),
-                  ),
-              )
-              .into_any_element()
-          }))
-          .child(
-            div()
-              .id("flow-outline-drop-end")
-              .h(px(22.0))
-              .rounded(cx.theme().radius)
-              .drag_over::<FlowOutlineDrag>(|this, _, _, cx| this.border_1().border_color(cx.theme().drag_border))
-              .on_drop(cx.listener(move |workspace, drag: &FlowOutlineDrag, window, cx| {
-                if len > 0
-                  && let Some(editor) = workspace.active_flow.clone()
-                {
-                  editor.update(cx, |editor, cx| editor.move_flow_to_index(drag.flow_id.clone(), usize::MAX, window, cx));
-                  cx.notify();
-                }
-              })),
-          ),
-      )
+      .child(self.render_left_nav_header("Flow", cx))
+      .child(div().flex_1().w_full().overflow_y_scrollbar().children(rows))
       .into_any_element()
+  }
+}
+
+fn append_flow_outline_cell_rows(
+  sheet: &flowstate_flow::Sheet,
+  definition: &flowstate_flow::SheetTypeDefinition,
+  cell_id: flowstate_flow::CellId,
+  editor: &Entity<FlowEditor>,
+  active_cell: Option<flowstate_flow::CellId>,
+  nav_width: Pixels,
+  window: &mut Window,
+  ancestor_depths: &[usize],
+  sheet_color: Option<Hsla>,
+  is_final_child: bool,
+  cx: &mut Context<Workspace>,
+  rows: &mut Vec<AnyElement>,
+) {
+  let Some(cell) = sheet.cells.iter().find(|cell| cell.id == cell_id) else {
+    return;
+  };
+  let Some(column_depth) = definition.columns.iter().position(|column| column.id == cell.column_id) else {
+    return;
+  };
+  let depth = column_depth + 1;
+  let children: Vec<_> = sheet
+    .cells
+    .iter()
+    .filter(|candidate| candidate.parent_id == Some(cell_id))
+    .map(|candidate| candidate.id)
+    .collect();
+  let expanded = editor.read(cx).outline_item_expanded(cell_id);
+  let side_palette = crate::flow::flow_side_palette(definition.columns[column_depth].side, cx);
+  let side_color = side_palette.base;
+  let guide_colors = (0..depth)
+    .map(|guide_depth| {
+      if guide_depth == 0 {
+        sheet_color.unwrap_or_else(|| outline_hierarchy_color(0, cx))
+      } else {
+        crate::flow::flow_side_palette(definition.columns[guide_depth - 1].side, cx).base
+      }
+    })
+    .collect();
+  let label = {
+    let text = cell.summary.summary_text.to_string();
+    if text.trim().is_empty() { "(empty)".to_string() } else { text }
+  };
+  let activate_editor = editor.clone();
+  let toggle_editor = editor.clone();
+  let incoming_branch = cell.parent_id.map(|_| IncomingBranch {
+    parent_depth: depth.saturating_sub(1),
+    is_final_child,
+  });
+  let guide = OutlineRowGuides {
+    ancestor_depths: ancestor_depths.to_vec(),
+    // Flow branches are rendered in their parent's indentation slot. The
+    // document-outline toggle extension uses a different coordinate and would
+    // leave a short duplicate segment below every expanded flow parent.
+    extends_from_toggle: false,
+  };
+  let key = cell_id.as_u128() as usize;
+  rows.push(
+    render_sidebar_tree_row(
+      SidebarTreeRow {
+        row_id: ("flow-outline-cell", key),
+        toggle_id: ("flow-outline-toggle", key),
+        label_id: ("flow-outline-label", key),
+        label: label.into(),
+        nav_width,
+        depth,
+        is_folder: !children.is_empty(),
+        is_expanded: expanded,
+        is_active: active_cell == Some(cell_id),
+        has_search_match: false,
+        guide,
+        hierarchy_color: Some(side_color),
+        label_color: None,
+        interaction_palette: Some(side_palette),
+        guide_colors: Some(guide_colors),
+        incoming_branch,
+        icon: None,
+        icon_color: None,
+        toggle_action: Some(Rc::new(move |_, cx| {
+          toggle_editor.update(cx, |editor, cx| editor.toggle_outline_item(cell_id, cx));
+        })),
+        label_action: Rc::new(move |_, cx| activate_editor.update(cx, |editor, cx| editor.activate_cell(cell_id, cx))),
+        stop_icon_mouse_down: true,
+        stop_label_mouse_down: true,
+        context_menu_action: None,
+      },
+      window,
+      cx,
+    )
+    .into_any_element(),
+  );
+  if expanded {
+    let mut child_ancestors = ancestor_depths.to_vec();
+    if !is_final_child {
+      child_ancestors.push(depth.saturating_sub(1));
+    }
+    for (index, child_id) in children.iter().copied().enumerate() {
+      append_flow_outline_cell_rows(
+        sheet,
+        definition,
+        child_id,
+        editor,
+        active_cell,
+        nav_width,
+        window,
+        &child_ancestors,
+        sheet_color,
+        index + 1 == children.len(),
+        cx,
+        rows,
+      );
+    }
   }
 }
 
@@ -298,6 +392,11 @@ struct SidebarTreeRow {
   is_active: bool,
   has_search_match: bool,
   guide: OutlineRowGuides,
+  hierarchy_color: Option<Hsla>,
+  label_color: Option<Hsla>,
+  interaction_palette: Option<crate::flow::FlowSidePalette>,
+  guide_colors: Option<Vec<Hsla>>,
+  incoming_branch: Option<IncomingBranch>,
   icon: Option<IconName>,
   icon_color: Option<Hsla>,
   toggle_action: Option<SidebarTreeAction>,
@@ -307,9 +406,19 @@ struct SidebarTreeRow {
   context_menu_action: Option<ContextMenuAction>,
 }
 
+#[derive(Clone, Copy)]
+struct IncomingBranch {
+  parent_depth: usize,
+  is_final_child: bool,
+}
+
 fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut App) -> ListItem {
-  let hierarchy_color = outline_hierarchy_color(row.depth, cx);
+  let hierarchy_color = row.hierarchy_color.unwrap_or_else(|| outline_hierarchy_color(row.depth, cx));
+  let label_color = row.label_color.unwrap_or(hierarchy_color);
+  let interaction_palette = row.interaction_palette;
+  let guide_colors = row.guide_colors;
   let guide_depths = row.guide.ancestor_depths;
+  let incoming_branch = row.incoming_branch;
   let label_width = outline_label_width(row.nav_width, row.depth);
   let label = truncate_outline_label(row.label.as_ref(), outline_label_text_width(label_width, window), window, cx);
   let icon_color = row.icon_color.unwrap_or(hierarchy_color);
@@ -346,13 +455,18 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
         .gap_1()
         .children((0..row.depth).map(|guide_depth| {
           let has_guide = guide_depths.contains(&guide_depth);
-          let guide_color = outline_hierarchy_color(guide_depth, cx);
+          let incoming_branch = incoming_branch.filter(|branch| branch.parent_depth == guide_depth);
+          let guide_color = guide_colors
+            .as_ref()
+            .and_then(|colors| colors.get(guide_depth))
+            .copied()
+            .unwrap_or_else(|| outline_hierarchy_color(guide_depth, cx));
           div()
             .relative()
             .w(px(12.0))
             .h(px(20.0))
             .flex_none()
-            .when(has_guide, |this| {
+            .when(has_guide && incoming_branch.is_none(), |this| {
               this.child(
                 div()
                   .absolute()
@@ -362,6 +476,42 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                   .w(px(0.5))
                   .bg(guide_color.opacity(0.68)),
               )
+            })
+            .when_some(incoming_branch, |this, branch| {
+              if branch.is_final_child {
+                this.child(
+                  div()
+                    .absolute()
+                    .top_0()
+                    .left(px(11.0))
+                    .w(px(9.0))
+                    .h(px(10.5))
+                    .border_l_1()
+                    .border_b_1()
+                    .border_color(guide_color.opacity(0.68))
+                    .rounded_bl(cx.theme().radius.min(px(10.0))),
+                )
+              } else {
+                this
+                  .child(
+                    div()
+                      .absolute()
+                      .top_0()
+                      .bottom_0()
+                      .left(px(11.5))
+                      .w(px(0.5))
+                      .bg(guide_color.opacity(0.68)),
+                  )
+                  .child(
+                    div()
+                      .absolute()
+                      .top(px(10.0))
+                      .left(px(11.5))
+                      .w(px(8.5))
+                      .h(px(0.5))
+                      .bg(guide_color.opacity(0.68)),
+                  )
+              }
             })
             .into_any_element()
         }))
@@ -391,7 +541,10 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
               this.child(
                 Button::new(row.toggle_id)
                   .xsmall()
-                  .ghost()
+                  .when(incoming_branch.is_none(), |button| button.ghost())
+                  .when(incoming_branch.is_some(), |button| {
+                    button.custom(ButtonCustomVariant::new(cx).foreground(hierarchy_color))
+                  })
                   .absolute()
                   .top_0()
                   .left_0()
@@ -448,9 +601,9 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
             .px_1()
             .overflow_hidden()
             .text_color(if row.is_active {
-              cx.theme().sidebar_accent_foreground
+              interaction_palette.map_or(cx.theme().sidebar_accent_foreground, |palette| palette.foreground)
             } else {
-              hierarchy_color
+              label_color
             })
             .whitespace_nowrap()
             .rounded(cx.theme().radius)
@@ -474,18 +627,20 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
                   .left_0()
                   .right_0()
                   .bottom_0()
-                  .bg(
-                    cx.theme()
-                      .sidebar_accent
-                      .opacity(if row.has_search_match { 0.55 } else { 1.0 }),
-                  )
+                  .bg(interaction_palette.map_or(cx.theme().sidebar_accent, |palette| palette.active).opacity(if row.has_search_match {
+                    0.55
+                  } else {
+                    1.0
+                  }))
                   .border_1()
                   .border_color(hierarchy_color)
                   .rounded(cx.theme().radius),
               )
             })
             .when(!row.is_active && !row.has_search_match, |this| {
-              this.hover(|style| style.bg(cx.theme().list_hover))
+              this.hover(|style| {
+                style.bg(interaction_palette.map_or(cx.theme().list_hover, |palette| palette.hover.opacity(0.14)))
+              })
             })
             .child(label)
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
@@ -508,33 +663,7 @@ fn render_sidebar_tree_row(row: SidebarTreeRow, window: &mut Window, cx: &mut Ap
     )
 }
 
-#[derive(Clone)]
-struct FlowOutlineDrag {
-  flow_id: String,
-  label: String,
-  source_index: usize,
-}
 
-#[hotpath::measure_all]
-impl Render for FlowOutlineDrag {
-  fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-    h_flex()
-      .id("flow-outline-drag")
-      .w(px(180.0))
-      .items_center()
-      .gap_2()
-      .rounded(cx.theme().radius)
-      .border_1()
-      .border_color(cx.theme().drag_border)
-      .bg(cx.theme().popover.opacity(0.92))
-      .px_2()
-      .py_1()
-      .text_xs()
-      .text_color(cx.theme().popover_foreground)
-      .child(Icon::new(IconName::Menu).xsmall())
-      .child(div().flex_1().truncate().child(self.label.clone()))
-  }
-}
 
 #[hotpath::measure]
 fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
@@ -548,11 +677,37 @@ fn outline_hierarchy_color(depth: usize, cx: &App) -> Hsla {
   }
 }
 
-#[hotpath::measure]
-fn flow_drop_index(source_index: usize, target_index: usize) -> usize {
-  if source_index < target_index {
-    target_index.saturating_sub(1)
-  } else {
-    target_index
+fn sheet_type_color(side: Hsla, background: Hsla) -> Hsla {
+  let mut color = Hsla {
+    s: (side.s * 0.70).clamp(0.46, 0.78),
+    l: if background.l < 0.5 {
+      (side.l + 0.18).clamp(0.52, 0.78)
+    } else {
+      (side.l - 0.18).clamp(0.22, 0.48)
+    },
+    ..side
+  };
+  if contrast_ratio(color, background) < 3.0 {
+    color.l = if background.l < 0.5 { 0.72 } else { 0.28 };
   }
+  color
 }
+
+fn contrast_ratio(foreground: Hsla, background: Hsla) -> f32 {
+  let luminance = |color: Hsla| {
+    let rgb = color.to_rgb();
+    let linear = |channel: f32| {
+      if channel <= 0.04045 {
+        channel / 12.92
+      } else {
+        ((channel + 0.055) / 1.055).powf(2.4)
+      }
+    };
+    0.2126 * linear(rgb.r) + 0.7152 * linear(rgb.g) + 0.0722 * linear(rgb.b)
+  };
+  let foreground = luminance(foreground);
+  let background = luminance(background);
+  (foreground.max(background) + 0.05) / (foreground.min(background) + 0.05)
+}
+
+

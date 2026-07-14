@@ -47,16 +47,13 @@ impl RichTextEditor {
     let delta = (content_y - item_top).max(px(0.0));
     match item {
       VirtualItem::ParagraphRemainder { paragraph_ix, .. } => {
-        let width = self.current_layout_width();
-        let start_byte = self
-          .valid_chunk_cache_entry(paragraph_ix, width)
-          .and_then(|entry| entry.chunks.last())
-          .map(|chunk| chunk.end_byte)
-          .unwrap_or(0);
+        let block_ix = self.block_ix_for_paragraph(paragraph_ix)?;
+        let paragraph_start_item = self.item_sizes_cache.as_ref()?.block_item_ranges.get(block_ix)?.start;
+        let paragraph_top = self.height_prefix_index.item_top(paragraph_start_item);
         Some(ScrollAnchorSnapshot::ParagraphRemainder {
           paragraph_ix,
-          start_byte,
-          delta,
+          start_byte: 0,
+          delta: (content_y - paragraph_top).max(px(0.0)),
         })
       },
       item => Some(ScrollAnchorSnapshot::Item { item, delta }),

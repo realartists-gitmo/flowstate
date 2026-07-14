@@ -400,9 +400,13 @@ pub struct RichTextEditorStyleState {
 ///
 /// This is intentionally separate from document data. Future settings UI can
 /// edit this object without changing saved document content.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RichTextEditorConfig {
   pub smart_word_selection: bool,
+  pub allow_paragraph_breaks: bool,
+  pub flow_cell_surface: bool,
+  pub show_section_collapse_controls: bool,
+  pub caret_color: Option<gpui::Hsla>,
   pub show_own_collaboration_caret_color: bool,
 }
 
@@ -411,6 +415,10 @@ impl Default for RichTextEditorConfig {
   fn default() -> Self {
     Self {
       smart_word_selection: true,
+      allow_paragraph_breaks: true,
+      flow_cell_surface: false,
+      show_section_collapse_controls: true,
+      caret_color: None,
       show_own_collaboration_caret_color: true,
     }
   }
@@ -906,6 +914,8 @@ pub struct RichTextEditor {
   last_send_document_generation: Option<u64>,
   last_format_export_generation: Option<u64>,
   zoom_percent: f32,
+  zoom_anchor: Option<ZoomAnchorSnapshot>,
+  zoom_anchor_apply_pending: bool,
   save_status: SaveStatus,
   identity_map: DocumentIdentityMap,
   reconciliation_recoveries: u64,

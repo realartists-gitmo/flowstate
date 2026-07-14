@@ -37,11 +37,14 @@ impl Render for RichTextEditor {
     let render_item_sizes = item_sizes.clone();
     let render_items = render_layout.items.clone();
     let hide_initial_layout = render_layout.hide_initial_layout;
+    let flow_cell_surface = self.config.flow_cell_surface;
+    let flow_cell_height = item_sizes.iter().fold(px(1.0), |height, item| height + item.height);
     div()
-      .size_full()
       .id("rich-text-editor")
       .relative()
-      .bg(self.document.theme.document_background_color)
+      .when(flow_cell_surface, |this| this.w_full().h(flow_cell_height))
+      .when(!flow_cell_surface, |this| this.size_full())
+      .when(!flow_cell_surface, |this| this.bg(self.document.theme.document_background_color))
       .track_focus(&self.focus_handle(cx))
       .key_context("RichTextEditor")
       .cursor(CursorStyle::IBeam)
@@ -116,6 +119,12 @@ impl Render for RichTextEditor {
       .on_mouse_move(cx.listener(Self::on_mouse_move))
       .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
       .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+      .on_scroll_wheel(cx.listener(|editor, event: &gpui::ScrollWheelEvent, window, cx| {
+        if !event.modifiers.control {
+          editor.reset_zoom_anchor();
+          cx.on_next_frame(window, |editor, _, _| editor.reset_zoom_anchor());
+        }
+      }))
       .drag_over::<ToolkitTextDrag>(|style, _, _, cx| style.border_1().border_color(cx.theme().drag_border))
       .on_drag_move(cx.listener(Self::on_toolkit_text_drag_move))
       .on_drop(cx.listener(Self::on_toolkit_text_drop))
@@ -247,10 +256,10 @@ impl Render for RichTextEditor {
           .left_0()
           .right_0()
           .bottom_0()
-          .child(
+          .when(!flow_cell_surface, |this| this.child(
             Scrollbar::vertical(&self.scroll_handle)
               .scrollbar_show(ScrollbarShow::Always)
-          ),
+          )),
       )
   }
 }

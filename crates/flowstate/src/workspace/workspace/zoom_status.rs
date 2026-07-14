@@ -3,12 +3,16 @@ impl Workspace {
   fn on_zoom_in(&mut self, _: &ZoomIn, _: &mut Window, cx: &mut Context<Self>) {
     if let Some(editor) = self.active_editor.clone() {
       editor.update(cx, |editor, cx| editor.zoom_in(cx));
+    } else if let Some(flow) = self.active_flow.clone() {
+      flow.update(cx, |flow, cx| flow.zoom_in(cx));
     }
   }
 
   fn on_zoom_out(&mut self, _: &ZoomOut, _: &mut Window, cx: &mut Context<Self>) {
     if let Some(editor) = self.active_editor.clone() {
       editor.update(cx, |editor, cx| editor.zoom_out(cx));
+    } else if let Some(flow) = self.active_flow.clone() {
+      flow.update(cx, |flow, cx| flow.zoom_out(cx));
     }
   }
 

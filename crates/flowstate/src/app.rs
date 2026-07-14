@@ -406,6 +406,7 @@ impl AssetSource for AppAssets {
       "icons/save.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/save.svg")))),
       "icons/bold.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/bold.svg")))),
       "icons/eraser.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/eraser.svg")))),
+      "icons/remove-formatting.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/remove-formatting.svg")))),
       "icons/highlighter.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/highlighter.svg")))),
       "icons/mark-card.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/mark-card.svg")))),
       "icons/shrink.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/shrink.svg")))),
@@ -413,6 +414,8 @@ impl AssetSource for AppAssets {
       "icons/underline.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/underline.svg")))),
       "icons/archive.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/archive.svg")))),
       "icons/file-search-corner.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/file-search-corner.svg")))),
+      "icons/file-input.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/file-input.svg")))),
+      "icons/message-square-reply.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/message-square-reply.svg")))),
       "icons/notebook-text.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/notebook-text.svg")))),
       "icons/table-of-contents.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/table-of-contents.svg")))),
       "icons/panel-top-open.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/panel-top-open.svg")))),
@@ -422,6 +425,7 @@ impl AssetSource for AppAssets {
       "icons/letter-case.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/letter-case.svg")))),
       "icons/text-box-edit.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-box-edit.svg")))),
       "icons/replace.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace.svg")))),
+      "icons/replace-all.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/replace-all.svg")))),
       "icons/pin.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pin.svg")))),
       "icons/paragraph-break-two.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/paragraph-break-two.svg")))),
       "icons/send-to-back.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-to-back.svg")))),
@@ -431,6 +435,7 @@ impl AssetSource for AppAssets {
       "icons/send-horizontal.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/send-horizontal.svg")))),
       "icons/pdf.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/pdf.svg")))),
       "icons/docx.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/docx.svg")))),
+      "icons/text-search.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/icons/text-search.svg")))),
       "logo/flowstate-app-icon.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon.svg")))),
       "logo/flowstate-app-icon-light.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-app-icon-light.svg")))),
       "logo/flowstate-mark.svg" => Ok(Some(Cow::Borrowed(include_bytes!("../assets/logo/flowstate-mark.svg")))),
@@ -452,6 +457,9 @@ impl AssetSource for AppAssets {
     if "icons/eraser.svg".starts_with(path) {
       assets.push("icons/eraser.svg".into());
     }
+    if "icons/remove-formatting.svg".starts_with(path) {
+      assets.push("icons/remove-formatting.svg".into());
+    }
     if "icons/highlighter.svg".starts_with(path) {
       assets.push("icons/highlighter.svg".into());
     }
@@ -472,6 +480,12 @@ impl AssetSource for AppAssets {
     }
     if "icons/file-search-corner.svg".starts_with(path) {
       assets.push("icons/file-search-corner.svg".into());
+    }
+    if "icons/file-input.svg".starts_with(path) {
+      assets.push("icons/file-input.svg".into());
+    }
+    if "icons/message-square-reply.svg".starts_with(path) {
+      assets.push("icons/message-square-reply.svg".into());
     }
     if "icons/notebook-text.svg".starts_with(path) {
       assets.push("icons/notebook-text.svg".into());
@@ -500,6 +514,9 @@ impl AssetSource for AppAssets {
     if "icons/replace.svg".starts_with(path) {
       assets.push("icons/replace.svg".into());
     }
+    if "icons/replace-all.svg".starts_with(path) {
+      assets.push("icons/replace-all.svg".into());
+    }
     if "icons/pin.svg".starts_with(path) {
       assets.push("icons/pin.svg".into());
     }
@@ -526,6 +543,9 @@ impl AssetSource for AppAssets {
     }
     if "icons/docx.svg".starts_with(path) {
       assets.push("icons/docx.svg".into());
+    }
+    if "icons/text-search.svg".starts_with(path) {
+      assets.push("icons/text-search.svg".into());
     }
     if "logo/flowstate-app-icon.svg".starts_with(path) {
       assets.push("logo/flowstate-app-icon.svg".into());
