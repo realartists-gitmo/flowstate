@@ -130,7 +130,7 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   // owner proxy: C can authenticate directly to B and bootstrap from B even
   // if A is unavailable.
   install_snapshot_handler(&b, session, b"snapshot-from-b".to_vec()).await;
-  let b_invite = SessionTicket::new(session, vec![b_addr.clone()], "Shared brief".into(), admission.clone());
+  let b_invite = SessionTicket::new(session, vec![b_addr.clone()], "Shared brief".into(), admission.clone(), flowstate_collab::ticket::DocumentKind::RichText);
   let b_invite = SessionTicket::decode_text(&b_invite.encode_text())?;
   let snapshot = direct::pull_with_endpoint(
     &c.endpoint,

@@ -305,6 +305,13 @@ impl CollabSession {
     &self.title
   }
 
+  /// The session's document kind (rides the v4 invite ticket under its HMAC).
+  /// Step 9 (session enum split) derives this from the attached editor arm;
+  /// every current session is a rich-text document.
+  pub fn document_kind(&self) -> flowstate_collab::ticket::DocumentKind {
+    flowstate_collab::ticket::DocumentKind::RichText
+  }
+
   pub(super) fn set_admission(&mut self, admission: SessionAdmission) {
     self.admission = Some(admission);
   }

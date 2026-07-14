@@ -83,6 +83,7 @@ pub struct DirectServeState {
 struct StandingAccessGrant {
   document_fingerprint: [u8; 32],
   title: String,
+  document: crate::ticket::DocumentKind,
   identities: HashSet<iroh::PublicKey>,
 }
 
@@ -130,6 +131,7 @@ impl DirectServeState {
     session: SessionId,
     document_fingerprint: [u8; 32],
     title: String,
+    document: crate::ticket::DocumentKind,
     identities: HashSet<iroh::PublicKey>,
   ) {
     self.standing_access.write().await.insert(
@@ -137,6 +139,7 @@ impl DirectServeState {
       StandingAccessGrant {
         document_fingerprint,
         title,
+        document,
         identities,
       },
     );
@@ -190,15 +193,15 @@ impl DirectServeState {
         .get(&session)
         .and_then(|grant| {
           (grant.document_fingerprint == request.document_fingerprint && grant.identities.contains(&request.identity))
-            .then(|| grant.title.clone())
+            .then(|| (grant.title.clone(), grant.document))
         });
-      let Some(title) = title else {
+      let Some((title, document)) = title else {
         return ServeOutcome::Header(DirectResponseHeader::Unauthorized);
       };
       let Some(admission) = self.auth.admission(session) else {
         return ServeOutcome::Header(DirectResponseHeader::NotAttached);
       };
-      let payload = match postcard::to_stdvec(&DiscoveryAdmissionGrant { admission, title }) {
+      let payload = match postcard::to_stdvec(&DiscoveryAdmissionGrant { admission, title, document }) {
         Ok(payload) => payload,
         Err(_) => return ServeOutcome::Header(DirectResponseHeader::NotFound),
       };

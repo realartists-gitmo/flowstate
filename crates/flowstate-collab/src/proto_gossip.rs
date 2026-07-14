@@ -5,9 +5,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::ids::{BlobId, SessionId};
 
-/// Version 3 uses symmetric, session-lifetime editor admission. Pre-release
-/// protocol versions are intentionally not accepted.
-pub const PROTOCOL_VERSION: u16 = 3;
+/// Version 4 adds the session DOCUMENT KIND (rich text vs flow) to the
+/// invite ticket — HMAC-covered, so a ticket's kind cannot be flipped — and
+/// flow-aware presence focus. Version 3 used symmetric, session-lifetime
+/// editor admission; pre-release protocol versions are intentionally not
+/// accepted.
+pub const PROTOCOL_VERSION: u16 = 4;
 pub const GOSSIP_INLINE_LIMIT: usize = 2 * 1024;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

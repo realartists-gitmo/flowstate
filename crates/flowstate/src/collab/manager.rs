@@ -309,6 +309,7 @@ impl CollabManager {
     let session_id = self.session_by_panel.get(&panel_id).copied()?;
     let session = self.sessions_by_id.get(&session_id)?.clone();
     let title = session.read(cx).title().to_string();
+    let document = session.read(cx).document_kind();
     let commands = self.ensure_runtime(cx).ok()?;
     let (ticket_tx, ticket_rx) = async_channel::bounded(1);
     let (reply_tx, reply_rx) = async_channel::bounded(1);
@@ -327,7 +328,7 @@ impl CollabManager {
           tracing::info!(%session_id, inviter = %minted.inviter.id, "created collaboration share ticket");
           let own_endpoint_id = minted.inviter.id;
           let _ = cx.update_global::<CollabManager, _>(|manager, _| manager.own_endpoint_id = Some(own_endpoint_id));
-          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission))
+          Ok(SessionTicket::new(session_id, vec![minted.inviter], title, minted.admission, document))
         },
         Ok(Err(error)) => {
           tracing::error!(%session_id, error = %format_args!("{error:#}"), "minting collaboration invite failed");
@@ -538,9 +539,18 @@ impl CollabManager {
       .cloned()
       .unwrap_or_else(|| "Shared document".into());
     let identities = trusted_identity_keys_for_path(path);
+    let document = self
+      .sessions_by_id
+      .get(&session)
+      .map_or(flowstate_collab::ticket::DocumentKind::RichText, |_| {
+        // Step 9 (session enum split) threads the live session's kind here;
+        // until then every standing-access session is a rich-text document.
+        flowstate_collab::ticket::DocumentKind::RichText
+      });
     if let Err(error) = runtime
       .commands
       .try_send(NetCommand::ConfigureStandingAccess {
+        document,
         session,
         document_fingerprint,
         title,

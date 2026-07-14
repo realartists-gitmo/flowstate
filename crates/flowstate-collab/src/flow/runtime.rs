@@ -138,6 +138,9 @@ pub struct FlowRuntime {
   pub(crate) defects: Vec<FlowDefect>,
   /// Remaining import-side order-canonicalization repair passes (loop guard).
   order_repairs_remaining: u32,
+  /// Batched-import calls served (one per gate hold) — the §6.4 coalescing
+  /// counter the pump tests assert against.
+  import_batches_served: u64,
 }
 
 impl FlowRuntime {
@@ -190,6 +193,7 @@ impl FlowRuntime {
       undo_meta,
       defects,
       order_repairs_remaining: 64,
+      import_batches_served: 0,
     })
   }
 
@@ -422,6 +426,7 @@ impl FlowRuntime {
     if chunks.is_empty() {
       return Ok(());
     }
+    self.import_batches_served += 1;
     let frontier_before = self.doc.state_frontiers();
     for chunk in chunks {
       self.doc.import(chunk).context("importing remote flow update")?;
@@ -508,6 +513,11 @@ impl FlowRuntime {
   #[must_use]
   pub fn can_redo(&self) -> bool {
     self.undo.can_redo()
+  }
+
+  #[must_use]
+  pub fn import_batches_served(&self) -> u64 {
+    self.import_batches_served
   }
 }
 

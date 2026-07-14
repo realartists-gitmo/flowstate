@@ -51,6 +51,9 @@ pub enum DirectRequest {
 pub struct DiscoveryAdmissionGrant {
   pub admission: SessionAdmission,
   pub title: String,
+  /// The session's document kind (v4) — carried into the minted ticket.
+  #[serde(default)]
+  pub document: crate::ticket::DocumentKind,
 }
 
 /// How a streamed direct payload is encoded on the wire. Rides on the response
