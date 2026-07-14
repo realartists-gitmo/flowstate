@@ -51,6 +51,102 @@ fn find_keystroke_is_absorbed_without_panic(cx: &mut TestAppContext) {
   cx.run_until_parked();
 }
 
+/// Build-order step 11 gate: synthetic remote presence → peer-color outline
+/// on the focused cell + a sheet-switcher dot, and the peer's exact caret
+/// (encoded Loro cursors) forwarded into the open cell editor.
+#[gpui::test]
+fn flow_external_presence_outline_and_cell_caret_forwarding(cx: &mut TestAppContext) {
+  let h = support::open_workspace(cx);
+  h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
+  cx.run_until_parked();
+  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+
+  // One sheet + one cell, typed through the authority, editor open.
+  h.update(cx, |_, _, cx| {
+    flow.update(cx, |editor, cx| {
+      editor.create_sheet(cx);
+      editor.add_first_argument(cx);
+    });
+  });
+  cx.run_until_parked();
+  let (sheet_id, cell_id) = h.update(cx, |_, _, cx| {
+    let board = flow.read(cx).board().clone();
+    (board.sheets[0].id, board.sheets[0].cells[0].id)
+  });
+  h.update(cx, |_, _, cx| {
+    flow.update(cx, |editor, cx| {
+      let authority = editor.handle().cell_authority(cell_id);
+      let projection = editor.handle().open_cell(cell_id).expect("open cell");
+      use crate::rich_text_element::{InsertTextIntent, LocalIntent, LocalWriteAuthority, TextAnchor};
+      let authority: std::sync::Arc<dyn LocalWriteAuthority> = authority;
+      authority
+        .apply(LocalIntent::InsertText(InsertTextIntent {
+          at: TextAnchor::new(projection.ids.paragraph_ids[0], 0),
+          text: "presence target".into(),
+          style_override: None,
+        }))
+        .expect("cell typing commits");
+      editor.activate_cell(cell_id, cx);
+    });
+  });
+  cx.run_until_parked();
+
+  // The "remote" caret: byte offset 8 of paragraph 0, encoded to the exact
+  // Loro cursor bytes a peer's presence frame would carry.
+  use crate::rich_text_element::{DocumentOffset, EditorSelection};
+  let at = DocumentOffset { paragraph: 0, byte: 8 };
+  let caret = h.update(cx, |_, _, cx| {
+    flow
+      .read(cx)
+      .handle()
+      .presence_selection(cell_id, &EditorSelection::range(at, at))
+      .expect("encode presence caret")
+  });
+
+  let presence = crate::flow::FlowExternalPresence {
+    name: "Remote Peer".into(),
+    color_rgb: 0x00ff_0000,
+    sheet: Some(sheet_id),
+    cell: Some(cell_id),
+    editing: true,
+    caret: Some(caret),
+  };
+  h.update(cx, |_, _, cx| {
+    flow.update(cx, |editor, cx| editor.set_external_presences(vec![presence], cx));
+  });
+  cx.run_until_parked();
+
+  h.update(cx, |_, _, cx| {
+    let editor = flow.read(cx);
+    assert_eq!(
+      editor.presence_for_cell(cell_id).map(|presence| presence.color_rgb),
+      Some(0x00ff_0000),
+      "remote focus must outline the focused cell in the peer color",
+    );
+    assert_eq!(
+      editor.presence_dots_for_sheet(sheet_id),
+      vec![0x00ff_0000],
+      "the peer's sheet must show a presence dot",
+    );
+    let cell_editor = editor.cell_editor(cell_id).expect("open cell editor");
+    let carets = cell_editor.read(cx).external_carets_for_paragraph(0);
+    assert_eq!(carets.len(), 1, "the peer caret must be forwarded into the open cell editor");
+    assert_eq!(carets[0].color_rgb, 0x00ff_0000);
+    assert_eq!(carets[0].offset, at, "the forwarded caret resolves to the exact encoded position");
+  });
+
+  // Clearing presence (leave semantics) clears the forwarded carets too.
+  h.update(cx, |_, _, cx| {
+    flow.update(cx, |editor, cx| editor.set_external_presences(Vec::new(), cx));
+  });
+  h.update(cx, |_, _, cx| {
+    let editor = flow.read(cx);
+    assert!(editor.presence_for_cell(cell_id).is_none());
+    let cell_editor = editor.cell_editor(cell_id).expect("open cell editor");
+    assert!(cell_editor.read(cx).external_carets_for_paragraph(0).is_empty());
+  });
+}
+
 /// Build-order step 8 gate: solo flow edit/save/undo THROUGH the gated
 /// authority path — sheet + cell structural intents, cell typing via the
 /// per-cell `FlowCellAuthority`, `.fl0` v2 save round trip, drag commit via

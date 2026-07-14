@@ -169,8 +169,10 @@ impl Workspace {
       let toggle_editor = editor.clone();
       let activate_editor = editor.clone();
       let key = sheet_id.as_u128() as usize;
-      rows.push(
-        render_sidebar_tree_row(
+      // Remote peers focused on this sheet show as colored dots on its
+      // switcher row (spec Part C presence rendering).
+      let presence_dots = editor.read(cx).presence_dots_for_sheet(sheet_id);
+      let sheet_row = render_sidebar_tree_row(
           SidebarTreeRow {
             row_id: ("flow-outline-sheet", key),
             toggle_id: ("flow-outline-sheet-toggle", key),
@@ -200,9 +202,29 @@ impl Workspace {
           },
           window,
           cx,
-        )
-        .into_any_element(),
-      );
+        );
+      rows.push(if presence_dots.is_empty() {
+        sheet_row.into_any_element()
+      } else {
+        div()
+          .relative()
+          .child(sheet_row)
+          .child(
+            div()
+              .absolute()
+              .right_2()
+              .top_2()
+              .flex()
+              .gap_1()
+              .children(presence_dots.into_iter().map(|color| {
+                div()
+                  .size(px(8.0))
+                  .rounded_full()
+                  .bg(Hsla::from(gpui::rgb(color)))
+              })),
+          )
+          .into_any_element()
+      });
       if !sheet_expanded {
         continue;
       }

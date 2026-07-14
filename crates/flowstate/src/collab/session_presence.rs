@@ -74,6 +74,25 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping own collaboration presence refresh because store is missing");
       return;
     }
+    // FLOW arm: board focus + exact cell caret are read synchronously (the
+    // flow gate encodes cursors inline, no I/O-thread round trip needed).
+    if let Some(flow) = self.flow_editor() {
+      let focus = flow.read(cx).presence_focus(cx);
+      let state = PresenceState {
+        name: default_presence_name(),
+        color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
+        focus: Some(flowstate_collab::presence::PresenceFocus::Flow(focus)),
+      };
+      if let Some(presence) = &self.presence
+        && let Err(error) = presence.set_self(&state)
+      {
+        tracing::warn!(session = %self.session, error = %format_args!("{error:#}"), "collaboration flow presence encode failed");
+      }
+      if self.refresh_peer_count() {
+        cx.notify();
+      }
+      return;
+    }
     let selection = self
       .rich_text_editor()
       .map(|editor| editor.read(cx).selection().clone());
@@ -95,9 +114,9 @@ impl CollabSession {
           let state = PresenceState {
             name: default_presence_name(),
             color_rgb: crate::app_settings::load_local_user_profile().color_rgb,
-            selection,
+            focus: selection.map(flowstate_collab::presence::PresenceFocus::Text),
           };
-          tracing::trace!(session = %session_id, has_selection = state.selection.is_some(), "refreshing own collaboration presence");
+          tracing::trace!(session = %session_id, has_focus = state.focus.is_some(), "refreshing own collaboration presence");
           if let Some(presence) = &session.presence
             && let Err(error) = presence.set_self(&state)
           {
@@ -204,6 +223,29 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
     };
+    // FLOW arm: remote board focus (sheet/cell/editing + caret) paints via the
+    // flow editor, which owns cell bounds and open cell editors.
+    if let Some(flow) = self.flow_editor() {
+      let self_key = presence.self_key();
+      let presences: Vec<crate::flow::FlowExternalPresence> = presence
+        .roster()
+        .into_iter()
+        .filter(|entry| entry.key != self_key)
+        .filter_map(|entry| {
+          let focus = entry.focus.as_ref()?.flow()?.clone();
+          Some(crate::flow::FlowExternalPresence {
+            name: entry.name,
+            color_rgb: entry.color_rgb,
+            sheet: focus.sheet,
+            cell: focus.cell,
+            editing: focus.editing,
+            caret: focus.caret,
+          })
+        })
+        .collect();
+      flow.update(cx, |flow, cx| flow.set_external_presences(presences, cx));
+      return;
+    }
     let Some(runtime) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because no rich-text runtime is attached");
       return;
@@ -220,7 +262,8 @@ impl CollabSession {
       .filter(|entry| entry.key != self_key)
       .filter_map(|entry| {
         entry
-          .selection
+          .focus
+          .and_then(|focus| focus.text().cloned())
           .map(|selection| RuntimePresenceCaretRequest {
             selection,
             color_rgb: entry.color_rgb,

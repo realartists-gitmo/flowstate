@@ -44,11 +44,15 @@ pub enum FlowEditorEvent {
   Changed,
   ActiveCellChanged(Option<CellId>),
   ActiveSheetChanged(Option<SheetId>),
+  /// The caret moved inside the active cell's editor (presence refresh only —
+  /// no document change).
+  CellSelectionChanged,
 }
 
 /// One remote peer's board focus, resolved for rendering: which sheet they
-/// are on, which cell they focus (outline + name chip), and whether they are
-/// editing inside it.
+/// are on, which cell they focus (outline + name chip), whether they are
+/// editing inside it, and — because cells are real CRDT text — their exact
+/// caret as encoded Loro cursors (forwarded into the open cell editor).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FlowExternalPresence {
   pub name: String,
@@ -56,6 +60,7 @@ pub struct FlowExternalPresence {
   pub sheet: Option<SheetId>,
   pub cell: Option<CellId>,
   pub editing: bool,
+  pub caret: Option<flowstate_collab::presence::PresenceSelection>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -788,7 +793,88 @@ impl FlowEditor {
   pub fn set_external_presences(&mut self, presences: Vec<FlowExternalPresence>, cx: &mut Context<Self>) {
     if self.external_presences != presences {
       self.external_presences = presences;
+      self.sync_external_cell_carets(cx);
       cx.notify();
+    }
+  }
+
+  /// The local user's board focus for the presence channel: active sheet/cell,
+  /// whether the cell editor is open, and the exact caret encoded as Loro
+  /// cursors under the flow gate.
+  pub fn presence_focus(&self, cx: &gpui::App) -> flowstate_collab::presence::FlowPresenceFocus {
+    let caret = self.active_cell.and_then(|cell| {
+      let editor = self.cell_editors.get(&cell)?;
+      let selection = editor.read(cx).selection().clone();
+      self.handle.presence_selection(cell, &selection)
+    });
+    flowstate_collab::presence::FlowPresenceFocus {
+      sheet: self.active_sheet,
+      cell: self.active_cell,
+      editing: self
+        .active_cell
+        .is_some_and(|cell| self.cell_editors.contains_key(&cell)),
+      caret,
+    }
+  }
+
+  /// The open editor for a cell, if any (presence caret forwarding + tests).
+  pub fn cell_editor(&self, cell: CellId) -> Option<Entity<RichTextEditor>> {
+    self.cell_editors.get(&cell).cloned()
+  }
+
+  /// The peer-color outline for a cell a remote peer focuses (render + gate
+  /// test hook). First matching peer wins; roster order is deterministic.
+  pub fn presence_for_cell(&self, cell: CellId) -> Option<&FlowExternalPresence> {
+    self
+      .external_presences
+      .iter()
+      .find(|presence| presence.cell == Some(cell))
+  }
+
+  /// Peers focused on a sheet OTHER than the local active one — rendered as
+  /// colored dots on that sheet's switcher row.
+  pub fn presence_dots_for_sheet(&self, sheet: SheetId) -> Vec<u32> {
+    self
+      .external_presences
+      .iter()
+      .filter(|presence| presence.sheet == Some(sheet))
+      .map(|presence| presence.color_rgb)
+      .collect()
+  }
+
+  /// Forward remote peers' carets into the matching OPEN cell editors via the
+  /// existing external-caret API (exact positions — the cursors resolve under
+  /// the flow gate against the cell's current text).
+  pub(super) fn sync_external_cell_carets(&mut self, cx: &mut Context<Self>) {
+    for (cell_id, editor) in &self.cell_editors {
+      let mut carets = Vec::new();
+      let mut selections = Vec::new();
+      for presence in &self.external_presences {
+        if presence.cell != Some(*cell_id) {
+          continue;
+        }
+        let Some(caret) = presence.caret.as_ref() else {
+          continue;
+        };
+        let Some((head, anchor)) = self.handle.resolve_presence_selection(*cell_id, caret) else {
+          continue;
+        };
+        carets.push(crate::rich_text_element::ExternalCaret {
+          offset: head,
+          visual_gravity: crate::rich_text_element::VisualGravity::Neutral,
+          color_rgb: presence.color_rgb,
+        });
+        if anchor != head {
+          selections.push(crate::rich_text_element::ExternalSelection {
+            selection: crate::rich_text_element::EditorSelection::range(anchor, head),
+            color_rgb: presence.color_rgb,
+          });
+        }
+      }
+      editor.update(cx, |editor, cx| {
+        editor.set_external_carets(carets, cx);
+        editor.set_external_selections(selections, cx);
+      });
     }
   }
 
@@ -1055,6 +1141,12 @@ impl FlowEditor {
             }
             let cell_editor = self.cell_editors.get(&id).cloned();
             let reply_editor = cx.entity().clone();
+            // Remote peer focus: peer-color outline + name chip on the card
+            // (spec Part C presence rendering).
+            let presence = self.presence_for_cell(id).cloned();
+            let presence_color = presence
+              .as_ref()
+              .map(|presence| gpui::Hsla::from(gpui::rgb(presence.color_rgb)));
             div()
               .w_full()
               .flex_col()
@@ -1084,8 +1176,10 @@ impl FlowEditor {
                 .min_h(px(54.0 * zoom))
                 .p(px(10.0 * zoom))
                 .rounded(px(6.0 * zoom))
-                .border(px(1.0 * zoom))
-                .border_color(if active == Some(id) {
+                .border(px(if presence_color.is_some() { 2.0 * zoom } else { 1.0 * zoom }))
+                .border_color(if let Some(color) = presence_color {
+                  color
+                } else if active == Some(id) {
                   side_palette.active
                 } else {
                   side_color.opacity(0.56)
@@ -1161,6 +1255,26 @@ impl FlowEditor {
                     }))
                 })
                 .when(is_ghost, |this| this.opacity(0.5).border_dashed().border_color(side_palette.active))
+                .when_some(presence, |this, presence| {
+                  let color = gpui::Hsla::from(gpui::rgb(presence.color_rgb));
+                  let chip: SharedString = if presence.editing {
+                    format!("{} ✎", presence.name).into()
+                  } else {
+                    presence.name.clone().into()
+                  };
+                  this.child(
+                    div()
+                      .absolute()
+                      .top(px(-10.0 * zoom))
+                      .left(px(6.0 * zoom))
+                      .px(px(6.0 * zoom))
+                      .rounded(px(4.0 * zoom))
+                      .text_size(px(10.0 * zoom))
+                      .bg(color)
+                      .text_color(gpui::white())
+                      .child(chip),
+                  )
+                })
                 .child(
                   div()
                     .id(("flow-cell-drag-handle", id.as_u128() as u64))

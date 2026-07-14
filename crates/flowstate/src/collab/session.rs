@@ -1441,8 +1441,9 @@ impl CollabSession {
       .push(cx.subscribe(editor, |session, _, event: &FlowEditorEvent, cx| {
         match event {
           FlowEditorEvent::Changed => session.schedule_publish_pump(cx),
-          FlowEditorEvent::ActiveCellChanged(_) | FlowEditorEvent::ActiveSheetChanged(_) => {
-            // Step 11 (presence): board focus rides the presence channel.
+          FlowEditorEvent::ActiveCellChanged(_) | FlowEditorEvent::ActiveSheetChanged(_) | FlowEditorEvent::CellSelectionChanged => {
+            // Step 11 (presence): board focus + cell caret ride the presence
+            // channel.
             session.schedule_own_presence_refresh(cx);
           },
         }

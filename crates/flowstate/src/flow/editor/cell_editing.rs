@@ -56,13 +56,21 @@ impl FlowEditor {
     // the BOARD side current (summary refreshes ride the board stream) and
     // the dirty flag honest — caret-only notifies are ignored.
     let subscription = cx.subscribe(&editor, move |flow, _editor, event: &crate::rich_text_element::EditorEvent, cx| {
-      if matches!(event, crate::rich_text_element::EditorEvent::Changed { .. }) {
-        flow.sync_board_from_handle(cx);
-        if !flow.dirty {
-          flow.dirty = true;
-          cx.emit(super::FlowEditorEvent::Changed);
-        }
-        cx.notify();
+      match event {
+        crate::rich_text_element::EditorEvent::Changed { .. } => {
+          flow.sync_board_from_handle(cx);
+          if !flow.dirty {
+            flow.dirty = true;
+            cx.emit(super::FlowEditorEvent::Changed);
+          }
+          cx.notify();
+        },
+        // Caret motion inside the cell rides the presence channel (step 11) —
+        // the session subscription debounces + republishes own presence.
+        crate::rich_text_element::EditorEvent::SelectionChanged { .. } => {
+          cx.emit(super::FlowEditorEvent::CellSelectionChanged);
+        },
+        _ => {},
       }
     });
     self.cell_editors.insert(cell_id, editor);
@@ -78,6 +86,9 @@ impl FlowEditor {
     for editor in self.cell_editors.values() {
       editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
     }
+    // Remote edits move text under peers' carets; re-resolve them against the
+    // refreshed cell state.
+    self.sync_external_cell_carets(cx);
   }
 
   pub(super) fn refresh_active_cell_theme(&mut self, cx: &mut Context<Self>) {

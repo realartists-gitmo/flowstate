@@ -3,7 +3,7 @@ pub mod editor;
 pub mod panel;
 pub mod ribbon;
 
-pub use editor::{AnnotationTool, FlowEditor, FlowEditorEvent};
+pub use editor::{AnnotationTool, FlowEditor, FlowEditorEvent, FlowExternalPresence};
 pub use panel::FlowPanel;
 pub use ribbon::FlowRibbon;
 

@@ -177,6 +177,79 @@ impl FlowDocHandle {
       })?
   }
 
+  // ---- Presence (spec Part C, step 11) ----------------------------------------
+
+  /// Encode a cell-local editor selection as presence cursor bytes (exact Loro
+  /// cursors — no offset guessing). Advisory: presence rides its own channel,
+  /// so unlike undo-context capture there is no editor-frontier requirement.
+  pub fn presence_selection(
+    &self,
+    cell: CellId,
+    selection: &gpui_flowtext::EditorSelection,
+  ) -> Option<crate::presence::PresenceSelection> {
+    use crate::presence::{PresenceSelection, SelectionAffinity, SelectionEndpoint, VisualGravity};
+    let selection = selection.clone();
+    self
+      .with_runtime(GateHolder::Presence, move |runtime| {
+        let ctx = super::cell_text::CellTextContext::resolve(runtime.doc(), cell).ok()?;
+        let endpoint = |offset: gpui_flowtext::DocumentOffset,
+                        affinity: SelectionAffinity,
+                        gravity: VisualGravity|
+         -> Option<SelectionEndpoint> {
+          let unicode = ctx.unicode_for_offset(offset)?;
+          let cursor = crate::crdt_runtime::cursor_for_boundary(&ctx.text, unicode, affinity)?;
+          Some(SelectionEndpoint {
+            cursor: cursor.encode(),
+            affinity,
+            visual_gravity: gravity,
+          })
+        };
+        Some(PresenceSelection {
+          anchor: endpoint(
+            selection.anchor,
+            SelectionAffinity::from(selection.anchor_affinity),
+            VisualGravity::from(selection.anchor_gravity),
+          )?,
+          head: endpoint(
+            selection.head,
+            SelectionAffinity::from(selection.head_affinity),
+            VisualGravity::from(selection.head_gravity),
+          )?,
+          direction: selection_direction(selection.anchor, selection.head),
+        })
+      })
+      .ok()
+      .flatten()
+  }
+
+  /// Resolve a remote peer's presence caret against THIS cell's current text:
+  /// `(head, anchor)` projection offsets, or `None` when the cursors belong to
+  /// another container (foreign-cell cursors fail safely) or no longer resolve.
+  pub fn resolve_presence_selection(
+    &self,
+    cell: CellId,
+    selection: &crate::presence::PresenceSelection,
+  ) -> Option<(gpui_flowtext::DocumentOffset, gpui_flowtext::DocumentOffset)> {
+    use loro::{ContainerTrait as _, cursor::Cursor};
+    let head_cursor = selection.head.cursor.clone();
+    let anchor_cursor = selection.anchor.cursor.clone();
+    self
+      .with_runtime(GateHolder::Presence, move |runtime| {
+        let ctx = super::cell_text::CellTextContext::resolve(runtime.doc(), cell).ok()?;
+        let resolve = |encoded: &[u8]| {
+          let cursor = Cursor::decode(encoded).ok()?;
+          if cursor.container != ctx.text.id() {
+            return None;
+          }
+          let position = runtime.doc().get_cursor_pos(&cursor).ok()?;
+          ctx.offset_for_unicode(position.current.pos)
+        };
+        Some((resolve(&head_cursor)?, resolve(&anchor_cursor)?))
+      })
+      .ok()
+      .flatten()
+  }
+
   /// Test/tooling support: run a closure against the gate-held runtime (the
   /// flow analog of holding a test gate guard on the .db8 core).
   pub fn with_test_runtime<T>(&self, call: impl FnOnce(&mut FlowRuntime) -> T) -> T {
@@ -196,5 +269,16 @@ impl FlowDocHandle {
   ) -> Result<T, FlowWriteRejected> {
     let mut guard = self.lock(holder)?;
     Ok(read(&mut guard))
+  }
+}
+
+fn selection_direction(
+  anchor: gpui_flowtext::DocumentOffset,
+  head: gpui_flowtext::DocumentOffset,
+) -> crate::presence::SelectionDirection {
+  match anchor.cmp(&head) {
+    std::cmp::Ordering::Less => crate::presence::SelectionDirection::Forward,
+    std::cmp::Ordering::Greater => crate::presence::SelectionDirection::Backward,
+    std::cmp::Ordering::Equal => crate::presence::SelectionDirection::None,
   }
 }
