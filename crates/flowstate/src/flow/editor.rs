@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 use std::collections::HashSet;
 
-use flowstate_flow::{AnnotationOriginator, BoardPoint, CellId, FlowDocument, RelativePosition, SheetId, VersionVector};
+use flowstate_flow::{
+  AnnotationOriginator, BoardPoint, CellId, FlowCommitResult, FlowDocument, FlowFrontier, FlowProjection, FlowProjectionSnapshot,
+  FlowDropIntent, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, RelativePosition, SheetId, VersionVector,
+};
 use gpui::{
   AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, MouseButton, MouseDownEvent,
   KeyDownEvent, KeyUpEvent, MouseMoveEvent, MouseUpEvent, Render, SharedString, Subscription, Task, Window, canvas, div, point,
@@ -24,11 +27,12 @@ mod cell_editing;
 mod connector;
 mod drag_drop;
 mod layout;
+mod telemetry;
 mod zoom;
 
 use annotation::paint_stroke;
 use connector::paint_connector_family;
-use drag_drop::{CellDropDestination, FlowCellDrag, FlowCellDragPreview};
+use drag_drop::{DropEdge, FlowCellDrag, FlowCellDragPreview};
 use layout::{CellMeasurement, sheet_cell_layout};
 use zoom::grid_dot_metrics;
 
@@ -69,7 +73,12 @@ pub struct FlowEditor {
   cell_editors: std::collections::HashMap<CellId, Entity<RichTextEditor>>,
   cell_editor_themes: std::collections::HashMap<CellId, (gpui::Hsla, gpui::Hsla, u32)>,
   cell_editor_subscriptions: std::collections::HashMap<CellId, Subscription>,
-  pending_cell_drop: Option<CellDropDestination>,
+  pending_cell_drop: Option<FlowDropIntent>,
+  dragging_cell: Option<CellId>,
+  drag_autoscroll: Option<gpui::Point<gpui::Pixels>>,
+  drag_autoscroll_scheduled: bool,
+  drag_log: Option<telemetry::DragLogSession>,
+  drag_log_counter: u64,
   cell_bounds: std::collections::HashMap<CellId, Bounds<gpui::Pixels>>,
   cell_measurements: std::collections::HashMap<CellId, CellMeasurement>,
   board_scroll: ScrollHandle,
@@ -101,14 +110,17 @@ impl FlowEditor {
       annotation_tool: AnnotationTool::None,
       hidden_annotation_sheets: HashSet::new(),
       hidden_annotation_originators: HashSet::new(),
-      // suggestion: replace this opaque local value with the identity source
-      // selected by the document-collaboration implementation.
       local_annotation_originator: AnnotationOriginator("local".into()),
       drawing_points: Vec::new(),
       cell_editors: std::collections::HashMap::new(),
       cell_editor_themes: std::collections::HashMap::new(),
       cell_editor_subscriptions: std::collections::HashMap::new(),
       pending_cell_drop: None,
+      dragging_cell: None,
+      drag_autoscroll: None,
+      drag_autoscroll_scheduled: false,
+      drag_log: None,
+      drag_log_counter: 0,
       cell_bounds: std::collections::HashMap::new(),
       cell_measurements: std::collections::HashMap::new(),
       board_scroll: ScrollHandle::new(),
@@ -134,15 +146,38 @@ impl FlowEditor {
     self.document.version_vector()
   }
 
-  pub fn collaboration_updates_since(&self, version: &VersionVector) -> anyhow::Result<Vec<u8>> {
-    self.document.updates_since(version)
+  pub fn collaboration_projection_snapshot(&self) -> FlowProjectionSnapshot {
+    self.document.projection_snapshot()
   }
 
-  pub fn import_collaboration_updates(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> anyhow::Result<()> {
-    self.document.import_updates(bytes)?;
+  pub fn collaboration_frontier(&self) -> FlowFrontier {
+    self.document.frontier()
+  }
+
+  pub fn collaboration_updates_since(&self, version: &VersionVector) -> anyhow::Result<FlowUpdateBytes> {
+    self.document.export_updates_for(version)
+  }
+
+  pub fn import_collaboration_updates(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> anyhow::Result<Vec<FlowRuntimeEvent>> {
+    let events = self.document.import_remote_update(bytes)?;
     self.sync_cell_editors(cx);
     self.changed(self.active_cell, cx);
-    Ok(())
+    Ok(events)
+  }
+
+  pub fn apply_collaboration_transaction(
+    &mut self,
+    transaction_id: FlowTransactionId,
+    base_frontier: &[u8],
+    change: impl FnOnce(&mut FlowProjection) -> anyhow::Result<()>,
+    cx: &mut Context<Self>,
+  ) -> anyhow::Result<FlowCommitResult> {
+    let result = self
+      .document
+      .apply_projection_transaction(transaction_id, base_frontier, change)?;
+    self.sync_cell_editors(cx);
+    self.changed(self.active_cell, cx);
+    Ok(result)
   }
 
   pub fn active_sheet(&self) -> Option<SheetId> {
@@ -554,10 +589,14 @@ impl FlowEditor {
   pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 
   fn render_sheet(&self, sheet_id: SheetId, cx: &mut Context<Self>) -> AnyElement {
-    let sheet = self.document.projection().sheets.iter().find(|sheet| sheet.id == sheet_id);
-    let Some(sheet) = sheet else {
+    let Some(real_sheet) = self.document.projection().sheets.iter().find(|sheet| sheet.id == sheet_id) else {
       return div().child("Select a sheet").into_any_element();
     };
+    // During a drag the layout stays stable (no reflow) so drop locations don't move under the pointer:
+    // the dragged cell holds its slot as a faded placeholder, its children stay put, and the landing is
+    // shown by a directional accent on the target cell. The real subtree move still happens on drop.
+    let sheet = real_sheet;
+    let drop_target = self.drag_drop_target(real_sheet);
     let Some(definition) = self.document.projection().format.sheet_type(sheet.sheet_type_id) else {
       return div().child("Invalid sheet type").into_any_element();
     };
@@ -578,7 +617,27 @@ impl FlowEditor {
     let control_size = px(20.0 * zoom);
     let control_icon_size = px(12.0 * zoom);
     let cell_layout = sheet_cell_layout(sheet, &self.cell_measurements, zoom);
+    // The drop preview marks the target with a thin, non-displacing landing bar. A full-card-height
+    // gap used to be inserted here, which shoved the target — and everything below it — down by a
+    // whole card; for a Before landing that slid the very cell you were aiming at out from under the
+    // pointer (making fine placement feel like chasing a moving target, and silently handing the drop
+    // off to the column handler at family boundaries). A slim bar keeps the pointer over its target.
+    // Tuple: (column index, top in layout space, bar height).
+    let column_gap: Option<(usize, f32, f32)> = drop_target.and_then(|(target, edge)| {
+      let target_cell = sheet.cells.iter().find(|cell| cell.id == target)?;
+      let target_layout = cell_layout.get(&target)?;
+      let target_column = definition.columns.iter().position(|column| column.id == target_cell.column_id)?;
+      // Keep well under a card's half-height (min card is 54px) so opening the bar never displaces the
+      // target far enough for the pointer to fall off it.
+      let height = 5.0 * zoom;
+      Some(match edge {
+        DropEdge::Before => (target_column, target_layout.top, height),
+        DropEdge::After => (target_column, target_layout.top + target_layout.height, height),
+        DropEdge::Child => (target_column + 1, target_layout.top, height),
+      })
+    });
     let board_width = px((32.0 + definition.columns.len() as f32 * 280.0 + definition.columns.len().saturating_sub(1) as f32 * 16.0) * zoom);
+    let column_count = definition.columns.len();
     let weak_editor = cx.entity().downgrade();
     let weak_connector_editor = weak_editor.clone();
     let mut children_by_parent: std::collections::HashMap<CellId, Vec<CellId>> = std::collections::HashMap::new();
@@ -601,6 +660,40 @@ impl FlowEditor {
       .flex()
       .gap(px(16.0 * zoom))
       .p(px(16.0 * zoom))
+      // Board-level fallback so the landing preview never freezes in a dead zone. The per-column
+      // handlers only act inside a column div, but the 16px inter-column flex gaps and the outer
+      // padding lie outside every column, so a pointer crossing between columns would otherwise stop
+      // updating the drop. This runs first (capture phase, parent-before-child), so a real column or
+      // cell handler still overrides it whenever the pointer is genuinely inside one; it only "wins"
+      // in the strips no column covers.
+      .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+        let bounds = event.bounds;
+        let position = event.event.position;
+        if !bounds.contains(&position) {
+          return;
+        }
+        editor.update_drag_autoscroll(position, window, cx);
+        if editor.cursor_over_live_cell(position) {
+          return;
+        }
+        let zoom = editor.board_zoom;
+        let column_width = 280.0 * zoom;
+        let stride = (280.0 + 16.0) * zoom;
+        let relative = (position.x - bounds.left()).as_f32() - 16.0 * zoom;
+        if relative < 0.0 {
+          editor.update_column_drop(0, position.y, cx);
+          return;
+        }
+        let raw_index = (relative / stride).floor();
+        let within = relative - raw_index * stride;
+        let index = raw_index as usize;
+        if within <= column_width && index < column_count {
+          // Inside a real column — its own handler already covers this point, so don't fight it.
+          return;
+        }
+        // In the gap after `index` (or the trailing padding) — snap to the nearest real column.
+        editor.update_column_drop(index.min(column_count.saturating_sub(1)), position.y, cx);
+      }))
       .children(definition.columns.iter().enumerate().map(|(column_index, column)| {
         let side_palette = flow_side_palette(column.side, cx);
         let side_color = side_palette.base;
@@ -610,8 +703,20 @@ impl FlowEditor {
           .w(px(280.0 * zoom))
           .flex_none()
           .flex_col()
-          .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, _, cx| {
+          .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+            // Same as the cell handler: `on_drag_move` is not hit-tested, so gate on this column's own
+            // bounds, and defer to the cell handler whenever the pointer is actually over a live cell.
+            if !event.bounds.contains(&event.event.position) {
+              return;
+            }
+            editor.update_drag_autoscroll(event.event.position, window, cx);
+            if editor.cursor_over_live_cell(event.event.position) {
+              return;
+            }
             editor.update_column_drop(column_index, event.event.position.y, cx);
+            if let Some(intent) = editor.pending_cell_drop {
+              editor.log_drag_over_column(column_index, event.event.position, intent);
+            }
           }))
           .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| editor.finish_cell_drop(drag.cell_id, cx)))
           .child(
@@ -655,12 +760,38 @@ impl FlowEditor {
           )
           .child(div().h(px(12.0 * zoom)).flex_none())
           .children({
+            // Render this column's cells in vertical (layout `top`) order, not sheet order. A cell's
+            // vertical band comes from the family tree, so after some moves sheet order diverges from
+            // top order; iterating in sheet order with push-down-only spacers would stack cells wrong
+            // (e.g. a first child's subtree rendering *below* a later sibling's).
+            let mut column_cells: Vec<_> = sheet.cells.iter().filter(|cell| cell.column_id == column.id).collect();
+            column_cells.sort_by(|a, b| {
+              let top = |id| cell_layout.get(id).map(|layout| layout.top).unwrap_or(0.0);
+              top(&a.id).partial_cmp(&top(&b.id)).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            // Open the landing gap (if it belongs to this column) before the first cell at/after its
+            // top, shifting the rest of the column down by the gap's height. Everything else stays put.
+            let mut gap_pending = column_gap.filter(|(gap_column, _, _)| *gap_column == column_index).map(|(_, top, height)| (top, height));
             let mut previous_bottom = 0.0;
-            sheet.cells.iter().filter(|cell| cell.column_id == column.id).map(|cell| {
+            let mut shift = 0.0;
+            let mut elements: Vec<AnyElement> = column_cells.into_iter().map(|cell| {
             let id = cell.id;
+            let is_ghost = self.dragging_cell == Some(id);
             let layout = cell_layout.get(&id).copied().unwrap_or_default();
-            let spacer_height = px((layout.top - previous_bottom).max(0.0));
-            previous_bottom = layout.top + layout.height;
+            let gap_slot = if let Some((gap_top, gap_height)) = gap_pending
+              && layout.top >= gap_top - 0.5
+            {
+              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
+              previous_bottom = gap_top + gap_height;
+              shift = gap_height;
+              gap_pending = None;
+              Some((gap_spacer, px(gap_height)))
+            } else {
+              None
+            };
+            let cell_top = layout.top + shift;
+            let spacer_height = px((cell_top - previous_bottom).max(0.0));
+            previous_bottom = cell_top + layout.height;
             let label: SharedString = cell
               .summary_text()
               .unwrap_or_else(|_| "Invalid rich text".into())
@@ -679,12 +810,18 @@ impl FlowEditor {
             }
             let cell_editor = self.cell_editors.get(&id).cloned();
             let reply_editor = cx.entity().clone();
-            let is_drop_target = self.pending_cell_drop.is_some_and(|destination| {
-              matches!(destination, CellDropDestination::Relative(target, _) | CellDropDestination::ChildOf(target) if target == id)
-            });
             div()
               .w_full()
               .flex_col()
+              .when_some(gap_slot, |this, (gap_spacer, gap_height)| {
+                this.child(div().h(gap_spacer).flex_none()).child(
+                  div()
+                    .w_full()
+                    .h(gap_height)
+                    .rounded(px(2.0 * zoom))
+                    .bg(side_palette.active),
+                )
+              })
               .when(spacer_height > px(0.0), |this| this.child(div().h(spacer_height).flex_none()))
               .on_children_prepainted({
                 let weak_editor = weak_editor.clone();
@@ -715,6 +852,16 @@ impl FlowEditor {
                 })
                 .hover(|style| style.bg(side_palette.hover.opacity(0.12)))
                 .cursor_pointer()
+                .when(active != Some(id) && !is_ghost, |this| {
+                  // The whole card (except the one being edited) is a drag handle; a plain click still
+                  // selects because GPUI only starts a drag past a small movement threshold.
+                  let weak = weak_editor.clone();
+                  let drag_label = label.clone();
+                  this.on_drag(FlowCellDrag { cell_id: id }, move |drag, _, _, cx| {
+                    let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
+                    cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                  })
+                })
                 .on_mouse_down(MouseButton::Left, cx.listener(|editor, _, _, cx| {
                   if editor.annotation_tool != AnnotationTool::None {
                     editor.set_annotation_tool(AnnotationTool::None, cx);
@@ -727,23 +874,48 @@ impl FlowEditor {
                     cell_editor.read(cx).focus_handle(cx).focus(window);
                   }
                 }))
-                .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, _, cx| {
-                  let right_zone = event.event.position.x >= event.bounds.left() + event.bounds.size.width * 0.72;
-                  let destination = if right_zone && can_receive_child {
-                    CellDropDestination::ChildOf(id)
-                  } else if event.event.position.y < event.bounds.top() + event.bounds.size.height / 2.0 {
-                    CellDropDestination::Relative(id, RelativePosition::Before)
-                  } else {
-                    CellDropDestination::Relative(id, RelativePosition::After)
-                  };
-                  editor.update_cell_drop(destination, cx);
-                  cx.stop_propagation();
-                }))
-                .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| {
-                  editor.finish_cell_drop(drag.cell_id, cx);
-                  cx.stop_propagation();
-                }))
-                .when(is_drop_target, |this| this.border(px(2.0 * zoom)).border_color(side_palette.active))
+                // Ghost cells (the dragged subtree drawn in its previewed drop position) must not be drop
+                // targets. Otherwise the ghost sits under the cursor, captures the drag, resolves to a
+                // self-referential intent, and the placement oscillates and pins near the source/parent.
+                .when(!is_ghost, |this| {
+                  this
+                    .on_drag_move(cx.listener(move |editor, event: &DragMoveEvent<FlowCellDrag>, window, cx| {
+                      // `on_drag_move` is dispatched in the CAPTURE phase to every registered element
+                      // (not hit-tested), parent-before-child — so the column handler above has already
+                      // run this frame. Each handler hit-tests itself against its own bounds; the actual
+                      // column-vs-cell arbitration is the `cursor_over_live_cell` guard in the column
+                      // handler, NOT the `stop_propagation` below (which fires too late to gate the
+                      // already-executed column handler and only suppresses later-painted siblings).
+                      if !event.bounds.contains(&event.event.position) {
+                        return;
+                      }
+                      // Left 60% reorders siblings (before/after by vertical half); right 40% nests as a
+                      // child (first/last by vertical half). The wider child zone is far easier to hit
+                      // than the old 28% strip, and top/bottom finally makes "first child" reachable.
+                      let in_child_zone = event.event.position.x >= event.bounds.left() + event.bounds.size.width * 0.6;
+                      let upper_half = event.event.position.y < event.bounds.top() + event.bounds.size.height / 2.0;
+                      let destination = if in_child_zone && can_receive_child {
+                        if upper_half {
+                          FlowDropIntent::FirstChildOf(id)
+                        } else {
+                          FlowDropIntent::LastChildOf(id)
+                        }
+                      } else if upper_half {
+                        FlowDropIntent::BeforeSibling(id)
+                      } else {
+                        FlowDropIntent::AfterSibling(id)
+                      };
+                      editor.update_cell_drop(destination, cx);
+                      editor.update_drag_autoscroll(event.event.position, window, cx);
+                      editor.log_drag_over_cell(id, event.event.position, event.bounds, destination);
+                      cx.stop_propagation();
+                    }))
+                    .on_drop(cx.listener(|editor, drag: &FlowCellDrag, _, cx| {
+                      editor.finish_cell_drop(drag.cell_id, cx);
+                      cx.stop_propagation();
+                    }))
+                })
+                .when(is_ghost, |this| this.opacity(0.5).border_dashed().border_color(side_palette.active))
                 .child(
                   div()
                     .id(("flow-cell-drag-handle", id.as_u128() as u64))
@@ -755,7 +927,14 @@ impl FlowEditor {
                     .text_color(cx.theme().muted_foreground)
                     .child("⠿")
                     .on_mouse_down(MouseButton::Left, cx.listener(move |editor, _, _, cx| editor.activate_cell(id, cx)))
-                    .on_drag(FlowCellDrag { cell_id: id }, |_, _, _, cx| cx.new(|_| FlowCellDragPreview)),
+                    .on_drag(FlowCellDrag { cell_id: id }, {
+                      let weak = weak_editor.clone();
+                      let drag_label = label.clone();
+                      move |drag, _, _, cx| {
+                        let _ = weak.update(cx, |editor, cx| editor.begin_cell_drag(drag.cell_id, cx));
+                        cx.new(|_| FlowCellDragPreview { label: drag_label.clone() })
+                      }
+                    }),
                 )
                 .when(can_receive_child, |this| {
                   this.child(
@@ -786,7 +965,27 @@ impl FlowEditor {
                   )
                 }),
             )
-          }).collect::<Vec<_>>()})
+            .into_any_element()
+          }).collect();
+            if let Some((gap_top, gap_height)) = gap_pending {
+              let gap_spacer = px((gap_top - previous_bottom).max(0.0));
+              elements.push(
+                div()
+                  .w_full()
+                  .flex_col()
+                  .child(div().h(gap_spacer).flex_none())
+                  .child(
+                    div()
+                      .w_full()
+                      .h(px(gap_height))
+                      .rounded(px(2.0 * zoom))
+                      .bg(side_palette.active),
+                  )
+                  .into_any_element(),
+              );
+            }
+            elements
+          })
       }))
       .child(
         canvas(
@@ -856,6 +1055,14 @@ impl Render for FlowEditor {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
     self.apply_pending_camera_center();
     self.refresh_active_cell_theme(cx);
+    if !cx.has_active_drag() && (self.pending_cell_drop.is_some() || self.dragging_cell.is_some()) {
+      self.pending_cell_drop = None;
+      self.dragging_cell = None;
+      self.drag_autoscroll = None;
+      // A drag that ended without an accepted drop (released over empty space) still flushes, tagged
+      // as an uncommitted attempt.
+      self.finish_drag_log(None, false);
+    }
     if self.pan_drag.is_some() {
       let editor = cx.entity();
       window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
@@ -871,15 +1078,17 @@ impl Render for FlowEditor {
       .relative()
       .size_full()
       .track_focus(&self.focus_handle)
-      .on_key_down(cx.listener(|editor, event: &KeyDownEvent, _, cx| {
-        if event.keystroke.key == "space" {
+      .on_key_down(cx.listener(|editor, event: &KeyDownEvent, window, cx| {
+        // Only arm panning when the board itself holds focus. Otherwise a space typed inside a focused
+        // cell editor would silently arm a pan (and a later click would pan instead of act).
+        if event.keystroke.key == "space" && editor.focus_handle.is_focused(window) {
           editor.space_pan_armed = true;
           cx.stop_propagation();
           cx.notify();
         }
       }))
       .on_key_up(cx.listener(|editor, event: &KeyUpEvent, _, cx| {
-        if event.keystroke.key == "space" {
+        if event.keystroke.key == "space" && editor.space_pan_armed {
           editor.space_pan_armed = false;
           editor.finish_space_pan(cx);
           cx.stop_propagation();

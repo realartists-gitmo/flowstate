@@ -5,6 +5,10 @@ use loro::{ExportMode, LoroDoc, LoroValue, UndoManager, VersionVector, ValueOrCo
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use crate::{
+  FlowCommitResult, FlowFrontier, FlowProjectionSnapshot, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, StaleFlowProjectionError,
+};
+
 pub type FormatId = Uuid;
 pub type SheetTypeId = Uuid;
 pub type SheetId = Uuid;
@@ -15,7 +19,6 @@ pub type StrokeId = Uuid;
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct AnnotationOriginator(pub String);
 
-const PROJECTION_KEY: &str = "projection";
 const FORMAT_KEY: &str = "immutable-format";
 const ANNOTATIONS_MAP: &str = "flow-annotations";
 const SHEETS_MAP: &str = "flow-sheets";
@@ -361,9 +364,7 @@ impl FlowDocument {
   pub fn from_projection(projection: FlowProjection) -> anyhow::Result<Self> {
     projection.validate()?;
     let loro = LoroDoc::new();
-    let root = loro.get_map("flow");
-    root.insert(FORMAT_KEY, postcard::to_allocvec(&projection.format)?)?;
-    root.insert(PROJECTION_KEY, postcard::to_allocvec(&projection)?)?;
+    loro.get_map("flow").insert(FORMAT_KEY, postcard::to_allocvec(&projection.format)?)?;
     let annotations = loro.get_map(ANNOTATIONS_MAP);
     for stroke in projection.sheets.iter().flat_map(|sheet| &sheet.annotations) {
       annotations.insert(&stroke.id.to_string(), postcard::to_allocvec(stroke)?)?;
@@ -381,17 +382,7 @@ impl FlowDocument {
   pub fn from_snapshot(snapshot: &[u8]) -> anyhow::Result<Self> {
     let loro = LoroDoc::new();
     loro.import(snapshot)?;
-    let value = loro.get_map("flow").get(PROJECTION_KEY).context("Loro snapshot is missing flow projection")?;
-    let ValueOrContainer::Value(LoroValue::Binary(bytes)) = value else {
-      bail!("Loro flow projection has invalid type");
-    };
-    let mut projection: FlowProjection = postcard::from_bytes(&bytes)?;
-    let immutable_format = read_immutable_format(&loro)?;
-    if projection.format != immutable_format {
-      bail!("persisted flow format definition was mutated");
-    }
-    merge_entity_records_from_loro(&mut projection, &loro)?;
-    projection.validate()?;
+    let projection = load_projection(&loro)?;
     let undo_manager = UndoManager::new(&loro);
     Ok(Self {
       loro,
@@ -404,39 +395,105 @@ impl FlowDocument {
     Ok(self.loro.export(ExportMode::Snapshot)?)
   }
 
-  /// suggestion: publish these opaque Loro update bytes through the symmetric
-  /// collaboration transport selected by the document-collaboration branch.
-  pub fn updates_since(&self, version: &VersionVector) -> anyhow::Result<Vec<u8>> {
+  pub fn projection_snapshot(&self) -> FlowProjectionSnapshot {
+    FlowProjectionSnapshot {
+      projection: self.projection.clone(),
+      frontier: self.frontier(),
+      version_vector: self.version_vector(),
+    }
+  }
+
+  pub fn frontier(&self) -> FlowFrontier {
+    self.loro.state_frontiers().encode()
+  }
+
+  pub fn export_updates_for(&self, version: &VersionVector) -> anyhow::Result<FlowUpdateBytes> {
     Ok(self.loro.export(ExportMode::updates(version))?)
+  }
+
+  pub fn updates_since(&self, version: &VersionVector) -> anyhow::Result<FlowUpdateBytes> {
+    self.export_updates_for(version)
   }
 
   pub fn version_vector(&self) -> VersionVector {
     self.loro.oplog_vv()
   }
 
-  /// suggestion: call this for remote update bytes, then notify every UI
-  /// projection consumer. Flow peers are symmetric and every peer writes.
-  pub fn import_updates(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+  pub fn import_remote_update(&mut self, bytes: &[u8]) -> anyhow::Result<Vec<FlowRuntimeEvent>> {
     self.loro.import(bytes)?;
-    self.reload_projection()
+    self.reload_projection()?;
+    Ok(vec![
+      FlowRuntimeEvent::RemoteUpdateApplied {
+        bytes_len: bytes.len(),
+        frontier: self.frontier(),
+        version_vector: self.version_vector(),
+      },
+      FlowRuntimeEvent::ProjectionUpdated {
+        snapshot: Box::new(self.projection_snapshot()),
+      },
+    ])
+  }
+
+  pub fn import_updates(&mut self, bytes: &[u8]) -> anyhow::Result<()> {
+    self.import_remote_update(bytes).map(|_| ())
+  }
+
+  pub fn apply_projection_transaction(
+    &mut self,
+    transaction_id: FlowTransactionId,
+    base_frontier: &[u8],
+    change: impl FnOnce(&mut FlowProjection) -> anyhow::Result<()>,
+  ) -> anyhow::Result<FlowCommitResult> {
+    let actual_frontier = self.frontier();
+    if !base_frontier.is_empty() && base_frontier != actual_frontier.as_slice() {
+      return Err(StaleFlowProjectionError {
+        expected: base_frontier.to_vec(),
+        actual: actual_frontier,
+      }
+      .into());
+    }
+
+    let base_frontier = actual_frontier;
+    let before_vv = self.version_vector();
+    self.update(change)?;
+    let update = self.export_updates_for(&before_vv)?;
+    let new_frontier = self.frontier();
+    let version_vector = self.version_vector();
+    Ok(FlowCommitResult {
+      transaction_id,
+      base_frontier,
+      new_frontier: new_frontier.clone(),
+      events: vec![
+        FlowRuntimeEvent::LocalUpdate {
+          bytes: update,
+          frontier: new_frontier,
+          version_vector: version_vector.clone(),
+        },
+        FlowRuntimeEvent::ProjectionUpdated {
+          snapshot: Box::new(FlowProjectionSnapshot {
+            projection: self.projection.clone(),
+            frontier: self.frontier(),
+            version_vector,
+          }),
+        },
+      ],
+    })
   }
 
   pub fn update(&mut self, change: impl FnOnce(&mut FlowProjection) -> anyhow::Result<()>) -> anyhow::Result<()> {
-    let before = self.projection.clone();
-    change(&mut self.projection)?;
-    if let Err(error) = self.projection.validate() {
-      self.projection = before;
-      return Err(error);
-    }
-    if self.projection.format != read_immutable_format(&self.loro)? {
-      self.projection = before;
+    // Mutate a draft clone so a failing `change` or a rejected validation leaves `self` untouched.
+    let mut draft = self.projection.clone();
+    change(&mut draft)?;
+    draft.validate()?;
+    if draft.format != read_immutable_format(&self.loro)? {
       bail!("flow format definitions are immutable");
     }
-    sync_entity_delta(&self.loro, &before, &self.projection)?;
-    if let Err(error) = self.commit_projection() {
-      self.projection = before;
-      return Err(error);
-    }
+    // Serialize the whole delta up front. Only once every fallible step has succeeded do we touch the
+    // Loro doc, so a rejected update can never leave half-written, uncommitted state behind.
+    let delta = compute_entity_delta(&self.projection, &draft)?;
+    apply_entity_delta(&self.loro, delta)?;
+    self.loro.commit();
+    self.projection = draft;
     Ok(())
   }
 
@@ -464,34 +521,24 @@ impl FlowDocument {
     Ok(changed)
   }
 
-  fn commit_projection(&mut self) -> anyhow::Result<()> {
-    if self.projection.format != read_immutable_format(&self.loro)? {
-      bail!("flow format definitions are immutable");
-    }
-    let bytes = postcard::to_allocvec(&self.projection)?;
-    self.loro.get_map("flow").insert(PROJECTION_KEY, bytes)?;
-    self.loro.commit();
-    Ok(())
-  }
-
   fn reload_projection(&mut self) -> anyhow::Result<()> {
-    let value = self
-      .loro
-      .get_map("flow")
-      .get(PROJECTION_KEY)
-      .context("Loro snapshot is missing flow projection")?;
-    let ValueOrContainer::Value(LoroValue::Binary(bytes)) = value else {
-      bail!("Loro flow projection has invalid type");
-    };
-    let mut projection: FlowProjection = postcard::from_bytes(&bytes)?;
-    if projection.format != read_immutable_format(&self.loro)? {
-      bail!("persisted flow format definition was mutated");
-    }
-    merge_entity_records_from_loro(&mut projection, &self.loro)?;
-    projection.validate()?;
-    self.projection = projection;
+    self.projection = load_projection(&self.loro)?;
     Ok(())
   }
+}
+
+/// Rebuild the projection from the immutable format plus the granular per-entity records. These
+/// records are the source of truth for sheets, cells, and annotations — there is no whole-projection
+/// blob to read back.
+fn load_projection(loro: &LoroDoc) -> anyhow::Result<FlowProjection> {
+  let format = read_immutable_format(loro)?;
+  let mut projection = FlowProjection {
+    format,
+    sheets: Vec::new(),
+  };
+  merge_entity_records_from_loro(&mut projection, loro)?;
+  projection.validate()?;
+  Ok(projection)
 }
 
 fn read_immutable_format(loro: &LoroDoc) -> anyhow::Result<FlowFormat> {
@@ -502,43 +549,37 @@ fn read_immutable_format(loro: &LoroDoc) -> anyhow::Result<FlowFormat> {
   Ok(postcard::from_bytes(&bytes)?)
 }
 
-fn sync_entity_delta(loro: &LoroDoc, before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<()> {
-  sync_sheet_delta(loro, before, after)?;
-  sync_cell_delta(loro, before, after)?;
-  sync_annotation_delta(loro, before, after)
+/// A single pending change to a Loro entity map: `Some(bytes)` inserts/updates a key, `None` deletes it.
+type EntityOp = (&'static str, String, Option<Vec<u8>>);
+
+/// Serialize the full sheet/cell/annotation delta between two projections *without* touching the Loro
+/// doc, so serialization failures can be surfaced before any state is mutated (see [`FlowDocument::update`]).
+fn compute_entity_delta(before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<Vec<EntityOp>> {
+  let mut ops = Vec::new();
+  push_record_ops(&mut ops, SHEETS_MAP, &sheet_records(before), &sheet_records(after))?;
+  push_record_ops(&mut ops, CELLS_MAP, &cell_records(before), &cell_records(after))?;
+  push_annotation_ops(&mut ops, before, after)?;
+  Ok(ops)
 }
 
-fn sync_sheet_delta(loro: &LoroDoc, before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<()> {
-  let before = sheet_records(before);
-  let after = sheet_records(after);
-  sync_record_map(loro, SHEETS_MAP, &before, &after)
-}
-
-fn sync_cell_delta(loro: &LoroDoc, before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<()> {
-  let before = cell_records(before);
-  let after = cell_records(after);
-  sync_record_map(loro, CELLS_MAP, &before, &after)
-}
-
-fn sync_record_map<T: Serialize + PartialEq>(
-  loro: &LoroDoc,
-  map_name: &str,
+fn push_record_ops<T: Serialize + PartialEq>(
+  ops: &mut Vec<EntityOp>,
+  map_name: &'static str,
   before: &HashMap<Uuid, T>,
   after: &HashMap<Uuid, T>,
 ) -> anyhow::Result<()> {
-  let map = loro.get_map(map_name);
   for id in before.keys().filter(|id| !after.contains_key(id)) {
-    map.delete(&id.to_string())?;
+    ops.push((map_name, id.to_string(), None));
   }
   for (id, record) in after {
     if before.get(id) != Some(record) {
-      map.insert(&id.to_string(), postcard::to_allocvec(record)?)?;
+      ops.push((map_name, id.to_string(), Some(postcard::to_allocvec(record)?)));
     }
   }
   Ok(())
 }
 
-fn sync_annotation_delta(loro: &LoroDoc, before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<()> {
+fn push_annotation_ops(ops: &mut Vec<EntityOp>, before: &FlowProjection, after: &FlowProjection) -> anyhow::Result<()> {
   let before: HashMap<_, _> = before
     .sheets
     .iter()
@@ -549,13 +590,25 @@ fn sync_annotation_delta(loro: &LoroDoc, before: &FlowProjection, after: &FlowPr
     .iter()
     .flat_map(|sheet| sheet.annotations.iter().map(|stroke| (stroke.id, stroke)))
     .collect();
-  let map = loro.get_map(ANNOTATIONS_MAP);
   for id in before.keys().filter(|id| !after.contains_key(id)) {
-    map.delete(&id.to_string())?;
+    ops.push((ANNOTATIONS_MAP, id.to_string(), None));
   }
   for (id, stroke) in &after {
     if before.get(id).is_none_or(|existing| *existing != *stroke) {
-      map.insert(&id.to_string(), postcard::to_allocvec(*stroke)?)?;
+      ops.push((ANNOTATIONS_MAP, id.to_string(), Some(postcard::to_allocvec(*stroke)?)));
+    }
+  }
+  Ok(())
+}
+
+/// Apply a pre-serialized delta to the Loro doc. This is the only step in [`FlowDocument::update`] that
+/// mutates Loro state; it runs after every fallible step has already succeeded.
+fn apply_entity_delta(loro: &LoroDoc, ops: Vec<EntityOp>) -> anyhow::Result<()> {
+  for (map_name, key, value) in ops {
+    let map = loro.get_map(map_name);
+    match value {
+      Some(bytes) => map.insert(key.as_str(), bytes)?,
+      None => map.delete(key.as_str())?,
     }
   }
   Ok(())
@@ -770,5 +823,80 @@ mod tests {
         })
         .is_err()
     );
+  }
+
+  #[test]
+  fn collaboration_transaction_returns_update_and_projection_events() {
+    let mut document = FlowDocument::new();
+    let base_frontier = document.frontier();
+    let sheet_type = document.projection().format.sheet_types[0].id;
+    let sheet_id = Uuid::new_v4();
+
+    let commit = document
+      .apply_projection_transaction(7, &base_frontier, |projection| {
+        projection.sheets.push(Sheet {
+          id: sheet_id,
+          name: "Shared".into(),
+          sheet_type_id: sheet_type,
+          cells: Vec::new(),
+          annotations: Vec::new(),
+        });
+        Ok(())
+      })
+      .unwrap();
+
+    assert_eq!(commit.transaction_id, 7);
+    assert_eq!(commit.base_frontier, base_frontier);
+    assert_eq!(commit.new_frontier, document.frontier());
+    assert_eq!(commit.events.len(), 2);
+    assert!(matches!(commit.events[0], FlowRuntimeEvent::LocalUpdate { .. }));
+    assert!(matches!(commit.events[1], FlowRuntimeEvent::ProjectionUpdated { .. }));
+  }
+
+  #[test]
+  fn collaboration_transaction_rejects_stale_frontier() {
+    let mut document = FlowDocument::new();
+    let sheet_type = document.projection().format.sheet_types[0].id;
+    document.create_sheet("Case", sheet_type).unwrap();
+    let stale_frontier = document.frontier();
+    document
+      .update(|projection| {
+        projection.sheets[0].name = "Changed".into();
+        Ok(())
+      })
+      .unwrap();
+
+    let error = document
+      .apply_projection_transaction(8, &stale_frontier, |projection| {
+        projection.sheets[0].name = "Rejected".into();
+        Ok(())
+      })
+      .unwrap_err();
+
+    assert!(error.downcast_ref::<StaleFlowProjectionError>().is_some());
+    assert_eq!(document.projection().sheets[0].name, "Changed");
+  }
+
+  #[test]
+  fn collaboration_remote_update_reloads_projection() {
+    let mut source = FlowDocument::new();
+    let sheet_type = source.projection().format.sheet_types[0].id;
+    source.create_sheet("Case", sheet_type).unwrap();
+    let mut target = FlowDocument::from_snapshot(&source.snapshot().unwrap()).unwrap();
+    let target_vv = target.version_vector();
+    source
+      .update(|projection| {
+        projection.sheets[0].name = "Remote".into();
+        Ok(())
+      })
+      .unwrap();
+    let update = source.export_updates_for(&target_vv).unwrap();
+
+    let events = target.import_remote_update(&update).unwrap();
+
+    assert_eq!(target.projection().sheets[0].name, "Remote");
+    assert_eq!(events.len(), 2);
+    assert!(matches!(events[0], FlowRuntimeEvent::RemoteUpdateApplied { .. }));
+    assert!(matches!(events[1], FlowRuntimeEvent::ProjectionUpdated { .. }));
   }
 }
