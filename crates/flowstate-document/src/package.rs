@@ -2926,10 +2926,6 @@ fn append_journal_transaction(path: &Path, payload: &[u8]) -> io::Result<()> {
   file.sync_all()
 }
 
-fn append_journal_transaction_to_prepared_file(path: &Path, payload: &[u8]) -> io::Result<()> {
-  append_journal_transaction_to_prepared_file_with_durability(path, payload, true)
-}
-
 fn append_journal_transaction_to_prepared_file_with_durability(path: &Path, payload: &[u8], sync: bool) -> io::Result<()> {
   let parent = path
     .parent()

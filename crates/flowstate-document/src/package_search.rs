@@ -332,18 +332,6 @@ fn body_paragraph_cursor_ranges(text: &LoroText) -> Vec<BodyParagraphRange> {
   ranges
 }
 
-fn cursor_fields(body: &LoroText, range: BodyParagraphRange) -> (Vec<u8>, Vec<u8>) {
-  let start_cursor = body
-    .get_cursor(range.start, Side::Left)
-    .map(|cursor| cursor.encode())
-    .unwrap_or_default();
-  let end_cursor = body
-    .get_cursor(range.end, Side::Right)
-    .map(|cursor| cursor.encode())
-    .unwrap_or_default();
-  (start_cursor, end_cursor)
-}
-
 fn text_cursor_fields(text: &LoroText) -> Option<(Vec<u8>, Vec<u8>)> {
   let len = text.len_unicode();
   if len == 0 {

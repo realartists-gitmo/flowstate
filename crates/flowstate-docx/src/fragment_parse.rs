@@ -342,9 +342,11 @@ fn scan_body(reader: &mut Reader<&[u8]>, scanned: &mut ScannedDocument, queue: &
 
 #[cfg(test)]
 mod tests {
+  use std::fmt::Write as _;
+
   use super::*;
 
-  /// Build a synthetic document.xml big enough (> MIN_FRAGMENT_PARSE_BYTES) to
+  /// Build a synthetic document.xml big enough (> `MIN_FRAGMENT_PARSE_BYTES`) to
   /// engage the parallel path, exercising every top-level shape the scanner
   /// mirrors: paragraphs, tables, unknown raw-xml subtrees, self-closing
   /// elements, sectPr, background, and extra namespaces.
@@ -358,24 +360,28 @@ mod tests {
     xml.push_str("<w:body>");
     for ix in 0..1200 {
       match ix % 5 {
-        0 => xml.push_str(&format!(
+        0 => write!(
+          xml,
           r#"<w:p><w:pPr><w:pStyle w:val="Heading{}"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">heading {} with some padding text to grow the file body toward the parallel threshold</w:t></w:r></w:p>"#,
           (ix % 4) + 1,
           ix
-        )),
-        1 | 2 | 3 => xml.push_str(&format!(
-          r#"<w:p><w:r><w:t xml:space="preserve">card body text {} lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>underlined tail {}</w:t></w:r></w:p>"#,
-          ix, ix
-        )),
-        _ => xml.push_str(&format!(
-          r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4675"/><w:gridCol w:w="4675"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4675" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>cell a {}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="4675" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>cell b {}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#,
-          ix, ix
-        )),
+        )
+        .unwrap(),
+        1..=3 => write!(
+          xml,
+          r#"<w:p><w:r><w:t xml:space="preserve">card body text {ix} lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor incididunt ut labore et dolore magna aliqua</w:t></w:r><w:r><w:rPr><w:u w:val="single"/></w:rPr><w:t>underlined tail {ix}</w:t></w:r></w:p>"#
+        )
+        .unwrap(),
+        _ => write!(
+          xml,
+          r#"<w:tbl><w:tblPr><w:tblW w:w="0" w:type="auto"/></w:tblPr><w:tblGrid><w:gridCol w:w="4675"/><w:gridCol w:w="4675"/></w:tblGrid><w:tr><w:tc><w:tcPr><w:tcW w:w="4675" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>cell a {ix}</w:t></w:r></w:p></w:tc><w:tc><w:tcPr><w:tcW w:w="4675" w:type="dxa"/></w:tcPr><w:p><w:r><w:t>cell b {ix}</w:t></w:r></w:p></w:tc></w:tr></w:tbl>"#
+        )
+        .unwrap(),
       }
       if ix % 97 == 0 {
         // Unknown top-level subtree and a self-closing unknown element: both
         // must round-trip as RawXml captures in exactly the upstream form.
-        xml.push_str(r#"<w:sdt><w:sdtContent><w:p><w:r><w:t>inside sdt</w:t></w:r></w:p></w:sdtContent></w:sdt>"#);
+        xml.push_str(r"<w:sdt><w:sdtContent><w:p><w:r><w:t>inside sdt</w:t></w:r></w:p></w:sdtContent></w:sdt>");
         xml.push_str(r#"<w:bookmarkStart w:id="7" w:name="mark"/>"#);
       }
     }
@@ -403,6 +409,6 @@ mod tests {
     let xml = br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hi</w:t></w:r></w:p></w:body></w:document>"#;
     let via_entry = ct_document_from_xml(xml).expect("entry parse");
     let sequential = CT_Document::from_xml(xml).expect("sequential parse");
-    assert!(via_entry == sequential);
+    assert_eq!(via_entry, sequential);
   }
 }

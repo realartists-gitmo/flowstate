@@ -145,7 +145,7 @@ pub fn violation(class: FidelityClass, kind: &str, detail: impl FnOnce() -> Stri
   VIOLATIONS.with(|sink| {
     sink
       .borrow_mut()
-      .push(format!("[{class}] {kind}: {detail}"))
+      .push(format!("[{class}] {kind}: {detail}"));
   });
   tracing::error!(
     target: "fidelity.violation",

@@ -64,11 +64,14 @@ jobs:
 
       # GPUI links against Vulkan / Wayland / X11 / fontconfig and friends;
       # xvfb + a software Vulkan driver cover any test that builds a gpui::App.
+      # libdbus-1-dev: bluer (BLE collab discovery) links libdbus via
+      # dbus/libdbus-sys.
       - name: Install system dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             cmake clang pkg-config \
+            libdbus-1-dev \
             libfontconfig1-dev libasound2-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxinerama-dev libxi-dev \
             libxkbcommon-dev libxkbcommon-x11-dev \

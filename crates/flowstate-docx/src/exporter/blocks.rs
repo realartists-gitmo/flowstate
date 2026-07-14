@@ -164,13 +164,13 @@ fn apply_run_style(run: Run, styles: RunStyles, paragraph_style: ParagraphStyle,
       run.run_property = run
         .run_property
         .clone()
-        .vert_align(VertAlignType::SuperScript)
+        .vert_align(VertAlignType::SuperScript);
     },
     VertAlign::Subscript => {
       run.run_property = run
         .run_property
         .clone()
-        .vert_align(VertAlignType::SubScript)
+        .vert_align(VertAlignType::SubScript);
     },
   }
   if let Some(highlight) = styles.highlight {
