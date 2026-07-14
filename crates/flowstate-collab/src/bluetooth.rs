@@ -207,7 +207,14 @@ mod linux {
           .await
           .unwrap_or_default()
           .unwrap_or_default();
-        if service_data.get(&service_uuid()).map(Vec::as_slice) != Some(&document_fingerprint[..16]) {
+        // A locator for a DIFFERENT document is skipped pre-connect. A missing
+        // locator is not: CoreBluetooth cannot publish service data, so macOS
+        // peers advertise only the service UUID and are verified after the
+        // full signed record is read (the authoritative check either way).
+        if service_data
+          .get(&service_uuid())
+          .is_some_and(|locator| locator.as_slice() != &document_fingerprint[..16])
+        {
           continue;
         }
         let remaining = deadline

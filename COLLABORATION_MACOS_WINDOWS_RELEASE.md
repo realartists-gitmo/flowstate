@@ -1,237 +1,200 @@
-# Collaboration discovery: macOS and Windows release work
+# Collaboration release handoff: macOS and Windows
 
-This note describes the work required to release nearby Bluetooth discovery on
-macOS and Windows, and records the remaining gaps in the broader collaboration
-plan as of July 2026.
+**Status date: 2026-07-13.** This document supersedes the July-2026 draft that
+previously lived at this path. That draft's "other incomplete items" list is
+obsolete: the discovery coordinator, Dropbox connect flow, checkpoint
+compare-and-swap, anchored comments, trust/identity settings UI, and revision
+author attribution are now all implemented, wired into the application
+lifecycle, and verified on Linux (unit + integration tests, clippy-clean).
 
-The shared, security-sensitive wire model already exists in
-`flowstate-collab`:
+What remains is exactly two categories:
 
-- `DiscoveryAdvertisement` is signed, scoped to a document fingerprint, and
-  expires.
-- `RendezvousBackend` and `RendezvousSet` provide the common publish, scan, and
-  clear lifecycle.
-- BLE broadcasts only a short locator: the Flowstate service UUID plus the
-  first 16 bytes of the document fingerprint.
-- The complete postcard-encoded signed advertisement is length-prefixed and
-  read from the Flowstate GATT characteristic. It is never truncated into the
-  small advertising payload.
-- Results must pass `eligible_advertisements`, including signature, expiry,
-  document, deduplication, and standing-access checks, before reaching UI.
+- **Yellow zone** — code that is written and cross-compile-checked for
+  macOS/Windows but has never executed on those platforms. It needs a dev with
+  the hardware to run, verify, and fix what only a live radio/OS can reveal.
+- **Red zone** — packaging, signing, entitlements, and the physical-device
+  acceptance matrix. Not started here by design; owned entirely by the
+  macOS/Windows devs.
 
-The Linux implementation in `crates/flowstate-collab/src/bluetooth.rs` is the
-behavioral reference. Non-Linux builds currently return an explicit
-"unavailable" error; they must not ship with nearby discovery presented as
-active until the corresponding native host below is complete.
+## Architecture you are inheriting (all verified on Linux)
 
-## macOS: CoreBluetooth host
+- `crates/flowstate-collab/src/discovery.rs` — signed `DiscoveryAdvertisement`
+  (Ed25519, domain-separated contexts, expiry, document-fingerprint scope),
+  `RendezvousBackend` trait, and `eligible_advertisements` — the single
+  verification/dedup gate every backend result must pass before UI.
+- `crates/flowstate-collab/src/bluetooth.rs` — shared GATT frame codec
+  (u32-LE length prefix, 60 KiB cap) plus three native backends: Linux/BlueZ
+  (the behavioral reference), Windows/WinRT, macOS/CoreBluetooth.
+- `crates/flowstate-collab/src/dropbox.rs` — PKCE OAuth, rendezvous sidecars,
+  revision-conditional checkpoint writes (CAS). HTTP clients have bounded
+  connect/read timeouts and a 256 MiB download cap.
+- `crates/flowstate/src/collab/discovery_runtime.rs` — the application-level
+  discovery coordinator (publish on session start, 30 s renewal, 90 s ad
+  lifetime, scan-on-request, clear on close/shutdown).
+- Comments, identity/trust settings, safety codes, and revision attribution
+  are application-level and platform-neutral; nothing there needs macOS- or
+  Windows-specific work beyond running the app.
 
-Implement a `RendezvousBackend` using CoreBluetooth rather than attempting to
-share the BlueZ implementation.
+Security posture (for your review, not rework): discovery ads never carry
+admission bearers; admission is granted server-side only to identities in the
+document's standing-access set, over the encrypted iroh channel
+(`net/direct.rs`); comment delete/edit are author-gated in the CRDT runtime;
+the Dropbox checkpoint merge trusts the Dropbox folder ACL as its boundary
+(documented at `dropbox_checkpoint.rs`); `settings.toml` (identity seed +
+Dropbox tokens) is written `0600` on Unix — see the Windows note below.
 
-### Peripheral/publishing side
+## Yellow zone: run and verify the native BLE backends
 
-- Own one long-lived `CBPeripheralManager` on a queue whose callbacks can be
-  bridged safely into the app's async runtime.
-- Publish the Flowstate primary service UUID and one read-only characteristic
-  using `FLOWSTATE_ADVERTISEMENT_CHARACTERISTIC_UUID`.
-- Implement characteristic reads with CoreBluetooth's requested offset. Return
-  the same length-prefixed bytes produced by `encode_gatt_advertisement` and
-  reject invalid/out-of-range offsets.
-- Advertise only the Flowstate service UUID and a compact fingerprint locator.
-  Do not put a ticket, endpoint, profile, or complete signed record in the BLE
-  advertising packet.
-- Replace the current advertisement atomically enough that a profile/session
-  refresh does not leave two native managers or stale GATT values alive.
-- Stop advertising and remove the service when discovery is paused, the
-  document closes, the session ends, or the application terminates.
+Both backends compile cleanly today (`aarch64-apple-darwin` and
+`x86_64-pc-windows-msvc`). On a real machine, plain `cargo check`/`cargo test`
+works natively — no probe rig needed. Neither backend has ever executed.
 
-Apple limits the keys accepted by `startAdvertising` and the space available
-to advertisements, so the GATT indirection is required rather than optional:
-<https://developer.apple.com/documentation/corebluetooth/cbperipheralmanager/startadvertising%28_%3A%29>.
+### macOS (`bluetooth.rs`, `macos_backend`) — rebuilt 2026-07-13, highest risk
 
-### Central/scanning side
+The module as originally drafted had never compiled (the
+`objc2-core-bluetooth/dispatch2` feature was never enabled). It was rebuilt:
 
-- Own a `CBCentralManager`, wait for the powered-on state, and scan specifically
-  for the Flowstate service UUID.
-- Read and check the compact document locator before connecting where the OS
-  exposes it.
-- Connect with a bounded timeout, discover only the Flowstate service and
-  characteristic, and perform offset reads until the declared frame length is
-  satisfied.
-- Reject oversized, short, trailing, malformed, expired, incorrectly scoped,
-  or incorrectly signed records through the shared decoder and eligibility
-  gate.
-- Cancel connections and scans promptly when the scan window closes. Do not
-  retain peripherals solely because they were seen in an earlier scan.
-- Define foreground behavior across sleep, wake, Bluetooth power changes, and
-  app activation. Background discovery should remain disabled until it has a
-  separately reviewed privacy and battery design.
+- **Peripheral (publish) side runs on a dedicated actor thread**
+  (`flowstate-ble-peripheral`): CoreBluetooth objects are `!Send`, so the
+  backend only passes plain-data commands over a channel. All manager/service
+  objects live and die on that thread.
+- **Both managers get dedicated serial dispatch queues** — callbacks must not
+  depend on the GPUI-owned main run loop (the scan side blocks its own thread).
+- **`wait_for_power` distinguishes states**: fails fast on
+  PoweredOff/Unauthorized/Unsupported, waits up to 15 s through
+  Unknown/Resetting to cover the first-run permission prompt.
 
-CoreBluetooth's central manager is the native scan/connection surface:
-<https://developer.apple.com/documentation/corebluetooth/cbcentralmanager>.
+Verify on hardware, in roughly this order:
+
+1. **Permission**: without `NSBluetoothAlwaysUsageDescription` in the bundle's
+   Info.plist, modern macOS kills the process on first CoreBluetooth use. This
+   is the first thing to wire (red zone below) before any run.
+2. **Publish**: manager reaches PoweredOn on its queue; `addService` triggers
+   no `didAdd…error`; the ad is visible to a BLE sniffer / a Linux peer with
+   the Flowstate service UUID.
+3. **Static characteristic long reads**: the signed record is set as the
+   characteristic's static value; CoreBluetooth serves offset reads itself.
+   Verify a Linux peer reads the full frame (records are typically 400–500
+   bytes; ATT caps attribute values at 512 bytes — see the matrix item below).
+4. **Scan**: 4 s scan window connects, discovers, reads, disconnects; the
+   delegate feeds decoded records through `eligible_advertisements`.
+5. **Teardown**: Clear command and backend drop stop advertising, remove
+   services, and nil the delegate; repeated publish replaces cleanly (one
+   peripheral-manager slot).
+6. **Sleep/wake and Bluetooth toggling** while a session is live.
+
+**Known macOS platform constraint (already handled, verify the behavior):**
+CoreBluetooth cannot publish service data — macOS ads carry only the service
+UUID, not the 16-byte document locator. The Linux scanner was changed
+(2026-07-13) to connect-and-verify peers with a missing locator instead of
+skipping them; the Windows watcher never used a locator prefilter. Verify a
+macOS publisher is actually discovered by both. The post-read signed-record
+check is the authoritative document scope test on every platform.
+
+### Windows (`bluetooth.rs`, `windows_backend`) — written by the prior agent, API-verified only
+
+The code compiles and its WinRT usage was reviewed; nothing has run. Verify:
+
+1. **Provider**: `GattServiceProvider::CreateAsync` + characteristic creation
+   succeed on a real adapter; `StartAdvertisingWithParameters` including the
+   `SetServiceData` locator (best-effort on older builds — a failure there is
+   deliberately ignored).
+2. **Long reads**: `ReadValueWithCacheModeAsync(Uncached)` performs ATT Read
+   Blob continuation internally; a truncated frame fails loud in the shared
+   decoder. Verify against a Linux publisher with a large profile.
+3. **Watcher hygiene**: repeated scans must not accumulate callbacks
+   (`Stop` + `RemoveReceived` run per scan; confirm with a scan loop).
+4. **Apartment/threading**: WinRT activation happens from tokio worker
+   threads; `NativeBluetoothBackend::new` probes watcher creation so settings
+   gets a synchronous, actionable platform error. Verify with radio off, no
+   adapter, and after adapter reset.
+5. **Packaged vs unpackaged**: BLE works unpackaged for development; under
+   MSIX the `bluetooth` device capability is required (red zone).
+
+### Dropbox end-to-end (all platforms; code done, no live-account run)
+
+The PKCE begin → system browser → `flowstate://oauth/dropbox` callback →
+token exchange → persisted credentials flow, plus disconnect and the
+checkpoint CAS conflict-merge path, are implemented and unit-tested. Nobody
+has run them against a live Dropbox app key. On each OS verify: custom-scheme
+routing to a running instance AND to a cold launch; token refresh persistence;
+two clients CAS-conflicting on one bound path and converging.
+
+## Red zone: packaging, signing, and the acceptance matrix
 
 ### macOS packaging and privacy
 
-The current `crates/flowstate/assets/macos/Info.plist` registers the
-`flowstate://` URL scheme but is not yet a release-complete application plist.
+`crates/flowstate/assets/macos/Info.plist` registers `flowstate://` but is not
+a release-complete plist.
 
-- Add a clear `NSBluetoothAlwaysUsageDescription`. Add the legacy peripheral
-  usage key only if the minimum supported macOS version requires it.
-- Confirm the hardened-runtime/App Sandbox Bluetooth entitlement requirements
-  for the chosen distribution model and add only the necessary entitlement.
-- Merge the URL registration and Bluetooth keys into the real bundle generated
-  by the release packaging process; the repository plist must not remain an
-  unused template.
-- Verify incoming `flowstate://join` and `flowstate://oauth/dropbox` URLs both
-  reach an already-running app and a cold launch.
-- Sign with the release identity, notarize, staple, and test the final artifact
-  outside the build machine's development permissions.
-- Test both Apple Silicon and Intel if Intel remains supported.
-
-## Windows: WinRT Bluetooth host
-
-Implement a `RendezvousBackend` using
-`Windows.Devices.Bluetooth.Advertisement` and
-`Windows.Devices.Bluetooth.GenericAttributeProfile`.
-
-### Publisher/GATT-provider side
-
-- Create a `GattServiceProvider` for the Flowstate service and a read-only GATT
-  characteristic for the framed signed advertisement.
-- Handle read requests and offsets without blocking the WinRT callback thread.
-  Complete or deferral-fail every request; never leave a request pending during
-  shutdown.
-- Advertise the service through the provider. If a separate
-  `BluetoothLEAdvertisementPublisher` is needed for the compact locator, keep
-  its payload within the platform limit and never place admission material in
-  manufacturer/service data.
-- Observe provider/publisher status changes and surface radio-off, permission,
-  unsupported-adapter, and aborted states distinctly.
-- Stop the provider and publisher when discovery pauses or the owning session
-  closes. Recreate them after suspend/resume or adapter reset when appropriate.
-
-Microsoft documents the publisher/watcher model and its small payload budget
-here: <https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/ble-beacon>.
-The native GATT server surface is `GattServiceProvider`:
-<https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.genericattributeprofile.gattserviceprovider>.
-
-### Watcher/client side
-
-- Configure a `BluetoothLEAdvertisementWatcher` filter for the Flowstate service
-  UUID and compact document locator.
-- Deduplicate rotating/device addresses for the duration of one scan without
-  treating a Bluetooth address as durable identity.
-- Resolve a received address to `BluetoothLEDevice`, discover the Flowstate
-  service and characteristic with bounded timeouts, and perform offset reads
-  until the complete frame is available.
-- Dispose WinRT event registrations and device/service/characteristic objects
-  deterministically. Repeated scans must not accumulate callbacks.
-- Send the decoded result through the shared eligibility gate. Windows pairing
-  or OS device trust is not Flowstate authorization.
+- Add `NSBluetoothAlwaysUsageDescription` (legacy peripheral key only if the
+  minimum macOS requires it). Without it, CoreBluetooth use is fatal.
+- Confirm hardened-runtime/App Sandbox Bluetooth entitlements for the chosen
+  distribution model; add only what is necessary.
+- Merge URL registration + Bluetooth keys into the real release bundle; the
+  repository plist must not remain an unused template.
+- Verify `flowstate://join` and `flowstate://oauth/dropbox` reach both a
+  running app and a cold launch.
+- Sign, notarize, staple; test the artifact outside the build machine.
+  Apple Silicon and Intel if Intel remains supported.
 
 ### Windows packaging and protocol registration
 
-The existing PowerShell helper registers file associations and the
-`flowstate://` protocol for an unpackaged development build. Release packaging
-still needs a deliberate choice:
+The PowerShell helper registers associations for unpackaged dev builds only.
 
-- For MSIX, declare the Bluetooth device capability and protocol/file
-  extensions in `Package.appxmanifest`, then test activation routing through
-  the packaged app lifecycle.
-- For an unpackaged installer, install and uninstall the per-user protocol and
-  file associations cleanly, quote the executable and URL argument safely, and
-  test upgrade/repair behavior.
-- Ensure only one running instance handles a URL activation, including a URL
-  received while no window is active.
-- Sign the executable and installer/MSIX and test on clean Windows 10 and
-  Windows 11 systems without Visual Studio or developer mode.
+- MSIX: declare the `bluetooth` device capability plus protocol/file
+  extensions in `Package.appxmanifest`; test activation routing through the
+  packaged lifecycle.
+- Unpackaged installer: clean install/uninstall of per-user protocol + file
+  associations, safe quoting of the executable and URL argument,
+  upgrade/repair behavior.
+- Single-instance URL activation, including with no window open.
+- Sign executable and installer/MSIX; test on clean Windows 10 and 11 without
+  Visual Studio or developer mode.
+- **Secrets at rest**: the Unix `0600` on `settings.toml` does not apply on
+  Windows. Decide on DPAPI (and Keychain on macOS) for the identity signing
+  seed and Dropbox tokens, or accept per-user-profile ACLs explicitly.
 
-The packaged Bluetooth capability requirement is documented with the Windows
-BLE APIs: <https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/ble-beacon>.
-
-## Cross-platform acceptance matrix
+### Physical-device acceptance matrix
 
 Do not enable the nearby-discovery toggle by default on either platform until
 all of these pass with release artifacts and physical devices:
 
-- macOS publishes and Windows discovers; Windows publishes and macOS discovers.
-- Each platform interoperates with the Linux/BlueZ reference implementation.
-- Two Flowstate instances can publish and scan concurrently where the OS permits
-  it, with a clear degraded state where the radio does not.
-- Records larger than one negotiated ATT payload are reassembled correctly.
-- Wrong-document locators are ignored before connection when possible and are
-  always rejected after the full record is read.
-- Tampered signatures, expired records, oversized frames, invalid offsets, and
-  trailing bytes are rejected.
+- macOS publishes and Windows discovers; Windows publishes and macOS
+  discovers; each platform interoperates with the Linux/BlueZ reference.
+- A macOS publisher (no service-data locator) is discovered by Linux and
+  Windows scanners; wrong-document locators are skipped pre-connect where a
+  locator exists, and every record is re-checked post-read.
+- Records larger than one ATT payload are reassembled; records approaching
+  the 512-byte ATT attribute cap are measured. If a real profile (long
+  display name, many relay addresses) pushes a frame past 512 bytes, GATT
+  reads will truncate at the OS level on some stacks — the decoder fails
+  loudly, but delivery needs a design change (trim the endpoint address list,
+  or move to an L2CAP channel). Measure before shipping.
+- Tampered signatures, expired records, oversized frames, invalid offsets,
+  and trailing bytes are rejected (the shared decoder tests cover the codec;
+  verify the OS paths deliver bytes unmodified).
+- Two Flowstate instances publishing/scanning concurrently where the OS
+  permits, with a clear degraded state otherwise.
 - Permission denied, radio disabled, no adapter, adapter reset, sleep/wake,
-  application suspend/resume, and document/session closure do not leak tasks,
-  event handlers, services, or advertisements.
+  suspend/resume, and document/session closure leak no tasks, handlers,
+  services, or advertisements.
 - Discovery never displays an unverified or out-of-scope identity and never
   transports a session admission bearer.
-- Battery and scan/connect rates remain acceptable during a long editing
-  session.
-- Accessibility text explains why Bluetooth is requested and allows discovery
-  to remain disabled without impairing invite links.
+- Battery and scan/connect rates acceptable during a long editing session
+  (current cadence: one BLE publish round-robin + Dropbox refresh per 30 s
+  tick, 4 s scan windows on demand).
+- Accessibility text explains why Bluetooth is requested; discovery can stay
+  disabled without impairing invite links.
 
-## Other incomplete items from the collaboration plan
+### Deliberate design decisions (do not re-litigate without cause)
 
-Yes. The following items are incomplete even though their lower-level models
-now exist.
-
-### Discovery product wiring
-
-- `RendezvousSet`, `DropboxRendezvousBackend`, and the Linux Bluetooth backend
-  are not yet constructed and owned by the normal application/session
-  lifecycle. Starting a session does not currently publish automatically;
-  opening a document does not scan automatically.
-- There is no nearby/trusted-peer suggestion UI, accept/dismiss interaction,
-  discovery pause control, per-document discovery status, or actionable error
-  presentation.
-- Advertisement renewal, expiry cleanup, retry/backoff, sleep/wake recovery,
-  and shutdown cleanup need an application-level coordinator.
-- Dropbox discovery needs a real settings/connect flow that begins PKCE, handles
-  the `flowstate://oauth/dropbox` callback, persists refreshed credentials, and
-  supports disconnect/revocation. The OAuth and storage primitives exist, but
-  no user-facing flow invokes them.
-- Dropbox checkpoint compare-and-swap exists at the transport level but is not
-  connected to the document save/checkpoint pipeline. Conflict recovery must
-  fetch the current revision, merge the CRDT/package state, and retry without
-  silently overwriting another client's checkpoint.
-- No Dropbox-account or physical-radio end-to-end test has run in this branch.
-
-### Trust and identity UX
-
-- Portable signing identity, signed profiles, safety codes, trust attestations,
-  scope rules, and squads exist as models/settings.
-- There is no product UI to verify a safety code, add/remove a trusted person,
-  inspect key changes, manage squads/scopes/exclusions, revoke standing access,
-  or resolve a renamed/reinstalled identity.
-- Display name and color feed presence, but profile/avatar editing and profile
-  conflict UX are not complete.
-
-### Friendly invite discovery
-
-- Copyable `flowstate://join` links, save/open `.flowinvite` files, readable
-  invite summaries, and OS protocol registration are present.
-- A hosted web landing page remains optional deployment work; it is not needed
-  for the native link/file invitation flow.
-- Release packaging still needs to prove custom-URL cold-launch and
-  already-running activation on every supported OS.
-
-### Durable collaboration surfaces
-
-- Anchored comments, threads, replies, resolve/reopen, permissions, offline
-  behavior, accessibility, export/import, notifications, and comment UI are not
-  implemented.
-- Revision records can contain author identity underneath, but
-  `RuntimeRevisionInfo` and the revision browser still do not expose author
-  attribution. Rich activity/provenance queries and UI are also absent.
-- The larger participant/comment sidebar or popover remains intentionally
-  deferred; the current roster and bottom participant indicator are not a
-  replacement for that product surface.
-
-These gaps should be tracked separately from the already working live session,
-invite-link, presence, signed identity, trust-policy, Dropbox transport, and
-Linux Bluetooth primitives so that release readiness is not inferred from the
-existence of backend code alone.
+- Dropbox folder membership **is** the checkpoint trust boundary; checkpoint
+  packages are not additionally signed.
+- Discovery admission requests carry a nonce but are not replay-tracked:
+  a 30 s expiry, the encrypted direct channel, and the standing-access
+  identity gate bound the exposure.
+- Trust attestations have no expiry; revocation is removing the trusted key
+  in settings. Key-change alerting is future UX, not release-blocking.
+- Background (app-closed) BLE discovery stays out of scope until it has a
+  separately reviewed privacy/battery design.
