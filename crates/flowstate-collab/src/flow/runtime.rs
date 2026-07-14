@@ -136,6 +136,8 @@ pub struct FlowRuntime {
   undo_meta: Arc<Mutex<FlowUndoMetaState>>,
   /// Latest normalization defects (repair-pass input; capped by stable key).
   pub(crate) defects: Vec<FlowDefect>,
+  /// Remaining import-side order-canonicalization repair passes (loop guard).
+  order_repairs_remaining: u32,
 }
 
 impl FlowRuntime {
@@ -187,6 +189,7 @@ impl FlowRuntime {
       undo,
       undo_meta,
       defects,
+      order_repairs_remaining: 64,
     })
   }
 
@@ -401,10 +404,12 @@ impl FlowRuntime {
   pub(crate) fn audit_board_against_rebuild(&self, class: &str) {
     match materialize_board(&self.doc) {
       Ok((fresh, _)) => {
-        assert!(
-          fresh == self.board,
-          "flow intent '{class}' left the maintained board out of sync with a fresh materialization"
-        );
+        if fresh != self.board {
+          panic!(
+            "flow intent '{class}' left the maintained board out of sync with a fresh materialization:\n{}",
+            board_divergence(&self.board, &fresh)
+          );
+        }
       },
       Err(error) => panic!("flow board audit rematerialization failed after '{class}': {error:#}"),
     }
@@ -425,6 +430,18 @@ impl FlowRuntime {
       return Ok(());
     }
     self.refresh_all()?;
+    // Capped canonicalization repair (spec Part A): when the merge left the
+    // raw order lists in a non-canonical interleaving, rewrite them (origin
+    // "repair") to the canonical linearization every peer already renders.
+    // Deterministic-target rewrites converge; the cap stops any pathological
+    // repair ping-pong from spinning.
+    if self.order_repairs_remaining > 0 {
+      match super::commit::repair_canonical_orders(self) {
+        Ok(true) => self.order_repairs_remaining -= 1,
+        Ok(false) => {},
+        Err(error) => tracing::error!(%error, "flow order canonicalization repair failed"),
+      }
+    }
     let event = FlowPublishEvent::RemoteUpdateApplied {
       frontier: self.frontier(),
       version_vector: self.doc.state_vv().encode(),
@@ -492,6 +509,37 @@ impl FlowRuntime {
   pub fn can_redo(&self) -> bool {
     self.undo.can_redo()
   }
+}
+
+/// Debug-audit diagnostics: the first field-level difference between the
+/// maintained and freshly-materialized boards.
+#[cfg(debug_assertions)]
+fn board_divergence(maintained: &FlowBoardProjection, fresh: &FlowBoardProjection) -> String {
+  if maintained.format != fresh.format {
+    return "format differs".to_string();
+  }
+  if maintained.sheets.len() != fresh.sheets.len() {
+    return format!("sheet count {} vs fresh {}", maintained.sheets.len(), fresh.sheets.len());
+  }
+  for (ours, theirs) in maintained.sheets.iter().zip(&fresh.sheets) {
+    if ours.id != theirs.id || ours.name != theirs.name || ours.sheet_type_id != theirs.sheet_type_id {
+      return format!("sheet header {:?} vs fresh {:?}", (ours.id, &ours.name), (theirs.id, &theirs.name));
+    }
+    if ours.annotations != theirs.annotations {
+      return format!("sheet {} annotations differ", ours.id);
+    }
+    let our_ids: Vec<_> = ours.cells.iter().map(|cell| cell.id).collect();
+    let their_ids: Vec<_> = theirs.cells.iter().map(|cell| cell.id).collect();
+    if our_ids != their_ids {
+      return format!("sheet {} order {our_ids:?} vs fresh {their_ids:?}", ours.id);
+    }
+    for (our_cell, their_cell) in ours.cells.iter().zip(&theirs.cells) {
+      if our_cell != their_cell {
+        return format!("cell {} maintained {our_cell:?} vs fresh {their_cell:?}", our_cell.id);
+      }
+    }
+  }
+  "boards differ in an uncompared field".to_string()
 }
 
 fn install_undo_meta_callbacks(undo: &UndoManager, state: &Arc<Mutex<FlowUndoMetaState>>) {

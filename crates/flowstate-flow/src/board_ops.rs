@@ -300,6 +300,49 @@ pub fn resolve_drop_intent(
   }
 }
 
+/// The canonical DFS linearization (the materializer's normalization step 6
+/// as a pure function): roots in current flat order, each followed by its
+/// whole subtree, children in flat order. The write path re-linearizes after
+/// any structural mutation that can interleave subtrees (delete-orphaning, an
+/// arbitrary-index drop), so canonical order stays an invariant of the raw
+/// order list rather than a view-time repair.
+#[must_use]
+pub fn canonical_linearization(cells: &[Cell]) -> Vec<CellId> {
+  let mut children: HashMap<CellId, Vec<CellId>> = HashMap::new();
+  let mut roots: Vec<CellId> = Vec::new();
+  for cell in cells {
+    match cell.parent_id {
+      Some(parent) => children.entry(parent).or_default().push(cell.id),
+      None => roots.push(cell.id),
+    }
+  }
+  let mut canonical = Vec::with_capacity(cells.len());
+  let mut stack: Vec<CellId> = roots.iter().rev().copied().collect();
+  while let Some(id) = stack.pop() {
+    canonical.push(id);
+    if let Some(kids) = children.get(&id) {
+      stack.extend(kids.iter().rev());
+    }
+  }
+  canonical
+}
+
+/// Reorder `sheet.cells` into the canonical linearization. Returns whether
+/// anything moved.
+pub fn canonicalize_sheet(sheet: &mut Sheet) -> bool {
+  let canonical = canonical_linearization(&sheet.cells);
+  let current: Vec<CellId> = sheet.cells.iter().map(|cell| cell.id).collect();
+  if canonical == current {
+    return false;
+  }
+  let mut by_id: HashMap<CellId, Cell> = sheet.cells.drain(..).map(|cell| (cell.id, cell)).collect();
+  sheet.cells = canonical
+    .into_iter()
+    .filter_map(|id| by_id.remove(&id))
+    .collect();
+  true
+}
+
 /// Read-only preview of a subtree move: the sheet with the drag already
 /// applied, or `None` if the move is invalid (self/descendant drop, a
 /// descendant outside the columns, or a landing the committed move would
@@ -309,7 +352,13 @@ pub fn preview_move_cell_subtree(board: &FlowBoardProjection, sheet_id: SheetId,
   let column_ids = sheet_column_ids(board, sheet_id).ok()?;
   let mut sheet = board.sheet(sheet_id)?.clone();
   apply_move_subtree(&mut sheet, &column_ids, cell_id, intent).ok()?;
-  sheet_topology_ok(&sheet, &column_ids).then_some(sheet)
+  if !sheet_topology_ok(&sheet, &column_ids) {
+    return None;
+  }
+  // ONE law with the commit: the committed order is the canonical
+  // linearization of the moved sheet, so the preview shows exactly it.
+  canonicalize_sheet(&mut sheet);
+  Some(sheet)
 }
 
 /// Read-only preview with the dragged subtree lifted out (drag in flight, no

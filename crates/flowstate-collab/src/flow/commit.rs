@@ -227,6 +227,7 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
           },
         );
       }
+      canonicalize_sheet_order(core, doc, *sheet_id)?;
       Ok(Some(Derived::Board))
     },
     FlowIntent::DeleteCell { sheet_id, cell_id } => {
@@ -256,6 +257,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
           }
         }
       }
+      // Orphaned children may now interleave another subtree's span; restore
+      // the canonical linearization inside this same commit.
+      canonicalize_sheet_order(core, doc, *sheet_id)?;
       Ok(Some(Derived::Board))
     },
     FlowIntent::MoveCellSubtree { sheet_id, cell_id, drop } => {
@@ -274,6 +278,10 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       if !board_ops::sheet_topology_ok(&target, &columns) {
         return Err(FlowWriteRejected::StructureViolation("move would violate sheet topology".into()).into());
       }
+      // The committed order is the canonical linearization of the moved sheet
+      // (an arbitrary-index root drop can land inside another subtree's span);
+      // the drag preview applies the identical step.
+      board_ops::canonicalize_sheet(&mut target);
       let before = sheet.clone();
       let sheet_map = loro_schema::sheet_map(doc, *sheet_id).context("resolving sheet map")?;
       // Column/parent rewrites for changed subtree members (LWW fields).
@@ -514,13 +522,63 @@ fn resolve_placement(
   }
 }
 
-/// Transform the live cell order into `target` with a minimal `mov` sequence
-/// (only displaced elements move; a subtree move emits one `mov` per member).
+/// Re-linearize a sheet canonically after a structural mutation, in BOTH
+/// representations inside the same commit: the maintained board's cell vec and
+/// the raw Loro order list. Keeps "raw order == canonical order" a write-path
+/// invariant instead of a view-time repair, so the materializer's DFS
+/// normalization is a no-op on locally-produced states.
+fn canonicalize_sheet_order(core: &mut FlowRuntime, doc: &LoroDoc, sheet_id: SheetId) -> Result<(), ExecuteError> {
+  let Some(sheet) = core.board_mut().sheet_mut(sheet_id) else {
+    return Ok(());
+  };
+  board_ops::canonicalize_sheet(sheet);
+  let target: Vec<String> = sheet.cells.iter().map(|cell| cell.id.to_string()).collect();
+  let sheet_map = loro_schema::sheet_map(doc, sheet_id).context("resolving sheet map for canonicalization")?;
+  // ALWAYS diff against the live raw order: after a merge, raw may sit in a
+  // non-canonical interleaving (normalized only in the materialized view), so
+  // "maintained unchanged" does not imply "raw already matches".
+  if loro_schema::cell_order_ids(&sheet_map) != target {
+    apply_order_diff(&sheet_map, &target).context("re-linearizing sheet order")?;
+  }
+  Ok(())
+}
+
+/// Reconcile the live cell order onto `target`: drop dead/duplicate entries,
+/// append missing ones, then a minimal `mov` sequence (only displaced elements
+/// move; a subtree move emits one `mov` per member). Handles post-merge raw
+/// orders that carry liveness drift the materialized view already normalized.
 fn apply_order_diff(sheet_map: &loro::LoroMap, target: &[String]) -> Result<()> {
-  let mut working = loro_schema::cell_order_ids(sheet_map);
+  let order = loro_schema::cell_order_list(sheet_map).context("resolving cell order list")?;
+  reconcile_order_list(&order, &loro_schema::cell_order_ids(sheet_map), target)
+}
+
+/// The generic movable-list reconcile behind [`apply_order_diff`], shared with
+/// the import-side canonicalization repair (board sheet order + cell orders).
+pub(crate) fn reconcile_order_list(order: &loro::LoroMovableList, current: &[String], target: &[String]) -> Result<()> {
+  let mut working = current.to_vec();
+  let target_set: std::collections::HashSet<&String> = target.iter().collect();
+  // Dead or duplicate entries, removed back-to-front so indices stay live.
+  let mut seen: std::collections::HashSet<&String> = std::collections::HashSet::new();
+  let mut doomed: Vec<usize> = Vec::new();
+  for (index, id) in working.iter().enumerate() {
+    if !target_set.contains(id) || !seen.insert(id) {
+      doomed.push(index);
+    }
+  }
+  for index in doomed.into_iter().rev() {
+    order.delete(index, 1).context("dropping dead order entry")?;
+    working.remove(index);
+  }
+  // Missing target entries append (their canonical position lands via `mov`).
+  for id in target {
+    if !working.iter().any(|entry| entry == id) {
+      order.insert(working.len(), id.as_str()).context("appending missing order entry")?;
+      working.push(id.clone());
+    }
+  }
   anyhow::ensure!(
     working.len() == target.len(),
-    "order diff over mismatched sets ({} live vs {} target)",
+    "order reconcile left mismatched sets ({} live vs {} target)",
     working.len(),
     target.len()
   );
@@ -532,11 +590,59 @@ fn apply_order_diff(sheet_map: &loro::LoroMap, target: &[String]) -> Result<()> 
       .iter()
       .position(|id| *id == target[index])
       .context("target order entry missing from live order")?;
-    loro_schema::move_cell_order(sheet_map, from, index)?;
+    order.mov(from, index).context("moving order entry")?;
     let id = working.remove(from);
     working.insert(index, id);
   }
   Ok(())
+}
+
+/// Import-side canonicalization repair (the flow mirror of
+/// `schedule_projection_repairs`): rewrite the raw sheet/cell order lists to
+/// the canonical linearization the materialized view already shows, under the
+/// `"repair"` origin (undo-excluded), publishing the pass like any commit.
+/// Returns whether anything was rewritten. The caller caps invocations.
+pub(crate) fn repair_canonical_orders(core: &mut FlowRuntime) -> Result<bool> {
+  let doc = core.doc().clone();
+  let vv_before = doc.oplog_vv();
+  let mut changed = false;
+
+  let target_sheets: Vec<String> = core
+    .board_ref()
+    .sheets
+    .iter()
+    .map(|sheet| sheet.id.to_string())
+    .collect();
+  let sheet_order = loro_schema::sheet_order(&doc);
+  let current_sheets = loro_schema::sheet_order_ids(&doc);
+  if current_sheets != target_sheets {
+    reconcile_order_list(&sheet_order, &current_sheets, &target_sheets).context("repairing sheet order")?;
+    changed = true;
+  }
+
+  let sheets: Vec<(SheetId, Vec<String>)> = core
+    .board_ref()
+    .sheets
+    .iter()
+    .map(|sheet| (sheet.id, sheet.cells.iter().map(|cell| cell.id.to_string()).collect()))
+    .collect();
+  for (sheet_id, target) in sheets {
+    let Some(sheet_map) = loro_schema::sheet_map(&doc, sheet_id) else {
+      continue;
+    };
+    if loro_schema::cell_order_ids(&sheet_map) != target {
+      apply_order_diff(&sheet_map, &target).context("repairing cell order")?;
+      changed = true;
+    }
+  }
+
+  if changed {
+    doc.set_next_commit_origin("repair");
+    doc.set_next_commit_message("flow-order-canonicalization");
+    doc.commit();
+    core.queue_local_update_publish(&vv_before);
+  }
+  Ok(changed)
 }
 
 /// Cursor-backed caret snapshot after a cell-text intent (spec §8 shape).
