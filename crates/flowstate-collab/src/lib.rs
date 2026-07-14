@@ -10,6 +10,7 @@ pub mod crdt_runtime;
 pub mod discovery;
 pub mod doc_io;
 pub mod dropbox;
+pub mod flow;
 pub mod identity;
 pub mod ids;
 pub mod local_write;

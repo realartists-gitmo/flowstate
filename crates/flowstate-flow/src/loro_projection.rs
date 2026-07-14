@@ -27,6 +27,22 @@ pub struct MaterializedBoard {
 /// projection space and reported, never returned as an error (only a missing
 /// immutable format — an unopenable document — errors).
 pub fn board_from_loro(doc: &LoroDoc) -> anyhow::Result<MaterializedBoard> {
+  board_from_loro_cached(doc, &HashMap::new(), None)
+}
+
+/// Runtime variant: reuse CACHED cell summaries except for `dirty` cells
+/// (None = everything is dirty). Summaries are pure functions of a cell's
+/// flow content, so reuse is exact; this is what keeps a structural commit or
+/// a single-cell keystroke O(changed), not O(board).
+#[allow(
+  clippy::implicit_hasher,
+  reason = "the cache is the runtime's plain HashMap; generalizing the hasher buys nothing at this call count"
+)]
+pub fn board_from_loro_cached(
+  doc: &LoroDoc,
+  summary_cache: &HashMap<CellId, CellSummary>,
+  dirty: Option<&HashSet<CellId>>,
+) -> anyhow::Result<MaterializedBoard> {
   let format = loro_schema::read_format(doc)?;
   let mut defects = Vec::new();
 
@@ -148,8 +164,15 @@ pub fn board_from_loro(doc: &LoroDoc) -> anyhow::Result<MaterializedBoard> {
 
     normalize_sheet_cells(&mut cells, &column_ids, sheet_id, &mut defects);
 
-    // Summaries: materialize each live cell's flow once.
+    // Summaries: reuse the cache unless the cell is dirty (or no cache).
     for cell in &mut cells {
+      if let Some(dirty) = dirty
+        && !dirty.contains(&cell.id)
+        && let Some(cached) = summary_cache.get(&cell.id)
+      {
+        cell.summary = cached.clone();
+        continue;
+      }
       let Some(record) = records_by_id.get(&cell.id) else {
         continue;
       };

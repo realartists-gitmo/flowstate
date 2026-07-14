@@ -10,6 +10,7 @@ async-channel = { workspace = true }
 base64 = { workspace = true }
 blake3 = "1.8.5"
 flowstate-document.workspace = true
+flowstate-flow.workspace = true
 flowstate-fidelity.workspace = true
 gpui-flowtext = { workspace = true }
 hotpath.workspace = true

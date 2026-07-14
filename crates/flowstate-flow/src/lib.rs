@@ -20,7 +20,7 @@ pub use document::{FlowDocument, FlowFrontier};
 pub use format::{ArgumentSide, CellId, ColumnDefinition, ColumnId, FlowFormat, FormatId, SheetId, SheetTypeDefinition, SheetTypeId, StrokeId};
 pub use intents::{AnnotationScope, CellPlacement, CellSeed, FlowDropIntent, FlowIntent, RelativePosition};
 pub use loro::VersionVector;
-pub use loro_projection::{MaterializedBoard, board_from_loro, cell_document, derive_cell_summary};
+pub use loro_projection::{MaterializedBoard, board_from_loro, board_from_loro_cached, cell_document, derive_cell_summary};
 pub use mutate::MutationReport;
 pub use persistence::{decode as decode_flow_document, encode as encode_flow_document, load_flow_document, save_flow_document};
 pub use projection::{
