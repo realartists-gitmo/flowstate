@@ -42,7 +42,13 @@ pub fn decode_fl0_snapshot(bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
   if version == 1 {
     // v1 was a pre-release format that never shipped; there is nothing to
     // migrate. Loud, specific message instead of a generic version error.
-    return Err(io::Error::new(io::ErrorKind::InvalidData, "this .fl0 uses the pre-release v1 format, which never shipped and cannot be opened").into());
+    return Err(
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "this .fl0 uses the pre-release v1 format, which never shipped and cannot be opened",
+      )
+      .into(),
+    );
   }
   if version != FL0_VERSION {
     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unsupported .fl0 version {version}")).into());

@@ -74,18 +74,16 @@ impl CollabSession {
         // FLOW arm: one import request; the derivation rides the runtime's
         // streams and the pump drains vv/publish events afterwards.
         let session_id = self.session;
-        cx.spawn(async move |session, cx| {
-          match io.import_remote_update(bytes).await {
-            Ok(()) => {
-              let _ = session.update(cx, |session, cx| {
-                session.pump_publish(cx);
-                session.last_document_activity = std::time::Instant::now();
-              });
-            },
-            Err(error) => {
-              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "dropped unimportable remote flow update");
-            },
-          }
+        cx.spawn(async move |session, cx| match io.import_remote_update(bytes).await {
+          Ok(()) => {
+            let _ = session.update(cx, |session, cx| {
+              session.pump_publish(cx);
+              session.last_document_activity = std::time::Instant::now();
+            });
+          },
+          Err(error) => {
+            tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "dropped unimportable remote flow update");
+          },
         })
         .detach();
         return Ok(());
@@ -387,7 +385,11 @@ impl CollabSession {
     // replica's own saves/packages include them. The session still never
     // writes document CONTENT (invariant 5) — asset bytes are content-
     // addressed sideband records.
-    if let Some(io) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) {
+    if let Some(io) = self
+      .runtime
+      .clone()
+      .and_then(|io| io.as_rich_text().cloned())
+    {
       let records: Vec<AssetRecord> = asset_records
         .iter()
         .map(|(_, record)| record.clone())

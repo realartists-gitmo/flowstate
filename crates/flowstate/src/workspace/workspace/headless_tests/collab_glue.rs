@@ -59,7 +59,9 @@ fn start_and_leave_flow_collaboration_session_round_trip(cx: &mut TestAppContext
   let h = support::open_workspace(cx);
   h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
   cx.run_until_parked();
-  let panel_id = h.read(cx, |ws| ws.active_document_id).expect("flow panel id");
+  let panel_id = h
+    .read(cx, |ws| ws.active_document_id)
+    .expect("flow panel id");
 
   let session = h.update(cx, |ws, _, cx| ws.start_collaboration_on_active_document(cx));
   assert!(session.is_some(), "hosting a session on a fresh flow must succeed");
@@ -95,7 +97,9 @@ fn start_and_leave_flow_collaboration_session_round_trip(cx: &mut TestAppContext
 
   // The tab stays editable after leave: a structural intent still commits
   // through the same gated authority.
-  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  let flow = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("active flow");
   let sheets_before = h.update(cx, |_, _, cx| flow.read(cx).board().sheets.len());
   h.update(cx, |_, _, cx| flow.update(cx, |editor, cx| editor.create_sheet(cx)));
   cx.run_until_parked();
@@ -142,7 +146,9 @@ fn flow_join_handoff_pathless_tab_recovery_written_and_discarded(cx: &mut TestAp
   });
   cx.run_until_parked();
 
-  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("joined flow tab active");
+  let flow = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("joined flow tab active");
   h.update(cx, |_, _, cx| {
     let editor = flow.read(cx);
     assert!(editor.document_path().is_none(), "joined tab must be pathless (autosave skips it)");
@@ -163,7 +169,8 @@ fn flow_join_handoff_pathless_tab_recovery_written_and_discarded(cx: &mut TestAp
   h.update(cx, |_, _, cx| {
     assert_eq!(flow.read(cx).board().sheets.len(), 2, "joined tab edits commit through the gate");
   });
-  cx.executor().advance_clock(std::time::Duration::from_millis(800));
+  cx.executor()
+    .advance_clock(std::time::Duration::from_millis(800));
   let recovery_for_wait = recovery.clone();
   h.wait_until(cx, "flow recovery file write", move |_| recovery_for_wait.exists());
   let recovered = flowstate_flow::read_fl0(&recovery).expect("recovery file is a valid .fl0 v2");

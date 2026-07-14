@@ -112,11 +112,15 @@ impl FlowIoHandle {
 
   /// Drain committed-but-unpublished local events.
   pub async fn pump_publish(&self) -> Result<Vec<FlowPublishEvent>> {
-    self.request(|reply| FlowIoRequest::PumpPublish { reply }).await
+    self
+      .request(|reply| FlowIoRequest::PumpPublish { reply })
+      .await
   }
 
   pub async fn board_snapshot(&self) -> Result<FlowBoardProjection> {
-    self.request(|reply| FlowIoRequest::BoardSnapshot { reply }).await
+    self
+      .request(|reply| FlowIoRequest::BoardSnapshot { reply })
+      .await
   }
 
   pub async fn oplog_version_vector(&self) -> Result<Vec<u8>> {
@@ -132,15 +136,21 @@ impl FlowIoHandle {
   }
 
   pub async fn snapshot_bytes(&self) -> Result<Vec<u8>> {
-    self.request(|reply| FlowIoRequest::SnapshotBytes { reply }).await
+    self
+      .request(|reply| FlowIoRequest::SnapshotBytes { reply })
+      .await
   }
 
   pub async fn save_to(&self, path: PathBuf) -> Result<()> {
-    self.request(|reply| FlowIoRequest::SaveTo { path, reply }).await
+    self
+      .request(|reply| FlowIoRequest::SaveTo { path, reply })
+      .await
   }
 
   pub async fn encode_bytes(&self) -> Result<Vec<u8>> {
-    self.request(|reply| FlowIoRequest::EncodeBytes { reply }).await
+    self
+      .request(|reply| FlowIoRequest::EncodeBytes { reply })
+      .await
   }
 }
 
@@ -232,9 +242,7 @@ fn io_loop(core: &Arc<WriteGate<FlowRuntime>>, receiver: &Receiver<FlowIoRequest
       ),
       FlowIoRequest::OplogVersionVector { reply } => send_reply(
         &reply,
-        gate_call(core, GateHolder::ExportUpdates, |runtime| {
-          Ok(runtime.oplog_version_vector().encode())
-        }),
+        gate_call(core, GateHolder::ExportUpdates, |runtime| Ok(runtime.oplog_version_vector().encode())),
       ),
       FlowIoRequest::ExportUpdatesFor { remote_vv, reply } => {
         let result = VersionVector::decode(&remote_vv)

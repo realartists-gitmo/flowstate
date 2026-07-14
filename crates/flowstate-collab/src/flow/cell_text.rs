@@ -8,7 +8,9 @@
 //! path owns the single commit and the compensation law.
 
 use anyhow::{Context as _, Result};
-use flowstate_document::loro_schema::{MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH};
+use flowstate_document::loro_schema::{
+  MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH,
+};
 use flowstate_document::paragraph_ids_by_boundary_in;
 use flowstate_flow::format::CellId;
 use flowstate_flow::loro_schema::{cell_paragraph_registry, cell_text, write_paragraph_record};
@@ -100,7 +102,10 @@ impl CellTextContext {
       .checked_sub(1)?;
     let (start, end) = self.paragraph_span(ix)?;
     let clamped = unicode.clamp(start, end);
-    let byte = self.chars[start..clamped].iter().map(|ch| ch.len_utf8()).sum();
+    let byte = self.chars[start..clamped]
+      .iter()
+      .map(|ch| ch.len_utf8())
+      .sum();
     Some(gpui_flowtext::DocumentOffset { paragraph: ix, byte })
   }
 
@@ -291,7 +296,9 @@ pub(crate) fn resolve_cell_plan(
     },
     LocalIntent::ReplaceMatches(intent) => {
       if intent.replacement.contains('\n') {
-        return Err(FlowWriteRejected::StructureViolation("replacement must not contain structural characters".into()));
+        return Err(FlowWriteRejected::StructureViolation(
+          "replacement must not contain structural characters".into(),
+        ));
       }
       let mut matches: Vec<(usize, usize, Option<RunStyles>)> = Vec::new();
       for candidate in &intent.matches {
@@ -300,12 +307,17 @@ pub(crate) fn resolve_cell_plan(
         };
         // Same-paragraph, non-collapsed: a range crossing a boundary was moved
         // by concurrent edits — skip, don't reject.
-        if start == end || ctx.boundaries.iter().any(|boundary| (start..end).contains(boundary)) {
+        if start == end
+          || ctx
+            .boundaries
+            .iter()
+            .any(|boundary| (start..end).contains(boundary))
+        {
           continue;
         }
         matches.push((start, end, candidate.styles));
       }
-      matches.sort_by(|a, b| b.0.cmp(&a.0));
+      matches.sort_by_key(|entry| std::cmp::Reverse(entry.0));
       // Descending by start: drop a match that overlaps the previously kept
       // (higher-positioned) one — its end reaches past that match's start.
       matches.dedup_by(|current, previous| current.1 > previous.0);
@@ -377,14 +389,20 @@ pub(crate) fn execute_cell_plan(ctx: &CellTextContext, plan: &CellPlan) -> Resul
       Ok(Some(*start))
     },
     CellPlan::Split { at, style } => {
-      ctx.text.insert(*at, "\n").context("inserting cell split boundary")?;
+      ctx
+        .text
+        .insert(*at, "\n")
+        .context("inserting cell split boundary")?;
       ctx
         .text
         .mark(*at..*at + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(*style))
         .context("marking cell split style")?;
       // Sentinel hygiene: strip expand-`After` run keys off the boundary.
       for key in [MARK_RUN_SEMANTIC_STYLE, MARK_HIGHLIGHT_STYLE, MARK_DIRECT_UNDERLINE, MARK_STRIKETHROUGH] {
-        ctx.text.unmark(*at..*at + 1, key).context("unmarking split boundary run keys")?;
+        ctx
+          .text
+          .unmark(*at..*at + 1, key)
+          .context("unmarking split boundary run keys")?;
       }
       let key = format!("paragraph.{}", Uuid::new_v4().as_u128());
       write_paragraph_record(&ctx.registry, &ctx.text, &key, *at).context("writing split paragraph record")?;
@@ -477,11 +495,13 @@ pub(crate) fn execute_cell_plan(ctx: &CellTextContext, plan: &CellPlan) -> Resul
   }
 }
 
-/// Unmark-then-set over a range (the .db8 `mark_run_styles` law: SetMarks is a
+/// Unmark-then-set over a range (the .db8 `mark_run_styles` law: `SetMarks` is a
 /// full restatement of the range's run styles).
 fn replace_run_styles(text: &LoroText, range: std::ops::Range<usize>, styles: RunStyles) -> Result<()> {
   for key in [MARK_RUN_SEMANTIC_STYLE, MARK_HIGHLIGHT_STYLE, MARK_DIRECT_UNDERLINE, MARK_STRIKETHROUGH] {
-    text.unmark(range.clone(), key).context("unmarking run style key")?;
+    text
+      .unmark(range.clone(), key)
+      .context("unmarking run style key")?;
   }
   if let gpui_flowtext::RunSemanticStyle::Custom(slot) = styles.semantic {
     text.mark(range.clone(), MARK_RUN_SEMANTIC_STYLE, i64::from(slot))?;

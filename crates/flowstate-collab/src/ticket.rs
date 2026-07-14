@@ -57,12 +57,10 @@ impl SessionTicket {
   /// Version-mismatch UX: a specific, actionable message per direction
   /// instead of a generic failure.
   fn version_mismatch_message(version: u16) -> Option<&'static str> {
-    if version < PROTOCOL_VERSION {
-      Some("this collaboration invite is outdated and can no longer be joined — ask for a fresh invite")
-    } else if version > PROTOCOL_VERSION {
-      Some("this collaboration invite was created by a newer Flowstate — update Flowstate to join")
-    } else {
-      None
+    match version.cmp(&PROTOCOL_VERSION) {
+      std::cmp::Ordering::Less => Some("this collaboration invite is outdated and can no longer be joined — ask for a fresh invite"),
+      std::cmp::Ordering::Greater => Some("this collaboration invite was created by a newer Flowstate — update Flowstate to join"),
+      std::cmp::Ordering::Equal => None,
     }
   }
 

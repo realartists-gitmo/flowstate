@@ -1477,11 +1477,11 @@ pub fn paragraph_ids_by_boundary_in(doc: &LoroDoc, paragraphs: &LoroMap, text: &
   // dead-anchor / id-less-cursor fallbacks are all preserved bit-identically.
   let container = text.id();
   // §perf-heaven T4: consume the sorted keys by value (no per-key clone).
-  let sorted_keys = map_keys(&paragraphs);
+  let sorted_keys = map_keys(paragraphs);
   let mut cands: Vec<(String, Option<Cursor>, Option<Cursor>)> = Vec::with_capacity(sorted_keys.len());
   let mut ids: Vec<ID> = Vec::new();
   for key in sorted_keys {
-    let Some(record) = child_map(&paragraphs, &key).ok().flatten() else {
+    let Some(record) = child_map(paragraphs, &key).ok().flatten() else {
       continue;
     };
     let decode = |field: &str| {
@@ -2433,18 +2433,28 @@ mod tests {
       .ensure_mergeable_text(crate::loro_schema::FLOW_TEXT_KEY)
       .expect("flow text");
     crate::loro_schema::ensure_sentinel(&text).expect("sentinel");
-    let paragraphs = flow.ensure_mergeable_map(PARAGRAPHS_BY_ID).expect("paragraph registry");
+    let paragraphs = flow
+      .ensure_mergeable_map(PARAGRAPHS_BY_ID)
+      .expect("paragraph registry");
     standalone_paragraph_record(&paragraphs, &text, ROOT_FIRST_PARAGRAPH_ID, flow_id, 0);
     (flow, text, paragraphs)
   }
 
   fn standalone_paragraph_record(paragraphs: &LoroMap, text: &LoroText, key: &str, flow_id: &str, boundary: usize) {
-    let record = paragraphs.ensure_mergeable_map(key).expect("paragraph record");
+    let record = paragraphs
+      .ensure_mergeable_map(key)
+      .expect("paragraph record");
     record.insert("id", key).expect("record id");
     record.insert("flow_id", flow_id).expect("record flow id");
-    let cursor = text.get_cursor(boundary, Side::Left).expect("boundary cursor");
-    record.insert("boundary_cursor", cursor.encode()).expect("boundary cursor bytes");
-    record.insert("start_cursor", cursor.encode()).expect("start cursor bytes");
+    let cursor = text
+      .get_cursor(boundary, Side::Left)
+      .expect("boundary cursor");
+    record
+      .insert("boundary_cursor", cursor.encode())
+      .expect("boundary cursor bytes");
+    record
+      .insert("start_cursor", cursor.encode())
+      .expect("start cursor bytes");
   }
 
   /// The .fl0 cell round trip: a standalone flow with styled multi-paragraph
@@ -2459,14 +2469,18 @@ mod tests {
     let (flow, text, paragraphs) = seed_standalone_flow(&registry, flow_id);
 
     // "\n" (sentinel, Normal) + "Hello wörld" + "\n" (Custom(3) tag row) + "café tail".
-    text.insert(1, "Hello wörld").expect("insert first paragraph");
+    text
+      .insert(1, "Hello wörld")
+      .expect("insert first paragraph");
     let boundary = text.len_unicode();
     text.insert(boundary, "\n").expect("insert boundary");
     text
       .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, 4_i64)
       .expect("mark boundary style"); // slot value 4 → Custom(3)
     standalone_paragraph_record(&paragraphs, &text, "paragraph.row2", flow_id, boundary);
-    text.insert(boundary + 1, "café tail").expect("insert second paragraph");
+    text
+      .insert(boundary + 1, "café tail")
+      .expect("insert second paragraph");
     // Strikethrough over "wörld" (unicode 7..12) — the strike_cell shape.
     text
       .mark(7..12, MARK_STRIKETHROUGH, true)
@@ -2481,7 +2495,11 @@ mod tests {
     };
     assert_eq!(first.style, gpui_flowtext::ParagraphStyle::Normal);
     assert_eq!(
-      first.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+      first
+        .runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>(),
       "Hello wörld"
     );
     assert!(
@@ -2495,7 +2513,14 @@ mod tests {
       panic!("second row is a paragraph");
     };
     assert_eq!(second.style, gpui_flowtext::ParagraphStyle::Custom(3));
-    assert_eq!(second.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "café tail");
+    assert_eq!(
+      second
+        .runs
+        .iter()
+        .map(|run| run.text.as_str())
+        .collect::<String>(),
+      "café tail"
+    );
     // Durable identities: the seeded first record + the explicit second record,
     // and block ids derived 1:1 from them.
     assert_eq!(

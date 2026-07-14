@@ -11,9 +11,15 @@ workspace = true
 anyhow = { workspace = true }
 flowstate-document.workspace = true
 gpui-flowtext = { workspace = true }
+hotpath.workspace = true
 loro = "1.13.1"
 postcard = "1.1.3"
 rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true, features = ["serde", "v4"] }
 zstd.workspace = true
+
+[features]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]

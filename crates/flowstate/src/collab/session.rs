@@ -101,7 +101,7 @@ pub struct JoinedDocument {
 
 /// The join snapshot's materialization, per document kind.
 pub enum JoinedDocumentPayload {
-  RichText(DocumentProjection),
+  RichText(Box<DocumentProjection>),
   Flow(flowstate_flow::FlowBoardProjection),
 }
 
@@ -403,11 +403,19 @@ impl CollabSession {
   /// The rich-text arm of the attached editor (presence/comments/assets are
   /// rich-text-only surfaces; flow arms no-op through this accessor).
   pub(super) fn rich_text_editor(&self) -> Option<Entity<RichTextEditor>> {
-    self.editor.as_ref().and_then(CollabEditor::as_rich_text).cloned()
+    self
+      .editor
+      .as_ref()
+      .and_then(CollabEditor::as_rich_text)
+      .cloned()
   }
 
   pub(super) fn flow_editor(&self) -> Option<Entity<FlowEditor>> {
-    self.editor.as_ref().and_then(CollabEditor::as_flow).cloned()
+    self
+      .editor
+      .as_ref()
+      .and_then(CollabEditor::as_flow)
+      .cloned()
   }
 
   pub(super) fn set_admission(&mut self, admission: SessionAdmission) {
@@ -897,7 +905,7 @@ impl CollabSession {
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
-      payload: JoinedDocumentPayload::RichText(document),
+      payload: JoinedDocumentPayload::RichText(Box::new(document)),
     })
   }
 
@@ -1051,24 +1059,22 @@ impl CollabSession {
         .detach();
       },
       SyncIoHandle::Flow(io) => {
-        cx.spawn(async move |session, cx| {
-          match io.pump_publish().await {
-            Ok(events) => {
-              if events.is_empty() {
-                return;
-              }
-              let published = events.len();
-              let _ = session.update(cx, |session, cx| {
-                fidelity::event(FidelityClass::Reconcile, "publish-pump", || {
-                  format!("session={session_id} kind=flow events={published}")
-                });
-                session.apply_flow_events(events, cx);
+        cx.spawn(async move |session, cx| match io.pump_publish().await {
+          Ok(events) => {
+            if events.is_empty() {
+              return;
+            }
+            let published = events.len();
+            let _ = session.update(cx, |session, cx| {
+              fidelity::event(FidelityClass::Reconcile, "publish-pump", || {
+                format!("session={session_id} kind=flow events={published}")
               });
-            },
-            Err(error) => {
-              tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "pumping flow publish queue failed");
-            },
-          }
+              session.apply_flow_events(events, cx);
+            });
+          },
+          Err(error) => {
+            tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "pumping flow publish queue failed");
+          },
         })
         .detach();
       },

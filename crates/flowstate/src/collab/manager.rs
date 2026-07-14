@@ -125,7 +125,9 @@ impl CollabManager {
       self.discovery_paths.insert(session, path);
     }
     self.discovery_titles.insert(session, title.clone());
-    self.session_kinds.insert(session, flowstate_collab::DocumentKind::RichText);
+    self
+      .session_kinds
+      .insert(session, flowstate_collab::DocumentKind::RichText);
     let collab = CollabSession::from_local_runtime(session, panel_id, editor, title, document_io, commands.clone());
     let direct_handler = collab.direct_handler();
     self.finish_start_session(session, panel_id, collab, direct_handler, commands, cx)
@@ -165,7 +167,9 @@ impl CollabManager {
       self.discovery_paths.insert(session, path);
     }
     self.discovery_titles.insert(session, title.clone());
-    self.session_kinds.insert(session, flowstate_collab::DocumentKind::Flow);
+    self
+      .session_kinds
+      .insert(session, flowstate_collab::DocumentKind::Flow);
     let collab = CollabSession::from_local_flow_runtime(session, panel_id, editor, title, flow_io, commands.clone());
     let direct_handler = collab.direct_handler();
     self.finish_start_session(session, panel_id, collab, direct_handler, commands, cx)
@@ -262,7 +266,14 @@ impl CollabManager {
       .map(|addr| addr.id)
       .ok_or_else(|| anyhow!("collaboration invite has no reachable participants"))?;
     self.session_kinds.insert(session, ticket.document);
-    let collab = CollabSession::joining(session, ticket.title.clone(), commands.clone(), bootstrap.clone(), admission.clone(), ticket.document);
+    let collab = CollabSession::joining(
+      session,
+      ticket.title.clone(),
+      commands.clone(),
+      bootstrap.clone(),
+      admission.clone(),
+      ticket.document,
+    );
     let entity = cx.new(|_| collab);
     self.register_session(entity.clone(), cx);
     let neighbor_rx = entity.update(cx, |session, cx| session.prepare_join_neighbor_wait(cx));

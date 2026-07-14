@@ -96,7 +96,10 @@ impl CollabSession {
     let selection = self
       .rich_text_editor()
       .map(|editor| editor.read(cx).selection().clone());
-    let runtime = self.runtime.clone().and_then(|io| io.as_rich_text().cloned());
+    let runtime = self
+      .runtime
+      .clone()
+      .and_then(|io| io.as_rich_text().cloned());
     let session_id = self.session;
     self.presence_refresh_generation = self.presence_refresh_generation.wrapping_add(1);
     let generation = self.presence_refresh_generation;
@@ -177,7 +180,11 @@ impl CollabSession {
     if self.comment_annotation_refresh_pending {
       return;
     }
-    let Some(runtime) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) else {
+    let Some(runtime) = self
+      .runtime
+      .clone()
+      .and_then(|io| io.as_rich_text().cloned())
+    else {
       return;
     };
     let Some(editor) = self.rich_text_editor() else { return };
@@ -246,7 +253,11 @@ impl CollabSession {
       flow.update(cx, |flow, cx| flow.set_external_presences(presences, cx));
       return;
     }
-    let Some(runtime) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) else {
+    let Some(runtime) = self
+      .runtime
+      .clone()
+      .and_then(|io| io.as_rich_text().cloned())
+    else {
       tracing::trace!(session = %self.session, "skipping external caret refresh because no rich-text runtime is attached");
       return;
     };

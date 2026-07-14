@@ -19,12 +19,12 @@ use tokio::{
 use crate::{
   admission::SessionAdmission,
   doc_io::DocIoHandle,
-  sync_io::SyncIoHandle,
   ids::{BlobId, SessionId},
   proto_direct::{
     AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, DiscoveryAdmissionGrant, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN,
     MAX_PAYLOAD_LEN, WireCodec, decode_frame, encode_frame,
   },
+  sync_io::SyncIoHandle,
 };
 
 use super::{PullProgress, auth::SessionAuthRegistry, blobs::BlobOutbox};

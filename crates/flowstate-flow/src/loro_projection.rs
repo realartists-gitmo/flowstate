@@ -19,9 +19,7 @@
 
 use std::sync::Arc;
 
-use flowstate_document::{
-  PARAGRAPH_ANALYTIC, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, RegionRows, SEMANTIC_CITE, materialize_single_flow,
-};
+use flowstate_document::{PARAGRAPH_ANALYTIC, PARAGRAPH_TAG, PARAGRAPH_UNDERTAG, RegionRows, SEMANTIC_CITE, materialize_single_flow};
 use gpui_flowtext::{DocumentProjection, DocumentTheme, InputBlock, document_from_input_blocks};
 use loro::{LoroDoc, LoroMap};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -29,8 +27,8 @@ use uuid::Uuid;
 
 use crate::format::{CellId, SheetId};
 use crate::loro_schema::{
-  cell_flow_label, cell_flow_map, cell_order_ids, cells_by_id, child_map, map_string, map_uuid, read_annotations, read_format,
-  sheet_order_ids, sheets_by_id,
+  cell_flow_label, cell_flow_map, cell_order_ids, cells_by_id, child_map, map_string, map_uuid, read_annotations, read_format, sheet_order_ids,
+  sheets_by_id,
 };
 use crate::projection::{Cell, CellSummary, FlowBoardProjection, Sheet};
 
@@ -66,7 +64,10 @@ pub enum FlowDefect {
   /// Cell record without a seeded flow container → empty summary.
   CellMissingFlow { cell: CellId },
   /// A defect reported by the shared rich-text materializer for one cell.
-  CellFlow { cell: CellId, defect: flowstate_document::ProjectionDefect },
+  CellFlow {
+    cell: CellId,
+    defect: flowstate_document::ProjectionDefect,
+  },
 }
 
 impl FlowDefect {
@@ -92,6 +93,7 @@ impl FlowDefect {
 
 /// Materialize the whole board. Deterministic: byte-equal boards on every peer
 /// sharing the same canonical state, regardless of local op history.
+#[hotpath::measure]
 pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, Vec<FlowDefect>)> {
   let format = read_format(doc)?;
   let mut defects = Vec::new();
@@ -212,11 +214,11 @@ pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, 
     let mut linear: Vec<CellId> = Vec::with_capacity(raw_cells.len());
     let mut seen: FxHashSet<CellId> = FxHashSet::default();
     for entry in cell_order_ids(&sheet_map) {
-      let Some(id) = Uuid::parse_str(&entry).ok().filter(|id| by_id.contains_key(id)) else {
-        defects.push(FlowDefect::CellOrderMissingRecord {
-          sheet: sheet_id,
-          key: entry,
-        });
+      let Some(id) = Uuid::parse_str(&entry)
+        .ok()
+        .filter(|id| by_id.contains_key(id))
+      else {
+        defects.push(FlowDefect::CellOrderMissingRecord { sheet: sheet_id, key: entry });
         continue;
       };
       if seen.insert(id) {
@@ -226,10 +228,9 @@ pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, 
     // raw_cells is uuid-key-sorted already, so the append order is
     // deterministic.
     for cell in &raw_cells {
-      if !seen.contains(&cell.id) {
+      if seen.insert(cell.id) {
         defects.push(FlowDefect::CellRecordMissingOrder { cell: cell.id });
         linear.push(cell.id);
-        seen.insert(cell.id);
       }
     }
 
@@ -244,12 +245,12 @@ pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, 
     }
 
     // Step 3 (dangling parent → orphan).
-    for ix in 0..raw_cells.len() {
-      if let Some(parent) = raw_cells[ix].parent_id
+    for cell in &mut raw_cells {
+      if let Some(parent) = cell.parent_id
         && !by_id.contains_key(&parent)
       {
-        defects.push(FlowDefect::DanglingParent { cell: raw_cells[ix].id });
-        raw_cells[ix].parent_id = None;
+        defects.push(FlowDefect::DanglingParent { cell: cell.id });
+        cell.parent_id = None;
       }
     }
 
@@ -305,16 +306,16 @@ pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, 
       .iter()
       .filter_map(|cell| level_of(cell.column_id).map(|level| (cell.id, level)))
       .collect();
-    for ix in 0..raw_cells.len() {
-      let Some(parent) = raw_cells[ix].parent_id else {
+    for cell in &mut raw_cells {
+      let Some(parent) = cell.parent_id else {
         continue;
       };
-      let child_level = levels.get(&raw_cells[ix].id).copied();
+      let child_level = levels.get(&cell.id).copied();
       let parent_level = levels.get(&parent).copied();
       let adjacent = matches!((child_level, parent_level), (Some(child), Some(parent)) if child == parent + 1);
       if !adjacent {
-        defects.push(FlowDefect::ColumnAdjacency { cell: raw_cells[ix].id });
-        raw_cells[ix].parent_id = None;
+        defects.push(FlowDefect::ColumnAdjacency { cell: cell.id });
+        cell.parent_id = None;
       }
     }
 
@@ -397,6 +398,7 @@ pub fn materialize_board(doc: &LoroDoc) -> anyhow::Result<(FlowBoardProjection, 
 
 /// Materialize ONE cell's full rich-text projection (editor attach). The board
 /// carries only summaries; this is the on-demand deep materialization.
+#[hotpath::measure]
 pub fn materialize_cell_projection(doc: &LoroDoc, cell_id: CellId, theme: DocumentTheme) -> anyhow::Result<DocumentProjection> {
   let rows = materialize_cell_rows(doc, cell_id)?;
   Ok(document_from_rows(doc, rows, theme))
@@ -404,6 +406,7 @@ pub fn materialize_cell_projection(doc: &LoroDoc, cell_id: CellId, theme: Docume
 
 /// The raw materialized rows for one cell (shared by the projection above and
 /// the runtime's summary refresh).
+#[hotpath::measure]
 pub fn materialize_cell_rows(doc: &LoroDoc, cell_id: CellId) -> anyhow::Result<RegionRows> {
   let cell = crate::loro_schema::cell_map(doc, cell_id).ok_or_else(|| anyhow::anyhow!("unknown cell {cell_id}"))?;
   let flow = cell_flow_map(&cell).ok_or_else(|| anyhow::anyhow!("cell {cell_id} has no flow"))?;

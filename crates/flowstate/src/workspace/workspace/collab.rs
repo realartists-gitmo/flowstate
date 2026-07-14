@@ -353,7 +353,7 @@ impl Workspace {
               let (panel_id, editor) = match (joined.payload, authority, io) {
                 (JoinedDocumentPayload::RichText(document), JoinedAuthority::RichText(authority), flowstate_collab::SyncIoHandle::RichText(io)) => {
                   let attachment = DocumentRuntimeAttachment { authority, io };
-                  let panel = match workspace.add_joined_collaboration_panel(document, joined.title, attachment, window, cx) {
+                  let panel = match workspace.add_joined_collaboration_panel(*document, joined.title, attachment, window, cx) {
                     Ok(panel) => panel,
                     Err(error) => {
                       tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");

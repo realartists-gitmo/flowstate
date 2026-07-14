@@ -51,7 +51,10 @@ impl FlowDocHandle {
   }
 
   fn lock(&self, holder: GateHolder) -> Result<crate::local_write::gate::GateGuard<'_, FlowRuntime>, FlowWriteRejected> {
-    self.core.lock(holder).map_err(|_| FlowWriteRejected::GatePoisoned)
+    self
+      .core
+      .lock(holder)
+      .map_err(|_| FlowWriteRejected::GatePoisoned)
   }
 
   /// Update the board context riding future undo items (focus restoration).
@@ -169,12 +172,11 @@ impl FlowDocHandle {
   /// Whole-doc Loro snapshot under a brief gate hold (solo save path; the
   /// collaboration save goes through the flow I/O service's fork-off-gate).
   pub fn snapshot(&self) -> Result<Vec<u8>, FlowWriteRejected> {
-    self
-      .with_runtime(GateHolder::DocumentService, |runtime| {
-        runtime
-          .snapshot()
-          .map_err(|error| FlowWriteRejected::StructureViolation(format!("{error:#}")))
-      })?
+    self.with_runtime(GateHolder::DocumentService, |runtime| {
+      runtime
+        .snapshot()
+        .map_err(|error| FlowWriteRejected::StructureViolation(format!("{error:#}")))
+    })?
   }
 
   // ---- Presence (spec Part C, step 11) ----------------------------------------
@@ -182,28 +184,22 @@ impl FlowDocHandle {
   /// Encode a cell-local editor selection as presence cursor bytes (exact Loro
   /// cursors — no offset guessing). Advisory: presence rides its own channel,
   /// so unlike undo-context capture there is no editor-frontier requirement.
-  pub fn presence_selection(
-    &self,
-    cell: CellId,
-    selection: &gpui_flowtext::EditorSelection,
-  ) -> Option<crate::presence::PresenceSelection> {
+  pub fn presence_selection(&self, cell: CellId, selection: &gpui_flowtext::EditorSelection) -> Option<crate::presence::PresenceSelection> {
     use crate::presence::{PresenceSelection, SelectionAffinity, SelectionEndpoint, VisualGravity};
     let selection = selection.clone();
     self
       .with_runtime(GateHolder::Presence, move |runtime| {
         let ctx = super::cell_text::CellTextContext::resolve(runtime.doc(), cell).ok()?;
-        let endpoint = |offset: gpui_flowtext::DocumentOffset,
-                        affinity: SelectionAffinity,
-                        gravity: VisualGravity|
-         -> Option<SelectionEndpoint> {
-          let unicode = ctx.unicode_for_offset(offset)?;
-          let cursor = crate::crdt_runtime::cursor_for_boundary(&ctx.text, unicode, affinity)?;
-          Some(SelectionEndpoint {
-            cursor: cursor.encode(),
-            affinity,
-            visual_gravity: gravity,
-          })
-        };
+        let endpoint =
+          |offset: gpui_flowtext::DocumentOffset, affinity: SelectionAffinity, gravity: VisualGravity| -> Option<SelectionEndpoint> {
+            let unicode = ctx.unicode_for_offset(offset)?;
+            let cursor = crate::crdt_runtime::cursor_for_boundary(&ctx.text, unicode, affinity)?;
+            Some(SelectionEndpoint {
+              cursor: cursor.encode(),
+              affinity,
+              visual_gravity: gravity,
+            })
+          };
         Some(PresenceSelection {
           anchor: endpoint(
             selection.anchor,
@@ -262,20 +258,13 @@ impl FlowDocHandle {
 
   // ---- Gate-held reads shared with the cell authority ------------------------
 
-  pub(crate) fn with_runtime<T>(
-    &self,
-    holder: GateHolder,
-    read: impl FnOnce(&mut FlowRuntime) -> T,
-  ) -> Result<T, FlowWriteRejected> {
+  pub(crate) fn with_runtime<T>(&self, holder: GateHolder, read: impl FnOnce(&mut FlowRuntime) -> T) -> Result<T, FlowWriteRejected> {
     let mut guard = self.lock(holder)?;
     Ok(read(&mut guard))
   }
 }
 
-fn selection_direction(
-  anchor: gpui_flowtext::DocumentOffset,
-  head: gpui_flowtext::DocumentOffset,
-) -> crate::presence::SelectionDirection {
+fn selection_direction(anchor: gpui_flowtext::DocumentOffset, head: gpui_flowtext::DocumentOffset) -> crate::presence::SelectionDirection {
   match anchor.cmp(&head) {
     std::cmp::Ordering::Less => crate::presence::SelectionDirection::Forward,
     std::cmp::Ordering::Greater => crate::presence::SelectionDirection::Backward,

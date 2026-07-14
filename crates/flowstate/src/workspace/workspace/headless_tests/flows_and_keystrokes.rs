@@ -59,7 +59,9 @@ fn flow_external_presence_outline_and_cell_caret_forwarding(cx: &mut TestAppCont
   let h = support::open_workspace(cx);
   h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
   cx.run_until_parked();
-  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  let flow = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("active flow");
 
   // One sheet + one cell, typed through the authority, editor open.
   h.update(cx, |_, _, cx| {
@@ -119,7 +121,9 @@ fn flow_external_presence_outline_and_cell_caret_forwarding(cx: &mut TestAppCont
   h.update(cx, |_, _, cx| {
     let editor = flow.read(cx);
     assert_eq!(
-      editor.presence_for_cell(cell_id).map(|presence| presence.color_rgb),
+      editor
+        .presence_for_cell(cell_id)
+        .map(|presence| presence.color_rgb),
       Some(0x00ff_0000),
       "remote focus must outline the focused cell in the peer color",
     );
@@ -143,7 +147,12 @@ fn flow_external_presence_outline_and_cell_caret_forwarding(cx: &mut TestAppCont
     let editor = flow.read(cx);
     assert!(editor.presence_for_cell(cell_id).is_none());
     let cell_editor = editor.cell_editor(cell_id).expect("open cell editor");
-    assert!(cell_editor.read(cx).external_carets_for_paragraph(0).is_empty());
+    assert!(
+      cell_editor
+        .read(cx)
+        .external_carets_for_paragraph(0)
+        .is_empty()
+    );
   });
 }
 
@@ -156,7 +165,9 @@ fn flow_edit_save_undo_through_the_authority(cx: &mut TestAppContext) {
   let h = support::open_workspace(cx);
   h.update(cx, |ws, window, cx| ws.new_flow(window, cx));
   cx.run_until_parked();
-  let flow = h.read(cx, |ws| ws.active_flow.clone()).expect("active flow");
+  let flow = h
+    .read(cx, |ws| ws.active_flow.clone())
+    .expect("active flow");
 
   // Structural edits: sheet + two root cells + typing into the second.
   h.update(cx, |_, _, cx| {
@@ -205,18 +216,24 @@ fn flow_edit_save_undo_through_the_authority(cx: &mut TestAppContext) {
     flow.update(cx, |editor, cx| {
       let sheet = editor.board().sheets[0].id;
       editor.activate_sheet(sheet, cx);
-      let moved = editor.handle().apply(flowstate_flow::FlowIntent::MoveCellSubtree {
-        sheet_id: sheet,
-        cell_id: second,
-        drop: flowstate_flow::FlowDropIntent::AfterSibling(first),
-      });
+      let moved = editor
+        .handle()
+        .apply(flowstate_flow::FlowIntent::MoveCellSubtree {
+          sheet_id: sheet,
+          cell_id: second,
+          drop: flowstate_flow::FlowDropIntent::AfterSibling(first),
+        });
       assert!(moved.is_ok_and(|outcome| outcome.changed), "drag commit through the gate");
       editor.sync_board_from_handle(cx);
     });
   });
   cx.run_until_parked();
   h.update(cx, |_, _, cx| {
-    let order: Vec<_> = flow.read(cx).board().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    let order: Vec<_> = flow.read(cx).board().sheets[0]
+      .cells
+      .iter()
+      .map(|cell| cell.id)
+      .collect();
     assert_eq!(order, vec![first, second]);
   });
 
@@ -226,7 +243,11 @@ fn flow_edit_save_undo_through_the_authority(cx: &mut TestAppContext) {
   });
   cx.run_until_parked();
   h.update(cx, |_, _, cx| {
-    let order: Vec<_> = flow.read(cx).board().sheets[0].cells.iter().map(|cell| cell.id).collect();
+    let order: Vec<_> = flow.read(cx).board().sheets[0]
+      .cells
+      .iter()
+      .map(|cell| cell.id)
+      .collect();
     assert_eq!(order, vec![second, first], "undo reversed the move");
   });
 
@@ -235,12 +256,14 @@ fn flow_edit_save_undo_through_the_authority(cx: &mut TestAppContext) {
   std::fs::create_dir_all(&dir).expect("temp dir");
   let path = dir.join("gate.fl0");
   h.update(cx, |_, _, cx| {
-    flow.update(cx, |editor, cx| editor.save_as(path.clone(), cx)).detach();
+    flow
+      .update(cx, |editor, cx| editor.save_as(path.clone(), cx))
+      .detach();
   });
   let flow_for_wait = flow.clone();
   h.wait_until(cx, "flow save to complete", move |_| path.exists());
   cx.run_until_parked();
-  let snapshot = flowstate_flow::read_fl0(&dir.join("gate.fl0")).expect("read .fl0 v2");
+  let snapshot = flowstate_flow::read_fl0(dir.join("gate.fl0")).expect("read .fl0 v2");
   let reloaded = flowstate_collab::flow::FlowRuntime::from_snapshot(&snapshot).expect("reload");
   h.update(cx, |_, _, cx| {
     assert_eq!(reloaded.board_ref(), flow_for_wait.read(cx).board(), "saved board round-trips");

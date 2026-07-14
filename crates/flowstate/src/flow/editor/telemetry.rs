@@ -174,7 +174,16 @@ impl FlowEditor {
     self
       .board()
       .cell(id)
-      .map(|(_, cell)| cell.summary.summary_text.lines().next().unwrap_or_default().trim().to_string())
+      .map(|(_, cell)| {
+        cell
+          .summary
+          .summary_text
+          .lines()
+          .next()
+          .unwrap_or_default()
+          .trim()
+          .to_string()
+      })
       .filter(|label| !label.is_empty())
       .unwrap_or_else(|| format!("cell:{}", &id.to_string()[..8]))
   }
@@ -196,9 +205,7 @@ impl FlowEditor {
     self
       .active_sheet
       .zip(self.dragging_cell)
-      .is_some_and(|(sheet, dragged)| {
-        flowstate_flow::board_ops::preview_move_cell_subtree(self.board(), sheet, dragged, intent).is_some()
-      })
+      .is_some_and(|(sheet, dragged)| flowstate_flow::board_ops::preview_move_cell_subtree(self.board(), sheet, dragged, intent).is_some())
   }
 
   fn sheet_topology_snapshot(&self) -> Vec<Value> {

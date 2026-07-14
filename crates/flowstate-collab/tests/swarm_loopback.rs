@@ -130,7 +130,13 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   // owner proxy: C can authenticate directly to B and bootstrap from B even
   // if A is unavailable.
   install_snapshot_handler(&b, session, b"snapshot-from-b".to_vec()).await;
-  let b_invite = SessionTicket::new(session, vec![b_addr.clone()], "Shared brief".into(), admission.clone(), flowstate_collab::ticket::DocumentKind::RichText);
+  let b_invite = SessionTicket::new(
+    session,
+    vec![b_addr.clone()],
+    "Shared brief".into(),
+    admission.clone(),
+    flowstate_collab::ticket::DocumentKind::RichText,
+  );
   let b_invite = SessionTicket::decode_text(&b_invite.encode_text())?;
   let snapshot = direct::pull_with_endpoint(
     &c.endpoint,
@@ -257,13 +263,7 @@ async fn flow_direct_snapshot_and_updates_pull() -> Result<()> {
     .await;
 
   // B pulls the snapshot and reconstructs the identical board.
-  let snapshot = direct::pull_with_endpoint(
-    &b.endpoint,
-    DirectRequest::Snapshot { session },
-    vec![a_addr.id],
-    Duration::from_secs(5),
-  )
-  .await?;
+  let snapshot = direct::pull_with_endpoint(&b.endpoint, DirectRequest::Snapshot { session }, vec![a_addr.id], Duration::from_secs(5)).await?;
   let joined = FlowRuntime::from_snapshot(&snapshot).expect("joiner runtime");
   assert_eq!(joined.board_ref(), &expected_board);
 
@@ -288,7 +288,10 @@ async fn flow_direct_snapshot_and_updates_pull() -> Result<()> {
   let mut joined = joined;
   joined.import_remote_updates(&[updates.as_slice()])?;
   assert_eq!(
-    joined.board_ref().sheet(sheet).map(|sheet| sheet.name.as_str()),
+    joined
+      .board_ref()
+      .sheet(sheet)
+      .map(|sheet| sheet.name.as_str()),
     Some("Renamed after snapshot")
   );
   a.router.shutdown().await.ok();

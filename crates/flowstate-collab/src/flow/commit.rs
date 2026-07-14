@@ -31,6 +31,7 @@ use super::runtime::{FlowRuntime, FlowWriteOutcome, FlowWriteRejected};
 use crate::crdt_runtime::cursor_for_boundary;
 
 /// Execute one flow intent against the gate-held runtime.
+#[hotpath::measure]
 pub(crate) fn apply_flow_intent(core: &mut FlowRuntime, intent: &FlowIntent) -> Result<FlowWriteOutcome, FlowWriteRejected> {
   let class = intent.class();
   let doc = core.doc().clone();
@@ -112,7 +113,7 @@ impl From<anyhow::Error> for ExecuteError {
   }
 }
 
-fn sheet_of<'a>(core: &'a FlowRuntime, sheet_id: SheetId) -> Result<&'a Sheet, FlowWriteRejected> {
+fn sheet_of(core: &FlowRuntime, sheet_id: SheetId) -> Result<&Sheet, FlowWriteRejected> {
   core
     .board_ref()
     .sheet(sheet_id)
@@ -162,7 +163,10 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       for cell in cells {
         core.close_cell(cell);
       }
-      core.board_mut().sheets.retain(|sheet| sheet.id != *sheet_id);
+      core
+        .board_mut()
+        .sheets
+        .retain(|sheet| sheet.id != *sheet_id);
       Ok(Some(Derived::Board))
     },
     FlowIntent::MoveSheet { sheet_id, target_index } => {
@@ -276,7 +280,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       let sheet_map = loro_schema::sheet_map(doc, *sheet_id).context("resolving sheet map")?;
       // Column/parent rewrites for changed subtree members (LWW fields).
       for cell in &target.cells {
-        let old = before.cell(cell.id).context("moved cell missing from pre-state")?;
+        let old = before
+          .cell(cell.id)
+          .context("moved cell missing from pre-state")?;
         if old.column_id != cell.column_id || old.parent_id != cell.parent_id {
           let map = loro_schema::cell_map(doc, cell.id).context("resolving moved cell map")?;
           if old.column_id != cell.column_id {
@@ -289,7 +295,11 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       }
       // Order-list moves ONLY (never a cell map/text write): minimal `mov`
       // sequence transforming the live order into the target order.
-      let target_ids: Vec<String> = target.cells.iter().map(|cell| cell.id.to_string()).collect();
+      let target_ids: Vec<String> = target
+        .cells
+        .iter()
+        .map(|cell| cell.id.to_string())
+        .collect();
       apply_order_diff(&sheet_map, &target_ids).context("applying order-list moves")?;
       if let Some(sheet) = core.board_mut().sheet_mut(*sheet_id) {
         *sheet = target;
@@ -298,7 +308,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
     },
     FlowIntent::SetCellStruck { sheet_id, cell_id, struck } => {
       let sheet = sheet_of(core, *sheet_id)?;
-      let cell = sheet.cell(*cell_id).ok_or(FlowWriteRejected::UnknownCell(*cell_id))?;
+      let cell = sheet
+        .cell(*cell_id)
+        .ok_or(FlowWriteRejected::UnknownCell(*cell_id))?;
       if cell.summary.struck == *struck {
         return Ok(None);
       }
@@ -322,7 +334,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
     },
     FlowIntent::EnsureCellEditable { sheet_id, cell_id } => {
       let sheet = sheet_of(core, *sheet_id)?;
-      let cell = sheet.cell(*cell_id).ok_or(FlowWriteRejected::UnknownCell(*cell_id))?;
+      let cell = sheet
+        .cell(*cell_id)
+        .ok_or(FlowWriteRejected::UnknownCell(*cell_id))?;
       if cell.summary.uses_summary_projection {
         return Ok(None);
       }
@@ -360,7 +374,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       }
       loro_schema::put_annotation(doc, stroke).context("writing annotation stroke")?;
       if let Some(sheet) = core.board_mut().sheet_mut(*sheet_id) {
-        sheet.annotations.retain(|existing| existing.id != stroke.id);
+        sheet
+          .annotations
+          .retain(|existing| existing.id != stroke.id);
         sheet.annotations.push(stroke.clone());
         sheet.annotations.sort_by_key(|stroke| stroke.id);
       }
@@ -406,7 +422,9 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       }
       for sheet in &mut core.board_mut().sheets {
         if sheet_id.is_none_or(|target| sheet.id == target) {
-          sheet.annotations.retain(|stroke| &stroke.originator != originator);
+          sheet
+            .annotations
+            .retain(|stroke| &stroke.originator != originator);
         }
       }
       Ok(Some(Derived::Board))
@@ -429,10 +447,7 @@ fn execute_intent(core: &mut FlowRuntime, doc: &LoroDoc, intent: &FlowIntent) ->
       };
       let plan = cell_text::resolve_cell_plan(doc, &ctx, &paragraph_ids, intent)?;
       let caret = cell_text::execute_cell_plan(&ctx, &plan).context("executing cell text plan")?;
-      Ok(Some(Derived::Content {
-        cell: *cell_id,
-        caret,
-      }))
+      Ok(Some(Derived::Content { cell: *cell_id, caret }))
     },
   }
 }
@@ -447,7 +462,9 @@ fn resolve_placement(
   placement: &CellPlacement,
 ) -> Result<(usize, usize, Option<CellId>), FlowWriteRejected> {
   let board = core.board_ref();
-  let sheet = board.sheet(sheet_id).ok_or(FlowWriteRejected::UnknownSheet(sheet_id))?;
+  let sheet = board
+    .sheet(sheet_id)
+    .ok_or(FlowWriteRejected::UnknownSheet(sheet_id))?;
   match placement {
     CellPlacement::ColumnEnd { column_index } => {
       if *column_index >= columns.len() {
@@ -493,7 +510,9 @@ fn resolve_placement(
       Ok((column, insertion, source.parent_id))
     },
     CellPlacement::FirstResponseTo { parent } | CellPlacement::ResponseTo { parent } => {
-      let parent_cell = sheet.cell(*parent).ok_or(FlowWriteRejected::UnknownCell(*parent))?;
+      let parent_cell = sheet
+        .cell(*parent)
+        .ok_or(FlowWriteRejected::UnknownCell(*parent))?;
       let parent_column = columns
         .iter()
         .position(|column| *column == parent_cell.column_id)
@@ -556,13 +575,17 @@ pub(crate) fn reconcile_order_list(order: &loro::LoroMovableList, current: &[Str
     }
   }
   for index in doomed.into_iter().rev() {
-    order.delete(index, 1).context("dropping dead order entry")?;
+    order
+      .delete(index, 1)
+      .context("dropping dead order entry")?;
     working.remove(index);
   }
   // Missing target entries append (their canonical position lands via `mov`).
   for id in target {
     if !working.iter().any(|entry| entry == id) {
-      order.insert(working.len(), id.as_str()).context("appending missing order entry")?;
+      order
+        .insert(working.len(), id.as_str())
+        .context("appending missing order entry")?;
       working.push(id.clone());
     }
   }

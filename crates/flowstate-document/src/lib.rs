@@ -27,9 +27,8 @@ pub use loro_schema::{
   SectionPageAttrs, SectionPageNumbering, SectionPageSize, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY,
   TABLE_ROW_ORDER, TABLE_ROWS_BY_ID, USERS_BY_ID, cell_flow_loro_id, cell_loro_id, cell_loro_id_for, column_loro_id, document_id,
   document_schema_version, ensure_flow, ensure_section, ensure_sentinel, fork_document_lineage, init_loro_document, new_loro_document,
-  parse_cell_loro_id,
-  parse_column_loro_id, parse_row_loro_id, read_section_page_attrs, record_revision, register_replica, register_user, row_loro_id,
-  set_section_page_attrs, touch_document_metadata,
+  parse_cell_loro_id, parse_column_loro_id, parse_row_loro_id, read_section_page_attrs, record_revision, register_replica, register_user,
+  row_loro_id, set_section_page_attrs, touch_document_metadata,
 };
 pub use package::{
   AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,

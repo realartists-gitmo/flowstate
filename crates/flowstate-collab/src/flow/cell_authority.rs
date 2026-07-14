@@ -87,10 +87,7 @@ impl LocalWriteAuthority for FlowCellAuthority {
   fn apply(&self, intent: LocalIntent) -> Result<LocalWriteOutcome, WriteRejected> {
     let outcome = self
       .handle
-      .apply(FlowIntent::CellText {
-        cell_id: self.cell,
-        intent,
-      })
+      .apply(FlowIntent::CellText { cell_id: self.cell, intent })
       .map_err(Self::map_rejection)?;
     if !outcome.changed {
       return Err(WriteRejected::EmptyIntent);
@@ -116,7 +113,10 @@ impl LocalWriteAuthority for FlowCellAuthority {
 
   fn undo(&self) -> Result<UndoOutcome, WriteRejected> {
     let outcome = self.handle.undo().map_err(Self::map_rejection)?;
-    let selection = outcome.meta.as_ref().and_then(|meta| self.selection_from_meta(meta));
+    let selection = outcome
+      .meta
+      .as_ref()
+      .and_then(|meta| self.selection_from_meta(meta));
     Ok(UndoOutcome {
       applied: outcome.applied,
       selection,
@@ -125,7 +125,10 @@ impl LocalWriteAuthority for FlowCellAuthority {
 
   fn redo(&self) -> Result<UndoOutcome, WriteRejected> {
     let outcome = self.handle.redo().map_err(Self::map_rejection)?;
-    let selection = outcome.meta.as_ref().and_then(|meta| self.selection_from_meta(meta));
+    let selection = outcome
+      .meta
+      .as_ref()
+      .and_then(|meta| self.selection_from_meta(meta));
     Ok(UndoOutcome {
       applied: outcome.applied,
       selection,
@@ -148,7 +151,10 @@ impl LocalWriteAuthority for FlowCellAuthority {
   }
 
   fn canonical_projection(&self) -> Result<DocumentProjection, WriteRejected> {
-    self.handle.open_cell(self.cell).map_err(Self::map_rejection)
+    self
+      .handle
+      .open_cell(self.cell)
+      .map_err(Self::map_rejection)
   }
 
   fn encode_selection_anchor(&self, selection: &EditorSelection, editor_frontier: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
@@ -156,7 +162,7 @@ impl LocalWriteAuthority for FlowCellAuthority {
     let selection = selection.clone();
     let editor_frontier = editor_frontier.to_vec();
     let handle = Arc::clone(&self.handle);
-    let encoded = self
+    self
       .handle
       .with_runtime(GateHolder::Presence, move |runtime| {
         // Only encode while the editor is in sync with the core (an undrained
@@ -180,8 +186,7 @@ impl LocalWriteAuthority for FlowCellAuthority {
         });
         Some((head.encode(), anchor.encode()))
       })
-      .ok()?;
-    encoded
+      .ok()?
   }
 
   fn resolve_selection_anchor(

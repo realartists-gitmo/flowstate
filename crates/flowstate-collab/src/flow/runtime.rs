@@ -366,7 +366,11 @@ impl FlowRuntime {
 
   fn set_board_summary(&mut self, cell: CellId, summary: CellSummary) -> bool {
     for sheet in &mut self.board.sheets {
-      if let Some(found) = sheet.cells.iter_mut().find(|candidate| candidate.id == cell) {
+      if let Some(found) = sheet
+        .cells
+        .iter_mut()
+        .find(|candidate| candidate.id == cell)
+      {
         if found.summary == summary {
           return false;
         }
@@ -408,12 +412,11 @@ impl FlowRuntime {
   pub(crate) fn audit_board_against_rebuild(&self, class: &str) {
     match materialize_board(&self.doc) {
       Ok((fresh, _)) => {
-        if fresh != self.board {
-          panic!(
-            "flow intent '{class}' left the maintained board out of sync with a fresh materialization:\n{}",
-            board_divergence(&self.board, &fresh)
-          );
-        }
+        assert!(
+          fresh == self.board,
+          "flow intent '{class}' left the maintained board out of sync with a fresh materialization:\n{}",
+          board_divergence(&self.board, &fresh)
+        );
       },
       Err(error) => panic!("flow board audit rematerialization failed after '{class}': {error:#}"),
     }
@@ -429,7 +432,10 @@ impl FlowRuntime {
     self.import_batches_served += 1;
     let frontier_before = self.doc.state_frontiers();
     for chunk in chunks {
-      self.doc.import(chunk).context("importing remote flow update")?;
+      self
+        .doc
+        .import(chunk)
+        .context("importing remote flow update")?;
     }
     if self.doc.state_frontiers() == frontier_before {
       return Ok(());
@@ -578,12 +584,7 @@ fn install_undo_meta_callbacks(undo: &UndoManager, state: &Arc<Mutex<FlowUndoMet
 
   let pop_state = Arc::clone(state);
   undo.set_on_pop(Some(Box::new(move |_, _, meta| {
-    let transformed: Vec<Vec<u8>> = meta
-      .cursors
-      .iter()
-      .map(|entry| entry.cursor.encode())
-      .collect();
-    let LoroValue::Binary(bytes) = meta.value else {
+    let LoroValue::Binary(bytes) = meta.value.clone() else {
       return;
     };
     match postcard::from_bytes::<FlowUndoMeta>(bytes.as_ref()) {
@@ -591,7 +592,7 @@ fn install_undo_meta_callbacks(undo: &UndoManager, state: &Arc<Mutex<FlowUndoMet
         // Prefer the stack-transformed cursors over the capture-time bytes.
         let had_head = restored.head_cursor.is_some();
         let had_anchor = restored.anchor_cursor.is_some();
-        let mut transformed = transformed.into_iter();
+        let mut transformed = meta.cursors.iter().map(|entry| entry.cursor.encode());
         if had_head && let Some(head) = transformed.next() {
           restored.head_cursor = Some(head);
         }

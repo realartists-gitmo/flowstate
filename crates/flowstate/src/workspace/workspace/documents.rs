@@ -1396,9 +1396,16 @@ impl Workspace {
         return;
       }
       let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+      let dropbox = self.flow_dropbox_sync_context(&editor, cx);
       let window_handle = window.window_handle();
       cx.spawn(async move |_, cx| {
-        if let Err(error) = save_task.await {
+        let result = match save_task.await {
+          // The bound-path mirror runs after (and only after) a good local
+          // save, exactly like the .db8 checkpoint hook.
+          Ok(()) => sync_flow_dropbox_binding(dropbox).await,
+          Err(error) => Err(error),
+        };
+        if let Err(error) = result {
           let detail = error.to_string();
           let _ = window_handle.update(cx, |_, window, cx| {
             window.prompt(PromptLevel::Critical, "Save failed", Some(&detail), &[PromptButton::ok("Ok")], cx)
@@ -1408,6 +1415,26 @@ impl Workspace {
       .detach();
       cx.notify();
     }
+  }
+
+  /// Everything the post-save Dropbox mirror needs, captured while the
+  /// workspace lease is held: the flow's bound path, its document id (the
+  /// cross-document clobber gate), and the panel's I/O service.
+  fn flow_dropbox_sync_context(
+    &self,
+    editor: &Entity<FlowEditor>,
+    cx: &App,
+  ) -> Option<(PathBuf, Uuid, flowstate_collab::flow::FlowIoHandle)> {
+    let path = editor.read(cx).document_path()?.clone();
+    crate::app_settings::load_dropbox_document_binding(&path)?;
+    let document_id = editor.read(cx).handle().document_id().ok()?;
+    let panel_id = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).editor() == *editor)
+      .map(|panel| panel.read(cx).id())?;
+    let io = self.flow_document_runtimes.get(&panel_id)?.clone();
+    Some((path, document_id, io))
   }
 
   pub fn save_active_as(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1522,8 +1549,13 @@ impl Workspace {
 
     self.autosave_flow_in_flight.insert(panel_id);
     let save_task = editor.update(cx, |editor, cx| editor.save(cx));
+    let dropbox = self.flow_dropbox_sync_context(&editor, cx);
     cx.spawn(async move |workspace, cx| {
-      if let Err(error) = save_task.await {
+      let result = match save_task.await {
+        Ok(()) => sync_flow_dropbox_binding(dropbox).await,
+        Err(error) => Err(error),
+      };
+      if let Err(error) = result {
         eprintln!("flow autosave failed: {error}");
       }
       let _ = workspace.update(cx, |workspace, _| {
@@ -1789,6 +1821,16 @@ fn write_bytes_to_path(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
   atomicwrites::AtomicFile::new(path, atomicwrites::AllowOverwrite)
     .write(|file| std::io::Write::write_all(file, bytes))
     .map_err(Into::into)
+}
+
+/// Mirror a just-saved, Dropbox-bound flow to its remote path (spec Part C
+/// lifecycle parity). `None` context (no path / no binding / no I/O service)
+/// is the common case and a silent no-op.
+async fn sync_flow_dropbox_binding(context: Option<(PathBuf, Uuid, flowstate_collab::flow::FlowIoHandle)>) -> std::io::Result<()> {
+  match context {
+    Some((path, document_id, io)) => crate::collab::dropbox_checkpoint::sync_bound_flow_file(&path, document_id, &io).await,
+    None => Ok(()),
+  }
 }
 
 /// Stable short tag for a runtime event variant, used only by fidelity firehose

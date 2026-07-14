@@ -3285,6 +3285,7 @@ dependencies = [
  "anyhow",
  "flowstate-document",
  "gpui-flowtext",
+ "hotpath",
  "loro",
  "postcard",
  "rustc-hash 2.1.2",
@@ -3302,9 +3303,12 @@ dependencies = [
  "flowstate-collab",
  "flowstate-document",
  "flowstate-docx",
+ "flowstate-flow",
+ "gpui-flowtext",
  "hotpath",
  "loro",
  "postcard",
+ "uuid",
 ]
 
 [[package]]

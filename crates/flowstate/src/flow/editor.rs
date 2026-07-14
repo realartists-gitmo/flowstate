@@ -174,8 +174,7 @@ impl FlowEditor {
   }
 
   pub fn blank(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let (handle, _gate) =
-      FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()).expect("fresh flow document");
+    let (handle, _gate) = FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()).expect("fresh flow document");
     Self::new_with_path(handle, None, window, cx)
   }
 
@@ -303,13 +302,7 @@ impl FlowEditor {
   pub fn activate_cell(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
     let sheet_id = self.board.cell(cell_id).map(|(sheet, _)| sheet.id);
     if let Some(sheet_id) = sheet_id {
-      self.apply_intent(
-        FlowIntent::EnsureCellEditable {
-          sheet_id,
-          cell_id,
-        },
-        cx,
-      );
+      self.apply_intent(FlowIntent::EnsureCellEditable { sheet_id, cell_id }, cx);
       self.ensure_cell_editor(cell_id, cx);
       self.active_sheet = Some(sheet_id);
       self.active_cell = Some(cell_id);
@@ -345,7 +338,7 @@ impl FlowEditor {
     self.add_cell_with_placement(sheet, CellPlacement::FirstResponseTo { parent: cell }, cx);
   }
 
-  /// The one AddCell path behind every add_* entry point.
+  /// The one `AddCell` path behind every `add_*` entry point.
   fn add_cell_with_placement(&mut self, sheet_id: SheetId, placement: CellPlacement, cx: &mut Context<Self>) {
     let cell_id = uuid::Uuid::new_v4();
     if self.apply_intent(
@@ -443,7 +436,12 @@ impl FlowEditor {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    let Some(index) = self.board.sheets.iter().position(|candidate| candidate.id == sheet) else {
+    let Some(index) = self
+      .board
+      .sheets
+      .iter()
+      .position(|candidate| candidate.id == sheet)
+    else {
       return;
     };
     let target = index

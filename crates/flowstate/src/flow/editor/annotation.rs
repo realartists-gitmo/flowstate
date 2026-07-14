@@ -40,13 +40,7 @@ impl FlowEditor {
 
   pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
     let originator = self.local_annotation_originator.clone();
-    if self.apply_intent(
-      flowstate_flow::FlowIntent::ClearAnnotations {
-        sheet_id: None,
-        originator,
-      },
-      cx,
-    ) {
+    if self.apply_intent(flowstate_flow::FlowIntent::ClearAnnotations { sheet_id: None, originator }, cx) {
       self.changed(self.active_cell, cx);
     }
   }
@@ -126,7 +120,10 @@ impl FlowEditor {
   }
 
   fn erase_at(&mut self, point: BoardPoint, cx: &mut Context<Self>) {
-    let Some(sheet) = self.active_sheet.and_then(|sheet_id| self.board.sheet(sheet_id)) else {
+    let Some(sheet) = self
+      .active_sheet
+      .and_then(|sheet_id| self.board.sheet(sheet_id))
+    else {
       return;
     };
     let radius = 10.0;

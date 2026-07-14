@@ -15,7 +15,7 @@
 //!    (write-once/delete-only — already proven convergent)
 //! ```
 //!
-//! Ordering is MovableList (`mov` writes only the order list, never a cell map
+//! Ordering is `MovableList` (`mov` writes only the order list, never a cell map
 //! or text container, so a reorder can never clobber a concurrent text edit);
 //! the parent tree is per-cell LWW `parent_id`/`column_id`. Everything here
 //! writes WITHOUT committing — the caller (the gated flow runtime, or a test)
@@ -336,7 +336,7 @@ pub fn sheet_order_ids(doc: &LoroDoc) -> Vec<String> {
 // ---- Cell rich text --------------------------------------------------------
 
 /// Ensure the cell's flow container exists in the EXACT .db8 flow shape
-/// (sentinel text container + attrs + text_container_id + a per-cell
+/// (sentinel text container + attrs + `text_container_id` + a per-cell
 /// paragraph registry child).
 pub fn ensure_cell_flow(cell: &LoroMap) -> LoroResult<LoroMap> {
   let flow = ensure_flow(cell, CELL_FLOW_KEY, CELL_FLOW_KIND)?;
@@ -396,11 +396,7 @@ pub fn cell_flow_from_paragraphs(cell: &LoroMap, paragraphs: &[InputParagraph]) 
 
   for (ix, paragraph) in paragraphs.iter().enumerate() {
     let boundary = boundaries[ix];
-    text.mark(
-      boundary..boundary + 1,
-      MARK_PARAGRAPH_STYLE,
-      paragraph_style_value(paragraph.style),
-    )?;
+    text.mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, paragraph_style_value(paragraph.style))?;
     let mut unicode_pos = boundary + 1;
     for run in &paragraph.runs {
       let run_len = run.text.chars().count();
@@ -438,7 +434,9 @@ pub fn write_paragraph_record(registry: &LoroMap, text: &LoroText, key: &str, bo
 /// Apply `styles` as explicit marks over `range` (unicode). The inverse of
 /// `run_styles_from_attrs`; only non-default fields emit marks.
 pub fn mark_run_styles(text: &LoroText, range: std::ops::Range<usize>, styles: &gpui_flowtext::RunStyles) -> LoroResult<()> {
-  use flowstate_document::loro_schema::{MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN};
+  use flowstate_document::loro_schema::{
+    MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN,
+  };
   if let RunSemanticStyle::Custom(slot) = styles.semantic {
     text.mark(range.clone(), MARK_RUN_SEMANTIC_STYLE, i64::from(slot))?;
   }
