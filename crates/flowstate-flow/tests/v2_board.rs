@@ -412,6 +412,31 @@ fn normalization_determinism_under_random_concurrent_raw_mutation() {
   }
 }
 
+/// The old `Cell::summary_text` fixture, verbatim: mixed card + analytic
+/// content projects tag/cite/undertag/analytic rows in document order.
+#[test]
+fn summary_projects_mixed_card_and_analytic_content_in_document_order() {
+  let cite = |text: &str| {
+    let mut run = run(text);
+    run.styles.semantic = flowstate_document::SEMANTIC_CITE;
+    run
+  };
+  let blocks: Vec<gpui_flowtext::InputBlock> = vec![
+    gpui_flowtext::InputBlock::Paragraph(paragraph(flowstate_document::PARAGRAPH_TAG, vec![run("Tag")])),
+    gpui_flowtext::InputBlock::Paragraph(paragraph(
+      ParagraphStyle::Normal,
+      vec![run("hidden before "), cite("Cite"), run(" hidden after")],
+    )),
+    gpui_flowtext::InputBlock::Paragraph(paragraph(flowstate_document::PARAGRAPH_UNDERTAG, vec![run("Undertag")])),
+    gpui_flowtext::InputBlock::Paragraph(paragraph(flowstate_document::PARAGRAPH_ANALYTIC, vec![run("Analytic")])),
+  ];
+  let summary = summary_from_rows(&blocks);
+  assert_eq!(summary.summary_text.as_ref(), "Tag\nCite\nUndertag\nAnalytic");
+  assert!(summary.uses_summary_projection);
+  assert!(!summary.struck);
+  assert!(!summary.is_empty);
+}
+
 #[test]
 fn fl0_v2_round_trips_and_v1_is_rejected() {
   let board = board_with_sheet();

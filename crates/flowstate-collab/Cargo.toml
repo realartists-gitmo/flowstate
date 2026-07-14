@@ -11,6 +11,7 @@ base64 = { workspace = true }
 blake3 = "1.8.5"
 flowstate-document.workspace = true
 flowstate-fidelity.workspace = true
+flowstate-flow.workspace = true
 gpui-flowtext = { workspace = true }
 hotpath.workspace = true
 iroh = { workspace = true }

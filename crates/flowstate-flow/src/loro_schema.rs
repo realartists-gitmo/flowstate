@@ -25,7 +25,7 @@ use flowstate_document::loro_schema::{
   FLOW_TEXT_KEY, MARK_PARAGRAPH_STYLE, PARAGRAPHS_BY_ID, ROOT_FIRST_PARAGRAPH_ID, configure_text_styles, ensure_flow,
 };
 use gpui_flowtext::{InputParagraph, ParagraphStyle, RunSemanticStyle};
-use loro::{LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, ValueOrContainer, cursor::Side};
+use loro::{ContainerTrait as _, LoroDoc, LoroMap, LoroMovableList, LoroResult, LoroText, LoroValue, ValueOrContainer, cursor::Side};
 use uuid::Uuid;
 
 use crate::format::{AnnotationStroke, CellId, FlowFormat, SheetId, StrokeId};
@@ -140,6 +140,38 @@ pub fn cell_order_list(sheet: &LoroMap) -> LoroResult<LoroMovableList> {
 #[must_use]
 pub fn cell_flow_label(cell_id: CellId) -> String {
   format!("cell.{cell_id}.flow")
+}
+
+/// READ-ONLY text resolution for a flow map (never creates containers):
+/// prefer the stored raw container id, fall back to the `text` child.
+pub fn flow_text(doc: &LoroDoc, flow: &LoroMap) -> Option<LoroText> {
+  if let Some(container_id) = map_string(flow, "text_container_id")
+    && let Ok(id) = loro::ContainerID::try_from(container_id.as_str())
+    && let Some(container) = doc.get_container(id)
+    && container.is_attached()
+    && !container.is_deleted()
+    && let Ok(text) = container.into_text()
+  {
+    return Some(text);
+  }
+  match flow.get(FLOW_TEXT_KEY)? {
+    ValueOrContainer::Container(container) => container.into_text().ok(),
+    ValueOrContainer::Value(_) => None,
+  }
+}
+
+/// READ-ONLY cell text resolution (`cell → flow → text`).
+pub fn cell_text(doc: &LoroDoc, cell_id: CellId) -> Option<LoroText> {
+  let cell = cell_map(doc, cell_id)?;
+  let flow = cell_flow_map(&cell)?;
+  flow_text(doc, &flow)
+}
+
+/// READ-ONLY per-cell paragraph registry resolution.
+pub fn cell_paragraph_registry(doc: &LoroDoc, cell_id: CellId) -> Option<LoroMap> {
+  let cell = cell_map(doc, cell_id)?;
+  let flow = cell_flow_map(&cell)?;
+  child_map(&flow, PARAGRAPHS_BY_ID)
 }
 
 // ---- Sheet records ---------------------------------------------------------

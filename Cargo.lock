@@ -3171,6 +3171,7 @@ dependencies = [
  "dispatch2",
  "flowstate-document",
  "flowstate-fidelity",
+ "flowstate-flow",
  "futures-util",
  "gpui",
  "gpui-flowtext",
@@ -3283,8 +3284,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "flowstate-document",
+ "gpui-flowtext",
  "loro",
  "postcard",
+ "rustc-hash 2.1.2",
  "serde",
  "uuid",
  "zstd",
