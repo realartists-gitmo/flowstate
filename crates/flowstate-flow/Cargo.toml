@@ -10,8 +10,10 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 flowstate-document.workspace = true
+gpui-flowtext = { workspace = true }
 loro = "1.13.1"
 postcard = "1.1.3"
+rustc-hash = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 uuid = { workspace = true, features = ["serde", "v4"] }
 zstd.workspace = true

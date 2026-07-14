@@ -4,21 +4,7 @@ use anyhow::{Context as _, bail};
 use uuid::Uuid;
 
 use crate::{AnnotationOriginator, AnnotationStroke, Cell, CellId, FlowDocument, FlowProjection, Sheet, SheetId, SheetTypeId};
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RelativePosition {
-  Before,
-  After,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum FlowDropIntent {
-  BeforeSibling(CellId),
-  AfterSibling(CellId),
-  FirstChildOf(CellId),
-  LastChildOf(CellId),
-  RootInColumn { column_index: usize, insertion_index: usize },
-}
+pub use crate::intents::{FlowDropIntent, RelativePosition};
 
 impl FlowDocument {
   pub fn child_append_index(&self, sheet_id: SheetId, parent_id: CellId) -> anyhow::Result<usize> {
