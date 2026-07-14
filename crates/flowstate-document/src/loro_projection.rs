@@ -150,6 +150,71 @@ pub fn materialize_viewport(doc: &LoroDoc, start_unicode: usize, end_unicode: us
   materialize_body_region(doc, sentinel, end, &paragraph_map, &pblock_map, &object_map)
 }
 
+/// Materialize ONE standalone flow — a flow map shaped by the canonical
+/// `ensure_flow` (sentinel text + `MARK_*` styles) that carries its OWN
+/// `paragraphs_by_id` registry as a child, e.g. a .fl0 cell's rich text. Runs
+/// the SAME flow walk as the body materialization, so coalescing, style
+/// defaults, fabrication, and defect reporting are one law. Paragraph-only:
+/// there is no object registry, so a stray U+FFFC is skipped exactly like the
+/// .db8 table-cell walk; block ids are derived 1:1 from the paragraph ids (a
+/// standalone flow's blocks ARE its paragraphs). `flow_id` labels defects and
+/// must not be the body flow id.
+pub fn materialize_single_flow(doc: &LoroDoc, flow_map: &LoroMap, flow_id: &str) -> io::Result<RegionRows> {
+  debug_assert_ne!(flow_id, ROOT_BODY_FLOW_ID, "standalone flow materialization is not the body path");
+  // §28 shape: prefer direct resolution via the flow's stored raw container id,
+  // falling back to map-key traversal (same law as `Projector::flow_text`).
+  let text = match map_string_opt(flow_map, "text_container_id")?.and_then(|id| resolve_text_by_container_id(doc, &id)) {
+    Some(text) => text,
+    None => child_text(flow_map, FLOW_TEXT_KEY)?.ok_or_else(|| invalid(format!("flow `{flow_id}` has no text")))?,
+  };
+  let paragraph_index = match child_map(flow_map, PARAGRAPHS_BY_ID)? {
+    Some(paragraphs) => paragraph_ids_by_boundary_in(doc, &paragraphs, &text),
+    None => FxHashMap::default(),
+  };
+  let delta = crate::streaming_delta::streaming_to_delta(&text);
+  let mut blocks = Vec::new();
+  let mut paragraph_ids = Vec::new();
+  let mut defects = Vec::new();
+  let no_objects = BTreeMap::new();
+  Projector::walk_flow_delta(
+    &text,
+    delta,
+    0,
+    &no_objects,
+    flow_id,
+    Some(&paragraph_index),
+    None,
+    Some(&mut paragraph_ids),
+    None,
+    &mut blocks,
+    &mut defects,
+    false,
+    |_, _| Err(invalid("standalone flow has no object blocks")),
+  )?;
+  if paragraph_ids.is_empty() {
+    // Same deterministic empty-projection placeholder as the body path: the
+    // editor's document assembly would otherwise mint a RANDOM id for the
+    // mandatory trailing paragraph, so two rebuilds of the same flow disagreed.
+    blocks.push(InputBlock::Paragraph(InputParagraph {
+      style: gpui_flowtext::ParagraphStyle::Normal,
+      runs: Vec::new(),
+    }));
+    defects.push(ProjectionDefect::MissingParagraphMetadata {
+      flow_id: flow_id.to_string(),
+      boundary_unicode: None,
+      fabricated_id: loro_id_u128("paragraph.projection.empty"),
+    });
+    paragraph_ids.push(ParagraphId(loro_id_u128("paragraph.projection.empty")));
+  }
+  let block_ids = paragraph_ids.iter().map(|id| BlockId(id.0)).collect();
+  Ok(RegionRows {
+    blocks,
+    paragraph_ids,
+    block_ids,
+    defects,
+  })
+}
+
 /// §act-four M4 (cold scroll): the body-unicode position of every block's
 /// leading boundary, in block order — paragraph leading `\n`s plus object
 /// U+FFFC placeholders, sorted + deduped. Persisted in the package manifest so
@@ -1388,11 +1453,21 @@ fn push_paragraph_projection_metadata(
 /// except boundary 0 always prefers `ROOT_FIRST_PARAGRAPH_ID` when it anchors there.
 #[hotpath::measure]
 fn paragraph_ids_by_boundary(doc: &LoroDoc, text: &LoroText) -> FxHashMap<usize, String> {
-  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   let root = doc.get_map(ROOT);
   let Some(paragraphs) = child_map(&root, PARAGRAPHS_BY_ID).ok().flatten() else {
-    return index;
+    return FxHashMap::default();
   };
+  paragraph_ids_by_boundary_in(doc, &paragraphs, text)
+}
+
+/// [`paragraph_ids_by_boundary`], parameterized over the paragraph registry: the
+/// same single-pass boundary→record-key index for a flow whose paragraph records
+/// live in `paragraphs` instead of the document-root `PARAGRAPHS_BY_ID` — e.g. a
+/// .fl0 cell's per-cell registry. Cursor decoding already filters on `text`'s
+/// container id, so foreign records in a shared registry are skipped either way.
+#[hotpath::measure]
+pub fn paragraph_ids_by_boundary_in(doc: &LoroDoc, paragraphs: &LoroMap, text: &LoroText) -> FxHashMap<usize, String> {
+  let mut index: FxHashMap<usize, String> = FxHashMap::default();
   // §act-five P4: ONE pass over the paragraph registry. The old shape scanned it
   // TWICE (once inside `boundary_cursor_positions`, once in the loop) and decoded
   // each cursor twice (there, then again in `live_cursor_pos`). Gather the decoded
@@ -2346,6 +2421,154 @@ mod tests {
         .iter()
         .any(|block| matches!(block, gpui_flowtext::Block::Image(image) if image.asset_id == AssetId(0)))
     );
+    Ok(())
+  }
+
+  /// Seed a STANDALONE flow (the .fl0 cell shape): canonical `ensure_flow` map
+  /// inside `registry`, sentinel + first paragraph record in the flow's OWN
+  /// `paragraphs_by_id` child — the exact shape `materialize_single_flow` reads.
+  fn seed_standalone_flow(registry: &LoroMap, flow_id: &str) -> (LoroMap, LoroText, LoroMap) {
+    let flow = crate::loro_schema::ensure_flow(registry, flow_id, "flow-cell").expect("ensure flow");
+    let text = flow
+      .ensure_mergeable_text(crate::loro_schema::FLOW_TEXT_KEY)
+      .expect("flow text");
+    crate::loro_schema::ensure_sentinel(&text).expect("sentinel");
+    let paragraphs = flow.ensure_mergeable_map(PARAGRAPHS_BY_ID).expect("paragraph registry");
+    standalone_paragraph_record(&paragraphs, &text, ROOT_FIRST_PARAGRAPH_ID, flow_id, 0);
+    (flow, text, paragraphs)
+  }
+
+  fn standalone_paragraph_record(paragraphs: &LoroMap, text: &LoroText, key: &str, flow_id: &str, boundary: usize) {
+    let record = paragraphs.ensure_mergeable_map(key).expect("paragraph record");
+    record.insert("id", key).expect("record id");
+    record.insert("flow_id", flow_id).expect("record flow id");
+    let cursor = text.get_cursor(boundary, Side::Left).expect("boundary cursor");
+    record.insert("boundary_cursor", cursor.encode()).expect("boundary cursor bytes");
+    record.insert("start_cursor", cursor.encode()).expect("start cursor bytes");
+  }
+
+  /// The .fl0 cell round trip: a standalone flow with styled multi-paragraph
+  /// content materializes to the exact paragraph rows, styles, run marks, and
+  /// durable identities — deterministically across rebuilds.
+  #[test]
+  fn materialize_single_flow_round_trips_styled_cell_text() -> io::Result<()> {
+    let doc = LoroDoc::new();
+    crate::loro_schema::configure_text_styles(&doc);
+    let registry = doc.get_map("test.cell_flows");
+    let flow_id = "cell.7.flow";
+    let (flow, text, paragraphs) = seed_standalone_flow(&registry, flow_id);
+
+    // "\n" (sentinel, Normal) + "Hello wörld" + "\n" (Custom(3) tag row) + "café tail".
+    text.insert(1, "Hello wörld").expect("insert first paragraph");
+    let boundary = text.len_unicode();
+    text.insert(boundary, "\n").expect("insert boundary");
+    text
+      .mark(boundary..boundary + 1, MARK_PARAGRAPH_STYLE, 4_i64)
+      .expect("mark boundary style"); // slot value 4 → Custom(3)
+    standalone_paragraph_record(&paragraphs, &text, "paragraph.row2", flow_id, boundary);
+    text.insert(boundary + 1, "café tail").expect("insert second paragraph");
+    // Strikethrough over "wörld" (unicode 7..12) — the strike_cell shape.
+    text
+      .mark(7..12, MARK_STRIKETHROUGH, true)
+      .expect("mark strikethrough");
+    doc.commit();
+
+    let rows = materialize_single_flow(&doc, &flow, flow_id)?;
+    assert_eq!(rows.defects, Vec::new(), "well-formed flow materializes without defects");
+    assert_eq!(rows.blocks.len(), 2, "two paragraph rows");
+    let InputBlock::Paragraph(first) = &rows.blocks[0] else {
+      panic!("first row is a paragraph");
+    };
+    assert_eq!(first.style, gpui_flowtext::ParagraphStyle::Normal);
+    assert_eq!(
+      first.runs.iter().map(|run| run.text.as_str()).collect::<String>(),
+      "Hello wörld"
+    );
+    assert!(
+      first
+        .runs
+        .iter()
+        .any(|run| run.styles.strikethrough && run.text == "wörld"),
+      "strikethrough mark survives the round trip"
+    );
+    let InputBlock::Paragraph(second) = &rows.blocks[1] else {
+      panic!("second row is a paragraph");
+    };
+    assert_eq!(second.style, gpui_flowtext::ParagraphStyle::Custom(3));
+    assert_eq!(second.runs.iter().map(|run| run.text.as_str()).collect::<String>(), "café tail");
+    // Durable identities: the seeded first record + the explicit second record,
+    // and block ids derived 1:1 from them.
+    assert_eq!(
+      rows.paragraph_ids,
+      vec![
+        ParagraphId(loro_id_u128(ROOT_FIRST_PARAGRAPH_ID)),
+        ParagraphId(loro_id_u128("paragraph.row2")),
+      ]
+    );
+    assert_eq!(rows.block_ids, vec![BlockId(rows.paragraph_ids[0].0), BlockId(rows.paragraph_ids[1].0)]);
+
+    // Pure function: a second materialization is identical.
+    let again = materialize_single_flow(&doc, &flow, flow_id)?;
+    assert_eq!(again.blocks, rows.blocks);
+    assert_eq!(again.paragraph_ids, rows.paragraph_ids);
+    assert_eq!(again.block_ids, rows.block_ids);
+
+    // And the rows assemble into a full per-cell DocumentProjection.
+    let projection = document_from_input_blocks(DocumentTheme::clone(&flowstate_document_theme()), rows.blocks);
+    assert_eq!(projection.paragraphs.len(), 2);
+    Ok(())
+  }
+
+  /// An EMPTY (even unseeded) standalone flow materializes the deterministic
+  /// placeholder row with a fabricated identity + defect — never a random id.
+  #[test]
+  fn materialize_single_flow_empty_flow_is_deterministic() -> io::Result<()> {
+    let doc = LoroDoc::new();
+    crate::loro_schema::configure_text_styles(&doc);
+    let registry = doc.get_map("test.cell_flows");
+    let flow = crate::loro_schema::ensure_flow(&registry, "cell.9.flow", "flow-cell").expect("ensure flow");
+    doc.commit();
+
+    let rows = materialize_single_flow(&doc, &flow, "cell.9.flow")?;
+    assert_eq!(rows.blocks.len(), 1, "placeholder paragraph");
+    assert!(matches!(&rows.blocks[0], InputBlock::Paragraph(paragraph) if paragraph.runs.is_empty()));
+    assert_eq!(rows.paragraph_ids, vec![ParagraphId(loro_id_u128("paragraph.projection.empty"))]);
+    assert_eq!(rows.block_ids, vec![BlockId(loro_id_u128("paragraph.projection.empty"))]);
+    assert!(
+      rows
+        .defects
+        .iter()
+        .any(|defect| matches!(defect, ProjectionDefect::MissingParagraphMetadata { .. }))
+    );
+    let again = materialize_single_flow(&doc, &flow, "cell.9.flow")?;
+    assert_eq!(again.blocks, rows.blocks);
+    assert_eq!(again.paragraph_ids, rows.paragraph_ids);
+    Ok(())
+  }
+
+  /// Registry parameterization: `paragraph_ids_by_boundary_in` reads ONLY the
+  /// given registry, and cursor container filtering keeps two standalone flows'
+  /// records from cross-talking even in a shared registry.
+  #[test]
+  fn paragraph_ids_by_boundary_in_scopes_to_the_given_registry() -> io::Result<()> {
+    let doc = LoroDoc::new();
+    crate::loro_schema::configure_text_styles(&doc);
+    let registry = doc.get_map("test.cell_flows");
+    let (_flow_a, text_a, paragraphs_a) = seed_standalone_flow(&registry, "cell.a.flow");
+    let (_flow_b, text_b, paragraphs_b) = seed_standalone_flow(&registry, "cell.b.flow");
+    text_a.insert(1, "alpha").expect("insert a");
+    text_b.insert(1, "beta").expect("insert b");
+    // A record for flow B written into flow A's registry: its cursor targets
+    // B's container, so A's index must skip it.
+    standalone_paragraph_record(&paragraphs_a, &text_b, "paragraph.foreign", "cell.b.flow", 0);
+    doc.commit();
+
+    let index_a = paragraph_ids_by_boundary_in(&doc, &paragraphs_a, &text_a);
+    assert_eq!(index_a.len(), 1);
+    assert_eq!(index_a.get(&0).map(String::as_str), Some(ROOT_FIRST_PARAGRAPH_ID));
+    let index_b = paragraph_ids_by_boundary_in(&doc, &paragraphs_b, &text_b);
+    assert_eq!(index_b.len(), 1);
+    assert_eq!(index_b.get(&0).map(String::as_str), Some(ROOT_FIRST_PARAGRAPH_ID));
     Ok(())
   }
 }

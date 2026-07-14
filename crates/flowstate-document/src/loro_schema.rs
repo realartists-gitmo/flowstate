@@ -700,7 +700,7 @@ fn init_meta(meta: &LoroMap, title: &str) -> LoroResult<()> {
   Ok(())
 }
 
-fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap> {
+pub fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap> {
   let flow = flows.ensure_mergeable_map(flow_id)?;
   flow.insert(FLOW_ID_KEY, flow_id)?;
   flow.insert(FLOW_KIND_KEY, kind)?;
@@ -710,7 +710,7 @@ fn ensure_flow(flows: &LoroMap, flow_id: &str, kind: &str) -> LoroResult<LoroMap
   Ok(flow)
 }
 
-fn ensure_sentinel(text: &LoroText) -> LoroResult<()> {
+pub fn ensure_sentinel(text: &LoroText) -> LoroResult<()> {
   if text.len_unicode() == 0 || !text.to_string().starts_with(SENTINEL_NEWLINE) {
     text.insert(0, SENTINEL_NEWLINE)?;
     text.mark(0..1, MARK_PARAGRAPH_STYLE, 0_i64)?;
