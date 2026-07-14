@@ -163,6 +163,7 @@ impl Workspace {
     let mut this = Self {
       document_panels: Vec::new(),
       document_runtimes: FxHashMap::default(), // §perf: FxHash for trusted Uuid keys
+      flow_document_runtimes: FxHashMap::default(),
       pending_authority_panels: FxHashSet::default(),
       document_runtime_flush_pending: FxHashSet::default(), // §perf: FxHash for trusted Uuid keys
       flow_panels: Vec::new(),
@@ -586,7 +587,10 @@ impl Workspace {
   }
 
   pub fn new_flow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-    self.add_flow_panel(flowstate_flow::FlowDocument::new(), None, window, cx);
+    let Ok((handle, gate)) = flowstate_collab::flow::FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()) else {
+      return;
+    };
+    self.add_flow_panel(FlowRuntimeSource { handle, gate }, None, window, cx);
   }
 
   pub fn open_demo_document(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -675,11 +679,11 @@ impl Workspace {
             });
           });
         },
-        Ok(LoadedWorkspaceDocument::Flow { document, path }) => {
+        Ok(LoadedWorkspaceDocument::Flow { source, path }) => {
           let _ = window_handle.update(cx, |_, window, cx| {
             let _ = workspace.update(cx, |workspace, cx| {
               workspace.record_recent_document(path.clone(), cx);
-              workspace.add_flow_panel(document, Some(path), window, cx);
+              workspace.add_flow_panel(source, Some(path), window, cx);
             });
           });
         },
@@ -797,10 +801,10 @@ impl Workspace {
         continue;
       }
       let loaded = if matches!(entry.kind, TemporaryWorkspaceSessionEntryKind::Flow) && is_flow_path(&entry.path) {
-        flowstate_flow::load_flow_document(&entry.path)
+        load_flow_runtime_source(&entry.path)
           .ok()
-          .map(|document| LoadedWorkspaceDocument::Flow {
-            document,
+          .map(|source| LoadedWorkspaceDocument::Flow {
+            source,
             path: entry.path,
           })
       } else {
@@ -833,8 +837,8 @@ impl Workspace {
           viewport_scrolls.push((panel_id, entry.viewport_paragraph));
           panel_id
         },
-        LoadedWorkspaceDocument::Flow { document, path } => {
-          let panel = self.create_flow_panel(document, Some(path), window, cx);
+        LoadedWorkspaceDocument::Flow { source, path } => {
+          let panel = self.create_flow_panel(source, Some(path), window, cx);
           panel.read(cx).id()
         },
       };
@@ -1012,12 +1016,13 @@ impl Workspace {
 
   fn create_flow_panel(
     &mut self,
-    document: flowstate_flow::FlowDocument,
+    source: FlowRuntimeSource,
     path: Option<PathBuf>,
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
-    let editor = cx.new(|cx| FlowEditor::new_with_path(document, path.clone(), window, cx));
+    let FlowRuntimeSource { handle, gate } = source;
+    let editor = cx.new(|cx| FlowEditor::new_with_path(handle, path.clone(), window, cx));
     let workspace = cx.entity().downgrade();
     let title = path
       .as_ref()
@@ -1032,6 +1037,11 @@ impl Workspace {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
       }),
     ));
+    // The flow I/O service shares the editor's gate; collaboration and
+    // off-thread saves route through it (spec Part C).
+    if let Ok(io) = flowstate_collab::flow::FlowIoHandle::spawn(gate) {
+      self.flow_document_runtimes.insert(id, io);
+    }
     self.active_document_id = Some(id);
     self.active_editor = None;
     self.active_flow = Some(editor);
@@ -1043,8 +1053,8 @@ impl Workspace {
     panel
   }
 
-  fn add_flow_panel(&mut self, document: flowstate_flow::FlowDocument, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
-    self.create_flow_panel(document, path, window, cx);
+  fn add_flow_panel(&mut self, source: FlowRuntimeSource, path: Option<PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+    self.create_flow_panel(source, path, window, cx);
     self.persist_temporary_workspace_session(cx);
     cx.notify();
   }
@@ -1760,16 +1770,30 @@ enum LoadedWorkspaceDocument {
     title: Option<String>,
   },
   Flow {
-    document: flowstate_flow::FlowDocument,
+    source: FlowRuntimeSource,
     path: PathBuf,
   },
+}
+
+/// A flow write authority + its gate, ready to become a panel (the flow
+/// mirror of the .db8 runtime attachment).
+struct FlowRuntimeSource {
+  handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+  gate: std::sync::Arc<flowstate_collab::local_write::WriteGate<flowstate_collab::flow::FlowRuntime>>,
+}
+
+fn load_flow_runtime_source(path: &std::path::Path) -> Result<FlowRuntimeSource, String> {
+  let snapshot = flowstate_flow::read_fl0(path).map_err(|error| error.to_string())?;
+  let runtime = flowstate_collab::flow::FlowRuntime::from_snapshot(&snapshot).map_err(|error| error.to_string())?;
+  let (handle, gate) = flowstate_collab::flow::FlowDocHandle::new(runtime);
+  Ok(FlowRuntimeSource { handle, gate })
 }
 
 #[hotpath::measure]
 fn load_workspace_document(path: PathBuf) -> Result<LoadedWorkspaceDocument, String> {
   if is_flow_path(&path) {
-    let document = flowstate_flow::load_flow_document(&path).map_err(|error| error.to_string())?;
-    return Ok(LoadedWorkspaceDocument::Flow { document, path });
+    let source = load_flow_runtime_source(&path)?;
+    return Ok(LoadedWorkspaceDocument::Flow { source, path });
   }
   load_document_for_open(&path)
     .map(|loaded| LoadedWorkspaceDocument::Document {

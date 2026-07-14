@@ -76,24 +76,14 @@ impl Render for FlowRibbon {
     let sheet_types: Vec<_> = self
       .editor
       .read(cx)
-      .document()
-      .projection()
+      .board()
       .format
       .sheet_types
       .iter()
       .map(|sheet_type| sheet_type.name.clone())
       .collect();
     let sheet_name_input = self.editor.read(cx).active_sheet().and_then(|sheet_id| {
-      let sheet_name = self
-        .editor
-        .read(cx)
-        .document()
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)?
-        .name
-        .clone();
+      let sheet_name = self.editor.read(cx).board().sheet(sheet_id)?.name.clone();
       let editor = self.editor.clone();
       let state = window.use_keyed_state(("flow-sheet-name-input", sheet_id.as_u128() as u64), cx, move |window, cx| {
         let input = cx.new(|cx| {

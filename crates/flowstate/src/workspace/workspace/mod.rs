@@ -70,6 +70,7 @@ pub struct Workspace {
   document_panels: Vec<Entity<DocumentPanel>>,
   // §perf: Uuid keys are locally generated and trusted; use FxHash to avoid SipHash overhead.
   document_runtimes: FxHashMap<Uuid, flowstate_collab::doc_io::DocIoHandle>,
+  flow_document_runtimes: FxHashMap<Uuid, flowstate_collab::flow::FlowIoHandle>,
   document_runtime_flush_pending: FxHashSet<Uuid>,
   /// §act-three C (background open): panels painted read-only from a phase-V
   /// cached projection whose authority runtime has not yet attached (phase G).

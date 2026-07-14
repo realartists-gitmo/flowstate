@@ -1,9 +1,12 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use std::sync::Arc;
+
+use flowstate_collab::flow::{FlowDocHandle, FlowStreamItem, FlowUndoMeta};
+use flowstate_flow::intents::{CellPlacement, CellSeed};
 use flowstate_flow::{
-  AnnotationOriginator, BoardPoint, CellId, FlowCommitResult, FlowDocument, FlowDropIntent, FlowFrontier, FlowProjection,
-  FlowProjectionSnapshot, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, RelativePosition, SheetId, VersionVector,
+  AnnotationOriginator, BoardPoint, CellId, FlowBoardProjection, FlowDropIntent, FlowIntent, RelativePosition, SheetId, board_ops,
 };
 use gpui::{
   AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent,
@@ -59,7 +62,13 @@ struct PanDragState {
 }
 
 pub struct FlowEditor {
-  document: FlowDocument,
+  /// The ONE local write path (invariant 5): identical handle for solo and
+  /// collaborative tabs; the board copy advances only via the ordered stream.
+  handle: Arc<FlowDocHandle>,
+  board: FlowBoardProjection,
+  /// Render cache for INACTIVE cells' rich-text previews (materialized on
+  /// demand, dropped on any board change / remote sync).
+  cell_documents: std::collections::HashMap<CellId, flowstate_document::DocumentProjection>,
   path: Option<PathBuf>,
   dirty: bool,
   active_sheet: Option<SheetId>,
@@ -92,16 +101,21 @@ pub struct FlowEditor {
 }
 
 impl FlowEditor {
-  pub fn new_with_path(document: FlowDocument, path: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
-    let active_sheet = document.projection().sheets.first().map(|sheet| sheet.id);
-    let collapsed_outline_items = document
-      .projection()
+  pub fn new_with_path(handle: Arc<FlowDocHandle>, path: Option<PathBuf>, _window: &mut Window, cx: &mut Context<Self>) -> Self {
+    let board = handle.board_projection().unwrap_or(FlowBoardProjection {
+      format: flowstate_flow::FlowFormat::policy_debate(),
+      sheets: Vec::new(),
+    });
+    let active_sheet = board.sheets.first().map(|sheet| sheet.id);
+    let collapsed_outline_items = board
       .sheets
       .iter()
       .flat_map(|sheet| std::iter::once(sheet.id).chain(sheet.cells.iter().map(|cell| cell.id)))
       .collect();
     Self {
-      document,
+      handle,
+      board,
+      cell_documents: std::collections::HashMap::new(),
       path,
       dirty: false,
       active_sheet,
@@ -135,49 +149,75 @@ impl FlowEditor {
   }
 
   pub fn blank(window: &mut Window, cx: &mut Context<Self>) -> Self {
-    Self::new_with_path(FlowDocument::new(), None, window, cx)
+    let (handle, _gate) =
+      FlowDocHandle::new_document(&flowstate_flow::FlowFormat::policy_debate()).expect("fresh flow document");
+    Self::new_with_path(handle, None, window, cx)
   }
 
-  pub fn document(&self) -> &FlowDocument {
-    &self.document
+  pub fn handle(&self) -> &Arc<FlowDocHandle> {
+    &self.handle
   }
 
-  pub fn version_vector(&self) -> VersionVector {
-    self.document.version_vector()
+  pub fn board(&self) -> &FlowBoardProjection {
+    &self.board
   }
 
-  pub fn collaboration_projection_snapshot(&self) -> FlowProjectionSnapshot {
-    self.document.projection_snapshot()
+  /// Drain the ordered board stream and adopt the latest Replace — the ONE
+  /// way this editor's board copy advances. Local intents call it right after
+  /// `apply`; the collaboration session calls it as a pump when remote
+  /// batches land; solo tabs need no pump.
+  pub fn sync_board_from_handle(&mut self, cx: &mut Context<Self>) {
+    let Ok(items) = self.handle.drain_board_stream() else {
+      return;
+    };
+    let Some(FlowStreamItem::Board(board)) = items.into_iter().next_back() else {
+      return;
+    };
+    self.board = *board;
+    self.cell_documents.clear();
+    self.prune_dead_cell_state(cx);
+    if let Some(active) = self.active_sheet
+      && self.board.sheet(active).is_none()
+    {
+      self.active_sheet = self.board.sheets.first().map(|sheet| sheet.id);
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(self.active_sheet));
+    }
+    if let Some(active) = self.active_cell
+      && self.board.cell(active).is_none()
+    {
+      self.active_cell = None;
+      cx.emit(FlowEditorEvent::ActiveCellChanged(None));
+    }
+    cx.notify();
   }
 
-  pub fn collaboration_frontier(&self) -> FlowFrontier {
-    self.document.frontier()
+  /// Apply one flow intent through the handle and integrate the outcome.
+  fn apply_intent(&mut self, intent: FlowIntent, cx: &mut Context<Self>) -> bool {
+    match self.handle.apply(intent) {
+      Ok(outcome) => {
+        self.sync_board_from_handle(cx);
+        if outcome.changed {
+          self.dirty = true;
+          cx.emit(FlowEditorEvent::Changed);
+          cx.notify();
+        }
+        outcome.changed
+      },
+      Err(rejection) => {
+        tracing::warn!(%rejection, "flow intent rejected");
+        false
+      },
+    }
   }
 
-  pub fn collaboration_updates_since(&self, version: &VersionVector) -> anyhow::Result<FlowUpdateBytes> {
-    self.document.export_updates_for(version)
-  }
-
-  pub fn import_collaboration_updates(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> anyhow::Result<Vec<FlowRuntimeEvent>> {
-    let events = self.document.import_remote_update(bytes)?;
-    self.sync_cell_editors(cx);
-    self.changed(self.active_cell, cx);
-    Ok(events)
-  }
-
-  pub fn apply_collaboration_transaction(
-    &mut self,
-    transaction_id: FlowTransactionId,
-    base_frontier: &[u8],
-    change: impl FnOnce(&mut FlowProjection) -> anyhow::Result<()>,
-    cx: &mut Context<Self>,
-  ) -> anyhow::Result<FlowCommitResult> {
-    let result = self
-      .document
-      .apply_projection_transaction(transaction_id, base_frontier, change)?;
-    self.sync_cell_editors(cx);
-    self.changed(self.active_cell, cx);
-    Ok(result)
+  /// Update the undo context riding future commits (focus restoration).
+  fn refresh_undo_context(&self) {
+    self.handle.set_undo_context(FlowUndoMeta {
+      active_sheet: self.active_sheet,
+      focused_cell: self.active_cell,
+      head_cursor: None,
+      anchor_cursor: None,
+    });
   }
 
   pub fn active_sheet(&self) -> Option<SheetId> {
@@ -226,40 +266,29 @@ impl FlowEditor {
   }
 
   pub fn activate_sheet(&mut self, sheet_id: SheetId, cx: &mut Context<Self>) {
-    if self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .any(|sheet| sheet.id == sheet_id)
-    {
+    if self.board.sheet(sheet_id).is_some() {
       self.active_sheet = Some(sheet_id);
       self.active_cell = None;
+      self.refresh_undo_context();
       cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
       cx.notify();
     }
   }
 
   pub fn activate_cell(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
-    let sheet_id = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .find(|sheet| sheet.cells.iter().any(|cell| cell.id == cell_id))
-      .map(|sheet| sheet.id);
+    let sheet_id = self.board.cell(cell_id).map(|(sheet, _)| sheet.id);
     if let Some(sheet_id) = sheet_id {
-      if self
-        .document
-        .ensure_cell_editable_projection(sheet_id, cell_id)
-        .is_ok_and(|changed| changed)
-      {
-        self.dirty = true;
-        cx.emit(FlowEditorEvent::Changed);
-      }
+      self.apply_intent(
+        FlowIntent::EnsureCellEditable {
+          sheet_id,
+          cell_id,
+        },
+        cx,
+      );
       self.ensure_cell_editor(cell_id, cx);
       self.active_sheet = Some(sheet_id);
       self.active_cell = Some(cell_id);
+      self.refresh_undo_context();
       self.scroll_cell_into_view(cell_id);
       cx.emit(FlowEditorEvent::ActiveCellChanged(Some(cell_id)));
       cx.notify();
@@ -281,69 +310,50 @@ impl FlowEditor {
     let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
       return;
     };
-    if let Ok(id) = self.document.add_response(sheet, cell) {
-      self.collapsed_outline_items.insert(id);
-      self.ensure_cell_editor(id, cx);
-      self.changed(Some(id), cx);
-    }
+    self.add_cell_with_placement(sheet, CellPlacement::ResponseTo { parent: cell }, cx);
   }
 
   pub fn add_first_response_to(&mut self, cell: CellId, cx: &mut Context<Self>) {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    if let Ok(id) = self.document.add_first_response(sheet, cell) {
-      self.collapsed_outline_items.insert(id);
-      self.ensure_cell_editor(id, cx);
-      self.changed(Some(id), cx);
+    self.add_cell_with_placement(sheet, CellPlacement::FirstResponseTo { parent: cell }, cx);
+  }
+
+  /// The one AddCell path behind every add_* entry point.
+  fn add_cell_with_placement(&mut self, sheet_id: SheetId, placement: CellPlacement, cx: &mut Context<Self>) {
+    let cell_id = uuid::Uuid::new_v4();
+    if self.apply_intent(
+      FlowIntent::AddCell {
+        sheet_id,
+        cell_id,
+        placement,
+        seed: CellSeed::Empty,
+      },
+      cx,
+    ) {
+      self.collapsed_outline_items.insert(cell_id);
+      self.ensure_cell_editor(cell_id, cx);
+      self.changed(Some(cell_id), cx);
     }
   }
 
   pub fn active_cell_is_struck(&self) -> bool {
     self
-      .active_sheet
-      .zip(self.active_cell)
-      .and_then(|(sheet, cell)| {
-        self
-          .document
-          .projection()
-          .sheets
-          .iter()
-          .find(|candidate| candidate.id == sheet)?
-          .cells
-          .iter()
-          .find(|candidate| candidate.id == cell)
-      })
-      .and_then(|cell| cell.document().ok())
-      .is_some_and(|document| {
-        document
-          .paragraphs
-          .iter()
-          .flat_map(|paragraph| &paragraph.runs)
-          .all(|run| run.styles.strikethrough)
-      })
+      .active_cell
+      .and_then(|cell| self.board.cell(cell))
+      .is_some_and(|(_, cell)| cell.summary.struck)
   }
 
   pub fn add_first_argument(&mut self, cx: &mut Context<Self>) {
-    let Some(sheet) = self.active_sheet else {
-      return;
-    };
-    if let Ok(id) = self.document.add_orphan_at_column_top(sheet, 0) {
-      self.collapsed_outline_items.insert(id);
-      self.ensure_cell_editor(id, cx);
-      self.changed(Some(id), cx);
-    }
+    self.add_orphan_at_column_top(0, cx);
   }
 
   pub fn add_orphan_at_column_top(&mut self, column_index: usize, cx: &mut Context<Self>) {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    if let Ok(id) = self.document.add_orphan_at_column_top(sheet, column_index) {
-      self.collapsed_outline_items.insert(id);
-      self.ensure_cell_editor(id, cx);
-      self.changed(Some(id), cx);
-    }
+    self.add_cell_with_placement(sheet, CellPlacement::ColumnTop { column_index }, cx);
   }
 
   pub fn create_sheet(&mut self, cx: &mut Context<Self>) {
@@ -351,23 +361,25 @@ impl FlowEditor {
   }
 
   pub fn create_sheet_of_type(&mut self, sheet_type_index: usize, cx: &mut Context<Self>) {
-    let Some(sheet_type) = self
-      .document
-      .projection()
-      .format
-      .sheet_types
-      .get(sheet_type_index)
-    else {
+    let Some(sheet_type) = self.board.format.sheet_types.get(sheet_type_index) else {
       return;
     };
-    let name = format!("Sheet {}", self.document.projection().sheets.len() + 1);
-    if let Ok(id) = self.document.create_sheet(name, sheet_type.id) {
-      self.collapsed_outline_items.insert(id);
-      self.active_sheet = Some(id);
+    let sheet_type_id = sheet_type.id;
+    let name = format!("Sheet {}", self.board.sheets.len() + 1);
+    let sheet_id = uuid::Uuid::new_v4();
+    if self.apply_intent(
+      FlowIntent::CreateSheet {
+        sheet_id,
+        name,
+        sheet_type_id,
+      },
+      cx,
+    ) {
+      self.collapsed_outline_items.insert(sheet_id);
+      self.active_sheet = Some(sheet_id);
       self.active_cell = None;
-      self.dirty = true;
-      cx.emit(FlowEditorEvent::Changed);
-      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(id)));
+      self.refresh_undo_context();
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet_id)));
       cx.notify();
     }
   }
@@ -376,7 +388,13 @@ impl FlowEditor {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    if self.document.rename_sheet(sheet, name).is_ok() {
+    if self.apply_intent(
+      FlowIntent::RenameSheet {
+        sheet_id: sheet,
+        name: name.into(),
+      },
+      cx,
+    ) {
       self.changed(self.active_cell, cx);
     }
   }
@@ -385,17 +403,11 @@ impl FlowEditor {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    if self.document.delete_sheet(sheet).is_ok() {
+    if self.apply_intent(FlowIntent::DeleteSheet { sheet_id: sheet }, cx) {
       self.collapsed_outline_items.remove(&sheet);
-      self.active_sheet = self
-        .document
-        .projection()
-        .sheets
-        .first()
-        .map(|sheet| sheet.id);
+      self.active_sheet = self.board.sheets.first().map(|sheet| sheet.id);
       self.active_cell = None;
-      self.dirty = true;
-      cx.emit(FlowEditorEvent::Changed);
+      self.refresh_undo_context();
       cx.emit(FlowEditorEvent::ActiveSheetChanged(self.active_sheet));
       cx.emit(FlowEditorEvent::ActiveCellChanged(None));
       cx.notify();
@@ -406,19 +418,21 @@ impl FlowEditor {
     let Some(sheet) = self.active_sheet else {
       return;
     };
-    let Some(index) = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .position(|candidate| candidate.id == sheet)
-    else {
+    let Some(index) = self.board.sheets.iter().position(|candidate| candidate.id == sheet) else {
       return;
     };
     let target = index
       .saturating_add_signed(direction)
-      .min(self.document.projection().sheets.len().saturating_sub(1));
-    if target != index && self.document.move_sheet(sheet, target).is_ok() {
+      .min(self.board.sheets.len().saturating_sub(1));
+    if target != index
+      && self.apply_intent(
+        FlowIntent::MoveSheet {
+          sheet_id: sheet,
+          target_index: target,
+        },
+        cx,
+      )
+    {
       self.changed(self.active_cell, cx);
     }
   }
@@ -459,17 +473,10 @@ impl FlowEditor {
 
   fn cell_text_color(&self, cell_id: CellId, cx: &App) -> gpui::Hsla {
     self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .find_map(|sheet| {
-        let cell = sheet.cells.iter().find(|cell| cell.id == cell_id)?;
-        let definition = self
-          .document
-          .projection()
-          .format
-          .sheet_type(sheet.sheet_type_id)?;
+      .board
+      .cell(cell_id)
+      .and_then(|(sheet, cell)| {
+        let definition = self.board.format.sheet_type(sheet.sheet_type_id)?;
         let column = definition
           .columns
           .iter()
@@ -520,40 +527,29 @@ impl FlowEditor {
     let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
       return;
     };
-    if let Ok(id) = self.document.add_sibling(sheet, cell, position) {
-      self.collapsed_outline_items.insert(id);
-      self.ensure_cell_editor(id, cx);
-      self.changed(Some(id), cx);
-    }
+    self.add_cell_with_placement(sheet, CellPlacement::Sibling { of: cell, position }, cx);
   }
 
   pub fn active_cell_is_empty(&self) -> bool {
     self
-      .active_sheet
-      .zip(self.active_cell)
-      .and_then(|(sheet_id, cell_id)| {
-        self
-          .document
-          .projection()
-          .sheets
-          .iter()
-          .find(|sheet| sheet.id == sheet_id)?
-          .cells
-          .iter()
-          .find(|cell| cell.id == cell_id)
-      })
-      .is_some_and(|cell| cell.is_empty().unwrap_or(false))
+      .active_cell
+      .and_then(|cell| self.board.cell(cell))
+      .is_some_and(|(_, cell)| cell.summary.is_empty)
   }
 
   pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
       return;
     };
-    let fallback = self.document.deletion_fallback(sheet, cell);
-    if self.document.delete_cell(sheet, cell).is_ok() {
-      self.cell_editors.remove(&cell);
-      self.cell_editor_themes.remove(&cell);
-      self.cell_editor_subscriptions.remove(&cell);
+    let fallback = board_ops::deletion_fallback(&self.board, sheet, cell);
+    if self.apply_intent(
+      FlowIntent::DeleteCell {
+        sheet_id: sheet,
+        cell_id: cell,
+      },
+      cx,
+    ) {
+      self.drop_cell_editor(cell);
       if let Some(fallback) = fallback {
         self.ensure_cell_editor(fallback, cx);
         self.changed(Some(fallback), cx);
@@ -571,23 +567,36 @@ impl FlowEditor {
     let Some((sheet, cell)) = self.active_sheet.zip(self.active_cell) else {
       return;
     };
-    if self.document.strike_cell(sheet, cell).is_ok() {
-      self.sync_cell_editors(cx);
+    let struck = self
+      .board
+      .cell(cell)
+      .is_some_and(|(_, cell)| cell.summary.struck);
+    if self.apply_intent(
+      FlowIntent::SetCellStruck {
+        sheet_id: sheet,
+        cell_id: cell,
+        struck: !struck,
+      },
+      cx,
+    ) {
       self.changed(Some(cell), cx);
     }
   }
 
   pub fn can_undo(&self) -> bool {
-    self.document.can_undo()
+    self.handle.can_undo().unwrap_or(false)
   }
 
   pub fn can_redo(&self) -> bool {
-    self.document.can_redo()
+    self.handle.can_redo().unwrap_or(false)
   }
 
   pub fn undo(&mut self, cx: &mut Context<Self>) {
-    if self.document.undo().is_ok_and(|changed| changed) {
-      self.sync_cell_editors(cx);
+    if let Ok(outcome) = self.handle.undo()
+      && outcome.applied
+    {
+      self.sync_board_from_handle(cx);
+      self.restore_undo_focus(outcome.meta, cx);
       self.dirty = true;
       cx.emit(FlowEditorEvent::Changed);
       cx.notify();
@@ -595,12 +604,70 @@ impl FlowEditor {
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
-    if self.document.redo().is_ok_and(|changed| changed) {
-      self.sync_cell_editors(cx);
+    if let Ok(outcome) = self.handle.redo()
+      && outcome.applied
+    {
+      self.sync_board_from_handle(cx);
+      self.restore_undo_focus(outcome.meta, cx);
       self.dirty = true;
       cx.emit(FlowEditorEvent::Changed);
       cx.notify();
     }
+  }
+
+  /// `FlowUndoMeta` focus restoration: bring back the sheet/cell the undone
+  /// commit was made under (cell-text selection restores through the cell's
+  /// own authority).
+  fn restore_undo_focus(&mut self, meta: Option<FlowUndoMeta>, cx: &mut Context<Self>) {
+    let Some(meta) = meta else {
+      return;
+    };
+    if let Some(sheet) = meta.active_sheet
+      && self.board.sheet(sheet).is_some()
+      && self.active_sheet != Some(sheet)
+    {
+      self.active_sheet = Some(sheet);
+      cx.emit(FlowEditorEvent::ActiveSheetChanged(Some(sheet)));
+    }
+    if let Some(cell) = meta.focused_cell
+      && self.board.cell(cell).is_some()
+      && self.active_cell != Some(cell)
+    {
+      self.ensure_cell_editor(cell, cx);
+      self.active_cell = Some(cell);
+      cx.emit(FlowEditorEvent::ActiveCellChanged(Some(cell)));
+    }
+  }
+
+  /// Drop every per-cell UI artifact for cells no longer on the board, and
+  /// release their runtime streams.
+  fn prune_dead_cell_state(&mut self, cx: &mut Context<Self>) {
+    let live: HashSet<CellId> = self
+      .board
+      .sheets
+      .iter()
+      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .collect();
+    let dead: Vec<CellId> = self
+      .cell_editors
+      .keys()
+      .copied()
+      .filter(|id| !live.contains(id))
+      .collect();
+    for id in dead {
+      self.drop_cell_editor(id);
+    }
+    self.cell_bounds.retain(|id, _| live.contains(id));
+    self.cell_measurements.retain(|id, _| live.contains(id));
+    self.cell_documents.retain(|id, _| live.contains(id));
+    let _ = cx;
+  }
+
+  fn drop_cell_editor(&mut self, cell: CellId) {
+    self.cell_editors.remove(&cell);
+    self.cell_editor_themes.remove(&cell);
+    self.cell_editor_subscriptions.remove(&cell);
+    let _ = self.handle.close_cell(cell);
   }
 
   fn changed(&mut self, active_cell: Option<CellId>, cx: &mut Context<Self>) {
@@ -626,11 +693,16 @@ impl FlowEditor {
   }
 
   fn save_to_path(&mut self, path: PathBuf, cx: &mut Context<Self>) -> Task<std::io::Result<()>> {
-    let document = self.document.clone();
+    // Fork under the gate (brief), encode + write on the background executor
+    // (the I-9a long-export rule at editor scale).
+    let handle = self.handle.clone();
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()
-        .spawn(async move { flowstate_flow::save_flow_document(&path, &document).map_err(std::io::Error::other) })
+        .spawn(async move {
+          let snapshot = handle.snapshot().map_err(std::io::Error::other)?;
+          flowstate_flow::write_fl0(&path, &snapshot).map_err(std::io::Error::other)
+        })
         .await;
       if write_result.is_ok() {
         let _ = editor.update(cx, |editor, cx| {
@@ -646,14 +718,27 @@ impl FlowEditor {
 
   pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 
-  fn render_sheet(&self, sheet_id: SheetId, cx: &mut Context<Self>) -> AnyElement {
-    let Some(real_sheet) = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .find(|sheet| sheet.id == sheet_id)
-    else {
+  fn render_sheet(&mut self, sheet_id: SheetId, cx: &mut Context<Self>) -> AnyElement {
+    // Prefill the inactive-cell rich-text preview cache OUTSIDE the render
+    // borrow (materialize-on-miss; dropped on any board change).
+    let missing: Vec<CellId> = self
+      .board
+      .sheet(sheet_id)
+      .map(|sheet| {
+        sheet
+          .cells
+          .iter()
+          .map(|cell| cell.id)
+          .filter(|id| !self.cell_documents.contains_key(id))
+          .collect()
+      })
+      .unwrap_or_default();
+    for id in missing {
+      if let Ok(document) = self.handle.cell_preview(id) {
+        self.cell_documents.insert(id, document);
+      }
+    }
+    let Some(real_sheet) = self.board.sheet(sheet_id) else {
       return div().child("Select a sheet").into_any_element();
     };
     // During a drag the layout stays stable (no reflow) so drop locations don't move under the pointer:
@@ -661,12 +746,7 @@ impl FlowEditor {
     // shown by a directional accent on the target cell. The real subtree move still happens on drop.
     let sheet = real_sheet;
     let drop_target = self.drag_drop_target(real_sheet);
-    let Some(definition) = self
-      .document
-      .projection()
-      .format
-      .sheet_type(sheet.sheet_type_id)
-    else {
+    let Some(definition) = self.board.format.sheet_type(sheet.sheet_type_id) else {
       return div().child("Invalid sheet type").into_any_element();
     };
     let active = self.active_cell;
@@ -872,12 +952,9 @@ impl FlowEditor {
             let cell_top = layout.top + shift;
             let spacer_height = px((cell_top - previous_bottom).max(0.0));
             previous_bottom = cell_top + layout.height;
-            let label: SharedString = cell
-              .summary_text()
-              .unwrap_or_else(|_| "Invalid rich text".into())
-              .into();
-            let mut uses_summary_projection = cell.uses_summary_projection().unwrap_or(false);
-            let mut rendered_document = cell.document().ok();
+            let label: SharedString = cell.summary.summary_text.to_string().into();
+            let mut uses_summary_projection = cell.summary.uses_summary_projection;
+            let mut rendered_document = self.cell_documents.get(&id).cloned();
             if let Some(document) = rendered_document.as_mut() {
               if !uses_summary_projection {
                 let restyled = {

@@ -1,31 +1,33 @@
+//! Per-cell editor wiring (flow spec Part C, editor rewiring).
+//!
+//! Each open cell's `RichTextEditor` is driven by a real
+//! [`flowstate_collab::flow::FlowCellAuthority`] through
+//! `RichTextEditor::set_write_authority` — the identical injection the .db8
+//! body editor uses (invariant 5). The record-era observer loop (re-encode
+//! whole cell → `replace_cell_document` on every editor change) is GONE:
+//! keystrokes commit through the gated intent path, and this flow editor
+//! only reacts to the editor's notifications to refresh its board copy.
+
 use flowstate_flow::CellId;
 use gpui::{AppContext as _, Context};
 use gpui_component::ActiveTheme as _;
 
 use crate::{app_settings::load_document_theme, flow::cell_theme::apply_flow_cell_theme, rich_text_element::RichTextEditor};
 
-use super::{FlowEditor, FlowEditorEvent};
+use super::FlowEditor;
 
 impl FlowEditor {
   pub(super) fn ensure_cell_editor(&mut self, cell_id: CellId, cx: &mut Context<Self>) {
     if self.cell_editors.contains_key(&cell_id) {
       return;
     }
-    let Some((sheet_id, mut document, uses_summary_projection)) = self.document.projection().sheets.iter().find_map(|sheet| {
-      sheet
-        .cells
-        .iter()
-        .find(|cell| cell.id == cell_id)
-        .and_then(|cell| {
-          cell
-            .document()
-            .ok()
-            .map(|document| (document, cell.uses_summary_projection().unwrap_or(false)))
-        })
-        .map(|(document, uses_summary_projection)| (sheet.id, document, uses_summary_projection))
-    }) else {
+    let Ok(mut document) = self.handle.open_cell(cell_id) else {
       return;
     };
+    let uses_summary_projection = self
+      .board
+      .cell(cell_id)
+      .is_some_and(|(_, cell)| cell.summary.uses_summary_projection);
     let text_color = self.cell_text_color(cell_id, cx);
     apply_flow_cell_theme(
       &mut document,
@@ -34,8 +36,9 @@ impl FlowEditor {
       cx.theme().background,
       self.board_zoom(),
     );
+    let authority = self.handle.cell_authority(cell_id);
     let editor = cx.new(|cx| {
-      let mut editor = RichTextEditor::new_with_path(document, None, cx);
+      let mut editor = RichTextEditor::new_with_path(document.clone(), None, cx);
       editor.set_invisibility_mode(uses_summary_projection, cx);
       editor.update_config(
         |config| {
@@ -46,43 +49,19 @@ impl FlowEditor {
         },
         cx,
       );
+      editor.set_write_authority(authority, document, cx);
       editor
     });
-    let subscription = cx.observe(&editor, move |flow, editor, cx| {
-      let mut document = editor.read(cx).document().clone();
-      let source_theme = flow
-        .document
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)
-        .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
-        .and_then(|cell| cell.document().ok())
-        .map(|document| document.theme);
-      if let Some(source_theme) = source_theme {
-        document.theme = source_theme;
-      }
-      let Ok(bytes) = flowstate_flow::cell_db8_bytes(&document) else {
-        return;
-      };
-      let unchanged = flow
-        .document
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)
-        .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
-        .is_some_and(|cell| cell.document_bytes == bytes);
-      if unchanged {
-        return;
-      }
-      if flow
-        .document
-        .replace_cell_document(sheet_id, cell_id, &document)
-        .is_ok()
-      {
-        flow.dirty = true;
-        cx.emit(FlowEditorEvent::Changed);
+    // The editor commits through its authority; this subscription only keeps
+    // the BOARD side current (summary refreshes ride the board stream) and
+    // the dirty flag honest — caret-only notifies are ignored.
+    let subscription = cx.subscribe(&editor, move |flow, _editor, event: &crate::rich_text_element::EditorEvent, cx| {
+      if matches!(event, crate::rich_text_element::EditorEvent::Changed { .. }) {
+        flow.sync_board_from_handle(cx);
+        if !flow.dirty {
+          flow.dirty = true;
+          cx.emit(super::FlowEditorEvent::Changed);
+        }
         cx.notify();
       }
     });
@@ -93,50 +72,11 @@ impl FlowEditor {
     self.cell_editor_subscriptions.insert(cell_id, subscription);
   }
 
-  pub(super) fn sync_cell_editors(&mut self, cx: &mut Context<Self>) {
-    let client_theme = load_document_theme();
-    let cells: std::collections::HashMap<_, _> = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .flat_map(|sheet| {
-        sheet
-          .cells
-          .iter()
-          .filter_map(|cell| cell.document().ok().map(|document| (cell.id, document)))
-      })
-      .collect();
-    self.cell_editors.retain(|id, _| cells.contains_key(id));
-    self
-      .cell_editor_themes
-      .retain(|id, _| cells.contains_key(id));
-    self
-      .cell_editor_subscriptions
-      .retain(|id, _| cells.contains_key(id));
-    self.cell_bounds.retain(|id, _| cells.contains_key(id));
-    self
-      .cell_measurements
-      .retain(|id, _| cells.contains_key(id));
-    for (cell_id, editor) in &self.cell_editors {
-      if let Some(document) = cells.get(cell_id) {
-        let current = flowstate_flow::cell_db8_bytes(editor.read(cx).document()).ok();
-        let mut themed_document = document.clone();
-        let text_color = self.cell_text_color(*cell_id, cx);
-        apply_flow_cell_theme(&mut themed_document, &client_theme, text_color, cx.theme().background, self.board_zoom());
-        let desired = flowstate_flow::cell_db8_bytes(&themed_document).ok();
-        if current != desired {
-          editor.update(cx, |editor, cx| editor.replace_document_projection(themed_document, cx));
-          self
-            .cell_editor_themes
-            .insert(*cell_id, (text_color, cx.theme().background, self.board_zoom().to_bits()));
-        }
-      }
-    }
-    if let Some(active) = self.active_cell
-      && cells.contains_key(&active)
-    {
-      self.ensure_cell_editor(active, cx);
+  /// Pump remote projection changes into every open cell editor (the
+  /// collaboration session calls this after imports; solo tabs never need it).
+  pub fn sync_cell_editors_from_authority(&mut self, cx: &mut Context<Self>) {
+    for editor in self.cell_editors.values() {
+      editor.update(cx, |editor, cx| editor.sync_projection_from_authority(cx));
     }
   }
 
@@ -144,7 +84,7 @@ impl FlowEditor {
     let Some(cell_id) = self.active_cell else {
       return;
     };
-    let Some(editor) = self.cell_editors.get(&cell_id) else {
+    let Some(editor) = self.cell_editors.get(&cell_id).cloned() else {
       return;
     };
     let text_color = self.cell_text_color(cell_id, cx);
@@ -152,15 +92,7 @@ impl FlowEditor {
     if self.cell_editor_themes.get(&cell_id) == Some(&signature) {
       return;
     }
-    let Some(mut document) = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .flat_map(|sheet| &sheet.cells)
-      .find(|cell| cell.id == cell_id)
-      .and_then(|cell| cell.document().ok())
-    else {
+    let Ok(mut document) = self.handle.cell_preview(cell_id) else {
       return;
     };
     apply_flow_cell_theme(
@@ -170,7 +102,7 @@ impl FlowEditor {
       cx.theme().background,
       self.board_zoom(),
     );
-    editor.update(cx, |editor, cx| editor.replace_document_projection(document, cx));
+    editor.update(cx, |editor, cx| editor.install_canonical_projection(document, cx));
     self.cell_editor_themes.insert(cell_id, signature);
   }
 }

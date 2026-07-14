@@ -83,15 +83,7 @@ impl FlowEditor {
     let dragged = self.cell_label(dragged);
     let sheet = self
       .active_sheet
-      .and_then(|id| {
-        self
-          .document()
-          .projection()
-          .sheets
-          .iter()
-          .find(|sheet| sheet.id == id)
-          .map(|sheet| sheet.name.clone())
-      })
+      .and_then(|id| self.board().sheet(id).map(|sheet| sheet.name.clone()))
       .unwrap_or_default();
     self.drag_log_counter += 1;
     self.drag_log = Some(DragLogSession {
@@ -180,13 +172,9 @@ impl FlowEditor {
 
   fn cell_label(&self, id: CellId) -> String {
     self
-      .document()
-      .projection()
-      .sheets
-      .iter()
-      .find_map(|sheet| sheet.cells.iter().find(|cell| cell.id == id))
-      .and_then(|cell| cell.summary_text().ok())
-      .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
+      .board()
+      .cell(id)
+      .map(|(_, cell)| cell.summary.summary_text.lines().next().unwrap_or_default().trim().to_string())
       .filter(|label| !label.is_empty())
       .unwrap_or_else(|| format!("cell:{}", &id.to_string()[..8]))
   }
@@ -209,22 +197,15 @@ impl FlowEditor {
       .active_sheet
       .zip(self.dragging_cell)
       .is_some_and(|(sheet, dragged)| {
-        self
-          .document()
-          .preview_move_cell_subtree(sheet, dragged, intent)
-          .is_some()
+        flowstate_flow::board_ops::preview_move_cell_subtree(self.board(), sheet, dragged, intent).is_some()
       })
   }
 
   fn sheet_topology_snapshot(&self) -> Vec<Value> {
-    let projection = self.document().projection();
-    let Some(sheet) = self
-      .active_sheet
-      .and_then(|id| projection.sheets.iter().find(|sheet| sheet.id == id))
-    else {
+    let Some(sheet) = self.active_sheet.and_then(|id| self.board().sheet(id)) else {
       return Vec::new();
     };
-    let definition = projection.format.sheet_type(sheet.sheet_type_id);
+    let definition = self.board().format.sheet_type(sheet.sheet_type_id);
     sheet
       .cells
       .iter()

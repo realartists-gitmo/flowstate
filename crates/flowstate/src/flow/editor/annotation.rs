@@ -39,11 +39,14 @@ impl FlowEditor {
   }
 
   pub fn clear_annotations(&mut self, cx: &mut Context<Self>) {
-    if self
-      .document
-      .clear_all_annotations(&self.local_annotation_originator)
-      .is_ok()
-    {
+    let originator = self.local_annotation_originator.clone();
+    if self.apply_intent(
+      flowstate_flow::FlowIntent::ClearAnnotations {
+        sheet_id: None,
+        originator,
+      },
+      cx,
+    ) {
       self.changed(self.active_cell, cx);
     }
   }
@@ -117,20 +120,13 @@ impl FlowEditor {
       },
       bbox,
     };
-    if self.document.add_annotation(sheet_id, stroke).is_ok() {
+    if self.apply_intent(flowstate_flow::FlowIntent::AddAnnotation { sheet_id, stroke }, cx) {
       self.changed(self.active_cell, cx);
     }
   }
 
   fn erase_at(&mut self, point: BoardPoint, cx: &mut Context<Self>) {
-    let Some(sheet) = self.active_sheet.and_then(|sheet_id| {
-      self
-        .document
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)
-    }) else {
+    let Some(sheet) = self.active_sheet.and_then(|sheet_id| self.board.sheet(sheet_id)) else {
       return;
     };
     let radius = 10.0;
@@ -149,13 +145,19 @@ impl FlowEditor {
             .any(|segment| segment_distance(point, segment[0], segment[1]) <= radius)
       })
       .map(|stroke| stroke.id);
-    if let Some(stroke_id) = touched
-      && self
-        .document
-        .delete_annotation(sheet.id, stroke_id, &self.local_annotation_originator)
-        .is_ok_and(|removed| removed)
-    {
-      self.changed(self.active_cell, cx);
+    let sheet_id = sheet.id;
+    if let Some(stroke_id) = touched {
+      let originator = self.local_annotation_originator.clone();
+      if self.apply_intent(
+        flowstate_flow::FlowIntent::DeleteAnnotation {
+          sheet_id,
+          stroke_id,
+          originator,
+        },
+        cx,
+      ) {
+        self.changed(self.active_cell, cx);
+      }
     }
   }
 }

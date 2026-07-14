@@ -71,14 +71,6 @@ pub(crate) fn apply_flow_intent(core: &mut FlowRuntime, intent: &FlowIntent) -> 
       }
       selection_after = caret.and_then(|caret| cell_selection_snapshot(&doc, cell, caret));
     },
-    Derived::BoardAndContent { cell } => {
-      // Structural change already applied to the maintained board; fold in the
-      // (possibly fresh) cell summary, then one board Replace.
-      let _ = core
-        .refresh_cell(cell)
-        .map_err(|error| compensate_failed_intent(core, &doc, &frontier_before, &vv_before, class, &error))?;
-      core.push_board_stream();
-    },
   }
 
   // ---- Phase 5: publish ------------------------------------------------------
@@ -101,8 +93,6 @@ enum Derived {
   Board,
   /// One cell's rich text changed (cell rematerialization + summary check).
   Content { cell: CellId, caret: Option<usize> },
-  /// Structural board change PLUS one cell's content (AddCell).
-  BoardAndContent { cell: CellId },
 }
 
 enum ExecuteError {

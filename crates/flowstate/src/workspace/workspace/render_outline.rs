@@ -149,7 +149,7 @@ impl Workspace {
     let Some(editor) = self.active_flow.clone() else {
       return div().into_any_element();
     };
-    let projection = editor.read(cx).document().projection().clone();
+    let projection = editor.read(cx).board().clone();
     let active_sheet = editor.read(cx).active_sheet();
     let active_cell = editor.read(cx).active_cell();
     let mut rows = Vec::new();
@@ -279,10 +279,10 @@ fn append_flow_outline_cell_rows(
       }
     })
     .collect();
-  let label = cell
-    .summary_text()
-    .map(|text| if text.trim().is_empty() { "(empty)".into() } else { text })
-    .unwrap_or_else(|_| "(invalid rich text)".into());
+  let label = {
+    let text = cell.summary.summary_text.to_string();
+    if text.trim().is_empty() { "(empty)".to_string() } else { text }
+  };
   let activate_editor = editor.clone();
   let toggle_editor = editor.clone();
   let incoming_branch = cell.parent_id.map(|_| IncomingBranch {

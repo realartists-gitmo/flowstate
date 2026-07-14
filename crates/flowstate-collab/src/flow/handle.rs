@@ -153,6 +153,30 @@ impl FlowDocHandle {
     Ok(self.lock(GateHolder::UndoRedo)?.can_redo())
   }
 
+  /// Read-only cell materialization for render previews — unlike
+  /// [`Self::open_cell`], no stream/cache entry is created.
+  pub fn cell_preview(&self, cell: CellId) -> Result<DocumentProjection, FlowWriteRejected> {
+    self.with_runtime(GateHolder::LocalIntent, |runtime| {
+      flowstate_flow::loro_projection::materialize_cell_projection(
+        runtime.doc(),
+        cell,
+        flowstate_document::DocumentTheme::clone(&flowstate_document::flowstate_document_theme()),
+      )
+      .map_err(|error| FlowWriteRejected::StructureViolation(format!("{error:#}")))
+    })?
+  }
+
+  /// Whole-doc Loro snapshot under a brief gate hold (solo save path; the
+  /// collaboration save goes through the flow I/O service's fork-off-gate).
+  pub fn snapshot(&self) -> Result<Vec<u8>, FlowWriteRejected> {
+    self
+      .with_runtime(GateHolder::DocumentService, |runtime| {
+        runtime
+          .snapshot()
+          .map_err(|error| FlowWriteRejected::StructureViolation(format!("{error:#}")))
+      })?
+  }
+
   /// Test/tooling support: run a closure against the gate-held runtime (the
   /// flow analog of holding a test gate guard on the .db8 core).
   pub fn with_test_runtime<T>(&self, call: impl FnOnce(&mut FlowRuntime) -> T) -> T {
