@@ -64,10 +64,33 @@ impl CollabSession {
     }
 
     tracing::debug!(session = %self.session, bytes = bytes.len(), "importing remote collaboration update");
-    let io = self
+    let io = match self
       .runtime
       .clone()
-      .context("collaboration session has no document I/O service")?;
+      .context("collaboration session has no document I/O service")?
+    {
+      flowstate_collab::SyncIoHandle::RichText(io) => io,
+      flowstate_collab::SyncIoHandle::Flow(io) => {
+        // FLOW arm: one import request; the derivation rides the runtime's
+        // streams and the pump drains vv/publish events afterwards.
+        let session_id = self.session;
+        cx.spawn(async move |session, cx| {
+          match io.import_remote_update(bytes).await {
+            Ok(()) => {
+              let _ = session.update(cx, |session, cx| {
+                session.pump_publish(cx);
+                session.last_document_activity = std::time::Instant::now();
+              });
+            },
+            Err(error) => {
+              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "dropped unimportable remote flow update");
+            },
+          }
+        })
+        .detach();
+        return Ok(());
+      },
+    };
     // §perf: bytes is already owned; hand it straight to the I/O service with no extra copy.
     let bytes_len = bytes.len();
     let session_id = self.session;
@@ -254,8 +277,8 @@ impl CollabSession {
   }
 
   pub(super) fn flush_pending_asset_records(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(editor) = self.editor.clone() else {
-      tracing::trace!(session = %self.session, pending_asset_records = self.pending_asset_records.len(), "cannot flush collaboration asset records because editor is missing");
+    let Some(editor) = self.rich_text_editor() else {
+      tracing::trace!(session = %self.session, pending_asset_records = self.pending_asset_records.len(), "cannot flush collaboration asset records because no rich-text editor is attached");
       return false;
     };
     let deferred = editor.read(cx).projection_apply_deferred();
@@ -337,9 +360,8 @@ impl CollabSession {
 
   fn asset_bytes(&self, asset: u128, cx: &mut Context<Self>) -> Result<AssetBytes> {
     let editor = self
-      .editor
-      .as_ref()
-      .context("collaboration session has no editor")?;
+      .rich_text_editor()
+      .context("collaboration session has no rich-text editor (flow sessions carry no assets)")?;
     let bytes = editor
       .read(cx)
       .document()
@@ -365,7 +387,7 @@ impl CollabSession {
     // replica's own saves/packages include them. The session still never
     // writes document CONTENT (invariant 5) — asset bytes are content-
     // addressed sideband records.
-    if let Some(io) = self.runtime.clone() {
+    if let Some(io) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) {
       let records: Vec<AssetRecord> = asset_records
         .iter()
         .map(|(_, record)| record.clone())

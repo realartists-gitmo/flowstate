@@ -1022,12 +1022,45 @@ impl Workspace {
     cx: &mut Context<Self>,
   ) -> Entity<FlowPanel> {
     let FlowRuntimeSource { handle, gate } = source;
+    // The flow I/O service shares the editor's gate; collaboration and
+    // off-thread saves route through it (spec Part C).
+    let io = flowstate_collab::flow::FlowIoHandle::spawn(gate).ok();
+    self.create_flow_panel_inner(handle, io, path, None, window, cx)
+  }
+
+  /// Joined-session variant: the session already built the write authority and
+  /// spawned its I/O service from the snapshot, so the panel adopts them
+  /// instead of spawning a duplicate service on the same gate. Pathless —
+  /// autosave skips it and the session's recovery hooks cover crashes.
+  fn create_flow_panel_from_attachment(
+    &mut self,
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: flowstate_collab::flow::FlowIoHandle,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<FlowPanel> {
+    self.create_flow_panel_inner(handle, Some(io), None, title, window, cx)
+  }
+
+  fn create_flow_panel_inner(
+    &mut self,
+    handle: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: Option<flowstate_collab::flow::FlowIoHandle>,
+    path: Option<PathBuf>,
+    title: Option<String>,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<FlowPanel> {
     let editor = cx.new(|cx| FlowEditor::new_with_path(handle, path.clone(), window, cx));
     let workspace = cx.entity().downgrade();
-    let title = path
-      .as_ref()
-      .and_then(|path| path.file_name())
-      .map(|name| name.to_string_lossy().to_string())
+    let title = title
+      .or_else(|| {
+        path
+          .as_ref()
+          .and_then(|path| path.file_name())
+          .map(|name| name.to_string_lossy().to_string())
+      })
       .or_else(|| Some(self.next_untitled_flow_title(cx)));
     let panel = cx.new(|cx| FlowPanel::new_with_title(title, path, editor.clone(), workspace, window, cx));
     let id = panel.read(cx).id();
@@ -1037,9 +1070,7 @@ impl Workspace {
         workspace.maybe_autosave_flow(id, editor.clone(), cx);
       }),
     ));
-    // The flow I/O service shares the editor's gate; collaboration and
-    // off-thread saves route through it (spec Part C).
-    if let Ok(io) = flowstate_collab::flow::FlowIoHandle::spawn(gate) {
+    if let Some(io) = io {
       self.flow_document_runtimes.insert(id, io);
     }
     self.active_document_id = Some(id);

@@ -1,13 +1,23 @@
 #[hotpath::measure_all]
 impl Workspace {
   pub(crate) fn collaboration_discovery_context(&self, panel_id: Uuid, cx: &App) -> Option<(u128, PathBuf)> {
-    let panel = self
+    if let Some(panel) = self
       .document_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)
+    {
+      let editor = panel.read(cx).editor();
+      let editor = editor.read(cx);
+      return Some((editor.document().ids.document_id, editor.document_path()?.clone()));
+    }
+    // FLOW arm: discovery fingerprints derive from `flow.meta/document_id`.
+    let panel = self
+      .flow_panels
       .iter()
       .find(|panel| panel.read(cx).id() == panel_id)?;
     let editor = panel.read(cx).editor();
     let editor = editor.read(cx);
-    Some((editor.document().ids.document_id, editor.document_path()?.clone()))
+    Some((editor.handle().document_id().ok()?.as_u128(), editor.document_path()?.clone()))
   }
 
   pub fn open_comment_dialog(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -68,7 +78,9 @@ impl Workspace {
       self.collaboration_dialog = None;
     }
     let workspace = cx.entity().downgrade();
-    let panel_id = self.active_editor.as_ref().and(self.active_document_id);
+    let panel_id = (self.active_editor.is_some() || self.active_flow.is_some())
+      .then_some(self.active_document_id)
+      .flatten();
     let dialog = cx.new(|cx| crate::collab::share_dialog::CollabShareDialog::new(workspace, panel_id, mode, window, cx));
     let dialog_for_render = dialog.clone();
     let workspace_for_close = cx.entity().downgrade();
@@ -93,6 +105,9 @@ impl Workspace {
   }
 
   pub fn start_collaboration_on_document(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<flowstate_collab::SessionId> {
+    if self.flow_panels.iter().any(|panel| panel.read(cx).id() == panel_id) {
+      return self.start_collaboration_on_flow_panel(panel_id, cx);
+    }
     let panel = self
       .document_panels
       .iter()
@@ -116,6 +131,30 @@ impl Workspace {
       },
       Err(error) => {
         tracing::error!(%panel_id, error = %format_args!("{error:#}"), "starting collaboration session failed");
+        None
+      },
+    }
+  }
+
+  /// FLOW arm of session start: what makes "start collaboration on an open
+  /// flow tab" free — the editor already commits through its gated authority;
+  /// the session only takes the flow I/O handle for transport.
+  fn start_collaboration_on_flow_panel(&mut self, panel_id: Uuid, cx: &mut Context<Self>) -> Option<flowstate_collab::SessionId> {
+    let panel = self
+      .flow_panels
+      .iter()
+      .find(|panel| panel.read(cx).id() == panel_id)?;
+    let editor = panel.read(cx).editor();
+    let title = panel.read(cx).title_text().to_string();
+    let runtime = self.flow_document_runtimes.get(&panel_id)?.clone();
+    tracing::info!(%panel_id, title = %title, "workspace starting collaboration on flow");
+    match crate::collab::start_flow_session_for_panel(panel_id, editor, title, runtime, cx) {
+      Ok(session) => {
+        tracing::info!(%panel_id, %session, "workspace started collaboration on flow");
+        Some(session)
+      },
+      Err(error) => {
+        tracing::error!(%panel_id, error = %format_args!("{error:#}"), "starting flow collaboration session failed");
         None
       },
     }
@@ -310,24 +349,43 @@ impl Workspace {
                 ));
                 return;
               };
-              let attachment = DocumentRuntimeAttachment { authority, io };
-              let panel = match workspace.add_joined_collaboration_panel(joined.document, joined.title, attachment, window, cx) {
-                Ok(panel) => panel,
-                Err(error) => {
-                  tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");
-                  let detail = format!("Joined document runtime could not be started: {error:#}");
+              use crate::collab::{CollabEditor, JoinedAuthority, JoinedDocumentPayload};
+              let (panel_id, editor) = match (joined.payload, authority, io) {
+                (JoinedDocumentPayload::RichText(document), JoinedAuthority::RichText(authority), flowstate_collab::SyncIoHandle::RichText(io)) => {
+                  let attachment = DocumentRuntimeAttachment { authority, io };
+                  let panel = match workspace.add_joined_collaboration_panel(document, joined.title, attachment, window, cx) {
+                    Ok(panel) => panel,
+                    Err(error) => {
+                      tracing::error!(session = %joined.session, error = %format_args!("{error:#}"), "starting joined document runtime failed");
+                      let detail = format!("Joined document runtime could not be started: {error:#}");
+                      std::mem::drop(window.prompt(
+                        PromptLevel::Critical,
+                        "Join failed",
+                        Some(&detail),
+                        &[PromptButton::ok("Ok")],
+                        cx,
+                      ));
+                      return;
+                    },
+                  };
+                  (panel.read(cx).id(), CollabEditor::RichText(panel.read(cx).editor()))
+                },
+                (JoinedDocumentPayload::Flow(_board), JoinedAuthority::Flow(authority), flowstate_collab::SyncIoHandle::Flow(io)) => {
+                  let panel = workspace.add_joined_collaboration_flow_panel(authority, io, joined.title, window, cx);
+                  (panel.read(cx).id(), CollabEditor::Flow(panel.read(cx).editor()))
+                },
+                _ => {
+                  tracing::error!(session = %joined.session, "joined collaboration services have mismatched document kinds");
                   std::mem::drop(window.prompt(
                     PromptLevel::Critical,
                     "Join failed",
-                    Some(&detail),
+                    Some("The joined collaboration document kind is inconsistent."),
                     &[PromptButton::ok("Ok")],
                     cx,
                   ));
                   return;
                 },
               };
-              let panel_id = panel.read(cx).id();
-              let editor = panel.read(cx).editor();
               if let Err(error) = crate::collab::attach_joined_session(joined.session, panel_id, editor, cx) {
                 tracing::error!(session = %joined.session, %panel_id, error = %format_args!("{error:#}"), "collaboration joined document attachment failed");
                 let detail = format!("Joined document opened, but collaboration attachment failed: {error:#}");
@@ -388,6 +446,24 @@ impl Workspace {
     self.persist_temporary_workspace_session(cx);
     cx.notify();
     Ok(panel)
+  }
+
+  /// FLOW join sibling of [`Self::add_joined_collaboration_panel`]: the
+  /// session built authority + I/O from the snapshot; the panel wires them
+  /// exactly like a solo flow tab (invariant 5) — pathless, so autosave skips
+  /// it and the session's recovery hooks cover crashes.
+  fn add_joined_collaboration_flow_panel(
+    &mut self,
+    authority: std::sync::Arc<flowstate_collab::flow::FlowDocHandle>,
+    io: flowstate_collab::flow::FlowIoHandle,
+    title: String,
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Entity<crate::flow::FlowPanel> {
+    let panel = self.create_flow_panel_from_attachment(authority, io, Some(title), window, cx);
+    self.persist_temporary_workspace_session(cx);
+    cx.notify();
+    panel
   }
 
   pub fn leave_collaboration_on_active_document(&mut self, cx: &mut Context<Self>) -> bool {

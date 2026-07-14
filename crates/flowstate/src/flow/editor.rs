@@ -46,6 +46,18 @@ pub enum FlowEditorEvent {
   ActiveSheetChanged(Option<SheetId>),
 }
 
+/// One remote peer's board focus, resolved for rendering: which sheet they
+/// are on, which cell they focus (outline + name chip), and whether they are
+/// editing inside it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FlowExternalPresence {
+  pub name: String,
+  pub color_rgb: u32,
+  pub sheet: Option<SheetId>,
+  pub cell: Option<CellId>,
+  pub editing: bool,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum AnnotationTool {
   #[default]
@@ -70,6 +82,11 @@ pub struct FlowEditor {
   /// demand, dropped on any board change / remote sync).
   cell_documents: std::collections::HashMap<CellId, flowstate_document::DocumentProjection>,
   path: Option<PathBuf>,
+  /// Debounced `.fl0` recovery file for pathless joined collaboration tabs.
+  recovery_path: Option<PathBuf>,
+  recovery_write_pending: bool,
+  /// Remote peers' board focus (presence rendering, spec Part C).
+  external_presences: Vec<FlowExternalPresence>,
   dirty: bool,
   active_sheet: Option<SheetId>,
   active_cell: Option<CellId>,
@@ -117,6 +134,9 @@ impl FlowEditor {
       board,
       cell_documents: std::collections::HashMap::new(),
       path,
+      recovery_path: None,
+      recovery_write_pending: false,
+      external_presences: Vec::new(),
       dirty: false,
       active_sheet,
       active_cell: None,
@@ -673,6 +693,7 @@ impl FlowEditor {
   fn changed(&mut self, active_cell: Option<CellId>, cx: &mut Context<Self>) {
     self.active_cell = active_cell;
     self.dirty = true;
+    self.schedule_recovery_write(cx);
     cx.emit(FlowEditorEvent::Changed);
     cx.emit(FlowEditorEvent::ActiveCellChanged(active_cell));
     cx.notify();
@@ -714,7 +735,66 @@ impl FlowEditor {
     })
   }
 
-  pub fn discard_recovery_file(&mut self) {}
+  /// Pathless joined tabs write a debounced `.fl0` recovery file so a crash
+  /// mid-session cannot lose the shared board (lifecycle parity, spec Part C).
+  pub fn set_recovery_path(&mut self, path: Option<PathBuf>, cx: &mut Context<Self>) {
+    self.recovery_path = path;
+    if self.recovery_path.is_some() {
+      self.schedule_recovery_write(cx);
+    }
+  }
+
+  fn schedule_recovery_write(&mut self, cx: &mut Context<Self>) {
+    if self.recovery_write_pending {
+      return;
+    }
+    let Some(path) = self.recovery_path.clone() else {
+      return;
+    };
+    self.recovery_write_pending = true;
+    let handle = self.handle.clone();
+    cx.spawn(async move |editor, cx| {
+      cx.background_executor()
+        .timer(std::time::Duration::from_millis(750))
+        .await;
+      let write = cx
+        .background_executor()
+        .spawn(async move {
+          let snapshot = handle.snapshot().map_err(std::io::Error::other)?;
+          flowstate_flow::write_fl0(&path, &snapshot).map_err(std::io::Error::other)
+        })
+        .await;
+      if let Err(error) = write {
+        tracing::warn!(%error, "writing flow collaboration recovery file failed");
+      }
+      let _ = editor.update(cx, |editor, _| {
+        editor.recovery_write_pending = false;
+      });
+    })
+    .detach();
+  }
+
+  pub fn discard_recovery_file(&mut self) {
+    if let Some(path) = self.recovery_path.take()
+      && let Err(error) = std::fs::remove_file(&path)
+      && error.kind() != std::io::ErrorKind::NotFound
+    {
+      tracing::warn!(%error, path = %path.display(), "removing flow collaboration recovery file failed");
+    }
+  }
+
+  /// Remote peers' board focus (peer-color cell outlines + name chips; peers
+  /// on other sheets show as colored dots on the sheet switcher).
+  pub fn set_external_presences(&mut self, presences: Vec<FlowExternalPresence>, cx: &mut Context<Self>) {
+    if self.external_presences != presences {
+      self.external_presences = presences;
+      cx.notify();
+    }
+  }
+
+  pub fn external_presences(&self) -> &[FlowExternalPresence] {
+    &self.external_presences
+  }
 
   pub fn resolve_pending(&mut self, _cx: &mut Context<Self>) {}
 

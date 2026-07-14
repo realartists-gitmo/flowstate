@@ -6,9 +6,10 @@ use std::{
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use flowstate_collab::{
-  SessionAdmission, SessionId,
+  DocumentKind, SessionAdmission, SessionId, SyncIoHandle,
   crdt_runtime::{CrdtRuntime, RuntimeEvent},
   doc_io::DocIoHandle,
+  flow::{FlowDocHandle, FlowIoHandle, FlowPublishEvent, FlowRuntime},
   ids::PeerId,
   local_write::{LocalDocHandle, LocalWriteConfig},
   net::{
@@ -26,6 +27,7 @@ use loro::{LoroDoc, Subscription as LoroSubscription};
 use uuid::Uuid;
 
 use crate::app_settings::{load_document_theme, load_local_user_identity, load_local_user_profile};
+use crate::flow::{FlowEditor, FlowEditorEvent};
 use crate::rich_text_element::{AssetId, AssetRecord, CollaborationRole, DocumentProjection, EditorEvent, RichTextEditor};
 
 use super::presence_view;
@@ -94,7 +96,43 @@ pub(super) enum JoinNeighborSignal {
 pub struct JoinedDocument {
   pub session: SessionId,
   pub title: String,
-  pub document: DocumentProjection,
+  pub payload: JoinedDocumentPayload,
+}
+
+/// The join snapshot's materialization, per document kind.
+pub enum JoinedDocumentPayload {
+  RichText(DocumentProjection),
+  Flow(flowstate_flow::FlowBoardProjection),
+}
+
+/// The session's document-facing editor arm (spec Part C): ONE session type,
+/// two-arm document half.
+#[derive(Clone)]
+pub enum CollabEditor {
+  RichText(Entity<RichTextEditor>),
+  Flow(Entity<FlowEditor>),
+}
+
+impl CollabEditor {
+  pub fn as_rich_text(&self) -> Option<&Entity<RichTextEditor>> {
+    match self {
+      Self::RichText(editor) => Some(editor),
+      Self::Flow(_) => None,
+    }
+  }
+
+  pub fn as_flow(&self) -> Option<&Entity<FlowEditor>> {
+    match self {
+      Self::Flow(editor) => Some(editor),
+      Self::RichText(_) => None,
+    }
+  }
+}
+
+/// The parked join-handoff write authority, per document kind.
+pub enum JoinedAuthority {
+  RichText(Arc<LocalDocHandle>),
+  Flow(Arc<FlowDocHandle>),
 }
 
 #[derive(Clone, Debug)]
@@ -111,13 +149,14 @@ pub struct CollabSession {
   // Loro-first (spec §3, invariant 5): the session is TRANSPORT-ONLY. It holds
   // the document I/O service handle to import remote updates and drain the
   // publish queue — never a write path into the document.
-  runtime: Option<DocIoHandle>,
+  runtime: Option<SyncIoHandle>,
   // JOIN handoff slot (spec §3 join gate): the write authority constructed by
   // `finish_join_snapshot`, held ONLY until the workspace takes it via
   // `take_joined_document_services`. The session never calls into it.
-  join_authority: Option<Arc<LocalDocHandle>>,
+  join_authority: Option<JoinedAuthority>,
   runtime_vv: Vec<u8>,
-  editor: Option<Entity<RichTextEditor>>,
+  kind: DocumentKind,
+  editor: Option<CollabEditor>,
   panel_id: Option<Uuid>,
   // UI-only asset cache records fetched after Loro metadata arrives.
   pending_asset_records: Vec<(AssetId, AssetRecord)>,
@@ -180,6 +219,48 @@ impl CollabSession {
     io: DocIoHandle,
     net_tx: CommandSender,
   ) -> Self {
+    Self::from_local_parts(
+      session,
+      panel_id,
+      CollabEditor::RichText(editor),
+      title,
+      SyncIoHandle::RichText(io),
+      DocumentKind::RichText,
+      net_tx,
+    )
+  }
+
+  /// Start a session on an open FLOW tab: the identical wiring shape (the
+  /// editor already holds its write authority; the session only takes the
+  /// transport-side flow I/O handle).
+  pub fn from_local_flow_runtime(
+    session: SessionId,
+    panel_id: Uuid,
+    editor: Entity<FlowEditor>,
+    title: String,
+    io: FlowIoHandle,
+    net_tx: CommandSender,
+  ) -> Self {
+    Self::from_local_parts(
+      session,
+      panel_id,
+      CollabEditor::Flow(editor),
+      title,
+      SyncIoHandle::Flow(io),
+      DocumentKind::Flow,
+      net_tx,
+    )
+  }
+
+  fn from_local_parts(
+    session: SessionId,
+    panel_id: Uuid,
+    editor: CollabEditor,
+    title: String,
+    io: SyncIoHandle,
+    kind: DocumentKind,
+    net_tx: CommandSender,
+  ) -> Self {
     // Direct serving is network-bound and should backpressure rather than grow without limit.
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
@@ -197,6 +278,7 @@ impl CollabSession {
       runtime: Some(io),
       join_authority: None,
       runtime_vv: Vec::new(),
+      kind,
       editor: Some(editor),
       panel_id: Some(panel_id),
       pending_asset_records: Vec::new(),
@@ -239,7 +321,14 @@ impl CollabSession {
     }
   }
 
-  pub fn joining(session: SessionId, title: String, net_tx: CommandSender, bootstrap_addrs: Vec<PeerAddr>, admission: SessionAdmission) -> Self {
+  pub fn joining(
+    session: SessionId,
+    title: String,
+    net_tx: CommandSender,
+    bootstrap_addrs: Vec<PeerAddr>,
+    admission: SessionAdmission,
+    kind: DocumentKind,
+  ) -> Self {
     let collaboration_role = CollaborationRole::Editor;
     let (direct_tx, direct_rx) = async_channel::bounded(DIRECT_REQUEST_CHANNEL_CAPACITY);
     let now = Instant::now();
@@ -251,6 +340,7 @@ impl CollabSession {
       runtime: None,
       join_authority: None,
       runtime_vv: Vec::new(),
+      kind,
       editor: None,
       panel_id: None,
       pending_asset_records: Vec::new(),
@@ -306,10 +396,18 @@ impl CollabSession {
   }
 
   /// The session's document kind (rides the v4 invite ticket under its HMAC).
-  /// Step 9 (session enum split) derives this from the attached editor arm;
-  /// every current session is a rich-text document.
-  pub fn document_kind(&self) -> flowstate_collab::ticket::DocumentKind {
-    flowstate_collab::ticket::DocumentKind::RichText
+  pub fn document_kind(&self) -> DocumentKind {
+    self.kind
+  }
+
+  /// The rich-text arm of the attached editor (presence/comments/assets are
+  /// rich-text-only surfaces; flow arms no-op through this accessor).
+  pub(super) fn rich_text_editor(&self) -> Option<Entity<RichTextEditor>> {
+    self.editor.as_ref().and_then(CollabEditor::as_rich_text).cloned()
+  }
+
+  pub(super) fn flow_editor(&self) -> Option<Entity<FlowEditor>> {
+    self.editor.as_ref().and_then(CollabEditor::as_flow).cloned()
   }
 
   pub(super) fn set_admission(&mut self, admission: SessionAdmission) {
@@ -342,7 +440,7 @@ impl CollabSession {
     // thread (spec I-9a: raw ungated doc reads are outlawed — they can
     // force-commit mid-intent state). Absent a runtime yet, it falls back to
     // the session-served request channel.
-    DirectSessionHandler::new_rich_text(self.direct_tx.clone(), self.runtime.clone())
+    DirectSessionHandler::new(self.direct_tx.clone(), self.runtime.clone())
   }
 
   pub(super) fn pull_candidates(&self, preferred: Option<flowstate_collab::ids::PeerId>) -> Vec<flowstate_collab::ids::PeerId> {
@@ -522,7 +620,7 @@ impl CollabSession {
     Ok(reply_rx)
   }
 
-  pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: Entity<RichTextEditor>, cx: &mut Context<Self>) -> Result<()> {
+  pub fn attach_joined_editor(&mut self, panel_id: Uuid, editor: CollabEditor, cx: &mut Context<Self>) -> Result<()> {
     if self.runtime.is_none() {
       tracing::warn!(session = %self.session, %panel_id, "cannot attach joined editor before snapshot load finishes");
       bail!("collaboration snapshot has not finished loading");
@@ -584,7 +682,7 @@ impl CollabSession {
   /// (the session must never hold a write path once attached) and the I/O
   /// handle is shared. Returns `None` before the snapshot import completes or
   /// after the services were already taken.
-  pub fn take_joined_document_services(&mut self) -> Option<(Arc<LocalDocHandle>, DocIoHandle)> {
+  pub fn take_joined_document_services(&mut self) -> Option<(JoinedAuthority, SyncIoHandle)> {
     let io = self.runtime.clone()?;
     let authority = self.join_authority.take()?;
     Some((authority, io))
@@ -704,7 +802,7 @@ impl CollabSession {
     } else {
       tracing::debug!(session = %self.session, peer = %peer, "local collaboration peer presence already established");
     }
-    if let (Some(editor), Some(presence)) = (self.editor.clone(), self.presence.as_ref()) {
+    if let (Some(editor), Some(presence)) = (self.rich_text_editor(), self.presence.as_ref()) {
       editor.update(cx, |editor, cx| editor.set_own_collaboration_caret_color(Some(presence.self_color()), cx));
     }
     self.refresh_own_presence(cx);
@@ -721,7 +819,7 @@ impl CollabSession {
   }
 
   fn finish_join_snapshot(&mut self, snapshot: &[u8], cx: &mut Context<Self>) -> Result<JoinedDocument> {
-    tracing::info!(session = %self.session, snapshot_bytes = snapshot.len(), "building collaboration document from join snapshot");
+    tracing::info!(session = %self.session, snapshot_bytes = snapshot.len(), kind = ?self.kind, "building collaboration document from join snapshot");
     if matches!(self.phase, SessionPhase::Detached(_)) {
       bail!("collaboration join is no longer active");
     }
@@ -733,6 +831,10 @@ impl CollabSession {
     cx.notify();
     self.phase = SessionPhase::Joining(JoinStage::Building);
     cx.notify();
+
+    if matches!(self.kind, DocumentKind::Flow) {
+      return self.finish_join_flow_snapshot(snapshot);
+    }
 
     let doc = LoroDoc::new();
     flowstate_document::loro_schema::configure_text_styles(&doc);
@@ -749,7 +851,8 @@ impl CollabSession {
     // cannot receive it before this point, i.e. before the initial snapshot
     // import completed).
     let (authority, gate) = LocalDocHandle::new(runtime, LocalWriteConfig::default());
-    let io = DocIoHandle::spawn(gate).context("starting joined collaboration document I/O service")?;
+    let doc_io = DocIoHandle::spawn(gate).context("starting joined collaboration document I/O service")?;
+    let io = doc_io.clone();
     // §15/§31: bind this joiner's durable author identity to the joined
     // document so their revisions record an author and `users_by_id` is
     // populated. The user-registration op converges to peers via
@@ -757,7 +860,7 @@ impl CollabSession {
     // the join. `create_document_panel` receives this document through the
     // `Attachment` source, which deliberately skips re-binding to avoid a
     // redundant second call.
-    let identity_io = io.clone();
+    let identity_io = doc_io.clone();
     cx.spawn(async move |session, cx| {
       let (user_id, display_name) = cx
         .background_executor()
@@ -785,8 +888,8 @@ impl CollabSession {
       "built collaboration document from join snapshot",
     );
 
-    self.runtime = Some(io);
-    self.join_authority = Some(Arc::new(authority));
+    self.runtime = Some(SyncIoHandle::RichText(io));
+    self.join_authority = Some(JoinedAuthority::RichText(Arc::new(authority)));
     fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
       format!("session={} source=join-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
     });
@@ -794,7 +897,33 @@ impl CollabSession {
     Ok(JoinedDocument {
       session: self.session,
       title: format!("{} (shared)", self.title),
-      document,
+      payload: JoinedDocumentPayload::RichText(document),
+    })
+  }
+
+  /// The FLOW join arm (spec Part C): `FlowRuntime::from_snapshot` (schema
+  /// validated — the wrong-kind defense) → `FlowDocHandle::new` →
+  /// `FlowIoHandle::spawn` → park the authority for the workspace handoff.
+  fn finish_join_flow_snapshot(&mut self, snapshot: &[u8]) -> Result<JoinedDocument> {
+    let runtime = FlowRuntime::from_snapshot(snapshot).context("building joined flow runtime from snapshot")?;
+    let board = runtime.board_ref().clone();
+    let (authority, gate) = FlowDocHandle::new(runtime);
+    let io = FlowIoHandle::spawn(gate).context("starting joined flow I/O service")?;
+    tracing::info!(
+      session = %self.session,
+      sheets = board.sheets.len(),
+      "built collaboration flow document from join snapshot",
+    );
+    self.runtime = Some(SyncIoHandle::Flow(io));
+    self.join_authority = Some(JoinedAuthority::Flow(authority));
+    fidelity::event(FidelityClass::Frontier, "runtime-vv-reset", || {
+      format!("session={} source=join-snapshot prior_bytes={}", self.session, self.runtime_vv.len())
+    });
+    self.runtime_vv.clear();
+    Ok(JoinedDocument {
+      session: self.session,
+      title: format!("{} (shared)", self.title),
+      payload: JoinedDocumentPayload::Flow(board),
     })
   }
 
@@ -826,13 +955,22 @@ impl CollabSession {
     // document's write authority, gate, and I/O service are untouched — the
     // editor keeps editing through the identical path; nothing to reset on it
     // beyond collaboration presentation state.
-    if let Some(editor) = self.editor.clone() {
-      editor.update(cx, |editor, cx| {
-        editor.set_recovery_path(None, cx);
-        editor.set_collaboration_role(None, cx);
-        editor.set_own_collaboration_caret_color(None, cx);
-        editor.set_external_carets(Vec::new(), cx);
-      });
+    match self.editor.clone() {
+      Some(CollabEditor::RichText(editor)) => {
+        editor.update(cx, |editor, cx| {
+          editor.set_recovery_path(None, cx);
+          editor.set_collaboration_role(None, cx);
+          editor.set_own_collaboration_caret_color(None, cx);
+          editor.set_external_carets(Vec::new(), cx);
+        });
+      },
+      Some(CollabEditor::Flow(editor)) => {
+        editor.update(cx, |editor, cx| {
+          editor.set_recovery_path(None, cx);
+          editor.set_external_presences(Vec::new(), cx);
+        });
+      },
+      None => {},
     }
 
     self.editor_subscriptions.clear();
@@ -885,30 +1023,82 @@ impl CollabSession {
       return;
     };
     let session_id = self.session;
-    cx.spawn(async move |session, cx| {
-      match io.pump_publish().await {
-        Ok(events) => {
-          if events.is_empty() {
-            return;
+    match io {
+      SyncIoHandle::RichText(io) => {
+        cx.spawn(async move |session, cx| {
+          match io.pump_publish().await {
+            Ok(events) => {
+              if events.is_empty() {
+                return;
+              }
+              let published = events.len();
+              let _ = session.update(cx, |session, cx| {
+                fidelity::event(FidelityClass::Reconcile, "publish-pump", || {
+                  format!("session={session_id} events={published}")
+                });
+                if let Err(error) = session.apply_runtime_events(events, false, cx) {
+                  tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "publishing committed local collaboration updates failed");
+                  return;
+                }
+                session.refresh_external_carets(cx);
+              });
+            },
+            Err(error) => {
+              tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "pumping collaboration local update publish queue failed");
+            },
           }
-          let published = events.len();
-          let _ = session.update(cx, |session, cx| {
-            fidelity::event(FidelityClass::Reconcile, "publish-pump", || {
-              format!("session={session_id} events={published}")
-            });
-            if let Err(error) = session.apply_runtime_events(events, false, cx) {
-              tracing::error!(session = %session_id, error = %format_args!("{error:#}"), "publishing committed local collaboration updates failed");
-              return;
-            }
-            session.refresh_external_carets(cx);
-          });
+        })
+        .detach();
+      },
+      SyncIoHandle::Flow(io) => {
+        cx.spawn(async move |session, cx| {
+          match io.pump_publish().await {
+            Ok(events) => {
+              if events.is_empty() {
+                return;
+              }
+              let published = events.len();
+              let _ = session.update(cx, |session, cx| {
+                fidelity::event(FidelityClass::Reconcile, "publish-pump", || {
+                  format!("session={session_id} kind=flow events={published}")
+                });
+                session.apply_flow_events(events, cx);
+              });
+            },
+            Err(error) => {
+              tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "pumping flow publish queue failed");
+            },
+          }
+        })
+        .detach();
+      },
+    }
+  }
+
+  /// The flow arm of the publish/apply pump: `FlowPublishEvent`s ride the
+  /// SAME vv-tracking + gossip publication the rich-text events use.
+  pub(super) fn apply_flow_events(&mut self, events: Vec<FlowPublishEvent>, cx: &mut Context<Self>) {
+    for event in events {
+      match event {
+        FlowPublishEvent::LocalUpdate { bytes, version_vector, .. } => {
+          self.update_runtime_vv(version_vector, "local-update", true);
+          self.publish_update_bytes(bytes);
         },
-        Err(error) => {
-          tracing::warn!(session = %session_id, error = %format_args!("{error:#}"), "pumping collaboration local update publish queue failed");
+        FlowPublishEvent::RemoteUpdateApplied { version_vector, .. } => {
+          self.update_runtime_vv(version_vector, "remote-update-applied", true);
         },
       }
-    })
-    .detach();
+    }
+    self.last_document_activity = Instant::now();
+    // The projection changes ride the ordered board/cell streams; pump the
+    // flow editor to drain them.
+    if let Some(editor) = self.flow_editor() {
+      editor.update(cx, |editor, cx| {
+        editor.sync_board_from_handle(cx);
+        editor.sync_cell_editors_from_authority(cx);
+      });
+    }
+    cx.notify();
   }
 
   pub(super) fn apply_runtime_events(&mut self, events: Vec<RuntimeEvent>, apply_projection: bool, cx: &mut Context<Self>) -> Result<()> {
@@ -989,7 +1179,7 @@ impl CollabSession {
           self.apply_runtime_projection(*document, cx)?;
         },
         RuntimeEvent::SelectionRestored { selection } if apply_projection => {
-          if let Some(editor) = self.editor.clone() {
+          if let Some(editor) = self.rich_text_editor() {
             editor.update(cx, |editor, cx| editor.restore_runtime_selection(selection, cx));
           }
         },
@@ -1011,7 +1201,7 @@ impl CollabSession {
   }
 
   fn apply_runtime_patches(&mut self, batch: flowstate_document::ProjectionPatchBatch, cx: &mut Context<Self>) -> Result<()> {
-    let Some(editor) = self.editor.clone() else {
+    let Some(editor) = self.rich_text_editor() else {
       return Ok(());
     };
     fidelity::event(FidelityClass::Projection, "apply-projection-patches", || {
@@ -1035,7 +1225,7 @@ impl CollabSession {
   }
 
   fn apply_runtime_projection(&mut self, mut document: DocumentProjection, cx: &mut Context<Self>) -> Result<()> {
-    let Some(editor) = self.editor.clone() else {
+    let Some(editor) = self.rich_text_editor() else {
       return Ok(());
     };
     fidelity::event(FidelityClass::Projection, "apply-projection", || {
@@ -1167,6 +1357,13 @@ impl CollabSession {
       tracing::warn!(session = %self.session, "cannot attach collaboration editor hooks because editor is missing");
       return;
     };
+    let editor = match editor {
+      CollabEditor::RichText(editor) => editor,
+      CollabEditor::Flow(editor) => {
+        self.attach_flow_editor_hooks(&editor, cx);
+        return;
+      },
+    };
 
     tracing::debug!(session = %self.session, "attaching collaboration editor hooks");
     editor.update(cx, |editor, cx| {
@@ -1223,6 +1420,34 @@ impl CollabSession {
         }
       }));
     tracing::debug!(session = %self.session, subscriptions = self.editor_subscriptions.len(), "collaboration editor hooks attached");
+  }
+
+  /// FLOW editor hooks (spec Part C): observe → debounced publish pump;
+  /// pathless joined tabs get a debounced `.fl0` recovery file.
+  fn attach_flow_editor_hooks(&mut self, editor: &Entity<FlowEditor>, cx: &mut Context<Self>) {
+    tracing::debug!(session = %self.session, "attaching collaboration flow editor hooks");
+    editor.update(cx, |editor, cx| {
+      if editor.document_path().is_none() {
+        editor.set_recovery_path(Some(presence_view::collaboration_flow_recovery_path(self.session, &self.title)), cx);
+      }
+    });
+    self
+      .editor_subscriptions
+      .push(cx.observe(editor, |session, _, cx| {
+        session.schedule_publish_pump(cx);
+      }));
+    self
+      .editor_subscriptions
+      .push(cx.subscribe(editor, |session, _, event: &FlowEditorEvent, cx| {
+        match event {
+          FlowEditorEvent::Changed => session.schedule_publish_pump(cx),
+          FlowEditorEvent::ActiveCellChanged(_) | FlowEditorEvent::ActiveSheetChanged(_) => {
+            // Step 11 (presence): board focus rides the presence channel.
+            session.schedule_own_presence_refresh(cx);
+          },
+        }
+      }));
+    tracing::debug!(session = %self.session, subscriptions = self.editor_subscriptions.len(), "collaboration flow editor hooks attached");
   }
 
   fn schedule_publish_pump(&mut self, cx: &mut Context<Self>) {

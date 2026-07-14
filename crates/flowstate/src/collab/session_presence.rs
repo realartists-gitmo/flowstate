@@ -75,10 +75,9 @@ impl CollabSession {
       return;
     }
     let selection = self
-      .editor
-      .as_ref()
+      .rich_text_editor()
       .map(|editor| editor.read(cx).selection().clone());
-    let runtime = self.runtime.clone();
+    let runtime = self.runtime.clone().and_then(|io| io.as_rich_text().cloned());
     let session_id = self.session;
     self.presence_refresh_generation = self.presence_refresh_generation.wrapping_add(1);
     let generation = self.presence_refresh_generation;
@@ -159,8 +158,10 @@ impl CollabSession {
     if self.comment_annotation_refresh_pending {
       return;
     }
-    let Some(runtime) = self.runtime.clone() else { return };
-    let Some(editor) = self.editor.clone() else { return };
+    let Some(runtime) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) else {
+      return;
+    };
+    let Some(editor) = self.rich_text_editor() else { return };
     self.comment_annotation_refresh_pending = true;
     self.comment_annotation_refresh_generation = self.comment_annotation_refresh_generation.wrapping_add(1);
     let generation = self.comment_annotation_refresh_generation;
@@ -176,9 +177,8 @@ impl CollabSession {
         match result {
           Ok(comments)
             if session
-              .editor
-              .as_ref()
-              .is_some_and(|current| current == &editor) =>
+              .rich_text_editor()
+              .is_some_and(|current| current == editor) =>
           {
             let selections = comments
               .into_iter()
@@ -204,12 +204,12 @@ impl CollabSession {
       tracing::trace!(session = %self.session, "skipping external caret refresh because presence is missing");
       return;
     };
-    let Some(runtime) = self.runtime.clone() else {
-      tracing::trace!(session = %self.session, "skipping external caret refresh because Loro doc is missing");
+    let Some(runtime) = self.runtime.clone().and_then(|io| io.as_rich_text().cloned()) else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because no rich-text runtime is attached");
       return;
     };
-    let Some(editor) = self.editor.clone() else {
-      tracing::trace!(session = %self.session, "skipping external caret refresh because editor is missing");
+    let Some(editor) = self.rich_text_editor() else {
+      tracing::trace!(session = %self.session, "skipping external caret refresh because no rich-text editor is attached");
       return;
     };
     // §perf: self_key is only used for equality; borrow it instead of allocating a String.
@@ -248,9 +248,8 @@ impl CollabSession {
           }
           tracing::trace!(session = %session_id, carets = resolved.carets.len(), "refreshing collaboration external carets");
           if session
-            .editor
-            .as_ref()
-            .is_some_and(|current| current == &editor)
+            .rich_text_editor()
+            .is_some_and(|current| current == editor)
           {
             if fidelity::enabled() {
               // A resolved external caret must land inside the editor's current
