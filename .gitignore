@@ -8,3 +8,51 @@ perf.data
 /VIRTUALIZED_VIEWPORT_PLAN.md
 flamegraph
 .pi/
+
+# Local dev logs (flowstate::logging default dir; per-run timestamped files)
+flowstate-logs/
+
+# Compiled Python / caches
+__pycache__/
+*.pyc
+
+# Local scratch documents (real .db8 fixtures live under helpers/)
+/*.db8
+
+# Rustc crash dumps
+rustc-ice-*.txt
+
+# Large, regenerable ML datasets produced by tools/citation_finetune
+/datasets/
+
+# flowstate-autoflow: large/regenerable data (17 GB audio corpus + generated indexes)
+/crates/flowstate-autoflow/audio-stash/
+/crates/flowstate-autoflow/rounds.sqlite
+/crates/flowstate-autoflow/rounds.jsonl
+
+# Real .docx test corpus (3.3 GB, local fixture from Dropbox; gated by
+# FLOWSTATE_CORPUS_DIR). NEVER track this — it bloated .git to 19 GB and was
+# purged from history 2026-07-12. Regenerable from Dropbox if lost.
+/helpers/corpus/
+
+# Local design/spec scratch docs (kept on disk, deliberately out of git)
+/flowstate_*.md
+/debate-asr-production-plan.md
+/lororef.md
+/optimizationnotes.md
+
+# Profiling / probe run artifacts (regenerable captures)
+/hotpath*.md
+/peer1hotpath.md
+/peer2hotpath.md
+/*.log
+/output.json
+/fb_122_output.json
+
+# Vendored-crate build artifacts (Acts 5-14 vendoring)
+vendor/*/target/
+vendor/*/*/target/
+
+# Root scratch/analysis slop (keep it out of the repo)
+/scratchpad_*
+/citation_*.xlsx

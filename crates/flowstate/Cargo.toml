@@ -10,25 +10,39 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+async-channel = { workspace = true }
 clap = { workspace = true }
 dirs = { workspace = true }
 fff-search = { workspace = true }
 flowstate-document = { workspace = true }
 flowstate-docx = { workspace = true }
+flowstate-collab = { workspace = true }
 flowstate-flow = { workspace = true }
 flowstate-tub = { workspace = true }
+futures-util = "0.3"
 gpui = { workspace = true }
 gpui-component = { workspace = true }
 gpui-component-assets = { workspace = true }
 hotpath = { workspace = true }
+iroh = { workspace = true }
+loro = { workspace = true }
 memchr = "2.8.1"
 mimalloc = { workspace = true }
+notify = { workspace = true }
 rustc-hash = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 toml = { workspace = true }
 uuid = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { workspace = true }
+tracing-subscriber = { workspace = true, features = ["json"] }
+url = { workspace = true }
+atomicwrites = "0.4.4"
+blake3 = "1.8.5"
+flowstate-fidelity.workspace = true
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 
 [features]
 hotpath = [
@@ -36,6 +50,7 @@ hotpath = [
   "flowstate-document/hotpath",
   "flowstate-docx/hotpath",
   "flowstate-flow/hotpath",
+  "flowstate-collab/hotpath",
 ]
 hotpath-cpu = [
   "hotpath",
@@ -43,6 +58,7 @@ hotpath-cpu = [
   "flowstate-document/hotpath-cpu",
   "flowstate-docx/hotpath-cpu",
   "flowstate-flow/hotpath-cpu",
+  "flowstate-collab/hotpath-cpu",
 ]
 hotpath-alloc = [
   "hotpath",
@@ -50,11 +66,15 @@ hotpath-alloc = [
   "flowstate-document/hotpath-alloc",
   "flowstate-docx/hotpath-alloc",
   "flowstate-flow/hotpath-alloc",
+  "flowstate-collab/hotpath-alloc",
 ]
-profiler = ["hotpath", "hotpath-alloc"]
+profiler = ["hotpath", "hotpath-alloc", "hotpath-cpu"]
 
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui-symbols = { workspace = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
 cosmic-text = { workspace = true }
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }

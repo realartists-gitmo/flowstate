@@ -1,6 +1,42 @@
-pub use gpui_flowtext::*;
+pub mod instrument;
+pub mod loro_import;
+pub mod loro_projection;
+pub mod loro_schema;
+pub mod package;
+mod package_search;
+pub mod projection_defects;
+pub mod streaming_delta;
+pub mod table_topology;
 
-use std::{io, path::Path};
+pub use gpui_flowtext::*;
+pub use loro_import::{
+  ImportedLoroDocument, document_to_loro, import_document_projection, import_paragraphs_as_loro, write_imported_document_as_loro_db8,
+};
+pub use loro_projection::{
+  ChangedContainerOwner, RegionRows, document_from_loro, document_from_loro_with_defects, materialize_body_region, materialize_table_block,
+  object_input_blocks_for_ids, object_input_blocks_from_loro, owner_of_changed_container, section_page_attrs,
+};
+pub use loro_schema::{
+  BLOCKS_BY_ID, BODY_FLOW_ID, COMMENTS_BY_ID, FLOW_ATTRS_KEY, FLOW_ID_KEY, FLOW_KIND_KEY, FLOW_TEXT_KEY, FLOWS_BY_ID, MAIN_BODY_BLOCK_ID,
+  MARK_DIRECT_UNDERLINE, MARK_HIGHLIGHT_STYLE, MARK_PARAGRAPH_STYLE, MARK_RUN_SEMANTIC_STYLE, MARK_STRIKETHROUGH, MARK_VERT_ALIGN, META,
+  OBJECT_REPLACEMENT, PARAGRAPHS_BY_ID, PageNumberFormat, REPLICAS_BY_ID, ROOT, ROOT_BODY_FLOW_ID, ROOT_FIRST_PARAGRAPH_ID,
+  SECTION_ATTR_COLUMNS, SECTION_ATTR_FOOTER_FLOW_ID, SECTION_ATTR_HEADER_FLOW_ID, SECTION_ATTR_MARGIN_BOTTOM, SECTION_ATTR_MARGIN_LEFT,
+  SECTION_ATTR_MARGIN_RIGHT, SECTION_ATTR_MARGIN_TOP, SECTION_ATTR_ORIENTATION, SECTION_ATTR_PAGE_HEIGHT, SECTION_ATTR_PAGE_NUMBERING_FORMAT,
+  SECTION_ATTR_PAGE_NUMBERING_START, SECTION_ATTR_PAGE_WIDTH, SECTIONS_BY_ID, SENTINEL_NEWLINE, SectionMargins, SectionOrientation,
+  SectionPageAttrs, SectionPageNumbering, SectionPageSize, TABLE_CELLS_BY_ID, TABLE_COLUMN_ORDER, TABLE_COLUMNS_BY_ID, TABLE_KEY,
+  TABLE_ROW_ORDER, TABLE_ROWS_BY_ID, USERS_BY_ID, cell_flow_loro_id, cell_loro_id, cell_loro_id_for, column_loro_id, document_id,
+  document_schema_version, ensure_section, fork_document_lineage, init_loro_document, new_loro_document, parse_cell_loro_id,
+  parse_column_loro_id, parse_row_loro_id, read_section_page_attrs, record_revision, register_replica, register_user, row_loro_id,
+  set_section_page_attrs, touch_document_metadata,
+};
+pub use package::{
+  AssetChunk, ChunkRef, DEFAULT_UPDATE_SEGMENT_COMPACTION_THRESHOLD, DocumentPackage, DocumentPackageManifest, IntegrityIndexEntry,
+  LORO_PACKAGE_FORMAT_VERSION, LORO_SCHEMA_VERSION, PackageRevision, ProjectionCacheChunk, SchemaMigrationRecord, SearchUnitChunk,
+  ThumbnailChunk, loro_db8_bytes, read_loro_db8, write_loro_db8,
+};
+pub use projection_defects::{ProjectionDefect, TableTopologyKind};
+
+use std::{io, path::Path, sync::Arc};
 
 use gpui::{Pixels, black, px, rgb};
 use rustc_hash::{FxHashMap, FxHashSet};
@@ -33,20 +69,66 @@ fn border_eighth_points(value: f32) -> Pixels {
   pt(value / 8.0)
 }
 
-pub fn read_db8(path: impl AsRef<Path>) -> io::Result<Document> {
-  read_document(path)
+pub fn read_db8(path: impl AsRef<Path>) -> io::Result<DocumentProjection> {
+  document_from_package(DocumentPackage::read(path)?)
 }
 
-pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<Document> {
-  read_document_bytes(bytes)
+pub fn read_db8_bytes(bytes: &[u8]) -> io::Result<DocumentProjection> {
+  document_from_package(DocumentPackage::from_bytes(bytes)?)
 }
 
-pub fn write_db8(path: impl AsRef<Path>, document: &Document) -> io::Result<()> {
-  write_document(path, document)
+fn document_from_package(package: DocumentPackage) -> io::Result<DocumentProjection> {
+  let mut document = if let Some(document) = package.current_projection_document()? {
+    document
+  } else {
+    document_from_loro(&package.load_loro_doc()?)?
+  };
+  attach_package_assets(&mut document, &package.assets);
+  Ok(document)
 }
 
-pub fn db8_bytes(document: &Document) -> io::Result<Vec<u8>> {
-  document_bytes(document)
+pub fn attach_package_assets(document: &mut DocumentProjection, assets: &[AssetChunk]) {
+  let referenced = referenced_asset_ids(document);
+  for asset in assets
+    .iter()
+    .filter(|asset| referenced.contains(&AssetId(asset.asset_id)))
+  {
+    let bytes = asset.bytes.clone();
+    document.assets.assets.insert(
+      AssetId(asset.asset_id),
+      AssetRecord {
+        id: AssetId(asset.asset_id),
+        mime_type: asset.mime_type.clone().into(),
+        original_name: None,
+        content_hash: AssetRecord::stable_content_hash(&bytes),
+        bytes: Arc::new(bytes),
+      },
+    );
+  }
+  for id in referenced {
+    document
+      .assets
+      .assets
+      .entry(id)
+      .or_insert_with(|| AssetRecord {
+        id,
+        mime_type: "application/octet-stream".into(),
+        original_name: None,
+        content_hash: AssetRecord::stable_content_hash(&[]),
+        bytes: Arc::new(Vec::new()),
+      });
+  }
+}
+
+fn referenced_asset_ids(document: &DocumentProjection) -> FxHashSet<AssetId> {
+  document
+    .blocks
+    .iter()
+    .filter_map(|block| match block {
+      Block::Image(image) => Some(image.asset_id),
+      Block::Paragraph(_) | Block::Equation(_) | Block::Table(_) => None,
+    })
+    .collect()
 }
 
 pub fn flowstate_document_theme() -> DocumentTheme {

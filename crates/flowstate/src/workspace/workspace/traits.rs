@@ -1,32 +1,42 @@
 #[hotpath::measure_all]
 impl Render for Workspace {
   fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    // Window-level mouse listeners may only be registered during the paint
+    // phase (gpui debug-asserts this; render runs during layout), so the
+    // ctrl+scroll zoom hook rides a zero-cost canvas child's paint pass.
     let workspace = cx.entity().downgrade();
-    window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, _, window, cx| {
-      if event.modifiers.control {
-        let delta = event.delta.pixel_delta(window.line_height());
-        if let Some(workspace) = workspace.upgrade() {
-          workspace.update(cx, |workspace, cx| {
-            if let Some(editor) = workspace.active_editor.clone() {
-              if delta.y < px(0.0) {
-                editor.update(cx, |editor, cx| editor.zoom_in(cx));
-              } else {
-                editor.update(cx, |editor, cx| editor.zoom_out(cx));
-              }
+    let zoom_wheel_hook = gpui::canvas(
+      |_, _, _| (),
+      move |_, _, window, _| {
+        window.on_mouse_event(move |event: &gpui::ScrollWheelEvent, _, window, cx| {
+          if event.modifiers.control {
+            let delta = event.delta.pixel_delta(window.line_height());
+            if let Some(workspace) = workspace.upgrade() {
+              workspace.update(cx, |workspace, cx| {
+                if let Some(editor) = workspace.active_editor.clone() {
+                  if delta.y < px(0.0) {
+                    editor.update(cx, |editor, cx| editor.zoom_in(cx));
+                  } else {
+                    editor.update(cx, |editor, cx| editor.zoom_out(cx));
+                  }
+                }
+              });
             }
-          });
-        }
-        cx.stop_propagation();
-      }
-    });
+            cx.stop_propagation();
+          }
+        });
+      },
+    );
 
     div()
       .size_full()
       .relative()
+      .child(zoom_wheel_hook)
       .child(
         v_flex()
           .on_action(cx.listener(Self::on_save))
           .on_action(cx.listener(Self::on_find_in_document))
+          .on_action(cx.listener(Self::on_fidelity_mark))
           .on_action(cx.listener(Self::on_zoom_in))
           .on_action(cx.listener(Self::on_zoom_out))
           .size_full()
@@ -74,5 +84,7 @@ impl Render for Workspace {
           .with_priority(1),
         )
       })
+      .when_some(Root::render_dialog_layer(window, cx), |this, layer| this.child(layer))
+      .when_some(Root::render_notification_layer(window, cx), |this, layer| this.child(layer))
   }
 }

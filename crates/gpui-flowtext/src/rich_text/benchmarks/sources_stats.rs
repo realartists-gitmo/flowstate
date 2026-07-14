@@ -9,19 +9,7 @@ fn benchmark_sources(options: &BenchmarkOptions) -> Vec<BenchmarkSource> {
       .collect();
   }
 
-  let mut paths = fs::read_dir(".")
-    .ok()
-    .into_iter()
-    .flat_map(|entries| entries.filter_map(Result::ok))
-    .map(|entry| entry.path())
-    .filter(|path| path.extension().is_some_and(|extension| extension == DEFAULT_DOCUMENT_EXTENSION))
-    .collect::<Vec<_>>();
-  paths.sort();
-  if paths.is_empty() {
-    vec![BenchmarkSource::Demo]
-  } else {
-    paths.into_iter().map(BenchmarkSource::Path).collect()
-  }
+  vec![BenchmarkSource::Demo]
 }
 
 #[hotpath::measure]
@@ -33,7 +21,12 @@ fn load_document_source(source: &BenchmarkSource, iterations: usize) -> Result<L
   for _ in 0..iterations {
     let started = Instant::now();
     let loaded = match source {
-      BenchmarkSource::Path(path) => read_document(path).map_err(|error| error.to_string())?,
+      BenchmarkSource::Path(path) => {
+        return Err(format!(
+          "loading {} requires a host Loro package adapter",
+          path.display()
+        ));
+      },
       BenchmarkSource::Demo => demo_document(),
     };
     timings.push(started.elapsed());
@@ -66,7 +59,7 @@ fn source_label(source: &BenchmarkSource) -> String {
 }
 
 #[hotpath::measure]
-fn document_stats(document: &Document) -> DocumentStats {
+fn document_stats(document: &DocumentProjection) -> DocumentStats {
   let mut stats = DocumentStats {
     text_bytes: document.text.byte_len(),
     text_chars: full_document_text(document).chars().count(),
@@ -151,7 +144,7 @@ fn accumulate_table_stats(table: &TableBlock, stats: &mut DocumentStats, nested:
 }
 
 #[hotpath::measure]
-fn check_document_fidelity(document: &Document) -> FidelityReport {
+fn check_document_fidelity(document: &DocumentProjection) -> FidelityReport {
   let mut report = FidelityReport::default();
   let full_text = full_document_text(document);
   report.check(!document.paragraphs.is_empty(), "document must contain at least one paragraph");
@@ -226,7 +219,7 @@ fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: 
     .max()
     .unwrap_or_default();
   report.check(
-    table.column_widths.is_empty() || table.column_widths.len() == widest_row,
+    table.columns.is_empty() || table.columns.len() == widest_row,
     format!("{label} column width count should match widest row when explicit widths are present"),
   );
   for (row_ix, row) in table.rows.iter().enumerate() {
@@ -239,7 +232,7 @@ fn check_table_fidelity(table: &TableBlock, report: &mut FidelityReport, label: 
         match block {
           TableCellBlock::Paragraph(paragraph) => {
             report.check(
-              paragraph.paragraph.byte_range.len() == paragraph.text.len(),
+              crate::paragraph_runs_len(&paragraph.paragraph) == paragraph.text.len(),
               format!("{label} cell {row_ix}:{cell_ix} paragraph {block_ix} byte range must match cell text"),
             );
           },

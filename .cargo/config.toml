@@ -4,3 +4,8 @@ linker = "rust-lld.exe"
 [alias]
 survey = "run --profile profiler --features profiler"
 product = "run --profile product"
+
+[env]
+# hotpath-meta 0.16.x looks for "hotpath-samply-meta" but the installed
+# binary from hotpath 0.20.x is "hotpath-samply". Point to the correct name.
+HOTPATH_META_SAMPLY_WRAPPER_BIN = "hotpath-samply"

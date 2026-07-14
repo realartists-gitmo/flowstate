@@ -35,20 +35,22 @@ impl RichTextEditor {
       2 => SelectionGranularity::Word,
       _ => SelectionGranularity::Paragraph,
     };
+    let before_selection = self.selection.clone();
+    // Mouse placement carries no explicit affinity/gravity (§16): clicks/drags
+    // produce neutral endpoints.
     self.selection = match self.drag_granularity {
-      SelectionGranularity::Character if event.modifiers.shift => EditorSelection {
-        anchor: self.selection.anchor,
-        head: offset,
-      },
-      SelectionGranularity::Character => EditorSelection {
-        anchor: offset,
-        head: offset,
-      },
+      SelectionGranularity::Character if event.modifiers.shift => EditorSelection::range(self.selection.anchor, offset),
+      SelectionGranularity::Character => EditorSelection::collapsed(offset),
       SelectionGranularity::Word => selection_for_word_at(&self.document, offset),
       SelectionGranularity::Paragraph => selection_for_paragraph_at(&self.document, offset.paragraph),
     };
+    self.fidelity_caret_set_from("on_mouse_down", &before_selection);
     self.drag_anchor = Some(self.selection.anchor);
     self.reset_caret_blink(cx);
+    if self.selection != before_selection {
+      self.note_explicit_selection_movement();
+      self.emit_selection_changed(cx);
+    }
     cx.notify();
   }
 
@@ -78,6 +80,7 @@ impl RichTextEditor {
         paragraph: paragraph_ix,
         byte: paragraph_text_len(paragraph),
       },
+      VisualGravity::Neutral,
       origin,
     ) else {
       return false;
@@ -120,7 +123,7 @@ impl RichTextEditor {
       return;
     }
     if event.dragging()
-      && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block
+      && let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix, .. }) = self.selected_block
       && let Some((
         BlockSelection::TableCell {
           row_ix: hit_row,
@@ -150,7 +153,12 @@ impl RichTextEditor {
         source_range: source_range.clone(),
         fragment: selected_rich_fragment(&self.document, source_range),
       });
+      let before_selection = self.selection.clone();
       self.selection = pending_drag.source_selection;
+      self.fidelity_caret_set_from("on_mouse_move/begin-text-drag", &before_selection);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       self.pending_text_drag = None;
     }
     if self.active_text_drag.is_some() {
@@ -158,11 +166,15 @@ impl RichTextEditor {
       self.autoscroll_for_drag(event.position);
       self.ensure_drag_autoscroll_task(cx);
       let drop = self.hit_test_document_position(event.position, window, cx);
-      let selection = EditorSelection { anchor: drop, head: drop };
+      let selection = EditorSelection::collapsed(drop);
       if self.selection != selection {
+        self.note_explicit_selection_movement();
+        let fid_before = self.fidelity_caret_before();
         self.selection = selection;
+        self.fidelity_caret_set("on_mouse_move/text-drag-caret", &fid_before);
         self.scroll_head_into_view();
         self.reset_caret_blink(cx);
+        self.emit_selection_changed(cx);
       }
       cx.notify();
       return;
@@ -193,9 +205,13 @@ impl RichTextEditor {
       },
     );
     if self.selection != selection {
+      self.note_explicit_selection_movement();
+      let fid_before = self.fidelity_caret_before();
       self.selection = selection;
+      self.fidelity_caret_set("on_mouse_move/drag-select", &fid_before);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
+      self.emit_selection_changed(cx);
       cx.notify();
     } else {
       cx.notify();
@@ -230,9 +246,14 @@ impl RichTextEditor {
     } else if self.pending_text_drag.take().is_some() {
       self.clear_drop_preview();
       let caret = self.hit_test_document_position(event.position, window, cx);
-      self.selection = EditorSelection { anchor: caret, head: caret };
+      let before_selection = self.selection.clone();
+      self.selection = EditorSelection::collapsed(caret);
+      self.fidelity_caret_set_from("on_mouse_up/cancel-text-drag", &before_selection);
       self.scroll_head_into_view();
       self.reset_caret_blink(cx);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       cx.notify();
     }
     if self.selecting {
@@ -248,59 +269,68 @@ impl RichTextEditor {
     self.clear_drop_preview();
   }
 
+  /// Drag-drop text move, Loro-first (spec §5): ONE undo group of two typed
+  /// intents — delete the source range, then insert the dragged fragment at
+  /// the drop position. The fragment content was captured at drag start (in
+  /// `ActiveTextDrag`), BEFORE the delete; after the delete commits the
+  /// projection has changed, so the drop caret is recomputed in post-delete
+  /// coordinates and resolved to a `TextAnchor` through the reconciled
+  /// identity map inside the write helpers. No direct projection mutation,
+  /// no local history record — undo is the authority's grouped undo.
   fn move_rich_text_fragment(&mut self, drag: ActiveTextDrag, drop: DocumentOffset, cx: &mut Context<Self>) {
     if offset_in_range(drop, drag.source_range.clone()) {
       self.clear_drop_preview();
-      self.selection = EditorSelection {
-        anchor: drag.source_range.start,
-        head: drag.source_range.end,
-      };
+      let before_selection = self.selection.clone();
+      self.selection = EditorSelection::range(drag.source_range.start, drag.source_range.end);
+      self.fidelity_caret_set_from("move_rich_text_fragment/drop-on-source", &before_selection);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
       cx.notify();
       return;
     }
-    let before_selection = EditorSelection {
-      anchor: drag.source_range.start,
-      head: drag.source_range.end,
-    };
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
+    if drag.fragment.paragraphs.is_empty() {
+      self.clear_drop_preview();
+      return;
+    }
     let source_range = drag.source_range.clone();
+    // Drop position expressed in post-delete projection coordinates.
     let adjusted_drop = adjust_drop_after_source_delete(drop, source_range.clone());
-    self.selection = before_selection.clone();
-    self.delete_selection_internal();
-    let inserted_start = adjusted_drop;
-    let inserted_end = insert_rich_fragment_at(&mut self.document, inserted_start, &drag.fragment);
-    self.selection = EditorSelection {
-      anchor: inserted_end,
-      head: inserted_end,
-    };
-    self.undo_stack.push(EditRecord {
-      before_selection,
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::MoveRichText {
-        source_range,
-        adjusted_drop,
-        inserted_range: inserted_start..inserted_end,
-        fragment: drag.fragment,
-      }],
-      canonical_operations: vec![CanonicalOperation::ReplaceParagraphSpan {
-        start_paragraph: self.identity_map.paragraph_id(inserted_start.paragraph),
-        before: capture_document_span(
-          &self.document,
-          inserted_start.paragraph..(inserted_start.paragraph + 1).min(self.document.paragraphs.len()),
-        ),
-        after: capture_document_span(
-          &self.document,
-          inserted_start.paragraph..(inserted_end.paragraph + 1).min(self.document.paragraphs.len()),
-        ),
-      }],
-    });
-    self.redo_stack.clear();
-    self.after_text_mutation(cx);
-    self.mark_document_changed(after_generation, cx);
+    self.begin_undo_group();
+    if !self.write_delete_offset_range(source_range.clone(), cx) {
+      self.end_undo_group();
+      self.clear_drop_preview();
+      return;
+    }
+    // The delete committed; the projection (and identity map) advanced. Land
+    // the caret at the recomputed drop position so the insert helpers anchor
+    // against the post-delete projection — never the stale pre-delete offset.
+    let caret = self.clamp_offset_to_document(adjusted_drop);
+    let fid_before = self.fidelity_caret_before();
+    self.selection = EditorSelection::collapsed(caret);
+    self.fidelity_caret_set("move_rich_text_fragment/drop-caret", &fid_before);
+    self.emit_selection_changed(cx);
+    // Plain single-paragraph unstyled content moves as a plain text insert;
+    // anything styled or multi-paragraph moves as a rich fragment intent.
+    let plain_text = (drag.fragment.paragraphs.len() == 1)
+      .then(|| &drag.fragment.paragraphs[0])
+      .filter(|paragraph| paragraph.runs.iter().all(|run| run.styles == RunStyles::default()))
+      .map(|paragraph| paragraph.runs.iter().map(|run| run.text.as_str()).collect::<String>());
+    match plain_text {
+      Some(text) => {
+        self.write_insert_text_at_caret(&text, cx);
+      },
+      None => {
+        let blocks = drag
+          .fragment
+          .paragraphs
+          .into_iter()
+          .map(FragmentBlock::Paragraph)
+          .collect::<Vec<_>>();
+        self.write_insert_rich_fragment_at_caret(blocks, cx);
+      },
+    }
+    self.end_undo_group();
     self.clear_drop_preview();
   }
 
@@ -378,7 +408,7 @@ impl RichTextEditor {
     let Some(bounds) = layout.bounds else {
       return;
     };
-    let Some(caret) = caret_bounds(&layout, self.selection.head, bounds.origin) else {
+    let Some(caret) = caret_bounds(&layout, self.selection.head, self.selection.head_gravity, bounds.origin) else {
       return;
     };
     scroll_rect_into_view(&self.scroll_handle, caret, px(4.0));
@@ -432,7 +462,10 @@ impl RichTextEditor {
             if let Some(head) = editor.hit_test_cached_position(position)
               && editor.selection.head != head
             {
+              let fid_before = editor.fidelity_caret_before();
               editor.selection.head = head;
+              editor.fidelity_caret_set("autoscroll_drag/extend-head", &fid_before);
+              editor.emit_selection_changed(cx);
             }
             cx.notify();
             true

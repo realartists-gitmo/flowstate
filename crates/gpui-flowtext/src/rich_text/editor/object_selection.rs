@@ -108,7 +108,14 @@ impl RichTextEditor {
     for (row_ix, row) in table.rows.iter().enumerate() {
       for (cell_ix, cell) in row.cells.iter().enumerate() {
         if cell.bounds.contains(&document_point) {
-          let selection = BlockSelection::TableCell { block_ix, row_ix, cell_ix };
+          let (row_id, column_id) = table_cell_ids_at(&self.document, block_ix, row_ix, cell_ix);
+          let selection = BlockSelection::TableCell {
+            block_ix,
+            row_ix,
+            cell_ix,
+            row_id,
+            column_id,
+          };
           let mut fallback = (selection, 0, 0);
           for block in &cell.blocks {
             if let LaidOutBlock::Paragraph(paragraph) = block {
@@ -189,71 +196,96 @@ impl RichTextEditor {
     None
   }
 
+  /// Track a live column-resize drag. Loro-first (spec §5): the drag never
+  /// touches THE projection — it only accumulates the target width, and the
+  /// commit at drag end is a batch of typed `SetColumnWidth` intents.
+  ///
+  /// The accumulated width rides in the slot appended past the per-column
+  /// `start_widths` (the drag struct carries no dedicated field for it); a
+  /// drag that never moved has no slot and commits nothing.
   fn update_table_column_resize_drag(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) -> bool {
-    let Some(drag) = self.table_column_resize_drag.clone() else {
+    let Some(drag) = self.table_column_resize_drag.as_ref() else {
       return false;
     };
-    let Some(Block::Table(table)) = Arc::make_mut(&mut self.document.blocks).get_mut(drag.block_ix) else {
-      self.table_column_resize_drag = None;
-      return true;
-    };
+    let base_columns = table_column_count(&drag.before).max(1);
+    let column_ix = drag.column_ix;
+    let start_width = drag.start_widths.get(column_ix).copied();
     let delta: f32 = (position.x - drag.start_position.x).into();
-    let column_count = drag
-      .start_widths
-      .len()
-      .max(table_column_count(table))
-      .max(1);
-    while table.column_widths.len() < column_count {
-      table.column_widths.push(TableColumnWidth::FixedPx(120));
-    }
-    for (ix, width) in drag.start_widths.iter().copied().enumerate() {
-      if ix < table.column_widths.len() {
-        table.column_widths[ix] = TableColumnWidth::FixedPx(width);
-      }
-    }
-    let Some(start_width) = drag.start_widths.get(drag.column_ix).copied() else {
+    let Some(start_width) = start_width else {
       self.table_column_resize_drag = None;
       return true;
     };
-    table.column_widths[drag.column_ix] = TableColumnWidth::FixedPx((start_width as f32 + delta).clamp(32.0, 1600.0).round() as u32);
-    table.version = drag.before.version.wrapping_add(1);
-    self.invalidate_document_layout_caches();
+    let width = (start_width as f32 + delta).clamp(32.0, 1600.0).round() as u32;
+    if let Some(drag) = self.table_column_resize_drag.as_mut() {
+      drag.start_widths.truncate(base_columns);
+      drag.start_widths.push(width);
+    }
     cx.notify();
     true
   }
 
+  /// Commit the column resize at drag end through the ONE write path: one
+  /// typed `SetColumnWidth` intent per changed column. Every column pins to
+  /// its measured fixed width (freezing the table layout, matching the
+  /// pre-Loro-first behavior), grouped as a single undo unit. The runtime's
+  /// patches advance THE projection — no direct write, no history snapshot.
   fn finish_table_column_resize_drag(&mut self, cx: &mut Context<Self>) -> bool {
     let Some(drag) = self.table_column_resize_drag.take() else {
       return false;
     };
-    let Some(Block::Table(after)) = self.document.blocks.get(drag.block_ix).cloned() else {
+    let base_columns = table_column_count(&drag.before).max(1);
+    let Some(final_width) = drag.start_widths.get(base_columns).copied() else {
+      // The drag never moved: nothing to commit.
       cx.notify();
       return true;
     };
-    if after == drag.before {
+    let Some(Block::Table(table)) = self.document.blocks.get(drag.block_ix).cloned() else {
+      cx.notify();
+      return true;
+    };
+    let Some(table_id) = self.semantic_block_id(drag.block_ix) else {
+      tracing::warn!(
+        block_ix = drag.block_ix,
+        "refusing table column resize: projection block has no durable id, so no intent can address it",
+      );
+      cx.notify();
+      return true;
+    };
+    let mut targets = drag.start_widths[..base_columns].to_vec();
+    if let Some(slot) = targets.get_mut(drag.column_ix) {
+      *slot = final_width;
+    }
+    let mut changed = Vec::new();
+    for (column_ix, column) in table.columns.iter().enumerate() {
+      let Some(width) = targets.get(column_ix).copied() else {
+        break;
+      };
+      if input_table_column_width_from_table_column_width(&column.width) != InputTableColumnWidth::FixedPx(width) {
+        changed.push((column.id, width));
+      }
+    }
+    if changed.is_empty() {
       cx.notify();
       return true;
     }
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection: self.selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceBlock {
-        block_ix: drag.block_ix,
-        before: Block::Table(drag.before),
-        after: Block::Table(after),
-      }],
-      canonical_operations: vec![CanonicalOperation::ReplaceBlock {
-        block: self.identity_map.block_id(drag.block_ix),
-      }],
-    });
-    self.redo_stack.clear();
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
+    let grouped = changed.len() > 1;
+    if grouped {
+      self.begin_undo_group();
+    }
+    for (column, width) in changed {
+      self.write_intent(
+        LocalIntent::Table(crate::local_intents::TableIntent::SetColumnWidth {
+          table: table_id,
+          column,
+          width: InputTableColumnWidth::FixedPx(width),
+        }),
+        cx,
+      );
+    }
+    if grouped {
+      self.end_undo_group();
+    }
+    cx.notify();
     true
   }
 
@@ -322,8 +354,10 @@ impl RichTextEditor {
     }
     let start_block = self.block_ix_for_paragraph(range.start.paragraph)?;
     let end_block = self.block_ix_for_paragraph(range.end.paragraph)?;
-    let has_object = self.document.blocks[start_block.min(end_block)..=start_block.max(end_block)]
-      .iter()
+    let has_object = self
+      .document
+      .blocks
+      .range(start_block.min(end_block)..start_block.max(end_block) + 1)
       .any(|block| !matches!(block, Block::Paragraph(_)));
     if !has_object {
       return None;
@@ -369,21 +403,6 @@ impl RichTextEditor {
     })
   }
 
-  fn selection_crosses_object_blocks(&self, range: Range<DocumentOffset>) -> bool {
-    if !self.document_has_object_blocks() {
-      return false;
-    }
-    let Some(start_block) = self.block_ix_for_paragraph(range.start.paragraph) else {
-      return false;
-    };
-    let Some(end_block) = self.block_ix_for_paragraph(range.end.paragraph) else {
-      return false;
-    };
-    self.document.blocks[start_block.min(end_block)..=start_block.max(end_block)]
-      .iter()
-      .any(|block| !matches!(block, Block::Paragraph(_)))
-  }
-
   pub(super) fn block_is_inside_text_selection(&self, block_ix: usize) -> bool {
     if self.selected_block.is_some() || self.selection.is_caret() {
       return false;
@@ -401,77 +420,15 @@ impl RichTextEditor {
     block_ix > start_block.min(end_block) && block_ix < start_block.max(end_block)
   }
 
-  fn object_block_indices_in_text_range(&self, range: Range<DocumentOffset>) -> Vec<usize> {
-    if !self.document_has_object_blocks() {
-      return Vec::new();
-    }
-    let Some(start_block) = self.block_ix_for_paragraph(range.start.paragraph) else {
-      return Vec::new();
-    };
-    let Some(end_block) = self.block_ix_for_paragraph(range.end.paragraph) else {
-      return Vec::new();
-    };
-    ((start_block + 1)..end_block)
-      .filter(|block_ix| {
-        self
-          .document
-          .blocks
-          .get(*block_ix)
-          .is_some_and(|block| !matches!(block, Block::Paragraph(_)))
-      })
-      .collect()
-  }
-
-  fn delete_selection_with_document_snapshot(&mut self, cx: &mut Context<Self>) -> bool {
-    if self.selection.is_caret() {
-      return false;
-    }
-    let range = self.selection.normalized();
-    let object_indices = self.object_block_indices_in_text_range(range.clone());
-    if object_indices.is_empty() {
-      return false;
-    }
-    let before_document = self.document.clone();
-    let before_selection = self.selection.clone();
-    {
-      let blocks = Arc::make_mut(&mut self.document.blocks);
-      for block_ix in object_indices.iter().copied().rev() {
-        if block_ix < blocks.len() {
-          blocks.remove(block_ix);
-        }
-      }
-    }
-    for block_ix in object_indices.into_iter().rev() {
-      remove_block_ids(&mut self.document, block_ix..block_ix + 1);
-    }
-    self.delete_selection_internal();
-    let after_document = self.document.clone();
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection,
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::ReplaceDocument {
-        before: Box::new(before_document),
-        after: Box::new(after_document),
-      }],
-      canonical_operations: vec![CanonicalOperation::ReplaceDocument],
-    });
-    self.redo_stack.clear();
-    self.invalidate_document_layout_caches();
-    self.mark_document_changed(after_generation, cx);
-    true
-  }
-
+  /// Delete the selected object block through the ONE write path: a typed
+  /// `DeleteBlocks` intent addressed by the block's durable identity. The
+  /// runtime retires the block canonically and its returned patches advance
+  /// THE projection — no direct block removal, no snapshot history.
   fn delete_selected_block(&mut self, cx: &mut Context<Self>) -> bool {
-    let Some(selection) = self.selected_block.take() else {
+    let Some(selection) = self.selected_block else {
       return false;
     };
     if matches!(selection, BlockSelection::TableCell { .. }) {
-      self.selected_block = Some(selection);
       return false;
     }
     let block_ix = match selection {
@@ -480,35 +437,27 @@ impl RichTextEditor {
       | BlockSelection::Table(block_ix)
       | BlockSelection::TableCell { block_ix, .. } => block_ix,
     };
-    if block_ix >= self.document.blocks.len() {
+    if !matches!(
+      self.document.blocks.get(block_ix),
+      Some(Block::Image(_) | Block::Equation(_) | Block::Table(_))
+    ) {
       return false;
     }
-    let blocks = Arc::make_mut(&mut self.document.blocks);
-    if matches!(blocks.get(block_ix), Some(Block::Paragraph(_))) {
+    let Some(block_id) = self.identity_map.block_id(block_ix) else {
+      tracing::warn!(block_ix, "refusing selected-block deletion: projection block has no durable id, so no intent can address it");
       return false;
+    };
+    let committed = self
+      .write_intent(
+        LocalIntent::DeleteBlocks(crate::local_intents::DeleteBlocksIntent { blocks: vec![block_id] }),
+        cx,
+      )
+      .is_some();
+    if committed {
+      self.clear_block_selection();
+      cx.notify();
     }
-    let block = blocks.remove(block_ix);
-    remove_block_ids(&mut self.document, block_ix..block_ix + 1);
-    let before_selection = self.selection.clone();
-    let before_generation = self.edit_generation;
-    let after_generation = self.next_edit_generation;
-    self.next_edit_generation = self.next_edit_generation.wrapping_add(1);
-    self.undo_stack.push(EditRecord {
-      before_selection: before_selection.clone(),
-      before_generation,
-      after_selection: self.selection.clone(),
-      after_generation,
-      operations: vec![EditOperation::DeleteBlock { block_ix, block }],
-      canonical_operations: vec![CanonicalOperation::DeleteBlock {
-        block: self.identity_map.block_id(block_ix).unwrap_or(BlockId(0)),
-      }],
-    });
-    self.redo_stack.clear();
-    self.clear_layout_work_caches();
-    self.item_sizes_cache = None;
-    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-    self.mark_document_changed(after_generation, cx);
-    true
+    committed
   }
 
   pub fn caret_paragraph(&self) -> usize {
@@ -544,10 +493,10 @@ impl RichTextEditor {
   }
 
   pub(super) fn drag_source_selection(&self) -> Option<EditorSelection> {
-    self.active_text_drag.as_ref().map(|drag| EditorSelection {
-      anchor: drag.source_range.start,
-      head: drag.source_range.end,
-    })
+    self
+      .active_text_drag
+      .as_ref()
+      .map(|drag| EditorSelection::range(drag.source_range.start, drag.source_range.end))
   }
 
   pub(super) fn caret_paint_width(&self) -> Pixels {
@@ -558,13 +507,22 @@ impl RichTextEditor {
     if !self.focus_handle.is_focused(window) {
       return None;
     }
-    let BlockSelection::TableCell { block_ix, row_ix, cell_ix } = self.selected_block? else {
+    let BlockSelection::TableCell {
+      block_ix,
+      row_ix,
+      cell_ix,
+      row_id,
+      column_id,
+    } = self.selected_block?
+    else {
       return None;
     };
     Some(TableCellCaret {
       block_ix,
       row_ix,
       cell_ix,
+      row_id,
+      column_id,
       paragraph_block_ix: self.table_cell_block_ix,
       anchor: self.table_cell_anchor,
       byte: self.table_cell_caret,

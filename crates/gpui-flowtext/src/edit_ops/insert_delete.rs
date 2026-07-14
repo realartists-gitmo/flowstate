@@ -1,13 +1,16 @@
 #[hotpath::measure]
-pub fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {
+pub fn insert_text_at(document: &mut DocumentProjection, paragraph_ix: usize, byte: usize, text: &str, styles: RunStyles) {
   if text.is_empty() {
     return;
   }
+  let byte = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, byte);
   let insert_len = text.len();
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   document.text.insert(paragraph_start + byte, text);
   {
-    let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
+    let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
+      return;
+    };
     bump_paragraph_version(paragraph);
     if paragraph.runs.is_empty() {
       paragraph.runs.push(TextRun { len: insert_len, styles });
@@ -88,16 +91,21 @@ pub fn insert_text_at(document: &mut Document, paragraph_ix: usize, byte: usize,
 // `paragraph`. Runs are split or dropped as needed; remaining runs are re-
 // merged so adjacent same-style fragments coalesce.
 #[hotpath::measure]
-pub fn delete_range_in_paragraph(document: &mut Document, paragraph_ix: usize, range: Range<usize>) {
-  if range.start >= range.end {
+pub fn delete_range_in_paragraph(document: &mut DocumentProjection, paragraph_ix: usize, range: Range<usize>) {
+  let start = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, range.start);
+  let end = clamp_paragraph_byte_to_char_boundary(document, paragraph_ix, range.end);
+  if start >= end {
     return;
   }
+  let range = start..end;
   let paragraph_start = paragraph_byte_range(document, paragraph_ix).start;
   document
     .text
     .delete(paragraph_start + range.start..paragraph_start + range.end);
   {
-    let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
+    let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
+      return;
+    };
     bump_paragraph_version(paragraph);
     let mut offset = 0;
     let mut new_runs: Vec<TextRun> = Vec::with_capacity(paragraph.runs.len());

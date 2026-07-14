@@ -163,14 +163,15 @@ fn search_document_files(
     .filter_map(|file| supported_hit_from_fff_file(picker, root, file))
     .collect::<Vec<_>>();
 
+  // §perf: dedup against borrowed hit paths instead of cloning each PathBuf into the set.
   let existing = hits
     .iter()
-    .map(|hit| hit.path.clone())
-    .collect::<std::collections::HashSet<_>>();
+    .map(|hit| hit.path.as_path())
+    .collect::<std::collections::HashSet<&std::path::Path>>();
   let mut supplemental_hits =
     search_supplemental_document_files(supplemental_files, query, limit.saturating_mul(SEARCH_OVERSAMPLE_FACTOR).max(limit))
       .into_iter()
-      .filter(|hit| !existing.contains(&hit.path))
+      .filter(|hit| !existing.contains(hit.path.as_path()))
       .collect::<Vec<_>>();
   hits.append(&mut supplemental_hits);
   hits.truncate(limit);
@@ -301,10 +302,8 @@ fn is_supported_document_path(path: &Path) -> bool {
   path
     .extension()
     .and_then(|extension| extension.to_str())
-    .is_some_and(|extension| {
-      let extension = extension.to_ascii_lowercase();
-      SUPPORTED_DOCUMENT_EXTENSIONS.contains(&extension.as_str())
-    })
+    // §perf: compare case-insensitively without allocating a lowercased String.
+    .is_some_and(|extension| SUPPORTED_DOCUMENT_EXTENSIONS.iter().any(|e| extension.eq_ignore_ascii_case(e)))
 }
 
 #[hotpath::measure]

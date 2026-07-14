@@ -1,7 +1,13 @@
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn valid_chunk_cache_entry(&self, paragraph_ix: usize, width: Pixels) -> Option<&ParagraphChunkLayoutCacheEntry> {
+  // §act-nine A9.3: chunk validity is the content key (style, version) + the
+  // stable paragraph id + width/invisibility/layout generation — no global
+  // `edit_generation`, so edits to other paragraphs keep these chunks. The id
+  // check matters because this cache is positional and (style, version) alone
+  // can collide across different paragraphs after a row shift.
+  pub(super) fn valid_chunk_cache_entry(&self, paragraph_ix: usize, width: Pixels) -> Option<&ParagraphChunkLayoutCacheEntry> {
     let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let paragraph_id = self.paragraph_id_at(paragraph_ix)?;
     let key = paragraph_cache_key(&self.document, paragraph);
     self
       .paragraph_chunk_layout_cache
@@ -9,15 +15,33 @@ impl RichTextEditor {
       .and_then(|entry| entry.as_ref())
       .filter(|entry| {
         entry.key == key
+          && entry.paragraph_id == paragraph_id
           && entry.width == width
           && entry.invisibility_mode == self.invisibility_mode
-          && entry.edit_generation == self.edit_generation
           && entry.layout_generation == self.layout_generation
       })
   }
 
+  /// Height-cache validity (§act-nine A9.3): content key + stable id + width +
+  /// invisibility mode — the ONE check both read sites share. No global
+  /// `edit_generation`; theme/zoom/width changes clear the map wholesale.
+  pub(super) fn valid_paragraph_height(&self, paragraph_ix: usize, width: Pixels) -> Option<Pixels> {
+    let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let paragraph_id = self.paragraph_id_at(paragraph_ix)?;
+    let key = paragraph_cache_key(&self.document, paragraph);
+    self
+      .paragraph_height_cache
+      .get(paragraph_ix)
+      .and_then(|entry| *entry)
+      .filter(|entry| entry.key == key && entry.paragraph_id == paragraph_id && entry.width == width && entry.invisibility_mode == self.invisibility_mode)
+      .map(|entry| entry.height)
+  }
+
   fn ensure_current_chunk_cache_entry(&mut self, paragraph_ix: usize, width: Pixels) -> bool {
     let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
+      return false;
+    };
+    let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix) else {
       return false;
     };
     self
@@ -30,9 +54,9 @@ impl RichTextEditor {
       .and_then(|entry| entry.as_ref())
       .is_none_or(|entry| {
         entry.key != key
+          || entry.paragraph_id != paragraph_id
           || entry.width != width
           || entry.invisibility_mode != self.invisibility_mode
-          || entry.edit_generation != self.edit_generation
           || entry.layout_generation != self.layout_generation
       });
     if reset {
@@ -45,9 +69,9 @@ impl RichTextEditor {
       }
       self.paragraph_chunk_layout_cache[paragraph_ix] = Some(ParagraphChunkLayoutCacheEntry {
         key,
+        paragraph_id,
         width,
         invisibility_mode: self.invisibility_mode,
-        edit_generation: self.edit_generation,
         layout_generation: self.layout_generation,
         prep,
         chunks: Vec::new(),
@@ -155,15 +179,17 @@ impl RichTextEditor {
         .resize(self.document.paragraphs.len(), None);
       self.paragraph_height_cache[paragraph_ix] = Some(ParagraphHeightCacheEntry {
         key: entry.key,
+        paragraph_id: entry.paragraph_id,
         width,
         invisibility_mode: self.invisibility_mode,
-        edit_generation: self.edit_generation,
         height: entry.exact_height,
       });
     }
     if bump_revision {
       self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-      self.item_sizes_cache = None;
+      // Patch, don't nuke: only THIS paragraph's items changed (see
+      // `note_item_sizes_patch_paragraph`).
+      self.note_item_sizes_patch_paragraph(paragraph_ix);
     }
     true
   }

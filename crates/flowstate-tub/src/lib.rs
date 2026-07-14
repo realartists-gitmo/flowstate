@@ -9,8 +9,8 @@ use std::{
 
 use anyhow::{Context as _, Result};
 use flowstate_document::{
-  Document, DocumentSection, InputParagraph, InputRun, SectionId, SectionKind, document_text_slice, paragraph_byte_range,
-  paragraph_index_for_id, paragraph_text_len, read_db8,
+  DocumentPackage, DocumentProjection, InputParagraph, InputRun, SearchUnitChunk, document_text_slice, paragraph_byte_range, paragraph_text_len,
+  read_db8,
 };
 use ignore::WalkBuilder;
 use notify::{
@@ -27,7 +27,7 @@ use tantivy::{
 };
 
 const CATALOG_FILE: &str = "catalog.sqlite3";
-const TANTIVY_DIR: &str = "tantivy-v1";
+const TANTIVY_DIR: &str = "tantivy-v2";
 const FILENAME_TOKENIZER: &str = "filename_ngram";
 const WRITER_MEMORY_BYTES: usize = 96_000_000;
 
@@ -49,7 +49,7 @@ impl FileKind {
   }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum SearchUnitKind {
   File,
   Pocket,
@@ -60,13 +60,18 @@ pub enum SearchUnitKind {
   Card,
   Cite,
   Paragraph,
+  ImageAlt,
+  ImageCaption,
+  Equation,
+  TableCell,
   FlowNode,
   Document,
+  Unknown(String),
 }
 
 impl SearchUnitKind {
   #[must_use]
-  pub const fn as_str(self) -> &'static str {
+  pub fn as_str(&self) -> &str {
     match self {
       Self::File => "file",
       Self::Pocket => "pocket",
@@ -77,38 +82,35 @@ impl SearchUnitKind {
       Self::Card => "card",
       Self::Cite => "cite",
       Self::Paragraph => "paragraph",
+      Self::ImageAlt => "image_alt",
+      Self::ImageCaption => "image_caption",
+      Self::Equation => "equation",
+      Self::TableCell => "table_cell",
       Self::FlowNode => "flow_node",
       Self::Document => "document",
+      Self::Unknown(value) => value.as_str(),
     }
   }
 
   fn from_str(value: &str) -> Option<Self> {
-    match value {
-      "file" => Some(Self::File),
-      "pocket" => Some(Self::Pocket),
-      "hat" => Some(Self::Hat),
-      "block" => Some(Self::BlockSection),
-      "tag" => Some(Self::TagSection),
-      "analytic" => Some(Self::Analytic),
-      "card" => Some(Self::Card),
-      "cite" => Some(Self::Cite),
-      "paragraph" => Some(Self::Paragraph),
-      "flow_node" => Some(Self::FlowNode),
-      "document" => Some(Self::Document),
-      _ => None,
-    }
-  }
-
-  const fn from_section(kind: SectionKind) -> Self {
-    match kind {
-      SectionKind::Custom(0) => Self::Pocket,
-      SectionKind::Custom(1) => Self::Hat,
-      SectionKind::Custom(2) => Self::BlockSection,
-      SectionKind::Custom(3) => Self::TagSection,
-      SectionKind::Custom(4) => Self::Analytic,
-      SectionKind::Custom(5) => Self::Card,
-      SectionKind::Custom(_) => Self::Paragraph,
-    }
+    Some(match value {
+      "file" => Self::File,
+      "pocket" => Self::Pocket,
+      "hat" => Self::Hat,
+      "block" => Self::BlockSection,
+      "tag" => Self::TagSection,
+      "analytic" => Self::Analytic,
+      "card" => Self::Card,
+      "cite" => Self::Cite,
+      "paragraph" => Self::Paragraph,
+      "image_alt" => Self::ImageAlt,
+      "image_caption" => Self::ImageCaption,
+      "equation" => Self::Equation,
+      "table_cell" => Self::TableCell,
+      "flow_node" => Self::FlowNode,
+      "document" => Self::Document,
+      _ => Self::Unknown(value.to_owned()),
+    })
   }
 }
 
@@ -155,6 +157,10 @@ pub struct SearchHit {
   pub score: f32,
   pub paragraph_start: Option<usize>,
   pub paragraph_end_exclusive: Option<usize>,
+  #[serde(default)]
+  pub paragraph_start_cursor: Option<Vec<u8>>,
+  #[serde(default)]
+  pub paragraph_end_cursor: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug)]
@@ -230,14 +236,14 @@ impl TubIndex {
       let path = canonicalize_file(path)?;
       seen_paths.insert(path.clone());
       let metadata = fs::metadata(&path)?;
+      let size_bytes = metadata.len();
+      let modified_ns = modified_ns(&metadata);
       let display_path = display_path_for(&self.root, &path);
       let parent_display_path = parent_display_path(&display_path);
       let file_name = path
         .file_name()
         .map_or_else(|| display_path.clone(), |name| name.to_string_lossy().to_string());
-      let size_bytes = metadata.len();
-      let modified_ns = modified_ns(&metadata);
-      let fingerprint = fingerprint(size_bytes, modified_ns);
+      let fingerprint = fingerprint(size_bytes, modified_ns, kind, &path)?;
       let existing = existing.get(&path);
       let file_id = existing.map_or_else(|| stable_file_id(&self.root, &path), |record| record.file_id.clone());
 
@@ -382,7 +388,7 @@ impl TubIndex {
     } else {
       kinds
     };
-    let allowed = kinds.iter().copied().collect::<HashSet<_>>();
+    let allowed = kinds.iter().cloned().collect::<HashSet<_>>();
     let mut hits = Vec::with_capacity(limit);
 
     for file in self.list_files()? {
@@ -435,7 +441,7 @@ impl TubIndex {
       &query,
       &tantivy::collector::TopDocs::with_limit(limit.saturating_mul(8).max(limit)).order_by_score(),
     )?;
-    let allowed = allowed_kinds.iter().copied().collect::<HashSet<_>>();
+    let allowed = allowed_kinds.iter().cloned().collect::<HashSet<_>>();
     let mut hits = Vec::new();
 
     for (score, address) in top_docs {
@@ -461,7 +467,14 @@ impl TubIndex {
     if !hit.preview_paragraphs.is_empty() {
       return Ok(());
     }
+    if hit.paragraph_start_cursor.is_some() && !hit.insert_text.trim().is_empty() {
+      hit.preview_paragraphs = vec![preview_paragraph_from_text(&hit.insert_text)];
+      return Ok(());
+    }
     let Some(start) = hit.paragraph_start else {
+      if !hit.insert_text.trim().is_empty() {
+        hit.preview_paragraphs = vec![preview_paragraph_from_text(&hit.insert_text)];
+      }
       return Ok(());
     };
     let Some(end) = hit.paragraph_end_exclusive else {
@@ -686,6 +699,8 @@ struct TubSchema {
   insert_text: Field,
   paragraph_start: Field,
   paragraph_end: Field,
+  paragraph_start_cursor: Field,
+  paragraph_end_cursor: Field,
   size_bytes: Field,
   modified_ns: Field,
 }
@@ -740,6 +755,8 @@ impl From<TubFile> for SearchHit {
       score: 0.0,
       paragraph_start: None,
       paragraph_end_exclusive: None,
+      paragraph_start_cursor: None,
+      paragraph_end_cursor: None,
     }
   }
 }
@@ -759,6 +776,8 @@ struct IndexUnit {
   insert_text: String,
   paragraph_start: Option<usize>,
   paragraph_end_exclusive: Option<usize>,
+  paragraph_start_cursor: Option<Vec<u8>>,
+  paragraph_end_cursor: Option<Vec<u8>>,
 }
 
 struct FileDocumentInput<'input> {
@@ -794,6 +813,8 @@ fn build_schema() -> (Schema, TubSchema) {
   let insert_text = builder.add_text_field("insert_text", STORED);
   let paragraph_start = builder.add_text_field("paragraph_start", STORED);
   let paragraph_end = builder.add_text_field("paragraph_end", STORED);
+  let paragraph_start_cursor = builder.add_text_field("paragraph_start_cursor", STORED);
+  let paragraph_end_cursor = builder.add_text_field("paragraph_end_cursor", STORED);
   let size_bytes = builder.add_u64_field("size_bytes", STORED);
   let modified_ns = builder.add_u64_field("modified_ns", STORED);
   let schema = builder.build();
@@ -812,6 +833,8 @@ fn build_schema() -> (Schema, TubSchema) {
     insert_text,
     paragraph_start,
     paragraph_end,
+    paragraph_start_cursor,
+    paragraph_end_cursor,
     size_bytes,
     modified_ns,
   };
@@ -840,6 +863,8 @@ fn file_document(schema: &TubSchema, input: FileDocumentInput<'_>) -> TantivyDoc
     schema.insert_text => "",
     schema.paragraph_start => "",
     schema.paragraph_end => "",
+    schema.paragraph_start_cursor => "",
+    schema.paragraph_end_cursor => "",
     schema.size_bytes => input.size_bytes,
     schema.modified_ns => input.modified_ns,
   )
@@ -861,6 +886,8 @@ fn unit_document(schema: &TubSchema, unit: &IndexUnit) -> TantivyDocument {
     schema.insert_text => unit.insert_text.as_str(),
     schema.paragraph_start => unit.paragraph_start.map(|value| value.to_string()).unwrap_or_default(),
     schema.paragraph_end => unit.paragraph_end_exclusive.map(|value| value.to_string()).unwrap_or_default(),
+    schema.paragraph_start_cursor => unit.paragraph_start_cursor.as_deref().map(hex_bytes).unwrap_or_default(),
+    schema.paragraph_end_cursor => unit.paragraph_end_cursor.as_deref().map(hex_bytes).unwrap_or_default(),
     schema.size_bytes => unit.insert_text.len() as u64,
     schema.modified_ns => 0_u64,
   )
@@ -883,6 +910,8 @@ fn hit_from_unit(unit: IndexUnit) -> SearchHit {
     score: 0.0,
     paragraph_start: unit.paragraph_start,
     paragraph_end_exclusive: unit.paragraph_end_exclusive,
+    paragraph_start_cursor: unit.paragraph_start_cursor,
+    paragraph_end_cursor: unit.paragraph_end_cursor,
   }
 }
 
@@ -910,6 +939,8 @@ fn hit_from_document(schema: &TubSchema, document: &TantivyDocument, score: f32)
     score,
     paragraph_start: stored_text(document, schema.paragraph_start).and_then(|value| value.parse::<usize>().ok()),
     paragraph_end_exclusive: stored_text(document, schema.paragraph_end).and_then(|value| value.parse::<usize>().ok()),
+    paragraph_start_cursor: stored_text(document, schema.paragraph_start_cursor).and_then(|value| unhex_bytes(&value)),
+    paragraph_end_cursor: stored_text(document, schema.paragraph_end_cursor).and_then(|value| unhex_bytes(&value)),
   })
 }
 
@@ -920,103 +951,124 @@ fn stored_text(document: &TantivyDocument, field: Field) -> Option<String> {
     .map(ToOwned::to_owned)
 }
 
+fn hex_bytes(bytes: &[u8]) -> String {
+  let mut out = String::with_capacity(bytes.len() * 2);
+  for byte in bytes {
+    use std::fmt::Write as _;
+    let _ = write!(&mut out, "{byte:02x}");
+  }
+  out
+}
+
+fn unhex_bytes(value: &str) -> Option<Vec<u8>> {
+  if value.is_empty() {
+    return None;
+  }
+  let mut bytes = Vec::with_capacity(value.len() / 2);
+  let mut chunks = value.as_bytes().chunks_exact(2);
+  if !chunks.remainder().is_empty() {
+    return None;
+  }
+  for chunk in &mut chunks {
+    let text = std::str::from_utf8(chunk).ok()?;
+    bytes.push(u8::from_str_radix(text, 16).ok()?);
+  }
+  Some(bytes)
+}
+
 fn db8_index_units(file_id: &str, path: &Path, display_path: &str, file_name: &str) -> Result<Vec<IndexUnit>> {
-  let document = read_db8(path).with_context(|| format!("reading {}", path.display()))?;
-  let sections_by_id = document
-    .sections
-    .iter()
-    .map(|section| (section.id, section))
-    .collect::<HashMap<_, _>>();
-  let mut units = Vec::new();
-
-  for section in document.sections.iter() {
-    let unit_kind = SearchUnitKind::from_section(section.kind);
-    if !matches!(
-      unit_kind,
-      SearchUnitKind::BlockSection | SearchUnitKind::TagSection | SearchUnitKind::Analytic
-    ) {
-      continue;
-    }
-    let Some(start) = paragraph_index_for_id(&document, section.start_paragraph) else {
-      continue;
-    };
-    let end = section_end_index(&document, section).unwrap_or(document.paragraphs.len());
-    let end = end.max(start + 1).min(document.paragraphs.len());
-    let body = paragraph_range_text(&document, start, end);
-    let heading = section
-      .heading_paragraph
-      .and_then(|id| paragraph_index_for_id(&document, id))
-      .map(|ix| paragraph_text_trimmed(&document, ix))
-      .filter(|text| !text.is_empty())
-      .unwrap_or_else(|| first_non_empty_line(&body).unwrap_or_else(|| unit_kind.as_str().to_owned()));
-    let heading_path = section_heading_path(&document, &sections_by_id, section);
-    let cite = cite_for_range(&document, start, end);
-    let unit_id = format!("{file_id}:{}:{}", unit_kind.as_str(), section.start_paragraph.0);
-    units.push(IndexUnit {
-      file_id: file_id.to_owned(),
-      unit_id,
-      unit_kind,
-      path: path.to_path_buf(),
-      display_path: display_path.to_owned(),
-      file_name: file_name.to_owned(),
-      heading_path,
-      heading,
-      cite,
-      body: body.clone(),
-      insert_text: body,
-      paragraph_start: Some(start),
-      paragraph_end_exclusive: Some(end),
-    });
+  if let Some(units) =
+    DocumentPackage::read_cached_search_units(path).with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
+  {
+    return Ok(
+      units
+        .iter()
+        .filter_map(|unit| package_search_unit(file_id, path, display_path, file_name, unit))
+        .collect(),
+    );
   }
-
-  Ok(units)
-}
-
-fn section_end_index(document: &Document, section: &DocumentSection) -> Option<usize> {
-  let id = section.end_paragraph_exclusive?;
-  paragraph_index_for_id(document, id)
-}
-
-fn section_heading_path(document: &Document, sections_by_id: &HashMap<SectionId, &DocumentSection>, section: &DocumentSection) -> Vec<String> {
-  let mut path = Vec::new();
-  let mut current = Some(section.id);
-  while let Some(section_id) = current {
-    let Some(section) = sections_by_id.get(&section_id).copied() else {
-      break;
-    };
-    if let Some(heading) = section
-      .heading_paragraph
-      .and_then(|id| paragraph_index_for_id(document, id))
-      .map(|ix| paragraph_text_trimmed(document, ix))
-      .filter(|text| !text.is_empty())
-    {
-      path.push(heading);
-    }
-    current = section.parent_id;
+  let mut package = DocumentPackage::read(path).with_context(|| format!("reading Flowstate package {}", path.display()))?;
+  if package.current_search_units().is_empty() {
+    let doc = package
+      .load_loro_doc()
+      .with_context(|| format!("loading Loro document {}", path.display()))?;
+    package
+      .rebuild_search_units_from_loro(&doc)
+      .with_context(|| format!("rebuilding Loro search units {}", path.display()))?;
   }
-  path.reverse();
-  path
+  Ok(
+    package
+      .current_search_units()
+      .iter()
+      .filter_map(|unit| package_search_unit(file_id, path, display_path, file_name, unit))
+      .collect(),
+  )
 }
 
-fn paragraph_range_text(document: &Document, start: usize, end: usize) -> String {
-  let mut text = String::new();
-  for paragraph_ix in start..end {
-    if !text.is_empty() {
-      text.push('\n');
-    }
-    text.push_str(&paragraph_text_trimmed(document, paragraph_ix));
+fn package_search_unit(file_id: &str, path: &Path, display_path: &str, file_name: &str, unit: &SearchUnitChunk) -> Option<IndexUnit> {
+  let unit_kind = SearchUnitKind::from_str(&unit.unit_kind)?;
+  let body = unit.body.trim().to_string();
+  if body.is_empty() {
+    return None;
   }
-  text.trim().to_owned()
+  let heading = if unit.heading.trim().is_empty() {
+    first_non_empty_line(&body).unwrap_or_else(|| unit_kind.as_str().to_string())
+  } else {
+    unit.heading.clone()
+  };
+  Some(IndexUnit {
+    file_id: file_id.to_owned(),
+    unit_id: format!("{file_id}:loro:{:032x}", unit.unit_id),
+    unit_kind,
+    path: path.to_path_buf(),
+    display_path: display_path.to_owned(),
+    file_name: file_name.to_owned(),
+    heading_path: unit.heading_path.clone(),
+    heading,
+    cite: None,
+    body: body.clone(),
+    insert_text: if unit.insert_text.is_empty() { body } else { unit.insert_text.clone() },
+    paragraph_start: None,
+    paragraph_end_exclusive: None,
+    paragraph_start_cursor: Some(cursor_for_index(unit)).filter(|cursor| !cursor.is_empty()),
+    paragraph_end_cursor: Some(end_cursor_for_index(unit)).filter(|cursor| !cursor.is_empty()),
+  })
 }
 
-fn input_paragraphs_from_document_range(document: &Document, start: usize, end: usize) -> Vec<InputParagraph> {
+fn cursor_for_index(unit: &SearchUnitChunk) -> Vec<u8> {
+  if unit.paragraph_start_cursor.is_empty() {
+    unit.unit_start_cursor.clone()
+  } else {
+    unit.paragraph_start_cursor.clone()
+  }
+}
+
+fn end_cursor_for_index(unit: &SearchUnitChunk) -> Vec<u8> {
+  if unit.paragraph_end_cursor.is_empty() {
+    unit.unit_end_cursor.clone()
+  } else {
+    unit.paragraph_end_cursor.clone()
+  }
+}
+
+fn preview_paragraph_from_text(text: &str) -> InputParagraph {
+  InputParagraph {
+    style: flowstate_document::ParagraphStyle::Normal,
+    runs: vec![InputRun {
+      text: text.to_string(),
+      styles: flowstate_document::RunStyles::default(),
+    }],
+  }
+}
+
+fn input_paragraphs_from_document_range(document: &DocumentProjection, start: usize, end: usize) -> Vec<InputParagraph> {
   (start..end.min(document.paragraphs.len()))
     .map(|paragraph_ix| input_paragraph_from_document_range(document, paragraph_ix, 0..paragraph_text_len(&document.paragraphs[paragraph_ix])))
     .filter(|paragraph| paragraph.runs.iter().any(|run| !run.text.is_empty()))
     .collect()
 }
 
-fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize, range: std::ops::Range<usize>) -> InputParagraph {
+fn input_paragraph_from_document_range(document: &DocumentProjection, paragraph_ix: usize, range: std::ops::Range<usize>) -> InputParagraph {
   let paragraph = &document.paragraphs[paragraph_ix];
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   let start = range.start.min(paragraph_text_len(paragraph));
@@ -1042,31 +1094,6 @@ fn input_paragraph_from_document_range(document: &Document, paragraph_ix: usize,
   }
 }
 
-fn paragraph_text_trimmed(document: &Document, paragraph_ix: usize) -> String {
-  document_text_slice(document, paragraph_byte_range(document, paragraph_ix))
-    .trim()
-    .to_owned()
-}
-
-fn cite_for_range(document: &Document, start: usize, end: usize) -> Option<String> {
-  for paragraph_ix in start..end {
-    let paragraph = document.paragraphs.get(paragraph_ix)?;
-    let paragraph_range = paragraph_byte_range(document, paragraph_ix);
-    let mut offset = 0_usize;
-    for run in &paragraph.runs {
-      if run.styles.semantic == flowstate_document::SEMANTIC_CITE {
-        let text = document_text_slice(document, paragraph_range.start + offset..paragraph_range.start + offset + run.len);
-        let text = text.trim();
-        if !text.is_empty() {
-          return Some(text.to_owned());
-        }
-      }
-      offset += run.len;
-    }
-  }
-  None
-}
-
 fn first_non_empty_line(text: &str) -> Option<String> {
   text
     .lines()
@@ -1076,7 +1103,17 @@ fn first_non_empty_line(text: &str) -> Option<String> {
 }
 
 fn preview_text(text: &str, max_chars: usize) -> String {
-  let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+  // §perf: build the whitespace-normalized string in a single pass, avoiding the
+  // intermediate `Vec<&str>` allocation from `.collect().join(" ")`. Output is
+  // identical: `split_whitespace` drops all whitespace runs and we insert a
+  // single space between words with no leading/trailing space.
+  let mut normalized = String::with_capacity(text.len());
+  for word in text.split_whitespace() {
+    if !normalized.is_empty() {
+      normalized.push(' ');
+    }
+    normalized.push_str(word);
+  }
   if normalized.chars().count() <= max_chars {
     return normalized;
   }
@@ -1162,8 +1199,30 @@ fn modified_ns(metadata: &fs::Metadata) -> u64 {
   .expect("nanosecond timestamp is clamped to u64::MAX")
 }
 
-fn fingerprint(size_bytes: u64, modified_ns: u64) -> String {
-  format!("{size_bytes}:{modified_ns}")
+fn fingerprint(size_bytes: u64, modified_ns: u64, kind: FileKind, path: &Path) -> Result<String> {
+  let mut fingerprint = format!("{size_bytes}:{modified_ns}");
+  if kind == FileKind::Db8
+    && let Some((frontier, unit_count)) = cached_search_metadata(path)?
+  {
+    fingerprint.push(':');
+    fingerprint.push_str(&frontier);
+    fingerprint.push(':');
+    fingerprint.push_str(&unit_count.to_string());
+  }
+  Ok(fingerprint)
+}
+
+fn cached_search_metadata(path: &Path) -> Result<Option<(String, usize)>> {
+  let Some(units) =
+    DocumentPackage::read_cached_search_units(path).with_context(|| format!("reading cached Flowstate search units {}", path.display()))?
+  else {
+    return Ok(None);
+  };
+  let frontier = units
+    .first()
+    .map(|unit| hex_bytes(&unit.frontier))
+    .unwrap_or_default();
+  Ok(Some((frontier, units.len())))
 }
 
 fn stable_file_id(root: &Path, path: &Path) -> String {
@@ -1264,5 +1323,17 @@ fn emit_tree_dir(relative_dir: &Path, depth: usize, context: &mut TreeEmitContex
         file_kind: Some(file.kind),
       });
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn unknown_search_unit_kind_is_preserved() {
+    let kind = SearchUnitKind::from_str("mystery_kind").expect("unknown kind should be preserved");
+    assert_eq!(kind.as_str(), "mystery_kind");
+    assert!(matches!(kind, SearchUnitKind::Unknown(value) if value == "mystery_kind"));
   }
 }

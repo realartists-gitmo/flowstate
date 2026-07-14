@@ -1,4 +1,4 @@
-// Submodules. Document model, edit helpers, persistence, demo builders, and
+// Submodules. DocumentProjection model, edit helpers, persistence, demo builders, and
 // collaboration IDs live at the crate root; this module exposes the reusable
 // GPUI rich-text editor and rendering internals.
 mod benchmarks;
@@ -55,7 +55,7 @@ pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce()
 }
 
 #[cfg(test)]
-use editor::{EditOperation, adjust_drop_after_source_delete};
+use editor::adjust_drop_after_source_delete;
 
 #[cfg(test)]
 mod tests;

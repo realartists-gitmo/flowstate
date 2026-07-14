@@ -233,29 +233,39 @@ impl RichTextEditor {
         key_char.to_string()
       };
       if self.insert_text_into_selected_table_cell(&key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       if self.insert_text_into_selected_equation(&key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       self.insert_text_command(&key_char, cx);
+      cx.stop_propagation();
     }
 
     #[cfg(not(target_os = "windows"))]
     {
       let _ = window;
       if self.insert_text_into_selected_table_cell(key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       if self.insert_text_into_selected_equation(key_char, cx) {
+        cx.stop_propagation();
         return;
       }
       self.insert_text_command(key_char, cx);
+      cx.stop_propagation();
     }
   }
 
+  /// Loro-first: the edit primitives inside the closure commit through the
+  /// write authority themselves — there is nothing to capture, diff, replay,
+  /// or locally record. This wrapper survives only as a call-site-stable
+  /// pass-through.
   pub(super) fn apply_document_edit(&mut self, cx: &mut Context<Self>, edit: impl FnOnce(&mut Self, &mut Context<Self>)) {
-    self.apply_document_edit_with_capture_range(cx, None, edit);
+    edit(self, cx);
   }
 
 }

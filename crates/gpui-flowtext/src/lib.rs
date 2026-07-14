@@ -1,23 +1,27 @@
 mod api;
+pub mod block_tree;
 mod collaboration;
 mod demo;
 mod document;
 mod edit_ops;
+pub mod local_intents;
 mod persistence;
 mod rich_text;
 
 pub use api::*;
+pub use block_tree::{BlockTree, Summary};
 pub use collaboration::*;
 pub use demo::*;
 pub use document::*;
 pub use edit_ops::*;
+pub use local_intents::*;
 pub use persistence::*;
 pub use rich_text::*;
 
 pub mod prelude {
   pub use crate::{
-    Document, DocumentTheme, EditorSelection, HighlightStyle, Paragraph, ParagraphStyle, RichTextDocumentElement, RichTextEditor,
-    RichTextEditorCommand, RunSemanticStyle, RunStyle, RunStyles, TextRun,
+    DocumentProjection, DocumentTheme, EditorSelection, HighlightStyle, Paragraph, ParagraphStyle, RichTextDocumentElement, RichTextEditor,
+    RichTextEditorCommand, RunSemanticStyle, RunStyle, RunStyles, TextRun, VertAlign,
   };
 }
 
@@ -35,37 +39,14 @@ pub mod editor_api {
   };
 }
 
-pub mod persistence_api {
-  pub use crate::{
-    DEFAULT_DOCUMENT_EXTENSION, document_bytes, load_or_create_document, read_document, read_document_bytes, recovery_path_for_document,
-    write_document,
-  };
-}
-
 pub mod host {
   pub use crate::{
-    AssetResolver, BlockKindId, DocumentExportAdapter, DocumentExportFormat, DocumentSerializer, ExternalFormatExporter,
-    set_document_export_adapter,
+    AssetResolver, BlockKindId, DocumentExportAdapter, DocumentExportFormat, DocumentRecoveryAdapter, DocumentSerializer,
+    ExternalFormatExporter, set_document_export_adapter, set_document_recovery_adapter,
   };
 }
 
 pub mod advanced {
   pub use crate::collaboration::*;
   pub use crate::edit_ops::*;
-}
-
-use std::time::Instant;
-
-const TIMING_ENV: &str = "DEBATEPROCESSOR_TIMING";
-
-#[hotpath::measure]
-fn timing_enabled() -> bool {
-  std::env::var_os(TIMING_ENV).is_some()
-}
-
-#[hotpath::measure]
-pub(crate) fn log_timing_lazy(label: &str, start: Instant, detail: impl FnOnce() -> String) {
-  if timing_enabled() {
-    eprintln!("[timing] {label}: {:?} {}", start.elapsed(), detail());
-  }
 }

@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn wrap_lines(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   text: &str,
@@ -60,7 +60,7 @@ pub(super) fn wrap_lines(
 
 #[hotpath::measure]
 fn wrap_lines_limited(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   text: &str,
@@ -142,7 +142,7 @@ fn wrap_lines_limited(
 
 #[hotpath::measure]
 fn wrap_text_segment_limited(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   text: &str,
@@ -311,7 +311,7 @@ fn wrap_text_segment_limited(
 #[hotpath::measure]
 fn push_wrapped_soft_segment(
   lines: &mut Vec<LaidOutLine>,
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   text: &str,
@@ -340,7 +340,7 @@ fn push_wrapped_soft_segment(
 
 #[hotpath::measure]
 fn wrap_text_segment(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   text: &str,
@@ -502,7 +502,7 @@ fn first_break_after(break_ends: &[usize], byte: usize) -> usize {
 #[allow(clippy::too_many_arguments, reason = "Wrapping needs independent font, width, style, and cache inputs.")]
 #[hotpath::measure]
 fn first_break_over_width(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: &EffectiveParagraphFormat,
   text: &str,
@@ -581,22 +581,30 @@ pub(super) fn wrap_break_ends(text: &str) -> Vec<usize> {
   breaks
 }
 
-#[hotpath::measure]
+// §perf: NOT hotpath-measured — a two-instruction predicate called tens of
+// millions of times per layout pass; the measurement hooks cost orders of
+// magnitude more than the function and dominated profiler-build profiles
+// (11.3% of total CPU attributed to a char compare).
+#[inline]
 pub(super) fn is_wrap_break(ch: char) -> bool {
   ch.is_whitespace() || matches!(ch, '-' | '/' | ',' | ';' | ':')
 }
 
-#[hotpath::measure]
+#[inline]
 pub(super) fn skip_leading_whitespace(text: &str, mut byte: usize) -> usize {
-  while byte < text.len() && text[byte..].chars().next().is_some_and(char::is_whitespace) {
-    byte += text[byte..].chars().next().unwrap().len_utf8();
+  // §perf: decode each char once per iteration instead of twice (peek + re-decode).
+  while let Some(ch) = text[byte..].chars().next() {
+    if !ch.is_whitespace() {
+      break;
+    }
+    byte += ch.len_utf8();
   }
   byte
 }
 
 #[hotpath::measure]
 pub(super) fn first_overflow_line_end(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: &EffectiveParagraphFormat,
   text: &str,

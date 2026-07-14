@@ -198,6 +198,7 @@ impl Workspace {
       },
       WorkspaceSettingsOverlay::Settings => match self.settings_section {
         WorkspaceSettingsSection::General => "app-popup-settings-general",
+        WorkspaceSettingsSection::Collaboration => "app-popup-settings-collaboration",
         WorkspaceSettingsSection::Keymap => "app-popup-settings-keymap",
       },
     };
@@ -597,6 +598,26 @@ impl Workspace {
             .item(send_to_document_directory_item(workspace.clone()))
             .item(send_custom_directory_item(workspace.clone())),
         ),
+      SettingPage::new("Collaboration")
+        .group(reset_workspace_settings_section_group(
+          workspace.clone(),
+          WorkspaceSettingsSection::Collaboration,
+        ))
+        .group(
+          SettingGroup::new()
+            .title("Identity and discovery")
+            .item(collaboration_profile_item(workspace.clone()))
+            .item(trusted_collaborators_item(workspace.clone()))
+            .item(collaboration_squads_item(workspace.clone()))
+            .item(collaboration_discovery_pause_item(workspace.clone()))
+            .item(collaboration_bluetooth_item(workspace.clone())),
+        )
+        .group(
+          SettingGroup::new()
+            .title("Dropbox")
+            .item(dropbox_connection_item(workspace.clone()))
+            .item(dropbox_document_binding_item(workspace.clone())),
+        ),
       SettingPage::new("Keymap")
         .group(reset_workspace_settings_section_group(
           workspace.clone(),
@@ -743,6 +764,13 @@ impl Workspace {
             }
           })
           .detach();
+        cx.notify();
+      },
+      WorkspaceSettingsSection::Collaboration => {
+        if let Err(error) = crate::app_settings::save_collaboration_discovery_options(false, false) {
+          tracing::warn!(%error, "resetting collaboration discovery settings failed");
+        }
+        crate::collab::reconfigure_discovery(cx);
         cx.notify();
       },
     }

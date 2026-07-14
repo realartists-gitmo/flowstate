@@ -199,7 +199,10 @@ impl RichTextEditor {
   }
 
   fn force_apply_inline_tool_to_current_target(&mut self, tool: ArmedInlineTool, cx: &mut Context<Self>) {
-    if let Some(BlockSelection::TableCell { block_ix, row_ix, cell_ix }) = self.selected_block {
+    if let Some(BlockSelection::TableCell {
+      block_ix, row_ix, cell_ix, ..
+    }) = self.selected_block
+    {
       let Some(selection_range) = self.table_cell_selection_range() else {
         return;
       };

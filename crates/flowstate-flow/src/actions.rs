@@ -56,6 +56,9 @@ impl FlowDocument {
   pub fn apply_action(&mut self, action: Action) -> Action {
     match action {
       Action::Add { parent, id, index, value } => {
+        if self.nodes.contains_key(&id) {
+          return Action::Identity;
+        }
         let Some(parent_node) = self.nodes.get(&parent) else {
           return Action::Identity;
         };
@@ -74,6 +77,13 @@ impl FlowDocument {
         Action::Delete { id }
       },
       Action::Delete { id } => {
+        let inverse_replace = self
+          .nodes
+          .get(&id)
+          .is_some_and(|node| !node.children.is_empty())
+          .then(|| Action::Replace {
+            new_nodes: self.nodes.clone(),
+          });
         let Some(node) = self.nodes.get(&id).cloned() else {
           return Action::Identity;
         };
@@ -87,13 +97,13 @@ impl FlowDocument {
           return Action::Identity;
         };
         parent.children.remove(index);
-        self.nodes.remove(&id);
-        Action::Add {
+        remove_subtree(&mut self.nodes, &id);
+        inverse_replace.unwrap_or(Action::Add {
           parent: parent_id,
           id,
           index,
           value: node.value,
-        }
+        })
       },
       Action::Update { id, new_value } => {
         let Some(node) = self.nodes.get_mut(&id) else {
@@ -145,6 +155,20 @@ impl FlowDocument {
   }
 }
 
+/// Removes `id` and all of its descendants from `nodes`.
+///
+/// Removing each node before recursing into its (former) children keeps the
+/// walk cycle-safe: a malformed child edge pointing back at an already-removed
+/// ancestor short-circuits on the `remove` miss instead of recursing forever.
+#[hotpath::measure]
+fn remove_subtree(nodes: &mut Nodes, id: &NodeId) {
+  if let Some(node) = nodes.remove(id) {
+    for child in &node.children {
+      remove_subtree(nodes, child);
+    }
+  }
+}
+
 #[hotpath::measure]
 pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, placeholder: Option<String>) -> Action {
   Action::Add {
@@ -163,7 +187,6 @@ pub fn new_box_action(parent: NodeId, parent_flow_id: NodeId, index: usize, plac
   }
 }
 
-#[hotpath::measure]
 pub const fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: NodeId) -> Action {
   Action::Add {
     parent,
@@ -181,7 +204,6 @@ pub const fn new_extension_action(parent: NodeId, parent_flow_id: NodeId, id: No
   }
 }
 
-#[hotpath::measure]
 #[must_use]
 pub const fn new_update_action(id: NodeId, new_value: NodeValue) -> Action {
   Action::Update { id, new_value }

@@ -1,4 +1,4 @@
-use std::{fs, io::Cursor, path::Path};
+use std::{fs, io::Cursor, path::Path, sync::Arc};
 
 use rdocx_opc::OpcPackage;
 
@@ -20,7 +20,17 @@ pub enum CleanAction {
 #[derive(Clone, Debug)]
 pub struct CleanedDocx {
   pub bytes: Vec<u8>,
-  pub main_document_xml: Option<Vec<u8>>,
+  // §perf-heaven T8.4: `Arc<[u8]>` (was `Vec<u8>`) — an uncompressed copy of
+  // document.xml is deliberately kept (parsing it repeatedly from the zip would
+  // re-inflate it), but shared ownership makes any downstream reuse a cheap
+  // refcount bump instead of another ~doc.xml-sized allocation.
+  pub main_document_xml: Option<Arc<[u8]>>,
+  // §act-nine A9.2: the in-memory package the cleaner already opened (unzip #1),
+  // carried so the structured walk's image resolution reuses it instead of
+  // re-inflating the zip from `bytes` (was unzip #3). `bytes` stays alongside it
+  // because rdocx's `from_bytes` takes packaged bytes (that inflate stays for
+  // now). `None` when the bytes are not a readable OPC package.
+  pub package: Option<Arc<OpcPackage>>,
   pub report: DocxCleanReport,
 }
 
@@ -39,6 +49,9 @@ pub struct DocxCleanStats {
   pub tab_values_normalized: usize,
   pub section_values_normalized: usize,
   pub style_type_values_normalized: usize,
+  /// Fractional numeric attributes (e.g. Google-Docs `w:line="316.06"`) rounded to
+  /// integers so the strict downstream OOXML integer parse does not reject them.
+  pub numeric_values_normalized: usize,
   pub styles_normalized: usize,
   pub styles_removed: usize,
   pub paragraphs_restyled: usize,
@@ -48,64 +61,120 @@ pub struct DocxCleanStats {
 
 #[hotpath::measure]
 pub fn clean_docx_path(path: impl AsRef<Path>) -> std::io::Result<CleanedDocx> {
-  clean_docx_vec(fs::read(path)?)
+  let bytes = fs::read(path)?;
+  let (recompressed, main_document_xml, package, stats) = normalize_docx_formatting_values(&bytes)?;
+  // Reuse the caller-owned Vec untouched when nothing was normalized.
+  Ok(cleaned_docx(recompressed.unwrap_or(bytes), main_document_xml, package, stats))
 }
 
 #[hotpath::measure]
 pub fn clean_docx_bytes(bytes: &[u8]) -> std::io::Result<CleanedDocx> {
-  clean_docx_vec(bytes.to_vec())
+  let (recompressed, main_document_xml, package, stats) = normalize_docx_formatting_values(bytes)?;
+  // §act-nine A9.2: copy the borrowed input only when normalization did NOT
+  // rewrite the package (the recompressed output replaces it entirely) — the
+  // old up-front `to_vec` copied the whole package even when it was about to be
+  // superseded by the re-deflated bytes.
+  Ok(cleaned_docx(
+    recompressed.unwrap_or_else(|| bytes.to_vec()),
+    main_document_xml,
+    package,
+    stats,
+  ))
 }
 
 #[hotpath::measure]
-fn clean_docx_vec(bytes: Vec<u8>) -> std::io::Result<CleanedDocx> {
-  let (bytes, main_document_xml, stats) = normalize_docx_formatting_values(bytes)?;
-  Ok(CleanedDocx {
+fn cleaned_docx(bytes: Vec<u8>, main_document_xml: Option<Arc<[u8]>>, package: Option<Arc<OpcPackage>>, stats: DocxCleanStats) -> CleanedDocx {
+  CleanedDocx {
     bytes,
     main_document_xml,
+    package,
     report: DocxCleanReport {
       stats,
       actions: CLEANING_RULES,
     },
-  })
+  }
 }
 
+/// `(recompressed package bytes when normalization changed anything, uncompressed
+/// document.xml, the opened in-memory package, clean stats)`.
+type NormalizedDocx = (Option<Vec<u8>>, Option<Arc<[u8]>>, Option<Arc<OpcPackage>>, DocxCleanStats);
+
 #[hotpath::measure]
-fn normalize_docx_formatting_values(bytes: Vec<u8>) -> std::io::Result<(Vec<u8>, Option<Vec<u8>>, DocxCleanStats)> {
-  let mut package = match OpcPackage::from_reader(Cursor::new(bytes.as_slice())) {
+fn normalize_docx_formatting_values(bytes: &[u8]) -> std::io::Result<NormalizedDocx> {
+  let mut package = match OpcPackage::from_reader(Cursor::new(bytes)) {
     Ok(package) => package,
-    Err(_) => return Ok((bytes, None, DocxCleanStats::default())),
+    Err(_) => return Ok((None, None, None, DocxCleanStats::default())),
   };
   let main_document_part = package.main_document_part();
   let mut stats = DocxCleanStats::default();
 
-  for (part_name, part) in &mut package.parts {
-    if !part_might_contain_word_xml(part_name, part) {
-      continue;
-    }
-    let Ok(xml) = std::str::from_utf8(part) else {
-      continue;
-    };
-    let (normalized, part_stats) = normalize_formatting_values_in_xml(xml);
-    if let Some(normalized) = normalized {
+  // §act-twelve A12.3.1: the qualifying parts (document.xml + headers/
+  // footers/footnotes, ≤ ~7) normalize INDEPENDENTLY — run them on scoped
+  // threads (the interpreter's established overlap pattern) so the cost is
+  // the largest part, not the sum (~100ms serial → ~max-part on the impact
+  // doc). Results apply serially afterwards; determinism is unaffected
+  // (per-part transform, order-independent stats merge... stats merge below
+  // follows the collection order for exactness).
+  let normalized_parts: Vec<(String, Option<String>, DocxCleanStats)> = {
+    let jobs: Vec<(&String, &str)> = package
+      .parts
+      .iter()
+      .filter(|(part_name, part)| part_might_contain_word_xml(part_name, part))
+      .filter_map(|(part_name, part)| std::str::from_utf8(part).ok().map(|xml| (part_name, xml)))
+      .collect();
+    let mut results = std::thread::scope(|scope| {
+      // Spawn ALL before joining any (a lazy chain would serialize the parts).
+      #[allow(clippy::needless_collect, reason = "spawn-all-then-join-all; lazy iteration would serialize the burst")]
+      let handles: Vec<_> = jobs
+        .into_iter()
+        .map(|(part_name, xml)| {
+          scope.spawn(move || {
+            let (normalized, part_stats) = normalize_formatting_values_in_xml(xml);
+            (part_name.clone(), normalized, part_stats)
+          })
+        })
+        .collect();
+      handles
+        .into_iter()
+        .map(|handle| handle.join().expect("docx part normalization thread"))
+        .collect::<Vec<_>>()
+    });
+    // Deterministic apply order regardless of HashMap iteration order.
+    results.sort_by(|a, b| a.0.cmp(&b.0));
+    results
+  };
+  for (part_name, normalized, part_stats) in normalized_parts {
+    if let Some(normalized) = normalized
+      && let Some(part) = package.parts.get_mut(&part_name)
+    {
       *part = normalized.into_bytes();
       stats.merge(part_stats);
     }
   }
 
-  let main_document_xml = main_document_part
+  let main_document_xml: Option<Arc<[u8]>> = main_document_part
     .as_deref()
     .and_then(|part_name| package.get_part(part_name))
-    .map(<[u8]>::to_vec);
+    .map(Arc::from);
 
-  if !stats.has_changes() {
-    return Ok((bytes, main_document_xml, stats));
+  if std::env::var_os("FLOWSTATE_CLEAN_DEBUG").is_some() {
+    eprintln!("[clean-debug] has_changes={} stats={stats:?}", stats.has_changes());
+    if let Some(xml) = main_document_xml.as_deref() {
+      let crlf = xml.windows(2).filter(|w| *w == [13u8, 10u8]).count();
+      let cr_entity = xml.windows(5).filter(|w| *w == *b"&#13;").count();
+      eprintln!("[clean-debug] doc.xml crlf={crlf} cr_entity={cr_entity} len={}", xml.len());
+    }
   }
-
-  let mut output = Cursor::new(Vec::new());
-  package
-    .write_to(&mut output)
-    .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
-  Ok((output.into_inner(), main_document_xml, stats))
+  let recompressed = if stats.has_changes() {
+    let mut output = Cursor::new(Vec::new());
+    package
+      .write_to(&mut output)
+      .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Some(output.into_inner())
+  } else {
+    None
+  };
+  Ok((recompressed, main_document_xml, Some(Arc::new(package)), stats))
 }
 
 #[hotpath::measure]
@@ -233,6 +302,20 @@ fn normalize_formatting_tag(tag: &str) -> (Option<String>, DocxCleanStats) {
         &mut stats.border_values_normalized,
       );
     },
+    // Fractional-twip integers (Google Docs exports write `w:line`/`w:before`/
+    // `w:after`/indents/sizes as floats like "316.06"): round to an integer so the
+    // strict downstream OOXML integer parse (`rdocx-oxml`) does not reject them.
+    "spacing" => {
+      for attr in ["line", "before", "after"] {
+        normalize_numeric_attr(tag, &mut normalized, attr, &mut stats.numeric_values_normalized);
+      }
+    },
+    "ind" => {
+      for attr in ["left", "right", "start", "end", "firstLine", "hanging"] {
+        normalize_numeric_attr(tag, &mut normalized, attr, &mut stats.numeric_values_normalized);
+      }
+    },
+    "sz" | "szCs" => normalize_numeric_attr(tag, &mut normalized, "val", &mut stats.numeric_values_normalized),
     _ => {},
   }
 
@@ -250,6 +333,36 @@ fn tag_local_name(tag: &str) -> Option<&str> {
     .unwrap_or(tag.len());
   let name = tag[1..name_end].rsplit(':').next().unwrap_or("");
   (!name.is_empty()).then_some(name)
+}
+
+/// Round a fractional numeric attribute (e.g. `w:line="316.0615539550781"` from a
+/// Google Docs export) to the nearest integer, in place, so the strict OOXML integer
+/// parse downstream does not fail with `invalid digit`. No-op when the value is
+/// already a valid integer or is not numeric at all. Chains through `normalized_tag`
+/// like [`normalize_attr`] so multiple attrs on one tag compose.
+fn normalize_numeric_attr(original_tag: &str, normalized_tag: &mut Option<String>, attr_name: &str, count: &mut usize) {
+  let tag = normalized_tag.as_deref().unwrap_or(original_tag);
+  let Some((value_start, value_end)) = attr_value_range(tag, attr_name) else {
+    return;
+  };
+  let value = &tag[value_start..value_end];
+  if value.parse::<i64>().is_ok() {
+    return; // already a valid integer
+  }
+  let Ok(number) = value.parse::<f64>() else {
+    return; // non-numeric (e.g. "auto") — leave for the enum/value normalizers
+  };
+  #[allow(
+    clippy::cast_possible_truncation,
+    reason = "twip/half-point attributes are small; a rounded fractional value cannot overflow i64"
+  )]
+  let rounded = number.round() as i64;
+  let mut normalized = String::with_capacity(tag.len());
+  normalized.push_str(&tag[..value_start]);
+  normalized.push_str(&rounded.to_string());
+  normalized.push_str(&tag[value_end..]);
+  *normalized_tag = Some(normalized);
+  *count += 1;
 }
 
 #[hotpath::measure]
@@ -321,14 +434,13 @@ fn attr_value_range(tag: &str, target_attr_name: &str) -> Option<(usize, usize)>
 
 #[hotpath::measure]
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-  !needle.is_empty()
-    && haystack
-      .windows(needle.len())
-      .any(|window| window == needle)
+  // §perf: memchr's SIMD substring search is O(n) vs the O(n·m) `windows` scan.
+  // The empty-needle guard preserves the prior `false` result (memmem::find
+  // returns Some(0) for an empty needle).
+  !needle.is_empty() && memchr::memmem::find(haystack, needle).is_some()
 }
 
 impl DocxCleanStats {
-  #[hotpath::measure]
   const fn has_changes(self) -> bool {
     self.underline_values_normalized
       + self.highlight_values_normalized
@@ -337,10 +449,10 @@ impl DocxCleanStats {
       + self.tab_values_normalized
       + self.section_values_normalized
       + self.style_type_values_normalized
+      + self.numeric_values_normalized
       > 0
   }
 
-  #[hotpath::measure]
   const fn merge(&mut self, other: Self) {
     self.underline_values_normalized += other.underline_values_normalized;
     self.highlight_values_normalized += other.highlight_values_normalized;
@@ -349,6 +461,7 @@ impl DocxCleanStats {
     self.tab_values_normalized += other.tab_values_normalized;
     self.section_values_normalized += other.section_values_normalized;
     self.style_type_values_normalized += other.style_type_values_normalized;
+    self.numeric_values_normalized += other.numeric_values_normalized;
   }
 }
 

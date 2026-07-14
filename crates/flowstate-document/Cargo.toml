@@ -10,9 +10,31 @@ workspace = true
 [dependencies]
 gpui-flowtext = { workspace = true }
 gpui = { version = "0.2.2", default-features = false }
+imagesize = { workspace = true }
 rustc-hash = { workspace = true }
+# §A13.1.2: "rayon" enables update_rayon — multithreaded hashing for the
+# multi-MB chunk payloads still verified on the open path.
+blake3 = { version = "1.8.5", features = ["rayon"] }
+loro.workspace = true
+postcard.workspace = true
+serde.workspace = true
+# §A13.1: postcard's Vec<u8> wire format is IDENTICAL to serde_bytes'
+# (varint len + raw bytes) — this only swaps the element-wise decode loop
+# for a memcpy-scale one. Old packages decode unchanged.
+serde_bytes = "0.11"
+uuid.workspace = true
+tempfile.workspace = true
+atomicwrites = "0.4.4"
+flowstate-fidelity.workspace = true
+hotpath.workspace = true
+loro-internal = "1.13.1"
+
+[package.metadata.cargo-machete]
+# serde_bytes is used via `#[serde(with = "serde_bytes")]` attributes in
+# package.rs (§A13.1), which cargo-machete's source scan cannot see.
+ignored = ["serde_bytes"]
 
 [features]
-hotpath = ["gpui-flowtext/hotpath"]
-hotpath-cpu = ["hotpath", "gpui-flowtext/hotpath-cpu"]
-hotpath-alloc = ["hotpath", "gpui-flowtext/hotpath-alloc"]
+hotpath = ["hotpath/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]

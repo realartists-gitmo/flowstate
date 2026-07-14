@@ -42,7 +42,7 @@ impl OutlineCache {
     self.visible_revision = revision;
   }
 
-  fn update_signature(&mut self, document: &Document, edit_generation: u64) -> bool {
+  fn update_signature(&mut self, document: &DocumentProjection, edit_generation: u64) -> bool {
     let paragraph_count = outline_signature_entries_into(document, &mut self.signature_scratch);
     let unchanged = self.signature.paragraph_count == paragraph_count && self.signature.entries == self.signature_scratch;
     self.signature.paragraph_count = paragraph_count;
@@ -119,7 +119,7 @@ fn outline_node_to_tree_item(node: &OutlineNode, collapsed_items: &HashSet<usize
 
 #[cfg(test)]
 #[hotpath::measure]
-fn outline_nodes(document: &Document) -> Vec<OutlineNode> {
+fn outline_nodes(document: &DocumentProjection) -> Vec<OutlineNode> {
   let signature = outline_signature(document);
   outline_nodes_from_entries(&signature.entries)
 }
@@ -143,14 +143,14 @@ fn outline_nodes_from_entries(entries: &[OutlineEntry]) -> Vec<OutlineNode> {
 }
 
 #[hotpath::measure]
-fn outline_signature(document: &Document) -> OutlineSignature {
+fn outline_signature(document: &DocumentProjection) -> OutlineSignature {
   let mut entries = Vec::new();
   let paragraph_count = outline_signature_entries_into(document, &mut entries);
   OutlineSignature { paragraph_count, entries }
 }
 
 #[hotpath::measure]
-fn outline_signature_entries_into(document: &Document, entries: &mut Vec<OutlineEntry>) -> usize {
+fn outline_signature_entries_into(document: &DocumentProjection, entries: &mut Vec<OutlineEntry>) -> usize {
   let mut entry_ix = 0usize;
   for (paragraph_ix, paragraph) in document.paragraphs.iter().enumerate() {
     let Some(level) = outline_level(paragraph.style) else {
@@ -264,14 +264,14 @@ fn outline_paragraph_ix(id: &str) -> Option<usize> {
 
 #[cfg(test)]
 #[hotpath::measure]
-fn outline_paragraph_label(document: &Document, paragraph_ix: usize) -> String {
+fn outline_paragraph_label(document: &DocumentProjection, paragraph_ix: usize) -> String {
   let mut label = String::with_capacity(80);
   outline_paragraph_label_into(document, paragraph_ix, &mut label);
   label
 }
 
 #[hotpath::measure]
-fn outline_paragraph_label_into(document: &Document, paragraph_ix: usize, label: &mut String) {
+fn outline_paragraph_label_into(document: &DocumentProjection, paragraph_ix: usize, label: &mut String) {
   let paragraph_range = paragraph_byte_range(document, paragraph_ix);
   const MAX_BYTES: usize = 80;
   const TRUNCATED_BYTES: usize = MAX_BYTES - 3;

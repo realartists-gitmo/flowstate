@@ -1,0 +1,81 @@
+[package]
+name = "flowstate-collab"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+async-channel = { workspace = true }
+base64 = { workspace = true }
+blake3 = "1.8.5"
+flowstate-document.workspace = true
+flowstate-fidelity.workspace = true
+gpui-flowtext = { workspace = true }
+hotpath.workspace = true
+iroh = { workspace = true }
+iroh-gossip = { workspace = true }
+iroh-tickets = { workspace = true }
+loro = { workspace = true }
+n0-future = { workspace = true }
+postcard = { workspace = true }
+rand = { workspace = true }
+reqwest = { workspace = true }
+rustc-hash = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+twox-hash = { workspace = true }
+url = { workspace = true }
+uuid = { workspace = true }
+zstd.workspace = true
+
+[features]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
+
+[dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
+pollster = "0.4.0"
+proptest = { workspace = true }
+tempfile.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+bluer = { version = "0.17.4", features = ["bluetoothd"] }
+futures-util = "0.3"
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62.2", features = [
+  "Devices_Bluetooth",
+  "Devices_Bluetooth_Advertisement",
+  "Devices_Bluetooth_GenericAttributeProfile",
+  "Foundation",
+  "Foundation_Collections",
+  "Storage_Streams",
+] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = "0.3.1"
+objc2 = "0.6.4"
+objc2-foundation = { version = "0.3.2", features = ["NSArray", "NSData", "NSDictionary", "NSError", "NSObject", "NSString"] }
+objc2-core-bluetooth = { version = "0.3.2", features = [
+  "CBATTRequest",
+  "CBAttribute",
+  "CBCentral",
+  "CBCentralManager",
+  "CBCharacteristic",
+  "CBManager",
+  "CBPeer",
+  "CBPeripheral",
+  "CBPeripheralManager",
+  "CBService",
+  "CBUUID",
+  "dispatch2",
+] }
+
+[lints]
+workspace = true

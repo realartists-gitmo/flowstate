@@ -9,8 +9,6 @@ use std::{
 };
 
 use gpui::{Bounds, Context, IntoElement, Pixels, Render, Window, div, point, prelude::*, px, size};
-use tempfile::tempdir;
-
 use super::*;
 
 const DEFAULT_WIDTHS: &[f32] = &[720.0, 900.0, 1100.0, 1440.0];
@@ -143,7 +141,7 @@ struct LoadedDocument {
   label: String,
   path: Option<PathBuf>,
   file_bytes: Option<u64>,
-  document: Document,
+  document: DocumentProjection,
   load: DurationStats,
 }
 

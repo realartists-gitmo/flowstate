@@ -107,6 +107,19 @@ impl RichTextEditor {
     self.edit_generation
   }
 
+  pub fn mark_saved_generation(&mut self, generation: u64, cx: &mut Context<Self>) {
+    self.saved_generation = self.saved_generation.max(generation);
+    self.refresh_save_status();
+    cx.notify();
+  }
+
+  pub fn set_save_failed(&mut self, generation: u64, message: String, cx: &mut Context<Self>) {
+    if generation >= self.saved_generation {
+      self.save_status = SaveStatus::SaveFailed(message);
+    }
+    cx.notify();
+  }
+
   pub fn update_document_theme(&mut self, update: impl FnOnce(&mut DocumentTheme), cx: &mut Context<Self>) {
     update(&mut self.document.theme);
     rebuild_document_sections(&mut self.document);
@@ -115,6 +128,11 @@ impl RichTextEditor {
 
   fn invalidate_document_theme_layout(&mut self, cx: &mut Context<Self>) {
     self.clear_layout_work_caches();
+    // §act-nine A9.3 (pre-existing stale-prep hazard): the theme feeds
+    // invisibility-mode prep (`run_is_visible_for_theme` decides projected
+    // text/runs), but theme identity is not part of `ParagraphPrepKey` — a
+    // theme change must clear the prep map too, or stale projections survive.
+    self.clear_all_layout_prep();
     self.paragraph_chunk_layout_cache = vec![None; self.document.paragraphs.len()];
     self.paragraph_height_cache = vec![None; self.document.paragraphs.len()];
     self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
@@ -146,28 +164,10 @@ impl RichTextEditor {
     self.paragraph_height_cache.resize(paragraph_count, None);
 
     for paragraph_ix in 0..paragraph_count {
-      let Some(paragraph) = self.document.paragraphs.get(paragraph_ix) else {
-        self.paragraph_chunk_layout_cache[paragraph_ix] = None;
-        self.paragraph_height_cache[paragraph_ix] = None;
-        continue;
-      };
-      let key = paragraph_cache_key(&self.document, paragraph);
-      let chunk_valid = self.valid_chunk_cache_entry(paragraph_ix, width).is_some();
-      if !chunk_valid {
+      if self.valid_chunk_cache_entry(paragraph_ix, width).is_none() {
         self.paragraph_chunk_layout_cache[paragraph_ix] = None;
       }
-
-      let height_valid = self
-        .paragraph_height_cache
-        .get(paragraph_ix)
-        .and_then(|entry| entry.as_ref())
-        .is_some_and(|entry| {
-          entry.key == key
-            && entry.width == width
-            && entry.invisibility_mode == self.invisibility_mode
-            && entry.edit_generation == self.edit_generation
-        });
-      if !height_valid {
+      if self.valid_paragraph_height(paragraph_ix, width).is_none() {
         self.paragraph_height_cache[paragraph_ix] = None;
       }
     }
@@ -176,32 +176,6 @@ impl RichTextEditor {
     self.item_sizes_cache = None;
     self.pending_item_sizes_patch_range = None;
     self.height_prefix_index = HeightPrefixIndex::default();
-  }
-
-  fn invalidate_paragraph_layout_cache_range(&mut self, range: Range<usize>) {
-    let paragraph_count = self.document.paragraphs.len();
-    let expanded_range = expand_paragraph_range(range, paragraph_count, 2);
-    self.clear_layout_work_cache_range(expanded_range.clone());
-    self.clear_layout_prep_range(expanded_range.clone());
-    self
-      .paragraph_chunk_layout_cache
-      .resize(paragraph_count, None);
-    self.paragraph_height_cache.resize(paragraph_count, None);
-
-    for paragraph_ix in expanded_range.clone() {
-      if let Some(cache) = self.paragraph_chunk_layout_cache.get_mut(paragraph_ix) {
-        *cache = None;
-      }
-      if let Some(cache) = self.paragraph_height_cache.get_mut(paragraph_ix) {
-        *cache = None;
-      }
-    }
-
-    self.paragraph_height_cache_revision = self.paragraph_height_cache_revision.wrapping_add(1);
-    self.pending_item_sizes_patch_range = Some(match self.pending_item_sizes_patch_range.take() {
-      Some(previous) => previous.start.min(expanded_range.start)..previous.end.max(expanded_range.end),
-      None => expanded_range,
-    });
   }
 
   pub fn invisibility_mode(&self) -> bool {
@@ -266,12 +240,46 @@ impl RichTextEditor {
     let recovery_path = self.recovery_path.clone();
     self.save_status = SaveStatus::Saving;
     cx.notify();
+    if let Some(save_hook) = self.native_save_hook.clone() {
+      // Loro-first: every local edit is already committed to the doc core, so
+      // the hook persists canonical state — there is nothing to flush, replay,
+      // or re-install; the projection stays untouched.
+      let assets = document.assets.assets.values().cloned().collect();
+      return cx.spawn(async move |editor, cx| {
+        let write_result = save_hook(path, assets).await;
+        if write_result.is_ok()
+          && let Some(recovery_path) = recovery_path
+        {
+          let _ = fs::remove_file(recovery_path);
+        }
+        match write_result {
+          Ok(()) => {
+            let _ = editor.update(cx, |editor, cx| {
+              editor.saved_generation = editor.saved_generation.max(generation);
+              editor.refresh_save_status();
+              cx.notify();
+            });
+            Ok(())
+          },
+          Err(error) => {
+            let message = error.to_string();
+            let _ = editor.update(cx, |editor, cx| {
+              if generation >= editor.saved_generation {
+                editor.save_status = SaveStatus::SaveFailed(message);
+              }
+              cx.notify();
+            });
+            Err(error)
+          },
+        }
+      });
+    }
     cx.spawn(async move |editor, cx| {
       let write_result = cx
         .background_executor()
         .spawn(async move {
           let document = detach_document_for_background_write(&document);
-          let result = write_document(&path, &document);
+          let result = write_native_document(&path, &document);
           if result.is_ok()
             && let Some(recovery_path) = recovery_path
           {

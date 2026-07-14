@@ -159,18 +159,18 @@ impl RichTextEditor {
     if paragraph_ix < self.document.paragraphs.len() {
       // Outline navigation should place the insertion caret at the start of
       // the target paragraph, matching what the user just selected in the nav.
-      self.selection = EditorSelection {
-        anchor: DocumentOffset {
-          paragraph: paragraph_ix,
-          byte: 0,
-        },
-        head: DocumentOffset {
-          paragraph: paragraph_ix,
-          byte: 0,
-        },
-      };
+      let before_selection = self.selection.clone();
+      self.note_explicit_selection_movement();
+      self.selection = EditorSelection::collapsed(DocumentOffset {
+        paragraph: paragraph_ix,
+        byte: 0,
+      });
+      self.fidelity_caret_set_from("scroll_to_paragraph", &before_selection);
       self.goal_x = None;
       self.reset_caret_blink(cx);
+      if self.selection != before_selection {
+        self.emit_selection_changed(cx);
+      }
 
       let width = self.current_layout_width();
       let start = paragraph_ix.saturating_sub(2);
@@ -188,40 +188,25 @@ impl RichTextEditor {
     }
   }
 
+  /// Loro-first (spec §10): undo executes through the write authority's
+  /// `UndoManager` — synchronously, cursor-restored, collaboration-safe. The
+  /// editor holds no content history of its own (invariant 11).
   pub fn undo(&mut self, cx: &mut Context<Self>) {
-    let Some(record) = self.undo_stack.pop() else {
-      return;
-    };
-    let restored_generation = record.before_generation;
-    for operation in record.operations.iter().rev() {
-      operation.undo(&mut self.document);
-    }
-    self.selection = record.before_selection.clone();
-    self.edit_generation = restored_generation;
-    self.redo_stack.push(record);
-    self.after_history_restore(cx);
+    self.note_explicit_selection_movement();
+    self.undo_via_authority(cx);
   }
 
   pub fn redo(&mut self, cx: &mut Context<Self>) {
-    let Some(record) = self.redo_stack.pop() else {
-      return;
-    };
-    let restored_generation = record.after_generation;
-    for operation in &record.operations {
-      operation.redo(&mut self.document);
-    }
-    self.selection = record.after_selection.clone();
-    self.edit_generation = restored_generation;
-    self.undo_stack.push(record);
-    self.after_history_restore(cx);
+    self.note_explicit_selection_movement();
+    self.redo_via_authority(cx);
   }
 
   pub fn can_undo(&self) -> bool {
-    !self.undo_stack.is_empty()
+    self.write_authority.is_some()
   }
 
   pub fn can_redo(&self) -> bool {
-    !self.redo_stack.is_empty()
+    self.write_authority.is_some()
   }
 
   pub fn move_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -288,37 +273,41 @@ impl RichTextEditor {
     }
     let last = self.document.paragraphs.len() - 1;
     let last_len = paragraph_text_len(&self.document.paragraphs[last]);
-    let selection = EditorSelection {
-      anchor: DocumentOffset { paragraph: 0, byte: 0 },
-      head: DocumentOffset {
+    let selection = EditorSelection::range(
+      DocumentOffset { paragraph: 0, byte: 0 },
+      DocumentOffset {
         paragraph: last,
         byte: last_len,
       },
-    };
+    );
     if self.selection == selection {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("select_all", &fid_before);
     self.goal_x = None;
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 
   pub fn move_word_left(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_left(self.selection.head), false, cx);
+    self.move_to_offset(self.word_left(self.selection.head), SelectionAffinity::Before, VisualGravity::Neutral, false, cx);
   }
 
   pub fn move_word_right(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_right(self.selection.head), false, cx);
+    self.move_to_offset(self.word_right(self.selection.head), SelectionAffinity::After, VisualGravity::Neutral, false, cx);
   }
 
   pub fn select_word_left(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_left(self.selection.head), true, cx);
+    self.move_to_offset(self.word_left(self.selection.head), SelectionAffinity::Before, VisualGravity::Neutral, true, cx);
   }
 
   pub fn select_word_right(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(self.word_right(self.selection.head), true, cx);
+    self.move_to_offset(self.word_right(self.selection.head), SelectionAffinity::After, VisualGravity::Neutral, true, cx);
   }
 
   pub fn page_up(&mut self, cx: &mut Context<Self>) {
@@ -338,19 +327,19 @@ impl RichTextEditor {
   }
 
   pub fn move_document_start(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(DocumentOffset::default(), false, cx);
+    self.move_to_offset(DocumentOffset::default(), SelectionAffinity::Before, VisualGravity::Neutral, false, cx);
   }
 
   pub fn move_document_end(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(document_end(&self.document), false, cx);
+    self.move_to_offset(document_end(&self.document), SelectionAffinity::After, VisualGravity::Neutral, false, cx);
   }
 
   pub fn select_document_start(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(DocumentOffset::default(), true, cx);
+    self.move_to_offset(DocumentOffset::default(), SelectionAffinity::Before, VisualGravity::Neutral, true, cx);
   }
 
   pub fn select_document_end(&mut self, cx: &mut Context<Self>) {
-    self.move_to_offset(document_end(&self.document), true, cx);
+    self.move_to_offset(document_end(&self.document), SelectionAffinity::After, VisualGravity::Neutral, true, cx);
   }
 
   pub fn insert_text_command(&mut self, text: &str, cx: &mut Context<Self>) {
@@ -358,8 +347,10 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    if self.insert_single_grapheme_fast_path(text, cx) {
-      return;
+    let before = self.selection.clone();
+    clamp_selection_to_document(&self.document, &mut self.selection);
+    if self.selection != before {
+      self.emit_selection_changed(cx);
     }
     self.apply_document_edit(cx, |editor, cx| editor.insert_text(text, cx));
   }
@@ -367,10 +358,6 @@ impl RichTextEditor {
   pub fn backspace_command(&mut self, cx: &mut Context<Self>) {
     if !self.can_write_collaboration() {
       cx.notify();
-      return;
-    }
-    if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
-      let _ = self.delete_selection_with_document_snapshot(cx);
       return;
     }
     self.apply_document_edit(cx, |editor, cx| editor.backspace(cx));
@@ -381,25 +368,13 @@ impl RichTextEditor {
       cx.notify();
       return;
     }
-    if !self.selection.is_caret() && self.selection_crosses_object_blocks(self.selection.normalized()) {
-      let _ = self.delete_selection_with_document_snapshot(cx);
-      return;
-    }
     self.apply_document_edit(cx, |editor, cx| editor.delete_forward(cx));
   }
 
   pub fn insert_paragraph_break_command(&mut self, cx: &mut Context<Self>) {
-    if !self.selection.is_caret() {
-      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
-      return;
-    }
-
-    let caret = self.selection.head;
-    let Some(block_ix) = block_ix_for_paragraph(&self.document, caret.paragraph) else {
-      self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
-      return;
-    };
-    self.insert_paragraph_break_at_caret(caret, block_ix, cx);
+    // Loro-first: one primitive covers caret and selection cases — the split
+    // intent commits through the write authority (spec §5).
+    self.apply_document_edit(cx, |editor, cx| editor.insert_paragraph_break(cx));
   }
 
   pub fn delete_word_backward_command(&mut self, cx: &mut Context<Self>) {
@@ -407,9 +382,11 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let head = editor.selection.head;
         let anchor = editor.word_left(head);
-        editor.selection = EditorSelection { anchor, head };
+        let fid_before = editor.fidelity_caret_before();
+        editor.selection = EditorSelection::range(anchor, head);
+        editor.fidelity_caret_set("delete_word_backward_command", &fid_before);
       }
-      editor.delete_selection_internal();
+      editor.delete_selection_internal_with_cx(cx);
       editor.after_text_mutation(cx);
     });
   }
@@ -419,9 +396,11 @@ impl RichTextEditor {
       if editor.selection.is_caret() {
         let anchor = editor.selection.head;
         let head = editor.word_right(anchor);
-        editor.selection = EditorSelection { anchor, head };
+        let fid_before = editor.fidelity_caret_before();
+        editor.selection = EditorSelection::range(anchor, head);
+        editor.fidelity_caret_set("delete_word_forward_command", &fid_before);
       }
-      editor.delete_selection_internal();
+      editor.delete_selection_internal_with_cx(cx);
       editor.after_text_mutation(cx);
     });
   }
@@ -470,13 +449,9 @@ impl RichTextEditor {
       });
       return;
     }
-    if self.delete_selection_with_document_snapshot(cx) {
-      return;
-    }
-    self.apply_document_edit(cx, |editor, cx| {
-      editor.delete_selection_internal();
-      editor.after_text_mutation(cx);
-    });
+    // Loro-first: one DeleteRange intent handles object-crossing selections
+    // canonically (the runtime retires objects + records with the text).
+    self.write_delete_selection(cx);
   }
 
   pub fn paste(&mut self, cx: &mut Context<Self>) {
@@ -566,6 +541,9 @@ impl RichTextEditor {
 
   pub fn insert_plain_text_from_toolkit(&mut self, text: &str, cx: &mut Context<Self>) {
     if text.trim().is_empty() {
+      return;
+    }
+    if self.insert_text_into_selected_equation(text, cx) {
       return;
     }
     if self.insert_plain_text_into_selected_table_cell(text, cx) {

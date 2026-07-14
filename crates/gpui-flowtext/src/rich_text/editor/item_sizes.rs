@@ -1,4 +1,4 @@
-type ParagraphRangeItemSizes = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
+type VirtualItemSizeParts = (Vec<VirtualItem>, Vec<Range<usize>>, Vec<Pixels>, Vec<Size<Pixels>>);
 type FullItemSizes = (Rc<Vec<VirtualItem>>, Vec<Range<usize>>, Vec<Pixels>, Rc<Vec<Size<Pixels>>>);
 
 #[hotpath::measure_all]
@@ -104,38 +104,46 @@ impl RichTextEditor {
   ) -> Option<Rc<Vec<Size<Pixels>>>> {
     let range = self.pending_item_sizes_patch_range.clone()?;
     let paragraph_count = self.document.paragraphs.len();
-    if range.start > range.end || range.end > paragraph_count || self.document_has_object_blocks() {
+    if range.start > range.end || range.end > paragraph_count {
       return None;
     }
 
-    let cache = self.item_sizes_cache.as_ref()?;
-    if cache.width != width
-      || cache.block_count != self.document.blocks.len()
-      || cache.invisibility_mode != self.invisibility_mode
-      || cache.paragraph_chunk_item_ranges.len() != paragraph_count
-      || cache.paragraph_remainder_items.len() != paragraph_count
-      || cache.block_item_ranges.len() != self.document.blocks.len()
-      || cache.block_heights.len() != self.document.blocks.len()
-      || self.height_prefix_index.len() != cache.item_count
-    {
-      return None;
-    }
+    let block_range = self.block_range_for_paragraph_range(range.clone())?;
+    let (replace_start, replace_end, item_count) = {
+      let cache = self.item_sizes_cache.as_ref()?;
+      if cache.width != width
+        || cache.block_count != self.document.blocks.len()
+        || cache.invisibility_mode != self.invisibility_mode
+        || cache.paragraph_chunk_item_ranges.len() != paragraph_count
+        || cache.paragraph_remainder_items.len() != paragraph_count
+        || cache.block_item_ranges.len() != self.document.blocks.len()
+        || cache.block_heights.len() != self.document.blocks.len()
+        || self.height_prefix_index.len() != cache.item_count
+      {
+        return None;
+      }
 
-    let replace_start = cache
-      .block_item_ranges
-      .get(range.start)
-      .map_or(cache.item_count, |range| range.start);
-    let replace_end = if range.end == 0 {
-      0
-    } else {
-      cache.block_item_ranges.get(range.end - 1)?.end
+      let replace_start = if block_range.start == block_range.end {
+        cache
+          .block_item_ranges
+          .get(block_range.start)
+          .map_or(cache.item_count, |range| range.start)
+      } else {
+        cache.block_item_ranges.get(block_range.start)?.start
+      };
+      let replace_end = if block_range.start == block_range.end {
+        replace_start
+      } else {
+        cache.block_item_ranges.get(block_range.end - 1)?.end
+      };
+      (replace_start, replace_end, cache.item_count)
     };
-    if replace_start > replace_end || replace_end > cache.item_count {
+    if replace_start > replace_end || replace_end > item_count {
       return None;
     }
 
     let (replacement_items, replacement_block_ranges, replacement_block_heights, replacement_sizes) =
-      self.virtual_item_sizes_for_paragraph_range(range.clone(), width, window, cx)?;
+      self.virtual_item_sizes_for_block_range(block_range.clone(), range.start, width, window, cx)?;
     let old_len = replace_end - replace_start;
     let new_len = replacement_items.len();
     let item_delta = new_len as isize - old_len as isize;
@@ -147,15 +155,15 @@ impl RichTextEditor {
       items.splice(replace_start..replace_end, replacement_items);
       sizes.splice(replace_start..replace_end, replacement_sizes.clone());
 
-      for block_ix in range.clone() {
-        let relative = &replacement_block_ranges[block_ix - range.start];
+      for block_ix in block_range.clone() {
+        let relative = &replacement_block_ranges[block_ix - block_range.start];
         cache.block_item_ranges[block_ix] = replace_start + relative.start..replace_start + relative.end;
-        cache.block_heights[block_ix] = replacement_block_heights[block_ix - range.start];
+        cache.block_heights[block_ix] = replacement_block_heights[block_ix - block_range.start];
       }
       if item_delta != 0 {
-        for block_range in cache.block_item_ranges.iter_mut().skip(range.end) {
-          block_range.start = block_range.start.checked_add_signed(item_delta)?;
-          block_range.end = block_range.end.checked_add_signed(item_delta)?;
+        for cached_block_range in cache.block_item_ranges.iter_mut().skip(block_range.end) {
+          cached_block_range.start = cached_block_range.start.checked_add_signed(item_delta)?;
+          cached_block_range.end = cached_block_range.end.checked_add_signed(item_delta)?;
         }
       }
 
@@ -184,61 +192,121 @@ impl RichTextEditor {
     Some(patched_sizes)
   }
 
-  fn virtual_item_sizes_for_paragraph_range(
+  /// Record that `paragraph_ix`'s item sizes went stale (a chunk materialized
+  /// and refined its height) so the next size query PATCHES the cache instead
+  /// of rebuilding it. The former shape nuked `item_sizes_cache` outright,
+  /// which made every scroll frame that materialized a chunk pay a full
+  /// O(blocks) rebuild + prefix-index rebuild (~10 ms per frame on the
+  /// reference doc — half the frame budget).
+  pub(super) fn note_item_sizes_patch_paragraph(&mut self, paragraph_ix: usize) {
+    self.pending_item_sizes_patch_range = Some(match self.pending_item_sizes_patch_range.take() {
+      Some(range) => range.start.min(paragraph_ix)..range.end.max(paragraph_ix + 1),
+      None => paragraph_ix..paragraph_ix + 1,
+    });
+  }
+
+  fn block_range_for_paragraph_range(&self, range: Range<usize>) -> Option<Range<usize>> {
+    if range.start == range.end {
+      let block_ix = if range.start == self.document.paragraphs.len() {
+        self.document.blocks.len()
+      } else {
+        self.block_ix_for_paragraph(range.start)?
+      };
+      return Some(block_ix..block_ix);
+    }
+
+    let start_block = self.block_ix_for_paragraph(range.start)?;
+    let end_block = if range.end == self.document.paragraphs.len() {
+      self.document.blocks.len()
+    } else {
+      self.block_ix_for_paragraph(range.end)?
+    };
+    Some(start_block..end_block.max(start_block))
+  }
+
+  // §perf: the sole caller already knows the paragraph index of `block_range.start`
+  // (it derives the block range from a paragraph range whose `start` is exactly that
+  // index), so it threads it in as `first_paragraph_ix`. This removes a former
+  // O(block_range.start) scan of the whole block vector that ran on every keystroke
+  // editing low in a large document.
+  fn virtual_item_sizes_for_block_range(
     &mut self,
-    range: Range<usize>,
+    block_range: Range<usize>,
+    first_paragraph_ix: usize,
     width: Pixels,
-    _window: &mut Window,
-    _cx: &mut Context<Self>,
-  ) -> Option<ParagraphRangeItemSizes> {
-    let mut items = Vec::with_capacity(range.len());
-    let mut sizes = Vec::with_capacity(range.len());
-    let mut block_item_ranges = Vec::with_capacity(range.len());
-    let mut block_heights = Vec::with_capacity(range.len());
+    window: &mut Window,
+    cx: &mut Context<Self>,
+  ) -> Option<VirtualItemSizeParts> {
+    let mut items = Vec::with_capacity(block_range.len());
+    let mut sizes = Vec::with_capacity(block_range.len());
+    let mut block_item_ranges = Vec::with_capacity(block_range.len());
+    let mut block_heights = Vec::with_capacity(block_range.len());
+    let mut paragraph_ix = first_paragraph_ix;
 
-    for paragraph_ix in range {
-      let paragraph = self.document.paragraphs.get(paragraph_ix)?;
-      if !matches!(self.document.blocks.get(paragraph_ix), Some(Block::Paragraph(_))) {
-        return None;
-      }
-
+    for block_ix in block_range {
       let block_start = items.len();
       let mut block_height = px(0.0);
-      if self.paragraph_hidden_by_collapsed_section(paragraph_ix) {
-        block_item_ranges.push(block_start..items.len());
-        block_heights.push(px(0.0));
-        continue;
-      }
-      if self.invisibility_mode && !paragraph_is_visible(&self.document, paragraph) {
-        block_item_ranges.push(block_start..items.len());
-        block_heights.push(px(0.0));
-        continue;
-      }
 
-      let complete = self
-        .valid_chunk_cache_entry(paragraph_ix, width)
-        .map(|entry| {
-          for (chunk_ix, chunk) in entry.chunks.iter().enumerate() {
-            items.push(VirtualItem::ParagraphChunk {
-              block_ix: paragraph_ix,
-              paragraph_ix,
-              chunk_ix,
-            });
-            sizes.push(size(width, chunk.height));
-            block_height += chunk.height;
+      match self.document.blocks.get(block_ix) {
+        Some(Block::Paragraph(paragraph)) => {
+          let current_paragraph_ix = paragraph_ix;
+          paragraph_ix += 1;
+          if self.paragraph_hidden_by_collapsed_section(current_paragraph_ix) {
+            block_item_ranges.push(block_start..items.len());
+            block_heights.push(px(0.0));
+            continue;
           }
-          entry.complete
-        })
-        .unwrap_or(false);
+          if self.invisibility_mode && !paragraph_is_visible(&self.document, paragraph) {
+            block_item_ranges.push(block_start..items.len());
+            block_heights.push(px(0.0));
+            continue;
+          }
 
-      if !complete {
-        let estimate = self.paragraph_remainder_estimate(paragraph_ix, width);
-        items.push(VirtualItem::ParagraphRemainder {
-          block_ix: paragraph_ix,
-          paragraph_ix,
-        });
-        sizes.push(size(width, estimate));
-        block_height += estimate;
+          let complete = self
+            .valid_chunk_cache_entry(current_paragraph_ix, width)
+            .map(|entry| {
+              for (chunk_ix, chunk) in entry.chunks.iter().enumerate() {
+                items.push(VirtualItem::ParagraphChunk {
+                  block_ix,
+                  paragraph_ix: current_paragraph_ix,
+                  chunk_ix,
+                });
+                sizes.push(size(width, chunk.height));
+                block_height += chunk.height;
+              }
+              entry.complete
+            })
+            .unwrap_or(false);
+
+          if !complete {
+            let estimate = self.paragraph_remainder_estimate(current_paragraph_ix, width);
+            items.push(VirtualItem::ParagraphRemainder {
+              block_ix,
+              paragraph_ix: current_paragraph_ix,
+            });
+            sizes.push(size(width, estimate));
+            block_height += estimate;
+          }
+        },
+        Some(Block::Image(_) | Block::Equation(_) | Block::Table(_)) => {
+          if self.invisibility_mode {
+            block_item_ranges.push(block_start..items.len());
+            block_heights.push(px(0.0));
+            continue;
+          }
+          let height = layout_structural_block_at(&self.document, block_ix, width, px(0.0), window, cx)
+            .as_ref()
+            .map(structural_block_height)
+            .unwrap_or_else(|| estimate_structural_block_item_height(&self.document, block_ix, width))
+            + self.document.theme.paragraph_after;
+          items.push(VirtualItem::StructuralBlock { block_ix });
+          sizes.push(size(width, height));
+          block_height += height;
+        },
+        None => {
+          items.push(VirtualItem::HiddenBlock { block_ix });
+          sizes.push(size(width, px(0.0)));
+        },
       }
 
       block_item_ranges.push(block_start..items.len());
@@ -248,7 +316,7 @@ impl RichTextEditor {
     Some((items, block_item_ranges, block_heights, sizes))
   }
 
-  pub(crate) fn benchmark_paragraph_item_sizes(
+  pub fn benchmark_paragraph_item_sizes(
     &mut self,
     width: Pixels,
     window: &mut Window,
@@ -308,7 +376,40 @@ impl RichTextEditor {
     }
   }
 
-  pub(crate) fn benchmark_invalidate_document_layout_caches(&mut self) {
+  /// §perf-heaven T5 net: force an exact layout pass, then for every paragraph
+  /// with a COMPLETE exact layout compare its estimate to its exact height.
+  /// Returns the worst over/under ratios — the layout-fidelity oracle for the
+  /// estimate heuristic and the guard any persisted-estimate work must pass.
+  pub fn benchmark_estimate_accuracy(&mut self, width: Pixels, window: &mut Window, cx: &mut Context<Self>) -> EstimateAccuracy {
+    self.measured_item_width = Some(width);
+    let _ = self.paragraph_item_sizes(window, cx);
+    let mut acc = EstimateAccuracy::default();
+    for paragraph_ix in 0..self.document.paragraphs.len() {
+      let Some(entry) = self.valid_chunk_cache_entry(paragraph_ix, width) else {
+        continue;
+      };
+      if !entry.complete {
+        continue;
+      }
+      let exact: f32 = entry.exact_height.into();
+      if exact <= 1.0 {
+        continue;
+      }
+      let estimate: f32 = self
+        .paragraph_estimated_total_height(paragraph_ix, width)
+        .map_or(0.0, |(height, _)| height.into());
+      let ratio = estimate / exact;
+      acc.compared += 1;
+      if ratio >= 1.0 {
+        acc.max_over_ratio = acc.max_over_ratio.max(ratio - 1.0);
+      } else {
+        acc.max_under_ratio = acc.max_under_ratio.max(1.0 - ratio);
+      }
+    }
+    acc
+  }
+
+  pub fn benchmark_invalidate_document_layout_caches(&mut self) {
     self.invalidate_document_layout_caches();
   }
 
@@ -398,7 +499,7 @@ impl RichTextEditor {
     if self.collapsed_section_ids.is_empty() {
       return false;
     }
-    self.document.sections.iter().any(|section| {
+    self.document.outline.iter().any(|section| {
       if !self.collapsed_section_ids.contains(&section.id) {
         return false;
       }
@@ -422,7 +523,7 @@ impl RichTextEditor {
 fn reusable_virtual_item_buffers(
   old_cache: Option<ItemSizesCache>,
   block_count: usize,
-) -> ParagraphRangeItemSizes {
+) -> VirtualItemSizeParts {
   let Some(cache) = old_cache else {
     return (
       Vec::with_capacity(block_count),

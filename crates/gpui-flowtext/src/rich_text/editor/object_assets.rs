@@ -1,5 +1,5 @@
 #[hotpath::measure]
-fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
+fn reserved_object_frame(document: &DocumentProjection, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let object_height = (row_size.height - document.theme.paragraph_after).max(px(1.0));
   let object_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   div()
@@ -16,15 +16,20 @@ fn reserved_object_frame(document: &Document, row_size: Size<Pixels>, selected: 
 }
 
 #[hotpath::measure]
-fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
+fn image_object_frame(document: &DocumentProjection, image: &ImageBlock, asset: &AssetRecord, row_size: Size<Pixels>, selected: bool) -> gpui::Div {
   let available_width = (row_size.width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_asset_intrinsic_size(asset);
-  let object_width = match image.sizing {
-    ImageSizing::Fixed { width_px, .. } => px(width_px as f32).min(available_width),
-    ImageSizing::FitWidth => available_width,
-    ImageSizing::Intrinsic => intrinsic
-      .map(|(width, _)| width.min(available_width))
-      .unwrap_or(available_width),
+  let loading = asset.is_loading_placeholder();
+  let object_width = if loading {
+    px(IMAGE_LOADING_PLACEHOLDER_WIDTH_PX).min(available_width)
+  } else {
+    match image.sizing {
+      ImageSizing::Fixed { width_px, .. } => px(width_px as f32).min(available_width),
+      ImageSizing::FitWidth => available_width,
+      ImageSizing::Intrinsic => intrinsic
+        .map(|(width, _)| width.min(available_width))
+        .unwrap_or(available_width),
+    }
   };
   let object_height = (row_size.height - document.theme.paragraph_after).max(px(1.0));
   let left_margin = document.theme.pageless_inset_x
@@ -41,13 +46,22 @@ fn image_object_frame(document: &Document, image: &ImageBlock, asset: &AssetReco
     .mr(document.theme.pageless_inset_x)
     .mb(document.theme.paragraph_after)
     .overflow_hidden()
-    .bg(rgb(0xffffff))
+    .bg(if loading { rgb(0xf3f4f6) } else { rgb(0xffffff) })
     .border_1()
-    .border_color(if selected { rgb(0x0969da) } else { rgb(0xffffff) })
+    .border_color(if selected {
+      rgb(0x0969da)
+    } else if loading {
+      rgb(0xd0d7de)
+    } else {
+      rgb(0xffffff)
+    })
 }
 
 #[hotpath::measure]
 fn image_asset_intrinsic_size(asset: &AssetRecord) -> Option<(Pixels, Pixels)> {
+  if asset.is_loading_placeholder() {
+    return None;
+  }
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
   if size.width == 0 || size.height == 0 {
     return None;
@@ -68,14 +82,13 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
     .file_name()
     .map(|name| name.to_string_lossy().to_string());
   let alt_text: SharedString = original_name.clone().unwrap_or_default().into();
-  let mut hasher = DefaultHasher::new();
-  bytes.hash(&mut hasher);
+  let content_hash = AssetRecord::stable_content_hash(&bytes);
   Some((
     AssetRecord {
       id: AssetId(uuid::Uuid::new_v4().as_u128()),
       mime_type: format.mime_type().into(),
       original_name: original_name.map(Into::into),
-      content_hash: hasher.finish(),
+      content_hash,
       bytes: Arc::new(bytes),
     },
     alt_text,
@@ -85,14 +98,13 @@ fn image_asset_from_path(path: &Path) -> Option<(AssetRecord, SharedString)> {
 #[hotpath::measure]
 fn image_asset_from_image(image: Image) -> (AssetRecord, SharedString) {
   let asset_id = AssetId(uuid::Uuid::new_v4().as_u128());
-  let mut hasher = DefaultHasher::new();
-  image.bytes.hash(&mut hasher);
+  let content_hash = AssetRecord::stable_content_hash(&image.bytes);
   (
     AssetRecord {
       id: asset_id,
       mime_type: image.format.mime_type().into(),
       original_name: None,
-      content_hash: hasher.finish(),
+      content_hash,
       bytes: Arc::new(image.bytes),
     },
     "Pasted image".into(),

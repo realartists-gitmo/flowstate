@@ -1,8 +1,10 @@
 #[cfg(target_os = "macos")]
 use gpui::ParentElement;
+#[cfg(not(target_os = "macos"))]
+use gpui_component::IconName;
 use gpui_component::button::Button;
 use gpui_component::button::ButtonVariants as _;
-use gpui_component::{Icon, IconName, Sizable as _};
+use gpui_component::{Icon, Sizable as _};
 
 #[derive(Clone, Copy)]
 pub enum AppIcon {

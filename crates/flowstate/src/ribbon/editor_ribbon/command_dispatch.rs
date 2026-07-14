@@ -65,7 +65,7 @@ fn perform_ribbon_command(editor: &mut RichTextEditor, command_id: RibbonCommand
     RibbonCommandId::Redo => {
       editor.redo(cx);
     },
-    RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend | RibbonCommandId::ToggleInvisibility => {},
+    RibbonCommandId::Revisions | RibbonCommandId::ExportFormat | RibbonCommandId::ExportSend | RibbonCommandId::ToggleInvisibility => {},
   }
 }
 

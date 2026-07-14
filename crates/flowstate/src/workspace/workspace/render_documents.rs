@@ -75,6 +75,7 @@ impl Workspace {
       .children(tabs.into_iter().map(|tab| {
         let panel_id = tab.id;
         let workspace = workspace.clone();
+        let collab_phase = crate::collab::phase_for_panel(panel_id, cx);
         let tab_prefix = h_flex()
           .ml(px(5.0))
           .mr(px(-3.0))
@@ -104,6 +105,9 @@ impl Workspace {
                 .border_color(cx.theme().warning.opacity(0.72))
                 .child(pin_label),
             )
+          })
+          .when_some(collab_phase.as_ref().and_then(|phase| crate::collab::status::tab_badge(phase, cx)), |this, badge| {
+            this.child(badge)
           });
         let close_button = icon_button(("close-tab", panel_id.as_u128() as u64), AppIcon::Close)
           .tooltip("Close document")

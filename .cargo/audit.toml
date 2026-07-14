@@ -1,0 +1,10 @@
+# cargo-audit configuration (CI `cargo audit` job).
+#
+# quick-xml < 0.41 DoS advisories. Our own untrusted-input parse paths are on
+# quick-xml 0.41; the remaining old copies in Cargo.lock are pinned by the
+# LATEST releases of third-party crates (xcb 0.30, docx-rs 0.36,
+# rdocx-opc/oxml 0.37, citationberg-via-typst 0.38, wayland-scanner 0.39) and
+# cannot be bumped without vendoring them. Mirrors the deny.toml ignore list —
+# keep the two in sync. Re-check on dependency upgrades.
+[advisories]
+ignore = ["RUSTSEC-2026-0194", "RUSTSEC-2026-0195"]

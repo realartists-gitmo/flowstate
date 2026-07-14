@@ -1,43 +1,88 @@
+/// §perf-heaven T5: fraction of a line's raw char capacity actually filled once
+/// word-wrap (break at word boundaries, not mid-word) is accounted for. Tuned
+/// against the estimate-accuracy net so the estimate approaches the exact height
+/// without over-shooting.
+const WORD_WRAP_FILL: f32 = 0.82;
+
 #[hotpath::measure]
-pub(super) fn estimate_paragraph_item_height(document: &Document, paragraph_ix: usize, width: Pixels) -> Pixels {
+pub(super) fn estimate_paragraph_item_height(document: &DocumentProjection, paragraph_ix: usize, width: Pixels) -> Pixels {
   estimate_paragraph_item_height_with_visibility(document, paragraph_ix, width, false)
 }
 
 #[hotpath::measure]
 pub(super) fn estimate_paragraph_item_height_with_visibility(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   invisibility_mode: bool,
 ) -> Pixels {
-  if invisibility_mode
-    && document
+  if invisibility_mode {
+    if document
       .paragraphs
       .get(paragraph_ix)
       .is_some_and(|paragraph| !paragraph_is_visible(document, paragraph))
-  {
-    return px(0.0);
+    {
+      return px(0.0);
+    }
+    // §act-ten A10.9: estimate the projected paragraph from its visible
+    // text/runs DIRECTLY. The old path assembled a full throwaway
+    // `DocumentProjection` (rope + paragraph/block trees + assets clone +
+    // sections rebuild) per paragraph per estimate — 30k calls / 320 MB in
+    // hotpath1. Same inputs, same numbers: the projected paragraph is always
+    // `Normal`-styled and its text length equals the sum of projected run
+    // lengths.
+    if document
+      .paragraphs
+      .get(paragraph_ix)
+      .is_some_and(|paragraph| matches!(paragraph.style, ParagraphStyle::Normal))
+      && let Some((text, _runs)) = projected_visible_paragraph_text_and_runs(document, paragraph_ix)
+    {
+      return estimate_item_height_from_parts(
+        document,
+        paragraph_ix,
+        ParagraphStyle::Normal,
+        text.len(),
+        text.matches(SOFT_LINE_BREAK).count(),
+        width,
+      );
+    }
+    // No projection (non-Normal visible style, or no non-empty visible runs):
+    // fall through to the full-paragraph estimate, as before.
   }
-  let projected_document = invisibility_mode
-    .then(|| invisibility_projected_document(document, paragraph_ix))
-    .flatten();
-  let estimate_document = projected_document.as_ref().unwrap_or(document);
-  let estimate_paragraph_ix = if projected_document.is_some() { 0 } else { paragraph_ix };
-  let paragraph = &estimate_document.paragraphs[estimate_paragraph_ix];
-  let p_format = paragraph_format(estimate_document, paragraph.style);
+  let paragraph = &document.paragraphs[paragraph_ix];
+  estimate_item_height_from_parts(
+    document,
+    paragraph_ix,
+    paragraph.style,
+    paragraph_text_len(paragraph),
+    paragraph_char_count(document, paragraph_ix, SOFT_LINE_BREAK),
+    width,
+  )
+}
+
+/// Shared core of the §perf-heaven T5 line-count height heuristic, over
+/// pre-extracted paragraph facts (style, text byte length, forced-break count).
+fn estimate_item_height_from_parts(
+  document: &DocumentProjection,
+  paragraph_ix: usize,
+  style: ParagraphStyle,
+  text_len: usize,
+  forced_line_count: usize,
+  width: Pixels,
+) -> Pixels {
+  let p_format = paragraph_format(document, style);
   let border = p_format.border;
   let border_inset = border.map_or(px(0.0), |border| border.width + border.space_x);
   let content_top = border.map_or(px(0.0), |border| border.width + border.space_y);
-  let content_width = (width - estimate_document.theme.pageless_inset_x * 2.0 - border_inset * 2.0).max(px(1.0));
+  let content_width = (width - document.theme.pageless_inset_x * 2.0 - border_inset * 2.0).max(px(1.0));
   let avg_char_width = (p_format.font_size * 0.52).max(px(1.0));
-  let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
-  let text_len = paragraph_text_len(paragraph);
-  let forced_line_count = paragraph_char_count(estimate_document, estimate_paragraph_ix, SOFT_LINE_BREAK);
+  // §perf-heaven T5: word-wrap allowance — see the prep variant.
+  let chars_per_line = ((content_width / avg_char_width * WORD_WRAP_FILL).floor() as usize).max(1);
   let estimated_lines = (text_len / chars_per_line)
     .saturating_add(1)
     .saturating_add(forced_line_count)
     .max(1);
-  let line_gap = p_format.font_size * estimate_document.theme.line_gap_fraction;
+  let line_gap = p_format.font_size * document.theme.line_gap_fraction;
   let line_height = (p_format.font_size + line_gap) * p_format.line_spacing;
   let mut height = p_format.spacing_before + content_top + line_height * estimated_lines as f32 + content_top + p_format.spacing_after;
   if paragraph_ix == 0 {
@@ -50,7 +95,16 @@ pub(super) fn estimate_paragraph_item_height_with_visibility(
 }
 
 #[hotpath::measure]
-pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &ParagraphPrep, width: Pixels) -> Pixels {
+// §act-eleven A11.7: takes the CURRENT paragraph index — the prep's stored
+// `paragraph_ix` is its build-time position, which a structural shift above
+// invalidated positionally but not contentually (the whole point of dropping
+// the positional validity check is that the shifted tail keeps its prep).
+pub(super) fn estimate_paragraph_prep_item_height(
+  document: &DocumentProjection,
+  prep: &ParagraphPrep,
+  paragraph_ix: usize,
+  width: Pixels,
+) -> Pixels {
   if !prep.visible {
     return px(0.0);
   }
@@ -60,8 +114,19 @@ pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &Pa
   let content_top = border.map_or(px(0.0), |border| border.width + border.space_y);
   let content_width = (width - document.theme.pageless_inset_x * 2.0 - border_inset * 2.0).max(px(1.0));
   let avg_char_width = (p_format.font_size * 0.52).max(px(1.0));
-  let chars_per_line = ((content_width / avg_char_width).floor() as usize).max(1);
-  let text_len = prep.paragraph_text.len();
+  // §perf-heaven T5: word-wrap breaks at word boundaries, so a line holds fewer
+  // chars than its raw char capacity (the last word spills to the next line).
+  // Applying `WORD_WRAP_FILL` lifts the estimated line count toward the exact
+  // one, cutting the estimate's height under-shoot (guarded by the
+  // estimate-accuracy net — it must not tip into over-shoot).
+  let chars_per_line = ((content_width / avg_char_width * WORD_WRAP_FILL).floor() as usize).max(1);
+  // §perf-heaven T7.17: `chars_per_line` is a CHARACTER capacity, so measure the
+  // text in characters, not bytes. `prep.paragraph_text` is already materialized
+  // here, so the char count is cheap; using the byte length made a multibyte
+  // (e.g. CJK) paragraph estimate up to 3–4× too many lines, which over-shoots
+  // the exact height (guarded by the estimate-accuracy net, now including a
+  // non-ASCII fixture).
+  let text_len = prep.paragraph_text.chars().count();
   let forced_line_count = prep.paragraph_text.matches(SOFT_LINE_BREAK).count();
   let estimated_lines = (text_len / chars_per_line)
     .saturating_add(1)
@@ -70,17 +135,17 @@ pub(super) fn estimate_paragraph_prep_item_height(document: &Document, prep: &Pa
   let line_gap = p_format.font_size * document.theme.line_gap_fraction;
   let line_height = (p_format.font_size + line_gap) * p_format.line_spacing;
   let mut height = p_format.spacing_before + content_top + line_height * estimated_lines as f32 + content_top + p_format.spacing_after;
-  if prep.paragraph_ix == 0 {
+  if paragraph_ix == 0 {
     height += document.theme.pageless_inset_top;
   }
-  if prep.paragraph_ix + 1 == document.paragraphs.len() {
+  if paragraph_ix + 1 == document.paragraphs.len() {
     height += document.theme.pageless_inset_bottom;
   }
   height.max(line_height)
 }
 
 #[hotpath::measure]
-pub(super) fn estimate_structural_block_item_height(document: &Document, block_ix: usize, width: Pixels) -> Pixels {
+pub(super) fn estimate_structural_block_item_height(document: &DocumentProjection, block_ix: usize, width: Pixels) -> Pixels {
   let Some(block) = document.blocks.get(block_ix) else {
     return px(1.0);
   };
@@ -102,10 +167,10 @@ pub(super) fn estimate_structural_block_item_height(document: &Document, block_i
 }
 
 #[hotpath::measure]
-fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixels) -> Pixels {
+fn table_placeholder_height(document: &DocumentProjection, table: &TableBlock, width: Pixels) -> Pixels {
   let line_height = (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * document.theme.line_spacing).max(px(16.0));
   let column_count = table
-    .column_widths
+    .columns
     .len()
     .max(
       table
@@ -152,11 +217,11 @@ fn table_placeholder_height(document: &Document, table: &TableBlock, width: Pixe
 }
 
 #[hotpath::measure]
-fn layout_table_block_without_text(document: &Document, table: &TableBlock, width: Pixels, y: Pixels) -> LaidOutTable {
+fn layout_table_block_without_text(document: &DocumentProjection, table: &TableBlock, width: Pixels, y: Pixels) -> LaidOutTable {
   let table_left = document.theme.pageless_inset_x;
   let table_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let column_count = table
-    .column_widths
+    .columns
     .len()
     .max(
       table

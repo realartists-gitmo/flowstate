@@ -110,24 +110,29 @@ impl Workspace {
       .into_any_element()
   }
 
-  fn search_match_outline_paragraphs(&self, cx: &App) -> HashSet<usize> {
+  fn search_match_outline_paragraphs(&self, cx: &App) -> FxHashSet<usize> {
     let Some(active_document_id) = self.active_document_id else {
-      return HashSet::new();
+      return FxHashSet::default();
     };
     let Some(cache) = self.outline_cache.as_ref() else {
-      return HashSet::new();
+      return FxHashSet::default();
     };
     let Some(panel) = self
       .document_panels
       .iter()
       .find(|panel| panel.read(cx).id() == active_document_id)
     else {
-      return HashSet::new();
+      return FxHashSet::default();
     };
 
-    let mut outline_paragraphs = HashSet::new();
     let panel = panel.read(cx);
-    for paragraph_ix in panel.search_match_paragraphs() {
+    // §perf: FxHashSet + skip building the set entirely when no search match is active.
+    let mut matches = panel.search_match_paragraphs().peekable();
+    if matches.peek().is_none() {
+      return FxHashSet::default();
+    }
+    let mut outline_paragraphs = FxHashSet::default();
+    for paragraph_ix in matches {
       if let Some(outline_paragraph) = active_visible_outline_paragraph_from_visible(&cache.visible_paragraphs, paragraph_ix) {
         outline_paragraphs.insert(outline_paragraph);
       }

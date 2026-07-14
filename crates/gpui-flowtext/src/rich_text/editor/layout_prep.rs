@@ -3,29 +3,53 @@ const LAYOUT_PREP_MAX_TEXT_BYTES_PER_BATCH: usize = 512 * 1024;
 
 #[hotpath::measure_all]
 impl RichTextEditor {
-  fn resize_layout_aux_caches(&mut self) {
-    let paragraph_count = self.document.paragraphs.len();
-    self.paragraph_prep_cache.resize_with(paragraph_count, ParagraphPrepSlot::default);
-    self
-      .paragraph_shaping_cache
-      .resize_with(paragraph_count, || None);
-    self
-      .paragraph_estimate_height_cache
-      .resize(paragraph_count, None);
+  /// Resolve a paragraph index to its stable id, the key for the id-keyed
+  /// prep/shaping caches (§perf-heaven T8.12).
+  pub(super) fn paragraph_id_at(&self, paragraph_ix: usize) -> Option<ParagraphId> {
+    self.document.ids.paragraph_ids.get(paragraph_ix).copied()
   }
 
-  fn valid_paragraph_prep(&self, paragraph_ix: usize) -> Option<Arc<ParagraphPrep>> {
+  fn resize_layout_aux_caches(&mut self) {
+    let paragraph_count = self.document.paragraphs.len();
+    // §perf-heaven T8.12/T7.14: the prep, shaping, and estimate caches are all
+    // id-keyed maps — no positional resize. Deleted paragraphs leave stale id
+    // entries; bound each map so a long editing session cannot leak them without
+    // limit. §act-ten A10.12: when the bound trips, RETAIN the live ids instead
+    // of clearing wholesale — after a mass delete every SURVIVING paragraph
+    // used to re-prep/re-shape/re-estimate for no reason.
+    if self.paragraph_prep_cache.len() > paragraph_count * 2 + 64
+      || self.paragraph_shaping_cache.len() > paragraph_count * 2 + 64
+      || self.paragraph_estimate_height_cache.len() > paragraph_count * 2 + 64
+    {
+      let live: std::collections::HashSet<ParagraphId> = self.document.ids.paragraph_ids.iter().copied().collect();
+      self.paragraph_prep_cache.retain(|id, _| live.contains(id));
+      self.paragraph_shaping_cache.retain(|id, _| live.contains(id));
+      self.paragraph_estimate_height_cache.retain(|id, _| live.contains(id));
+    }
+  }
+
+  // §act-nine A9.3: validity is CONTENT-keyed — the (style, version) cache key
+  // plus the invisibility mode plus the stable paragraph id — with NO global
+  // `edit_generation`, so edits to OTHER paragraphs keep this prep. Soundness
+  // rests on version discipline (every content change bumps the version;
+  // structural rebuilds and canonical installs carry versions forward instead
+  // of resetting to 0). §act-eleven A11.7: NO positional check either — a
+  // structural shift (Enter/delete-row above) moves a paragraph without
+  // changing its content, and (id, style, version) already pins exactly that
+  // content; the prep's stored `paragraph_ix` is build-time context only
+  // (position-dependent consumers take the CURRENT index as a parameter).
+  pub(super) fn valid_paragraph_prep(&self, paragraph_ix: usize) -> Option<Arc<ParagraphPrep>> {
     let paragraph = self.document.paragraphs.get(paragraph_ix)?;
+    let paragraph_id = self.paragraph_id_at(paragraph_ix)?;
     let expected_key = ParagraphPrepKey {
       paragraph_key: paragraph_cache_key(&self.document, paragraph),
       invisibility_mode: self.invisibility_mode,
-      edit_generation: self.edit_generation,
     };
     self
       .paragraph_prep_cache
-      .get(paragraph_ix)
+      .get(&paragraph_id)
       .and_then(|slot| slot.get(self.invisibility_mode))
-      .filter(|prep| prep.paragraph_ix == paragraph_ix && prep.key == expected_key)
+      .filter(|prep| prep.paragraph_id == paragraph_id && prep.key == expected_key)
       .cloned()
   }
 
@@ -36,20 +60,13 @@ impl RichTextEditor {
     self.valid_paragraph_prep(paragraph_ix).is_none()
   }
 
-  fn ensure_paragraph_prep_sync(&mut self, paragraph_ix: usize) -> Option<Arc<ParagraphPrep>> {
+  pub(super) fn ensure_paragraph_prep_sync(&mut self, paragraph_ix: usize) -> Option<Arc<ParagraphPrep>> {
     if let Some(prep) = self.valid_paragraph_prep(paragraph_ix) {
       return Some(prep);
     }
-    let prep = Arc::new(build_paragraph_prep(
-      &self.document,
-      paragraph_ix,
-      self.edit_generation,
-      self.invisibility_mode,
-    )?);
+    let prep = Arc::new(build_paragraph_prep(&self.document, paragraph_ix, self.invisibility_mode)?);
     self.resize_layout_aux_caches();
-    if let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix) {
-      slot.set(prep.clone());
-    }
+    self.paragraph_prep_cache.entry(prep.paragraph_id).or_default().set(prep.clone());
     Some(prep)
   }
 
@@ -67,7 +84,6 @@ impl RichTextEditor {
     }
     let request = LayoutPrepRequest {
       width,
-      edit_generation: self.edit_generation,
       invisibility_mode: self.invisibility_mode,
       paragraphs,
     };
@@ -83,7 +99,7 @@ impl RichTextEditor {
       self.pending_layout_prep_request = Some(request);
       return;
     };
-    if pending.edit_generation != request.edit_generation || pending.invisibility_mode != request.invisibility_mode {
+    if pending.invisibility_mode != request.invisibility_mode {
       *pending = request;
       return;
     }
@@ -103,7 +119,6 @@ impl RichTextEditor {
     if !overflow.is_empty() {
       self.merge_pending_layout_prep_request(LayoutPrepRequest {
         width: request.width,
-        edit_generation: request.edit_generation,
         invisibility_mode: request.invisibility_mode,
         paragraphs: overflow,
       });
@@ -111,7 +126,6 @@ impl RichTextEditor {
     let width = request.width;
     let batch = paragraph_prep_batch_request(
       &self.document,
-      request.edit_generation,
       request.invisibility_mode,
       request.paragraphs,
       LAYOUT_PREP_MAX_PARAGRAPHS_PER_BATCH,
@@ -141,14 +155,14 @@ impl RichTextEditor {
     );
   }
 
-  fn install_layout_prep_batch(&mut self, width: Pixels, result: ParagraphPrepBatchResult, cx: &mut Context<Self>) {
+  pub(super) fn install_layout_prep_batch(&mut self, width: Pixels, result: ParagraphPrepBatchResult, cx: &mut Context<Self>) {
     self.resize_layout_aux_caches();
     self.layout_prep_metrics.batches = self.layout_prep_metrics.batches.saturating_add(1);
     self.layout_prep_metrics.requested = self.layout_prep_metrics.requested.saturating_add(result.requested);
     self.layout_prep_metrics.completed = self.layout_prep_metrics.completed.saturating_add(result.completed);
     self.layout_prep_metrics.text_bytes = self.layout_prep_metrics.text_bytes.saturating_add(result.text_bytes);
 
-    if result.edit_generation == self.edit_generation && result.invisibility_mode == self.invisibility_mode {
+    if result.invisibility_mode == self.invisibility_mode {
       let deferred = result
         .deferred_paragraphs
         .iter()
@@ -158,7 +172,6 @@ impl RichTextEditor {
       if !deferred.is_empty() {
         self.merge_pending_layout_prep_request(LayoutPrepRequest {
           width,
-          edit_generation: result.edit_generation,
           invisibility_mode: result.invisibility_mode,
           paragraphs: deferred,
         });
@@ -166,25 +179,40 @@ impl RichTextEditor {
     }
 
     let mut installed = 0usize;
+    // §act-eleven A11.7: resolve each prep's CURRENT index by id (one map for
+    // the whole batch) — the prep's build-time position may have shifted
+    // structurally during the background build, and a shifted-but-unchanged
+    // paragraph must still install (the id-keyed cache doesn't care where the
+    // paragraph lives).
+    let index_by_id: FxHashMap<ParagraphId, usize> = self
+      .document
+      .ids
+      .paragraph_ids
+      .iter()
+      .enumerate()
+      .map(|(current_ix, id)| (*id, current_ix))
+      .collect();
     for prep in result.preps {
-      let paragraph_ix = prep.paragraph_ix;
-      let valid = result.edit_generation == self.edit_generation
-        && result.invisibility_mode == self.invisibility_mode
-        && prep.key.edit_generation == self.edit_generation
-        && prep.key.invisibility_mode == self.invisibility_mode
-        && self
-          .document
-          .paragraphs
-          .get(paragraph_ix)
-          .is_some_and(|paragraph| paragraph_cache_key(&self.document, paragraph) == prep.key.paragraph_key);
+      // §act-nine A9.3 install gate: a completed background prep installs iff
+      // its content is STILL CURRENT — same paragraph id (wherever it now
+      // lives) with the same (style, version) content key and invisibility
+      // mode. No `edit_generation` conjunct: an unrelated edit landing during
+      // the batch must not discard prep for untouched paragraphs (the
+      // background-prep thrash during typing bursts).
+      let valid = prep.key.invisibility_mode == self.invisibility_mode
+        && index_by_id.get(&prep.paragraph_id).is_some_and(|&current_ix| {
+          self
+            .document
+            .paragraphs
+            .get(current_ix)
+            .is_some_and(|paragraph| paragraph_cache_key(&self.document, paragraph) == prep.key.paragraph_key)
+        });
       if !valid {
         self.layout_prep_metrics.stale = self.layout_prep_metrics.stale.saturating_add(1);
         continue;
       }
-      if let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix) {
-        slot.set(Arc::new(prep));
-        installed += 1;
-      }
+      self.paragraph_prep_cache.entry(prep.paragraph_id).or_default().set(Arc::new(prep));
+      installed += 1;
     }
     if installed == 0 {
       return;
@@ -197,45 +225,19 @@ impl RichTextEditor {
   }
 
   fn clear_all_layout_prep(&mut self) {
-    for slot in &mut self.paragraph_prep_cache {
-      slot.clear();
-    }
+    self.paragraph_prep_cache.clear();
     self.pending_layout_prep_task = None;
     self.pending_layout_prep_request = None;
   }
-
-  fn clear_layout_prep_range(&mut self, range: Range<usize>) {
-    self.resize_layout_aux_caches();
-    for paragraph_ix in range {
-      if let Some(slot) = self.paragraph_prep_cache.get_mut(paragraph_ix) {
-        slot.clear();
-      }
-    }
-    self.pending_layout_prep_request = None;
-  }
-
   fn clear_layout_work_caches(&mut self) {
     self.layout_generation = self.layout_generation.wrapping_add(1);
     self.paragraph_shaping_cache.clear();
-    self.paragraph_shaping_cache.resize_with(self.document.paragraphs.len(), || None);
     self.layout_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.prep_cache_retain_ranges = ParagraphCacheRetainRanges::default();
     self.pending_chunk_prefetch = false;
     self.chunk_prefetch_queue.clear();
   }
-
-  fn clear_layout_work_cache_range(&mut self, range: Range<usize>) {
-    self.resize_layout_aux_caches();
-    for paragraph_ix in range {
-      if let Some(cache) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
-        *cache = None;
-      }
-    }
-    self.pending_chunk_prefetch = false;
-    self.chunk_prefetch_queue.clear();
-  }
-
-  fn paragraph_work_key(&self, prep: &ParagraphPrep, width: Pixels) -> ParagraphLayoutWorkKey {
+  pub(super) fn paragraph_work_key(&self, prep: &ParagraphPrep, width: Pixels) -> ParagraphLayoutWorkKey {
     ParagraphLayoutWorkKey {
       prep_key: prep.key,
       width,
@@ -243,18 +245,18 @@ impl RichTextEditor {
     }
   }
 
-  fn take_paragraph_shape_cache(&mut self, paragraph_ix: usize, key: ParagraphLayoutWorkKey) -> FragmentShapeCache {
+  pub(super) fn take_paragraph_shape_cache(&mut self, paragraph_ix: usize, key: ParagraphLayoutWorkKey) -> FragmentShapeCache {
     self.resize_layout_aux_caches();
-    match self.paragraph_shaping_cache.get_mut(paragraph_ix).and_then(Option::take) {
+    match self.paragraph_id_at(paragraph_ix).and_then(|id| self.paragraph_shaping_cache.remove(&id)) {
       Some(entry) if entry.key == key => entry.fragment_shapes,
       _ => FragmentShapeCache::default(),
     }
   }
 
-  fn store_paragraph_shape_cache(&mut self, paragraph_ix: usize, key: ParagraphLayoutWorkKey, fragment_shapes: FragmentShapeCache) {
+  pub(super) fn store_paragraph_shape_cache(&mut self, paragraph_ix: usize, key: ParagraphLayoutWorkKey, fragment_shapes: FragmentShapeCache) {
     self.resize_layout_aux_caches();
-    if let Some(slot) = self.paragraph_shaping_cache.get_mut(paragraph_ix) {
-      *slot = Some(ParagraphShapingCacheEntry { key, fragment_shapes });
+    if let Some(paragraph_id) = self.paragraph_id_at(paragraph_ix) {
+      self.paragraph_shaping_cache.insert(paragraph_id, ParagraphShapingCacheEntry { key, fragment_shapes });
     }
   }
 }

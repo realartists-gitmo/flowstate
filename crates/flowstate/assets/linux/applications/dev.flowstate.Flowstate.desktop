@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Flowstate
+Comment=A rich-text editor for debate documents
+Exec=flowstate %U
+Icon=dev.flowstate.Flowstate
+Terminal=false
+Categories=Office;WordProcessor;
+MimeType=application/x-flowstate;x-scheme-handler/flowstate;
+StartupWMClass=dev.flowstate.Flowstate

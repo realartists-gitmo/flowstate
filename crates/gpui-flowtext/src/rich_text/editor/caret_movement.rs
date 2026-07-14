@@ -102,19 +102,29 @@ impl RichTextEditor {
         }
       },
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+    // §16: a rightward step parks the caret after the preceding glyph, a
+    // leftward step before the following glyph. Gravity stays neutral — arrow
+    // motion keeps the historical wrap-seam bias.
+    let head_affinity = match dir {
+      HDir::Left => SelectionAffinity::Before,
+      HDir::Right => SelectionAffinity::After,
+    };
+    let selection = self.selection.moved(new_head, head_affinity, VisualGravity::Neutral, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = None;
       return;
     }
+    self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_horizontal", &fid_before);
     self.goal_x = None;
     let width = self.current_layout_width();
     let _ = self.ensure_paragraph_chunk_containing_byte(new_head.paragraph, new_head.byte, width, window, cx);
     let _ = self.paragraph_item_sizes(window, cx);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 
@@ -164,7 +174,7 @@ impl RichTextEditor {
       let Some(layout) = self.layout_for_offset(head) else {
         return;
       };
-      let Some((p_ix, l_ix)) = locate_line(&layout, head) else {
+      let Some((p_ix, l_ix)) = locate_line(&layout, head, self.selection.head_gravity) else {
         cx.notify();
         return;
       };
@@ -187,18 +197,23 @@ impl RichTextEditor {
       };
       (new_head, cur_x)
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    let selection = EditorSelection { anchor, head: new_head };
-    if self.selection == selection {
+    // Vertical motion lands on a fresh column position; reset to neutral
+    // affinity/gravity.
+    let selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
+    if self.selection.same_positions(&selection) {
       self.goal_x = Some(used_goal_x);
       return;
     }
+    self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
     self.selection = selection;
+    self.fidelity_caret_set("move_vertical", &fid_before);
     // Preserve the goal x across the move so repeated Up/Down stays on a
     // straight column.
     self.goal_x = Some(used_goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 
@@ -251,11 +266,14 @@ impl RichTextEditor {
       paragraph: target_paragraph,
       byte: target_byte,
     };
-    let anchor = if extend { self.selection.anchor } else { new_head };
-    self.selection = EditorSelection { anchor, head: new_head };
+    self.note_explicit_selection_movement();
+    let fid_before = self.fidelity_caret_before();
+    self.selection = self.selection.moved(new_head, SelectionAffinity::Neutral, VisualGravity::Neutral, extend);
+    self.fidelity_caret_set("move_to_adjacent_unmounted_paragraph", &fid_before);
     self.goal_x = Some(goal_x);
     self.scroll_head_into_view();
     self.reset_caret_blink(cx);
+    self.emit_selection_changed(cx);
     cx.notify();
   }
 

@@ -1,0 +1,11 @@
+[package]
+name = "flowstate-fidelity"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+tracing = { workspace = true }

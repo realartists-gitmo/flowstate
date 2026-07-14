@@ -1,0 +1,34 @@
+[package]
+name = "flowstate-corpus"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+flowstate-collab = { version = "0.1.0", path = "../flowstate-collab" }
+flowstate-document = { version = "0.1.0", path = "../flowstate-document" }
+flowstate-docx = { version = "0.1.0", path = "../flowstate-docx" }
+tempfile.workspace = true
+gpui.workspace = true
+gpui-component.workspace = true
+gpui-flowtext = { version = "0.1.0", path = "../gpui-flowtext" }
+hotpath.workspace = true
+ignore.workspace = true
+image = "0.25.10"
+loro = "1.13"
+mimalloc.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+# Profiler features (mirror the app's, for the `hotpath_bench` bin). Off by default,
+# so `flowstate-corpus` (the sweep) and `perf_probe` build without any hotpath cost.
+# Enable one for the profiler tables: `cargo run --release --features hotpath-alloc --bin hotpath_bench -- <file>`.
+[features]
+hotpath = ["hotpath/hotpath", "flowstate-document/hotpath", "flowstate-docx/hotpath", "flowstate-collab/hotpath", "gpui-flowtext/hotpath"]
+hotpath-cpu = ["hotpath", "hotpath/hotpath-cpu", "flowstate-document/hotpath-cpu", "flowstate-docx/hotpath-cpu", "flowstate-collab/hotpath-cpu", "gpui-flowtext/hotpath-cpu"]
+hotpath-alloc = ["hotpath", "hotpath/hotpath-alloc", "flowstate-document/hotpath-alloc", "flowstate-docx/hotpath-alloc", "flowstate-collab/hotpath-alloc", "gpui-flowtext/hotpath-alloc"]
+
+[lints]
+workspace = true

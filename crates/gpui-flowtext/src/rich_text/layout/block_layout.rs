@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn build_layout(
-  document: &Document,
+  document: &DocumentProjection,
   width: Pixels,
   previous_layout: Option<&LayoutState>,
   window: &mut Window,
@@ -53,7 +53,7 @@ pub(super) fn build_layout(
 
 #[hotpath::measure]
 pub(super) fn build_layout_with_visibility(
-  document: &Document,
+  document: &DocumentProjection,
   width: Pixels,
   previous_layout: Option<&LayoutState>,
   invisibility_mode: bool,
@@ -133,7 +133,7 @@ pub(super) fn build_layout_with_visibility(
 
 #[hotpath::measure]
 pub(super) fn build_single_paragraph_layout_with_visibility(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   previous_layout: Option<&LayoutState>,
@@ -207,7 +207,7 @@ pub(super) fn build_single_paragraph_layout_with_visibility(
 #[allow(dead_code, reason = "Block layout helper is retained for incremental object-layout work.")]
 #[hotpath::measure]
 pub(super) fn build_structural_block_layout(
-  document: &Document,
+  document: &DocumentProjection,
   width: Pixels,
   previous_layout: Option<&LayoutState>,
   window: &mut Window,
@@ -266,14 +266,22 @@ pub(super) fn build_structural_block_layout(
 }
 
 #[hotpath::measure]
-fn structural_block_bounds(document: &Document, width: Pixels, y: Pixels, height: Pixels) -> Bounds<Pixels> {
+fn structural_block_bounds(document: &DocumentProjection, width: Pixels, y: Pixels, height: Pixels) -> Bounds<Pixels> {
   let left = document.theme.pageless_inset_x;
   let block_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   Bounds::new(point(left, y), size(block_width, height.max(px(1.0))))
 }
 
 #[hotpath::measure]
-fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
+fn image_placeholder_height(document: &DocumentProjection, image: &ImageBlock, width: Pixels) -> Pixels {
+  if document
+    .assets
+    .assets
+    .get(&image.asset_id)
+    .is_some_and(AssetRecord::is_loading_placeholder)
+  {
+    return px(IMAGE_LOADING_PLACEHOLDER_HEIGHT_PX);
+  }
   let available_width = (width - document.theme.pageless_inset_x * 2.0).max(px(1.0));
   let intrinsic = image_intrinsic_size(document, image);
   match image.sizing {
@@ -286,15 +294,12 @@ fn image_placeholder_height(document: &Document, image: &ImageBlock, width: Pixe
   }
 }
 
-#[cfg(test)]
 #[hotpath::measure]
-pub(super) fn image_layout_height_for_test(document: &Document, image: &ImageBlock, width: Pixels) -> Pixels {
-  image_placeholder_height(document, image, width)
-}
-
-#[hotpath::measure]
-fn image_intrinsic_size(document: &Document, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
+fn image_intrinsic_size(document: &DocumentProjection, image: &ImageBlock) -> Option<(Pixels, Pixels)> {
   let asset = document.assets.assets.get(&image.asset_id)?;
+  if asset.is_loading_placeholder() {
+    return None;
+  }
   let size = imagesize::blob_size(asset.bytes.as_ref()).ok()?;
   if size.width == 0 || size.height == 0 {
     return None;
@@ -315,7 +320,7 @@ fn image_height_for_width(intrinsic: Option<(Pixels, Pixels)>, width: Pixels) ->
 }
 
 #[hotpath::measure]
-fn equation_placeholder_height(document: &Document, equation: &EquationBlock) -> Pixels {
+fn equation_placeholder_height(document: &DocumentProjection, equation: &EquationBlock) -> Pixels {
   match equation.display {
     EquationDisplay::Display => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 3.7).max(px(72.0)),
     EquationDisplay::InlineLikeParagraph => (document.theme.body_font_size * document.theme.zoom_factor.max(0.01) * 2.75).max(px(56.0)),
@@ -324,7 +329,7 @@ fn equation_placeholder_height(document: &Document, equation: &EquationBlock) ->
 
 #[hotpath::measure]
 pub(super) fn layout_structural_block_at(
-  document: &Document,
+  document: &DocumentProjection,
   block_ix: usize,
   width: Pixels,
   y: Pixels,

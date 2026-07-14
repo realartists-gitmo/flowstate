@@ -3,14 +3,14 @@ use std::{
   path::{Path, PathBuf},
 };
 
-use crate::rich_text_element::{Document, blank_document};
+use crate::rich_text_element::{DocumentProjection, blank_document};
 
 pub const UNTITLED_DOCUMENT_NAME: &str = "Untitled.db8";
 pub const UNTITLED_FLOW_NAME: &str = "Untitled.fl0";
 
 /// Create the document used by File > New and the empty-workspace New button.
 #[hotpath::measure]
-pub fn new_blank_document() -> Document {
+pub fn new_blank_document() -> DocumentProjection {
   blank_document()
 }
 

@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn measure_line_width(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: &EffectiveParagraphFormat,
   paragraph_text: &str,
@@ -70,7 +70,7 @@ pub(super) fn measure_line_width(
 
 #[hotpath::measure]
 pub(super) fn shape_line(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   p_format: EffectiveParagraphFormat,
   line_text: &str,
@@ -91,8 +91,6 @@ pub(super) fn shape_line(
   );
   let mut x = px(0.0);
   let mut segments = Vec::with_capacity(fragments.len().max(1));
-  let mut ascent = px(0.0);
-  let mut descent = px(0.0);
 
   for (fragment_ix, fragment) in fragments.iter().enumerate() {
     let text = &line_text[fragment.fragment.line_range.clone()];
@@ -105,8 +103,6 @@ pub(super) fn shape_line(
     let (box_pad_left, box_pad_right) = boxed_fragment_padding(&fragments, fragment_ix, document.theme.box_padding_left, document.theme.box_padding_right);
     let segment_ascent = shaped.ascent;
     let segment_descent = shaped.descent;
-    ascent = ascent.max(segment_ascent);
-    descent = descent.max(segment_descent);
     x += box_pad_left;
     segments.push(LaidOutSegment {
       shaped,
@@ -125,7 +121,7 @@ pub(super) fn shape_line(
 
   if segments.is_empty() {
     let format = run_format(document, &p_format, RunStyles::default());
-    let shaped = shape_fragment(window, "", &format);
+    let shaped = std::sync::Arc::new(shape_fragment(window, "", &format));
     #[cfg(target_os = "linux")]
     let (segment_ascent, segment_descent) = {
       let (font_ascent, font_descent) = font_metrics_for_format(&format, cx);
@@ -147,11 +143,13 @@ pub(super) fn shape_line(
     });
   }
 
-  ascent = segments
+  // §perf: ascent/descent derive solely from the final segment set, so compute them
+  // once here instead of also max-accumulating them per segment inside the loop above.
+  let ascent = segments
     .iter()
     .map(|segment| segment.ascent)
     .fold(px(0.0), Pixels::max);
-  descent = segments
+  let descent = segments
     .iter()
     .map(|segment| segment.descent)
     .fold(px(0.0), Pixels::max);
@@ -185,7 +183,10 @@ pub(super) fn shape_line(
 
 #[derive(Default)]
 pub(super) struct FragmentShapeCache {
-  shapes: FxHashMap<FragmentShapeCacheKey, ShapedLine>,
+  // Arc'd values: a cache HIT previously deep-cloned the `ShapedLine`
+  // (glyph runs + decorations, ~1.4KB) — ~1.3GB of pure hit-path churn per
+  // profiled session. An Arc bump serves the same layout.
+  shapes: FxHashMap<FragmentShapeCacheKey, std::sync::Arc<ShapedLine>>,
   line_widths: FxHashMap<LineMeasureCacheKey, Pixels>,
   fragment_scratch: Vec<FormattedFragment>,
   run_formats: FxHashMap<RunStyles, EffectiveRunFormat>,
@@ -212,17 +213,17 @@ pub(super) fn shape_fragment_cached(
   source_start: usize,
   styles: RunStyles,
   cache: &mut FragmentShapeCache,
-) -> ShapedLine {
+) -> std::sync::Arc<ShapedLine> {
   let key = FragmentShapeCacheKey {
     source_start,
     len: text.len(),
     styles,
   };
   if let Some(shaped) = cache.shapes.get(&key) {
-    return shaped.clone();
+    return std::sync::Arc::clone(shaped);
   }
-  let shaped = shape_fragment(window, text, format);
-  cache.shapes.insert(key, shaped.clone());
+  let shaped = std::sync::Arc::new(shape_fragment(window, text, format));
+  cache.shapes.insert(key, std::sync::Arc::clone(&shaped));
   shaped
 }
 
@@ -253,7 +254,7 @@ pub(super) struct FormattedFragment {
 #[cfg(test)]
 #[hotpath::measure]
 pub(super) fn formatted_fragments_for_range(
-  document: &Document,
+  document: &DocumentProjection,
   p_format: &EffectiveParagraphFormat,
   paragraph: &Paragraph,
   range: &Range<usize>,
@@ -275,7 +276,7 @@ pub(super) fn formatted_fragments_for_range(
 
 #[hotpath::measure]
 pub(super) fn formatted_fragments_for_range_into(
-  document: &Document,
+  document: &DocumentProjection,
   p_format: &EffectiveParagraphFormat,
   paragraph: &Paragraph,
   range: &Range<usize>,

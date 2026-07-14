@@ -1,56 +1,31 @@
-use std::ops::Range;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-
-use super::{Block, BlockId, Document, DocumentSpan, ParagraphId, ParagraphStyle, RunStyles, new_block_id, new_paragraph_id};
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Serialize, Deserialize)]
-pub struct TableCellId(pub u128);
+use super::{AssetId, AssetRecord, BlockId, DocumentProjection, InputBlock, InputParagraph, ParagraphId, ParagraphStyle, TextRun};
+use rustc_hash::FxHashMap;
 
 #[derive(Clone, Debug, Default)]
 pub struct DocumentIdentityMap {
   paragraph_ids: Vec<ParagraphId>,
   block_ids: Vec<BlockId>,
-  table_cell_ids: Vec<Vec<Vec<TableCellId>>>,
+  paragraph_index_by_id: FxHashMap<ParagraphId, usize>,
 }
 
 #[hotpath::measure_all]
 impl DocumentIdentityMap {
   #[must_use]
-  pub fn new(document: &Document) -> Self {
+  pub fn new(document: &DocumentProjection) -> Self {
     let mut this = Self::default();
     this.reconcile(document);
     this
   }
 
-  pub fn reconcile(&mut self, document: &Document) {
+  pub fn reconcile(&mut self, document: &DocumentProjection) {
     self.paragraph_ids.clone_from(&document.ids.paragraph_ids);
-    self.block_ids.clone_from(&document.ids.block_ids);
-    self
-      .table_cell_ids
-      .resize_with(document.blocks.len(), Vec::new);
-    self.table_cell_ids.truncate(document.blocks.len());
-    for (block_ix, block) in document.blocks.iter().enumerate() {
-      let Block::Table(table) = block else {
-        self.table_cell_ids[block_ix].clear();
-        continue;
-      };
-      let rows = &mut self.table_cell_ids[block_ix];
-      rows.resize_with(table.rows.len(), Vec::new);
-      rows.truncate(table.rows.len());
-      for (row_ix, row) in table.rows.iter().enumerate() {
-        resize_ids(&mut rows[row_ix], row.cells.len(), TableCellId);
-      }
+    self.paragraph_index_by_id.clear();
+    for (ix, id) in self.paragraph_ids.iter().enumerate() {
+      self.paragraph_index_by_id.insert(*id, ix);
     }
-  }
-
-  pub fn insert_split_paragraph(&mut self, paragraph_ix: usize, block_ix: usize) {
-    self
-      .paragraph_ids
-      .insert((paragraph_ix + 1).min(self.paragraph_ids.len()), new_paragraph_id());
-    let block_insert_ix = (block_ix + 1).min(self.block_ids.len());
-    self.block_ids.insert(block_insert_ix, new_block_id());
-    self.table_cell_ids.insert(block_insert_ix, Vec::new());
+    self.block_ids.clone_from(&document.ids.block_ids);
   }
 
   #[must_use]
@@ -64,242 +39,141 @@ impl DocumentIdentityMap {
   }
 
   #[must_use]
-  pub fn table_cell_id(&self, block_ix: usize, row_ix: usize, cell_ix: usize) -> Option<TableCellId> {
-    self
-      .table_cell_ids
-      .get(block_ix)?
-      .get(row_ix)?
-      .get(cell_ix)
-      .copied()
-  }
-
-  #[must_use]
   pub fn paragraph_index(&self, id: ParagraphId) -> Option<usize> {
-    self
-      .paragraph_ids
-      .iter()
-      .position(|candidate| *candidate == id)
+    self.paragraph_index_by_id.get(&id).copied()
   }
 }
 
-#[hotpath::measure]
-fn resize_ids<T>(ids: &mut Vec<T>, len: usize, wrap: impl Fn(u128) -> T)
-where
-  T: std::marker::Copy,
-{
-  while ids.len() < len {
-    ids.push(wrap(uuid::Uuid::new_v4().as_u128()));
-  }
-  ids.truncate(len);
+// Loro-first (spec invariant 6): the raw projection-space command surface is
+// DELETED — not deprecated, not quarantined. Local editing enters exclusively
+// as typed intents (`crate::local_intents`) resolved against live Loro state;
+// wrong-position operations are unrepresentable. The CI guard
+// (tools/check_raw_authority.sh) rejects any reintroduction by name.
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProjectionTextDelta {
+  Retain(usize),
+  Insert(usize),
+  Delete(usize),
 }
 
 #[derive(Clone, Debug)]
-pub enum CanonicalOperation {
-  InsertText {
-    paragraph: ParagraphId,
-    byte: usize,
-    text: String,
-    styles: RunStyles,
+pub struct ProjectionStructuralBlock {
+  pub block_id: BlockId,
+  pub paragraph_id: Option<ParagraphId>,
+  pub block: InputBlock,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProjectionPatchBatch {
+  /// Unique id for diagnostics and duplicate-delivery detection. It is not part
+  /// of document semantics; the frontier pair is the authoritative ordering.
+  pub transaction_id: u128,
+  /// Frontier of the materialized document this delta must be applied to.
+  pub base_frontier: Vec<u8>,
+  /// Frontier represented after every patch has been applied successfully.
+  pub new_frontier: Vec<u8>,
+  // §perf-heaven T8.19: `Arc<[…]>` so the recorded-inverse undo/redo can SHARE
+  // its (possibly huge, mass-op) patch set with the emitted event instead of
+  // cloning it — the `patches.clone()` in `try_fast_step` becomes an O(1) refcount
+  // bump. Not serialized (`ProjectionPatchBatch` is `Clone, Debug` only), so this
+  // is purely an in-process representation change; every consumer reads by `&`.
+  pub patches: Arc<[ProjectionPatch]>,
+}
+
+impl ProjectionPatchBatch {
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.patches.is_empty()
+  }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProjectionApplyError {
+  StaleFrontier { expected: Vec<u8>, actual: Vec<u8> },
+  MissingBlock { block_id: BlockId, row_hint: usize },
+  WrongBlockKind { block_id: BlockId, expected: &'static str },
+  MissingParagraph { paragraph_id: ParagraphId, block_id: BlockId },
+  DuplicateBlockId(BlockId),
+  DuplicateParagraphId(ParagraphId),
+  InvalidAnchor(BlockId),
+  InvalidStructuralPatch(&'static str),
+  UnexpectedTransaction { expected: Option<u128>, actual: u128 },
+}
+
+impl std::fmt::Display for ProjectionApplyError {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    match self {
+      Self::StaleFrontier { expected, actual } => write!(
+        f,
+        "materialized document frontier mismatch (expected {} bytes, actual {} bytes)",
+        expected.len(),
+        actual.len()
+      ),
+      Self::MissingBlock { block_id, row_hint } => write!(f, "projection patch target block {} is missing (row hint {row_hint})", block_id.0),
+      Self::WrongBlockKind { block_id, expected } => write!(f, "projection patch target block {} is not {expected}", block_id.0),
+      Self::MissingParagraph { paragraph_id, block_id } => {
+        write!(f, "projection paragraph {} is not attached to block {}", paragraph_id.0, block_id.0)
+      },
+      Self::DuplicateBlockId(id) => write!(f, "projection patch would create duplicate block id {}", id.0),
+      Self::DuplicateParagraphId(id) => write!(f, "projection patch would create duplicate paragraph id {}", id.0),
+      Self::InvalidAnchor(id) => write!(f, "projection insertion anchor block {} is missing", id.0),
+      Self::InvalidStructuralPatch(reason) => f.write_str(reason),
+      Self::UnexpectedTransaction { expected, actual } => {
+        write!(f, "runtime transaction acknowledgement mismatch (expected {expected:?}, actual {actual})")
+      },
+    }
+  }
+}
+
+impl std::error::Error for ProjectionApplyError {}
+
+#[derive(Clone, Debug)]
+pub enum ProjectionPatch {
+  ParagraphText {
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
+    new: InputParagraph,
+    delta_utf8: Vec<ProjectionTextDelta>,
   },
-  DeleteRange {
-    start_paragraph: ParagraphId,
-    start_byte: usize,
-    end_paragraph: ParagraphId,
-    end_byte: usize,
-  },
-  SplitParagraph {
-    paragraph: ParagraphId,
-    byte: usize,
-    new_paragraph: ParagraphId,
-  },
-  JoinParagraphs {
-    first: ParagraphId,
-    second: ParagraphId,
-  },
-  SetParagraphStyle {
-    paragraph: ParagraphId,
+  ParagraphStyle {
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
     style: ParagraphStyle,
   },
-  SetRunStyles {
-    paragraph: ParagraphId,
-    range: Range<usize>,
-    styles: RunStyles,
+  ParagraphRuns {
+    block_id: BlockId,
+    paragraph_id: ParagraphId,
+    row_hint: usize,
+    runs: Vec<TextRun>,
   },
-  InsertBlock {
-    block: BlockId,
-    block_ix: usize,
+  ReplaceObjectBlock {
+    block_id: BlockId,
+    row_hint: usize,
+    block: ProjectionStructuralBlock,
   },
-  DeleteBlock {
-    block: BlockId,
+  InsertBlocks {
+    /// Insert immediately before this stable block id, or append when `None`.
+    before: Option<BlockId>,
+    row_hint: usize,
+    blocks: Vec<ProjectionStructuralBlock>,
+  },
+  DeleteBlocks {
+    block_ids: Vec<BlockId>,
+    row_hint: usize,
   },
   MoveBlock {
-    block: BlockId,
-    new_block_ix: usize,
+    block_id: BlockId,
+    /// Place the moved block immediately before this id, or at the end when
+    /// `None`. The anchor is interpreted after removing `block_id`.
+    before: Option<BlockId>,
+    from_hint: usize,
+    to_hint: usize,
   },
-  ReplaceParagraphSpan {
-    start_paragraph: Option<ParagraphId>,
-    before: DocumentSpan,
-    after: DocumentSpan,
+  AssetArrived {
+    id: AssetId,
+    record: AssetRecord,
   },
-  ReplaceBlock {
-    block: Option<BlockId>,
-  },
-  ReplaceDocument,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-enum WireCanonicalOperation {
-  InsertText {
-    paragraph: ParagraphId,
-    byte: usize,
-    text: String,
-    styles: RunStyles,
-  },
-  DeleteRange {
-    start_paragraph: ParagraphId,
-    start_byte: usize,
-    end_paragraph: ParagraphId,
-    end_byte: usize,
-  },
-  SplitParagraph {
-    paragraph: ParagraphId,
-    byte: usize,
-    new_paragraph: ParagraphId,
-  },
-  JoinParagraphs {
-    first: ParagraphId,
-    second: ParagraphId,
-  },
-  SetParagraphStyle {
-    paragraph: ParagraphId,
-    style: ParagraphStyle,
-  },
-  SetRunStyles {
-    paragraph: ParagraphId,
-    range: Range<usize>,
-    styles: RunStyles,
-  },
-}
-
-impl WireCanonicalOperation {
-  fn from_canonical(operation: &CanonicalOperation) -> Option<Self> {
-    match operation {
-      CanonicalOperation::InsertText {
-        paragraph,
-        byte,
-        text,
-        styles,
-      } => Some(Self::InsertText {
-        paragraph: *paragraph,
-        byte: *byte,
-        text: text.clone(),
-        styles: *styles,
-      }),
-      CanonicalOperation::DeleteRange {
-        start_paragraph,
-        start_byte,
-        end_paragraph,
-        end_byte,
-      } => Some(Self::DeleteRange {
-        start_paragraph: *start_paragraph,
-        start_byte: *start_byte,
-        end_paragraph: *end_paragraph,
-        end_byte: *end_byte,
-      }),
-      CanonicalOperation::SplitParagraph {
-        paragraph,
-        byte,
-        new_paragraph,
-      } => Some(Self::SplitParagraph {
-        paragraph: *paragraph,
-        byte: *byte,
-        new_paragraph: *new_paragraph,
-      }),
-      CanonicalOperation::JoinParagraphs { first, second } => Some(Self::JoinParagraphs {
-        first: *first,
-        second: *second,
-      }),
-      CanonicalOperation::SetParagraphStyle { paragraph, style } => Some(Self::SetParagraphStyle {
-        paragraph: *paragraph,
-        style: *style,
-      }),
-      CanonicalOperation::SetRunStyles { paragraph, range, styles } => Some(Self::SetRunStyles {
-        paragraph: *paragraph,
-        range: range.clone(),
-        styles: *styles,
-      }),
-      CanonicalOperation::InsertBlock { .. }
-      | CanonicalOperation::DeleteBlock { .. }
-      | CanonicalOperation::MoveBlock { .. }
-      | CanonicalOperation::ReplaceParagraphSpan { .. }
-      | CanonicalOperation::ReplaceBlock { .. }
-      | CanonicalOperation::ReplaceDocument => None,
-    }
-  }
-
-  fn into_canonical(self) -> CanonicalOperation {
-    match self {
-      Self::InsertText {
-        paragraph,
-        byte,
-        text,
-        styles,
-      } => CanonicalOperation::InsertText {
-        paragraph,
-        byte,
-        text,
-        styles,
-      },
-      Self::DeleteRange {
-        start_paragraph,
-        start_byte,
-        end_paragraph,
-        end_byte,
-      } => CanonicalOperation::DeleteRange {
-        start_paragraph,
-        start_byte,
-        end_paragraph,
-        end_byte,
-      },
-      Self::SplitParagraph {
-        paragraph,
-        byte,
-        new_paragraph,
-      } => CanonicalOperation::SplitParagraph {
-        paragraph,
-        byte,
-        new_paragraph,
-      },
-      Self::JoinParagraphs { first, second } => CanonicalOperation::JoinParagraphs { first, second },
-      Self::SetParagraphStyle { paragraph, style } => CanonicalOperation::SetParagraphStyle { paragraph, style },
-      Self::SetRunStyles { paragraph, range, styles } => CanonicalOperation::SetRunStyles { paragraph, range, styles },
-    }
-  }
-}
-
-pub fn encode_canonical_operations(operations: &[CanonicalOperation]) -> Option<Vec<u8>> {
-  let wire_operations: Vec<_> = operations
-    .iter()
-    .filter_map(WireCanonicalOperation::from_canonical)
-    .collect();
-  if wire_operations.is_empty() && !operations.is_empty() {
-    return None;
-  }
-  postcard::to_stdvec(&wire_operations).ok()
-}
-
-pub fn decode_canonical_operations(bytes: &[u8]) -> Option<Vec<CanonicalOperation>> {
-  postcard::from_bytes::<Vec<WireCanonicalOperation>>(bytes)
-    .ok()
-    .map(|operations| {
-      operations
-        .into_iter()
-        .map(WireCanonicalOperation::into_canonical)
-        .collect()
-    })
-}
-
-#[derive(Clone, Debug, Default)]
-pub struct CollaborationEdit {
-  pub operations: Vec<CanonicalOperation>,
 }

@@ -1,12 +1,14 @@
 #[hotpath::measure]
-pub fn mutate_runs_in_range(document: &mut Document, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
+pub fn mutate_runs_in_range(document: &mut DocumentProjection, range: Range<DocumentOffset>, mut mutate: impl FnMut(&mut RunStyles)) {
   let paragraph_count = paragraphs_mut(document).len();
   if paragraph_count == 0 || range.start.paragraph >= paragraph_count || range.start.paragraph > range.end.paragraph {
     return;
   }
   let last_paragraph = range.end.paragraph.min(paragraph_count - 1);
   for paragraph_ix in range.start.paragraph..=last_paragraph {
-    let paragraph = &mut paragraphs_mut(document)[paragraph_ix];
+    let Some(paragraph) = paragraphs_mut(document).get_mut(paragraph_ix) else {
+      continue;
+    };
     let start = if paragraph_ix == range.start.paragraph { range.start.byte } else { 0 };
     let end = if paragraph_ix == range.end.paragraph {
       range.end.byte

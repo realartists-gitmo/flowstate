@@ -1,6 +1,6 @@
 #[hotpath::measure]
 pub(super) fn layout_paragraph_at(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   previous_bottom: Pixels,
@@ -64,9 +64,14 @@ pub(super) fn layout_paragraph_at(
   (
     LaidOutParagraph {
       index: paragraph_ix,
+      // PARAGRAPH-LOCAL byte range (matches `offset.byte`, which is paragraph-local
+      // everywhere in the editor). A prior change set this to the ABSOLUTE document
+      // range (`paragraph_byte_range`), so `contains_byte` compared a local caret
+      // byte against an absolute range and the caret vanished for every byte below
+      // the paragraph's document offset (the "invisible caret" bug).
+      byte_range: 0..paragraph_text.len(),
       cache_key,
       len: paragraph_text.len(),
-      byte_range: 0..paragraph_text.len(),
       top: y,
       bottom,
       lines: laid_out_lines,
@@ -90,7 +95,7 @@ pub(super) struct ParagraphChunkBuildResult {
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 pub(super) fn build_paragraph_chunk_layout_with_visibility(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph_ix: usize,
   width: Pixels,
   start_byte: usize,
@@ -110,7 +115,6 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
     }
     let paragraph = Paragraph {
       style: prep.layout_style,
-      byte_range: 0..prep.paragraph_text.len(),
       runs: prep.layout_runs.as_ref().to_vec(),
       version: prep.layout_version,
     };
@@ -170,7 +174,7 @@ pub(super) fn build_paragraph_chunk_layout_with_visibility(
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 fn layout_paragraph_chunk_at(
-  document: &Document,
+  document: &DocumentProjection,
   layout_paragraph_ix: usize,
   display_paragraph_ix: usize,
   width: Pixels,
@@ -204,7 +208,7 @@ fn layout_paragraph_chunk_at(
 #[allow(clippy::too_many_arguments, reason = "Paragraph layout needs several independent shaping and theme inputs.")]
 #[hotpath::measure]
 fn layout_prepared_paragraph_chunk_at(
-  document: &Document,
+  document: &DocumentProjection,
   paragraph: &Paragraph,
   display_paragraph_ix: usize,
   width: Pixels,
@@ -301,9 +305,12 @@ fn layout_prepared_paragraph_chunk_at(
 
   let paragraph = LaidOutParagraph {
     index: display_paragraph_ix,
+    // PARAGRAPH-LOCAL byte range of THIS chunk (matches the paragraph-local
+    // `offset.byte`). Was the ABSOLUTE document range, which broke `contains_byte`
+    // and hid the caret for local bytes below the paragraph's document offset.
+    byte_range: start_byte..byte_range_end,
     cache_key,
     len,
-    byte_range: start_byte..byte_range_end,
     top: paragraph_top,
     bottom: row_bottom,
     lines: laid_out_lines,

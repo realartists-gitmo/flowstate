@@ -1,3 +1,10 @@
+/// Max consecutive render-path materialization passes allowed at an unchanged
+/// (scroll, edit) signature before the loop is broken. Progressive materialization
+/// of a viewport converges in a handful of frames; a non-converging item-size loop
+/// runs thousands, so this cleanly separates the two while leaving ample headroom
+/// for a legitimately complex viewport (it just falls back to estimated heights).
+const SCROLL_MATERIALIZE_STALL_CAP: u32 = 30;
+
 #[hotpath::measure_all]
 impl RichTextEditor {
   fn materialize_visible_remainders_for_scroll(
@@ -7,6 +14,32 @@ impl RichTextEditor {
     window: &mut Window,
     cx: &mut Context<Self>,
   ) -> bool {
+    // §hang-guard: this runs during render and `cx.notify()`s whenever it
+    // materializes anything, re-entering next frame. On a large object-bearing
+    // document the item-size cache can't be incrementally patched, so it can
+    // re-materialize the same visible window every frame without converging and
+    // freeze the window. Cap consecutive passes at an unchanged scroll+edit
+    // position; a real scroll or edit changes the signature and resets the count,
+    // so only the pathological non-converging loop is ever broken (it then renders
+    // with estimated heights, which the virtualization already tolerates).
+    let scroll_px: f32 = (-self.scroll_handle.offset().y).max(px(0.0)).into();
+    #[allow(clippy::cast_possible_truncation, reason = "rounded pixel scroll offset fits i32 with ample range")]
+    let scroll_y = scroll_px.round() as i32;
+    let signature = (scroll_y, self.edit_generation);
+    if self.scroll_materialize_signature == Some(signature) {
+      self.scroll_materialize_stall_frames = self.scroll_materialize_stall_frames.saturating_add(1);
+    } else {
+      self.scroll_materialize_signature = Some(signature);
+      self.scroll_materialize_stall_frames = 1;
+    }
+    if self.scroll_materialize_stall_frames > SCROLL_MATERIALIZE_STALL_CAP {
+      if self.scroll_materialize_stall_frames == SCROLL_MATERIALIZE_STALL_CAP + 1 {
+        flowstate_fidelity::event(flowstate_fidelity::FidelityClass::Structure, "scroll-materialize-stall-cap", || {
+          format!("broke non-converging materialization loop at scroll_y={scroll_y} after {SCROLL_MATERIALIZE_STALL_CAP} passes")
+        });
+      }
+      return false;
+    }
     let scroll_anchor = scroll_anchor.or_else(|| self.capture_scroll_anchor());
     let overscan = px(SCROLL_FOREGROUND_OVERSCAN_PX);
     let Some(visible_range) = self.visible_item_range_for_current_scroll(overscan) else {
@@ -50,7 +83,12 @@ impl RichTextEditor {
     }
 
     if changed {
-      let _ = self.rebuild_item_sizes_cache(width, scroll_anchor, window, cx);
+      // Patch, don't rebuild: the materialized paragraphs recorded themselves
+      // in `pending_item_sizes_patch_range`; a full O(blocks) rebuild per
+      // scroll tick was ~10 ms of every scrolled frame on the reference doc.
+      if self.try_patch_item_sizes_cache(width, scroll_anchor.clone(), window, cx).is_none() {
+        let _ = self.rebuild_item_sizes_cache(width, scroll_anchor, window, cx);
+      }
       cx.notify();
     }
     changed

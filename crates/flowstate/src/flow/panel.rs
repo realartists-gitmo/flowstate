@@ -149,8 +149,13 @@ impl Panel for FlowPanel {
     if active {
       let editor = self.editor.clone();
       let panel_id = self.id;
-      let _ = self.workspace.update(cx, |workspace, cx| {
-        workspace.set_active_flow(panel_id, editor, cx);
+      let workspace = self.workspace.clone();
+      // Dock plumbing may invoke this while the Workspace lease is held
+      // (same double-lease shape as the fixed share-dialog panic) — defer.
+      cx.defer(move |cx| {
+        let _ = workspace.update(cx, |workspace, cx| {
+          workspace.set_active_flow(panel_id, editor, cx);
+        });
       });
     }
   }
@@ -158,8 +163,11 @@ impl Panel for FlowPanel {
   #[hotpath::measure]
   fn on_removed(&mut self, window: &mut Window, cx: &mut Context<Self>) {
     let panel_id = self.id;
-    let _ = self.workspace.update(cx, |workspace, cx| {
-      workspace.remove_document_panel(panel_id, window, cx);
+    let workspace = self.workspace.clone();
+    window.defer(cx, move |window, cx| {
+      let _ = workspace.update(cx, |workspace, cx| {
+        workspace.remove_document_panel(panel_id, window, cx);
+      });
     });
   }
 
