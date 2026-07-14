@@ -26,7 +26,7 @@ fn main() {
         .cells
         .iter()
         .find(|c| c.id == id)
-        .and_then(|c| c.summary_text().ok())
+        .map(|c| c.summary.summary_text.to_string())
         .map(|t| t.lines().next().unwrap_or_default().trim().to_string())
         .unwrap_or_default()
     };
@@ -34,8 +34,8 @@ fn main() {
     for (index, cell) in sheet.cells.iter().enumerate() {
       let col = column_name(cell.column_id).unwrap_or_else(|| "?".into());
       let parent = cell.parent_id.map(label).unwrap_or_else(|| "—".into());
-      let text = cell
-        .document()
+      let text = document
+        .cell_document(cell.id)
         .map(|d| d.text.to_string())
         .unwrap_or_default();
       println!("[{index:2}] col={col:<6} parent={parent}");

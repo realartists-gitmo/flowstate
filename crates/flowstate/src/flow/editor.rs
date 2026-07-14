@@ -1,10 +1,7 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use flowstate_flow::{
-  AnnotationOriginator, BoardPoint, CellId, FlowCommitResult, FlowDocument, FlowDropIntent, FlowFrontier, FlowProjection,
-  FlowProjectionSnapshot, FlowRuntimeEvent, FlowTransactionId, FlowUpdateBytes, RelativePosition, SheetId, VersionVector,
-};
+use flowstate_flow::{AnnotationOriginator, BoardPoint, CellId, FlowDocument, FlowDropIntent, RelativePosition, SheetId, VersionVector};
 use gpui::{
   AnyElement, App, Bounds, Context, DragMoveEvent, Entity, EventEmitter, FocusHandle, Focusable, IntoElement, KeyDownEvent, KeyUpEvent,
   MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Render, ScrollHandle, ScrollWheelEvent, SharedString, Subscription, Task, Window,
@@ -146,38 +143,13 @@ impl FlowEditor {
     self.document.version_vector()
   }
 
-  pub fn collaboration_projection_snapshot(&self) -> FlowProjectionSnapshot {
-    self.document.projection_snapshot()
-  }
-
-  pub fn collaboration_frontier(&self) -> FlowFrontier {
-    self.document.frontier()
-  }
-
-  pub fn collaboration_updates_since(&self, version: &VersionVector) -> anyhow::Result<FlowUpdateBytes> {
-    self.document.export_updates_for(version)
-  }
-
-  pub fn import_collaboration_updates(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> anyhow::Result<Vec<FlowRuntimeEvent>> {
-    let events = self.document.import_remote_update(bytes)?;
+  /// Import remote flow updates (transitional wiring until the gated flow
+  /// runtime lands in S3/S9).
+  pub fn import_collaboration_updates(&mut self, bytes: &[u8], cx: &mut Context<Self>) -> anyhow::Result<()> {
+    self.document.import_updates(bytes)?;
     self.sync_cell_editors(cx);
     self.changed(self.active_cell, cx);
-    Ok(events)
-  }
-
-  pub fn apply_collaboration_transaction(
-    &mut self,
-    transaction_id: FlowTransactionId,
-    base_frontier: &[u8],
-    change: impl FnOnce(&mut FlowProjection) -> anyhow::Result<()>,
-    cx: &mut Context<Self>,
-  ) -> anyhow::Result<FlowCommitResult> {
-    let result = self
-      .document
-      .apply_projection_transaction(transaction_id, base_frontier, change)?;
-    self.sync_cell_editors(cx);
-    self.changed(self.active_cell, cx);
-    Ok(result)
+    Ok(())
   }
 
   pub fn active_sheet(&self) -> Option<SheetId> {
@@ -314,7 +286,8 @@ impl FlowEditor {
           .iter()
           .find(|candidate| candidate.id == cell)
       })
-      .and_then(|cell| cell.document().ok())
+      .map(|cell| cell.id)
+      .and_then(|cell_id| self.document.cell_document(cell_id).ok())
       .is_some_and(|document| {
         document
           .paragraphs
@@ -542,7 +515,7 @@ impl FlowEditor {
           .iter()
           .find(|cell| cell.id == cell_id)
       })
-      .is_some_and(|cell| cell.is_empty().unwrap_or(false))
+      .is_some_and(|cell| cell.summary.is_empty)
   }
 
   pub fn delete_selected(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -872,12 +845,9 @@ impl FlowEditor {
             let cell_top = layout.top + shift;
             let spacer_height = px((cell_top - previous_bottom).max(0.0));
             previous_bottom = cell_top + layout.height;
-            let label: SharedString = cell
-              .summary_text()
-              .unwrap_or_else(|_| "Invalid rich text".into())
-              .into();
-            let mut uses_summary_projection = cell.uses_summary_projection().unwrap_or(false);
-            let mut rendered_document = cell.document().ok();
+            let label: SharedString = cell.summary.summary_text.to_string().into();
+            let mut uses_summary_projection = cell.summary.uses_summary_projection;
+            let mut rendered_document = self.document.cell_document(cell.id).ok();
             if let Some(document) = rendered_document.as_mut() {
               if !uses_summary_projection {
                 let restyled = {

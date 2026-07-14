@@ -116,6 +116,51 @@ pub fn write_imported_document_as_loro_db8(path: impl AsRef<Path>, document: &Do
   crate::DocumentPackage::from_loro_snapshot_with_assets(&imported.doc, title, assets_from_document(&imported.projection))?.write(path)
 }
 
+/// Flow architecture spec Part 2.1: (re)write ONE self-contained flow — a
+/// debate-flow CELL's rich text — from a projection, via the exact body import
+/// law ([`FlowTextImportPlan`]: one contiguous insert + merged mark ranges)
+/// scoped to a single flow with its OWN paragraph registry. No block or
+/// section records are written: single-flow block ids are derived from
+/// paragraph ids at materialize time ([`crate::materialize_single_flow`]).
+/// Existing flow text and registry records are replaced wholesale.
+pub fn replace_single_flow_from_document(
+  doc: &LoroDoc,
+  flow: &LoroMap,
+  registry: &LoroMap,
+  flow_id: &str,
+  document: &DocumentProjection,
+) -> LoroResult<()> {
+  let text = flow.ensure_mergeable_text(FLOW_TEXT_KEY)?;
+  clear_map(registry)?;
+  let plan = FlowTextImportPlan::for_document(document);
+  let text_op_base = plan.write_to(Some(doc), &text)?;
+  let mut paragraph_ix = 0_usize;
+  for (block, position) in document.blocks.iter().zip(&plan.block_positions) {
+    match (block, position) {
+      (Block::Paragraph(_), FlowBlockPosition::Paragraph { boundary_pos, .. }) => {
+        let paragraph_id = projection_paragraph_id(document, paragraph_ix);
+        let record = registry.ensure_mergeable_map(&paragraph_id)?;
+        record.insert("id", paragraph_id.as_str())?;
+        record.insert("flow_id", flow_id)?;
+        if let Some(cursor) = body_cursor_at(&text, text_op_base, *boundary_pos, Side::Left) {
+          record.insert("start_cursor", cursor.encode())?;
+        }
+        if let Some(cursor) = body_cursor_at(&text, text_op_base, *boundary_pos, Side::Right) {
+          record.insert("boundary_cursor", cursor.encode())?;
+        }
+        record.ensure_mergeable_map("attrs")?;
+        paragraph_ix += 1;
+      },
+      _ => {
+        return Err(loro::LoroError::ArgErr(
+          format!("single flow `{flow_id}` cannot contain object blocks").into_boxed_str(),
+        ));
+      },
+    }
+  }
+  Ok(())
+}
+
 pub(crate) fn replace_body_from_document(doc: &LoroDoc, document: &DocumentProjection) -> LoroResult<()> {
   let root = doc.get_map(ROOT);
   let flows = root.ensure_mergeable_map(FLOWS_BY_ID)?;

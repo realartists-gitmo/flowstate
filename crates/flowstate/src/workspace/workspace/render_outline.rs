@@ -279,10 +279,10 @@ fn append_flow_outline_cell_rows(
       }
     })
     .collect();
-  let label = cell
-    .summary_text()
-    .map(|text| if text.trim().is_empty() { "(empty)".into() } else { text })
-    .unwrap_or_else(|_| "(invalid rich text)".into());
+  let label = {
+    let text = cell.summary.summary_text.to_string();
+    if text.trim().is_empty() { "(empty)".to_string() } else { text }
+  };
   let activate_editor = editor.clone();
   let toggle_editor = editor.clone();
   let incoming_branch = cell.parent_id.map(|_| IncomingBranch {

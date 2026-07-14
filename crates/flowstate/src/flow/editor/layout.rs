@@ -98,7 +98,7 @@ fn measured_cell_height(cell: &Cell, measurements: &HashMap<CellId, CellMeasurem
 }
 
 fn estimated_cell_height(cell: &Cell) -> f32 {
-  let text = cell.summary_text().unwrap_or_default();
+  let text = cell.summary.summary_text.to_string();
   let lines = text
     .lines()
     .map(|line| line.chars().count().div_ceil(34).max(1))
@@ -113,9 +113,12 @@ mod tests {
   use flowstate_flow::{Cell, ColumnId};
 
   fn cell(parent_id: Option<CellId>) -> Cell {
-    let mut cell = Cell::plain(ColumnId::new_v4()).unwrap();
-    cell.parent_id = parent_id;
-    cell
+    Cell {
+      id: CellId::new_v4(),
+      column_id: ColumnId::new_v4(),
+      parent_id,
+      summary: flowstate_flow::CellSummary::default(),
+    }
   }
 
   #[test]

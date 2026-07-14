@@ -11,19 +11,16 @@ impl FlowEditor {
     if self.cell_editors.contains_key(&cell_id) {
       return;
     }
-    let Some((sheet_id, mut document, uses_summary_projection)) = self.document.projection().sheets.iter().find_map(|sheet| {
+    let Some((sheet_id, uses_summary_projection)) = self.document.projection().sheets.iter().find_map(|sheet| {
       sheet
         .cells
         .iter()
         .find(|cell| cell.id == cell_id)
-        .and_then(|cell| {
-          cell
-            .document()
-            .ok()
-            .map(|document| (document, cell.uses_summary_projection().unwrap_or(false)))
-        })
-        .map(|(document, uses_summary_projection)| (sheet.id, document, uses_summary_projection))
+        .map(|cell| (sheet.id, cell.summary.uses_summary_projection))
     }) else {
+      return;
+    };
+    let Ok(mut document) = self.document.cell_document(cell_id) else {
       return;
     };
     let text_color = self.cell_text_color(cell_id, cx);
@@ -49,30 +46,11 @@ impl FlowEditor {
       editor
     });
     let subscription = cx.observe(&editor, move |flow, editor, cx| {
-      let mut document = editor.read(cx).document().clone();
-      let source_theme = flow
-        .document
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)
-        .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
-        .and_then(|cell| cell.document().ok())
-        .map(|document| document.theme);
-      if let Some(source_theme) = source_theme {
-        document.theme = source_theme;
-      }
-      let Ok(bytes) = flowstate_flow::cell_db8_bytes(&document) else {
-        return;
-      };
+      let document = editor.read(cx).document().clone();
       let unchanged = flow
         .document
-        .projection()
-        .sheets
-        .iter()
-        .find(|sheet| sheet.id == sheet_id)
-        .and_then(|sheet| sheet.cells.iter().find(|cell| cell.id == cell_id))
-        .is_some_and(|cell| cell.document_bytes == bytes);
+        .cell_document(cell_id)
+        .is_ok_and(|current| cell_signature(&current) == cell_signature(&document));
       if unchanged {
         return;
       }
@@ -95,16 +73,21 @@ impl FlowEditor {
 
   pub(super) fn sync_cell_editors(&mut self, cx: &mut Context<Self>) {
     let client_theme = load_document_theme();
-    let cells: std::collections::HashMap<_, _> = self
+    let cell_ids: Vec<CellId> = self
       .document
       .projection()
       .sheets
       .iter()
-      .flat_map(|sheet| {
-        sheet
-          .cells
-          .iter()
-          .filter_map(|cell| cell.document().ok().map(|document| (cell.id, document)))
+      .flat_map(|sheet| sheet.cells.iter().map(|cell| cell.id))
+      .collect();
+    let cells: std::collections::HashMap<_, _> = cell_ids
+      .iter()
+      .filter_map(|cell_id| {
+        self
+          .document
+          .cell_document(*cell_id)
+          .ok()
+          .map(|document| (*cell_id, document))
       })
       .collect();
     self.cell_editors.retain(|id, _| cells.contains_key(id));
@@ -120,11 +103,11 @@ impl FlowEditor {
       .retain(|id, _| cells.contains_key(id));
     for (cell_id, editor) in &self.cell_editors {
       if let Some(document) = cells.get(cell_id) {
-        let current = flowstate_flow::cell_db8_bytes(editor.read(cx).document()).ok();
+        let current = cell_signature(editor.read(cx).document());
         let mut themed_document = document.clone();
         let text_color = self.cell_text_color(*cell_id, cx);
         apply_flow_cell_theme(&mut themed_document, &client_theme, text_color, cx.theme().background, self.board_zoom());
-        let desired = flowstate_flow::cell_db8_bytes(&themed_document).ok();
+        let desired = cell_signature(&themed_document);
         if current != desired {
           editor.update(cx, |editor, cx| editor.replace_document_projection(themed_document, cx));
           self
@@ -152,15 +135,7 @@ impl FlowEditor {
     if self.cell_editor_themes.get(&cell_id) == Some(&signature) {
       return;
     }
-    let Some(mut document) = self
-      .document
-      .projection()
-      .sheets
-      .iter()
-      .flat_map(|sheet| &sheet.cells)
-      .find(|cell| cell.id == cell_id)
-      .and_then(|cell| cell.document().ok())
-    else {
+    let Ok(mut document) = self.document.cell_document(cell_id) else {
       return;
     };
     apply_flow_cell_theme(
@@ -173,4 +148,20 @@ impl FlowEditor {
     editor.update(cx, |editor, cx| editor.replace_document_projection(document, cx));
     self.cell_editor_themes.insert(cell_id, signature);
   }
+}
+
+/// Theme-independent content signature for skip-if-unchanged checks: the
+/// rope text plus every paragraph's (style, runs). Replaces the v1 whole-blob
+/// byte comparison.
+fn cell_signature(
+  document: &flowstate_document::DocumentProjection,
+) -> (String, Vec<(flowstate_document::ParagraphStyle, Vec<flowstate_document::TextRun>)>) {
+  (
+    document.text.to_string(),
+    document
+      .paragraphs
+      .iter()
+      .map(|paragraph| (paragraph.style, paragraph.runs.clone()))
+      .collect(),
+  )
 }

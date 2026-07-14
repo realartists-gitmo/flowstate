@@ -185,7 +185,7 @@ impl FlowEditor {
       .sheets
       .iter()
       .find_map(|sheet| sheet.cells.iter().find(|cell| cell.id == id))
-      .and_then(|cell| cell.summary_text().ok())
+      .map(|cell| cell.summary.summary_text.to_string())
       .map(|text| text.lines().next().unwrap_or_default().trim().to_string())
       .filter(|label| !label.is_empty())
       .unwrap_or_else(|| format!("cell:{}", &id.to_string()[..8]))

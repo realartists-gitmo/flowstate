@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::document::FlowDocument;
 
 const MAGIC: &[u8; 8] = b"FLOWFL0\0";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 /// Refuse to read pathological on-disk sizes before allocating for them.
 const MAX_FL0_BYTES: u64 = 64 * 1024 * 1024;
 
@@ -68,6 +68,15 @@ pub fn decode(bytes: &[u8]) -> anyhow::Result<FlowDocument> {
     return Err(io::Error::new(io::ErrorKind::InvalidData, "invalid .fl0 signature").into());
   }
   let version = read_u32(&mut cursor)?;
+  if version == 1 {
+    return Err(
+      io::Error::new(
+        io::ErrorKind::InvalidData,
+        "unsupported .fl0 version 1 (pre-release format, never shipped; no migration path)",
+      )
+      .into(),
+    );
+  }
   if version != VERSION {
     return Err(io::Error::new(io::ErrorKind::InvalidData, format!("unsupported .fl0 version {version}")).into());
   }
