@@ -19,6 +19,7 @@ use tokio::{
 use crate::{
   admission::SessionAdmission,
   doc_io::DocIoHandle,
+  sync_io::SyncIoHandle,
   ids::{BlobId, SessionId},
   proto_direct::{
     AssetBytes, DIRECT_ALPN, DirectRequest, DirectResponseHeader, DiscoveryAdmissionGrant, MAX_FRAME_LEN, MAX_PAYLOAD_CHUNK_LEN,
@@ -46,14 +47,21 @@ pub struct DirectSessionHandler {
   /// mid-intent state, so the old shared read-handle path is outlawed), and
   /// snapshot exports fork under the gate + export off it, so a peer's
   /// recovery pull still cannot be starved behind local edits. `None` falls
-  /// back to the session-served request channel.
-  io: Option<DocIoHandle>,
+  /// back to the session-served request channel. Kind-agnostic (spec Part C):
+  /// rich-text and flow sessions serve the identical three transport calls.
+  io: Option<SyncIoHandle>,
 }
 
 impl DirectSessionHandler {
   #[must_use]
-  pub fn new(requests: Sender<DirectServeRequest>, io: Option<DocIoHandle>) -> Self {
+  pub fn new(requests: Sender<DirectServeRequest>, io: Option<SyncIoHandle>) -> Self {
     Self { requests, io }
+  }
+
+  /// Rich-text convenience constructor (the pre-flow call shape).
+  #[must_use]
+  pub fn new_rich_text(requests: Sender<DirectServeRequest>, io: Option<DocIoHandle>) -> Self {
+    Self::new(requests, io.map(SyncIoHandle::RichText))
   }
 }
 
@@ -548,7 +556,7 @@ where
 /// is a brief `fork()`; the actual snapshot encode happens off-gate on the I/O
 /// thread (spec I-9a long-export rule), so a large snapshot neither stalls
 /// typing nor gets starved behind local edits.
-async fn serve_snapshot_via_io(session: SessionId, io: DocIoHandle) -> ServeOutcome {
+async fn serve_snapshot_via_io(session: SessionId, io: SyncIoHandle) -> ServeOutcome {
   match io.snapshot_bytes().await {
     Ok(bytes) => {
       tracing::trace!(%session, bytes = bytes.len(), "served collaboration snapshot via the document I/O service");
@@ -564,7 +572,7 @@ async fn serve_snapshot_via_io(session: SessionId, io: DocIoHandle) -> ServeOutc
 /// Serve an incremental-updates pull through the document I/O service (see
 /// [`serve_snapshot_via_io`]); the version-vector decode and gate-held export
 /// happen on the I/O thread.
-async fn serve_updates_via_io(session: SessionId, io: DocIoHandle, have_vv: Vec<u8>) -> ServeOutcome {
+async fn serve_updates_via_io(session: SessionId, io: SyncIoHandle, have_vv: Vec<u8>) -> ServeOutcome {
   match io.export_updates_for(have_vv).await {
     Ok(bytes) => {
       tracing::trace!(%session, bytes = bytes.len(), "served collaboration updates via the document I/O service");

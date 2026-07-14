@@ -20,9 +20,12 @@ pub mod presence;
 pub mod proto_direct;
 pub mod proto_gossip;
 pub mod self_check;
+pub mod sync_io;
 pub mod ticket;
 
 pub use admission::SessionAdmission;
 pub use ids::{BlobId, SessionId};
 pub use proto_direct::DIRECT_ALPN;
 pub use proto_gossip::PROTOCOL_VERSION;
+pub use sync_io::SyncIoHandle;
+pub use ticket::DocumentKind;

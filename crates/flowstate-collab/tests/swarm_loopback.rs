@@ -209,6 +209,93 @@ async fn swarm_loopback_net_subset() -> Result<()> {
   Ok(())
 }
 
+/// Flow-variant direct serving (flow spec Part C): a session whose handler
+/// carries `SyncIoHandle::Flow` serves snapshot/updates pulls straight off the
+/// flow I/O service — the identical transport surface the rich-text arm uses.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires local UDP loopback and real iroh gossip timing"]
+async fn flow_direct_snapshot_and_updates_pull() -> Result<()> {
+  use flowstate_collab::SyncIoHandle;
+  use flowstate_collab::flow::{FlowDocHandle, FlowIoHandle, FlowRuntime};
+  use flowstate_flow::intents::FlowIntent;
+
+  let session = SessionId::new();
+  let lookup = MemoryLookup::new();
+  let a = Peer::spawn(lookup.clone()).await?;
+  let b = Peer::spawn(lookup.clone()).await?;
+  let admission = SessionAdmission::generate();
+  for peer in [&a, &b] {
+    peer
+      .direct_state
+      .auth()
+      .configure_session(session, admission.clone());
+  }
+  auth::install_local_admission(session, admission.clone());
+  let a_addr = wait_addr(&a.endpoint).await;
+  let b_addr = wait_addr(&b.endpoint).await;
+  for addr in [a_addr.clone(), b_addr.clone()] {
+    lookup.add_endpoint_info(addr);
+  }
+
+  // A hosts a real flow runtime behind its flow I/O service.
+  let format = flowstate_flow::FlowFormat::policy_debate();
+  let (handle, gate) = FlowDocHandle::new(FlowRuntime::new(&format).expect("flow runtime"));
+  let sheet = uuid::Uuid::new_v4();
+  handle
+    .apply(FlowIntent::CreateSheet {
+      sheet_id: sheet,
+      name: "Served".into(),
+      sheet_type_id: format.sheet_types[0].id,
+    })
+    .expect("sheet");
+  let expected_board = handle.board_projection().expect("board");
+  let vv_at_snapshot = handle.with_test_runtime(|runtime| runtime.oplog_version_vector());
+  let flow_io = FlowIoHandle::spawn(std::sync::Arc::clone(&gate)).expect("flow io");
+  let (request_tx, _request_rx) = async_channel::unbounded();
+  a.direct_state
+    .register_handler(session, DirectSessionHandler::new(request_tx, Some(SyncIoHandle::Flow(flow_io))))
+    .await;
+
+  // B pulls the snapshot and reconstructs the identical board.
+  let snapshot = direct::pull_with_endpoint(
+    &b.endpoint,
+    DirectRequest::Snapshot { session },
+    vec![a_addr.id],
+    Duration::from_secs(5),
+  )
+  .await?;
+  let joined = FlowRuntime::from_snapshot(&snapshot).expect("joiner runtime");
+  assert_eq!(joined.board_ref(), &expected_board);
+
+  // A commits more; B pulls incremental updates for its version vector.
+  handle
+    .apply(FlowIntent::RenameSheet {
+      sheet_id: sheet,
+      name: "Renamed after snapshot".into(),
+    })
+    .expect("rename");
+  let updates = direct::pull_with_endpoint(
+    &b.endpoint,
+    DirectRequest::Updates {
+      session,
+      have_vv: vv_at_snapshot.encode(),
+    },
+    vec![a_addr.id],
+    Duration::from_secs(5),
+  )
+  .await?;
+  ensure!(!updates.is_empty(), "updates pull returned no bytes");
+  let mut joined = joined;
+  joined.import_remote_updates(&[updates.as_slice()])?;
+  assert_eq!(
+    joined.board_ref().sheet(sheet).map(|sheet| sheet.name.as_str()),
+    Some("Renamed after snapshot")
+  );
+  a.router.shutdown().await.ok();
+  b.router.shutdown().await.ok();
+  Ok(())
+}
+
 async fn install_snapshot_handler(peer: &Peer, session: SessionId, snapshot: Vec<u8>) {
   let (request_tx, request_rx) = async_channel::unbounded();
   peer
